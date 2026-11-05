@@ -2,7 +2,7 @@
 
 Covers the four entry-point tables in `assess.lib.treesitter_index` that this
 suite owns: ``_ENTRY_ANNOTATIONS``, ``_ENTRY_METHOD_NAMES``,
-``_ENTRY_LINE_PATTERNS`` and ``_GLOBAL_ENTRY_LINE_PATTERNS`` (79 entries
+``_ENTRY_LINE_PATTERNS`` and ``_GLOBAL_ENTRY_LINE_PATTERNS`` (94 entries
 total). Every pattern is classified LIVE / DEAD / REDUNDANT / OBSOLETE /
 MISROUTED by executing the real indexer against idiomatic 2026 fixtures; only
 LIVE patterns get a positive test here (see the DEAD/MISROUTED allow-list on
@@ -861,6 +861,52 @@ app.get(
 """
 
 
+PY_DJANGO_URLS_SRC = """\
+from django.urls import path
+from django.conf.urls import url
+
+from files import views
+
+urlpatterns = [
+    path("files/", views.file_list),
+    url(r'^legacy/$', views.legacy),
+]
+"""
+
+PY_MODULE_ROUTES_SRC = """\
+import tornado.web
+from flask import Flask
+
+app = Flask(__name__)
+app.add_url_rule("/files", view_func=list_files)
+application = tornado.web.Application([
+    (r"/files", FilesHandler),
+])
+"""
+
+PY_APP_FACTORY_SRC = """\
+import tornado.web
+from flask import Flask
+
+
+def create_app():
+    app = Flask(__name__)
+    app.add_url_rule("/files", view_func=list_files)
+    return app
+
+
+def make_app():
+    return tornado.web.Application(handlers)
+"""
+
+PY_TORNADO_ROUTES_SRC = """\
+def routes():
+    return [
+        (r"/files", FilesHandler),
+    ]
+"""
+
+
 # ---------------------------------------------------------------------------
 # Catalogue sweep -- one row per LIVE pattern. Every row names its table,
 # language and the verbatim regex/method-name it is proving live, so drift
@@ -991,6 +1037,16 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str]] = [
     ("global_line_patterns", "php", r"\bRoute::(?:get|post|put|patch|delete|options|any|match|resource|apiResource|resources|apiResources|redirect|view|fallback)\s*\(", PHP_LARAVEL_ROUTES_SRC, "web.php", "Route::get('/users/{id}'", "laravel_route"),
     ("global_line_patterns", "php", r"\$app->\w+\s*\(", PHP_TOP_LEVEL_REGISTRAR_SRC, "index.php", "$app->get('/users'", "slim_route"),
     ("global_line_patterns", "php", r"\$router->\w+\s*\(", PHP_TOP_LEVEL_REGISTRAR_SRC, "index.php", "$router->post('/widgets'", "framework_route"),
+    # python's route tables: Django's urlpatterns at file scope only, and the
+    # Flask/Tornado registrations read over an app factory and file scope alike.
+    ("global_line_patterns", "python", r"(?<![\w.])(?:re_)?path\s*\(\s*r?['\"]", PY_DJANGO_URLS_SRC, "urls.py", 'path("files/"', "django_route"),
+    ("global_line_patterns", "python", r"(?<![\w.])url\s*\(\s*r?['\"]", PY_DJANGO_URLS_SRC, "urls.py", "url(r'^legacy/$'", "django_route"),
+    ("global_line_patterns", "python", r"\.add_url_rule\s*\(", PY_MODULE_ROUTES_SRC, "routes.py", "app.add_url_rule(", "flask_url_rule"),
+    ("global_line_patterns", "python", r"\b(?:tornado\.)?web\.Application\s*\(", PY_MODULE_ROUTES_SRC, "routes.py", "application = tornado.web.Application(", "tornado_application"),
+    ("global_line_patterns", "python", r"\(\s*r?['\"]/[^'\"]*['\"]\s*,\s*\w*Handler\b", PY_MODULE_ROUTES_SRC, "routes.py", '(r"/files", FilesHandler)', "tornado_route"),
+    ("line_patterns", "python", r"\.add_url_rule\s*\(", PY_APP_FACTORY_SRC, "factory.py", "def create_app():", "flask_url_rule"),
+    ("line_patterns", "python", r"\b(?:tornado\.)?web\.Application\s*\(", PY_APP_FACTORY_SRC, "factory.py", "def make_app():", "tornado_application"),
+    ("line_patterns", "python", r"\(\s*r?['\"]/[^'\"]*['\"]\s*,\s*\w*Handler\b", PY_TORNADO_ROUTES_SRC, "factory.py", "def routes():", "tornado_route"),
 ]
 
 
@@ -1163,13 +1219,16 @@ def test_a_registration_is_attributed_by_enclosing_call_not_proximity() -> None:
         ep for ep in _entries_at(result, registrar_line) if ep["kind"] == "http_handler"
     ], "registerLegacyHandle contains the http.Handle(...) call and must still match"
 
-    # ...and it stays there. metricsHandler has no registration of its own.
-    assert not _entries_at(result, neighbour_line), (
+    # ...and it stays there. metricsHandler has no registration of its own;
+    # what it does have is the handler signature, which is its own evidence.
+    assert [ep["kind"] for ep in _entries_at(result, neighbour_line)] == [
+        "go_http_handler"
+    ], (
         "metricsHandler has no http.Handle(...) call of its own; a match "
         "inherited from the preceding function points the hunter at the "
         "wrong function, which is worse than reporting nothing"
     )
-    assert len(result["entry_points"]) == 1
+    assert len(result["entry_points"]) == 2
 
 
 @pytest.mark.parametrize(
@@ -1366,9 +1425,9 @@ def test_catalogue_sweep_covers_every_entry_point_pattern() -> None:
         | _real_line_pattern_keys()
         | _real_global_line_pattern_keys()
     )
-    assert len(real_keys) == 86, (
-        f"expected 83 entry-point catalogue entries (19 annotations + "
-        f"20 method names + 37 line patterns + 7 global line patterns), "
+    assert len(real_keys) == 94, (
+        f"expected 94 entry-point catalogue entries (19 annotations + "
+        f"20 method names + 43 line patterns + 12 global line patterns), "
         f"found {len(real_keys)} -- the catalogue has drifted; update this "
         f"suite's LIVE_CASES/EXCLUDED_PATTERNS to match"
     )

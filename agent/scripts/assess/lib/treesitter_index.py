@@ -1634,8 +1634,14 @@ def _detect_top_level_entry_points(
     language: str,
     source_lines: list[str],
     attributed: list[dict[str, Any]],
+    file_scope_lines: list[tuple[int, str]],
 ) -> list[dict[str, Any]]:
     """Detect registrations and guards written as direct program children.
+
+    *file_scope_lines* is the ``<top-level>`` scope. A route-table pattern
+    reads every line of its statement, but only the lines that scope holds: a
+    program child can be a function definition, and the table inside an app
+    factory is the function-scoped pass's to attribute.
 
     *attributed* is what the function-scoped pass already found. A statement
     that registers a callable defined inline (`Route::get('/x', function () {
@@ -1648,6 +1654,7 @@ def _detect_top_level_entry_points(
     patterns = _GLOBAL_ENTRY_LINE_PATTERNS.get(language, [])
     if not patterns:
         return entry_points
+    file_scope_text = {index + 1: text for index, text in file_scope_lines}
 
     for node in getattr(tree.root_node, "named_children", ()):
         # A comment is a named child in every shipped grammar, so an unanchored
@@ -1661,24 +1668,78 @@ def _detect_top_level_entry_points(
         if line_number > len(source_lines):
             continue
         statement_lines = range(line_number, node.end_point[0] + 2)
-        line = source_lines[line_number - 1]
         for pattern in patterns:
-            identity = (line_number, pattern["kind"])
-            if identity in seen or not re.search(pattern["pattern"], line):
-                continue
-            if any(
-                entry["kind"] == pattern["kind"] and entry["line"] in statement_lines
-                for entry in attributed
-            ):
-                continue
-            entry_points.append({
-                "name": "<top-level>",
-                "line": line_number,
-                "kind": pattern["kind"],
-                "annotation": "",
-            })
-            seen.add(identity)
+            # A registration statement is read on its first line. A route table
+            # is one statement whose every row registers a route, so its
+            # patterns read each line the statement spans.
+            candidate_lines = (
+                [
+                    (number, file_scope_text[number])
+                    for number in statement_lines
+                    if number in file_scope_text
+                ]
+                if pattern.get("statement_lines") == "all"
+                else [(line_number, source_lines[line_number - 1])]
+            )
+            for candidate, text in candidate_lines:
+                identity = (candidate, pattern["kind"])
+                if identity in seen or not re.search(pattern["pattern"], text):
+                    continue
+                if any(
+                    entry["kind"] == pattern["kind"] and entry["line"] in statement_lines
+                    for entry in attributed
+                ):
+                    continue
+                entry_points.append({
+                    "name": "<top-level>",
+                    "line": candidate,
+                    "kind": pattern["kind"],
+                    "annotation": "",
+                })
+                seen.add(identity)
     return entry_points
+
+
+@lru_cache(maxsize=None)
+def _php_request_input_patterns() -> tuple[re.Pattern[str], ...]:
+    """The canonical PHP request-input table, compiled as the source scan reads it."""
+    return tuple(
+        re.compile(pattern, re.IGNORECASE)
+        for kind, pattern in _STREAM_SOURCE_PATTERNS["php"]
+        if kind == "http_request_input"
+    )
+
+
+def _detect_php_file_scope_entry(file_scope: _FileScope) -> list[dict[str, Any]]:
+    """A PHP file whose file scope runs on a request is itself the entry point.
+
+    Classic PHP has no router: the web server maps a URL to the file and runs
+    its top-level statements, so a page reading `$_GET` at file scope is an
+    HTTP entry point by definition. The evidence is the canonical request-input
+    table read over the file-scope lines, which already have commentary and
+    inline HTML blanked, so a `$_GET` named in a comment or in page prose is
+    not a read. Inline HTML alone marks a rendered page: the server sends it
+    back when the file is requested, but nothing in it proves request input
+    reaches the file, so it carries its own, weaker kind. One record per file
+    -- the file is the entry, not each line that reads input.
+    """
+    patterns = _php_request_input_patterns()
+    for index, line in file_scope.scanned:
+        if any(pattern.search(line) for pattern in patterns):
+            return [{
+                "name": "<top-level>",
+                "line": index + 1,
+                "kind": "php_script",
+                "annotation": "request_input",
+            }]
+    if file_scope.inline_text_lines:
+        return [{
+            "name": "<top-level>",
+            "line": file_scope.inline_text_lines[0],
+            "kind": "php_rendered_page",
+            "annotation": "inline_html",
+        }]
+    return []
 
 
 # Call nodes, per grammar family, for the walk from a callable to the call that
@@ -1780,6 +1841,120 @@ def _ruby_method_is_public(tree: Any, function: dict[str, Any], source: bytes) -
     return visibility == "public"
 
 
+def _is_go_http_handler(function: dict[str, Any], http_aliases: set[str]) -> bool:
+    """Whether a Go callable has exactly the `net/http` handler signature.
+
+    `ServeMux`, every router built on it, and a hand-rolled route slice walked
+    in a loop all dispatch to this shape, so the signature is the evidence the
+    registration line cannot be: `mux.HandleFunc(rt.path, rt.handler)` names
+    no handler at all. Exactly two parameters, because a helper that takes the
+    pair and more (`writeJSON(w, r, v)`) is called by a handler, not routed to.
+    """
+    params = [param.strip() for param in function.get("params", [])]
+    if len(params) != 2 or not http_aliases:
+        return False
+    alias = "|".join(re.escape(name) for name in sorted(http_aliases))
+    return bool(
+        re.fullmatch(rf"(?:\w+\s+)?(?:{alias})\.ResponseWriter", params[0])
+        and re.fullmatch(rf"(?:\w+\s+)?\*\s*(?:{alias})\.Request", params[1])
+    )
+
+
+_TORNADO_VERB_METHODS = frozenset({"get", "post", "put", "patch", "delete", "head", "options"})
+
+
+def _tornado_handler_classes(classes: list[dict[str, Any]]) -> set[str]:
+    """Names of in-file classes that are, directly or through a base, Tornado handlers.
+
+    Python's bases land in `extends` and `implements` by position, so a mixin
+    written first (`class H(AuthMixin, RequestHandler)`) puts the handler base
+    in `implements`; both are read, and in-file bases are followed to a fixed
+    point so a `BaseHandler` chain resolves.
+    """
+    handlers: set[str] = set()
+    changed = True
+    while changed:
+        changed = False
+        for cls in classes:
+            if cls["name"] in handlers:
+                continue
+            bases = {
+                base.rsplit(".", 1)[-1]
+                for base in [cls.get("extends") or "", *cls.get("implements", [])]
+                if base
+            }
+            if "RequestHandler" in bases or bases & handlers:
+                handlers.add(cls["name"])
+                changed = True
+    return handlers
+
+
+_NODE_HTTP_MODULE_RE = r"['\"](?:node:)?https?2?['\"]"
+
+
+def _node_http_module_names(source: bytes) -> tuple[set[str], bool, bool]:
+    """Names bound to Node's http/https/http2 modules, whether a bare
+    `createServer` was imported from one, and whether the file loads one at all."""
+    text = source.decode("utf-8", errors="replace")
+    loads_http = re.search(
+        rf"\brequire\s*\(\s*{_NODE_HTTP_MODULE_RE}\s*\)|\bfrom\s+{_NODE_HTTP_MODULE_RE}", text
+    ) is not None
+    names = {"http", "https", "http2"}
+    names.update(re.findall(
+        rf"\b(?:const|let|var)\s+(\w+)\s*=\s*require\s*\(\s*{_NODE_HTTP_MODULE_RE}\s*\)", text
+    ))
+    names.update(re.findall(
+        rf"\bimport\s+(?:\*\s+as\s+)?(\w+)\s+from\s+{_NODE_HTTP_MODULE_RE}", text
+    ))
+    bare = re.search(
+        rf"\bcreateServer\b[^;\n]*(?:require\s*\(\s*|from\s+){_NODE_HTTP_MODULE_RE}", text
+    ) is not None
+    return names, bare, loads_http
+
+
+def _node_server_handler_arguments(
+    node: Any, source: bytes, modules: set[str], bare: bool, loads_http: bool
+) -> list[Any] | None:
+    """The arguments of a Node HTTP server registration that can be its handler.
+
+    `http.createServer(handler)` and `https.createServer(options, handler)`
+    take the request listener in either position; `server.on('request', fn)`
+    attaches one afterwards, and is read only in a file that loads an HTTP
+    module, because a browser-automation `page.on('request', fn)` has the same
+    shape. `net.createServer` is a TCP server and is not read. None when *node*
+    is not such a registration.
+    """
+    target = node.child_by_field_name("function")
+    arguments = node.child_by_field_name("arguments")
+    if target is None or arguments is None:
+        return None
+    actual = list(arguments.named_children)
+    if target.type == "member_expression":
+        receiver = target.child_by_field_name("object")
+        prop = target.child_by_field_name("property")
+        prop_text = _node_text(prop, source) if prop is not None else ""
+        if prop_text == "on":
+            if (
+                loads_http
+                and len(actual) >= 2
+                and actual[0].type == "string"
+                and _node_text(actual[0], source).strip("'\"`") == "request"
+            ):
+                return actual[1:]
+            return None
+        if prop_text != "createServer" or receiver is None:
+            return None
+        receiver_text = _node_text(receiver, source)
+        if receiver_text not in modules and not re.fullmatch(
+            rf"require\s*\(\s*{_NODE_HTTP_MODULE_RE}\s*\)", receiver_text
+        ):
+            return None
+    elif not (target.type == "identifier" and bare and _node_text(target, source) == "createServer"):
+        return None
+    # The listener is the last argument; an options object or variable precedes it.
+    return actual[-1:]
+
+
 def _detect_entry_points(
     tree: Any,
     functions: list[dict[str, Any]],
@@ -1825,6 +2000,19 @@ def _detect_entry_points(
             )
             if match is not None:
                 js_route_calls.append((node, match.group(1)))
+    js_server_calls: list[tuple[Any, list[Any]]] = []
+    if language in {"javascript", "typescript"}:
+        http_modules, bare_create_server, loads_http = _node_http_module_names(source)
+        for node in _walk_named_nodes(tree.root_node):
+            if node.type != "call_expression":
+                continue
+            handlers = _node_server_handler_arguments(
+                node, source, http_modules, bare_create_server, loads_http
+            )
+            if handlers:
+                js_server_calls.append((node, handlers))
+    go_http_aliases = _go_http_aliases(source_lines) if language == "go" else set()
+    tornado_handlers = _tornado_handler_classes(classes) if language == "python" else set()
 
     for func in functions:
         if func.get("is_declaration", False):
@@ -1898,6 +2086,31 @@ def _detect_entry_points(
                 "name": func["name"],
                 "line": func["line_start"],
                 "kind": "minimal_api_route",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+
+        if language == "go" and _is_go_http_handler(func, go_http_aliases):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "go_http_handler",
+                "annotation": "",
+            })
+            func["is_entry_point"] = True
+            continue
+        if (
+            language == "python"
+            and cls is not None
+            and cls["name"] in tornado_handlers
+            and func["name"] in _TORNADO_VERB_METHODS
+            and func.get("params", [])[:1] == ["self"]
+        ):
+            entry_points.append({
+                "name": func["name"],
+                "line": func["line_start"],
+                "kind": "tornado_handler",
                 "annotation": "",
             })
             func["is_entry_point"] = True
@@ -2071,6 +2284,46 @@ def _detect_entry_points(
                     "annotation": "",
                 })
                 func["is_entry_point"] = True
+        # The request listener a Node HTTP server dispatches every request to.
+        # A hand-rolled router is exactly this function, path switch and all.
+        # A listener this file does not define -- an imported app, a factory's
+        # return value -- is still a registration, recorded at file scope.
+        functions_by_start = {func["_start_byte"]: func for func in functions}
+        for node, handlers in js_server_calls:
+            unresolved = False
+            for argument in handlers:
+                func = None
+                if argument.type in _JAVASCRIPT_CALLABLE_TYPES:
+                    func = functions_by_start.get(argument.start_byte)
+                elif argument.type == "identifier":
+                    candidates = [
+                        binding for binding in bindings.get(_node_text(argument, source), [])
+                        if binding[0] <= node.start_byte and node.end_byte <= binding[1]
+                    ]
+                    if candidates:
+                        func = min(
+                            candidates,
+                            key=lambda binding: (binding[1] - binding[0], -binding[2]["_start_byte"]),
+                        )[2]
+                if func is None:
+                    unresolved = True
+                    continue
+                if func["is_entry_point"]:
+                    continue
+                entry_points.append({
+                    "name": func["name"],
+                    "line": func["line_start"],
+                    "kind": "node_http_server",
+                    "annotation": "",
+                })
+                func["is_entry_point"] = True
+            if unresolved:
+                entry_points.append({
+                    "name": "<top-level>",
+                    "line": node.start_point[0] + 1,
+                    "kind": "node_http_server",
+                    "annotation": "",
+                })
 
     if language in ("c", "cpp", "go"):
         for func in functions:
@@ -2308,7 +2561,6 @@ _TOP_LEVEL_DECLARATION_PREFIXES = (
     "package ",
 )
 
-
 # Grammar nodes outside every callable that hold nothing a reader could match:
 # a TypeScript interface member or a Go interface method reads as a call by its
 # shape alone, a C prototype is a declaration with a parameter list, and PHP's
@@ -2335,11 +2587,13 @@ class _FileScope(NamedTuple):
 
     *scanned* is what the ``<top-level>`` scope reads, with grammar-labelled
     content blanked out of each line. *withheld* is declaration header lines
-    the readers do not take.
+    the readers do not take. *inline_text_lines* is the first line of every
+    non-blank PHP inline-HTML run outside a callable.
     """
 
     scanned: list[tuple[int, str]]
     withheld: list[tuple[int, str]]
+    inline_text_lines: list[int]
 
 
 def _callable_intervals(functions: list[dict[str, Any]]) -> list[tuple[int, int]]:
@@ -2397,6 +2651,7 @@ def _file_scope_lines(
     intervals = _callable_intervals(functions)
     starts = [start for start, _end in intervals]
     masked: dict[int, list[tuple[int, int | None]]] = {}
+    inline_text_lines: list[int] = []
     root = getattr(tree, "root_node", None)
     stack = list(reversed(list(getattr(root, "named_children", ()) or ())))
     while stack:
@@ -2405,6 +2660,14 @@ def _file_scope_lines(
         if _within_one_interval(intervals, starts, first, last):
             continue
         if _is_file_scope_unread_node(node, language):
+            if (
+                language == "php"
+                and node.type == "text"
+                and source[node.start_byte:node.end_byte].strip()
+                and not (node.start_byte == 0 and source.startswith(b"#!"))
+            ):
+                text = source[node.start_byte:node.end_byte]
+                inline_text_lines.append(first + 1 + text[: len(text) - len(text.lstrip())].count(b"\n"))
             start_line, start_column, end_line, end_column = _node_character_range(
                 node, source
             )
@@ -2431,7 +2694,7 @@ def _file_scope_lines(
             withheld.append((index, line))
         else:
             scanned.append((index, line))
-    return _FileScope(scanned, withheld)
+    return _FileScope(scanned, withheld, sorted(inline_text_lines))
 
 
 def _java_fetch_call_matches_type(
@@ -2528,6 +2791,21 @@ def _csharp_fetch_call_matches_type(
     return declared_type == "HttpClient"
 
 
+def _go_http_aliases(source_lines: list[str]) -> set[str]:
+    """Names this file binds the `net/http` package to."""
+    aliases: set[str] = set()
+    for line in source_lines:
+        if not _is_scannable_source_line(line, "go"):
+            continue
+        # The word boundary belongs to the alias: an import-block row is a bare
+        # `"net/http"` after indentation, where no boundary precedes the quote.
+        imported = re.search(r"(?:\b(\w+)\s+)?[\"`]net/http[\"`]", line)
+        if imported:
+            alias = imported.group(1)
+            aliases.add("http" if alias in {None, "import"} else alias)
+    return aliases
+
+
 def _go_fetch_bindings(lines: list[str], http_aliases: set[str]) -> set[str]:
     bindings: set[str] = set()
     package_names = "|".join(re.escape(alias) for alias in sorted(http_aliases))
@@ -2589,13 +2867,7 @@ def _detect_sinks(
                 if line not in callable_lines
             ])
     elif language == "go":
-        for line in source_lines:
-            if not _is_scannable_source_line(line):
-                continue
-            imported = re.search(r"\b(?:(\w+)\s+)?[\"`]net/http[\"`]", line)
-            if imported:
-                alias = imported.group(1)
-                go_http_aliases.add("http" if alias in {None, "import"} else alias)
+        go_http_aliases = _go_http_aliases(source_lines)
     seen: set[tuple[str, str, int]] = set()
 
     scopes = [
@@ -3336,9 +3608,11 @@ def index_file(
         )
         entry_points.extend(
             _detect_top_level_entry_points(
-                tree, effective_lang, source_lines, entry_points
+                tree, effective_lang, source_lines, entry_points, file_scope.scanned
             )
         )
+        if effective_lang == "php":
+            entry_points.extend(_detect_php_file_scope_entry(file_scope))
         sinks = _detect_sinks(
             functions, classes, effective_lang, source_lines, file_scope.scanned
         )

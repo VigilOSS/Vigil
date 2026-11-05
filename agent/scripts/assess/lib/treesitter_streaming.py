@@ -62,14 +62,20 @@ _CAPPED_INDEX_LISTS = (
 _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     "python": [
         ("http_request_input", r"\brequest\.(?:args|form|json|values|files|headers|GET|POST|FILES|COOKIES|META|body)\b"),
+        # Tornado's handler reads its request through `self`: the argument
+        # accessors, and the request attributes the table above does not name.
+        ("http_request_input",
+         r"\bself\.get_(?:query_|body_)?arguments?\s*\(|\bself\.get_(?:secure_)?cookie\s*\("),
+        ("http_request_input",
+         r"\bself\.request\.(?:arguments|query_arguments|body_arguments|path|uri|query)\b"),
         ("process_input", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()"),
     ],
     "javascript": [
-        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b"),
+        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies|url|originalUrl|path|rawHeaders)\b"),
         ("process_input", r"\bprocess\.(?:argv|env)\b"),
     ],
     "typescript": [
-        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies)\b"),
+        ("http_request_input", r"\breq\.(?:params|query|body|headers|cookies|url|originalUrl|path|rawHeaders)\b"),
         ("process_input", r"\bprocess\.(?:argv|env)\b"),
     ],
     "java": [
@@ -80,6 +86,7 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     ],
     "go": [
         ("http_request_input", r"\b(?:r|req|request)\.(?:URL\.Query|FormValue|PostFormValue|PathValue|Header\.Get|Cookie|FormFile)\s*\("),
+        ("http_request_input", r"\b(?:r|req|request)\.(?:URL\.(?:Path|RawPath|RawQuery)|Body|Form|PostForm)\b"),
         ("process_input", r"\bos\.(?:Args|Getenv)\b"),
     ],
     "ruby": [
@@ -110,6 +117,11 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         # accessors that only ever read request data.
         ("http_request_input",
          r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\("),
+        # The raw request body, the filtered superglobal reads, and the header
+        # helpers: request input that names no superglobal at all.
+        ("http_request_input",
+         r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b"
+         r"|\b(?:getallheaders|apache_request_headers)\s*\("),
         ("process_input", r"\bgetenv\s*\("),
     ],
     "csharp": [
@@ -227,8 +239,21 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
     ],
 }
 
+# Line-level shapes of the structural entry rules that read a signature or a
+# class header rather than a catalogue line: Go's handler signature, the Node
+# server registration, and a Tornado handler class.
 _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
     "blade": [("html_form", r"<form\b")],
+    "go": [(
+        "go_http_handler",
+        r"\bfunc\s+(?:\([^)]*\)\s*)?\w+\s*\(\s*(?:\w+\s+)?\w+\.ResponseWriter\s*,"
+        r"\s*(?:\w+\s+)?\*\w+\.Request\s*\)",
+    )],
+    # Only the server constructor: a line scanner cannot tell a server's
+    # `.on('request', fn)` from a browser-automation page listener.
+    "javascript": [("node_http_server", r"\bhttps?2?\.createServer\s*\(")],
+    "typescript": [("node_http_server", r"\bhttps?2?\.createServer\s*\(")],
+    "python": [("tornado_handler", r"^\s*class\s+\w+\s*\([^)]*\bRequestHandler\b")],
     "shell": [("shell_script", r"^#!")],
     "powershell": [("script_parameters", r"^\s*param\s*\(")],
     "dockerfile": [

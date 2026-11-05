@@ -346,10 +346,16 @@ PS_ENTRY_SRC = "param(\n  [string]$Name\n)\n"
 LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     # ============================= sources ================================
     ("source", "python", r"\brequest\.(?:args|form|json|values|files|headers|GET|POST|FILES|COOKIES|META|body)\b", "source", PY_SOURCES_SRC, "app.py", "uid = request.args.get('id')", "http_request_input"),
+    ("source", "python", r"\bself\.get_(?:query_|body_)?arguments?\s*\(|\bself\.get_(?:secure_)?cookie\s*\(", "source",
+     "class Report(RequestHandler):\n    def get(self):\n        rid = self.get_argument('id')\n",
+     "handlers.py", "rid = self.get_argument('id')", "http_request_input"),
+    ("source", "python", r"\bself\.request\.(?:arguments|query_arguments|body_arguments|path|uri|query)\b", "source",
+     "class Report(RequestHandler):\n    def get(self):\n        route = self.request.path\n",
+     "handlers.py", "route = self.request.path", "http_request_input"),
     ("source", "python", r"\b(?:sys\.argv|os\.environ|getenv\s*\(|input\s*\()", "source", PY_SOURCES_SRC, "app.py", "a = sys.argv[1]", "process_input"),
-    ("source", "javascript", r"\breq\.(?:params|query|body|headers|cookies)\b", "source", JS_SOURCES_SRC, "server.js", "const id = req.params.id;", "http_request_input"),
+    ("source", "javascript", r"\breq\.(?:params|query|body|headers|cookies|url|originalUrl|path|rawHeaders)\b", "source", JS_SOURCES_SRC, "server.js", "const id = req.params.id;", "http_request_input"),
     ("source", "javascript", r"\bprocess\.(?:argv|env)\b", "source", JS_SOURCES_SRC, "server.js", "const a = process.argv[2];", "process_input"),
-    ("source", "typescript", r"\breq\.(?:params|query|body|headers|cookies)\b", "source", TS_SOURCES_SRC, "server.ts", "const id = req.params.id;", "http_request_input"),
+    ("source", "typescript", r"\breq\.(?:params|query|body|headers|cookies|url|originalUrl|path|rawHeaders)\b", "source", TS_SOURCES_SRC, "server.ts", "const id = req.params.id;", "http_request_input"),
     ("source", "typescript", r"\bprocess\.(?:argv|env)\b", "source", TS_SOURCES_SRC, "server.ts", "const a = process.argv[2];", "process_input"),
     ("source", "java", r"\bget(?:Parameter|Header|InputStream)\s*\(", "source", JAVA_SOURCES_SRC, "App.java", 'String p = req.getParameter("id");', "http_request_input"),
     ("source", "java", r"@(?:PathVariable|MatrixVariable|RequestParam|RequestHeader|CookieValue|RequestBody|RequestPart|ModelAttribute|PathParam|QueryParam|FormParam|HeaderParam|CookieParam|MatrixParam)\b", "source",
@@ -360,12 +366,18 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
      "Routes.java", 'request.pathVariable("name")', "http_request_input"),
     ("source", "java", r"\bSystem\.getenv\s*\(", "source", JAVA_SOURCES_SRC, "App.java", 'String env = System.getenv("HOME");', "process_input"),
     ("source", "go", r"\b(?:r|req|request)\.(?:URL\.Query|FormValue|PostFormValue|PathValue|Header\.Get|Cookie|FormFile)\s*\(", "source", GO_SOURCES_SRC, "main.go", 'q := r.URL.Query()', "http_request_input"),
+    ("source", "go", r"\b(?:r|req|request)\.(?:URL\.(?:Path|RawPath|RawQuery)|Body|Form|PostForm)\b", "source",
+     "package acme\n\nimport \"net/http\"\n\nfunc route(w http.ResponseWriter, r *http.Request) {\n\tswitch r.URL.Path {\n\t}\n}\n",
+     "router.go", "switch r.URL.Path {", "http_request_input"),
     ("source", "go", r"\bos\.(?:Args|Getenv)\b", "source", GO_SOURCES_SRC, "main.go", "a := os.Args[1]", "process_input"),
     ("source", "ruby", r"\b(?:params\s*\[|request\.)", "source", RUBY_SOURCES_SRC, "app.rb", "id = params[:id]", "http_request_input"),
     ("source", "ruby", r"\b(?:ENV\s*\[|ARGV\b)", "source", RUBY_SOURCES_SRC, "app.rb", "e = ENV['HOME']", "process_input"),
     ("source", "php", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
     ("source", "php", r"(?:\$request|\$req|\$this->(?:request|input)|\brequest\s*\(\s*\))\s*->", "source", PHP_SOURCES_SRC, "index.php", "$page = $request->input('page');", "http_request_input"),
     ("source", "php", r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$legacy = Input::get('legacy');", "http_request_input"),
+    ("source", "php", r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b|\b(?:getallheaders|apache_request_headers)\s*\(", "source",
+     "<?php\n$body = file_get_contents('php://input');\n",
+     "hook.php", "php://input", "http_request_input"),
     ("source", "php", r"\bgetenv\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
     ("source", "blade", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
     ("source", "c", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", C_SOURCES_SRC, "main.c", 'char *a = argv[1];', "process_input"),
@@ -440,6 +452,18 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_sink", "powershell", r"\bServerCertificateValidationCallback\b|-SkipCertificateCheck\b", "ps_sink", PS_SINK_SRC, "sinks.ps1", "ServerCertificateValidationCallback", "certificate_validation_disabled"),
     # ========================= extra entry points ============================
     ("extra_entry", "shell", r"^#!", "extra_entry", SHELL_ENTRY_SRC, "x.sh", "#!/bin/bash", "shell_script"),
+    ("extra_entry", "go", r"\bfunc\s+(?:\([^)]*\)\s*)?\w+\s*\(\s*(?:\w+\s+)?\w+\.ResponseWriter\s*,\s*(?:\w+\s+)?\*\w+\.Request\s*\)", "extra_entry",
+     "package acme\n\nfunc (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {}\n",
+     "server.go", "ServeHTTP(", "go_http_handler"),
+    ("extra_entry", "javascript", r"\bhttps?2?\.createServer\s*\(", "extra_entry",
+     "const http = require('http');\nhttp.createServer(router).listen(8080);\n",
+     "server.js", "http.createServer(router)", "node_http_server"),
+    ("extra_entry", "typescript", r"\bhttps?2?\.createServer\s*\(", "extra_entry",
+     "import * as http from 'http';\nhttp.createServer(handle).listen(8080);\n",
+     "server.ts", "http.createServer(handle)", "node_http_server"),
+    ("extra_entry", "python", r"^\s*class\s+\w+\s*\([^)]*\bRequestHandler\b", "extra_entry",
+     "import tornado.web\n\nclass Report(tornado.web.RequestHandler):\n    pass\n",
+     "handlers.py", "class Report(", "tornado_handler"),
     ("extra_entry", "dockerfile", r"^\s*CMD\b", "extra_entry", DOCKERFILE_ENTRY_SRC, "Dockerfile", 'CMD ["run"]', "container_cmd"),
     ("extra_entry", "dockerfile", r"^\s*ENTRYPOINT\b", "extra_entry", DOCKERFILE_ENTRY_SRC, "Dockerfile", 'ENTRYPOINT ["/bin/app"]', "container_entrypoint"),
     ("extra_entry", "html", r"<form\b", "extra_entry", HTML_ENTRY_SRC, "x.html", '<form action="/submit"', "html_form"),
@@ -708,11 +732,9 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 91, (
-        f"expected 91 streaming catalogue entries (35 sources + 23 imports + "
-        f"25 extra sinks + 8 extra entry points -- includes the powershell and "
-        f"blade languages added mid-audit, and the csharp source/import tables "
-        f"added with C# tree-sitter support), found {len(real_keys)}. The catalogue "
+    assert len(real_keys) == 99, (
+        f"expected 99 streaming catalogue entries (39 sources + 23 imports + "
+        f"25 extra sinks + 12 extra entry points), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 

@@ -3,11 +3,15 @@
 Module-level code executes when the file is loaded or requested, so a reader
 that only walks callable bodies leaves it unread -- and ADR 0015 forbids
 reporting that unread scope as a clean negative. These tests pin the
-``<top-level>`` scope over files with no callable at all, and the
-grammar-labelled content it deliberately does not read (commentary, docstrings,
-declarations).
+``<top-level>`` scope over files with no callable at all, the grammar-labelled
+content it deliberately does not read (commentary, docstrings, declarations,
+inline HTML), and the file-scope entry evidence that keeps the entry-point
+dimension measured: PHP request scripts and rendered pages, and Python route
+tables.
 """
 from __future__ import annotations
+
+import pytest
 
 from assess.lib import treesitter_index
 from assess.lib.treesitter_index import index_file
@@ -24,6 +28,13 @@ def _sinks(indexed: dict) -> list[tuple[str, str, int]]:
     return [
         (sink["kind"], sink["function"], sink["line"])
         for sink in indexed["security_sinks"]
+    ]
+
+
+def _entries(indexed: dict) -> list[tuple[str, str, int]]:
+    return [
+        (entry["kind"], entry["name"], entry["line"])
+        for entry in indexed["entry_points"]
     ]
 
 
@@ -222,3 +233,186 @@ def test_php_inline_html_is_document_text_not_php() -> None:
         sink["line"] for sink in indexed["security_sinks"]
     }
     assert indexed["analysis_status"] == "complete"
+
+
+# --- 3. PHP file scope -------------------------------------------------------
+
+PHP_REQUEST_SCRIPT = b"""<?php
+require_once 'config.php';
+$id = $_GET['id'];
+$db = new mysqli('db.example.com', 'acme', 'secret', 'acme');
+$result = $db->query("SELECT * FROM reports WHERE id = " . $id);
+"""
+
+
+def test_a_php_script_reading_a_superglobal_is_an_entry_point() -> None:
+    indexed = index_file("acme/report.php", "php", PHP_REQUEST_SCRIPT)
+
+    assert _entries(indexed) == [
+        ("php_script", "<top-level>", _line_carrying("$_GET", PHP_REQUEST_SCRIPT))
+    ]
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(b"$body = file_get_contents('php://input');", id="php-input"),
+        pytest.param(
+            b"$id = filter_input(INPUT_GET, 'id', FILTER_SANITIZE_NUMBER_INT);",
+            id="filter-input",
+        ),
+        pytest.param(b"$headers = getallheaders();", id="getallheaders"),
+    ],
+)
+def test_request_input_beyond_the_superglobals_is_a_source_and_an_entry(line: bytes) -> None:
+    source = b"<?php\n" + line + b"\n"
+    indexed = index_file("acme/hook.php", "php", source)
+
+    assert [record["kind"] for record in indexed["security_sources"]] == [
+        "http_request_input"
+    ]
+    assert _entries(indexed) == [("php_script", "<top-level>", 2)]
+
+
+PHP_RENDERED_PAGE = b"""<?php require 'header.php'; ?>
+<html>
+  <body>
+    <p>Print this page for your records.</p>
+    <?php if ($user) { ?><b>Welcome</b><?php } ?>
+  </body>
+</html>
+"""
+
+
+def test_a_rendered_page_is_a_weaker_entry_and_its_html_is_not_php() -> None:
+    """Inline HTML is what a requested page sends back, so the file is a page;
+    the words in it are not PHP, so `print` in prose is not an output sink."""
+    indexed = index_file("acme/welcome.php", "php", PHP_RENDERED_PAGE)
+
+    assert _entries(indexed) == [
+        ("php_rendered_page", "<top-level>", _line_carrying("<html>", PHP_RENDERED_PAGE))
+    ]
+    assert all(sink["kind"] != "xss_output" for sink in indexed["security_sinks"])
+
+
+PHP_CLI_SCRIPT = b"""#!/usr/bin/env php
+<?php
+$total = count(scandir('/var/acme/reports'));
+"""
+
+
+def test_a_shebang_is_not_inline_html() -> None:
+    indexed = index_file("bin/count.php", "php", PHP_CLI_SCRIPT)
+
+    assert all(
+        entry["kind"] not in {"php_script", "php_rendered_page"}
+        for entry in indexed["entry_points"]
+    )
+
+
+PHP_CLASS_FILE = b"""<?php
+
+class ReportController
+{
+    public function show()
+    {
+        return $_GET['id'];
+    }
+}
+"""
+
+
+def test_request_input_inside_a_method_does_not_make_the_file_a_script() -> None:
+    indexed = index_file("acme/ReportController.php", "php", PHP_CLASS_FILE)
+
+    assert all(entry["kind"] != "php_script" for entry in indexed["entry_points"])
+
+
+PHP_LIBRARY = b"""<?php
+
+define('ACME_ROOT', __DIR__);
+"""
+
+
+def test_a_php_file_without_entry_evidence_still_measures_its_entries() -> None:
+    """PHP has a file-scope entry catalogue, so no callable is not no measurement."""
+    indexed = index_file("acme/bootstrap.php", "php", PHP_LIBRARY)
+
+    assert indexed["entry_points"] == []
+    assert indexed["analysis_status"] == "complete"
+
+
+def test_the_streaming_fallback_reports_request_reads_but_classifies_no_php_script() -> None:
+    """A byte-window scan has no callable spans, so it cannot tell a script's
+    file scope from a controller method. It reports every request read as a
+    source and leaves `php_script` to the structural reader, which can."""
+    for source in (PHP_REQUEST_SCRIPT, PHP_CLASS_FILE):
+        observed = treesitter_index._fallback_from_bytes(
+            "acme/report.php", "php", source, degradation_reason="test"
+        )
+
+        assert [record["kind"] for record in observed["security_sources"]] == [
+            "http_request_input"
+        ]
+        assert all(entry["kind"] != "php_script" for entry in observed["entry_points"])
+
+
+# --- 4. Python route tables --------------------------------------------------
+
+DJANGO_URLS = b"""from django.urls import path, re_path
+
+from acme import views
+
+urlpatterns = [
+    path("reports/", views.report_list),
+    re_path(r"^reports/(?P<pk>[0-9]+)/$", views.report_detail),
+]
+"""
+
+
+def test_a_django_url_table_names_every_route() -> None:
+    indexed = index_file("acme/urls.py", "python", DJANGO_URLS)
+
+    assert _entries(indexed) == [
+        ("django_route", "<top-level>", _line_carrying('path("reports/"', DJANGO_URLS)),
+        ("django_route", "<top-level>", _line_carrying("re_path(", DJANGO_URLS)),
+    ]
+    assert indexed["analysis_status"] == "complete"
+
+
+FLASK_MODULE_ROUTES = b"""from flask import Flask
+
+from acme.views import report
+
+app = Flask(__name__)
+app.add_url_rule("/report", view_func=report)
+"""
+
+
+def test_a_module_level_flask_url_rule_is_an_entry_point() -> None:
+    indexed = index_file("acme/app.py", "python", FLASK_MODULE_ROUTES)
+
+    assert _entries(indexed) == [
+        ("flask_url_rule", "<top-level>", _line_carrying("add_url_rule", FLASK_MODULE_ROUTES))
+    ]
+
+
+TORNADO_MODULE_APP = b"""import tornado.web
+
+from acme.handlers import ReportHandler
+
+application = tornado.web.Application([
+    (r"/report", ReportHandler),
+])
+"""
+
+
+def test_a_module_level_tornado_application_is_an_entry_point() -> None:
+    indexed = index_file("acme/server.py", "python", TORNADO_MODULE_APP)
+
+    assert _entries(indexed) == [
+        ("tornado_application", "<top-level>", _line_carrying("Application(", TORNADO_MODULE_APP)),
+        ("tornado_route", "<top-level>", _line_carrying('(r"/report"', TORNADO_MODULE_APP)),
+    ]

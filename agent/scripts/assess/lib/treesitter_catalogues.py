@@ -492,11 +492,27 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"\$app->\w+\s*\(", "kind": "slim_route"},
         {"pattern": r"\$router->\w+\s*\(", "kind": "framework_route"},
     ],
+    # Imperative route tables. Written inside an app factory as often as at
+    # module level, so the same list object is read over both scopes below.
+    # Each line of a route table is its own registration, which is why the
+    # file-scope reader takes every line of the statement for these.
+    "python": [
+        {"pattern": r"\.add_url_rule\s*\(", "kind": "flask_url_rule", "statement_lines": "all"},
+        {"pattern": r"\b(?:tornado\.)?web\.Application\s*\(", "kind": "tornado_application", "statement_lines": "all"},
+        {"pattern": r"\(\s*r?['\"]/[^'\"]*['\"]\s*,\s*\w*Handler\b", "kind": "tornado_route", "statement_lines": "all"},
+    ],
 }
 
 _GLOBAL_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
+    # Django's `urlpatterns` is a module-level list whose every `path(` /
+    # `re_path(` / `url(` row is a route. Anchored against an attribute or a
+    # longer name (`os.path(`, `urlpath(`) and against a non-literal first
+    # argument, which no route row has.
     "python": [
         {"pattern": r"^\s*if\s+__name__\s*==\s*['\"]__main__['\"]", "kind": "main_guard"},
+        {"pattern": r"(?<![\w.])(?:re_)?path\s*\(\s*r?['\"]", "kind": "django_route", "statement_lines": "all"},
+        {"pattern": r"(?<![\w.])url\s*\(\s*r?['\"]", "kind": "django_route", "statement_lines": "all"},
+        *_ENTRY_LINE_PATTERNS["python"],
     ],
     "ruby": [
         {"pattern": r"^\s*if\s+__FILE__\s*==\s*\$0", "kind": "main_guard"},
