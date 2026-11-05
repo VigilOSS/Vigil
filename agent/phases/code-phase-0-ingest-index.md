@@ -84,7 +84,8 @@ The `code-index` command:
   untrusted file crosses the parser resource boundary, scans every byte with the bounded streaming
   security fallback instead of risking an operator-process OOM
 - Parses the exact sealed bytes whose SHA-256 is recorded, and writes generation-scoped per-file
-  JSON containing the function map, entry points, security sinks, exports, and call sites
+  JSON containing the function map, the `<top-level>` file-scope segments (`top_level_segments`),
+  entry points, security sinks, exports, and call sites
 - Marks each artifact `complete`, `degraded`, or `unsupported`, names unavailable/truncated
   dimensions, and retains full observed signal counts even when bounded artifact arrays are capped
 - Reconciles the complete sealed path/hash inventory with the current backend language inventory;
@@ -113,7 +114,7 @@ The `code-index` command:
   build-only archival upgrade
 - If tree-sitter is still unavailable, fix the local `uv` environment and rerun. Do not skip
   structural indexing for a fresh engagement.
-- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map is the completeness anchor (`agent/shared-constraints-code.md` §2); sinks, exports, and import targets stay advisory navigation, not a scope limiter
+- The structural index accelerates Phase 2 hunting by giving the hunter a pre-built function map, export list, import dependency graph, and advisory sink annotations instead of requiring manual code triage. The function map and each file's `<top-level>` segments are the completeness anchor (`agent/shared-constraints-code.md` §2); sinks, exports, and import targets stay advisory navigation, not a scope limiter
 
 Output: a retained, generation-scoped structural-index directory and the manifest path printed by
 the command/backend repo record.

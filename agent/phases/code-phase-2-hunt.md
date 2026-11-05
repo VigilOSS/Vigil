@@ -105,9 +105,9 @@ vigil assess code-dispatch fetch 10 <agent-id> --ids-file ids.json
 ```
 
 `list` claims nothing and pages in the order `fetch` claims, so it is how you recover the ids for an
-explicit-id batch: the insertion output caps at 200 rows and scrolls away, and its ids were
-previously unrecoverable through any supported surface. Write `--ids-only` straight to the ids file
--- it is the same contract `fetch --ids-file` reads, so never scrape ids out of presentation text.
+explicit-id batch: the insertion output caps at 200 rows and scrolls away, while `list` pages
+through every current row. Write `--ids-only` straight to the ids file -- it is the same contract
+`fetch --ids-file` reads, so never scrape ids out of presentation text.
 Two things make that file a *claim* set rather than an inventory: pass `--status pending`, because
 `list` deliberately reports every current attempt while `fetch` only claims unleased pending rows;
 and read its stderr, because a page that stopped at `--limit` says so there and nowhere else.
@@ -131,22 +131,25 @@ one oversized mixed batch to a single agent.
 - **Batch theme** -- the logical module grouping, so files in the batch share cross-file context.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
 - **Applicable vulnerability classes** -- pass the backend-computed `applicable_vuln_classes` list
-  through unmodified (`SLOT_VULN_CLASSES` in `orchestrator/backend/app/services/code_analysis.py`,
-  from the canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`); do not hand-copy a
-  slot->class table, it drifts from the backend. This is a coverage floor, not a ceiling -- every
-  named class gets an effort score, and anything else the reading surfaces is still the hunter's
-  to flag. For every C/C++ file, sanity-check that the list includes `error-handling` and
-  `algorithmic-dos`: cleanup/partial-I/O failures and attacker-controlled CPU, allocation,
-  retry, or retention are baseline review surfaces, not optional memory-safety extras. A missing
-  baseline family is a dispatch-input defect to repair before review, not permission to omit it.
+  through unmodified (`_applicable_families_for_file` in
+  `orchestrator/backend/app/services/code_analysis.py` derives it from slot types, language, role
+  and the file's path over the canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`); do
+  not hand-copy a slot->class table, it drifts from the backend. This is a coverage floor, not a
+  ceiling -- every named class gets an effort score, and anything else the reading surfaces is
+  still the hunter's to flag. For every C/C++ file, sanity-check that the list includes
+  `error-handling` and `algorithmic-dos`: cleanup/partial-I/O failures and attacker-controlled
+  CPU, allocation, retry, or retention are baseline review surfaces, not optional memory-safety
+  extras. A missing baseline family is a dispatch-input defect to repair before review, not
+  permission to omit it.
 - **Guidance hypotheses** -- labeled "check AFTER broad analysis." The skill's Steps 3-4 already
   define why the first pass runs unconstrained by these hypotheses and checks them second (not
   re-derived here); "unconstrained" means not pre-anchored to the architect's guesses, not exempt
   from the applicable-classes floor above.
 - **Structural index** -- the manifest path plus relevant per-file index paths from
   the Code Source Identity block (return to Phase 0 for a generation-bound rebuild if missing). The
-  function map is the completeness anchor (`agent/shared-constraints-code.md` §2); sinks, exports,
-  and import targets stay advisory navigation, not a scope limiter.
+  function map and each file's `<top-level>` segments (`top_level_segments`) are the completeness
+  anchor (`agent/shared-constraints-code.md` §2); sinks, exports, and import targets stay advisory
+  navigation, not a scope limiter.
 - **Call graph excerpt** -- the relevant entry chain plus the artifact path to
   `tools/analysis-state/call-graph.json`; inline only edges that change this dispatch's reasoning.
 - **Current threat-model envelope plus a clipped summary** -- fetch
@@ -300,9 +303,10 @@ Phase 2B closes effort gaps Phase 2A left open, using the CWE effort matrix.
 vigil assess code-coverage --cwe-matrix
 ```
 
-Shows, per critical/high file: expected classes from `SLOT_VULN_CLASSES`, current effort per class,
-threshold flags (`!` = below threshold), and callable coverage derived from exact references on
-current receipts. `functions_analyzed` remains advisory context only. These scores steer review depth; they do not
+Shows, per critical/high file: expected classes (derived from slot types, language, role and
+path, exactly as `applicable_vuln_classes`), current effort per class, threshold flags (`!` = below
+threshold), and callable coverage derived from exact references on current receipts.
+`functions_analyzed` remains advisory context only. These scores steer review depth; they do not
 authorize or block a phase transition. If no warning represents a material gap, record that
 judgment and continue to 2C/2D. Pending cross-file triggers remain a separate structural-readiness
 blocker regardless of the quality score.

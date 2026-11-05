@@ -74,8 +74,9 @@ summary can orient the work but cannot replace either the bound envelope or stru
 
 You receive actual source code files -- read directly beneath `snapshot_path` with its bound
 structural-index navigation -- not JSON metadata about code. Read the code directly.
-Start with the function map as your completeness anchor, then use entry points, exports,
-sinks, and import targets as advisory navigation aids to prioritize where you deepen.
+Start with the function map and the file's `<top-level>` segments (`top_level_segments`) as your
+completeness anchor, then use entry points, exports, sinks, and import targets as advisory
+navigation aids to prioritize where you deepen.
 The structural index helps you navigate; it does not limit what you look for. Do not
 substitute metadata summaries for source reads.
 
@@ -275,16 +276,20 @@ Every reviewed callable or source span must receive a disposition, but the recei
 reasoning quota. One `file` receipt may group several callables in the claimed file; one
 `call_chain` receipt may group a traced chain across files in the same sealed repository snapshot.
 Name every covered callable with the exact structural-index identity, and use exact reviewed spans
-for non-callable source regions. A reviewed span cannot stand in for a registered callable it
-overlaps; include every overlapped callable as an exact `callable_ref`. A complete function index
-publishes exactly its reported callable total.
+for source outside every function. A reviewed span cannot stand in for a registered function it
+overlaps; include every overlapped function as an exact `callable_ref`. A complete function index
+publishes exactly `total_functions` function records plus one `<top-level>` record per
+file-scope segment.
 
 File scope is a callable too. The artifact's `top_level_segments` are the file-scope code between
-callables that runs when the file is loaded or requested; imports, declarations and comments open
-none. They are registered as `<top-level>` callables (name and qualified name `<top-level>`, one per
+callables that runs when the file is loaded or requested. Import, namespace and `use` lines, type
+and constant declarations, literal-valued bindings and comments open none. PHP `include`/`require`
+statements and inline HTML open one, as do bindings with computed values such as
+`const db = require('db')`, and a sink or source the index reports in file-scope code that can run.
+They are registered as `<top-level>` callables (name and qualified name `<top-level>`, one per
 segment, not counted in `total_functions`). The file owes each segment a disposition like any other
-callable: cite it as an exact `callable_ref`, or cover its lines with reviewed spans, which may
-overlap a `<top-level>` segment without citing it. Naming a function never covers the file scope.
+callable: cite it as an exact `callable_ref`, or cover its lines with reviewed spans. A span may
+cover a `<top-level>` segment without citing it. Naming a function never covers the file scope.
 
 Only a whole-file reviewed span can prove the manual source review (and it must still name every
 function it overlaps) when structural analysis is unsupported, the function dimension is truncated
@@ -351,7 +356,9 @@ reading surfaces the signal it matches, not as a blanket preload before you open
 type and code pattern: when your reading surfaces a signal (a parser over FILE-CONTENT, a crypto
 call, memory allocation with attacker-influenced size, an auth check, ...), load the matching
 file(s) yourself — list the directory or match filename to the observed signal. Do not load a
-file for a class the batch does not exhibit.
+file for a class the batch does not exhibit. `rate-limit` has no file of its own: its source checks
+live in `agent/references/code-vuln-patterns/business-logic.md` under "6. Attempt limits on OTP,
+MFA, passcodes and password reset".
 
 **A skill's Extended Resources section is a menu, not a Step 2.** Read it when the skill's own
 procedure sends you to a specific reference, not as a blanket read-everything-first pass. A
@@ -459,9 +466,9 @@ analysis receipts and reports it as `coverage_integrity` on the `code-dispatch d
    completion time, not from the coverage JSON alone.
 2. `functions_analyzed` is advisory self-reporting, never coverage proof. Each file's authoritative
    numerator is the union of exact `callable_refs` that name that file, including references from
-   a current cross-file `call_chain`; `reviewed_spans` prove checked source that has no structural
-   callable identity but do not invent callable coverage. A `<top-level>` reference covers file
-   scope and never counts toward the function numerator.
+   a current cross-file `call_chain`; `reviewed_spans` prove checked source outside every function,
+   including the `<top-level>` segments they cover, but do not invent function coverage. A
+   `<top-level>` reference covers file scope and never counts toward the function numerator.
 3. Cross-file callable coverage does not transfer lease ownership. Only a source receipt anchored
    to the claimed queue file can close its non-skipped review; referenced files retain
    their own queue, disposition, evidence, and closeout obligations.

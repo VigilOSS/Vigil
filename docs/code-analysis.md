@@ -145,7 +145,8 @@ fnmatch rules as `code-dispatch queue`. Repeat a flag to accept several values; 
 other filter still applies. The backend applies the scope inside the claim, so `fetch`
 never leases a row outside it.
 
-To see which directories still owe review, break coverage down by path:
+To see which directories hold critical and high files without a successful review, break
+coverage down by path:
 
 ```bash
 vigil assess code-coverage --by-path                               # depth 2, most uncovered first
@@ -157,6 +158,13 @@ segments and shows files, lines of code, analyzed critical and high files, the s
 analysis-status buckets as the summary, unreviewed structural debt, and accounted
 skips. The rows add up to the summary totals, and the debt column adds up to the
 structural debt that readiness blocks on. Reference repositories never appear.
+
+A file counts as analyzed once it has a successful review. The `code-coverage` gate
+also lists, in `uncovered_high_risk_files`, analyzed critical and high files whose
+receipts leave a function or `<top-level>` segment unproven, unless a finding is
+linked to the file or every applicable family is marked not applicable. Readiness for
+`verify-variant`, `fuzz` and `complete` reports those files as the
+`structural_coverage_unresolved` blocker.
 
 ## Runtime proof owed
 

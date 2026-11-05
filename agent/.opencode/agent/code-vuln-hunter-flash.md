@@ -80,8 +80,9 @@ Before producing any output, confirm:
       `queue_item_id`, `agent_name`, and `lease_token`; follow the heartbeat cadence in
       `shared-constraints-code.md` §10 for long-running work
 - [ ] **Structural index loaded from `structural_index_manifest_path`** -- provides the function
-      map as completeness anchor, plus entry points, sinks, exports, and import targets as advisory
-      navigation metadata; no directory scan or prior-generation manifest substitutes for it
+      map and each file's `<top-level>` segments (`top_level_segments`) as completeness anchor,
+      plus entry points, sinks, exports, and import targets as advisory navigation metadata; no
+      directory scan or prior-generation manifest substitutes for it
 - [ ] **Current threat-model envelope available** -- it matches Code Source Identity and supplies
       the product surface profile/evidence, target-kind entry points, product-reachability versus
       attacker-control status, trust boundaries, high-value targets, and trusted inputs (advisory,
@@ -253,15 +254,16 @@ not a lifecycle default.
 
 Before returning results, confirm the batch holds together as a complete pass, not a partial one:
 every function in every file is covered by an exact structural reference on a receipt (verified
-mechanical helpers may share a concise grouped `clean` receipt), every macro call was expanded and analyzed in its expanded form, every
-`#ifdef` branch was checked for guard completeness across all conditional paths, and every
-`needs-context` item names the exact missing function/file, the hypothesis it blocks, and the
-self-service already attempted. Produce `cwe_coverage` for every applicable vulnerability class
-(an explicit gap entry where effort is genuinely zero) and `cross_file_triggers` for any finding
-that connects elsewhere via the call graph. If the structural index was available, every listed
-callable has a disposition, including each `<top-level>` file-scope segment. `functions_analyzed` is advisory; the receipt's structural references
-are the coverage proof. Guidance hypotheses were checked after the skill's unconstrained pass
-(Steps 1-3), never before it.
+mechanical helpers may share a concise grouped `clean` receipt), every macro call was expanded and
+analyzed in its expanded form, every `#ifdef` branch was checked for guard completeness across all
+conditional paths, and every `needs-context` item names the exact missing function/file, the
+hypothesis it blocks, and the self-service already attempted. Produce `cwe_coverage` for every
+applicable vulnerability class (an explicit gap entry where effort is genuinely zero) and
+`cross_file_triggers` for any finding that connects elsewhere via the call graph. If the structural
+index was available, every listed callable has a disposition, including each `<top-level>`
+file-scope segment. `functions_analyzed` is advisory; the receipt's structural references and
+reviewed spans are the coverage proof. Guidance hypotheses were checked after the skill's
+unconstrained pass (Steps 1-3), never before it.
 
 ## Handoffs
 

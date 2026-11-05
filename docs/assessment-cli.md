@@ -259,10 +259,10 @@ The optional prompt-context JSON shape is documented in
 | Code track | `code-ingest`, `code-index`, `code-history`, `code-coverage`, `code-record`, `code-dispatch`, `code-size-summary`, `code-sourcemap-extract` |
 | Runtime tools | `kali` (see below), `egress-check` |
 
-`vigil assess code-dispatch list` and `fetch` take repeatable `--path-prefix` and
-`--path-glob` flags that scope the listing or the claim to a source subtree on the
-backend. A prefix matches whole path segments and is case-sensitive.
-`vigil assess code-coverage --by-path [--depth N] [--path-prefix PATH] [--json]` breaks
+`vigil assess code-dispatch list|fetch ... [--path-prefix PATH]... [--path-glob GLOB]...`
+scopes the listing or the claim to a source subtree on the backend; each flag repeats.
+A prefix matches whole path segments and is case-sensitive.
+`vigil assess code-coverage --by-path [--depth N] [--path-prefix PATH]... [--json]` breaks
 coverage down by directory. See
 [code-analysis.md](code-analysis.md#working-one-part-of-a-repository).
 

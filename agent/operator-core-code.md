@@ -178,8 +178,8 @@ a menu:
   `source-analyzer` (when it runs a code-track dispatch alongside web testing) all carry baseline +
   `developer.md`, no family lens.
 - **DEEP drill** (Phase 2B/2C) — `code-vuln-hunter` carries ONE family lens matching the flagged
-  signal (`injection-surface.md`, `idor-bac.md`, `business-logic.md`, or closest fit) plus the
-  matching CWE pattern refs.
+  signal (`agent/rules/mindsets/injection-surface.md`, `agent/rules/mindsets/idor-bac.md`,
+  `agent/rules/mindsets/business-logic.md`, or closest fit) plus the matching CWE pattern refs.
 - **SYNTHESIS** (Phase 2D) — `code-vuln-hunter` carries `chain-impact.md`, complementing (not
   replacing) the seam manifest and the exploit-developer A→B chain table.
 - **VARIANT** (Phase 3) — `code-variant-hunter` carries the sibling/variant lens of the confirmed
@@ -432,7 +432,7 @@ Then run the code-mode state checks that do not exist in web/runtime engagements
 
 ```bash
 vigil assess code-coverage                  # File classification + analysis coverage
-vigil assess code-coverage --by-path        # Which directories still owe critical/high review
+vigil assess code-coverage --by-path        # Per directory, ranked by critical/high files with no successful review
 vigil assess code-dispatch stats             # Queue state (pending/processing/done/needs-context)
 vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or later is active
 vigil assess code-coverage --require-transition-ready <next-phase>
