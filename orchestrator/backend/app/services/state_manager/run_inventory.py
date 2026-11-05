@@ -105,6 +105,29 @@ def _insert_obligation(
     return _serialize_obligation(row)
 
 
+def _refuse_manual_source_closure(
+    obligation_kind: str, status_value: str, *, obligation_label: str
+) -> None:
+    """Keep an unread source from being closed by assertion.
+
+    A source_read obligation is the ledger's record that included bytes were
+    never delivered. Prose or an unrelated receipt cannot prove delivery, so only
+    complete observed byte coverage or the producer's audited release closes it.
+    """
+
+    if obligation_kind == "source_read" and status_value in {"resolved", "accepted_gap"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"source_read obligation {obligation_label} cannot be set "
+                f"{status_value!r} by an obligation write; it closes only through "
+                "complete observed byte coverage (`run-audit source-read record`) "
+                "or, on a proof run, the producer's audited "
+                "`run-audit obligation release`"
+            ),
+        )
+
+
 def _serialize_obligation(row: sqlite3.Row | dict[str, Any]) -> dict[str, Any]:
     record = dict(row)
     record["hard"] = bool(record["hard"])
@@ -549,6 +572,9 @@ def record_run_obligation(
         )
         if status_value in {"resolved", "accepted_gap"} and not resolution.strip():
             raise HTTPException(status_code=400, detail="closed obligation requires a resolution")
+        _refuse_manual_source_closure(
+            str(obligation_kind), status_value, obligation_label=str(identity_key)
+        )
         if hard and status_value == "resolved" and not receipt_ids:
             raise HTTPException(
                 status_code=400,
@@ -614,6 +640,11 @@ def update_run_obligation(
         ).fetchone()
         if existing is None:
             raise HTTPException(status_code=404, detail="run obligation not found")
+        _refuse_manual_source_closure(
+            str(existing["obligation_kind"]),
+            status_value,
+            obligation_label=str(obligation_id),
+        )
         if bool(existing["hard"]) and status_value == "resolved" and not receipt_ids:
             raise HTTPException(
                 status_code=400,
