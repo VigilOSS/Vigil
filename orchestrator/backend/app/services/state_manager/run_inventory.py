@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from . import _common
 from ._common import _engagement_or_404
 from .run_accounting import (
+    CLOSED_OBLIGATION_STATUSES,
     INVENTORY_STATUSES,
     OBLIGATION_STATUSES,
     PARSER_STATUSES,
@@ -105,6 +106,12 @@ def _insert_obligation(
     return _serialize_obligation(row)
 
 
+# ``released`` is written only by ``release_run_obligation``.
+_WRITABLE_OBLIGATION_STATUSES = OBLIGATION_STATUSES - {"released"}
+# A source the producer can still read, or release instead of reading.
+_RELEASABLE_OBLIGATION_STATUSES = frozenset({"open", "blocked", "deferred"})
+
+
 def _refuse_manual_source_closure(
     obligation_kind: str, status_value: str, *, obligation_label: str
 ) -> None:
@@ -115,7 +122,7 @@ def _refuse_manual_source_closure(
     complete observed byte coverage or the producer's audited release closes it.
     """
 
-    if obligation_kind == "source_read" and status_value in {"resolved", "accepted_gap"}:
+    if obligation_kind == "source_read" and status_value in CLOSED_OBLIGATION_STATUSES:
         raise HTTPException(
             status_code=409,
             detail=(
@@ -562,8 +569,8 @@ def record_run_obligation(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     status_value = str(status_value)
-    if status_value not in OBLIGATION_STATUSES:
-        raise _invalid("obligation status", status_value, OBLIGATION_STATUSES)
+    if status_value not in _WRITABLE_OBLIGATION_STATUSES:
+        raise _invalid("obligation status", status_value, _WRITABLE_OBLIGATION_STATUSES)
     with _common.get_connection() as connection:
         run = _run_or_404(connection, engagement.id, run_id)
         _require_active_run(run, operation="obligation writes")
@@ -626,8 +633,10 @@ def update_run_obligation(
     proof_receipt_ids: list[int],
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    if status_value not in OBLIGATION_STATUSES - {"open"}:
-        raise _invalid("obligation status", status_value, OBLIGATION_STATUSES - {"open"})
+    if status_value not in _WRITABLE_OBLIGATION_STATUSES - {"open"}:
+        raise _invalid(
+            "obligation status", status_value, _WRITABLE_OBLIGATION_STATUSES - {"open"}
+        )
     if status_value in {"resolved", "accepted_gap"} and not resolution.strip():
         raise HTTPException(status_code=400, detail="closed obligation requires a resolution")
     with _common.get_connection() as connection:
@@ -660,7 +669,7 @@ def update_run_obligation(
             and existing_receipt_ids == receipt_ids
         ):
             return _serialize_obligation(existing)
-        if str(existing["status"]) in {"resolved", "accepted_gap"}:
+        if str(existing["status"]) in CLOSED_OBLIGATION_STATUSES:
             raise HTTPException(status_code=409, detail="closed obligation status is immutable")
         connection.execute(
             """
@@ -712,6 +721,135 @@ def update_run_obligation(
         return _serialize_obligation(updated)
 
 
+def release_run_obligation(
+    engagement_id: int,
+    *,
+    run_id: int,
+    obligation_id: int,
+    dispatch_agent_id: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Close an unread imported source its proof run's producer will not read.
+
+    The release is the honest alternative to a manual resolution: it records who
+    decided and why without claiming the bytes were delivered, and the run then
+    reports the source as released rather than read.
+    """
+
+    engagement = _engagement_or_404(engagement_id)
+    reason = str(reason or "")
+    if not reason.strip():
+        raise HTTPException(status_code=400, detail="source release requires a reason")
+    with _common.get_connection() as connection:
+        run = _run_or_404(connection, engagement.id, run_id)
+        _require_active_run(run, operation="source releases")
+        if str(run["run_purpose"]) != "proof":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "only a proof run can release an unread source; a scan's "
+                    "inventory is its completion contract, so an unread source "
+                    "keeps the scan partial"
+                ),
+            )
+        existing = connection.execute(
+            "SELECT * FROM assessment_run_obligations WHERE engagement_id = ? AND run_id = ? AND id = ?",
+            (engagement.id, run_id, obligation_id),
+        ).fetchone()
+        if existing is None:
+            raise HTTPException(status_code=404, detail="run obligation not found")
+        if str(existing["obligation_kind"]) != "source_read":
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"obligation {obligation_id} is {existing['obligation_kind']!r}; "
+                    "only a source_read obligation can be released"
+                ),
+            )
+        dispatch = connection.execute(
+            "SELECT id FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+            (engagement.id, str(dispatch_agent_id)),
+        ).fetchone()
+        if dispatch is None:
+            raise HTTPException(status_code=404, detail="release dispatch not found")
+        # ADR 0028: the decision to leave a source unread belongs to the dispatch
+        # whose run makes the claim, never to a bystander.
+        if int(dispatch["id"]) != int(run["producer_dispatch_id"]):
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"only run {run_id}'s producer dispatch "
+                    f"{run['producer_dispatch_agent_id']!r} can release its sources"
+                ),
+            )
+        current_status = str(existing["status"])
+        if current_status == "released":
+            released_by = connection.execute(
+                """
+                SELECT actor_dispatch_id FROM assessment_run_obligation_events
+                WHERE obligation_id = ? AND to_status = 'released'
+                ORDER BY id DESC LIMIT 1
+                """,
+                (obligation_id,),
+            ).fetchone()
+            if (
+                str(existing["resolution"]) == reason
+                and released_by is not None
+                and released_by["actor_dispatch_id"] == int(dispatch["id"])
+            ):
+                return _serialize_obligation(existing)
+            raise HTTPException(status_code=409, detail="closed obligation status is immutable")
+        if current_status not in _RELEASABLE_OBLIGATION_STATUSES:
+            raise HTTPException(status_code=409, detail="closed obligation status is immutable")
+        receipt_ids = _json_value(existing["proof_receipt_ids_json"], [])
+        connection.execute(
+            """
+            UPDATE assessment_run_obligations
+            SET status = 'released', resolution = ?, record_sha256 = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            """,
+            (
+                reason,
+                _sha256(
+                    {
+                        "identity_key": str(existing["identity_key"]),
+                        "obligation_kind": str(existing["obligation_kind"]),
+                        "object_type": str(existing["object_type"]),
+                        "object_key": str(existing["object_key"]),
+                        "hard": bool(existing["hard"]),
+                        "status": "released",
+                        "resolution": reason,
+                        "proof_receipt_ids": receipt_ids,
+                    }
+                ),
+                obligation_id,
+            ),
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_run_obligation_events (
+                engagement_id, run_id, obligation_id, from_status,
+                to_status, resolution, proof_receipt_ids_json, actor_dispatch_id
+            ) VALUES (?, ?, ?, ?, 'released', ?, ?, ?)
+            """,
+            (
+                engagement.id,
+                run_id,
+                obligation_id,
+                current_status,
+                reason,
+                _json_text(receipt_ids),
+                int(dispatch["id"]),
+            ),
+        )
+        updated = connection.execute(
+            "SELECT * FROM assessment_run_obligations WHERE id = ?", (obligation_id,)
+        ).fetchone()
+        assert updated is not None
+        return _serialize_obligation(updated)
+
+
 def list_obligation_history(
     engagement_id: int, *, run_id: int, obligation_id: int
 ) -> list[dict[str, Any]]:
@@ -726,8 +864,13 @@ def list_obligation_history(
             raise HTTPException(status_code=404, detail="run obligation not found")
         rows = connection.execute(
             """
-            SELECT * FROM assessment_run_obligation_events
-            WHERE engagement_id = ? AND run_id = ? AND obligation_id = ? ORDER BY id
+            SELECT events.*, dispatches.agent_id AS actor_dispatch_agent_id
+            FROM assessment_run_obligation_events AS events
+            LEFT JOIN assessment_dispatches AS dispatches
+              ON dispatches.id = events.actor_dispatch_id
+            WHERE events.engagement_id = ? AND events.run_id = ?
+              AND events.obligation_id = ?
+            ORDER BY events.id
             """,
             (engagement.id, run_id, obligation_id),
         ).fetchall()

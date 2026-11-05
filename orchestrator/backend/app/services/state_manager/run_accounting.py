@@ -31,7 +31,15 @@ TERMINAL_RUN_STATUSES = RUN_STATUSES - ACTIVE_RUN_STATUSES
 INVENTORY_STATUSES = frozenset({"included", "excluded", "missing"})
 PARSER_STATUSES = frozenset({"parsed", "failed", "not_applicable"})
 OBLIGATION_STATUSES = frozenset(
-    {"open", "resolved", "blocked", "deferred", "accepted_gap"}
+    {"open", "resolved", "blocked", "deferred", "accepted_gap", "released"}
+)
+# A closed obligation is immutable. ``released`` is reachable only through a
+# proof run producer's audited source release, never a generic obligation write.
+CLOSED_OBLIGATION_STATUSES = frozenset({"resolved", "accepted_gap", "released"})
+# Hard obligations in these statuses are live debt that blocks completion.
+LIVE_OBLIGATION_STATUSES = frozenset({"open", "blocked", "deferred", "accepted_gap"})
+_LIVE_OBLIGATION_SQL = ", ".join(
+    f"'{value}'" for value in sorted(LIVE_OBLIGATION_STATUSES)
 )
 CANDIDATE_STATES = frozenset(
     {"open", "promoted", "rejected", "duplicate", "deferred"}
@@ -752,12 +760,13 @@ def _counts_by_run(
         """
     )
     obligations = grouped(
-        """
+        f"""
         SELECT run_id, COUNT(*) AS total,
-               SUM(hard = 1 AND status IN ('open', 'blocked', 'deferred', 'accepted_gap'))
-                   AS open_hard
+               SUM(hard = 1 AND status IN ({_LIVE_OBLIGATION_SQL})) AS open_hard,
+               SUM(obligation_kind = 'source_read' AND status = 'released')
+                   AS released_sources
         FROM assessment_run_obligations
-        WHERE engagement_id = ? AND run_id IN ({placeholders}) GROUP BY run_id
+        WHERE engagement_id = ? AND run_id IN ({{placeholders}}) GROUP BY run_id
         """
     )
     candidates = grouped(
@@ -827,6 +836,7 @@ def _counts_by_run(
             "source_reads": value(simple["source_reads"], run_id),
             "obligations": value(obligations, run_id),
             "open_hard_obligations": value(obligations, run_id, "open_hard"),
+            "released_sources": value(obligations, run_id, "released_sources"),
             "candidates": value(candidates, run_id),
             "open_candidates": value(candidates, run_id, "open"),
             "tool_signals": value(simple["tool_signals"], run_id),
@@ -1126,10 +1136,10 @@ def _current_blockers(
     # The counts use the same predicates as these row queries, so a zero count
     # proves an empty result without asking again.
     obligation_rows = connection.execute(
-        """
+        f"""
         SELECT id, identity_key, status FROM assessment_run_obligations
         WHERE engagement_id = ? AND run_id = ? AND hard = 1
-          AND status IN ('open', 'blocked', 'deferred', 'accepted_gap')
+          AND status IN ({_LIVE_OBLIGATION_SQL})
         ORDER BY id
         """,
         (engagement_id, run_id),
@@ -1791,6 +1801,8 @@ def create_assessment_run(
                 # whose evidence has decayed can never re-resolve it. Reopening
                 # returns it to the one status an agent can still move, and its
                 # unevidenced resolution text is retired with the proof it rested on.
+                # A released source rests on its producer's recorded reason, not
+                # on proof, so the child inherits the release as it stands.
                 requires_new_proof = bool(dropped_receipt_ids) and parent_status in {
                     "resolved",
                     "accepted_gap",
@@ -2158,6 +2170,7 @@ from .run_inventory import (  # noqa: E402
     record_run_obligation as record_run_obligation,
     record_run_sources as record_run_sources,
     record_source_read as record_source_read,
+    release_run_obligation as release_run_obligation,
     update_run_obligation as update_run_obligation,
 )
 

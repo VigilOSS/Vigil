@@ -67,6 +67,7 @@ const COUNT_LABELS: Record<string, string> = {
   source_reads: "Source reads",
   obligations: "Obligations",
   open_hard_obligations: "Open hard obligations",
+  released_sources: "Sources released unread",
   candidates: "Candidates",
   open_candidates: "Open candidates",
   tool_signals: "Tool signals",

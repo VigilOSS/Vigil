@@ -24,7 +24,7 @@ _STREAM_CHUNK_BYTES = 1024 * 1024
 _INVENTORY_STATUSES = frozenset({"included", "excluded", "missing"})
 _PARSER_STATUSES = frozenset({"parsed", "failed", "not_applicable"})
 _OBLIGATION_STATUSES = frozenset(
-    {"open", "resolved", "blocked", "deferred", "accepted_gap"}
+    {"open", "resolved", "blocked", "deferred", "accepted_gap", "released"}
 )
 _CANDIDATE_STATES = frozenset(
     {"open", "promoted", "rejected", "duplicate", "deferred"}
@@ -91,7 +91,7 @@ def register(subparsers) -> None:
     _register_list(read_actions, _run_list)
 
     obligations = families.add_parser(
-        "obligation", help="Record, update, or list run obligations."
+        "obligation", help="Record, update, release, or list run obligations."
     )
     obligation_actions = obligations.add_subparsers(
         dest="run_audit_action", required=True
@@ -109,6 +109,19 @@ def register(subparsers) -> None:
     obligation_update.add_argument("obligation_id", type=int)
     obligation_update.add_argument("payload_file")
     obligation_update.set_defaults(func=_run_obligation_update)
+    obligation_release = obligation_actions.add_parser(
+        "release",
+        help="Release an unread proof-run source the producer will not read.",
+    )
+    obligation_release.add_argument("run_id", type=int)
+    obligation_release.add_argument("obligation_id", type=int)
+    obligation_release.add_argument(
+        "--agent-id", required=True, help="The run's producer dispatch agent id."
+    )
+    obligation_release.add_argument(
+        "--reason", required=True, help="Why this source will not be read."
+    )
+    obligation_release.set_defaults(func=_run_obligation_release)
     _register_list(obligation_actions, _run_list)
 
     candidates = families.add_parser(
@@ -976,6 +989,33 @@ def _run_obligation_update(args) -> None:
         validator=_require_obligation,
         requested_id=obligation_id,
     )
+
+
+def _run_obligation_release(args) -> None:
+    operation = "obligation release"
+    run_id = int(args.run_id)
+    obligation_id = int(args.obligation_id)
+    payload = {"dispatch_agent_id": str(args.agent_id), "reason": str(args.reason)}
+    _, client = _client(args)
+    try:
+        response = client.post(
+            f"assessment-runs/{run_id}/obligations/{obligation_id}/release", payload
+        )
+    finally:
+        client.close()
+    row = _require_obligation(
+        response,
+        operation=operation,
+        requested_run_id=run_id,
+        requested_id=obligation_id,
+        write=True,
+    )
+    _require_requested_fields(
+        row,
+        {"status": "released", "resolution": payload["reason"]},
+        operation=operation,
+    )
+    print(json.dumps(row, indent=2, ensure_ascii=False))
 
 
 def _run_candidate_record(args) -> None:

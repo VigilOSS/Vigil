@@ -316,6 +316,92 @@ def test_run_audit_writes_reject_malformed_success_without_retrying(
     assert "do not retry automatically" in stderr
 
 
+def _released_source_obligation() -> dict:
+    return {
+        **_obligation(),
+        "identity_key": "source_read:31",
+        "obligation_kind": "source_read",
+        "status": "released",
+        "resolution": "generated fixture outside the claimed path",
+    }
+
+
+def test_run_audit_obligation_release_posts_the_producer_and_reason(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    calls: list[tuple[str, dict]] = []
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+
+    def post(_client, endpoint: str, payload: dict):
+        calls.append((endpoint, payload))
+        return _released_source_obligation()
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+    cli.main(
+        [
+            "--engagement-dir",
+            str(engagement),
+            "run-audit",
+            "obligation",
+            "release",
+            "17",
+            "51",
+            "--agent-id",
+            "HUNT-1",
+            "--reason",
+            "generated fixture outside the claimed path",
+        ]
+    )
+
+    assert json.loads(capsys.readouterr().out) == _released_source_obligation()
+    assert calls == [
+        (
+            "assessment-runs/17/obligations/51/release",
+            {
+                "dispatch_agent_id": "HUNT-1",
+                "reason": "generated fixture outside the claimed path",
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {**_obligation(), "status": "open"},
+        {**_obligation(), "status": "released", "resolution": "another reason"},
+        {"id": True},
+    ],
+)
+def test_run_audit_obligation_release_rejects_an_unconfirmed_release(
+    response, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(AssessmentClient, "post", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "run-audit",
+                "obligation",
+                "release",
+                "17",
+                "51",
+                "--agent-id",
+                "HUNT-1",
+                "--reason",
+                "generated fixture outside the claimed path",
+            ]
+        )
+
+    assert excinfo.value.code == 1
+    assert "do not retry automatically" in capsys.readouterr().err
+
+
 def test_source_inventory_import_chunks_more_than_one_api_request(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -955,7 +1041,7 @@ def test_run_audit_contract_documents_all_actions() -> None:
     for action in (
         "sources commitment/import/list",
         "source-read record/list",
-        "obligation record/update/list",
+        "obligation record/update/release/list",
         "candidate record/update/list/history",
         "commands list",
         "observed-events list",

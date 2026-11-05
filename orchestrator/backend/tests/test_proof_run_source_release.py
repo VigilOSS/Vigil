@@ -1,12 +1,20 @@
 """Imported sources a proof run never read cannot disappear from its outcome."""
 from __future__ import annotations
 
+import hashlib
+import json
+import sqlite3
+
 import pytest
 
+from app import db as db_module
 from tests.test_run_accounting_api import (
     BASE,
+    _create_scan,
     _recovery_parent_run,
     _recovery_receipt,
+    _resume,
+    _seal,
     _seed,
     _source,
 )
@@ -96,3 +104,223 @@ def test_recording_a_closed_source_read_obligation_is_refused(
 
     assert refused.status_code == 409, refused.text
     assert "source-read record" in refused.json()["detail"]
+
+
+def _release(client, run: dict, obligation: dict, *, agent_id: str, reason: str):
+    return client.post(
+        f"{BASE}/assessment-runs/{run['id']}/obligations/{obligation['id']}/release",
+        json={"dispatch_agent_id": agent_id, "reason": reason},
+    )
+
+
+def _obligation_digest(client, run: dict) -> str:
+    """The seal's obligation digest, recomputed from the public listing."""
+
+    page = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/obligations",
+        params={"limit": 1000, "offset": 0},
+    ).json()["items"]
+    identity = [
+        [
+            row["identity_key"],
+            row["obligation_kind"],
+            row["object_type"],
+            row["object_key"],
+            int(row["hard"]),
+            row["status"],
+            row["resolution"],
+            json.dumps(row["proof_receipt_ids"], separators=(",", ":")),
+        ]
+        for row in sorted(page, key=lambda row: row["identity_key"])
+    ]
+    return hashlib.sha256(
+        json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+
+
+def test_producer_release_closes_an_unread_source_with_an_audited_reason(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="release-unread")
+    _recovery_receipt(client, run, slug="release-unread", observed="guard absent")
+    [source] = _import(client, run, 1)
+    obligation = _source_obligation(client, run, source)
+    reason = "generated fixture outside the claimed request path"
+
+    released = _release(client, run, obligation, agent_id="HUNT-RUN-1", reason=reason)
+
+    assert released.status_code == 200, released.text
+    assert released.json()["status"] == "released"
+    assert released.json()["resolution"] == reason
+    retried = _release(client, run, obligation, agent_id="HUNT-RUN-1", reason=reason)
+    assert retried.status_code == 200, retried.text
+    assert retried.json() == released.json()
+    history = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/obligations/{obligation['id']}/history"
+    ).json()
+    assert [(event["from_status"], event["to_status"]) for event in history] == [
+        (None, "open"),
+        ("open", "released"),
+    ]
+    assert history[-1]["resolution"] == reason
+    assert history[-1]["actor_dispatch_id"] == run["producer_dispatch_id"]
+    assert history[-1]["actor_dispatch_agent_id"] == "HUNT-RUN-1"
+    decisions = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/decision-history",
+        params={"limit": 10, "offset": 0},
+    ).json()["items"]
+    assert decisions[-1]["to_status"] == "released"
+    assert decisions[-1]["actor_dispatch_agent_id"] == "HUNT-RUN-1"
+    current = client.get(f"{BASE}/assessment-runs/{run['id']}").json()
+    assert current["counts"]["released_sources"] == 1
+    assert current["counts"]["open_hard_obligations"] == 0
+    assert current["blockers"] == []
+
+    sealed = _seal(client, run)
+
+    assert sealed["status"] == "completed"
+    assert sealed["seal"]["counts"]["released_sources"] == 1
+    assert sealed["seal"]["obligation_digest"] == _obligation_digest(client, run)
+    refused = _release(client, run, obligation, agent_id="HUNT-RUN-1", reason="later")
+    assert refused.status_code == 409, refused.text
+
+
+def test_release_rejects_a_different_reason_for_an_already_released_source(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="release-immutable")
+    [source] = _import(client, run, 1)
+    obligation = _source_obligation(client, run, source)
+    assert _release(
+        client, run, obligation, agent_id="HUNT-RUN-1", reason="out of scope"
+    ).status_code == 200
+
+    rewritten = _release(
+        client, run, obligation, agent_id="HUNT-RUN-1", reason="different story"
+    )
+
+    assert rewritten.status_code == 409, rewritten.text
+    assert _source_obligation(client, run, source)["resolution"] == "out of scope"
+
+
+def _second_dispatch(client) -> None:
+    response = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "VERIFY-RUN-2",
+            "agent_role": "code-vuln-verifier",
+            "task": "verify an unrelated finding",
+            "requested_model": "gpt-5.6-sol",
+            "requested_reasoning": "xhigh",
+            "client_name": "codex",
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+@pytest.mark.parametrize(
+    "case", ["scan", "other_kind", "other_agent", "blank_reason", "sealed"]
+)
+def test_release_is_refused_outside_a_producer_proof_source_release(
+    client, isolate_settings, case
+) -> None:
+    _seed(client, isolate_settings)
+    agent_id = "HUNT-RUN-1"
+    reason = "generated fixture outside the claimed request path"
+    if case == "scan":
+        run = _create_scan(client, run_uuid="release-scan")
+        assert client.patch(
+            f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
+        ).status_code == 200
+    else:
+        run = _recovery_parent_run(client, run_uuid=f"release-{case}")
+    [source] = _import(client, run, 1)
+    obligation = _source_obligation(client, run, source)
+    if case == "other_kind":
+        obligation = client.post(
+            f"{BASE}/assessment-runs/{run['id']}/obligations",
+            json={
+                "identity_key": "coverage:service-a",
+                "obligation_kind": "coverage",
+                "object_type": "target",
+                "object_key": "service-a",
+                "hard": True,
+                "status": "open",
+                "resolution": "",
+                "proof_receipt_ids": [],
+            },
+        ).json()
+    elif case == "other_agent":
+        _second_dispatch(client)
+        agent_id = "VERIFY-RUN-2"
+    elif case == "blank_reason":
+        reason = "   "
+    elif case == "sealed":
+        _seal(client, run, "partial")
+
+    refused = _release(client, run, obligation, agent_id=agent_id, reason=reason)
+
+    assert refused.status_code == (400 if case == "blank_reason" else 409), refused.text
+    after = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/obligations/{obligation['id']}/history"
+    ).json()
+    assert [event["to_status"] for event in after] == ["open"]
+
+
+def test_resumed_proof_run_inherits_a_released_source(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    parent = _recovery_parent_run(client, run_uuid="release-parent")
+    _recovery_receipt(client, parent, slug="release-parent", observed="guard absent")
+    [source] = _import(client, parent, 1)
+    reason = "vendored copy of an upstream library"
+    assert _release(
+        client,
+        parent,
+        _source_obligation(client, parent, source),
+        agent_id="HUNT-RUN-1",
+        reason=reason,
+    ).status_code == 200
+    assert _seal(client, parent)["status"] == "completed"
+
+    child = _resume(client, parent, run_uuid="release-child")
+    child_sources = client.get(
+        f"{BASE}/assessment-runs/{child['id']}/sources",
+        params={"limit": 10, "offset": 0},
+    ).json()["items"]
+    inherited = _source_obligation(client, child, child_sources[0])
+
+    assert inherited["status"] == "released"
+    assert inherited["resolution"] == reason
+    assert child["counts"]["released_sources"] == 1
+    _recovery_receipt(client, child, slug="release-child", observed="guard absent")
+    assert client.get(f"{BASE}/assessment-runs/{child['id']}").json()["blockers"] == []
+    assert _seal(client, child)["status"] == "completed"
+
+
+def test_existing_obligation_history_gains_a_nullable_release_actor(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="release-upgrade")
+    [source] = _import(client, run, 1)
+    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+    db_module.close_thread_connection()
+    with sqlite3.connect(db_path) as connection:
+        connection.execute(
+            "ALTER TABLE assessment_run_obligation_events DROP COLUMN actor_dispatch_id"
+        )
+
+    db_module.init_db()
+
+    obligation = _source_obligation(client, run, source)
+    history = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/obligations/{obligation['id']}/history"
+    ).json()
+    assert [(event["to_status"], event["actor_dispatch_id"]) for event in history] == [
+        ("open", None)
+    ]
+    assert _release(
+        client, run, obligation, agent_id="HUNT-RUN-1", reason="out of scope"
+    ).status_code == 200

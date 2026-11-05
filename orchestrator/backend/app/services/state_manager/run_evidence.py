@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from . import _common
 from ._common import _engagement_or_404
 from .run_accounting import (
+    CLOSED_OBLIGATION_STATUSES,
     CODE_RECEIPT_KINDS,
     DISCOVERY_TERMINAL_REASONS,
     TOOL_SIGNAL_KINDS,
@@ -814,7 +815,7 @@ def record_run_code_receipt_link(
                 )
             return _serialize_code_receipt_link(existing)
         current_obligation_status = str(obligation["status"])
-        if current_obligation_status in {"resolved", "accepted_gap"}:
+        if current_obligation_status in CLOSED_OBLIGATION_STATUSES:
             raise HTTPException(
                 status_code=409,
                 detail="code receipt cannot rewrite a closed obligation",
@@ -932,8 +933,12 @@ def list_run_decision_history(
                    events.to_status AS to_status,
                    events.resolution AS detail,
                    events.proof_receipt_ids_json AS proof_receipt_ids_json,
+                   events.actor_dispatch_id AS actor_dispatch_id,
+                   dispatches.agent_id AS actor_dispatch_agent_id,
                    events.created_at AS created_at
             FROM assessment_run_obligation_events AS events
+            LEFT JOIN assessment_dispatches AS dispatches
+              ON dispatches.id = events.actor_dispatch_id
             WHERE events.engagement_id = ? AND events.run_id IN ({placeholders})
             UNION ALL
             SELECT 'candidate' AS object_type,
@@ -944,6 +949,8 @@ def list_run_decision_history(
                    events.to_state AS to_status,
                    events.reason AS detail,
                    events.proof_receipt_ids_json AS proof_receipt_ids_json,
+                   NULL AS actor_dispatch_id,
+                   NULL AS actor_dispatch_agent_id,
                    events.created_at AS created_at
             FROM assessment_run_candidate_events AS events
             WHERE events.engagement_id = ? AND events.run_id IN ({placeholders})

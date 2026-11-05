@@ -5312,10 +5312,21 @@ def _create_verification_evidence_tables(connection: sqlite3.Connection) -> None
             to_status TEXT NOT NULL,
             resolution TEXT NOT NULL DEFAULT '',
             proof_receipt_ids_json TEXT NOT NULL DEFAULT '[]',
+            actor_dispatch_id INTEGER REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
             created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
         )
         """
     )
+    # The dispatch that decided a transition; only an audited source release
+    # names one, so earlier and evidence-derived events stay NULL.
+    obligation_event_columns = _table_columns(
+        connection, "assessment_run_obligation_events"
+    )
+    if obligation_event_columns and "actor_dispatch_id" not in obligation_event_columns:
+        connection.execute(
+            "ALTER TABLE assessment_run_obligation_events ADD COLUMN actor_dispatch_id "
+            "INTEGER REFERENCES assessment_dispatches(id) ON DELETE RESTRICT"
+        )
     connection.execute(
         "CREATE INDEX IF NOT EXISTS idx_assessment_run_obligation_history "
         "ON assessment_run_obligation_events(engagement_id, run_id, obligation_id, id)"

@@ -1398,6 +1398,13 @@ class AssessmentRunObligationUpdate(BaseModel):
     proof_receipt_ids: list[int] = Field(default_factory=list, max_length=1000)
 
 
+class AssessmentRunObligationRelease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    dispatch_agent_id: str = Field(min_length=1, max_length=128)
+    reason: str = Field(min_length=1, max_length=8192)
+
+
 class AssessmentRunCandidateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -2848,6 +2855,23 @@ def update_assessment_run_obligation(
         status_value=request.status,
         resolution=request.resolution,
         proof_receipt_ids=request.proof_receipt_ids,
+    )
+
+
+@router.post("/assessment-runs/{run_id}/obligations/{obligation_id}/release")
+def release_assessment_run_obligation(
+    engagement_key: str,
+    run_id: int,
+    obligation_id: int,
+    request: AssessmentRunObligationRelease,
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return state_manager.release_run_obligation(
+        engagement.id,
+        run_id=run_id,
+        obligation_id=obligation_id,
+        dispatch_agent_id=request.dispatch_agent_id,
+        reason=request.reason,
     )
 
 
