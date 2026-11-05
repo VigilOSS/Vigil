@@ -8,6 +8,7 @@ from assess.lib.treesitter_catalogues import (
     _ENTRY_ANNOTATIONS,
     _ENTRY_LINE_PATTERNS,
     _PHP_CLI_INPUT_PATTERNS,
+    _PHP_FILE_INCLUSION_VULN_CLASSES,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record
@@ -223,6 +224,11 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
         ("unescaped_output", r"\{!![^!\r\n]+!!\}", ["xss"]),
         ("template_interpolation", r"\{\{(?!--)[^}\r\n]+\}\}", ["xss"]),
         ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
+    ],
+    # A line cannot tell an inclusion's argument shape; these sinks carry
+    # `argument_shape: "unclassified"`.
+    "php": [
+        ("file_inclusion", _PHP_STREAM_INCLUDE, list(_PHP_FILE_INCLUSION_VULN_CLASSES)),
     ],
     "dockerfile": [
         ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
@@ -598,17 +604,17 @@ class StreamingSecurityScanner:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue
-                self._retain(
-                    "security_sinks",
-                    {
-                        "kind": kind,
-                        "line": self._line_number,
-                        "function": "<streaming>",
-                        "snippet": self._snippet(window, match.start(), match.end()),
-                        "vuln_classes": vuln_classes,
-                        "detection": "heuristic_streaming",
-                    },
-                )
+                sink = {
+                    "kind": kind,
+                    "line": self._line_number,
+                    "function": "<streaming>",
+                    "snippet": self._snippet(window, match.start(), match.end()),
+                    "vuln_classes": vuln_classes,
+                    "detection": "heuristic_streaming",
+                }
+                if kind == "file_inclusion":
+                    sink["argument_shape"] = "unclassified"
+                self._retain("security_sinks", sink)
         for kind, pattern in self._source_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:

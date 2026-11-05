@@ -1,12 +1,12 @@
 """Empirical audit of `_SINK_DEFINITIONS`' file_path / file_inclusion /
-sql_exec / process_exec families -- 109 regex patterns across 10 languages.
+sql_exec / process_exec families -- 105 regex patterns across 10 languages.
 
 Every pattern below is exercised against an idiomatic, current-era (2026)
 fixture through the real tree-sitter indexer. Only patterns that fire on
 realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
-proves the two lists together account for all 109 patterns, so the catalogue
+proves the two lists together account for all 105 patterns, so the catalogue
 cannot silently restore a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
@@ -18,8 +18,8 @@ fails loudly rather than being re-documented:
 * PHP's four inclusion constructs (``include``/``require``/``include_once``/
   ``require_once``) were classed as ``file_path`` -> ``path-traversal``.
   They are now their own ``file_inclusion`` kind carrying ``["lfi", "rfi"]``
-  (vuln_taxonomy.py:92-93). The patterns moved verbatim, so the slice is
-  kept that redistribution: ``file_path`` is 35 and ``file_inclusion`` is 4.
+  (vuln_taxonomy.py:92-93), read off the parse tree's inclusion nodes
+  rather than a regex row in this slice.
 
 * Ruby's command-substitution pattern was ``\b`[^`]*` ``. ``\b`` holds only at
   a word/non-word transition and a backtick is never a word character, so the
@@ -740,15 +740,9 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("file_path", "csharp", r"\bFile\.Open\w*\s*\(", "File.OpenRead(name)", ["path-traversal"]),
     ("file_path", "csharp", r"\bnew\s+StreamReader\s*\(", "new StreamReader(name)", ["path-traversal"]),
     ("file_path", "csharp", r"\bPath\.Combine\s*\(", "Path.Combine(_root, name)", ["path-traversal"]),
-    # ---- file_inclusion : php ----
-    # Its own sink kind, carrying the canonical file-inclusion classes rather
-    # than borrowing file_path's `path-traversal`. The four constructs are
-    # independent, not redundant: `_` is a `\w` char, so `\binclude\b` cannot
-    # match inside `include_once` (nor `\brequire\b` inside `require_once`).
-    ("file_inclusion", "php", r"\binclude\b", 'include $this->viewRoot . "/" . $view', ["lfi", "rfi"]),
-    ("file_inclusion", "php", r"\brequire\b", 'require $this->viewRoot . "/" . $view', ["lfi", "rfi"]),
-    ("file_inclusion", "php", r"\binclude_once\b", 'include_once $this->viewRoot . "/helpers/"', ["lfi", "rfi"]),
-    ("file_inclusion", "php", r"\brequire_once\b", 'require_once "config/"', ["lfi", "rfi"]),
+    # PHP's `file_inclusion` sinks are read off the parse tree's inclusion
+    # nodes, not this table; `test_php_inclusion_is_its_own_kind...` below and
+    # `test_php_include_sinks.py` pin them.
 
     # ---- sql_exec : java (treesitter_index.py:268-269) ----
     ("sql_exec", "java", r"\bcreateStatement\s*\(", "selectStmt = connection.createStatement()", ["sqli"]),
@@ -910,7 +904,7 @@ def test_sql_exec_emits_the_canonical_sqli_class() -> None:
 
 # ---------------------------------------------------------------------------
 # Meta-test: the case table above, plus this allow-list, must account for
-# every one of the 109 patterns in the four assigned families. This is what
+# every one of the 105 patterns in the four assigned families. This is what
 # stops the catalogue drifting back to silent zero recall -- add a pattern
 # to _SINK_DEFINITIONS without touching this file and the test below fails.
 # ---------------------------------------------------------------------------
@@ -993,16 +987,11 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
         f"{(tested | excluded) - all_patterns}"
     )
 
-    # Hard counts. The slice is now 109 patterns. C# was added as a
-    # tree-sitter language, contributing 14 new patterns to this slice
-    # (5 file_path, 7 sql_exec, 2 process_exec), all of which fire LIVE on
-    # idiomatic C# -- so the case table gains 14 rows and _EXCLUDED gains
-    # nothing. PHP's four inclusion constructs still account for the
-    # file_path (34) / file_inclusion (4) split described above. Go's
+    # Hard counts. PHP inclusion is a parse-tree sink with no row here. Go's
     # `.Query(` excludes a `URL` receiver, so it is LIVE in the case table.
-    # file_path=40, file_inclusion=4, sql_exec=30, process_exec=35 -> 109.
-    assert len(all_patterns) == 109
-    assert len(tested) == 104
+    # file_path=40, sql_exec=30, process_exec=35 -> 105.
+    assert len(all_patterns) == 105
+    assert len(tested) == 100
     assert len(excluded) == 5
 
 

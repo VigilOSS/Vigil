@@ -30,6 +30,7 @@ from assess.lib.treesitter_catalogues import (
     _GLOBAL_ENTRY_LINE_PATTERNS,
     _IMPORT_QUERIES,
     _PHP_CLI_ENTRY_EVIDENCE,
+    _PHP_FILE_INCLUSION_VULN_CLASSES,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record, _snippet
@@ -1771,8 +1772,26 @@ class _PhpPath(NamedTuple):
     text: str
 
 
+# The argument operands that are not literal text, by what they are rooted in.
+# The order is precedence: one dynamic operand makes the whole argument dynamic.
+_PHP_ARGUMENT_SHAPES = ("dynamic", "property", "constant")
+_PHP_PROPERTY_TYPES = frozenset({
+    "member_access_expression",
+    "nullsafe_member_access_expression",
+    "scoped_property_access_expression",
+})
+_PHP_ARGUMENT_OPERAND_LIMIT = 8
+
+
 class _PhpPathEvaluator:
-    """Evaluate one include argument, recording why a value is not static."""
+    """Evaluate one include argument, recording why a value is not static.
+
+    Besides the value, it records each operand the argument is written with
+    that is not literal text -- a constant, a property, anything else -- which
+    is the argument's shape. Operands reached by expanding a constant's own
+    definition are not part of how the argument is written, so only the value
+    and its staticness follow them.
+    """
 
     def __init__(
         self,
@@ -1785,9 +1804,18 @@ class _PhpPathEvaluator:
         self.file_name = file_name
         self.dynamic = False
         self.unresolved: list[str] = []
+        self.operands: list[tuple[str, str]] = []
 
-    def _not_static(self) -> None:
+    def _not_static(self, node: Any, active: frozenset[str]) -> None:
         self.dynamic = True
+        if not active:
+            kind = "property" if node.type in _PHP_PROPERTY_TYPES else "dynamic"
+            self.operands.append((kind, _php_call_text(node, self.source)))
+
+    @property
+    def shape(self) -> str:
+        kinds = {kind for kind, _text in self.operands}
+        return next((kind for kind in _PHP_ARGUMENT_SHAPES if kind in kinds), "literal")
 
     def value(self, node: Any, active: frozenset[str] = frozenset()) -> _PhpPath | None:
         node_type = node.type
@@ -1795,33 +1823,39 @@ class _PhpPathEvaluator:
             inner = node.named_children[0] if node.named_children else None
             return self.value(inner, active) if inner is not None else None
         if node_type in _PHP_STRING_TYPES:
-            return self._string(node)
+            return self._string(node, active)
         if node_type in {"name", "qualified_name"}:
             return self._constant(_node_text(node, self.source).lstrip("\\"), active)
         if node_type == "class_constant_access_expression":
-            self.unresolved.append(_node_text(node, self.source))
+            text = _node_text(node, self.source)
+            self.unresolved.append(text)
+            if not active:
+                self.operands.append(("constant", text))
             return None
         if node_type == "binary_expression":
             operator = node.child_by_field_name("operator")
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
             if operator is None or operator.type != "." or left is None or right is None:
-                self._not_static()
+                self._not_static(node, active)
                 return None
             return self._concat(self.value(left, active), self.value(right, active))
         if node_type == "function_call_expression":
             return self._call(node, active)
-        self._not_static()
+        self._not_static(node, active)
         return None
 
-    def _string(self, node: Any) -> _PhpPath | None:
+    def _string(self, node: Any, active: frozenset[str]) -> _PhpPath | None:
         parts: list[str] = []
+        static = True
         stack = list(reversed(node.named_children))
         while stack:
             child = stack.pop()
             if child.type not in _PHP_STRING_PART_TYPES:
-                self._not_static()
-                return None
+                # Every interpolated operand is recorded, so keep reading.
+                self._not_static(child, active)
+                static = False
+                continue
             if child.type == "escape_sequence":
                 text = _node_text(child, self.source)
                 parts.append(_PHP_STRING_ESCAPES.get(text, text))
@@ -1829,7 +1863,7 @@ class _PhpPathEvaluator:
                 stack.extend(reversed(child.named_children))
             elif child.type in {"string_content", "string_value", "nowdoc_string"}:
                 parts.append(_node_text(child, self.source))
-        return _PhpPath(False, 0, "".join(parts))
+        return _PhpPath(False, 0, "".join(parts)) if static else None
 
     def _constant(self, name: str, active: frozenset[str]) -> _PhpPath | None:
         magic = name.upper()
@@ -1839,6 +1873,8 @@ class _PhpPathEvaluator:
             return _PhpPath(True, 0, "/" + self.file_name)
         if name in _PHP_PATH_CONSTANTS:
             return _PhpPath(False, 0, _PHP_PATH_CONSTANTS[name])
+        if not active:
+            self.operands.append(("constant", name))
         definitions = self.constants.get(name, [])
         if name not in active and definitions:
             values = {self.value(definition, active | {name}) for definition in definitions}
@@ -1853,7 +1889,7 @@ class _PhpPathEvaluator:
             return None
         if right.anchored:
             if left.anchored or left.text:
-                self._not_static()
+                self.dynamic = True
                 return None
             return right
         return _PhpPath(left.anchored, left.levels, left.text + right.text)
@@ -1872,15 +1908,18 @@ class _PhpPathEvaluator:
         if name == "dirname" and len(values) in {1, 2}:
             levels = 1
             if len(values) == 2:
-                if values[1].type != "integer":
-                    self._not_static()
+                text = _node_text(values[1], self.source).replace("_", "")
+                if values[1].type != "integer" or not text.isdigit():
+                    self._not_static(node, active)
                     return None
-                levels = int(_node_text(values[1], self.source), 0)
+                # A path never has more levels than this; the bound only keeps a
+                # nonsense literal from costing a loop of its own size.
+                levels = min(int(text), 256)
             path = self.value(values[0], active)
             for _level in range(levels):
                 path = _php_dirname(path) if path is not None else None
             return path
-        self._not_static()
+        self._not_static(node, active)
         return None
 
 
@@ -1955,13 +1994,23 @@ def _php_include_sites(tree: Any, source: bytes) -> tuple[list[_PhpIncludeSite],
     return sites, _php_defined_constants(captures, source)
 
 
-def _php_include_target(
+class _PhpInclude(NamedTuple):
+    """One inclusion read once: its import edge and its sink argument."""
+
+    site: _PhpIncludeSite
+    target: dict[str, Any]
+    shape: str
+    operands: list[str]
+
+
+def _php_include(
     site: _PhpIncludeSite,
     source: bytes,
     constants: dict[str, list[Any]],
     file_path: str,
-) -> dict[str, Any]:
-    """The `import_targets` record of one inclusion, before snapshot resolution."""
+) -> _PhpInclude:
+    """Evaluate one inclusion: the `import_targets` record, before snapshot
+    resolution, and the argument shape its sink carries."""
     record: dict[str, Any] = {
         "raw": _php_call_text(site.argument, source) if site.argument is not None else "",
         "resolved": "",
@@ -1979,7 +2028,16 @@ def _php_include_target(
         record.update(_php_static_include_target(path, file_path))
     else:
         record["status"] = "dynamic"
-    return record
+    operands: list[str] = []
+    for _kind, text in evaluator.operands:
+        if text not in operands:
+            operands.append(text)
+    return _PhpInclude(
+        site,
+        record,
+        evaluator.shape if site.argument is not None else "dynamic",
+        operands[:_PHP_ARGUMENT_OPERAND_LIMIT],
+    )
 
 
 def _php_static_include_target(path: _PhpPath, file_path: str) -> dict[str, str]:
@@ -2009,9 +2067,41 @@ def _php_static_include_target(path: _PhpPath, file_path: str) -> dict[str, str]
     return {"status": "unclassified", "anchor": anchor, "path": posixpath.normpath(text)}
 
 
-def _extract_php_include_targets(tree: Any, source: bytes, file_path: str) -> list[dict[str, Any]]:
+def _php_includes(tree: Any, source: bytes, file_path: str) -> list[_PhpInclude]:
+    """Every inclusion in the file, evaluated once for its import edge and its sink."""
     sites, constants = _php_include_sites(tree, source)
-    return [_php_include_target(site, source, constants, file_path) for site in sites]
+    return [_php_include(site, source, constants, file_path) for site in sites]
+
+
+def _php_include_sinks(
+    includes: list[_PhpInclude],
+    locator: _PhpCallableLocator,
+    source_lines: list[str],
+) -> list[dict[str, Any]]:
+    """A `file_inclusion` sink per inclusion construct, read off the parse tree.
+
+    Each is attributed to its innermost callable or `<top-level>` and tagged
+    with its argument shape. A literal inclusion stays a sink: whether a fixed
+    path matters is the reviewer's call. What a line only spells like an
+    inclusion -- a comment, a string, an array key, a `$include` variable,
+    `$this->include()` -- has no inclusion node, so it is not one.
+    """
+    sinks: list[dict[str, Any]] = []
+    for include in includes:
+        node = include.site.node
+        caller = locator.innermost(node.start_byte, node.end_byte)
+        line_index = node.start_point[0]
+        sinks.append({
+            "kind": "file_inclusion",
+            "line": line_index + 1,
+            "function": caller["name"] if caller is not None else "<top-level>",
+            "snippet": _snippet(source_lines[line_index]) if line_index < len(source_lines) else "",
+            "vuln_classes": list(_PHP_FILE_INCLUSION_VULN_CLASSES),
+            "argument_shape": include.shape,
+            "argument": include.target["raw"],
+            "dynamic_operands": include.operands,
+        })
+    return sinks
 
 
 def _repo_join(directory: str, path: str) -> str | None:
@@ -2096,13 +2186,16 @@ class PhpIncludeResolver:
 
 
 def _extract_import_records(
-    tree: Any, language: str, source: bytes, file_path: str
+    tree: Any,
+    language: str,
+    source: bytes,
+    php_includes: list[_PhpInclude],
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """The `imports` strings and their `import_targets`, one entry per import."""
     query_language = _query_language_family(language)
     if query_language == "php":
         targets = sorted(
-            [*_extract_php_imports(tree, source), *_extract_php_include_targets(tree, source, file_path)],
+            [*_extract_php_imports(tree, source), *(include.target for include in php_includes)],
             key=lambda target: target["line"],
         )
         return [target["raw"] for target in targets], targets
@@ -3706,6 +3799,39 @@ def _php_call_shape(call: Any) -> tuple[Any, Any, Any] | None:
     return call.child_by_field_name("name"), receiver, call.child_by_field_name("arguments")
 
 
+class _PhpCallableLocator:
+    """The innermost PHP callable holding a byte range, for the parse-tree readers."""
+
+    def __init__(self, functions: list[dict[str, Any]]) -> None:
+        self.callables = [
+            function for function in functions if not function.get("is_declaration", False)
+        ]
+        self._starts = [function["_start_byte"] for function in self.callables]
+        # Callable spans nest, so the innermost callable holding a range is the
+        # last one opening before it or one of that callable's enclosing callables.
+        self._enclosing: list[int] = []
+        open_callables: list[int] = []
+        for index, function in enumerate(self.callables):
+            while (
+                open_callables
+                and self.callables[open_callables[-1]]["_end_byte"] <= function["_start_byte"]
+            ):
+                open_callables.pop()
+            self._enclosing.append(open_callables[-1] if open_callables else -1)
+            open_callables.append(index)
+
+    def position(self, start_byte: int, end_byte: int) -> int:
+        """Index of the innermost callable holding the range, or -1 for file scope."""
+        position = bisect_right(self._starts, start_byte) - 1
+        while position >= 0 and self.callables[position]["_end_byte"] < end_byte:
+            position = self._enclosing[position]
+        return position
+
+    def innermost(self, start_byte: int, end_byte: int) -> dict[str, Any] | None:
+        position = self.position(start_byte, end_byte)
+        return self.callables[position] if position >= 0 else None
+
+
 def _detect_php_call_sites(
     tree: Any,
     functions: list[dict[str, Any]],
@@ -3728,19 +3854,8 @@ def _detect_php_call_sites(
     callable_nodes = {
         (node.start_byte, node.end_byte): node for node in captures.get("callable", [])
     }
-    callables = [
-        function for function in functions if not function.get("is_declaration", False)
-    ]
-    starts = [function["_start_byte"] for function in callables]
-    # Callable spans nest, so the innermost callable holding a call is the last
-    # one opening before it or one of that callable's enclosing callables.
-    enclosing: list[int] = []
-    open_callables: list[int] = []
-    for index, function in enumerate(callables):
-        while open_callables and callables[open_callables[-1]]["_end_byte"] <= function["_start_byte"]:
-            open_callables.pop()
-        enclosing.append(open_callables[-1] if open_callables else -1)
-        open_callables.append(index)
+    locator = _PhpCallableLocator(functions)
+    callables = locator.callables
     parameter_names: dict[int, frozenset[str]] = {}
     withheld_lines = {index for index, _line in withheld}
     sites: dict[int, dict[tuple[str, int], dict[str, Any]]] = {}
@@ -3759,9 +3874,7 @@ def _detect_php_call_sites(
             continue
         receiver = _php_call_text(receiver_node, source) if receiver_node is not None else ""
 
-        position = bisect_right(starts, call.start_byte) - 1
-        while position >= 0 and callables[position]["_end_byte"] < call.end_byte:
-            position = enclosing[position]
+        position = locator.position(call.start_byte, call.end_byte)
         caller = callables[position] if position >= 0 else None
         node = (
             callable_nodes.get((caller["_start_byte"], caller["_end_byte"]))
@@ -4375,7 +4488,10 @@ def index_file(
     try:
         functions = _extract_functions_ts(tree, parse_lang, source)
         classes = _extract_classes_ts(tree, parse_lang, source)
-        imports, import_targets = _extract_import_records(tree, parse_lang, source, file_path)
+        php_includes = _php_includes(tree, source, file_path) if language == "php" else []
+        imports, import_targets = _extract_import_records(
+            tree, parse_lang, source, php_includes
+        )
 
         effective_lang = "typescript" if parse_lang == "tsx" else language
         _enrich_qualified_names(functions, classes, effective_lang)
@@ -4404,6 +4520,10 @@ def index_file(
         sinks = _detect_sinks(
             functions, classes, effective_lang, source_lines, file_scope.scanned
         )
+        if effective_lang == "php":
+            sinks.extend(
+                _php_include_sinks(php_includes, _PhpCallableLocator(functions), source_lines)
+            )
         withheld_call = False
         if effective_lang == "php":
             call_sites, withheld_call = _detect_php_call_sites(

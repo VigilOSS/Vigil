@@ -105,6 +105,14 @@ _IMPORT_QUERIES: dict[str, str] = {
 
 SinkPattern = dict[str, Any]  # {"kind", "patterns": {lang: [regex_str,...]}, "vuln_classes": [...]}
 
+# PHP's inclusion constructs load and EXECUTE the named file, so a
+# caller-controlled path is `lfi` (and `rfi` wherever `allow_url_include` is
+# on), not the `path-traversal` that reading one would be. The structural
+# reader anchors `file_inclusion` on the parse tree's inclusion nodes
+# (`treesitter_index._php_include_sinks`); the streaming fallback reads the
+# keyword off a line under the same kind and classes.
+_PHP_FILE_INCLUSION_VULN_CLASSES = ("lfi", "rfi")
+
 _SINK_DEFINITIONS: list[SinkPattern] = [
     {
         "kind": "file_path",
@@ -126,19 +134,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "csharp": [r"\bFile\.ReadAllText\s*\(", r"\bFile\.WriteAllText\s*\(",
                        r"\bFile\.Open\w*\s*\(", r"\bnew\s+StreamReader\s*\(",
                        r"\bPath\.Combine\s*\("],
-        },
-    },
-    {
-        # PHP's inclusion constructs load and EXECUTE the named file, so a
-        # caller-controlled path is `lfi` (and `rfi` wherever `allow_url_include`
-        # is on), not the `path-traversal` that reading one would be. They route
-        # to different skills, so the coarser family was the wrong answer for the
-        # commonest PHP RCE shape there is.
-        "kind": "file_inclusion",
-        "vuln_classes": ["lfi", "rfi"],
-        "patterns": {
-            "php": [r"\binclude\b", r"\brequire\b", r"\binclude_once\b",
-                    r"\brequire_once\b"],
         },
     },
     {

