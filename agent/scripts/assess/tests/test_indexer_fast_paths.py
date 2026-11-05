@@ -13,8 +13,9 @@ from pathlib import Path
 import pytest
 
 from assess.lib.code_languages import STRUCTURAL_SUPPORTED_LANGUAGES
+from assess.lib.treesitter_catalogues import _SINK_DEFINITIONS
 from assess.lib.treesitter_common import _gate_literals, _literal_gate, _required_literals
-from assess.lib.treesitter_index import _function_scoped_reader_patterns
+from assess.lib.treesitter_index import _function_scoped_reader_patterns, index_file
 from assess.lib.treesitter_streaming import (
     StreamingSecurityScanner,
     _attach_bounded_security_sources,
@@ -129,3 +130,45 @@ def test_no_catalogue_match_lies_on_a_line_its_gate_rejects() -> None:
                 assert gate.search(lowered), (pattern.pattern, line)
                 assert any(literal in lowered for literal in literals)
     assert checked > 500
+
+
+ACME_C_TOOL = """\
+#include <stdio.h>
+#define RUN(cmd) system(cmd)
+// system("commented out") is not read
+static char banner[64];
+
+int acme_copy(char *dst, const char *src, FILE *log) {
+    fprintf(log, src); sprintf(dst, "%s", src); memcpy(dst, src, 4);
+    char *buf = malloc(16); free(buf); popen(src, "r");
+    return printf("%s", dst);
+}
+"""
+
+
+def test_sinks_follow_catalogue_order_whatever_lines_the_gate_admits() -> None:
+    # The reference reading: every catalogue pattern over every scannable
+    # line of each scope, one record per kind and line. C applies no
+    # receiver filter, so the reference is exactly the line readers' order.
+    indexed = index_file("src/acme_copy.c", "c", ACME_C_TOOL.encode())
+    lines = ACME_C_TOOL.splitlines()
+    scopes = [
+        (function["name"], range(function["line_start"] - 1, function["line_end"]))
+        for function in indexed["functions"]
+    ] + [("<top-level>", [1])]
+    expected: list[tuple[str, int, str]] = []
+    for name, indices in scopes:
+        seen: set[tuple[str, int]] = set()
+        for definition in _SINK_DEFINITIONS:
+            for pattern in definition["patterns"].get("c", []):
+                for index in indices:
+                    if not lines[index].strip() or lines[index].strip().startswith("//"):
+                        continue
+                    if re.search(pattern, lines[index]) and (definition["kind"], index) not in seen:
+                        seen.add((definition["kind"], index))
+                        expected.append((definition["kind"], index + 1, name))
+
+    assert [
+        (sink["kind"], sink["line"], sink["function"]) for sink in indexed["security_sinks"]
+    ] == expected
+    assert len({line for _kind, line, _name in expected}) == 4

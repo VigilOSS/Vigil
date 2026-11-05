@@ -37,7 +37,12 @@ from assess.lib.treesitter_catalogues import (
     _PHP_SERVER_ARGV,
     _SINK_DEFINITIONS,
 )
-from assess.lib.treesitter_common import _php_import_record, _snippet
+from assess.lib.treesitter_common import (
+    _gate_literals,
+    _literal_gate,
+    _php_import_record,
+    _snippet,
+)
 from assess.lib.treesitter_lightweight import (
     _blade_template_sources,
     _extract_blade,
@@ -3233,13 +3238,41 @@ def _file_is_commentary_only(tree: Any, source_lines: list[str]) -> bool:
 
 
 @lru_cache(maxsize=None)
+def _sink_line_readers(
+    language: str,
+) -> tuple[tuple[dict[str, Any], tuple[tuple[str, re.Pattern[str], tuple[str, ...]], ...]], ...]:
+    """The sink catalogue `_detect_sinks` runs over a line, in catalogue order.
+
+    Each pattern carries the literals it is gated on, one of which every match
+    contains, so a line holding none -- or one the language's `_sink_line_gate`
+    rejects -- cannot match it. An ungated pattern carries none.
+    """
+    return tuple(
+        (
+            definition,
+            tuple(
+                (pattern, compiled, tuple(sorted(_gate_literals(compiled) or ())))
+                for pattern in definition["patterns"].get(language, [])
+                for compiled in (re.compile(pattern),)
+            ),
+        )
+        for definition in _SINK_DEFINITIONS
+    )
+
+
+@lru_cache(maxsize=None)
 def _function_scoped_reader_patterns(language: str) -> tuple[re.Pattern[str], ...]:
     """The sink catalogue `_detect_sinks` would have run over a line."""
     return tuple(
-        re.compile(pattern)
-        for definition in _SINK_DEFINITIONS
-        for pattern in definition["patterns"].get(language, [])
+        compiled
+        for _definition, patterns in _sink_line_readers(language)
+        for _pattern, compiled, _literals in patterns
     )
+
+
+@lru_cache(maxsize=None)
+def _sink_line_gate(language: str) -> re.Pattern[str] | None:
+    return _literal_gate(_function_scoped_reader_patterns(language))
 
 
 def _withheld_reader_signal(
@@ -4273,6 +4306,8 @@ def _detect_sinks(
     elif language == "go":
         go_http_aliases = _go_http_aliases(source_lines)
     seen: set[tuple[str, str, int]] = set()
+    readers = _sink_line_readers(language)
+    gate = _sink_line_gate(language)
 
     scopes = [
         (func, _function_scan_lines(func, source_lines))
@@ -4305,12 +4340,20 @@ def _detect_sinks(
         elif language == "go":
             go_fetch_receivers.update(_go_fetch_bindings(func.get("params", []), go_http_aliases))
             go_fetch_receivers.update(_go_fetch_bindings([line for _, line in scan_lines], go_http_aliases))
-        for sink_def in _SINK_DEFINITIONS:
-            lang_patterns = sink_def["patterns"].get(language, [])
-            for pat in lang_patterns:
-                compiled = re.compile(pat)
-                for line_idx, line_text in scan_lines:
-                    if not _is_scannable_source_line(line_text, language):
+        # Each line is filtered once, and a line holding no literal a gated
+        # pattern requires is offered only to the patterns that require none.
+        readable = [
+            (line_idx, line_text)
+            for line_idx, line_text in scan_lines
+            if _is_scannable_source_line(line_text, language)
+        ]
+        admitted = readable if gate is None else [
+            (line_idx, line_text) for line_idx, line_text in readable if gate.search(line_text)
+        ]
+        for sink_def, patterns in readers:
+            for pat, compiled, literals in patterns:
+                for line_idx, line_text in admitted if literals else readable:
+                    if literals and not any(literal in line_text for literal in literals):
                         continue
                     matches = compiled.finditer(line_text)
                     if language == "java" and sink_def["kind"] == "url_fetch":
