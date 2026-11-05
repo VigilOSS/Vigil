@@ -266,7 +266,7 @@ def test_one_shared_pass_answers_each_query_as_its_own_cursor_would() -> None:
 
     parser = treesitter_index._get_parser("php")
     tree = parser.parse(ACME_PHP_CONTROLLER)
-    queries = treesitter_index._whole_tree_queries("php")
+    queries = treesitter_index._whole_tree_queries("php", parser.language)
     alone = {
         query: treesitter_index._ts_query_captures(parser.language, query, tree.root_node)
         for query in queries
@@ -280,10 +280,10 @@ def test_one_shared_pass_answers_each_query_as_its_own_cursor_would() -> None:
             for name, nodes in captures.items()
         }
 
-    assert len(queries) == 7
+    assert len(queries) == 9
     for query in queries:
         assert spans(shared.captures(parser.language, query, tree.root_node)) == spans(alone[query])
-    assert sum(len(nodes) for captures in alone.values() for nodes in captures.values()) == 21
+    assert sum(len(nodes) for captures in alone.values() for nodes in captures.values()) == 26
     # Another tree, or a query outside the family, is not this pass's to answer.
     other = parser.parse(ACME_PHP_CONTROLLER)
     assert shared.captures(parser.language, queries[0], other.root_node) is None
@@ -296,8 +296,105 @@ def test_indexing_a_file_releases_its_shared_query_pass() -> None:
     indexed = index_file("src/InvoiceController.php", "php", ACME_PHP_CONTROLLER)
 
     assert indexed["analysis_mode"] == "tree_sitter"
+    language = treesitter_index._get_parser("php").language
     assert treesitter_index._SHARED_TREE_QUERIES.captures(
-        treesitter_index._get_parser("php").language,
-        treesitter_index._whole_tree_queries("php")[0],
+        language,
+        treesitter_index._whole_tree_queries("php", language)[0],
         treesitter_index._get_parser("php").parse(ACME_PHP_CONTROLLER).root_node,
     ) is None
+
+
+ACME_SOURCES = {
+    "c": (
+        "src/acme_http.c",
+        b"/* Acme */\n#include <evhttp.h>\nstatic void acme_cb(struct evhttp_request *r, void *a) {"
+        b" log(r); }\nint main(void) { evhttp_set_cb(http, \"/\", acme_cb, 0); return run(main); }\n",
+    ),
+    "cpp": (
+        "src/acme_server.cpp",
+        b"#include <httplib.h>\nusing httplib::Server;\n// routes\nint main() { Server svr;\n"
+        b"  svr.Get(\"/hi\", [](const httplib::Request& req, httplib::Response& res) { res.set_content(req.body, \"text\"); });\n"
+        b"  return svr.listen(\"0.0.0.0\", 8080); }\n",
+    ),
+    "csharp": (
+        "Acme/Program.cs",
+        b"// Acme\nvar app = WebApplication.Create(args);\nstring Hello(string name) => $\"hi {name}\";\n"
+        b"app.MapGet(\"/hi\", (string name) => Hello(name));\napp.MapGet(\"/named\", Hello);\napp.Run();\n",
+    ),
+    "javascript": (
+        "src/acme.js",
+        b"// Acme routes\nconst http = require('http');\nfunction handler(req, res) { res.end(req.url); }\n"
+        b"/* server */ http.createServer(handler).listen(8080);\napp.get('/x', (req, res) => res.send(f(g(1))));\n",
+    ),
+    "php": (
+        "public/acme.php",
+        b"<?php\n// Acme\n$render = function ($v) { return fn($x) => $x . $v; };\n?>\n<p>Acme</p>\n<?php echo $render('a');\n",
+    ),
+    "python": (
+        "acme/app.py",
+        b'"""Acme."""\nimport os\n# config\nHOME = os.environ["ACME_HOME"]\ndef run():\n    """Run."""\n    os.system(HOME)\n',
+    ),
+    "ruby": (
+        "app/acme.rb",
+        b"# Acme\nrequire 'sinatra'\nget '/hi' do\n  erb :hi, locals: { name: params[:name] }\nend\nputs(helper(1))\n",
+    ),
+}
+
+
+@pytest.mark.parametrize("language", sorted(ACME_SOURCES))
+def test_the_shared_pass_collects_each_node_set_as_the_tree_walk_does(language) -> None:
+    from assess.lib import treesitter_index
+
+    _path, source = ACME_SOURCES[language]
+    parser = treesitter_index._get_parser(language)
+    tree = parser.parse(source)
+    sets = [
+        *treesitter_index._WHOLE_TREE_NODE_TYPES.get(language, ()),
+        treesitter_index._file_scope_candidate_types(language),
+    ]
+    walked = [
+        [
+            (node.start_byte, node.end_byte, node.type)
+            for node in treesitter_index._walk_named_nodes(tree.root_node)
+            if node.type in types
+        ]
+        for types in sets
+    ]
+    queries = treesitter_index._whole_tree_queries(language, parser.language)
+    treesitter_index._SHARED_TREE_QUERIES.open(tree.root_node, parser.language, queries)
+    try:
+        shared = [
+            [
+                (node.start_byte, node.end_byte, node.type)
+                for node in treesitter_index._named_nodes_of_types(tree, types)
+            ]
+            for types in sets
+        ]
+        assert treesitter_index._SHARED_TREE_QUERIES._results is not None
+    finally:
+        treesitter_index._SHARED_TREE_QUERIES.close()
+
+    assert shared == walked
+    assert all(walked)
+
+
+@pytest.mark.parametrize("language", sorted(ACME_SOURCES))
+def test_indexing_a_parsed_file_walks_no_tree_in_python(language, monkeypatch) -> None:
+    # Every whole-tree node set a reader takes is registered with the shared
+    # pass; a reader that walks the tree itself is one the pass does not know.
+    from assess.lib import treesitter_index
+
+    path, source = ACME_SOURCES[language]
+    expected = index_file(path, language, source)
+    walk = treesitter_index._walk_named_nodes
+
+    def no_walk(node):
+        if node.parent is None:
+            raise AssertionError(f"walked the whole {node.type} tree in Python")
+        return walk(node)
+
+    monkeypatch.setattr(treesitter_index, "_walk_named_nodes", no_walk)
+    indexed = index_file(path, language, source)
+
+    assert indexed["analysis_mode"] == "tree_sitter"
+    assert indexed == expected

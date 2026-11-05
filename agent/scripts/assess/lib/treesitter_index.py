@@ -314,6 +314,11 @@ _C_HTTP_CALLBACK_ARGUMENTS = {
 }
 
 _CPP_HTTP_ROUTE_METHODS = frozenset({"Get", "Post", "Put", "Patch", "Delete", "Options"})
+_CPP_HTTP_SCAN_TYPES = frozenset({
+    "call_expression", "declaration", "field_declaration", "parameter_declaration",
+    "using_declaration",
+})
+_CALL_EXPRESSION_TYPES = frozenset({"call_expression"})
 
 
 def _cpp_http_route_callbacks(tree: Any, source: bytes) -> list[Any]:
@@ -323,7 +328,7 @@ def _cpp_http_route_callbacks(tree: Any, source: bytes) -> list[Any]:
     server_bindings: set[tuple[int, int, str]] = set()
     declarations: list[Any] = []
     route_calls: list[Any] = []
-    for node in _walk_named_nodes(tree.root_node):
+    for node in _named_nodes_of_types(tree, _CPP_HTTP_SCAN_TYPES):
         if node.type == "using_declaration":
             match = re.fullmatch(
                 r"\s*using\s+httplib::(Server|SSLServer)\s*;",
@@ -401,9 +406,7 @@ def _cpp_binding_scopes(node: Any, root: Any) -> list[tuple[int, int]]:
 def _c_http_callback_names(tree: Any, source: bytes) -> set[str]:
     """Find direct function references in known C HTTP registration calls."""
     names: set[str] = set()
-    for node in _walk_named_nodes(tree.root_node):
-        if node.type != "call_expression":
-            continue
+    for node in _named_nodes_of_types(tree, _CALL_EXPRESSION_TYPES):
         callee = node.child_by_field_name("function")
         if callee is None or callee.type != "identifier":
             continue
@@ -452,8 +455,13 @@ def _query_language_family(language: str) -> str:
 
 
 @lru_cache(maxsize=None)
-def _whole_tree_queries(language: str) -> tuple[str, ...]:
-    """Every query the extractors run over a whole *language* tree."""
+def _whole_tree_queries(language: str, lang_obj: Any) -> tuple[str, ...]:
+    """Every query the extractors run over a whole *language* tree.
+
+    The node collections the readers take in document order -- every call,
+    every closure, every comment -- are queries too, so the shared pass
+    serves them instead of a Python walk of the tree per reader.
+    """
     family = _query_language_family(language)
     queries = [
         _FUNCTION_QUERIES.get(family),
@@ -468,7 +476,48 @@ def _whole_tree_queries(language: str) -> tuple[str, ...]:
         queries.extend((
             _PHP_INCLUDE_QUERY, _PHP_AST_SINK_QUERY, _PHP_CALL_QUERY, _PHP_SQL_CALL_QUERY,
         ))
+    queries.extend(
+        _node_type_query(lang_obj, types)
+        for types in (*_WHOLE_TREE_NODE_TYPES.get(family, ()), _file_scope_candidate_types(family))
+    )
     return tuple(dict.fromkeys(query for query in queries if query))
+
+
+@lru_cache(maxsize=None)
+def _node_type_query(lang_obj: Any, types: frozenset[str]) -> str | None:
+    """One pattern capturing, as ``node``, every named node of *types*.
+
+    A type the grammar does not have would fail the query, and no node of it
+    can occur, so it is left out; None when the grammar has none of them.
+    """
+    present = sorted(
+        node_type for node_type in types if lang_obj.id_for_node_kind(node_type, True) is not None
+    )
+    if not present:
+        return None
+    return "[" + " ".join(f"({node_type})" for node_type in present) + "] @node"
+
+
+def _named_nodes_of_types(tree: Any, types: frozenset[str]) -> list[Any]:
+    """Every named node of *types* in *tree*, in document pre-order.
+
+    The shared query pass answers when `index_file` registered *types* for the
+    tree's family; otherwise this walks the tree, which returns the same nodes
+    in the same order.
+    """
+    lang_obj = getattr(tree, "language", None)
+    query = _node_type_query(lang_obj, types) if lang_obj is not None else None
+    if query is not None:
+        shared = _SHARED_TREE_QUERIES.captures(lang_obj, query, tree.root_node)
+        if shared is not None:
+            return shared.get("node", [])
+    root = getattr(tree, "root_node", None)
+    return [
+        node
+        for child in getattr(root, "named_children", ()) or ()
+        for node in _walk_named_nodes(child)
+        if node.type in types
+    ]
 
 
 _CPP_NAME_NODE_TYPES = frozenset({
@@ -878,8 +927,7 @@ def _extract_javascript_callables(
 ) -> list[dict[str, Any]]:
     return [
         _parse_javascript_callable(node, source)
-        for node in _walk_named_nodes(tree.root_node)
-        if node.type in _JAVASCRIPT_CALLABLE_TYPES
+        for node in _named_nodes_of_types(tree, _JAVASCRIPT_CALLABLE_TYPES)
     ]
 
 
@@ -990,15 +1038,17 @@ def _attach_php_namespaces(tree: Any, source: bytes, symbols: list[dict[str, Any
 def _extract_php_closures(tree: Any, source: bytes) -> list[dict[str, Any]]:
     return [
         _parse_php_closure(node, source)
-        for node in _walk_named_nodes(tree.root_node)
-        if node.type in _PHP_CLOSURE_TYPES
+        for node in _named_nodes_of_types(tree, _PHP_CLOSURE_TYPES)
     ]
+
+
+_RUBY_CALL_TYPES = frozenset({"call"})
 
 
 def _extract_ruby_route_blocks(tree: Any, source: bytes) -> list[dict[str, Any]]:
     routes: list[dict[str, Any]] = []
-    for node in _walk_named_nodes(tree.root_node):
-        if node.type != "call" or node.child_by_field_name("receiver") is not None:
+    for node in _named_nodes_of_types(tree, _RUBY_CALL_TYPES):
+        if node.child_by_field_name("receiver") is not None:
             continue
         method = node.child_by_field_name("method")
         arguments = node.child_by_field_name("arguments")
@@ -1112,6 +1162,11 @@ def _extract_c_declarations(tree: Any, language: str, source: bytes) -> list[dic
     return declarations
 
 
+_CSHARP_LAMBDA_TYPES = frozenset({"lambda_expression"})
+_CSHARP_CALLABLE_DECLARATION_TYPES = frozenset({"local_function_statement", "method_declaration"})
+_CSHARP_INVOCATION_TYPES = frozenset({"invocation_expression"})
+
+
 def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[str, Any]]:
     """Extract function/method definitions and C++ declarations."""
     query_language = _query_language_family(language)
@@ -1206,9 +1261,7 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
             key=lambda function: function["_start_byte"],
         )
     elif query_language == "csharp":
-        for node in _walk_named_nodes(tree.root_node):
-            if node.type != "lambda_expression":
-                continue
+        for node in _named_nodes_of_types(tree, _CSHARP_LAMBDA_TYPES):
             parent = node.parent
             invocation = parent.parent if parent is not None and parent.type == "argument" else None
             if invocation is not None and invocation.type == "argument_list":
@@ -1246,12 +1299,9 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
 
         declaration_nodes = {
             node.start_byte: node
-            for node in _walk_named_nodes(tree.root_node)
-            if node.type in {"local_function_statement", "method_declaration"}
+            for node in _named_nodes_of_types(tree, _CSHARP_CALLABLE_DECLARATION_TYPES)
         }
-        for invocation in _walk_named_nodes(tree.root_node):
-            if invocation.type != "invocation_expression":
-                continue
+        for invocation in _named_nodes_of_types(tree, _CSHARP_INVOCATION_TYPES):
             target = invocation.child_by_field_name("function")
             if target is None or not re.search(
                 r"\.Map(?:Get|Post|Put|Patch|Delete|Methods|Fallback)\s*$",
@@ -2836,9 +2886,7 @@ def _detect_entry_points(
     }
     js_route_calls: list[tuple[Any, str]] = []
     if language in {"javascript", "typescript"}:
-        for node in _walk_named_nodes(tree.root_node):
-            if node.type != "call_expression":
-                continue
+        for node in _named_nodes_of_types(tree, _CALL_EXPRESSION_TYPES):
             target = node.child_by_field_name("function")
             if target is None:
                 continue
@@ -2850,9 +2898,7 @@ def _detect_entry_points(
     js_server_calls: list[tuple[Any, list[Any]]] = []
     if language in {"javascript", "typescript"}:
         http_modules, bare_create_server, loads_http = _node_http_module_names(source)
-        for node in _walk_named_nodes(tree.root_node):
-            if node.type != "call_expression":
-                continue
+        for node in _named_nodes_of_types(tree, _CALL_EXPRESSION_TYPES):
             handlers = _node_server_handler_arguments(
                 node, source, http_modules, bare_create_server, loads_http
             )
@@ -3092,8 +3138,7 @@ def _detect_entry_points(
     if language in {"javascript", "typescript"}:
         callable_nodes = {
             node.start_byte: node
-            for node in _walk_named_nodes(tree.root_node)
-            if node.type in _JAVASCRIPT_CALLABLE_TYPES
+            for node in _named_nodes_of_types(tree, _JAVASCRIPT_CALLABLE_TYPES)
         }
         bindings: dict[str, list[tuple[int, int, dict[str, Any]]]] = {}
         for func in functions:
@@ -3472,6 +3517,20 @@ _FILE_SCOPE_DECLARATION_NODE_TYPES: dict[str, frozenset[str]] = {
 # declarator; `int (*hook)(int) = run;` carries an `init_declarator` instead.
 _PROTOTYPE_CONTAINER_TYPES = frozenset({"declaration", "field_declaration"})
 
+# The whole-tree node collections each family's readers take, which the shared
+# query pass matches alongside the extractors' queries.
+_WHOLE_TREE_NODE_TYPES: dict[str, tuple[frozenset[str], ...]] = {
+    "c": (_CALL_EXPRESSION_TYPES,),
+    "cpp": (_CPP_HTTP_SCAN_TYPES,),
+    "csharp": (
+        _CSHARP_LAMBDA_TYPES, _CSHARP_CALLABLE_DECLARATION_TYPES, _CSHARP_INVOCATION_TYPES,
+    ),
+    "javascript": (_JAVASCRIPT_CALLABLE_TYPES, _CALL_EXPRESSION_TYPES, _COMMENT_NODE_TYPES),
+    "php": (_PHP_CLOSURE_TYPES,),
+    "ruby": (_RUBY_CALL_TYPES,),
+    "typescript": (_JAVASCRIPT_CALLABLE_TYPES, _CALL_EXPRESSION_TYPES, _COMMENT_NODE_TYPES),
+}
+
 
 class _FileScope(NamedTuple):
     """The file-scope complement of the callable spans, as the readers see it.
@@ -3509,6 +3568,17 @@ def _within_one_interval(
     return position >= 0 and intervals[position][1] >= last
 
 
+@lru_cache(maxsize=None)
+def _file_scope_candidate_types(language: str) -> frozenset[str]:
+    """Every node type `_is_file_scope_unread_node` can accept in *language*."""
+    return frozenset({
+        *_COMMENT_NODE_TYPES,
+        "expression_statement",
+        *_FILE_SCOPE_DECLARATION_NODE_TYPES.get(language, ()),
+        *(_PROTOTYPE_CONTAINER_TYPES if language in {"c", "cpp"} else ()),
+    })
+
+
 def _is_file_scope_unread_node(node: Any, language: str) -> bool:
     if _is_comment_node(node):
         return True
@@ -3543,10 +3613,10 @@ def _file_scope_lines(
     starts = [start for start, _end in intervals]
     masked: dict[int, list[tuple[int, int | None]]] = {}
     inline_text_lines: list[int] = []
-    root = getattr(tree, "root_node", None)
-    stack = list(reversed(list(getattr(root, "named_children", ()) or ())))
-    while stack:
-        node = stack.pop()
+    # Every node the grammar labels unread, outside the callables. One nested
+    # in another is blanked again inside the same span, which changes nothing;
+    # inline HTML, the one kind recorded beyond its span, never nests.
+    for node in _named_nodes_of_types(tree, _file_scope_candidate_types(language)):
         first, last = node.start_point[0], node.end_point[0]
         if _within_one_interval(intervals, starts, first, last):
             continue
@@ -3567,8 +3637,6 @@ def _file_scope_lines(
                     start_column if line_number == start_line else 0,
                     end_column if line_number == end_line else None,
                 ))
-            continue
-        stack.extend(reversed(list(getattr(node, "named_children", ()) or ())))
 
     scanned: list[tuple[int, str]] = []
     withheld: list[tuple[int, str]] = []
@@ -5051,11 +5119,10 @@ def _export_source_lines(tree: Any, source: bytes) -> list[str]:
     # Keep source coordinates while excluding parser-labelled comments from
     # the line-based export reader, including comments closing before code.
     visible = bytearray(source)
-    for node in _walk_named_nodes(tree.root_node):
-        if getattr(node, "type", "") in _COMMENT_NODE_TYPES:
-            visible[node.start_byte:node.end_byte] = re.sub(
-                rb"[^\r\n]", b" ", source[node.start_byte:node.end_byte]
-            )
+    for node in _named_nodes_of_types(tree, _COMMENT_NODE_TYPES):
+        visible[node.start_byte:node.end_byte] = re.sub(
+            rb"[^\r\n]", b" ", source[node.start_byte:node.end_byte]
+        )
     return visible.decode("utf-8", errors="replace").splitlines()
 
 
@@ -5511,7 +5578,9 @@ def index_file(
 
     lang_obj = getattr(parser, "language", None)
     if lang_obj is not None:
-        _SHARED_TREE_QUERIES.open(tree.root_node, lang_obj, _whole_tree_queries(parse_lang))
+        _SHARED_TREE_QUERIES.open(
+            tree.root_node, lang_obj, _whole_tree_queries(parse_lang, lang_obj)
+        )
     try:
         functions = _extract_functions_ts(tree, parse_lang, source)
         classes = _extract_classes_ts(tree, parse_lang, source)
