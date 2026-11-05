@@ -275,15 +275,18 @@ def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
     return re.compile(pattern.encode("ascii"), re.IGNORECASE)
 
 
-# PHP's namespace `use` statement, read line by line where no parse tree
-# exists. A trait `use` inside a class body is spelled identically, so a
-# statement only counts until a class-like declaration opens and again after
-# the next `namespace`: imports precede the declarations that use them.
-_PHP_USE_STATEMENT = re.compile(rb"^\s*(?:<\?php\s+)?use\s+(?=[\\A-Za-z_\x80-\xff])", re.IGNORECASE)
+# PHP's namespace `use` statement, read statement by statement where no parse
+# tree exists; a line can hold several. A trait `use` inside a class body is
+# spelled identically, so a statement only counts until a class-like
+# declaration opens and again after the next `namespace`: imports precede the
+# declarations that use them.
+_PHP_STATEMENT_LEAD = re.compile(rb"\s*(?:<\?php\b\s*)?", re.IGNORECASE)
+_PHP_STATEMENT_BOUNDARY = re.compile(rb"[;{]")
+_PHP_USE_STATEMENT = re.compile(rb"use\s+(?=[\\A-Za-z_\x80-\xff])", re.IGNORECASE)
 _PHP_CLASS_DECLARATION = re.compile(
-    rb"^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\b", re.IGNORECASE
+    rb"(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\b", re.IGNORECASE
 )
-_PHP_NAMESPACE_DECLARATION = re.compile(rb"^\s*namespace\b", re.IGNORECASE)
+_PHP_NAMESPACE_DECLARATION = re.compile(rb"namespace\b", re.IGNORECASE)
 _PHP_USE_STATEMENT_LIMIT = STREAMING_SCAN_WINDOW_BYTES
 _PHP_USE_COMMENT = re.compile(r"//[^\n]*|#[^\n]*|/\*.*?\*/", re.DOTALL)
 _PHP_USE_KIND = re.compile(r"\s*(function|const)\s+", re.IGNORECASE)
@@ -495,33 +498,51 @@ class StreamingSecurityScanner:
             self._truncated.add("imports")
 
     def _read_php_use(self, text: bytes) -> None:
-        """Accumulate one PHP `use` statement across lines, then publish it."""
-        if self._php_use_pending is None:
-            if self._line_windows:
+        """Accumulate each PHP `use` statement across lines, then publish it."""
+        position = 0
+        while True:
+            if self._php_use_pending is None:
+                if self._line_windows:
+                    return
+                position = _PHP_STATEMENT_LEAD.match(text, position).end()
+                namespace = _PHP_NAMESPACE_DECLARATION.match(text, position) is not None
+                if namespace:
+                    self._php_use_open = True
+                elif _PHP_CLASS_DECLARATION.match(text, position):
+                    self._php_use_open = False
+                statement = (
+                    _PHP_USE_STATEMENT.match(text, position) if self._php_use_open else None
+                )
+                if statement is None:
+                    boundary = _PHP_STATEMENT_BOUNDARY.search(text, position)
+                    # Only a namespace block holds imports; a `use` inside any
+                    # other block on this line is a trait or closure capture.
+                    if boundary is None or (boundary.group() == b"{" and not namespace):
+                        return
+                    position = boundary.end()
+                    continue
+                position = statement.end()
+                self._php_use_pending = []
+                self._php_use_pending_bytes = 0
+            terminators = [
+                (index, len(token))
+                for token in (b";", b"?>")
+                if (index := text.find(token, position)) >= 0
+            ]
+            terminator, width = min(terminators, default=(-1, 0))
+            segment = text[position:] if terminator < 0 else text[position:terminator]
+            if self._php_use_pending and self._php_use_pending[-1][0] == self._line_number:
+                # The next window of one long line continues the same text.
+                self._php_use_pending[-1][1].extend(segment)
+            else:
+                self._php_use_pending.append((self._line_number, bytearray(segment)))
+            self._php_use_pending_bytes += len(segment)
+            if terminator < 0 and self._php_use_pending_bytes < _PHP_USE_STATEMENT_LIMIT:
                 return
-            if _PHP_NAMESPACE_DECLARATION.match(text):
-                self._php_use_open = True
-            elif _PHP_CLASS_DECLARATION.match(text):
-                self._php_use_open = False
-            statement = _PHP_USE_STATEMENT.match(text) if self._php_use_open else None
-            if statement is None:
-                return
-            text = text[statement.end():]
-            self._php_use_pending = []
-            self._php_use_pending_bytes = 0
-        terminator = min(
-            (index for index in (text.find(b";"), text.find(b"?>")) if index >= 0),
-            default=-1,
-        )
-        segment = text if terminator < 0 else text[:terminator]
-        if self._php_use_pending and self._php_use_pending[-1][0] == self._line_number:
-            # The next window of one long line continues the same text.
-            self._php_use_pending[-1][1].extend(segment)
-        else:
-            self._php_use_pending.append((self._line_number, bytearray(segment)))
-        self._php_use_pending_bytes += len(segment)
-        if terminator >= 0 or self._php_use_pending_bytes >= _PHP_USE_STATEMENT_LIMIT:
             self._publish_php_use()
+            if terminator < 0:
+                return
+            position = terminator + width
 
     def _publish_php_use(self) -> None:
         segments = [

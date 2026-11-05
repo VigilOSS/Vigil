@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from assess.lib.treesitter_index import index_file
 from assess.lib.treesitter_streaming import StreamingSecurityScanner
 
@@ -296,6 +298,53 @@ def test_streaming_fallback_reads_php_use_declarations_like_the_parser() -> None
         for item in observed["import_targets"]
         if "kind" in item
     ] == parsed["import_targets"]
+
+
+def test_streaming_fallback_reads_php_use_statements_that_share_a_line() -> None:
+    # Minified or generated PHP, the files that reach the streaming fallback,
+    # packs several statements onto one line; each `use` still imports.
+    source = (
+        b"<?php declare(strict_types=1); namespace Acme\\Billing; use Acme\\Models\\Invoice; "
+        b"use function Acme\\Support\\format_money; final class InvoiceController "
+        b"{ use Acme\\Concerns\\Loggable; }\n"
+    )
+    scanner = StreamingSecurityScanner("src/InvoiceController.php", "php")
+    scanner.feed(source)
+    observed = scanner.finish(degradation_reason="tree_sitter_syntax_error")
+    parsed = index_file("src/InvoiceController.php", "php", source)
+
+    assert _use_imports(observed["import_targets"]) == [
+        ("class", "Acme\\Models\\Invoice", "", 1),
+        ("function", "Acme\\Support\\format_money", "", 1),
+    ]
+    assert _use_imports(observed["import_targets"]) == _use_imports(parsed["import_targets"])
+
+
+@pytest.mark.parametrize(
+    "source, expected",
+    [
+        (
+            b"<?php namespace Acme\\Billing { use Acme\\Models\\Invoice; }\n",
+            [("class", "Acme\\Models\\Invoice", "", 1)],
+        ),
+        (
+            b"<?php use Acme\\Models\\Invoice; $audit = new class { use Acme\\Concerns\\Loggable; };\n",
+            [("class", "Acme\\Models\\Invoice", "", 1)],
+        ),
+    ],
+)
+def test_streaming_fallback_reads_only_top_level_php_use_on_a_shared_line(
+    source: bytes, expected: list[tuple[str, str, str, int]]
+) -> None:
+    # A namespace block holds imports; any other block's `use` is a trait.
+    scanner = StreamingSecurityScanner("src/InvoiceController.php", "php")
+    scanner.feed(source)
+    observed = scanner.finish(degradation_reason="tree_sitter_syntax_error")
+
+    assert _use_imports(observed["import_targets"]) == expected
+    assert expected == _use_imports(
+        index_file("src/InvoiceController.php", "php", source)["import_targets"]
+    )
 
 
 def test_streaming_fallback_keeps_php_inclusion_imports() -> None:
