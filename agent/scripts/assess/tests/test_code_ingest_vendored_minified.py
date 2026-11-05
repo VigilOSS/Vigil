@@ -189,8 +189,10 @@ def test_archive_named_directories_need_a_package_marker(tmp_path, dirname):
 # --- vendor/ casing ----------------------------------------------------------
 
 
-def test_vendor_is_matched_case_insensitively_and_keeps_its_reason(tmp_path):
+@pytest.mark.parametrize("marker", ["autoload.php", "modules.txt", "composer/installed.json"])
+def test_a_differently_cased_vendor_dir_with_package_manager_contents_is_skipped(tmp_path, marker):
     repo = tmp_path / "repo"
+    _write(repo, f"Vendor/{marker}", "<?php return 1;\n")
     _write(repo, "Vendor/acme/jwt/src/JWT.php", "<?php class JWT {}\n")
     _write(repo, "src/Coverage/Report.cs", "class Report {}\n")
     _write(repo, "src/Build/Step.cs", "class Step {}\n")
@@ -198,8 +200,48 @@ def test_vendor_is_matched_case_insensitively_and_keeps_its_reason(tmp_path):
     args = _args(repo)
 
     assert _admitted(repo, args) == ["src/Build/Step.cs", "src/Coverage/Report.cs"]
-    assert _excluded(repo, args) == {"Vendor/acme/jwt/src/JWT.php": "skipped_dir:vendor"}
-    assert code_ingest._skip_file_reason("Vendor/acme/a.php", "a.php") == "skipped_dir:vendor"
+    assert _excluded(repo, args) == {
+        f"Vendor/{marker}": "skipped_dir:vendor",
+        "Vendor/acme/jwt/src/JWT.php": "skipped_dir:vendor",
+    }
+    _assert_partition_verifies(repo, args)
+
+
+def test_a_first_party_vendor_domain_directory_is_admitted(tmp_path):
+    """`Vendor` is a business entity in marketplace and procurement code; only
+    the package manager's own directory, spelled `vendor`, is skipped by name."""
+    repo = tmp_path / "repo"
+    _write(repo, "composer.json", json.dumps({"name": "acme/market"}) + "\n")
+    _write(repo, "src/Controller/Vendor/VendorController.php", "<?php class VendorController {}\n")
+    _write(repo, "src/Entity/Vendor.php", "<?php class Vendor {}\n")
+    _write(repo, "vendor/autoload.php", "<?php\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == [
+        "composer.json", "src/Controller/Vendor/VendorController.php", "src/Entity/Vendor.php",
+    ]
+    assert _excluded(repo, args) == {"vendor/autoload.php": "skipped_dir:vendor"}
+    _assert_partition_verifies(repo, args)
+
+
+def test_a_workspace_package_named_like_an_archive_is_first_party(tmp_path):
+    """A forge archive unpacks as `<name>-<branch>/` beside a manifest naming
+    `<name>`; a package whose own name ends in `-main` is the project itself."""
+    repo = tmp_path / "repo"
+    _write(repo, "package.json", json.dumps({"name": "acme", "workspaces": ["packages/*"]}) + "\n")
+    _write(
+        repo,
+        "packages/electron-main/package.json",
+        json.dumps({"name": "@acme/electron-main", "version": "1.0.0"}) + "\n",
+    )
+    _write(repo, "packages/electron-main/index.js", "module.exports = {};\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == [
+        "package.json", "packages/electron-main/index.js", "packages/electron-main/package.json",
+    ]
     _assert_partition_verifies(repo, args)
 
 

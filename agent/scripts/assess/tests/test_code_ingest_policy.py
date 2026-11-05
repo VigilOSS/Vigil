@@ -185,7 +185,8 @@ def test_collapsed_admission_ratio_warns_with_the_dominant_reason(capsys):
     err = capsys.readouterr().err
     assert "admitted 14 of 882 files (1.6%)" in err
     assert "skipped_dir:dist: 860" in err
-    assert "--policy-preset package" in err
+    # A shipped bundle is usually minified too, so one re-run must admit both.
+    assert "--policy-preset package --include-minified" in err
 
 
 def test_a_healthy_ratio_stays_silent(capsys):

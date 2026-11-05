@@ -60,16 +60,21 @@ SKIP_EXTENSIONS = frozenset({
     '.phps',
 })
 
-# Matched regardless of case. Composer, Bundler and Go all write `vendor/`, and
-# a Windows-authored tree spells it `Vendor/`; PascalCase `Build/`, `Coverage/`
-# and `Target/` are ordinary .NET source directories, so the rest of SKIP_DIRS
-# stays exact.
+# Composer, Bundler and Go all write `vendor/`, and a Windows-authored tree may
+# spell it `Vendor/`. `Vendor` is also a business entity, so a PSR-4 or .NET
+# `src/Vendor/` is first-party: another casing is skipped only when the
+# directory holds what a package manager writes there. PascalCase `Build/`,
+# `Coverage/` and `Target/` are ordinary .NET source directories, so the rest
+# of SKIP_DIRS stays exact.
 _CASE_INSENSITIVE_SKIP_DIRS = frozenset({'vendor'})
+_PACKAGE_MANAGER_VENDOR_MARKERS = ('autoload.php', 'modules.txt', 'composer', 'bundle')
 
 # A source archive downloaded from a forge unpacks as `<project>-<branch>/`.
 # The name alone also describes first-party directories (`db-master/`), so a
 # directory is a vendored copy only when its root also carries the package
-# manifest or licence that marks it as someone else's distribution.
+# manifest or licence that marks it as someone else's distribution, and a
+# manifest whose own name is the directory's (`@acme/electron-main`) marks a
+# workspace package of the project.
 VENDORED_COPY_REASON = 'skipped_dir:vendored_copy'
 _VENDORED_COPY_DIR_RE = re.compile(r'^.+-(?:master|main)$', re.IGNORECASE)
 _VENDORED_COPY_MANIFESTS = (('composer.json', 'composer'), ('package.json', 'npm'))
@@ -533,9 +538,6 @@ def _named_skip_dir_reason(dirname: str, skip_dirs: frozenset[str] = SKIP_DIRS) 
     """The skip reason a directory earns by its name alone, or None."""
     if dirname in skip_dirs:
         return f"skipped_dir:{dirname}"
-    lowered = dirname.lower()
-    if lowered in _CASE_INSENSITIVE_SKIP_DIRS and lowered in skip_dirs:
-        return f"skipped_dir:{lowered}"
     return None
 
 
@@ -637,15 +639,32 @@ class _SkipPolicy:
         self.args = args
         self.skip_dirs = _effective_skip_dirs(args)
         self._vendored: dict[str, dict[str, object] | None] = {}
+        self._cased_vendor: dict[str, bool] = {}
         self._minified_by_content: set[str] = set()
 
     def directory_reason(self, rel_dir: str, dirname: str) -> str | None:
         named = _named_skip_dir_reason(dirname, self.skip_dirs)
         if named:
             return named
+        cased = self.cased_vendor_reason(rel_dir)
+        if cased:
+            return cased
         if self.vendored_copy(rel_dir) is not None:
             return VENDORED_COPY_REASON
         return None
+
+    def cased_vendor_reason(self, rel_dir: str) -> str | None:
+        """The `vendor` reason for another casing that holds package-manager output."""
+        lowered = PurePosixPath(rel_dir).name.lower()
+        if lowered not in _CASE_INSENSITIVE_SKIP_DIRS or lowered not in self.skip_dirs:
+            return None
+        if rel_dir not in self._cased_vendor:
+            listing = next(self.tree.walk(rel_dir))
+            names = set(listing.regular_files) | set(listing.directories)
+            self._cased_vendor[rel_dir] = any(
+                marker in names for marker in _PACKAGE_MANAGER_VENDOR_MARKERS
+            )
+        return f"skipped_dir:{lowered}" if self._cased_vendor[rel_dir] else None
 
     def vendored_copy(self, rel_dir: str) -> dict[str, object] | None:
         """Package identity of a vendored copy rooted at *rel_dir*, or None."""
@@ -703,6 +722,10 @@ class _SkipPolicy:
             name = document.get("name") if isinstance(document, dict) else None
             if not isinstance(name, str) or not name.strip():
                 continue
+            if name.strip().rsplit("/", 1)[-1].lower() == PurePosixPath(rel_dir).name.lower():
+                # An archive unpacks as `<name>-<branch>/`; a package whose
+                # own name carries the suffix is the project's own package.
+                return None
             identity["ecosystem"] = ecosystem
             identity["coordinate"] = name.strip()
             located = _first_line_matching(text, _JSON_NAME_LINE_RE)
@@ -737,6 +760,9 @@ class _SkipPolicy:
             return reason
         parts = PurePosixPath(rel_path).parts[:-1]
         for depth in range(1, len(parts) + 1):
+            cased = self.cased_vendor_reason("/".join(parts[:depth]))
+            if cased:
+                return cased
             if self.vendored_copy("/".join(parts[:depth])) is not None:
                 return VENDORED_COPY_REASON
         return self._content_reason(rel_path, filename)
@@ -943,7 +969,7 @@ def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -
     elif dominant.startswith("skipped_dir:"):
         directory = dominant.split(":", 1)[1]
         if directory in BUILD_ARTIFACT_DIRS:
-            remedy = "--policy-preset package"
+            remedy = "--policy-preset package --include-minified"
         elif directory in _CASE_INSENSITIVE_SKIP_DIRS:
             # The reason folds the letter case; the glob must match the tree.
             remedy = f"--include-path '**/<{directory} dir, as cased in the tree>/**'"

@@ -804,8 +804,8 @@ def test_code_index_walk_repo_applies_the_ingest_directory_skip_rule(tmp_path):
     module = _load_code_index_module()
 
     repo_path = tmp_path / "repo"
-    (repo_path / "Vendor" / "acme").mkdir(parents=True)
-    (repo_path / "Vendor" / "acme" / "lib.php").write_text("<?php\n", encoding="utf-8")
+    (repo_path / "vendor" / "acme").mkdir(parents=True)
+    (repo_path / "vendor" / "acme" / "lib.php").write_text("<?php\n", encoding="utf-8")
     (repo_path / "Build").mkdir()
     (repo_path / "Build" / "Report.cs").write_text("class Report {}\n", encoding="utf-8")
 
