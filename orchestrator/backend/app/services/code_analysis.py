@@ -2299,7 +2299,7 @@ def bulk_update_structural_metadata(
         receipt_bound_rows = connection.execute(
             """
             SELECT callables.id, callables.file_id, callables.name,
-                   files.file_path, callables.qualified_name,
+                   files.file_path, callables.qualified_name, callables.callable_key,
                    callables.start_line, callables.end_line
             FROM code_structural_callables AS callables
             JOIN code_files AS files ON files.id = callables.file_id
@@ -2315,6 +2315,7 @@ def bulk_update_structural_metadata(
             (engagement.id, repo_id, repo_generation, removed_callable_keys),
         ).fetchall()
         requalified_callables: list[tuple[int, dict[str, Any]]] = []
+        requalified_keys: dict[str, dict[str, Any]] = {}
         receipt_bound_removals = []
         bound_spans = Counter(
             (int(row["file_id"]), str(row["name"]), int(row["start_line"]), int(row["end_line"]))
@@ -2325,6 +2326,7 @@ def bulk_update_structural_metadata(
             candidates = added_callables_by_span.get(span, [])
             if len(candidates) == 1 and bound_spans[span] == 1:
                 requalified_callables.append((int(row["id"]), candidates[0]))
+                requalified_keys[str(row["callable_key"])] = candidates[0]
             else:
                 receipt_bound_removals.append(row)
         if receipt_bound_removals:
@@ -2429,6 +2431,36 @@ def bulk_update_structural_metadata(
                     callable_id,
                 ),
             )
+        # A receipt's stored refs name the callables it is linked to, so they follow
+        # the rebind; otherwise the receipt reads, searches and supersedes under a
+        # name the registry no longer holds.
+        if requalified_callables:
+            linked_results = connection.execute(
+                """
+                SELECT DISTINCT results.id, results.callable_refs_json
+                FROM code_analysis_results AS results
+                JOIN code_analysis_result_callables AS links ON links.result_id = results.id
+                WHERE results.engagement_id = ?
+                  AND links.callable_id IN (SELECT value FROM json_each(?))
+                """,
+                (
+                    engagement.id,
+                    json.dumps([callable_id for callable_id, _ in requalified_callables]),
+                ),
+            ).fetchall()
+            for linked_result in linked_results:
+                refs = _json_decode(linked_result["callable_refs_json"], [])
+                for ref in refs:
+                    replacement = requalified_keys.get(str(ref.get("callable_key", "")))
+                    if replacement is not None and int(ref["file_id"]) == int(
+                        replacement["file_id"]
+                    ):
+                        ref["qualified_name"] = replacement["qualified_name"]
+                        ref["callable_key"] = replacement["callable_key"]
+                connection.execute(
+                    "UPDATE code_analysis_results SET callable_refs_json = ? WHERE id = ?",
+                    (_json_list_text(refs), int(linked_result["id"])),
+                )
         for callable_record in canonical_callables:
             connection.execute(
                 """

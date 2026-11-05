@@ -2777,6 +2777,33 @@ def test_php_namespace_qualification_rebinds_receipt_bound_callables_with_unchan
         connection.close()
     assert [row[0] for row in linked] == [item["qualified_name"] for item in upgraded]
 
+    # The receipt itself names the callables it now follows, so it reads, searches
+    # and supersedes under the current registry's names.
+    current = [{"file_id": controller_id, **item} for item in upgraded]
+    stored = client.get(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results/{receipt.json()['id']}"
+    )
+    assert stored.status_code == 200, stored.text
+    assert [
+        (ref["qualified_name"], ref["start_line"], ref["end_line"])
+        for ref in stored.json()["callable_refs"]
+    ] == [(item["qualified_name"], item["start_line"], item["end_line"]) for item in upgraded]
+    correction = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            supersedes=receipt.json()["id"],
+            disposition="clean",
+            receipt_kind="call_chain",
+            callable_refs=current,
+            reviewed_spans=[],
+            evidence="show -> invoice_total was re-reviewed under the qualified names",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert correction.status_code == 201, correction.text
+
 
 def test_complete_structural_publication_rejects_callable_registry_shortfall(
     client, isolate_settings
