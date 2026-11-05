@@ -265,6 +265,11 @@ Tree-sitter dispatch lives there; query, sink, and entry catalogues live in
   both, never neither. They are `test_entry_point_catalogue.py`, `test_streaming_catalogue.py`, and
   the three `test_sink_catalogue_*.py` files. Expect to update a count in the same change.
 
+A PHP sink a line cannot tell from its lookalikes (an inclusion, a backtick command, a callable
+chosen at run time) is a parse-tree hook in `treesitter_index.py` (`_php_include_sinks`,
+`_php_ast_sinks`) rather than a catalogue row. The streaming fallback reports such a sink only
+where a line shape is safe, so give the hook a behavior test of its own.
+
 Fixtures are inline source constants in those test modules; the repository tracks no sample source
 files. Update `CODE-MAP.md` only if the change moves a boundary — it is near its size budget.
 

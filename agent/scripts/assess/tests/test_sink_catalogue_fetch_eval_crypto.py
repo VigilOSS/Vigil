@@ -1,7 +1,7 @@
 """Empirical catalogue audit: `url_fetch`, `deserialization`, `eval_exec`, `crypto`.
 
 Scope is exactly these four `_SINK_DEFINITIONS` families in
-`assess.lib.treesitter_index` (105 patterns total: 32 `url_fetch`, 19
+`assess.lib.treesitter_index` (107 patterns total: 34 `url_fetch`, 19
 `deserialization`, 23 `eval_exec`, 31 `crypto`). Every pattern was probed with
 an idiomatic, current-era (2026) fixture through the real structural indexer.
 Only the patterns that actually fire on idiomatic code get a test here; the
@@ -217,6 +217,14 @@ function fetchBHttp($target) {
 
 function fetchCHttp($target) {
     return fopen("http://" . $target, "r");
+}
+
+function fetchFacade($target) {
+    return Http::get($target);
+}
+
+function fetchWordPress($target) {
+    return wp_remote_get($target);
 }
 """
 
@@ -456,6 +464,10 @@ _PHP_EVAL = """<?php
 function runEval($code) {
     eval($code);
 }
+
+function runAssert($code) {
+    assert($code);
+}
 """
 
 _CSHARP_EVAL = """
@@ -617,6 +629,14 @@ function legacyMd5($data) {
 function legacySha1($data) {
     return sha1($data);
 }
+
+function legacyDigest($data) {
+    return hash('md5', $data);
+}
+
+function legacyCipher($key, $data) {
+    return mcrypt_encrypt(MCRYPT_DES, $key, $data, MCRYPT_MODE_ECB);
+}
 """
 
 _CSHARP_CRYPTO = """
@@ -737,10 +757,12 @@ CASES: list[tuple[str, str, str, str]] = [
     ("url_fetch", "ruby", r"\bNet::HTTP\.\w+\s*\(", "Net::HTTP.get(URI(url))"),
     ("url_fetch", "ruby", r"\bHTTParty\.\w+\s*\(", "HTTParty.get(url)"),
     ("url_fetch", "ruby", r"\bURI\.open\s*\(", "URI.open(url).read"),
-    # -- url_fetch: php (3) --
+    # -- url_fetch: php (5) --
     ("url_fetch", "php", r"\bcurl_exec\s*\(", "curl_exec($ch)"),
     ("url_fetch", "php", r"\bfile_get_contents\s*\(.*http", 'file_get_contents("http://" . $target)'),
     ("url_fetch", "php", r"\bfopen\s*\(.*http", 'fopen("http://" . $target, "r")'),
+    ("url_fetch", "php", r"\bHttp::(?:get|post|put|patch|delete|head|send)\s*\(", "Http::get($target)"),
+    ("url_fetch", "php", r"\bwp_remote_(?:get|post|request)\s*\(", "wp_remote_get($target)"),
     # -- url_fetch: csharp (3) --
     ("url_fetch", "csharp", r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync)\s*\(", "client.GetStringAsync(url)"),
     ("url_fetch", "csharp", r"\.(?:Download\w*|Upload\w*)\s*\(", "wc.DownloadString(url)"),
@@ -787,8 +809,9 @@ CASES: list[tuple[str, str, str, str]] = [
     ("eval_exec", "ruby", r"\bclass_eval\s*\(", 'class_eval("def #{name}; @#{name}; end")'),
     ("eval_exec", "ruby", r"\bsend\s*\(", "send(action_name)"),
     ("eval_exec", "ruby", r"\bpublic_send\s*\(", "public_send(attr)"),
-    # -- eval_exec: php (1) --
+    # -- eval_exec: php (2) --
     ("eval_exec", "php", r"\beval\s*\(", "eval($code);"),
+    ("eval_exec", "php", r"\bassert\s*\(\s*(?:['\"]|<<<|\$\w+\s*[,)])", "assert($code);"),
     # -- eval_exec: csharp (4) --
     ("eval_exec", "csharp", r"\bAssembly\.Load\w*\s*\(", "var assembly = Assembly.Load(raw);"),
     ("eval_exec", "csharp", r"\bActivator\.CreateInstance\s*\(", "var instance = Activator.CreateInstance(type);"),
@@ -816,10 +839,12 @@ CASES: list[tuple[str, str, str, str]] = [
     # -- crypto: ruby (2, Digest::\w+ excluded as MISROUTED) --
     ("crypto", "ruby", r"\bOpenSSL::Cipher\b", 'OpenSSL::Cipher.new("aes-256-gcm")'),
     ("crypto", "ruby", r"\bOpenSSL::HMAC\b", 'OpenSSL::HMAC.hexdigest("SHA256", key, data)'),
-    # -- crypto: php (3, hash( excluded as MISROUTED, mcrypt_encrypt( excluded as OBSOLETE) --
+    # -- crypto: php (5) --
     ("crypto", "php", r"\bopenssl_encrypt\s*\(", "openssl_encrypt($data,"),
     ("crypto", "php", r"\bmd5\s*\(", "return md5($data);"),
     ("crypto", "php", r"\bsha1\s*\(", "return sha1($data);"),
+    ("crypto", "php", r"\bhash\s*\(\s*(?:['\"](?:md2|md4|md5|sha1|crc32b?|adler32|fnv1a?(?:32|64)|joaat)['\"]|\$)", "return hash('md5', $data);"),
+    ("crypto", "php", r"\bmcrypt_encrypt\s*\(", "mcrypt_encrypt(MCRYPT_DES, $key, $data, MCRYPT_MODE_ECB)"),
     # -- crypto: csharp (6) --
     ("crypto", "csharp", r"\bMD5\b", "var hasher = MD5.Create();"),
     ("crypto", "csharp", r"\bSHA1\b", "var digest = SHA1.Create();"),
@@ -906,7 +931,7 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
         "calls arbitrary code); flagging it as deserialization noise is a "
         "false positive on correct code.",
 
-    # -- eval_exec (5 excluded) --
+    # -- eval_exec (4 excluded) --
     ("eval_exec", "java", r"\bScriptEngine\.eval\s*\("):
         "DEAD -- static-call-on-type-name form again; real code is "
         "`engine.eval(...)` on an instance obtained from "
@@ -919,14 +944,6 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
         "Python and completely unrelated to code execution. Verified by "
         "execution: `re.compile(pattern)` inside a function produces an "
         "eval_exec/injection sink.",
-    ("eval_exec", "php", r"\bassert\s*\("):
-        "MISROUTED -- the vulnerable capability this pattern is presumably "
-        "for (assert() implicitly eval()'ing a string argument) was removed "
-        "in PHP 8.0 (RFC \"Saner string to number comparisons\"-era cleanup; "
-        "assert() no longer evaluates string assertions from PHP 8.0 "
-        "onward). Idiomatic PHP 8.x invariant checks like "
-        "`assert($cond, 'msg')` are ordinary boolean assertions, not an "
-        "injection sink, in 2026-era code.",
     ("eval_exec", "php", r"\bpreg_replace\s*\(.*/e"):
         "OBSOLETE -- the `/e` (eval) modifier to preg_replace() was removed "
         "in PHP 7.0.0 (2015); calling preg_replace with `/e` on PHP 7+ is a "
@@ -938,7 +955,7 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
         "removed entirely in PHP 8.0.0; calling it now is a fatal "
         "\"Call to undefined function\" error.",
 
-    # -- crypto (8 excluded) --
+    # -- crypto (6 excluded) --
     ("crypto", "java", r"\bMessageDigest\s*\("):
         "DEAD -- MessageDigest has no public constructor; the only way to "
         "obtain one is the static factory MessageDigest.getInstance(...), "
@@ -982,17 +999,6 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
         "Digest::SHA256 (correct) and Digest::MD5 (weak), verified by "
         "execution on both; the pattern cannot distinguish them, so it is "
         "algorithm-blind noise rather than a misuse signal.",
-    ("crypto", "php", r"\bhash\s*\("):
-        "MISROUTED -- same overbreadth as hashlib./Digest::\\w+: "
-        "`hash(\"sha256\", $data)` is correct, idiomatic PHP (cache keys, "
-        "ETags) and fires identically to `hash(\"md5\", $data)`. Verified by "
-        "execution. md5()/sha1() in this same family already give "
-        "algorithm-specific, always-weak signal; this generic form adds "
-        "only noise.",
-    ("crypto", "php", r"\bmcrypt_encrypt\s*\("):
-        "OBSOLETE -- the mcrypt extension was removed from PHP core in "
-        "PHP 7.2.0 (2018); mcrypt_encrypt() is undefined on any PHP version "
-        "a 2026 target would run without a long-unmaintained PECL package.",
 }
 
 
@@ -1027,7 +1033,7 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
         f"{(tested | excluded) - catalogue}"
     )
 
-    # 32 + 19 + 23 + 31 = 105 (Java response reads are outbound requests).
-    assert len(catalogue) == 105
-    assert len(tested) == 89
-    assert len(excluded) == 16
+    # 34 + 19 + 23 + 31 = 107 (Java response reads are outbound requests).
+    assert len(catalogue) == 107
+    assert len(tested) == 94
+    assert len(excluded) == 13

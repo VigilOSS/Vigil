@@ -130,7 +130,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                    r"\bioutil\.ReadFile\s*\(", r"\bos\.ReadFile\s*\("],
             "ruby": [r"\bFile\.open\s*\(", r"\bFile\.read\s*\(", r"\bIO\.read\s*\(",
                      r"\bFileUtils\.\w+\s*\("],
-            "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\("],
+            # `copy`/`unlink` are common method names too, so a member or
+            # static call is not the filesystem function.
+            "php": [r"\bfopen\s*\(", r"\bfile_get_contents\s*\(", r"\bfile_put_contents\s*\(",
+                    r"(?<!->)(?<!::)\bunlink\s*\(", r"(?<!->)(?<!::)\bcopy\s*\(",
+                    r"\breadfile\s*\(", r"\bmove_uploaded_file\s*\("],
             "csharp": [r"\bFile\.ReadAllText\s*\(", r"\bFile\.WriteAllText\s*\(",
                        r"\bFile\.Open\w*\s*\(", r"\bnew\s+StreamReader\s*\(",
                        r"\bPath\.Combine\s*\("],
@@ -152,8 +156,16 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "go": [r"\b(?!URL\.)\w+\.Query\s*\(", r"\b\w+\.QueryRow\s*\(", r"\b\w+\.Exec\s*\("],
             "ruby": [r"\b\w+\.execute\s*\(", r"\bActiveRecord.*\.find_by_sql\s*\(",
                      r"\b\w+\.where\s*\(.*\braw\b"],
+            # The raw-expression escape hatches of Laravel's query builder and
+            # `DB` facade, a handle held in a property (`$this->db->query(`),
+            # and WordPress's `$wpdb` readers. A request object's `->query(`
+            # reads the query string; `_detect_sinks` drops that receiver.
             "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",
-                    r"\$\w+->prepare\s*\(", r"->exec\s*\("],
+                    r"\$\w+->prepare\s*\(", r"->exec\s*\(",
+                    r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(",
+                    r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(",
+                    r"\$\w+(?:->\w+)+->query\s*\(",
+                    r"\$wpdb->(?:get_results|get_var|get_row|get_col)\s*\("],
             "csharp": [r"\bnew\s+SqlCommand\s*\(", r"\bnew\s+OleDbCommand\s*\(",
                        r"\.ExecuteReader\s*\(", r"\.ExecuteNonQuery\s*\(",
                        r"\.ExecuteScalar\s*\(", r"\bFromSqlRaw\s*\(",
@@ -183,7 +195,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\bsystem\s*\(", r"\bexec\s*\(", r"`[^`]*`",
                      r"\bOpen3\.\w+\s*\(", r"\bIO\.popen\s*\("],
             "php": [r"(?<!->|::)\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
-                    r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\("],
+                    r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\(",
+                    r"\bpcntl_exec\s*\("],
             "csharp": [r"\bProcess\.Start\s*\(", r"\bnew\s+ProcessStartInfo\s*\("],
         },
     },
@@ -205,7 +218,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\bNet::HTTP\.\w+\s*\(", r"\bHTTParty\.\w+\s*\(",
                      r"\bopen-uri\b", r"\bURI\.open\s*\("],
             "php": [r"\bcurl_exec\s*\(", r"\bfile_get_contents\s*\(.*http",
-                    r"\bfopen\s*\(.*http"],
+                    r"\bfopen\s*\(.*http",
+                    r"\bHttp::(?:get|post|put|patch|delete|head|send)\s*\(",
+                    r"\bwp_remote_(?:get|post|request)\s*\("],
             "csharp": [
                 r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync)\s*\(",
                 r"\.(?:Download\w*|Upload\w*)\s*\(",
@@ -230,6 +245,15 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         },
     },
     {
+        # `extract()` turns array keys into local variables, so a request
+        # array overwrites whatever the scope already holds.
+        "kind": "mass_assignment",
+        "vuln_classes": ["mass-assignment"],
+        "patterns": {
+            "php": [r"(?<!->)(?<!::)\bextract\s*\("],
+        },
+    },
+    {
         "kind": "eval_exec",
         "vuln_classes": ["injection"],
         "patterns": {
@@ -247,7 +271,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             ],
             "ruby": [r"\beval\s*\(", r"\bclass_eval\s*\(", r"\binstance_eval\s*\(",
                      r"\bsend\s*\(", r"\bpublic_send\s*\("],
-            "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
+            # `assert()` evaluates its argument only when that is a string,
+            # which a variable can hold; a boolean condition is a check.
+            "php": [r"\beval\s*\(", r"\bassert\s*\(\s*(?:['\"]|<<<|\$\w+\s*[,)])", r"\bpreg_replace\s*\(.*/e",
                     r"\bcreate_function\s*\("],
             "csharp": [r"\bAssembly\.Load\w*\s*\(", r"\bActivator\.CreateInstance\s*\(",
                        r"\bType\.GetType\s*\(", r"\bCSharpCodeProvider\b"],
@@ -266,8 +292,12 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "go": [r"\bcrypto/\w+\b", r"\baes\.NewCipher\s*\(", r"\bsha256\.New\s*\(",
                    r"\bhmac\.New\s*\("],
             "ruby": [r"\bOpenSSL::Cipher\b", r"\bDigest::\w+\b", r"\bOpenSSL::HMAC\b"],
+            # The family is misuse, so `hash()` is a sink when its algorithm is
+            # a weak one or chosen at run time; `hash('sha256', ...)` is not.
+            # `mcrypt_encrypt` is the unmaintained cipher API itself.
             "php": [r"\bopenssl_encrypt\s*\(", r"\bmd5\s*\(", r"\bsha1\s*\(",
-                    r"\bhash\s*\(", r"\bmcrypt_encrypt\s*\("],
+                    r"\bhash\s*\(\s*(?:['\"](?:md2|md4|md5|sha1|crc32b?|adler32|fnv1a?(?:32|64)|joaat)['\"]|\$)",
+                    r"\bmcrypt_encrypt\s*\("],
             "csharp": [r"\bMD5\b", r"\bSHA1\b", r"\bDESCryptoServiceProvider\b",
                        r"\bTripleDES\b", r"\bRijndaelManaged\b", r"\bnew\s+Random\s*\("],
         },

@@ -3597,7 +3597,7 @@ def _detect_sinks(
                     elif language == "php" and sink_def["kind"] == "sql_exec" and "->query" in pat:
                         matches = (
                             match for match in matches
-                            if not re.match(r"\$(?:request|req)->query\s*\(", match.group())
+                            if not re.search(r"(?:\$|->)(?:request|req)->query\s*\($", match.group())
                         )
                     if next(matches, None) is not None:
                         identity = (sink_def["kind"], func["name"], line_idx)
@@ -3797,6 +3797,118 @@ def _php_call_shape(call: Any) -> tuple[Any, Any, Any] | None:
         return target, None, arguments
     receiver = call.child_by_field_name("scope" if call.type == "scoped_call_expression" else "object")
     return call.child_by_field_name("name"), receiver, call.child_by_field_name("arguments")
+
+
+# Sinks only the parse tree can tell from their lookalikes, so they have no
+# line pattern and the streaming fallback does not report them: a backtick
+# shell command (a backtick on a line is as often a string or a comment),
+# `mail()` given its fifth, sendmail-argument parameter, a callable or class
+# chosen at run time, and a Guzzle client built by the short name the file
+# imports it under.
+_PHP_AST_SINK_QUERY = "\n".join((
+    "(shell_command_expression) @shell",
+    "(function_call_expression) @call",
+    "(object_creation_expression) @new",
+))
+_PHP_DYNAMIC_CALLERS = frozenset({"call_user_func", "call_user_func_array"})
+_PHP_LITERAL_CALLABLE_TYPES = frozenset({"anonymous_function", "arrow_function"})
+_PHP_GUZZLE_CLIENT = "GuzzleHttp\\Client"
+
+
+def _php_literal_string(node: Any) -> bool:
+    return node.type in {"string", "nowdoc"} or (
+        node.type == "encapsed_string"
+        and all(child.type in _PHP_STRING_PART_TYPES for child in node.named_children)
+    )
+
+
+def _php_literal_callable(node: Any) -> bool:
+    """Whether a callable argument names its function in the source text."""
+    if _php_literal_string(node) or node.type in _PHP_LITERAL_CALLABLE_TYPES:
+        return True
+    if node.type != "array_creation_expression":
+        return False
+    elements = [child for child in node.named_children if child.type == "array_element_initializer"]
+    method = elements[-1].named_children[-1] if elements and elements[-1].named_children else None
+    return method is not None and _php_literal_string(method)
+
+
+def _php_ast_sinks(
+    tree: Any,
+    source: bytes,
+    locator: _PhpCallableLocator,
+    source_lines: list[str],
+    import_targets: list[dict[str, Any]],
+    known: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """The PHP sinks read off the parse tree, one per kind, callable and line."""
+    parser = _get_parser("php")
+    if parser is None:
+        return []
+    classes = {definition["kind"]: definition["vuln_classes"] for definition in _SINK_DEFINITIONS}
+    guzzle_names = {
+        target.get("alias") or target["qualified_name"].rsplit("\\", 1)[-1]
+        for target in import_targets
+        if target.get("kind") == "class" and target.get("qualified_name") == _PHP_GUZZLE_CLIENT
+    }
+    captures = _ts_query_captures(parser.language, _PHP_AST_SINK_QUERY, tree.root_node)
+    found: list[tuple[str, Any]] = [("process_exec", node) for node in captures.get("shell", [])]
+    for call in captures.get("call", []):
+        function = call.child_by_field_name("function")
+        arguments = call.child_by_field_name("arguments")
+        values = [
+            argument for argument in (arguments.named_children if arguments is not None else ())
+            if argument.type in {"argument", "variadic_unpacking"}
+        ]
+        if function is None:
+            continue
+        if function.type == "variable_name":
+            found.append(("eval_exec", call))
+            continue
+        name = _node_text(function, source).lstrip("\\").lower()
+        if name in _PHP_DYNAMIC_CALLERS and values:
+            callable_value = values[0].named_children[0] if values[0].named_children else None
+            if values[0].type != "argument" or callable_value is None or not _php_literal_callable(callable_value):
+                found.append(("eval_exec", call))
+        elif name == "mail" and (
+            len(values) >= 5 or any(value.type == "variadic_unpacking" for value in values)
+        ):
+            found.append(("process_exec", call))
+    for creation in captures.get("new", []):
+        target = next(
+            (
+                child for child in creation.named_children
+                if child.type not in {"arguments", "attribute_list"}
+            ),
+            None,
+        )
+        if target is None or target.type in {"declaration_list", "base_clause"}:
+            continue
+        if target.type in {"variable_name", *_PHP_PROPERTY_TYPES}:
+            found.append(("eval_exec", creation))
+            continue
+        text = _node_text(target, source)
+        if (
+            target.type == "qualified_name" and text.lstrip("\\") == _PHP_GUZZLE_CLIENT
+        ) or (target.type == "name" and text in guzzle_names):
+            found.append(("url_fetch", creation))
+    seen = {(sink["kind"], sink["function"], sink["line"]) for sink in known}
+    sinks: list[dict[str, Any]] = []
+    for kind, node in sorted(found, key=lambda item: item[1].start_byte):
+        caller = locator.innermost(node.start_byte, node.end_byte)
+        line_index = node.start_point[0]
+        identity = (kind, caller["name"] if caller is not None else "<top-level>", line_index + 1)
+        if identity in seen:
+            continue
+        seen.add(identity)
+        sinks.append({
+            "kind": kind,
+            "line": line_index + 1,
+            "function": identity[1],
+            "snippet": _snippet(source_lines[line_index]) if line_index < len(source_lines) else "",
+            "vuln_classes": list(classes[kind]),
+        })
+    return sinks
 
 
 class _PhpCallableLocator:
@@ -4521,8 +4633,10 @@ def index_file(
             functions, classes, effective_lang, source_lines, file_scope.scanned
         )
         if effective_lang == "php":
+            locator = _PhpCallableLocator(functions)
+            sinks.extend(_php_include_sinks(php_includes, locator, source_lines))
             sinks.extend(
-                _php_include_sinks(php_includes, _PhpCallableLocator(functions), source_lines)
+                _php_ast_sinks(tree, source, locator, source_lines, import_targets, sinks)
             )
         withheld_call = False
         if effective_lang == "php":

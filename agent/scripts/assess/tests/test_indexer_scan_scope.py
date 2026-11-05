@@ -714,7 +714,7 @@ def test_an_empty_closure_does_not_hide_executable_top_level_scope() -> None:
     assert [
         (sink["kind"], sink["function"], sink["line"])
         for sink in indexed["security_sinks"]
-    ] == [("eval_exec", "<top-level>", 7)]
+    ] == [("sql_exec", "<top-level>", 6), ("eval_exec", "<top-level>", 7)]
     assert indexed["analysis_status"] == "complete"
     assert indexed["unavailable_dimensions"] == []
 

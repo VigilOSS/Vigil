@@ -1,12 +1,12 @@
 """Empirical audit of `_SINK_DEFINITIONS`' file_path / file_inclusion /
-sql_exec / process_exec families -- 105 regex patterns across 10 languages.
+sql_exec / process_exec families -- 114 regex patterns across 10 languages.
 
 Every pattern below is exercised against an idiomatic, current-era (2026)
 fixture through the real tree-sitter indexer. Only patterns that fire on
 realistic code get a case in ``CASES`` -- DEAD / REDUNDANT / MISROUTED
 patterns are named, with the file:line evidence, in ``_EXCLUDED`` instead,
 and ``test_case_table_covers_every_live_pattern_in_the_assigned_slice``
-proves the two lists together account for all 105 patterns, so the catalogue
+proves the two lists together account for all 114 patterns, so the catalogue
 cannot silently restore a dead pattern or lose a live one.
 
 Taxonomy note. Three defects this audit recorded have since been fixed in the
@@ -520,6 +520,47 @@ class Shell {
     public function runPopen($cmd) {
         return popen($cmd, "r");
     }
+
+    public function runPcntl($path, $args) {
+        pcntl_exec($path, $args);
+    }
+}
+
+class Storage {
+    public function purge($path) {
+        unlink($path);
+    }
+
+    public function duplicate($path, $target) {
+        copy($path, $target);
+    }
+
+    public function stream($path) {
+        readfile($path);
+    }
+
+    public function accept($upload, $target) {
+        move_uploaded_file($upload, $target);
+    }
+}
+
+class LegacyQueries {
+    public function search($query, $term) {
+        return $query->whereRaw("name LIKE '%$term%'")->get();
+    }
+
+    public function count($term) {
+        return DB::select("SELECT COUNT(*) FROM acme WHERE name = '$term'");
+    }
+
+    public function find($id) {
+        return $this->db->query("SELECT * FROM acme WHERE id = $id");
+    }
+
+    public function wpFind($id) {
+        global $wpdb;
+        return $wpdb->get_results("SELECT * FROM acme WHERE id = $id");
+    }
 }
 """
 
@@ -734,6 +775,10 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("file_path", "php", r"\bfopen\s*\(", 'fopen($filename, "r")', ["path-traversal"]),
     ("file_path", "php", r"\bfile_get_contents\s*\(", "file_get_contents($filename)", ["path-traversal"]),
     ("file_path", "php", r"\bfile_put_contents\s*\(", "file_put_contents($filename, $body)", ["path-traversal"]),
+    ("file_path", "php", r"(?<!->)(?<!::)\bunlink\s*\(", "unlink($path)", ["path-traversal"]),
+    ("file_path", "php", r"(?<!->)(?<!::)\bcopy\s*\(", "copy($path, $target)", ["path-traversal"]),
+    ("file_path", "php", r"\breadfile\s*\(", "readfile($path)", ["path-traversal"]),
+    ("file_path", "php", r"\bmove_uploaded_file\s*\(", "move_uploaded_file($upload, $target)", ["path-traversal"]),
     # ---- file_path : csharp (treesitter_index.py:276-278) ----
     ("file_path", "csharp", r"\bFile\.ReadAllText\s*\(", "File.ReadAllText(full)", ["path-traversal"]),
     ("file_path", "csharp", r"\bFile\.WriteAllText\s*\(", "File.WriteAllText(name, body)", ["path-traversal"]),
@@ -769,6 +814,10 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "php", r"\$\w+->query\s*\(", "$pdo->query($sql)", ["sqli"]),
     ("sql_exec", "php", r"\$\w+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
     ("sql_exec", "php", r"->exec\s*\(", "$pdo->exec($sql)", ["sqli"]),
+    ("sql_exec", "php", r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(", "$query->whereRaw(", ["sqli"]),
+    ("sql_exec", "php", r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(", "DB::select(", ["sqli"]),
+    ("sql_exec", "php", r"\$\w+(?:->\w+)+->query\s*\(", "$this->db->query(", ["sqli"]),
+    ("sql_exec", "php", r"\$wpdb->(?:get_results|get_var|get_row|get_col)\s*\(", "$wpdb->get_results(", ["sqli"]),
     # ---- sql_exec : csharp (treesitter_index.py:310-313) ----
     ("sql_exec", "csharp", r"\bnew\s+SqlCommand\s*\(", "new SqlCommand(sql, conn)", ["sqli"]),
     ("sql_exec", "csharp", r"\bnew\s+OleDbCommand\s*\(", "new OleDbCommand(sql, conn)", ["sqli"]),
@@ -819,6 +868,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "php", r"\bpassthru\s*\(", "passthru($cmd)", ["injection"]),
     ("process_exec", "php", r"\bproc_open\s*\(", "proc_open($cmd, [], $pipes)", ["injection"]),
     ("process_exec", "php", r"\bpopen\s*\(", 'popen($cmd, "r")', ["injection"]),
+    ("process_exec", "php", r"\bpcntl_exec\s*\(", "pcntl_exec($path, $args)", ["injection"]),
     # ---- process_exec : csharp (treesitter_index.py:340) ----
     ("process_exec", "csharp", r"\bProcess\.Start\s*\(", "Process.Start(cmd)", ["injection"]),
     ("process_exec", "csharp", r"\bnew\s+ProcessStartInfo\s*\(", 'new ProcessStartInfo("cmd.exe", cmd)', ["injection"]),
@@ -904,7 +954,7 @@ def test_sql_exec_emits_the_canonical_sqli_class() -> None:
 
 # ---------------------------------------------------------------------------
 # Meta-test: the case table above, plus this allow-list, must account for
-# every one of the 105 patterns in the four assigned families. This is what
+# every one of the 114 patterns in the four assigned families. This is what
 # stops the catalogue drifting back to silent zero recall -- add a pattern
 # to _SINK_DEFINITIONS without touching this file and the test below fails.
 # ---------------------------------------------------------------------------
@@ -989,9 +1039,9 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
 
     # Hard counts. PHP inclusion is a parse-tree sink with no row here. Go's
     # `.Query(` excludes a `URL` receiver, so it is LIVE in the case table.
-    # file_path=40, sql_exec=30, process_exec=35 -> 105.
-    assert len(all_patterns) == 105
-    assert len(tested) == 100
+    # file_path=44, sql_exec=34, process_exec=36 -> 114.
+    assert len(all_patterns) == 114
+    assert len(tested) == 109
     assert len(excluded) == 5
 
 
