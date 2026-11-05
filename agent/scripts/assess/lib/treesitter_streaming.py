@@ -9,7 +9,9 @@ from assess.lib.treesitter_catalogues import (
     _ENTRY_LINE_PATTERNS,
     _PHP_CLI_INPUT_PATTERNS,
     _PHP_FILE_INCLUSION_VULN_CLASSES,
+    _PHP_NON_SQL_RECEIVERS,
     _PHP_SERVER_ARGV,
+    _PHP_STREAM_EXTRACT,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record
@@ -240,6 +242,7 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
     # `argument_shape: "unclassified"`.
     "php": [
         ("file_inclusion", _PHP_STREAM_INCLUDE, list(_PHP_FILE_INCLUSION_VULN_CLASSES)),
+        ("mass_assignment", _PHP_STREAM_EXTRACT, ["mass-assignment"]),
     ],
     "dockerfile": [
         ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),
@@ -307,6 +310,22 @@ _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
 
 def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
     return re.compile(pattern.encode("ascii"), re.IGNORECASE)
+
+
+# The receiver a line's `->exec(`/`->query(` sink match was called on: its
+# last name, a variable or a property or the method a call chain ends with.
+_PHP_STREAM_SQL_RECEIVER = re.compile(
+    rb"\$?(\w+)\s*(?:\([^()]*\))?\s*\??->\s*(?:exec|query)\s*\($", re.IGNORECASE
+)
+_PHP_STREAM_NON_SQL_RECEIVER = re.compile(_PHP_NON_SQL_RECEIVERS.encode("ascii"), re.IGNORECASE)
+_PHP_STREAM_RECEIVER_BYTES = 256
+
+
+def _php_stream_non_sql_receiver(window: bytes, match_end: int) -> bool:
+    receiver = _PHP_STREAM_SQL_RECEIVER.search(
+        window, max(0, match_end - _PHP_STREAM_RECEIVER_BYTES), match_end
+    )
+    return receiver is not None and _PHP_STREAM_NON_SQL_RECEIVER.fullmatch(receiver.group(1)) is not None
 
 
 # PHP's namespace `use` statement, read statement by statement where no parse
@@ -614,6 +633,12 @@ class StreamingSecurityScanner:
         for kind, pattern, vuln_classes in self._sink_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
+                    continue
+                if (
+                    kind == "sql_exec"
+                    and self.language == "php"
+                    and _php_stream_non_sql_receiver(window, match.end())
+                ):
                     continue
                 sink = {
                     "kind": kind,

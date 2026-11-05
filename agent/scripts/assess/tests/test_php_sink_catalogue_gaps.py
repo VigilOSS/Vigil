@@ -159,3 +159,88 @@ def test_a_dynamic_invocation_is_an_injection_sink_of_its_own_kind() -> None:
         (sink["kind"], sink["vuln_classes"], sink["function"])
         for sink in indexed["security_sinks"]
     ] == [("dynamic_invocation", ["injection"], "acme_handler")]
+
+
+def _streamed_kinds(statement: str, *, prelude: str = "") -> set[str]:
+    streamed = treesitter_index._fallback_from_bytes(
+        "src/acme.php", "php", _php(statement, prelude=prelude), degradation_reason="test"
+    )
+    line = 3 + prelude.count("\n")
+    return {sink["kind"] for sink in streamed["security_sinks"] if sink["line"] == line}
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("$schedule->exec('rsync -a /srv/acme /backup');", id="scheduler"),
+        pytest.param("$this->schedule->exec('echo acme')->everyMinute();", id="scheduler-property"),
+        pytest.param("$redis->multi()->exec();", id="redis-transaction"),
+        pytest.param("$pipeline->exec();", id="redis-pipeline"),
+        pytest.param("$multi->exec();", id="redis-multi"),
+        pytest.param("$this->redisClient->exec();", id="redis-client"),
+        pytest.param("$queue->exec();", id="queue"),
+        pytest.param("$this->hookManager->exec('actionAcmeShipping', [$id]);", id="hook-manager"),
+        pytest.param("$xpath->query('//item');", id="xpath"),
+        pytest.param("$this->xpath->query('//item');", id="xpath-property"),
+        pytest.param("$this->domXPath->query($id);", id="domxpath-property"),
+        pytest.param("$this->client->query('{ invoices { id } }');", id="graphql-client"),
+        pytest.param("$response->baseRequest->query('id');", id="request-property"),
+        pytest.param("$this->urlGenerator->query('acme/invoices');", id="url-generator"),
+    ],
+)
+def test_a_non_database_receiver_is_not_a_sql_sink(statement: str) -> None:
+    assert "sql_exec" not in _kinds(statement)
+    assert "sql_exec" not in _streamed_kinds(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("$pdo->exec($id);", id="pdo"),
+        pytest.param("$this->connection->exec($id);", id="connection-property"),
+        pytest.param("$db->getPdo()->exec($id);", id="pdo-getter"),
+        pytest.param("static::$drv->exec($id);", id="static-driver"),
+        pytest.param("$this->exec($id);", id="pdo-subclass"),
+        pytest.param("$mysqli->query($id);", id="mysqli"),
+        pytest.param("$this->db->query($id);", id="db-property"),
+    ],
+)
+def test_a_database_receiver_is_still_a_sql_sink(statement: str) -> None:
+    assert "sql_exec" in _kinds(statement)
+    assert "sql_exec" in _streamed_kinds(statement)
+
+
+def test_a_cakephp_console_test_runs_commands_not_sql() -> None:
+    prelude = "use Cake\\Console\\TestSuite\\ConsoleIntegrationTestTrait;\n"
+
+    assert "sql_exec" not in _kinds("$this->exec('cache clear_all');", prelude=prelude)
+
+
+def test_a_sql_receiver_named_in_a_string_is_not_a_call() -> None:
+    assert "sql_exec" not in _kinds("$help = 'call $pdo->exec($sql) to run it';")
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("$ids = array_map(fn ($r) => $extract($r), $data);", id="closure-variable"),
+        pytest.param('$sql = "SELECT EXTRACT(month FROM created_at) FROM invoices";', id="sql-string"),
+        pytest.param("$this->extract($data);", id="method"),
+        pytest.param("Acme\\Support\\extract($data);", id="namespaced-function"),
+    ],
+)
+def test_an_extract_lookalike_is_not_mass_assignment(statement: str) -> None:
+    assert "mass_assignment" not in _kinds(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("extract($data);", id="bare"),
+        pytest.param("\\extract($data);", id="qualified"),
+        pytest.param("EXTRACT($data, EXTR_SKIP);", id="case-blind"),
+    ],
+)
+def test_the_extract_builtin_is_mass_assignment_on_both_readers(statement: str) -> None:
+    assert "mass_assignment" in _kinds(statement)
+    assert "mass_assignment" in _streamed_kinds(statement)

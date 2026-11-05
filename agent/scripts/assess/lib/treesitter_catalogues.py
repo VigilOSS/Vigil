@@ -113,6 +113,20 @@ SinkPattern = dict[str, Any]  # {"kind", "patterns": {lang: [regex_str,...]}, "v
 # keyword off a line under the same kind and classes.
 _PHP_FILE_INCLUSION_VULN_CLASSES = ("lfi", "rfi")
 
+# Receivers whose `->exec(` or `->query(` runs no SQL, matched case-blind
+# against the receiver's last name: a scheduler's shell command, a Redis
+# transaction or pipeline, a job queue, PrestaShop's hook dispatcher, an
+# XPath or API-client query, and the query string of a request or URL.
+_PHP_NON_SQL_RECEIVERS = (
+    r"schedule|pipeline|pipe|multi|queue|hookmanager|\w*redis\w*|\w*xpath|xp"
+    r"|\w*client|(?:base)?request|req|ur[il]|urlgenerator|\w*builder"
+)
+# A CakePHP console test case runs a console command through `$this->exec()`.
+_PHP_CAKE_CONSOLE_TEST_TRAIT = "Cake\\Console\\TestSuite\\ConsoleIntegrationTestTrait"
+# The `extract()` builtin as a line can show it: not a method, a static call,
+# a variable holding a callable, or a declaration of a function so named.
+_PHP_STREAM_EXTRACT = r"(?<![\w$>:])(?<!function )extract\s*\("
+
 _SINK_DEFINITIONS: list[SinkPattern] = [
     {
         # Registered for its classes only: no line pattern can tell an
@@ -165,8 +179,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\b\w+\.where\s*\(.*\braw\b"],
             # The raw-expression escape hatches of Laravel's query builder and
             # `DB` facade, a handle held in a property (`$this->db->query(`),
-            # and WordPress's `$wpdb` readers. A request object's `->query(`
-            # reads the query string; `_detect_sinks` drops that receiver.
+            # and WordPress's `$wpdb` readers. A `->exec(`/`->query(` whose
+            # receiver is in `_PHP_NON_SQL_RECEIVERS` is not a database call;
+            # both readers drop it.
             "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",
                     r"\$\w+->prepare\s*\(", r"->exec\s*\(",
                     r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(",
@@ -253,12 +268,12 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
     },
     {
         # `extract()` turns array keys into local variables, so a request
-        # array overwrites whatever the scope already holds.
+        # array overwrites whatever the scope already holds. Registered for
+        # its classes only: the parse-tree reader names the builtin call, and
+        # the streaming fallback reads `_PHP_STREAM_EXTRACT` off a line.
         "kind": "mass_assignment",
         "vuln_classes": ["mass-assignment"],
-        "patterns": {
-            "php": [r"(?<!->)(?<!::)\bextract\s*\("],
-        },
+        "patterns": {},
     },
     {
         # A call through a callable chosen at runtime -- PHP's `$fn(...)`,
