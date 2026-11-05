@@ -216,6 +216,41 @@ def test_every_sink_vuln_class_is_canonical() -> None:
     assert sorted(declared - set(vuln_taxonomy.VULN_CLASSES)) == []
 
 
+PHP_HOOK_SINKS = b"""<?php
+include $_GET['page'];
+$out = `ls $dir`;
+$fn($id);
+$controller->$action($id);
+"""
+
+
+def test_every_sink_kind_a_reader_emits_is_registered_with_its_classes() -> None:
+    """The vocabulary sweep above reads `_SINK_DEFINITIONS`, so a kind only a
+    parse-tree hook or the streaming fallback emits must be registered there
+    too, or its classes escape the sweep."""
+    registered = {
+        definition["kind"]: definition["vuln_classes"]
+        for definition in treesitter_index._SINK_DEFINITIONS
+    }
+    exact = index_file("public/index.php", "php", PHP_HOOK_SINKS)
+    streamed = treesitter_index._fallback_from_bytes(
+        "public/index.php", "php", PHP_HOOK_SINKS, degradation_reason="test"
+    )
+    emitted = {
+        (sink["kind"], tuple(sink["vuln_classes"]))
+        for indexed in (exact, streamed)
+        for sink in indexed["security_sinks"]
+    }
+
+    assert {kind for kind, _classes in emitted} >= {
+        "file_inclusion", "process_exec", "dynamic_invocation",
+    }
+    assert {
+        (kind, classes) for kind, classes in emitted
+        if tuple(registered.get(kind, ())) != classes
+    } == set()
+
+
 STAX_JAVA = b"""\
 import javax.xml.stream.XMLInputFactory;
 import javax.xml.stream.XMLStreamReader;

@@ -1037,7 +1037,7 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
         f"{(tested | excluded) - all_patterns}"
     )
 
-    # Hard counts. PHP inclusion is a parse-tree sink with no row here. Go's
+    # Hard counts. PHP inclusion is a parse-tree sink with no pattern here. Go's
     # `.Query(` excludes a `URL` receiver, so it is LIVE in the case table.
     # file_path=44, sql_exec=34, process_exec=36 -> 114.
     assert len(all_patterns) == 114

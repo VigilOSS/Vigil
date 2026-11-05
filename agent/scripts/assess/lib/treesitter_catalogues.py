@@ -115,6 +115,13 @@ _PHP_FILE_INCLUSION_VULN_CLASSES = ("lfi", "rfi")
 
 _SINK_DEFINITIONS: list[SinkPattern] = [
     {
+        # Registered for its classes only: no line pattern can tell an
+        # inclusion from a lookalike, so both readers emit it themselves.
+        "kind": "file_inclusion",
+        "vuln_classes": list(_PHP_FILE_INCLUSION_VULN_CLASSES),
+        "patterns": {},
+    },
+    {
         "kind": "file_path",
         "vuln_classes": ["path-traversal"],
         "patterns": {
