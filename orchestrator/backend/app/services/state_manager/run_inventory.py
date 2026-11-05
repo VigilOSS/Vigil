@@ -110,6 +110,10 @@ def _insert_obligation(
 _WRITABLE_OBLIGATION_STATUSES = OBLIGATION_STATUSES - {"released"}
 # A source the producer can still read, or release instead of reading.
 _RELEASABLE_OBLIGATION_STATUSES = frozenset({"open", "blocked", "deferred"})
+# A hard source_read closed as an accepted gap by a write before the release verb
+# existed. It still blocks its proof run, and only the producer's release can
+# close it honestly, so it is the one closed status a release may move.
+_LEGACY_RELEASABLE_SOURCE_STATUS = "accepted_gap"
 
 
 def _refuse_manual_source_closure(
@@ -733,7 +737,9 @@ def release_run_obligation(
 
     The release is the honest alternative to a manual resolution: it records who
     decided and why without claiming the bytes were delivered, and the run then
-    reports the source as released rather than read.
+    reports the source as released rather than read. A hard source recorded as an
+    accepted gap before releases existed is released the same way, and its event
+    records ``accepted_gap`` as the status it left.
     """
 
     engagement = _engagement_or_404(engagement_id)
@@ -799,7 +805,10 @@ def release_run_obligation(
             ):
                 return _serialize_obligation(existing)
             raise HTTPException(status_code=409, detail="closed obligation status is immutable")
-        if current_status not in _RELEASABLE_OBLIGATION_STATUSES:
+        legacy_gap = (
+            current_status == _LEGACY_RELEASABLE_SOURCE_STATUS and bool(existing["hard"])
+        )
+        if current_status not in _RELEASABLE_OBLIGATION_STATUSES and not legacy_gap:
             raise HTTPException(status_code=409, detail="closed obligation status is immutable")
         receipt_ids = _json_value(existing["proof_receipt_ids_json"], [])
         connection.execute(

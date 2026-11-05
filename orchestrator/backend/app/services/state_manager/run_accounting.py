@@ -1174,7 +1174,14 @@ def _current_blockers(
                 "message": f"Hard obligation {row['identity_key']} is {row['status']}.",
                 "object_type": "obligation",
                 "object_id": int(row["id"]),
-                "action": "resolve with recorded evidence or retain a partial run",
+                # An accepted gap is closed and immutable, so only a partial
+                # outcome reports it truthfully.
+                "action": (
+                    "an accepted gap is closed and cannot be resolved; retain a "
+                    "partial run"
+                    if str(row["status"]) == "accepted_gap"
+                    else "resolve with recorded evidence or retain a partial run"
+                ),
             }
         )
     candidate_rows = connection.execute(
@@ -1272,7 +1279,8 @@ def _proof_completion_refusal(
     if not unread:
         return (
             f"proof run {run_id} cannot complete while blockers remain: {other_text}. "
-            f"Resolve each, or {seal_partial}."
+            f"Resolve each that is still open (an accepted gap stays closed), or "
+            f"{seal_partial}."
         )
     ids = _bounded_list([str(blocker["object_id"]) for blocker in unread], separator=", ")
     count = len(unread)

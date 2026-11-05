@@ -432,3 +432,138 @@ def test_scan_completion_with_an_unread_source_still_seals_partial(
     assert "unread_source" in {
         blocker["code"] for blocker in sealed.json()["seal"]["blockers"]
     }
+
+
+def _close_by_legacy_write(obligation: dict, status_value: str, *, hard: bool = True) -> None:
+    """Store a source_read obligation the way a write before the release verb did."""
+
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_run_obligations SET status = ?, resolution = ?, hard = ? "
+            "WHERE id = ?",
+            (status_value, "accepted before release existed", int(hard), obligation["id"]),
+        )
+        connection.execute(
+            """
+            INSERT INTO assessment_run_obligation_events (
+                engagement_id, run_id, obligation_id, from_status, to_status,
+                resolution, proof_receipt_ids_json
+            )
+            SELECT engagement_id, run_id, id, 'open', ?, resolution, '[]'
+            FROM assessment_run_obligations WHERE id = ?
+            """,
+            (status_value, obligation["id"]),
+        )
+
+
+def test_a_legacy_accepted_gap_source_is_released_by_its_proof_run_producer(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="legacy-accepted-gap")
+    _recovery_receipt(client, run, slug="legacy-accepted-gap", observed="guard absent")
+    [source] = _import(client, run, 1)
+    obligation = _source_obligation(client, run, source)
+    _close_by_legacy_write(obligation, "accepted_gap")
+    refused = client.patch(f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"})
+    assert refused.status_code == 409, refused.text
+    assert f"run-audit obligation release {run['id']} <id>" in refused.json()["detail"]
+    reason = "vendored helper outside the claimed request path"
+
+    released = _release(client, run, obligation, agent_id="HUNT-RUN-1", reason=reason)
+
+    assert released.status_code == 200, released.text
+    assert released.json()["status"] == "released"
+    assert released.json()["resolution"] == reason
+    history = client.get(
+        f"{BASE}/assessment-runs/{run['id']}/obligations/{obligation['id']}/history"
+    ).json()
+    assert (history[-1]["from_status"], history[-1]["to_status"]) == ("accepted_gap", "released")
+    assert history[-1]["actor_dispatch_agent_id"] == "HUNT-RUN-1"
+    assert _seal(client, run)["status"] == "completed"
+
+
+def test_a_legacy_accepted_gap_source_on_a_scan_is_still_refused(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _create_scan(client, run_uuid="legacy-accepted-gap-scan")
+    assert client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
+    ).status_code == 200
+    [source] = _import(client, run, 1)
+    obligation = _source_obligation(client, run, source)
+    _close_by_legacy_write(obligation, "accepted_gap")
+
+    refused = _release(client, run, obligation, agent_id="HUNT-RUN-1", reason="out of scope")
+
+    assert refused.status_code == 409, refused.text
+    assert _source_obligation(client, run, source)["status"] == "accepted_gap"
+
+
+@pytest.mark.parametrize(
+    "status_value, hard", [("resolved", True), ("released", True), ("accepted_gap", False)]
+)
+def test_other_closed_source_obligations_stay_immutable(
+    client, isolate_settings, status_value, hard
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid=f"legacy-{status_value}-{hard}")
+    [source] = _import(client, run, 1)
+    obligation = _source_obligation(client, run, source)
+    _close_by_legacy_write(obligation, status_value, hard=hard)
+
+    refused = _release(client, run, obligation, agent_id="HUNT-RUN-1", reason="out of scope")
+
+    assert refused.status_code == 409, refused.text
+    after = _source_obligation(client, run, source)
+    assert (after["status"], after["resolution"]) == (
+        status_value,
+        "accepted before release existed",
+    )
+
+
+def test_the_completion_refusal_offers_only_moves_each_listed_obligation_allows(
+    client, isolate_settings
+) -> None:
+    _seed(client, isolate_settings)
+    run = _recovery_parent_run(client, run_uuid="refusal-accuracy")
+    receipt_id = _recovery_receipt(client, run, slug="refusal-accuracy", observed="guard absent")
+    [source] = _import(client, run, 1)
+    _close_by_legacy_write(_source_obligation(client, run, source), "accepted_gap")
+    gap = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/obligations",
+        json={
+            "identity_key": "coverage:service-a",
+            "obligation_kind": "coverage",
+            "object_type": "target",
+            "object_key": "service-a",
+            "hard": True,
+            "status": "accepted_gap",
+            "resolution": "the admin surface was out of reach",
+            "proof_receipt_ids": [receipt_id],
+        },
+    )
+    assert gap.status_code in (200, 201), gap.text
+
+    refused = client.patch(f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"})
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "obligation release" in detail
+    assert f"proof-run finish {run['id']} --status partial" in detail
+    released = _release(
+        client, run, _source_obligation(client, run, source),
+        agent_id="HUNT-RUN-1", reason="vendored helper outside the claimed path",
+    )
+    assert released.status_code == 200, released.text
+    remaining = client.patch(f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"})
+    assert remaining.status_code == 409, remaining.text
+    assert "an accepted gap stays closed" in remaining.json()["detail"]
+    blockers = {
+        blocker["object_id"]: blocker
+        for blocker in client.get(f"{BASE}/assessment-runs/{run['id']}").json()["blockers"]
+    }
+    accepted = blockers[gap.json()["id"]]
+    assert "resolve with recorded evidence" not in accepted["action"]
+    assert "partial" in accepted["action"]
