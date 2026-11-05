@@ -3914,8 +3914,11 @@ _PHP_EXISTENCE_PROBES = frozenset({
 _PHP_EXIT_NAMES = frozenset({"die", "exit"})
 # Operands a constant expression is built from: constant and class-constant
 # names (`__DIR__`, `Invoice::class`) and operators over them.
-_PHP_CONSTANT_NAME_TYPES = frozenset({
-    "name", "qualified_name", "class_constant_access_expression",
+_PHP_CONSTANT_NAME_TYPES = frozenset({"name", "qualified_name", "relative_name"})
+# `Invoice::class`, `self::LIMIT`: a class constant of a class named in the
+# source. `acme()::X`, `(new Acme)::X` and `$obj::X` evaluate their scope first.
+_PHP_CLASS_CONSTANT_SCOPE_TYPES = frozenset({
+    "name", "qualified_name", "relative_name", "relative_scope",
 })
 _PHP_CONSTANT_OPERATOR_TYPES = frozenset({
     "binary_expression", "unary_op_expression", "parenthesized_expression",
@@ -3934,6 +3937,10 @@ def _php_constant_expression(node: Any) -> bool:
         current = stack.pop()
         if current.type in _PHP_CONSTANT_NAME_TYPES or _is_literal_value(current):
             continue
+        if current.type == "class_constant_access_expression":
+            if all(child.type in _PHP_CLASS_CONSTANT_SCOPE_TYPES for child in current.named_children):
+                continue
+            return False
         if current.type not in _PHP_CONSTANT_OPERATOR_TYPES and current.type not in _LITERAL_CONTAINER_TYPES:
             return False
         stack.extend(child for child in current.named_children if not _is_comment_node(child))
@@ -4922,7 +4929,8 @@ def _php_ast_sinks(
         if target.type not in {"name", "qualified_name"}:
             # `new $cls`, `new $this->handler`, `new $classes[$mode]`,
             # `new ($factory)`: the class is a value chosen at run time.
-            if not _is_literal_value(target):
+            # `new namespace\Acme` and `new (Acme::class)` name it in source.
+            if not _php_constant_expression(target):
                 found.append(("dynamic_invocation", creation))
             continue
         text = _node_text(target, source)

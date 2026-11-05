@@ -967,6 +967,9 @@ def test_constant_valued_php_file_scope_opens_no_segment(source: bytes) -> None:
         pytest.param(b"<?php\n$plugin->maturity = acme_maturity();\n", [(2, 2)], id="call"),
         pytest.param(b"<?php\n$config['dir'] = $root . 'temp/';\n", [(2, 2)], id="variable"),
         pytest.param(b"<?php\nreturn [Acme\\Mail::create()];\n", [(2, 2)], id="static-call"),
+        pytest.param(b"<?php\n$level = acme_factory()::LEVEL;\n", [(2, 2)], id="constant-of-a-call"),
+        pytest.param(b"<?php\n$level = (new Acme\\Mail())::LEVEL;\n", [(2, 2)], id="constant-of-new"),
+        pytest.param(b"<?php\n$level = $mailer::LEVEL;\n", [(2, 2)], id="constant-of-a-variable"),
         pytest.param(
             b"<?php\nif (!is_callable($hook)) {\n    function acme_hook() { return 1; }\n}\n",
             [(2, 2)],
