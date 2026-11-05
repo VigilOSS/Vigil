@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import sys
 
-from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.client import AssessmentClient, require_write_result, verdict_effect_line
 from assess.lib.config import load_config
 
 
@@ -54,5 +54,8 @@ def run(args) -> None:
     # from a blocked report-readiness check.
     for warning in (result or {}).get("warnings") or []:
         print(f"finding merge: {warning}", file=sys.stderr)
+    effect = verdict_effect_line("finding merge", args.target_slug, result)
+    if effect:
+        print(effect, file=sys.stderr)
 
     print(f"Merged {args.source_slug} into {args.target_slug}")

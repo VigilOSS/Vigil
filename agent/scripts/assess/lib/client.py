@@ -59,6 +59,27 @@ def require_finding_write_response(
     return response
 
 
+_VERDICT_EFFECT_GUIDANCE = {
+    "claim_review": (
+        "; the verdict stands, and an independent claim_equivalence review or "
+        "re-verification is required before the report"
+    ),
+    "invalidate": "; verification is unreviewed and needs a fresh proof run",
+}
+
+
+def verdict_effect_line(operation: str, slug: str, response: Any) -> str | None:
+    """One stderr line naming what a finding write did to the verdict, if reported."""
+    if not isinstance(response, dict) or not response.get("verification_effect"):
+        return None
+    effect = str(response["verification_effect"])
+    axes = ", ".join(str(axis) for axis in response.get("changed_axes") or []) or "no change"
+    return (
+        f"{operation}: {slug} verdict effect {effect} ({axes})"
+        f"{_VERDICT_EFFECT_GUIDANCE.get(effect, '')}"
+    )
+
+
 def canonical_artifact_path(engagement_dir: str, path_value: str, *, operation: str) -> str:
     """Canonicalise a submitted path the way the artifact index will.
 

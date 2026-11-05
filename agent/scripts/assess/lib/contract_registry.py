@@ -202,6 +202,112 @@ FINDING_PATCH_FIELDS: tuple[tuple[str, str, str], ...] = (
     ("workflow_status", "string", "Report-inclusion lifecycle state (the `--status` flag). Use 'draft' to reopen a finding for re-triage. Verification-status changes belong to `finding verify`."),
 )
 
+# What each finding write does to a verified finding's verdict, as (axis, effect).
+# MIRRORS `finding_change_policy.effect_table()` in
+# orchestrator/backend/app/services/state_manager/finding_change_policy.py, which
+# owns the decision; duplicated for the same packaging reason as
+# SUBMISSION_STATUSES above and pinned in sync by
+# test_finding_change_effects_contract_mirror. `details.*` is every detail key
+# without its own row.
+FINDING_CHANGE_EFFECTS: tuple[tuple[str, str], ...] = (
+    ("title", "keep"),
+    ("notes", "keep"),
+    ("workflow_status", "keep"),
+    ("submission", "keep"),
+    ("provenance", "keep"),
+    ("source_name", "keep"),
+    ("summary", "claim_review"),
+    ("severity", "invalidate"),
+    ("defect_family", "invalidate"),
+    ("root_cause_key", "invalidate"),
+    ("auth_context", "invalidate"),
+    ("canonical_location", "invalidate"),
+    ("evidence_ref.fill", "keep"),
+    ("evidence_ref.replace", "claim_review"),
+    ("evidence_ref.clear", "invalidate"),
+    ("evidence_type.fill", "keep"),
+    ("evidence_type.replace", "claim_review"),
+    ("details.remediation", "keep"),
+    ("details.references", "keep"),
+    ("details.correction_history", "keep"),
+    ("details.replies", "keep"),
+    ("details.withdrawal_reason", "keep"),
+    ("details.ghsa", "keep"),
+    ("details.notes_provenance", "keep"),
+    ("details.attempts_summary", "keep"),
+    ("details.related_intel_ids", "keep"),
+    ("details.discovered_by", "keep"),
+    ("details.kill_reason", "keep"),
+    ("details.kill_check", "keep"),
+    ("details.block_reason", "keep"),
+    ("details.unblock_requirements", "keep"),
+    ("details.cwe_id", "invalidate"),
+    ("details.*", "claim_review"),
+    ("details.asan_report.removed", "invalidate"),
+    ("details.crash_input.removed", "invalidate"),
+    ("details.evidence.removed", "invalidate"),
+    ("details.exploitability.removed", "invalidate"),
+    ("details.impact.removed", "invalidate"),
+    ("details.poc_code.removed", "invalidate"),
+    ("details.poc_request.removed", "invalidate"),
+    ("details.poc_response.removed", "invalidate"),
+    ("details.proof.removed", "invalidate"),
+    ("details.repro_runs.removed", "invalidate"),
+    ("details.steps_to_reproduce.removed", "invalidate"),
+    ("cvss.impact", "claim_review"),
+    ("cvss.score", "claim_review"),
+    ("cvss.exploitability", "invalidate"),
+    ("cvss.vector", "invalidate"),
+    ("cvss.band", "invalidate"),
+    ("link", "keep"),
+    ("root_cause_link", "keep"),
+    ("root_cause_link.eliminates_finding", "claim_review"),
+    ("reopen", "invalidate"),
+    ("retraction", "invalidate"),
+)
+
+_FINDING_CHANGE_EFFECT_MEANINGS = (
+    ("keep", "the verdict stands"),
+    (
+        "claim_review",
+        "a confirmed or downgraded verdict stands, but report readiness raises "
+        "finding_claim_review_pending until a separate verifier records a current "
+        "claim_equivalence decision or the finding is re-verified",
+    ),
+    (
+        "invalidate",
+        "verification returns to unreviewed and needs a fresh proof run, because a "
+        "proof receipt backs one verification event; on a killed (false_positive) "
+        "finding the write is refused with 409 until the finding is reopened",
+    ),
+)
+
+
+def _finding_change_effect_notes() -> tuple[str, ...]:
+    """Contract notes rendered from FINDING_CHANGE_EFFECTS for every finding write verb."""
+    notes = [
+        "Verdict effect: every finding write is classified on the stored before/after "
+        "rows by one change policy, and the response carries verification_effect "
+        "(keep, claim_review, invalidate: what happened to this verdict), "
+        "verification_invalidated and changed_axes. The transition records "
+        "metadata.change_policy with each axis and its effect.",
+    ]
+    for effect, meaning in _FINDING_CHANGE_EFFECT_MEANINGS:
+        axes = ", ".join(axis for axis, row_effect in FINDING_CHANGE_EFFECTS if row_effect == effect)
+        notes.append(f"Verdict effect {effect} ({meaning}): {axes}.")
+    notes.append(
+        "CVSS: an impact metric (C/I/A; VC/VI/VA/SC/SI/SA in 4.0) revised within the "
+        "same band is cvss.impact; any other metric is cvss.exploitability; a score "
+        "that crosses a band is cvss.band. `.removed` axes drop a proof dependency "
+        "(for repro_runs, any recorded run). A verified file finding's line drift "
+        "keeps its verdict only through `finding verify` rebinding it to the current "
+        "source snapshot."
+    )
+    return tuple(notes)
+
+
+FINDING_CHANGE_EFFECT_NOTES = _finding_change_effect_notes()
+
 # Route hints a runtime proof plan may name. MIRRORS the backend
 # `FindingNextTestRequest.route_hint` Literal in
 # orchestrator/backend/app/api/assessment.py, pinned in sync by
@@ -592,6 +698,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Set details.chain_required/details.chain_rationale/details.required_followup when the finding is concrete but only becomes exploitation-worthy as part of a larger chain. details.chain_required=true is ENFORCED to carry details.chain_rationale — client-side by the schema and server-side on every write — because a park that names no chain step is a follow-up nobody can action. Specialists own these via finding record/finding update; verification reviews but does not own them.",
             "Write the working finding in readable Markdown while the live session and exact evidence are available: one explicitly numbered details.steps_to_reproduce string, fenced commands/requests/responses, annotated details.evidence, and a Markdown operational replay log in notes. Raw captures belong in an artifact or poc_request/poc_response. The report-writer later edits Summary, Steps, Evidence, Attack Scenario, Impact, and Remediation to submission quality and writes them back; the backend does not invent or rewrite security evidence on persistence.",
             "Include details.repro_runs only when you have real command-run ids from this engagement; copied example ids are refused. Map the ids to the steps they actually exercised.",
+            "Re-recording an existing finding applies the same verdict policy as `finding update` (keep, claim_review or invalidate per changed axis; see `vigil assess contract finding update`), and the response carries verification_effect and changed_axes. A rediscovery that folds into a killed (false_positive) finding keeps it killed.",
             "Blocked-attempt convention (schema-validated under details): when a technique is proven-shaped but walled off by missing provisioning, set details.block_reason (short why), details.unblock_requirements {kind, description, requested_from}, and details.attempts_summary (what was already tried). These keys are validated by finding-record.schema.json under details (additionalProperties=false); only `kind` carries a documented vocabulary (account|line|device|credential|access) — that vocabulary is a convention, NOT a JSON-Schema-enforced enum. A blocked finding stays OUT of the report; record the wall with `vigil assess block-technique` and, once a finding/chain satisfies it, connect them from the finding side with `vigil assess finding link <unblocking-finding-slug> --link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>`.",
             "Do not put `link_kind=root_cause` in the `links` array. Record the finding first, then `vigil assess finding link` after verification — root/sibling grouping is an explicit lifecycle action.",
             "evidence_ref should point at ONE existing engagement path — a file OR a directory holding a capture set — which is auto-registered and linked on record. Nothing here BLOCKS the record: a URL ref is rerouted into details.references, and a prose ref, a composite ref that joins several references (\"scans/a.out; scans/b.out\", \"command-runs 56052/56054\"), or a path-shaped ref with nothing on disk is WARNED and still recorded. A ref that is not a single path mints NO artifact row, so report-readiness will flag the finding until real evidence is attached — check-phase-readiness --phase report is the backstop, not record time. Put external URLs in details.references; pass --allow-unindexed-evidence only for a theoretical/code-inferred finding with no file.",
@@ -744,7 +851,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Batch: list several sibling slugs positionally to attach them all to one --root-cause (or apply the same --intel / generic / --clear-root-cause op to each) in a resilient loop with a per-slug failure tally.",
-            "Root-cause mode (--root-cause): use after findings are verified enough to consolidate. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
+            "Root-cause mode (--root-cause): group after verification. A set, retarget or clear keeps every verdict and is audited as a relationship_recorded transition; --effect eliminates_finding (the default) raises a claim review on a confirmed or downgraded sibling because it says the root fix retires that finding. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
             "Each finding has at most one active root-cause link. Reissuing --root-cause updates that row in place, preserving its id, note, and order unless replacements are supplied; --clear-root-cause retires it without deleting evidence.",
             "Root-cause and sibling groupings cannot be nested, and merged/false-positive findings cannot appear on either end.",
             "Use --effect eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; use eliminates_finding when the root fix retires the sibling entirely.",
@@ -754,6 +861,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Generic update mode (--link-id): patches, retires, or reactivates an existing non-root-cause link. Retirement is reversible and evidence-preserving; self-links are rejected on create and update.",
             "Unblock path (first-class): a blocked finding stays OUT of the report, but when a finding/chain that satisfies the wall lands, link it with `--link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>` (or --target-kind chain --target-id <id>) so the operator and the next engagement see the connection.",
             "Blocked TECHNIQUE (from block-technique) unblock: a blocked technique has no slug and cannot be a link SUBJECT — record it on the FINDING side with `--link-kind unblocks --target-kind blocked_technique --target-ref <technique_key>` (the unblocking finding points at the technique key). target_kind is free text, so blocked_technique is accepted without a backend change.",
+            "Each linked slug prints its verdict effect to stderr (`finding link: <slug> verdict effect <effect> (<axes>)`); the JSON result carries verification_effect, verification_invalidated and changed_axes.",
+            *FINDING_CHANGE_EFFECT_NOTES,
         ),
         common_mistakes=(
             ("root_cause_key", "do not repurpose root_cause_key as a display grouping field; use finding link for intentional groups"),
@@ -1431,7 +1540,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "at least one patch field",
         ),
         notes=(
-            "--agent-id records dispatch_agent_id as the editing actor without changing the immutable original author. Before a terminal verdict, write reproduction and evidence details. Afterward, only the same canonical verifier (resolved through the latest verdict's receipt and run producer) can append to steps_to_reproduce or repro_runs while retaining their existing ordered content, or fill empty evidence_ref/evidence_type fields without invalidating the verdict. Existing evidence references and reproduction dependencies must remain; mixed claim/severity/CWE/auth/location edits and missing/foreign attribution retain normal review. Existing claim-review debt requires its explicit equivalence decision. Each proof receipt supports only one verification event.",
+            "--agent-id records dispatch_agent_id as the editing actor without changing the immutable original author. Before a terminal verdict, write reproduction and evidence details. Afterward, only the same canonical verifier (resolved through the latest verdict's receipt and run producer) can append to steps_to_reproduce or repro_runs while retaining their existing ordered content without a claim review. Any other claim-review or invalidating axis, missing or foreign attribution, and existing claim-review debt keep their normal path. Each proof receipt supports only one verification event.",
             "Use explicit flags for small patches. --payload-file accepts a partial writable patch for exactly one slug, is mutually exclusive with request-content flags, and must contain expected_row_version.",
             "A successful update returns the next row_version. Refresh the staging file yourself before reusing it; Vigil reads but never rewrites that file.",
             "When a payload file contains notes, it must set notes_mode to replace for a cumulative working document, append for a deliberate checkpoint, or rotate to replace the note while archiving the previous bytes in note_history.",
@@ -1440,7 +1549,8 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The generic --inline and trailing positional JSON forms were REMOVED. Use explicit flags or --payload-file <path>.",
             "Batch: list several slugs positionally only with explicit flags (resilient loop with a per-slug failure tally). The helper fetches each slug's current row_version and sends a separate compare-and-swap patch; one stale row cannot silently overwrite another.",
             "Use for workflow and metadata updates that are NOT verification lifecycle transitions.",
-            "Reopening a confirmed or false-positive finding for re-triage: finding update --status draft.",
+            "Reopening a verified or false-positive finding for re-triage: finding update --status draft --reason \"<why the prior verdict no longer holds>\". It returns verification to unreviewed from any verdict, audited as verification_invalidated with reason_code finding_reopened (a disputed verdict records verification_recleared), and leaves workflow draft until it is explicitly promoted.",
+            "A killed (false_positive) finding refuses an invalidating edit with 409; reopen it first. Edits whose effect is keep or claim_review land on a killed finding without changing its verdict.",
             "Verification-status changes, disputed reviews, and false_positive kills belong in finding verify --status false_positive.",
             "--submission-status tracks EXTERNAL bug-bounty/program submission state and is ORTHOGONAL to "
             "--workflow-status (which is report-inclusion). Setting one never changes the other. Allowed values: "
@@ -1455,6 +1565,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The patch payload field is `details` on write, and the API returns it back as `details` on GET/list responses. "
             "A top-level `details_json` key in the patch payload is rejected with a 422 (unknown field); "
             "`details_json` is an internal storage column, not a public wire alias.",
+            *FINDING_CHANGE_EFFECT_NOTES,
         ),
         common_mistakes=(
             ("verification_status", "use finding verify for verification lifecycle changes"),
@@ -1559,10 +1670,11 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Use this dedicated helper when the canonical defect location genuinely changes, including a file/non-file boundary crossing; generic finding update deliberately refuses that crossing.",
-            "Relocation is a material change. One atomic location_relocated transition records both locations and resets ANY verification status other than unreviewed back to unreviewed — confirmed, downgraded and false_positive, but also pending_runtime_proof, blocked and disputed. Independently verify the relocated claim again before report inclusion.",
+            "Relocation is a canonical_location change, which invalidates. One atomic location_relocated transition records both locations and resets confirmed, downgraded, pending_runtime_proof, blocked and disputed verdicts back to unreviewed. A killed (false_positive) finding refuses relocation with 409; reopen it first. Independently verify the relocated claim again before report inclusion.",
             "So relocate is NOT the way to attach live proof to a source finding: it would destroy that finding's pending_runtime_proof marker and drop it out of `finding list --holding`. Source location stays canonical and live proof attaches as a receipt instead: proof-run, then proof-receipt, then `finding verify --proof-receipt-id`. `vigil assess contract exploit` carries the complete invocation for each step.",
             "The required expected row version makes the relocation a compare-and-swap, so concurrent finding edits fail with a conflict instead of being overwritten.",
             "Moving into file: requires provenance.code_snapshot bound to the current verified repository snapshot. Moving out preserves the old binding under superseded_code_snapshot rather than erasing reviewed-source history.",
+            *FINDING_CHANGE_EFFECT_NOTES,
         ),
         common_mistakes=(
             (
@@ -2897,6 +3009,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The source row is not deleted: it moves to status='merged' with merged_into_finding_id pointing at the target, so its slug still resolves and its links follow it to the target.",
             "Merge CHAINS are refused (400): a source that already absorbed other findings cannot itself be merged. Merge into the surviving root instead.",
             "Both slugs must be bound to the same code snapshot; a cross-snapshot merge is a 409. The row-version guards are optional but make the merge a compare-and-swap.",
+            "Merge never changes the target's technical claim and never resets its verdict. Severity, CVSS and CWE stay the target's; a stronger source value comes back in `warnings` (printed to stderr) naming the explicit `finding update` that would apply it, which invalidates the verdict. Workflow, notes, links and missing evidence references merge without review; a stronger source summary or a replaced evidence reference raises a claim review.",
+            "A file/live merge makes the file location canonical. Into a verified live target that is a location change, so it is refused with 409: merge the live finding into the file finding instead, or reopen the target first.",
+            "The CLI prints the target's verdict effect to stderr (`finding merge: <target> verdict effect <effect> (<axes>)`); the response carries verification_effect, verification_invalidated and changed_axes, and the target transition records changed_axes with metadata.change_policy.",
+            *FINDING_CHANGE_EFFECT_NOTES,
         ),
         common_mistakes=(
             ("merging siblings that share a root cause", "use finding link <sibling> --root-cause <root> — merge deletes one from the report, linking does not"),

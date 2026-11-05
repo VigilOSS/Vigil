@@ -102,3 +102,15 @@ def test_a_response_without_warnings_is_not_an_error(tmp_path, monkeypatch, caps
     _run(monkeypatch, tmp_path, {"target": {"slug": "VA-001"}})
 
     assert capsys.readouterr().err == ""
+
+
+def test_merge_prints_the_target_verdict_effect(tmp_path, monkeypatch, capsys):
+    _run(monkeypatch, tmp_path, {
+        "target": {"slug": "VA-001"}, "warnings": [],
+        "verification_effect": "claim_review", "verification_invalidated": False,
+        "changed_axes": ["summary", "workflow_status"],
+    })
+
+    err = capsys.readouterr().err
+    assert "finding merge: VA-001 verdict effect claim_review (summary, workflow_status)" in err
+    assert "claim_equivalence" in err

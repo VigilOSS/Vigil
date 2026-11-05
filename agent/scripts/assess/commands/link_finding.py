@@ -9,6 +9,7 @@ from assess.lib.client import (
     AssessmentClient,
     require_finding_write_response,
     require_write_result,
+    verdict_effect_line,
 )
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
@@ -418,6 +419,9 @@ def run(args) -> None:
                 print(f"finding link: {slug} failed: {exc}", file=sys.stderr)
                 continue
             results.append(result)
+            effect = verdict_effect_line("finding link", slug, result)
+            if effect:
+                print(effect, file=sys.stderr)
 
     if len(slugs) == 1 and results:
         print(json.dumps(results[0], indent=2, ensure_ascii=False))

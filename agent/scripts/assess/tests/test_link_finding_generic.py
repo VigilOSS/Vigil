@@ -438,3 +438,22 @@ def test_generic_link_can_be_retired_by_id(
     assert fake.patches == [
         ("findings/VA-070/links/42", {"retired": True})
     ]
+
+
+def test_root_cause_link_prints_each_verdict_effect(tmp_path, monkeypatch, capsys):
+    class _EffectClient(_FakeClient):
+        def put(self, endpoint: str, payload: dict) -> dict:
+            return {**super().put(endpoint, payload), "verification_effect": "keep",
+                    "verification_invalidated": False, "changed_axes": ["root_cause_link"]}
+
+    fake = _EffectClient()
+    _install(monkeypatch, tmp_path, fake)
+    link_finding.run(_parse(
+        ["link", "VA-002", "VA-003", "--root-cause", "VA-001",
+         "--effect", "eliminates_attack_path"],
+        str(tmp_path),
+    ))
+
+    err = capsys.readouterr().err
+    assert "finding link: VA-002 verdict effect keep (root_cause_link)" in err
+    assert "finding link: VA-003 verdict effect keep (root_cause_link)" in err
