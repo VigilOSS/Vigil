@@ -101,6 +101,22 @@ def test_an_unknown_constant_names_itself() -> None:
     assert _resolved_bootstrap()[8]["status"] == "constant_unresolved:ACME_MISSING"
 
 
+def test_a_constant_defined_differently_on_two_branches_is_dynamic() -> None:
+    """The file defines the constant, so it is not unresolved; which value it
+    holds is decided at run time."""
+    source = b"""<?php
+if (PHP_SAPI === 'cli') {
+    define('ACME_ROOT', __DIR__ . '/cli');
+} else {
+    define('ACME_ROOT', __DIR__ . '/web');
+}
+include ACME_ROOT . '/boot.php';
+"""
+    indexed = index_file("public/index.php", "php", source)
+
+    assert [(t["line"], t["status"]) for t in _includes(indexed)] == [(7, "dynamic")]
+
+
 def test_request_and_property_rooted_paths_are_dynamic() -> None:
     targets = _resolved_bootstrap()
 

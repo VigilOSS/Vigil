@@ -1889,6 +1889,11 @@ class _PhpPathEvaluator:
             values = {self.value(definition, active | {name}) for definition in definitions}
             if len(values) == 1 and None not in values:
                 return values.pop()
+            if None not in values:
+                # Every definition is static but they differ, as on two
+                # branches: which one runs is decided at run time.
+                self.dynamic = True
+                return None
         if not self.dynamic:
             self.unresolved.append(name)
         return None
