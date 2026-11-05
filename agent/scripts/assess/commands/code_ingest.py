@@ -26,7 +26,8 @@ from assess.lib.code_snapshot import (
 from assess.lib.config import load_config
 from assess.lib.contracts import CODE_REPO_ROLES
 from assess.lib.trusted_exec import (
-    git_command,
+    git_layout,
+    run_target_git,
     trusted_environment,
 )
 from assess.lib.trusted_exec import (
@@ -1479,11 +1480,67 @@ def _git_warn(message: str) -> None:
 
 
 def _run_git(repo_path: str, git_path: str, arguments: list[str], **kwargs):
+    """Every Git call over the ingested repository; see trusted_exec.TargetGit."""
+    return run_target_git(git_path, repo_path, arguments, **kwargs)
+
+
+_GIT_STATUS_ARGUMENTS = [
+    "status", "--porcelain=v1", "-z", "--untracked-files=all", "--ignore-submodules=dirty",
+    "--", ".",
+]
+
+
+def _populated_submodules(repo_path: str, stage_listing: str) -> list[str]:
+    """Worktrees of the checked-out gitlinks in a `git ls-files --stage -z` listing."""
+    root = Path(repo_path).resolve()
+    worktrees: list[str] = []
+    for entry in stage_listing.split("\0"):
+        stage, _, rel_path = entry.partition("\t")
+        if stage.split(" ", 1)[0] != "160000":
+            continue
+        parts = PurePosixPath(rel_path).parts
+        if (
+            not rel_path
+            or rel_path.startswith("/")
+            or any(part in {".", "..", ".git"} for part in parts)
+        ):
+            raise ValueError(f"index names an unsafe submodule path: {rel_path!r}")
+        candidate = root.joinpath(*parts)
+        if candidate.is_symlink() or not candidate.resolve().is_relative_to(root):
+            raise ValueError(f"submodule path leaves the worktree: {rel_path!r}")
+        if git_layout(candidate) is not None:
+            worktrees.append(str(candidate))
+    return worktrees
+
+
+def _git_worktree_dirty(
+    repo_path: str, git_path: str, status_timeout: float, source_root: str,
+) -> bool:
+    """Whether the worktree, or any checked-out submodule's, differs from HEAD.
+
+    Git's own submodule check runs a child `git status` under the submodule's
+    configuration, so status stops at the gitlink commit
+    (`--ignore-submodules=dirty`) and each checked-out submodule is inspected
+    here through the same isolated invocation.
+    """
     options = {
-        "env": trusted_environment(source_root=repo_path),
-        **kwargs,
+        "capture_output": True, "text": True, "errors": "surrogateescape",
+        "timeout": status_timeout, "source_root": source_root,
     }
-    return subprocess.run(git_command(git_path, repo_path, *arguments), check=False, **options)
+    status_result = _run_git(repo_path, git_path, _GIT_STATUS_ARGUMENTS, **options)
+    if status_result.returncode != 0:
+        detail = status_result.stderr.strip()
+        raise ValueError(f"cannot inspect repository worktree status: {detail or repo_path}")
+    if status_result.stdout:
+        return True
+    listing = _run_git(repo_path, git_path, ["ls-files", "--stage", "-z"], **options)
+    if listing.returncode != 0:
+        detail = listing.stderr.strip()
+        raise ValueError(f"cannot list repository submodules: {detail or repo_path}")
+    return any(
+        _git_worktree_dirty(submodule, git_path, status_timeout, source_root)
+        for submodule in _populated_submodules(repo_path, listing.stdout)
+    )
 
 
 def _git_provenance(
@@ -1510,24 +1567,16 @@ def _git_provenance(
     )
     branch = branch_result.stdout.strip() if branch_result.returncode == 0 else ""
     try:
-        status_result = _run_git(
-            repo_path,
-            git_path,
-            ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."],
-            **{**common, "timeout": status_timeout},
-        )
+        dirty = _git_worktree_dirty(repo_path, git_path, status_timeout, repo_path)
     except subprocess.TimeoutExpired as exc:
         raise ValueError(
             f"Git worktree status timed out after {status_timeout:g}s; "
             "increase --git-status-timeout for this repository"
         ) from exc
-    if status_result.returncode != 0:
-        detail = status_result.stderr.strip()
-        raise ValueError(f"cannot inspect repository worktree status: {detail or repo_path}")
     return {
         "head": head.stdout.strip(),
         "branch": branch,
-        "dirty": bool(status_result.stdout),
+        "dirty": dirty,
     }
 
 
@@ -1675,7 +1724,7 @@ def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[
             f"git churn scan timed out for {repo_path} after {_GIT_LOG_TIMEOUT_SECONDS}s; "
             "git churn data will be incomplete"
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         _git_warn(f"git churn scan failed for {repo_path}: {exc}")
     return churn
 
@@ -1725,7 +1774,7 @@ def _git_security_files(repo_path: str, history_args: list[str] | None = None) -
             f"git security-history scan timed out for {repo_path} after {_GIT_LOG_TIMEOUT_SECONDS}s; "
             "security-history annotations will be incomplete"
         )
-    except OSError as exc:
+    except (OSError, ValueError) as exc:
         _git_warn(f"git security-history scan failed for {repo_path}: {exc}")
     return sec_files
 

@@ -50,8 +50,10 @@ The `code-ingest` command:
 - Publishes a content-addressed, read-only sealed source copy under
   `tools/analysis-state/code-snapshots/`; the origin remains provenance, not an analysis root
 - Detects language per file (extension + shebang)
-- Captures Git HEAD, branch, and dirty state through a trusted external Git executable when a Git
-  marker exists, then rechecks the source before publication
+- Captures Git HEAD, branch, and dirty state (including checked-out submodules) through a trusted
+  external Git executable when a Git marker exists, then rechecks the source before publication.
+  Git reads the repository's history and index as data and never runs a program its config,
+  attributes or hooks name
 - Marks generated/vendored/test/doc files as `skip` candidates. The default policy excludes
   `vendor/` in any letter case, a forge-archive copy (`<project>-master/` or `<project>-main/` whose
   root holds `composer.json`, `package.json`, `VERSION` or a licence file), `.phps` source-display

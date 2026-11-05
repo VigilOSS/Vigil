@@ -991,16 +991,14 @@ def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
 
     captured: dict[str, object] = {}
 
-    def fake_run(cmd, stdout, stderr, text, timeout, env, check):
-        captured["cmd"] = cmd
-        captured["env"] = env
+    def fake_run_git(repo_path, git_path, arguments, *, stdout, stderr, text, timeout):
+        captured["cmd"] = arguments
         captured["timeout"] = timeout
-        assert check is False
         stdout.write("commit:abc123\nsrc/auth.py\nsrc/http.py\n\ncommit:def456\nsrc/auth.py\n")
         stdout.flush()
         return SimpleNamespace(returncode=0)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_git", fake_run_git)
 
     files = module._git_security_files(str(tmp_path), [f"--since={module._GIT_SECURITY_LOOKBACK}"])
 
@@ -1017,10 +1015,10 @@ def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
 def test_git_churn_scores_warns_on_timeout(monkeypatch, capsys, tmp_path):
     module = _load_code_ingest_module()
 
-    def fake_run(*args, **kwargs):
+    def fake_run_git(*args, **kwargs):
         raise subprocess.TimeoutExpired(cmd="git log", timeout=module._GIT_LOG_TIMEOUT_SECONDS)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    monkeypatch.setattr(module, "_run_git", fake_run_git)
 
     assert module._git_churn_scores(str(tmp_path)) == {}
     assert "git churn scan timed out" in capsys.readouterr().err

@@ -509,54 +509,86 @@ def test_ingest_classifies_powershell_extensions(filename: str) -> None:
 def test_git_provenance_uses_safe_flags_and_strips_case_insensitive_git_environment(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    import subprocess
+
     module = _load_command("code_ingest.py", "test_sealed_ingest_git_provenance")
+    git = module._resolve_trusted_tool("git", source_root=tmp_path)
+    if not git:
+        pytest.skip("trusted Git executable not available")
     repo = tmp_path / "repo"
     repo.mkdir()
-    (repo / ".git").write_text("gitdir: /trusted/worktree-meta\n", encoding="utf-8")
-    git = tmp_path / "trusted-git"
-    git.write_text("", encoding="utf-8")
-    git.chmod(0o755)
-    monkeypatch.setenv("GIT_DIR", str(repo / "attacker"))
-    monkeypatch.setenv("git_work_tree", str(repo / "attacker-worktree"))
+    fixture_env = {
+        "PATH": os.environ.get("PATH", ""),
+        "GIT_CONFIG_NOSYSTEM": "1",
+        "GIT_CONFIG_GLOBAL": "/dev/null",
+        "GIT_AUTHOR_NAME": "Acme Dev",
+        "GIT_AUTHOR_EMAIL": "dev@acme.example",
+        "GIT_COMMITTER_NAME": "Acme Dev",
+        "GIT_COMMITTER_EMAIL": "dev@acme.example",
+    }
+    for arguments in (["init", "-q", "-b", "main"], ["commit", "-q", "--allow-empty", "-m", "init"]):
+        subprocess.run(["git", *arguments], cwd=repo, env=fixture_env, check=True)
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=repo, env=fixture_env, check=True,
+        capture_output=True, text=True,
+    ).stdout.strip()
+    (repo / "main.py").write_text("print('acme')\n", encoding="utf-8")
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    monkeypatch.setenv("GIT_DIR", str(attacker))
+    monkeypatch.setenv("git_work_tree", str(tmp_path / "attacker-worktree"))
 
     calls: list[tuple[list[str], dict[str, str]]] = []
+    real_run = subprocess.run
 
-    def fake_run(command, **kwargs):
+    def recording_run(command, **kwargs):
         calls.append((list(command), dict(kwargs["env"])))
-        tail = command[-3:]
-        if "--is-inside-work-tree" in command:
-            return SimpleNamespace(returncode=0, stdout="true\n", stderr="")
-        if tail[-2:] == ["--verify", "HEAD^{commit}"]:
-            return SimpleNamespace(returncode=0, stdout=f"{'a' * 40}\n", stderr="")
-        if "symbolic-ref" in command:
-            return SimpleNamespace(returncode=0, stdout="main\n", stderr="")
-        if "status" in command:
-            return SimpleNamespace(returncode=0, stdout=" M main.py\n", stderr="")
-        raise AssertionError(command)
+        return real_run(command, **kwargs)
 
-    monkeypatch.setattr(module.subprocess, "run", fake_run)
-    provenance_fn = getattr(module, "_git_provenance", None)
-    assert callable(provenance_fn), "code-ingest must capture trusted Git provenance"
-    provenance = provenance_fn(str(repo), str(git))
+    monkeypatch.setattr(module.subprocess, "run", recording_run)
+    provenance = module._git_provenance(str(repo), git)
 
-    assert provenance == {"head": "a" * 40, "branch": "main", "dirty": True}
-    assert calls
+    assert provenance == {"head": head, "branch": "main", "dirty": True}
+    worktree_calls = [(command, env) for command, env in calls if command[1:2] == ["-C"]]
+    assert worktree_calls
     for command, environment in calls:
-        assert command[0] == str(git.resolve())
+        assert command[0] == git
+        git_environment = {
+            key: value for key, value in environment.items() if key.upper().startswith("GIT_")
+        }
+        assert str(attacker) not in git_environment.values()
+        assert not any(key != key.upper() for key in git_environment)
+        if command[1:2] != ["-C"]:
+            # Reading the repository's config never follows its includes.
+            assert command[1:4] == ["config", "--file", str(repo.resolve() / ".git" / "config")]
+            assert "--no-includes" in command
+    for command, environment in worktree_calls:
         assert command[1:3] == ["-C", str(repo.resolve())]
         assert "--no-pager" in command
         assert "--no-optional-locks" in command
+        private_git_dir = Path(environment["GIT_DIR"])
+        assert not private_git_dir.is_relative_to(repo.resolve())
         assert {
-            key: value for key, value in environment.items() if key.upper().startswith("GIT_")
+            key: value
+            for key, value in environment.items()
+            if key.upper().startswith("GIT_") and key != "GIT_DIR"
         } == {
             "GIT_CONFIG_GLOBAL": "/dev/null",
             "GIT_CONFIG_NOSYSTEM": "1",
             "GIT_OPTIONAL_LOCKS": "0",
             "GIT_TERMINAL_PROMPT": "0",
+            "GIT_WORK_TREE": str(repo.resolve()),
+            "GIT_INDEX_FILE": str(repo.resolve() / ".git" / "index"),
+            "GIT_OBJECT_DIRECTORY": str(repo.resolve() / ".git" / "objects"),
+            "GIT_NO_LAZY_FETCH": "1",
+            "GIT_ATTR_NOSYSTEM": "1",
         }
     assert any(command[-3:] == ["rev-parse", "--verify", "HEAD^{commit}"] for command, _ in calls)
     assert any(
-        command[-6:] == ["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."]
+        command[-7:] == [
+            "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            "--ignore-submodules=dirty", "--", ".",
+        ]
         for command, _ in calls
     )
 

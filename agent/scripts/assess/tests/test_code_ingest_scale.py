@@ -46,7 +46,13 @@ def test_git_status_timeout_can_be_configured_without_skipping_provenance(monkey
     monkeypatch.setattr(code_ingest, "_run_git", run_git)
     result = code_ingest._git_provenance("/repo", "/trusted/git", parsed.git_status_timeout)
     assert result["dirty"] is True
-    assert calls[-1] == (["status", "--porcelain=v1", "-z", "--untracked-files=all", "--", "."], 300)
+    assert calls[-1] == (
+        [
+            "status", "--porcelain=v1", "-z", "--untracked-files=all",
+            "--ignore-submodules=dirty", "--", ".",
+        ],
+        300,
+    )
     code_ingest._verify_git_provenance("/repo", "/trusted/git", result, 300)
     assert len([call for call in calls if call[0][0] == "status"]) == 2
 

@@ -3,6 +3,10 @@
 Jujutsu snapshots filesystem edits into commits. Evidence therefore identifies
 immutable Git commit IDs, never mutable change IDs; empty single-parent working
 copy children retain the identity of the content they test.
+
+These commands run on the operator's own checkout, whose test suite remediation
+runs by design, so they are plain Git/jj invocations. Git over source Vigil
+ingests from a target goes through `trusted_exec.TargetGit` instead.
 """
 
 from __future__ import annotations
