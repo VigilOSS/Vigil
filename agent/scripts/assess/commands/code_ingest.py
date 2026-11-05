@@ -1747,6 +1747,8 @@ def _git_security_files(repo_path: str, history_args: list[str] | None = None) -
                 [
                     'log',
                     *history_args,
+                    # Commit messages capitalize freely: "Security fix", "cve-2026-1".
+                    '--regexp-ignore-case',
                     '--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free',
                     '--format=commit:%H',
                     '--name-only',

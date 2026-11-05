@@ -1003,9 +1003,10 @@ def test_git_security_files_parses_streamed_output(monkeypatch, tmp_path):
     files = module._git_security_files(str(tmp_path), [f"--since={module._GIT_SECURITY_LOOKBACK}"])
 
     assert files == {"src/auth.py", "src/http.py"}
-    assert captured["cmd"][-5:] == [
+    assert captured["cmd"][-6:] == [
         "log",
         f"--since={module._GIT_SECURITY_LOOKBACK}",
+        "--regexp-ignore-case",
         "--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free",
         "--format=commit:%H",
         "--name-only",

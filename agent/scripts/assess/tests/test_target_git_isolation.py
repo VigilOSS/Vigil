@@ -515,3 +515,27 @@ def test_target_git_refuses_a_worktree_without_git_metadata(tmp_path, git_bin):
     with pytest.raises(ValueError, match="Git"):
         with TargetGit(git_bin, plain_directory):
             pass
+
+
+# --- security-history matching -------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "Patch Security hole in uploads",
+        "cve-2026-4242 backport",
+        "Use-After-Free in the image parser",
+        "Fix XSS VULNERABILITY in search",
+    ],
+)
+def test_security_history_matches_commit_messages_in_any_letter_case(tmp_path, git_bin, message):
+    repo = tmp_path / "acme-history"
+    repo.mkdir()
+    _git(repo, "init", "-q", "-b", "main")
+    _write(repo, "src/app.py", "print('acme')\n")
+    _commit(repo, "Initial import", "2026-05-01T09:00:00Z")
+    _write(repo, "src/upload.py", "def upload():\n    pass\n")
+    _commit(repo, message, "2026-05-02T09:00:00Z")
+
+    assert code_ingest._git_security_files(str(repo), ["--all"]) == {"src/upload.py"}
