@@ -242,3 +242,62 @@ def test_a_call_passes_caller_params_only_for_a_whole_parameter_name() -> None:
     assert [
         (call["callee"], call["passes_caller_params"]) for call in indexed["call_sites"]
     ] == [("lookup", True), ("render", False), ("audit", True), ("notify", False)]
+
+
+ACME_PHP_CONTROLLER = b"""<?php
+namespace Acme\\Billing;
+use Acme\\Models\\Invoice;
+define('ACME_ROOT', __DIR__);
+const ACME_VIEWS = ACME_ROOT . '/views';
+require_once ACME_ROOT . '/bootstrap.php';
+final class InvoiceController extends Controller {
+    public function show($id) {
+        $render = function ($view) { return include ACME_VIEWS . "/$view.php"; };
+        return $render(Invoice::find($id)->name);
+    }
+}
+$controller = new InvoiceController();
+echo `ls`, $controller->show($_GET['id']);
+"""
+
+
+def test_one_shared_pass_answers_each_query_as_its_own_cursor_would() -> None:
+    from assess.lib import treesitter_index
+
+    parser = treesitter_index._get_parser("php")
+    tree = parser.parse(ACME_PHP_CONTROLLER)
+    queries = treesitter_index._whole_tree_queries("php")
+    alone = {
+        query: treesitter_index._ts_query_captures(parser.language, query, tree.root_node)
+        for query in queries
+    }
+    shared = treesitter_index._SharedTreeQueries()
+    shared.open(tree.root_node, parser.language, queries)
+
+    def spans(captures):
+        return {
+            name: [(node.start_byte, node.end_byte, node.type) for node in nodes]
+            for name, nodes in captures.items()
+        }
+
+    assert len(queries) == 7
+    for query in queries:
+        assert spans(shared.captures(parser.language, query, tree.root_node)) == spans(alone[query])
+    assert sum(len(nodes) for captures in alone.values() for nodes in captures.values()) == 21
+    # Another tree, or a query outside the family, is not this pass's to answer.
+    other = parser.parse(ACME_PHP_CONTROLLER)
+    assert shared.captures(parser.language, queries[0], other.root_node) is None
+    assert shared.captures(parser.language, "(echo_statement) @echo", tree.root_node) is None
+
+
+def test_indexing_a_file_releases_its_shared_query_pass() -> None:
+    from assess.lib import treesitter_index
+
+    indexed = index_file("src/InvoiceController.php", "php", ACME_PHP_CONTROLLER)
+
+    assert indexed["analysis_mode"] == "tree_sitter"
+    assert treesitter_index._SHARED_TREE_QUERIES.captures(
+        treesitter_index._get_parser("php").language,
+        treesitter_index._whole_tree_queries("php")[0],
+        treesitter_index._get_parser("php").parse(ACME_PHP_CONTROLLER).root_node,
+    ) is None

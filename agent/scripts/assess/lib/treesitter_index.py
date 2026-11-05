@@ -131,12 +131,76 @@ def _compiled_ts_query(lang_obj: Any, query_str: str) -> Any:
     return lang_obj.query(query_str)
 
 
+class _SharedTreeQueries:
+    """One cursor pass answering every whole-tree query the extractors run.
+
+    A cursor walks the whole tree whatever its pattern count, and each
+    extractor asks for its own query over the same tree. So the queries of the
+    tree's family are matched together the first time one is asked, and each
+    answer is the matches of its own patterns in the order its own cursor
+    returns them. `index_file` opens the pass for the tree it parsed and closes
+    it when it is done; any other query runs on its own.
+    """
+
+    def __init__(self) -> None:
+        self._root: Any = None
+        self._lang_obj: Any = None
+        self._queries: tuple[str, ...] = ()
+        self._results: dict[str, dict[str, list[Any]]] | None = None
+
+    def open(self, root: Any, lang_obj: Any, queries: tuple[str, ...]) -> None:
+        self._root, self._lang_obj, self._queries, self._results = root, lang_obj, queries, None
+
+    def close(self) -> None:
+        self.open(None, None, ())
+
+    def captures(self, lang_obj: Any, query_str: str, root: Any) -> dict[str, list[Any]] | None:
+        if (
+            self._root is None
+            or lang_obj is not self._lang_obj
+            or query_str not in self._queries
+            or root != self._root
+        ):
+            return None
+        if self._results is None:
+            self._results = self._match_all()
+            if self._results is None:
+                self._queries = ()
+                return None
+        return {name: list(nodes) for name, nodes in self._results[query_str].items()}
+
+    def _match_all(self) -> dict[str, dict[str, list[Any]]] | None:
+        try:
+            combined = _compiled_ts_query(self._lang_obj, "\n".join(self._queries))
+            owners = [
+                query_str
+                for query_str in self._queries
+                for _pattern in range(_compiled_ts_query(self._lang_obj, query_str).pattern_count)
+            ]
+        except Exception:  # noqa: BLE001 - each query then reports its own failure
+            return None
+        if len(owners) != combined.pattern_count:
+            return None
+        results: dict[str, dict[str, list[Any]]] = {query_str: {} for query_str in self._queries}
+        for pattern_index, match_dict in tree_sitter.QueryCursor(combined).matches(self._root):
+            result = results[owners[pattern_index]]
+            for name, nodes in match_dict.items():
+                result.setdefault(name, []).extend(nodes)
+        return results
+
+
+_SHARED_TREE_QUERIES = _SharedTreeQueries()
+
+
 def _ts_query_captures(lang_obj: Any, query_str: str, root_node: Any) -> dict[str, list[Any]]:
     """Run a tree-sitter query and return ``{capture_name: [nodes]}``."""
     if tree_sitter is None:
         return {}
     # 0.25+: Query() constructor + QueryCursor
     if hasattr(tree_sitter, "QueryCursor"):
+        shared = _SHARED_TREE_QUERIES.captures(lang_obj, query_str, root_node)
+        if shared is not None:
+            return shared
         try:
             query = _compiled_ts_query(lang_obj, query_str)
         except Exception as exc:
@@ -385,6 +449,26 @@ def _query_language_family(language: str) -> str:
     if language == "tsx":
         return "typescript"
     return language
+
+
+@lru_cache(maxsize=None)
+def _whole_tree_queries(language: str) -> tuple[str, ...]:
+    """Every query the extractors run over a whole *language* tree."""
+    family = _query_language_family(language)
+    queries = [
+        _FUNCTION_QUERIES.get(family),
+        _CLASS_QUERIES.get(family),
+        _IMPORT_QUERIES.get(family),
+    ]
+    if family == "c":
+        queries.append(_C_DECLARATION_QUERY)
+    elif family == "cpp":
+        queries.append(_CPP_DECLARATION_QUERY)
+    elif family == "php":
+        queries.extend((
+            _PHP_INCLUDE_QUERY, _PHP_AST_SINK_QUERY, _PHP_CALL_QUERY, _PHP_SQL_CALL_QUERY,
+        ))
+    return tuple(dict.fromkeys(query for query in queries if query))
 
 
 _CPP_NAME_NODE_TYPES = frozenset({
@@ -5425,6 +5509,9 @@ def index_file(
             degradation_reason="tree_sitter_syntax_error",
         )
 
+    lang_obj = getattr(parser, "language", None)
+    if lang_obj is not None:
+        _SHARED_TREE_QUERIES.open(tree.root_node, lang_obj, _whole_tree_queries(parse_lang))
     try:
         functions = _extract_functions_ts(tree, parse_lang, source)
         classes = _extract_classes_ts(tree, parse_lang, source)
@@ -5595,8 +5682,10 @@ def index_file(
             )
         _remove_internal_structural_fields(functions, classes)
     except MemoryError:
+        _SHARED_TREE_QUERIES.close()
         raise
     except Exception as exc:  # noqa: BLE001 - retain bounded signal coverage
+        _SHARED_TREE_QUERIES.close()
         warnings.warn(
             f"tree-sitter extraction for '{language}' on {file_path} failed: {exc}; "
             "using bounded streaming security fallback.",
@@ -5608,6 +5697,7 @@ def index_file(
             source,
             degradation_reason="tree_sitter_analysis_error",
         )
+    _SHARED_TREE_QUERIES.close()
 
     return _complete_index_metadata(
         {
