@@ -97,9 +97,10 @@ vigil assess code-dispatch list --repo-id <repo-id> --batch-theme <theme> --stat
 # <agent-id> is the dispatch id the hunter will run under (`agent start --agent-id`), never the role name.
 vigil assess code-dispatch fetch 10 <agent-id>
 
-# Narrow a lane atomically by repo/class/theme/queue-mode or explicit queue ids
+# Narrow a lane atomically by repo/class/theme/queue-mode, source subtree, or explicit queue ids
 vigil assess code-dispatch fetch 10 <agent-id> --repo-id <repo-id> --classification high --batch-theme <theme>
 vigil assess code-dispatch fetch 10 <agent-id> --queue-mode trigger
+vigil assess code-dispatch fetch 10 <agent-id> --path-prefix src/billing   # whole segments, case-sensitive; repeatable
 vigil assess code-dispatch fetch 10 <agent-id> --ids-file ids.json
 ```
 

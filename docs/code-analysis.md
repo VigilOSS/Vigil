@@ -129,6 +129,22 @@ which records a durable override decision. A weak quality score should trigger
 more focused review; `--require-transition-ready` remains the read-only authority
 for the target phase's actual blocker set.
 
+## Working one part of a repository
+
+`code-dispatch list` and `code-dispatch fetch` accept `--path-prefix <dir>` and
+`--path-glob <pattern>`, so a lane can page or claim one subtree:
+
+```bash
+vigil assess code-dispatch list --path-prefix src/billing --ids-only > billing-ids.json
+vigil assess code-dispatch fetch 10 <agent-id> --path-prefix src/auth --path-prefix src/session
+```
+
+A prefix matches whole path segments and is case-sensitive, so `src/auth` covers
+`src/auth/login.py` but not `src/auth_extra/`. A glob uses the same case-sensitive
+fnmatch rules as `code-dispatch queue`. Repeat a flag to accept several values; every
+other filter still applies. The backend applies the scope inside the claim, so `fetch`
+never leases a row outside it.
+
 ## Runtime proof owed
 
 When a verifier accepts the source evidence but cannot run the decisive test, it records

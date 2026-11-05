@@ -43,6 +43,15 @@ _DEFAULT_ADOPTION_STALE_MINUTES = 10
 _MIN_ADOPTION_STALE_MINUTES = 1
 _MAX_ADOPTION_STALE_MINUTES = 1440
 
+_PATH_SCOPE_HELP = (
+    "--path-prefix PATH keeps rows whose repository-relative path is PATH or "
+    "lies under it, matched by whole segments and case-sensitively "
+    "(src/auth never matches src/auth_extra). --path-glob GLOB matches the "
+    "path with the case-sensitive fnmatch dialect `queue` uses. Both repeat: "
+    "values of one flag are alternatives, and every other filter must also "
+    "match.\n"
+)
+
 _ACTION_HELP: dict[str, str] = {
     "stats": (
         "Usage: vigil assess code-dispatch stats\n\n"
@@ -51,7 +60,8 @@ _ACTION_HELP: dict[str, str] = {
     "list": (
         "Usage: vigil assess code-dispatch list [--status STATUS] [--repo-id ID] "
         "[--classification TIER] [--batch-theme THEME] [--queue-mode MODE] "
-        "[--stale-minutes N] [--limit N] [--offset N] [--json|--ids-only]\n\n"
+        "[--stale-minutes N] [--path-prefix PATH]... [--path-glob GLOB]... "
+        "[--limit N] [--offset N] [--json|--ids-only]\n\n"
         "Page the current-generation analysis queue without claiming anything.\n"
         "Rows are ordered exactly as fetch claims them (priority desc, id asc).\n"
         "Every row carries AGE (seconds since the lease last proved life) and "
@@ -64,6 +74,7 @@ _ACTION_HELP: dict[str, str] = {
         "explicit IDs stay recoverable after the queue-submission output scrolls.\n"
         "--json emits a page object with items, item_ids and pagination metadata; "
         "fetch emits a claim array. Diagnostics go to stderr.\n"
+        f"{_PATH_SCOPE_HELP}"
     ),
     "adopt-lease": (
         "Usage: vigil assess code-dispatch adopt-lease <item-id> <agent-id> "
@@ -87,10 +98,14 @@ _ACTION_HELP: dict[str, str] = {
     "fetch": (
         "Usage: vigil assess code-dispatch fetch <limit> <agent-id> "
         "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
-        "[--queue-mode MODE] [--ids-file PATH]\n\n"
+        "[--queue-mode MODE] [--ids-file PATH] [--path-prefix PATH]... "
+        "[--path-glob GLOB]...\n\n"
         "Atomically claim matching current queue items for one analysis worker.\n"
         "<agent-id> is the dispatch agent_id the worker runs under, never the "
         "role name; heartbeat, results and closeouts repeat it.\n"
+        "Every filter, including the path scope, is applied inside the claim, "
+        "so no row outside it is leased.\n"
+        f"{_PATH_SCOPE_HELP}"
     ),
     "heartbeat": (
         "Usage: vigil assess code-dispatch heartbeat "
@@ -219,7 +234,8 @@ def run(args) -> None:
             print(
                 "Usage: code-dispatch fetch <limit> <agent-id> "
                 "[--repo-id ID] [--classification TIER] [--batch-theme THEME] "
-                "[--queue-mode MODE] [--ids-file PATH]",
+                "[--queue-mode MODE] [--ids-file PATH] [--path-prefix PATH]... "
+                "[--path-glob GLOB]...",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -463,8 +479,24 @@ def _ids_from_file(path_value: str) -> list[int]:
     return sorted(set(raw))
 
 
+# Repeatable path-scope flags shared by `list` and `fetch`. The backend owns
+# their matching rules; values are sorted so one filter set is one request.
+_PATH_SCOPE_OPTIONS = {"--path-prefix": "path_prefix", "--path-glob": "path_glob"}
+
+
+def _add_path_scope_value(scopes: dict[str, list[str]], option: str, value: str) -> None:
+    if not value.strip():
+        print(f"ERROR: {option} requires a value", file=sys.stderr)
+        raise SystemExit(1)
+    values = scopes.setdefault(_PATH_SCOPE_OPTIONS[option], [])
+    if value not in values:
+        values.append(value)
+        values.sort()
+
+
 def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
     filters: dict[str, object] = {}
+    path_scopes: dict[str, list[str]] = {}
     index = 0
     options = {
         "--repo-id": "repo_id",
@@ -472,6 +504,7 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
         "--batch-theme": "batch_theme",
         "--queue-mode": "queue_mode",
         "--ids-file": "ids_file",
+        **_PATH_SCOPE_OPTIONS,
     }
     while index < len(tokens):
         option = tokens[index]
@@ -480,7 +513,9 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
             print(f"Unknown or incomplete code-dispatch fetch option: {option}", file=sys.stderr)
             raise SystemExit(1)
         value = tokens[index + 1]
-        if field == "repo_id":
+        if option in _PATH_SCOPE_OPTIONS:
+            _add_path_scope_value(path_scopes, option, value)
+        elif field == "repo_id":
             try:
                 filters[field] = int(value)
             except ValueError:
@@ -491,6 +526,9 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
         else:
             filters[field] = value
         index += 2
+    for field in ("path_prefix", "path_glob"):
+        if field in path_scopes:
+            filters[field] = path_scopes[field]
     return filters
 
 
@@ -503,16 +541,19 @@ _LIST_FILTER_OPTIONS = (
     ("--batch-theme", "batch_theme"),
     ("--queue-mode", "queue_mode"),
     ("--stale-minutes", "stale_minutes"),
+    ("--path-prefix", "path_prefix"),
+    ("--path-glob", "path_glob"),
     ("--limit", "limit"),
     ("--offset", "offset"),
 )
 _LIST_INT_MINIMUMS = {"repo_id": 1, "stale_minutes": 1, "limit": 1, "offset": 0}
 
 
-def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str], str]:
+def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], str]:
     """Parse `code-dispatch list` flags into query fields plus an output mode."""
     fields = dict(_LIST_FILTER_OPTIONS)
-    values: dict[str, str] = {}
+    values: dict[str, str | list[str]] = {}
+    path_scopes: dict[str, list[str]] = {}
     output = "table"
     index = 0
     while index < len(tokens):
@@ -534,6 +575,10 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str], str]:
                 file=sys.stderr,
             )
             raise SystemExit(1)
+        if token in _PATH_SCOPE_OPTIONS:
+            _add_path_scope_value(path_scopes, token, tokens[index + 1])
+            index += 2
+            continue
         if field in values:
             print(f"ERROR: {token} was specified more than once", file=sys.stderr)
             raise SystemExit(1)
@@ -551,6 +596,7 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str], str]:
             raise SystemExit(1)
         values[field] = value
         index += 2
+    values.update(path_scopes)
     return values, output
 
 
@@ -597,10 +643,17 @@ def _warn_if_page_is_partial(result: dict, output: str) -> None:
     )
 
 
-def _list(cfg, filters: dict[str, str], output: str) -> None:
+def _list(cfg, filters: dict[str, str | list[str]], output: str) -> None:
     """Render one bounded page of the current-generation analysis queue."""
     query = urlencode(
-        [(field, filters[field]) for _flag, field in _LIST_FILTER_OPTIONS if field in filters]
+        [
+            (field, value)
+            for _flag, field in _LIST_FILTER_OPTIONS
+            if field in filters
+            for value in (
+                filters[field] if isinstance(filters[field], list) else [filters[field]]
+            )
+        ]
     )
     endpoint = "code/analysis-queue" + (f"?{query}" if query else "")
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -934,7 +987,8 @@ def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None =
 
     if result == []:
         filter_text = ", ".join(
-            f"{key}={value}" for key, value in sorted((filters or {}).items())
+            f"{key}={','.join(map(str, value)) if isinstance(value, list) else value}"
+            for key, value in sorted((filters or {}).items())
         ) or "none"
         print(
             "No current pending code-analysis queue items matched the claim filters "

@@ -59,6 +59,7 @@ from .code_analysis_support import (
     _current_result_receipt_sql,
     _current_suspicious_analysis_counts,
     _fetch_all,
+    _file_path_scope_sql,
     _finding_snapshot_repo_id,
     _get_file_rows,
     _get_published_repo_row,
@@ -99,6 +100,7 @@ from .code_analysis_support import (
     _sync_trigger_status_for_file,
     canonical_structural_language,
     code_track_enabled,
+    register_path_scope_functions,
     structural_index_state,
     structural_input_identity_digest,
     function_callable_link_sql,
@@ -3271,6 +3273,8 @@ def list_queue_items(
     queue_mode: str | None = None,
     stale_minutes: int | None = None,
     current_only: bool = False,
+    path_prefix: list[str] | None = None,
+    path_glob: list[str] | None = None,
     limit: int | None = None,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -3295,6 +3299,10 @@ def list_queue_items(
     the sole canonical latest current-generation attempt, so a listed row can be
     stale without being recoverable; `stats` reports that history separately as
     `invalid_active_history`.
+
+    `path_prefix` / `path_glob` scope the page, `total` and `has_more` to a
+    source subtree through `_file_path_scope_sql`, the predicate `fetch` claims
+    with.
     """
     engagement = _engagement_or_404(engagement_id)
     if status_filter is not None and status_filter not in _QUEUE_STATUSES:
@@ -3357,6 +3365,10 @@ def list_queue_items(
             " < datetime('now', ? || ' minutes'))"
         )
         params.append(f"-{int(stale_minutes)}")
+    path_scope, path_params = _file_path_scope_sql("files", path_prefix, path_glob)
+    if path_scope:
+        clauses.append(path_scope)
+        params.extend(path_params)
     from_where = f"""
         FROM code_analysis_queue AS queue
         JOIN code_files AS files
@@ -3386,6 +3398,7 @@ def list_queue_items(
     elif limit is not None:
         query += f" LIMIT {int(limit)}"
     with get_connection() as connection:
+        register_path_scope_functions(connection)
         total = _scalar_row(connection, f"SELECT COUNT(*) {from_where}", tuple(params))
         rows = connection.execute(query, tuple(params)).fetchall()
     items = [_hydrate_queue_listing_row(row) for row in rows]
@@ -3411,6 +3424,8 @@ def fetch_queue_items(
     batch_theme: str | None = None,
     queue_mode: str | None = None,
     item_ids: list[int] | None = None,
+    path_prefix: list[str] | None = None,
+    path_glob: list[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Atomically claim pending queue items for an agent.
 
@@ -3450,8 +3465,15 @@ def fetch_queue_items(
         placeholders = ",".join("?" for _ in normalized_ids)
         filter_clauses.append(f"queue.id IN ({placeholders})")
         filter_params.extend(normalized_ids)
+    # Inside the claim SELECT, never after it: a subtree filtered once rows are
+    # claimed would hand this agent leases outside the subtree it was sent to.
+    path_scope, path_params = _file_path_scope_sql("files", path_prefix, path_glob)
+    if path_scope:
+        filter_clauses.append(path_scope)
+        filter_params.extend(path_params)
     filter_sql = "" if not filter_clauses else " AND " + " AND ".join(filter_clauses)
     with get_connection() as connection:
+        register_path_scope_functions(connection)
         connection.execute("BEGIN IMMEDIATE")
         selected = connection.execute(
             f"""

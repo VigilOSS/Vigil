@@ -120,6 +120,35 @@ def test_list_sends_every_filter_in_one_canonical_query(fake_client, tmp_path, c
     assert "--offset 6" in out
 
 
+def test_list_sends_repeatable_path_filters_in_canonical_order(fake_client, tmp_path):
+    typed = [
+        "--path-glob", "*.py",
+        "--limit", "5",
+        "--path-prefix", "src/billing",
+        "--status", "pending",
+        "--path-prefix", "src/auth",
+        "--path-glob", "*/api/*",
+    ]
+    reordered = [
+        "--path-prefix", "src/auth",
+        "--status", "pending",
+        "--path-glob", "*/api/*",
+        "--path-prefix", "src/billing",
+        "--path-glob", "*.py",
+        "--limit", "5",
+    ]
+    for tokens in (typed, reordered):
+        filters, output = code_dispatch._parse_list_filters(tokens)
+        code_dispatch._list(_config(tmp_path), filters, output)
+
+    expected = (
+        "code/analysis-queue?status=pending"
+        "&path_prefix=src%2Fauth&path_prefix=src%2Fbilling"
+        "&path_glob=%2A.py&path_glob=%2A%2Fapi%2F%2A&limit=5"
+    )
+    assert fake_client.requested == [expected, expected]
+
+
 def test_list_json_output_is_directly_usable_as_an_ids_file(
     fake_client, tmp_path, capsys
 ):
@@ -154,6 +183,8 @@ def test_list_ids_only_output_is_directly_usable_as_an_ids_file(
         ["--repo-id", "-1"],
         ["--json", "--ids-only"],
         ["--status", "pending", "--status", "done"],
+        ["--path-prefix"],
+        ["--path-glob", " "],
         ["stats"],
     ],
 )
@@ -200,6 +231,29 @@ def test_fetch_passes_queue_mode_filter_to_the_backend(monkeypatch, tmp_path, ca
         "agent_name": "trigger-hunter",
         "queue_mode": "trigger",
     }
+
+    code_dispatch._fetch(
+        _config(tmp_path),
+        3,
+        "auth-hunter",
+        code_dispatch._parse_fetch_filters(
+            [
+                "--path-glob", "*.py",
+                "--path-prefix", "src/billing",
+                "--repo-id", "2",
+                "--path-prefix", "src/auth",
+            ]
+        ),
+    )
+
+    assert posted["payload"] == {
+        "limit": 3,
+        "agent_name": "auth-hunter",
+        "repo_id": 2,
+        "path_prefix": ["src/auth", "src/billing"],
+        "path_glob": ["*.py"],
+    }
+    assert "path_prefix=src/auth,src/billing" in capsys.readouterr().err
 
 
 def test_a_truncated_ids_page_says_so_on_stderr(fake_client, tmp_path, capsys):

@@ -46,6 +46,10 @@ CodeQueueStatus: TypeAlias = Literal[
 CodeQueueMode: TypeAlias = Literal[
     "initial", "reanalysis", "trigger", "metadata-refresh"
 ]
+# One repository-relative path prefix or glob; content rules (non-empty, not
+# absolute) are the service's `_file_path_scope_sql` to enforce.
+CodePathScope: TypeAlias = Annotated[str, Field(max_length=1024)]
+MAX_PATH_SCOPE_VALUES = 50
 StructuralAnalysisStatus: TypeAlias = Literal["complete", "degraded", "unsupported"]
 StructuralAnalysisMode: TypeAlias = Literal[
     "tree_sitter",
@@ -265,6 +269,8 @@ class QueueFetchRequest(BaseModel):
     batch_theme: str | None = Field(default=None, max_length=256)
     queue_mode: CodeQueueMode | None = None
     item_ids: list[StrictPositiveId] | None = Field(default=None, min_length=1, max_length=1000)
+    path_prefix: list[CodePathScope] | None = Field(default=None, min_length=1, max_length=MAX_PATH_SCOPE_VALUES)
+    path_glob: list[CodePathScope] | None = Field(default=None, min_length=1, max_length=MAX_PATH_SCOPE_VALUES)
 
 
 class QueueCompleteRequest(BaseModel):
@@ -1209,6 +1215,16 @@ def list_queue_items(
         default=False,
         description="Only the latest attempt per file that analysis-queue/stats counts in its status lane.",
     ),
+    path_prefix: list[CodePathScope] | None = Query(
+        default=None,
+        max_length=MAX_PATH_SCOPE_VALUES,
+        description="Repeatable; a repository-relative directory or file path matched by whole segments.",
+    ),
+    path_glob: list[CodePathScope] | None = Query(
+        default=None,
+        max_length=MAX_PATH_SCOPE_VALUES,
+        description="Repeatable; a case-sensitive fnmatch pattern over the repository-relative path.",
+    ),
     limit: int = Query(default=200, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> dict[str, Any]:
@@ -1222,6 +1238,8 @@ def list_queue_items(
         queue_mode=queue_mode,
         stale_minutes=stale_minutes,
         current_only=current_only,
+        path_prefix=path_prefix,
+        path_glob=path_glob,
         limit=limit,
         offset=offset,
     )
@@ -1247,6 +1265,8 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
             batch_theme=request.batch_theme,
             queue_mode=request.queue_mode,
             item_ids=request.item_ids,
+            path_prefix=request.path_prefix,
+            path_glob=request.path_glob,
         )
     )
     await _broadcast(engagement.key, "queue_fetch", {"count": len(records)})

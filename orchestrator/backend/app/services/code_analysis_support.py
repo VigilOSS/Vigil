@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from fnmatch import fnmatchcase
 from pathlib import Path
 from typing import Any, Literal
 
@@ -2268,6 +2269,87 @@ def _analysis_repo_files_sql(files_alias: str) -> str:
         f" WHERE engagement_id = {files_alias}.engagement_id"
         f" AND {_analysis_repo_sql('code_repos')})"
     )
+
+
+# Registered on the connection that runs a glob-scoped query. fnmatchcase is the
+# dialect queue submission matches globs with, so a glob scopes listing, claims
+# and coverage exactly as it selects files to queue.
+PATH_GLOB_SQL_FUNCTION = "vigil_path_glob"
+
+
+def _path_glob_matches(path: Any, pattern: Any) -> int:
+    if path is None or pattern is None:
+        return 0
+    return int(fnmatchcase(str(path), str(pattern)))
+
+
+def register_path_scope_functions(connection) -> None:
+    """Make ``_file_path_scope_sql``'s glob predicate callable on ``connection``."""
+    connection.create_function(
+        PATH_GLOB_SQL_FUNCTION, 2, _path_glob_matches, deterministic=True
+    )
+
+
+def _path_scope_values(values: Any, *, field_name: str) -> list[str]:
+    if values is None:
+        return []
+    normalized: list[str] = []
+    for value in values:
+        text = str(value)
+        if not text.strip() or text.startswith("/"):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{field_name} values must be non-empty repository-relative "
+                    f"paths; got {value!r}"
+                ),
+            )
+        normalized.append(text)
+    return sorted(set(normalized))
+
+
+def _file_path_scope_sql(
+    files_alias: str,
+    prefix: Any = None,
+    glob: Any = None,
+) -> tuple[str, list[Any]]:
+    """Scope a ``code_files`` alias to a source subtree, or ``("", [])`` when unscoped.
+
+    The single owner of path scoping for queue listing, claims and per-directory
+    coverage. A prefix matches whole path segments (``src/auth`` covers
+    ``src/auth`` and ``src/auth/...`` but never ``src/auth_extra``) and compares
+    bytes exactly, which SQLite ``LIKE`` cannot: it folds ASCII case. A glob is
+    the case-sensitive fnmatch dialect queue submission uses. Repeated values of
+    one kind are alternatives; prefixes and globs must both match. The caller
+    registers ``register_path_scope_functions`` before running a glob scope.
+    """
+    prefixes = [
+        value.rstrip("/")
+        for value in _path_scope_values(prefix, field_name="path_prefix")
+    ]
+    globs = _path_scope_values(glob, field_name="path_glob")
+    clauses: list[str] = []
+    params: list[Any] = []
+    if prefixes:
+        alternatives: list[str] = []
+        for value in prefixes:
+            alternatives.append(
+                f"({files_alias}.file_path = ?"
+                f" OR substr({files_alias}.file_path, 1, ?) = ?)"
+            )
+            params.extend([value, len(value) + 1, f"{value}/"])
+        clauses.append(f"({' OR '.join(alternatives)})")
+    if globs:
+        clauses.append(
+            "("
+            + " OR ".join(
+                f"{PATH_GLOB_SQL_FUNCTION}({files_alias}.file_path, ?) = 1"
+                for _ in globs
+            )
+            + ")"
+        )
+        params.extend(globs)
+    return " AND ".join(clauses), params
 
 
 def _current_terminal_review_exists_sql(*, allow_accounted_skip: bool) -> str:
