@@ -279,8 +279,9 @@ for non-callable source regions. A reviewed span cannot stand in for a registere
 overlaps; include every overlapped callable as an exact `callable_ref`. A complete function index
 publishes exactly its reported callable total.
 
-File scope is a callable too. The artifact's `top_level_segments` are the file-scope lines between
-callables, registered as `<top-level>` callables (name and qualified name `<top-level>`, one per
+File scope is a callable too. The artifact's `top_level_segments` are the file-scope code between
+callables that runs when the file is loaded or requested; imports, declarations and comments open
+none. They are registered as `<top-level>` callables (name and qualified name `<top-level>`, one per
 segment, not counted in `total_functions`). The file owes each segment a disposition like any other
 callable: cite it as an exact `callable_ref`, or cover its lines with reviewed spans, which may
 overlap a `<top-level>` segment without citing it. Naming a function never covers the file scope.

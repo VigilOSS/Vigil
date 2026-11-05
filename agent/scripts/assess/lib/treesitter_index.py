@@ -10,7 +10,7 @@ from __future__ import annotations
 import posixpath
 import re
 import warnings
-from bisect import bisect_right
+from bisect import bisect_left, bisect_right
 from functools import lru_cache
 from typing import Any, NamedTuple
 
@@ -3332,28 +3332,362 @@ def _file_scope_lines(
     return _FileScope(scanned, withheld, sorted(inline_text_lines))
 
 
-# A file-scope line that holds nothing but delimiters or PHP's open and close
-# tags carries no statement to review: the closing brace of a class is not code.
-_TOP_LEVEL_DELIMITER_LINE = re.compile(r"(?:<\?php\b|\?>|[\s{}()\[\];,])*", re.IGNORECASE)
+# What file scope holds that never executes, per grammar family. Neither kind
+# of declaration opens a `<top-level>` segment however much source it spans.
+#
+# An inert declaration runs nothing and holds nothing that could: namespace,
+# package and import lines, `declare(...)`, PHP tags and attributes, type-only
+# declarations, and declarations whose values are constant expressions. A
+# reader that matches text in one -- `use DOMDocument;`, a constant naming a
+# function -- reports a signal that no review is owed for.
+_FILE_SCOPE_INERT_TYPES: dict[str, frozenset[str]] = {
+    "php": frozenset({
+        "php_tag", "php_end_tag", "namespace_use_declaration", "declare_statement",
+        "const_declaration", "attribute_list", "empty_statement",
+        # Class members whose initializers are constant expressions.
+        "property_declaration", "enum_case", "use_declaration",
+    }),
+    "python": frozenset({"import_statement", "import_from_statement", "future_import_statement"}),
+    "javascript": frozenset({"import_statement", "empty_statement", "hash_bang_line"}),
+    "typescript": frozenset({
+        "import_statement", "interface_declaration", "type_alias_declaration",
+        "enum_declaration", "ambient_declaration", "function_signature",
+        "empty_statement", "hash_bang_line",
+    }),
+    "go": frozenset({"package_clause", "import_declaration", "type_declaration", "const_declaration"}),
+    "java": frozenset({"package_declaration", "import_declaration", "module_declaration"}),
+    "c": frozenset({
+        "preproc_include", "type_definition", "struct_specifier", "enum_specifier",
+        "union_specifier", "empty_declaration",
+    }),
+    "cpp": frozenset({
+        "preproc_include", "type_definition", "struct_specifier", "enum_specifier",
+        "union_specifier", "using_declaration", "alias_declaration",
+        "namespace_alias_definition", "static_assert_declaration", "concept_definition",
+        "empty_declaration",
+    }),
+    "csharp": frozenset({
+        "using_directive", "extern_alias_directive", "global_attribute",
+        "delegate_declaration", "enum_declaration",
+    }),
+    "ruby": frozenset(),
+}
+# A definition declares code that runs elsewhere: a function whose body is a
+# callable (with its header and decorators), a macro expanded where it is
+# used, or a C declaration whose initializer is a constant expression. A
+# reader signal inside one still counts, so a sink in a macro body is owed
+# review wherever the indexer could not attribute it to a callable.
+_FILE_SCOPE_DEFINITION_TYPES: dict[str, frozenset[str]] = {
+    "php": frozenset({"function_definition"}),
+    "python": frozenset({"function_definition", "decorated_definition"}),
+    "javascript": frozenset({"function_declaration", "generator_function_declaration"}),
+    "typescript": frozenset({
+        "function_declaration", "generator_function_declaration", "module", "internal_module",
+    }),
+    "go": frozenset({"function_declaration", "method_declaration"}),
+    "c": frozenset({
+        "preproc_def", "preproc_function_def", "preproc_call", "function_definition",
+        "declaration",
+    }),
+    "cpp": frozenset({
+        "preproc_def", "preproc_function_def", "preproc_call", "class_specifier",
+        "function_definition", "template_declaration",
+    }),
+}
+# Nodes whose children are file-scope statements in their own right.
+_FILE_SCOPE_CONTAINER_TYPES: dict[str, frozenset[str]] = {
+    "php": frozenset({"namespace_definition", "compound_statement"}),
+    "c": frozenset({
+        "preproc_if", "preproc_ifdef", "preproc_else", "preproc_elif", "preproc_elifdef",
+    }),
+    "cpp": frozenset({
+        "preproc_if", "preproc_ifdef", "preproc_else", "preproc_elif", "preproc_elifdef",
+        "linkage_specification", "namespace_definition", "declaration_list",
+    }),
+    "csharp": frozenset({
+        "namespace_declaration", "file_scoped_namespace_declaration", "declaration_list",
+    }),
+}
+# Type declarations whose bodies are declarative: their methods are callables
+# and their fields are definitions. A member opens a segment only when it is
+# a block of code that runs without being a callable -- an initializer block
+# or a PHP property hook -- and otherwise counts a reader signal only when it
+# is not inert, so a sink in a field initializer is still owed review.
+_FILE_SCOPE_CLASS_TYPES: dict[str, frozenset[str]] = {
+    "php": frozenset({
+        "class_declaration", "interface_declaration", "trait_declaration", "enum_declaration",
+    }),
+    "python": frozenset({"class_definition"}),
+    "javascript": frozenset({"class_declaration"}),
+    "typescript": frozenset({"class_declaration", "abstract_class_declaration"}),
+    "java": frozenset({
+        "class_declaration", "interface_declaration", "enum_declaration",
+        "record_declaration", "annotation_type_declaration",
+    }),
+    "csharp": frozenset({
+        "class_declaration", "struct_declaration", "interface_declaration",
+        "record_declaration", "record_struct_declaration",
+    }),
+    "ruby": frozenset({"class", "module", "singleton_class"}),
+}
+_FILE_SCOPE_INITIALIZER_TYPES: dict[str, frozenset[str]] = {
+    "java": frozenset({"static_initializer", "block"}),
+    "javascript": frozenset({"class_static_block"}),
+    "typescript": frozenset({"class_static_block"}),
+    "php": frozenset({"property_hook"}),
+}
+# Member children that list a member's code blocks, such as PHP's hooks.
+_FILE_SCOPE_INITIALIZER_LIST_TYPES = frozenset({"property_hook_list"})
+_RUBY_IMPORT_CALLS = frozenset({"require", "require_relative", "load", "autoload"})
+# A value that runs nothing when bound: a literal, a container of literals, a
+# function or class value, or a type. Anything else -- a name, a call, an
+# interpolated string, an operator over non-literals -- is a non-literal
+# initializer, and counts.
+_LITERAL_LEAF_TYPES = frozenset({
+    "integer", "float", "number", "true", "false", "null", "none", "nil", "boolean",
+    "string_content", "string_fragment", "escape_sequence", "string_value",
+    "nowdoc_string", "heredoc_start", "heredoc_end", "character", "simple_symbol",
+    "hash_key_symbol", "property_identifier", "field_identifier", "comment",
+    "system_lib_string", "string_start", "string_end",
+})
+_LITERAL_CONTAINER_TYPES = frozenset({
+    "string", "encapsed_string", "heredoc", "heredoc_body", "nowdoc", "nowdoc_body",
+    "concatenated_string", "template_string", "string_literal", "char_literal",
+    "interpreted_string_literal", "raw_string_literal", "verbatim_string_literal",
+    "array_creation_expression", "array_element_initializer", "list", "tuple",
+    "dictionary", "pair", "set", "array", "object", "parenthesized_expression",
+    "expression_statement", "unary_expression", "unary_op_expression",
+    "initializer_list", "expression_list", "literal_value", "keyed_element",
+    "literal_element", "element", "composite_literal", "hash", "array_initializer",
+    "symbol_array", "string_array",
+})
+_FUNCTION_VALUE_TYPES = frozenset({
+    "anonymous_function", "arrow_function", "function", "function_expression",
+    "generator_function", "lambda", "class", "func_literal", "lambda_expression",
+    "anonymous_method_expression",
+})
+
+
+def _is_literal_value(node: Any) -> bool:
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        node_type = current.type
+        if (
+            node_type in _LITERAL_LEAF_TYPES
+            or node_type in _FUNCTION_VALUE_TYPES
+            or node_type.endswith(("_literal", "type", "type_identifier"))
+            and node_type not in _LITERAL_CONTAINER_TYPES
+        ):
+            continue
+        if node_type not in _LITERAL_CONTAINER_TYPES:
+            return False
+        stack.extend(current.named_children)
+    return True
+
+
+def _binding_values(node: Any) -> list[Any] | None:
+    """The values a binding statement assigns, or None for any other statement."""
+    node_type = node.type
+    if node_type in {"expression_statement", "global_statement"} and len(node.named_children) == 1:
+        return _binding_values(node.named_children[0])
+    if node_type in {"assignment_expression", "assignment"}:
+        right = node.child_by_field_name("right")
+        return [right] if right is not None else []
+    if node_type in {"lexical_declaration", "variable_declaration", "declaration", "field_declaration"}:
+        declarators = [
+            child for child in node.named_children
+            if child.type in {"variable_declarator", "init_declarator"}
+        ]
+        values = [declarator.child_by_field_name("value") for declarator in declarators]
+        return [value for value in values if value is not None]
+    if node_type == "var_declaration":
+        specs = [
+            spec
+            for child in node.named_children
+            for spec in ([child] if child.type == "var_spec" else child.named_children)
+            if spec.type == "var_spec"
+        ]
+        return [value for spec in specs if (value := spec.child_by_field_name("value")) is not None]
+    return None
+
+
+def _content_lines(node: Any, source: bytes) -> range:
+    """0-based lines holding a node's non-blank bytes; empty for blank text."""
+    text = source[node.start_byte:node.end_byte]
+    stripped = text.strip()
+    if not stripped:
+        return range(0)
+    first = node.start_point[0] + text[: len(text) - len(text.lstrip())].count(b"\n")
+    return range(first, first + stripped.count(b"\n") + 1)
+
+
+def _php_output_lines(node: Any, source: bytes) -> list[int]:
+    """Lines of inline HTML a PHP file sends back; a shebang is not output."""
+    texts = [node] if node.type == "text" else [
+        child for child in node.named_children if child.type == "text"
+    ]
+    return [
+        line
+        for text in texts
+        if not (text.start_byte == 0 and source.startswith(b"#!"))
+        for line in _content_lines(text, source)
+    ]
+
+
+def _is_executable_file_scope_node(node: Any, language: str, source: bytes) -> bool:
+    """Whether one file-scope statement runs when the file is loaded or requested."""
+    node_type = node.type
+    if language == "php" and node_type == "const_declaration":
+        # A constant expression runs nothing, except the `new` PHP allows
+        # in a global constant's initializer, which runs a constructor.
+        return _has_descendant_type(node, "object_creation_expression")
+    if (
+        _is_comment_node(node)
+        or node_type in _FILE_SCOPE_INERT_TYPES.get(language, ())
+        or node_type in _FILE_SCOPE_DEFINITION_TYPES.get(language, ())
+        or node_type in _FILE_SCOPE_CLASS_TYPES.get(language, ())
+    ):
+        return False
+    if node_type == "export_statement":
+        declaration = node.child_by_field_name("declaration")
+        if declaration is not None:
+            return _is_executable_file_scope_node(declaration, language, source)
+        value = node.child_by_field_name("value")
+        return value is not None and not _is_literal_value(value)
+    if language == "ruby" and node_type == "call":
+        method = node.child_by_field_name("method")
+        if (
+            method is not None
+            and _node_text(method, source) in _RUBY_IMPORT_CALLS
+            and node.child_by_field_name("receiver") is None
+        ):
+            return False
+    values = _binding_values(node)
+    if values is not None:
+        return any(not _is_literal_value(value) for value in values)
+    return not _is_literal_value(node)
+
+
+def _has_descendant_type(node: Any, node_type: str) -> bool:
+    stack = list(node.named_children)
+    while stack:
+        current = stack.pop()
+        if current.type == node_type:
+            return True
+        stack.extend(current.named_children)
+    return False
+
+
+def _carries_file_scope_signal(node: Any, language: str) -> bool:
+    """Whether a reader signal inside a non-executing node is owed review.
+
+    Comments, inert declarations and literal values hold nothing that runs,
+    so a reader matching their text (`use DOMDocument;`, a docblock quoting
+    `$_GET`) reports a signal that opens no segment. A definition, a field
+    with a computed initializer, or anything else that holds code counts it.
+    """
+    if _is_comment_node(node) or node.type in _FILE_SCOPE_INERT_TYPES.get(language, ()):
+        return False
+    values = _binding_values(node)
+    if values is not None:
+        return any(not _is_literal_value(value) for value in values)
+    return not _is_literal_value(node)
+
+
+def _executable_file_scope_lines(
+    tree: Any,
+    functions: list[dict[str, Any]],
+    language: str,
+    source: bytes,
+    signal_lines: set[int],
+) -> set[int]:
+    """0-based lines of file-scope code that executes, outside every callable.
+
+    The walk descends into namespaces and preprocessor conditionals, whose
+    children are file-scope statements, and into type bodies for their
+    initializer blocks and property hooks. *signal_lines* are file-scope lines
+    a sink or source reader reported; one counts wherever it sits in code that
+    could run -- a statement, a definition, a computed member initializer --
+    and never in a comment, an inert declaration or a literal.
+    """
+    intervals = _callable_intervals(functions)
+    starts = [start for start, _end in intervals]
+    containers = _FILE_SCOPE_CONTAINER_TYPES.get(language, frozenset())
+    class_types = _FILE_SCOPE_CLASS_TYPES.get(language, frozenset())
+    initializers = _FILE_SCOPE_INITIALIZER_TYPES.get(language, frozenset())
+    signals = sorted(signal_lines)
+    lines: set[int] = set()
+
+    def signals_within(node: Any) -> list[int]:
+        return signals[
+            bisect_left(signals, node.start_point[0]):bisect_right(signals, node.end_point[0])
+        ]
+
+    root = getattr(tree, "root_node", None)
+    stack = list(reversed(list(getattr(root, "named_children", ()) or ())))
+    while stack:
+        node = stack.pop()
+        first, last = node.start_point[0], node.end_point[0]
+        if _within_one_interval(intervals, starts, first, last):
+            continue
+        if node.type in containers:
+            body = node.child_by_field_name("body")
+            skipped = {
+                (child.start_byte, child.end_byte)
+                for field in ("name", "condition", "value")
+                if (child := node.child_by_field_name(field)) is not None
+            }
+            children = body.named_children if body is not None else [
+                child for child in node.named_children
+                if (child.start_byte, child.end_byte) not in skipped
+            ]
+            stack.extend(reversed(list(children)))
+            continue
+        if node.type in class_types:
+            body = node.child_by_field_name("body")
+            for member in body.named_children if body is not None else ():
+                if member.type in class_types:
+                    stack.append(member)
+                    continue
+                blocks = [member] if member.type in initializers else [
+                    block
+                    for child in member.named_children
+                    if child.type in _FILE_SCOPE_INITIALIZER_LIST_TYPES
+                    for block in child.named_children
+                    if block.type in initializers
+                ]
+                for block in blocks:
+                    lines.update(range(block.start_point[0], block.end_point[0] + 1))
+                if not blocks and _carries_file_scope_signal(member, language):
+                    lines.update(signals_within(member))
+            continue
+        if language == "php" and node.type in {"text", "text_interpolation"}:
+            lines.update(_php_output_lines(node, source))
+        elif _is_executable_file_scope_node(node, language, source):
+            lines.update(_content_lines(node, source))
+        elif _carries_file_scope_signal(node, language):
+            lines.update(signals_within(node))
+    return {
+        line for line in lines if not _within_one_interval(intervals, starts, line, line)
+    }
 
 
 def _top_level_segments(
-    functions: list[dict[str, Any]], file_scope: _FileScope
+    functions: list[dict[str, Any]], executable_lines: set[int]
 ) -> list[dict[str, int]]:
     """The ``<top-level>`` scope as contiguous line segments between callables.
 
-    Each segment runs from the first to the last scanned file-scope source line
-    of one gap between callable spans, so it never overlaps a callable and the
-    blank and comment lines inside a gap do not split it. These are the spans
-    the review gate holds the file scope to, published as `<top-level>`
-    callable records beside the real callables.
+    Each segment runs from the first to the last executable file-scope line of
+    one gap between callable spans, so it never overlaps a callable and the
+    declarations, blank and comment lines inside a gap do not split it. These
+    are the spans the review gate holds the file scope to, published as
+    `<top-level>` callable records beside the real callables.
     """
     intervals = _callable_intervals(functions)
     starts = [start for start, _end in intervals]
     segments: list[list[int]] = []
-    for index, line in file_scope.scanned:
-        if _TOP_LEVEL_DELIMITER_LINE.fullmatch(line):
-            continue
+    for index in sorted(executable_lines):
         gap = bisect_right(starts, index)
         if segments and segments[-1][2] == gap:
             segments[-1][1] = index
@@ -4612,13 +4946,6 @@ def index_file(
         file_scope = _file_scope_lines(
             tree, functions, effective_lang, source_lines, source
         )
-        # Past the signal limit the function registry is truncated, so the file
-        # owes a whole-file span and its file-scope segments would prove nothing.
-        top_level_segments = (
-            _top_level_segments(functions, file_scope)
-            if len(functions) <= STRUCTURAL_SIGNAL_LIMIT
-            else []
-        )
         entry_points = _detect_entry_points(
             tree, functions, classes, effective_lang, source_lines, source
         )
@@ -4749,6 +5076,22 @@ def index_file(
                     })
             security_observations["signal_counts"]["security_sources"] = len(
                 security_observations["security_sources"]
+            )
+        # Past the signal limit the function registry is truncated, so the file
+        # owes a whole-file span and its file-scope segments would prove nothing.
+        top_level_segments: list[dict[str, int]] = []
+        if len(functions) <= STRUCTURAL_SIGNAL_LIMIT:
+            signal_lines = {
+                sink["line"] - 1 for sink in sinks if sink["function"] == "<top-level>"
+            } | {
+                source_record["line"] - 1
+                for source_record in security_observations["security_sources"]
+            }
+            top_level_segments = _top_level_segments(
+                functions,
+                _executable_file_scope_lines(
+                    tree, functions, effective_lang, source, signal_lines
+                ),
             )
         _remove_internal_structural_fields(functions, classes)
     except MemoryError:

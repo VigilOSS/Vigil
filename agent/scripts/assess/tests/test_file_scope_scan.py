@@ -550,7 +550,7 @@ class Invoice
     assert _segments(indexed) == []
 
 
-def test_a_decorator_between_functions_is_its_own_segment() -> None:
+def test_a_decorator_is_part_of_the_declaration_it_heads() -> None:
     source = b"""from flask import Flask
 app = Flask(__name__)
 
@@ -564,7 +564,7 @@ def b():
 """
     indexed = index_file("app.py", "python", source)
 
-    assert _segments(indexed) == [(1, 4), (8, 8)]
+    assert _segments(indexed) == [(2, 2)]
 
 
 def test_a_zero_callable_file_is_one_segment_over_its_source_lines() -> None:
