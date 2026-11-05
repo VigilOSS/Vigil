@@ -3239,6 +3239,36 @@ def _file_scope_lines(
     return _FileScope(scanned, withheld, sorted(inline_text_lines))
 
 
+# A file-scope line that holds nothing but delimiters or PHP's open and close
+# tags carries no statement to review: the closing brace of a class is not code.
+_TOP_LEVEL_DELIMITER_LINE = re.compile(r"(?:<\?php\b|\?>|[\s{}()\[\];,])*", re.IGNORECASE)
+
+
+def _top_level_segments(
+    functions: list[dict[str, Any]], file_scope: _FileScope
+) -> list[dict[str, int]]:
+    """The ``<top-level>`` scope as contiguous line segments between callables.
+
+    Each segment runs from the first to the last scanned file-scope source line
+    of one gap between callable spans, so it never overlaps a callable and the
+    blank and comment lines inside a gap do not split it. These are the spans
+    the review gate holds the file scope to, published as `<top-level>`
+    callable records beside the real callables.
+    """
+    intervals = _callable_intervals(functions)
+    starts = [start for start, _end in intervals]
+    segments: list[list[int]] = []
+    for index, line in file_scope.scanned:
+        if _TOP_LEVEL_DELIMITER_LINE.fullmatch(line):
+            continue
+        gap = bisect_right(starts, index)
+        if segments and segments[-1][2] == gap:
+            segments[-1][1] = index
+        else:
+            segments.append([index, index, gap])
+    return [{"line_start": first + 1, "line_end": last + 1} for first, last, _gap in segments]
+
+
 def _java_fetch_call_matches_type(
     line: str,
     call_start: int,
@@ -4354,6 +4384,13 @@ def index_file(
         file_scope = _file_scope_lines(
             tree, functions, effective_lang, source_lines, source
         )
+        # Past the signal limit the function registry is truncated, so the file
+        # owes a whole-file span and its file-scope segments would prove nothing.
+        top_level_segments = (
+            _top_level_segments(functions, file_scope)
+            if len(functions) <= STRUCTURAL_SIGNAL_LIMIT
+            else []
+        )
         entry_points = _detect_entry_points(
             tree, functions, classes, effective_lang, source_lines, source
         )
@@ -4503,6 +4540,7 @@ def index_file(
             "total_exports": len(exports),
             "total_lines": total_lines,
             "functions": functions,
+            "top_level_segments": top_level_segments,
             "entry_points": entry_points,
             "security_sinks": sinks,
             "security_sources": security_observations["security_sources"],

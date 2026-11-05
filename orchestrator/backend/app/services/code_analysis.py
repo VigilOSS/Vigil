@@ -101,7 +101,8 @@ from .code_analysis_support import (
     code_track_enabled,
     structural_index_state,
     structural_input_identity_digest,
-    structural_scope_requires_whole_file_review,
+    function_callable_link_sql,
+    structural_review_gaps,
     variant_input_identity_digest,
 )
 from .events import _engagement_or_404
@@ -2139,6 +2140,7 @@ def bulk_update_structural_metadata(
         )
     structural_fields = {
         "total_functions",
+        "total_top_level_segments",
         "total_entry_points",
         "total_sinks",
         "total_exports",
@@ -3713,13 +3715,14 @@ def _compute_coverage_integrity(
     evidenced_receipt_rows = int(receipt_counts["evidenced_receipt_rows"] or 0)
 
     distinct_structural_callables = connection.execute(
-        """
+        f"""
         SELECT COUNT(DISTINCT links.callable_id)
         FROM code_analysis_results AS results
         JOIN code_analysis_result_callables AS links
           ON links.result_id = results.id AND links.file_id = ?
         WHERE results.engagement_id = ? AND results.queue_item_id = ?
           AND results.file_id = ? AND results.superseded_at IS NULL
+          AND ({function_callable_link_sql("links")})
           AND results.receipt_binding_status NOT IN (
               'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
           )
@@ -7435,6 +7438,7 @@ def code_coverage_summary(
                 WHERE results.engagement_id = ?
                   AND links.file_id IN ({placeholders})
                   AND ({current_result_receipt})
+                  AND ({function_callable_link_sql("links")})
                 GROUP BY links.file_id
                 """,
                 (engagement.id, *file_id_list),
@@ -7459,47 +7463,14 @@ def code_coverage_summary(
             file_total_functions = {
                 int(r["id"]): _safe_int(r["total_functions"]) for r in file_func_rows
             }
-            # A file whose function-scoped dimensions were never scanned, or an
-            # indexed file with source but no callable, has no structural
-            # callable a receipt could name. Counting it as "nothing to verify"
-            # is what let a zero-callable critical file close with no proof at
-            # all.
-            files_owing_whole_file_review = {
-                int(r["id"])
-                for r in file_func_rows
-                if structural_scope_requires_whole_file_review(dict(r))
-            }
-            # With no callable to cite a whole-file span is the only review
-            # proof left, which is exactly what the receipt gate demands of
-            # these files. A partial span from a review closed before the index
-            # landed proves nothing about the source it never named.
-            whole_file_span_file_ids = {
-                int(row["file_id"])
-                for row in connection.execute(
-                    f"""
-                    SELECT DISTINCT span_files.id AS file_id
-                    FROM code_analysis_results AS results
-                    JOIN json_each(results.reviewed_spans_json) AS span
-                    JOIN code_files AS span_files
-                      ON span_files.id =
-                         CAST(json_extract(span.value, '$.file_id') AS INTEGER)
-                     AND span_files.engagement_id = results.engagement_id
-                    JOIN code_analysis_queue AS result_queue
-                      ON result_queue.id = results.queue_item_id
-                    JOIN code_files AS result_files
-                      ON result_files.id = results.file_id
-                    JOIN code_repos AS result_repos
-                      ON result_repos.id = result_files.repo_id
-                    WHERE results.engagement_id = ?
-                      AND span_files.id IN ({placeholders})
-                      AND CAST(json_extract(span.value, '$.start_line') AS INTEGER) = 1
-                      AND CAST(json_extract(span.value, '$.end_line') AS INTEGER)
-                          >= span_files.loc
-                      AND ({current_result_receipt})
-                    """,
-                    (engagement.id, *file_id_list),
-                ).fetchall()
-            }
+            # What review proof each file's structural index leaves it owing --
+            # a cited function, every `<top-level>` segment, or a whole-file
+            # span -- and which files current receipts leave without it.
+            # Counting a file with nothing citable as "nothing to verify" is
+            # what let a zero-callable critical file close with no proof at all.
+            files_owing_review, files_unproven = structural_review_gaps(
+                connection, engagement.id, file_id_list, current_result_receipt
+            )
 
             for fid, meta in file_meta.items():
                 if not meta["has_coverage_record"]:
@@ -7513,9 +7484,7 @@ def code_coverage_summary(
                 if actual["receipt_count"] == 0 and meta["has_coverage_record"]:
                     efforts = file_efforts.get(fid, {})
                     max_effort = max(efforts.values(), default=0.0)
-                    if max_effort >= 60 and (
-                        total_funcs > 0 or fid in files_owing_whole_file_review
-                    ):
+                    if max_effort >= 60 and fid in files_owing_review:
                         file_warnings.append(
                             f"effort={max_effort:.0f} with 0 source-review receipts"
                         )
@@ -7571,8 +7540,7 @@ def code_coverage_summary(
                 if not meta["review_completed"]:
                     continue
                 total_funcs = file_total_functions.get(fid, 0)
-                owes_whole_file_review = fid in files_owing_whole_file_review
-                if total_funcs <= 0 and not owes_whole_file_review:
+                if fid not in files_owing_review:
                     continue  # no structural index to verify against
                 applicable = file_applicable.get(fid, [])
                 if not applicable:
@@ -7580,14 +7548,8 @@ def code_coverage_summary(
                 not_applicable = file_not_applicable.get(fid, set())
                 if all(family in not_applicable for family in applicable):
                     continue  # accepted gap: every applicable family is not_applicable
-                actual = result_counts.get(fid, {"distinct_structural_callables": 0})
-                callables_reviewed = int(
-                    actual.get("distinct_structural_callables", 0)
-                )
-                if callables_reviewed > 0:
-                    continue  # structurally attributable callable review was recorded
-                if owes_whole_file_review and fid in whole_file_span_file_ids:
-                    continue  # the only review proof this file can carry
+                if fid not in files_unproven:
+                    continue  # structurally attributable review covers what it owes
                 file_path = str(meta["file_path"])
                 prefix = f"file:{file_path}"
                 if any(loc == prefix or loc.startswith(prefix + ":") for loc in finding_locations):
@@ -10092,6 +10054,7 @@ def code_coverage_cwe_detail(
                 WHERE results.engagement_id = ?
                   AND links.file_id IN ({placeholders})
                   AND ({current_result_receipt})
+                  AND ({function_callable_link_sql("links")})
                 GROUP BY links.file_id
                 """,
                 (engagement.id, *file_ids),

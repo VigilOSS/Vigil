@@ -36,6 +36,11 @@ STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
     {"call_sites", "dataflow", "security_sinks"}
 )
+# The file scope's callable name: the structural index publishes the file-scope
+# lines between callables as records of this name, one per contiguous segment,
+# and never counts them in `total_functions`. Mirrors
+# `agent/scripts/assess/lib/code_structural_metadata.py:TOP_LEVEL_CALLABLE_NAME`.
+TOP_LEVEL_CALLABLE_NAME = "<top-level>"
 # Statuses under which the structural index measured a file, so its callable
 # registry is the review-proof vocabulary for that file.
 _INDEXED_STRUCTURAL_STATUSES = frozenset({"complete", "degraded"})
@@ -241,7 +246,11 @@ def _canonical_structural_callables(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="structural callables must be a list",
         )
-    if len(callables) > int(item["total_functions"]):
+    if sum(
+        1
+        for raw in callables
+        if not (isinstance(raw, dict) and raw.get("name") == TOP_LEVEL_CALLABLE_NAME)
+    ) > int(item["total_functions"]):
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="structural callables cannot exceed total_functions",
@@ -295,6 +304,11 @@ def _canonical_structural_callables(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="structural callable identities must be unique within a file",
             )
+        if (name == TOP_LEVEL_CALLABLE_NAME) != (qualified_name == TOP_LEVEL_CALLABLE_NAME):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"{TOP_LEVEL_CALLABLE_NAME} names only the file-scope callable",
+            )
         seen.add(identity)
         canonical.append(
             {
@@ -321,6 +335,24 @@ def _canonical_structural_callables(
                     end_line=end_line,
                 ),
             }
+        )
+    callable_spans = [
+        (record["start_line"], record["end_line"])
+        for record in canonical
+        if record["name"] != TOP_LEVEL_CALLABLE_NAME
+    ]
+    if any(
+        start <= record["end_line"] and end >= record["start_line"]
+        for record in canonical
+        if record["name"] == TOP_LEVEL_CALLABLE_NAME
+        for start, end in callable_spans
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"a {TOP_LEVEL_CALLABLE_NAME} segment cannot overlap a callable "
+                f"for file_id={file_row['id']}"
+            ),
         )
     return canonical
 
@@ -474,28 +506,261 @@ def _json_decode(value: Any, default: Any) -> Any:
     return default
 
 
-def structural_scope_requires_whole_file_review(file_row: dict[str, Any]) -> str:
-    """Why a file's only review proof is a whole-file span, or "" when it is not.
+@dataclass(frozen=True)
+class StructuralReviewObligation:
+    """The review proof a file's structural index leaves it owing.
 
-    A file whose function-scoped dimensions were never scanned has nothing a
-    partial span can be read against. An indexed file with source but no
-    callable has no structural callable a receipt could cite, whatever its file
-    scope measured: no signal is a fact about the readers, not proof that a
-    reviewer read the file, so a partial span would stand for lines nobody
-    showed were read. The receipt span gate and the coverage gate both ask here.
+    *whole_file_reason* says why a whole-file span is the only span that proves
+    a review: the function registry is incomplete, the index scanned no
+    function scope, or an indexed file with source has no callable at all.
+    *owes_callable* holds when the registry has functions, so a receipt must
+    name one. *top_level_spans* are the file's `<top-level>` segments; each is
+    discharged by an exact `callable_ref` or by reviewed spans that cover it,
+    so file scope never rides on whichever function a receipt happened to cite.
     """
-    if set(_json_decode(file_row.get("structural_unavailable_dimensions_json"), [])) & (
-        FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
+
+    whole_file_reason: str = ""
+    owes_callable: bool = False
+    top_level_spans: tuple[tuple[int, int], ...] = ()
+
+    @property
+    def owed(self) -> bool:
+        return bool(self.whole_file_reason or self.owes_callable or self.top_level_spans)
+
+    def span_requirement(self, loc: int) -> tuple[tuple[int, int], str] | None:
+        """The lines every reviewed span must cover on its own, and the refusal.
+
+        A file whose only callable is `<top-level>` keeps the whole-file rule
+        over its source lines: a partial span would stand for file-scope lines
+        nobody showed were read. Elsewhere spans add up across receipts.
+        """
+        if self.whole_file_reason:
+            return (1, loc), (
+                "reviewed spans require whole-file coverage while the structural "
+                f"{self.whole_file_reason}"
+            )
+        if self.top_level_spans and not self.owes_callable:
+            first, last = self.top_level_spans[0][0], self.top_level_spans[-1][1]
+            return (first, last), (
+                f"reviewed spans must cover every {TOP_LEVEL_CALLABLE_NAME} source line "
+                f"({first}-{last}) while the structural registry holds no other callable"
+            )
+        return None
+
+    def proven(
+        self,
+        *,
+        loc: int,
+        function_cited: bool,
+        cited_top_level: set[tuple[int, int]],
+        reviewed_spans: list[tuple[int, int]],
+    ) -> bool:
+        """Whether current receipts discharge every part of this obligation."""
+        if any(start <= 1 and end >= loc for start, end in reviewed_spans):
+            return True
+        if self.whole_file_reason and not self.owes_callable:
+            return False
+        if self.owes_callable and not function_cited:
+            return False
+        return all(
+            span in cited_top_level or _spans_cover(reviewed_spans, span)
+            for span in self.top_level_spans
+        )
+
+
+def _spans_cover(spans: list[tuple[int, int]], target: tuple[int, int]) -> bool:
+    """Whether the union of *spans* covers every line of *target*."""
+    reached = target[0] - 1
+    for start, end in sorted(spans):
+        if start > reached + 1:
+            break
+        reached = max(reached, end)
+        if reached >= target[1]:
+            return True
+    return reached >= target[1]
+
+
+def structural_review_obligation(
+    file_row: dict[str, Any],
+    top_level_spans: tuple[tuple[int, int], ...] = (),
+) -> StructuralReviewObligation:
+    """What review proof a file owes. The receipt span gate and the coverage gate both ask here.
+
+    A file whose function registry is incomplete, or whose function-scoped
+    dimensions were never scanned, has nothing a partial span can be read
+    against. An indexed file with source but no callable and no file-scope
+    segment has no structural callable a receipt could cite: no signal is a
+    fact about the readers, not proof that a reviewer read the file. Every
+    `<top-level>` segment is owed like any other callable.
+    """
+    if _safe_int(file_row.get("loc")) <= 0:
+        return StructuralReviewObligation()
+    analysis_status = str(file_row.get("structural_analysis_status") or "")
+    unavailable = set(_json_decode(file_row.get("structural_unavailable_dimensions_json"), []))
+    truncated = set(_json_decode(file_row.get("structural_truncated_dimensions_json"), []))
+    total_functions = _safe_int(file_row.get("total_functions"))
+    reason = ""
+    if analysis_status == "unsupported" or "functions" in unavailable | truncated:
+        reason = "function registry is incomplete"
+    elif unavailable & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS:
+        reason = "index scanned no function scope"
+    elif (
+        analysis_status in _INDEXED_STRUCTURAL_STATUSES
+        and total_functions <= 0
+        and not top_level_spans
     ):
-        return "index scanned no function scope"
-    if (
-        str(file_row.get("structural_analysis_status") or "")
-        in _INDEXED_STRUCTURAL_STATUSES
-        and _safe_int(file_row.get("total_functions")) <= 0
-        and _safe_int(file_row.get("loc")) > 0
-    ):
-        return "registry holds no callable for this file"
-    return ""
+        reason = "registry holds no callable for this file"
+    return StructuralReviewObligation(
+        whole_file_reason=reason,
+        owes_callable=total_functions > 0,
+        top_level_spans=tuple(sorted(top_level_spans)),
+    )
+
+
+def function_callable_link_sql(links_alias: str) -> str:
+    """True when a receipt link names a function, not a `<top-level>` segment.
+
+    `total_functions` counts functions only, so every function-coverage
+    numerator counts only these links.
+    """
+    return (
+        "EXISTS (SELECT 1 FROM code_structural_callables AS linked_callable"
+        f" WHERE linked_callable.id = {links_alias}.callable_id"
+        f" AND linked_callable.name != '{TOP_LEVEL_CALLABLE_NAME}')"
+    )
+
+
+def _current_top_level_spans(
+    connection, engagement_id: int, file_ids: list[int]
+) -> dict[int, list[tuple[int, int, int]]]:
+    """`(callable id, start, end)` of each file's `<top-level>` segments in its active generation."""
+    if not file_ids:
+        return {}
+    placeholders = ",".join("?" for _ in file_ids)
+    spans: dict[int, list[tuple[int, int, int]]] = {}
+    for row in connection.execute(
+        f"""
+        SELECT callables.file_id, callables.id, callables.start_line, callables.end_line
+        FROM code_structural_callables AS callables
+        JOIN code_files AS files
+          ON files.id = callables.file_id AND files.engagement_id = callables.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation = callables.repo_generation
+        WHERE callables.engagement_id = ? AND callables.name = ?
+          AND callables.file_id IN ({placeholders})
+        ORDER BY callables.file_id, callables.start_line
+        """,
+        (engagement_id, TOP_LEVEL_CALLABLE_NAME, *file_ids),
+    ).fetchall():
+        spans.setdefault(int(row["file_id"]), []).append(
+            (int(row["id"]), int(row["start_line"]), int(row["end_line"]))
+        )
+    return spans
+
+
+def structural_review_gaps(
+    connection,
+    engagement_id: int,
+    file_ids: list[int],
+    current_result_receipt: str,
+) -> tuple[set[int], set[int]]:
+    """(files that owe structural review proof, those current receipts leave unproven).
+
+    *current_result_receipt* is the caller's current-receipt predicate over the
+    `results`, `result_queue`, `result_files` and `result_repos` aliases, so the
+    proof is read from exactly the receipts the caller counts.
+    """
+    if not file_ids:
+        return set(), set()
+    placeholders = ",".join("?" for _ in file_ids)
+    file_rows = {
+        int(row["id"]): dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT id, loc, total_functions, structural_analysis_status,
+                   structural_unavailable_dimensions_json,
+                   structural_truncated_dimensions_json
+            FROM code_files
+            WHERE engagement_id = ? AND id IN ({placeholders})
+            """,
+            (engagement_id, *file_ids),
+        ).fetchall()
+    }
+    top_level = _current_top_level_spans(connection, engagement_id, list(file_rows))
+    receipt_joins = """
+        JOIN code_analysis_queue AS result_queue
+          ON result_queue.id = results.queue_item_id
+        JOIN code_files AS result_files
+          ON result_files.id = results.file_id
+        JOIN code_repos AS result_repos
+          ON result_repos.id = result_files.repo_id
+    """
+    linked: dict[int, set[int]] = {}
+    function_cited: set[int] = set()
+    for row in connection.execute(
+        f"""
+        SELECT DISTINCT links.file_id, links.callable_id, callables.name
+        FROM code_analysis_results AS results
+        JOIN code_analysis_result_callables AS links
+          ON links.result_id = results.id
+        JOIN code_structural_callables AS callables
+          ON callables.id = links.callable_id
+        {receipt_joins}
+        WHERE results.engagement_id = ?
+          AND links.file_id IN ({placeholders})
+          AND ({current_result_receipt})
+        """,
+        (engagement_id, *file_ids),
+    ).fetchall():
+        file_id = int(row["file_id"])
+        if str(row["name"]) == TOP_LEVEL_CALLABLE_NAME:
+            linked.setdefault(file_id, set()).add(int(row["callable_id"]))
+        else:
+            function_cited.add(file_id)
+    reviewed: dict[int, list[tuple[int, int]]] = {}
+    for row in connection.execute(
+        f"""
+        SELECT span_files.id AS file_id,
+               CAST(json_extract(span.value, '$.start_line') AS INTEGER) AS start_line,
+               CAST(json_extract(span.value, '$.end_line') AS INTEGER) AS end_line
+        FROM code_analysis_results AS results
+        JOIN json_each(results.reviewed_spans_json) AS span
+        JOIN code_files AS span_files
+          ON span_files.id = CAST(json_extract(span.value, '$.file_id') AS INTEGER)
+         AND span_files.engagement_id = results.engagement_id
+        {receipt_joins}
+        WHERE results.engagement_id = ?
+          AND span_files.id IN ({placeholders})
+          AND ({current_result_receipt})
+        """,
+        (engagement_id, *file_ids),
+    ).fetchall():
+        reviewed.setdefault(int(row["file_id"]), []).append(
+            (int(row["start_line"]), int(row["end_line"]))
+        )
+    owing: set[int] = set()
+    unproven: set[int] = set()
+    for file_id, file_row in file_rows.items():
+        segments = top_level.get(file_id, [])
+        obligation = structural_review_obligation(
+            file_row, tuple((start, end) for _id, start, end in segments)
+        )
+        if not obligation.owed:
+            continue
+        owing.add(file_id)
+        if not obligation.proven(
+            loc=_safe_int(file_row.get("loc")),
+            function_cited=file_id in function_cited,
+            cited_top_level={
+                (start, end)
+                for callable_id, start, end in segments
+                if callable_id in linked.get(file_id, set())
+            },
+            reviewed_spans=reviewed.get(file_id, []),
+        ):
+            unproven.add(file_id)
+    return owing, unproven
 
 
 def _finding_snapshot_repo_id(finding: Any) -> int | None:
@@ -924,37 +1189,33 @@ def _normalize_analysis_receipt_anchors(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="reviewed span must fall within the sealed file",
             )
-        unavailable_dimensions = set(
-            _json_decode(
-                file_rows[file_id].get("structural_unavailable_dimensions_json"), []
-            )
-        )
-        if (
-            str(file_rows[file_id].get("structural_analysis_status") or "")
-            == "unsupported"
-            or "functions"
-            in {
-                *unavailable_dimensions,
-                *_json_decode(
-                    file_rows[file_id].get("structural_truncated_dimensions_json"),
-                    [],
+        top_level_spans = tuple(
+            (int(row["start_line"]), int(row["end_line"]))
+            for row in connection.execute(
+                """
+                SELECT start_line, end_line
+                FROM code_structural_callables
+                WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+                  AND file_id = ? AND name = ?
+                """,
+                (
+                    engagement_id,
+                    repo_id,
+                    int(queue_row["repo_generation"]),
+                    file_id,
+                    TOP_LEVEL_CALLABLE_NAME,
                 ),
-            }
-        ):
-            incomplete_reason = "function registry is incomplete"
-        else:
-            incomplete_reason = structural_scope_requires_whole_file_review(
-                file_rows[file_id]
-            )
-        if incomplete_reason and (
-            start_line != 1 or end_line != int(file_rows[file_id]["loc"])
+            ).fetchall()
+        )
+        requirement = structural_review_obligation(
+            file_rows[file_id], top_level_spans
+        ).span_requirement(int(file_rows[file_id]["loc"]))
+        if requirement is not None and (
+            start_line > requirement[0][0] or end_line < requirement[0][1]
         ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "reviewed spans require whole-file coverage while the structural "
-                    f"{incomplete_reason}"
-                ),
+                detail=requirement[1],
             )
         identity = (file_id, start_line, end_line, label)
         if identity in seen_spans:
@@ -970,6 +1231,7 @@ def _normalize_analysis_receipt_anchors(
                 FROM code_structural_callables
                 WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
                   AND file_id = ? AND start_line <= ? AND end_line >= ?
+                  AND name != ?
                 """,
                 (
                     engagement_id,
@@ -978,6 +1240,7 @@ def _normalize_analysis_receipt_anchors(
                     file_id,
                     end_line,
                     start_line,
+                    TOP_LEVEL_CALLABLE_NAME,
                 ),
             ).fetchall()
         }

@@ -505,3 +505,86 @@ def test_a_module_level_tornado_application_is_an_entry_point() -> None:
         ("tornado_application", "<top-level>", _line_carrying("Application(", TORNADO_MODULE_APP)),
         ("tornado_route", "<top-level>", _line_carrying('(r"/report"', TORNADO_MODULE_APP)),
     ]
+
+
+# --- 5. File scope is a reviewable callable ----------------------------------
+
+PHP_MIXED = b"""<?php
+require_once __DIR__ . '/bootstrap.php';
+$id = $_GET['id'];
+
+function acme_render($id)
+{
+    return htmlspecialchars($id);
+}
+
+echo acme_render($id);
+"""
+
+
+def _segments(indexed: dict) -> list[tuple[int, int]]:
+    return [(segment["line_start"], segment["line_end"]) for segment in indexed["top_level_segments"]]
+
+
+def test_file_scope_segments_lie_between_the_callables() -> None:
+    indexed = index_file("public/report.php", "php", PHP_MIXED)
+
+    assert _segments(indexed) == [(2, 3), (10, 10)]
+    assert indexed["total_functions"] == 1
+
+
+def test_delimiter_only_lines_open_no_segment() -> None:
+    source = b"""<?php
+namespace Acme\\Billing;
+
+class Invoice
+{
+    public function total()
+    {
+        return 1;
+    }
+}
+"""
+    indexed = index_file("src/Invoice.php", "php", source)
+
+    assert _segments(indexed) == []
+
+
+def test_a_decorator_between_functions_is_its_own_segment() -> None:
+    source = b"""from flask import Flask
+app = Flask(__name__)
+
+@app.route("/a")
+def a():
+    return 1
+
+@app.route("/b")
+def b():
+    return 2
+"""
+    indexed = index_file("app.py", "python", source)
+
+    assert _segments(indexed) == [(1, 4), (8, 8)]
+
+
+def test_a_zero_callable_file_is_one_segment_over_its_source_lines() -> None:
+    indexed = index_file("acme/report.php", "php", PHP_REQUEST_SCRIPT)
+
+    assert indexed["total_functions"] == 0
+    assert _segments(indexed) == [(2, 5)]
+
+
+def test_the_top_level_scope_is_published_as_callable_records() -> None:
+    from assess.lib.code_structural_metadata import validated_callable_records
+
+    indexed = index_file("public/report.php", "php", PHP_MIXED)
+    records = validated_callable_records(indexed, rel_path="public/report.php")
+
+    assert [
+        (record["name"], record["qualified_name"], record["start_line"], record["end_line"])
+        for record in records
+    ] == [
+        ("acme_render", "acme_render", 5, 8),
+        ("<top-level>", "<top-level>", 2, 3),
+        ("<top-level>", "<top-level>", 10, 10),
+    ]

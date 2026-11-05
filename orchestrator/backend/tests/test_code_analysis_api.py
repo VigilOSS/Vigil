@@ -1072,6 +1072,15 @@ def _publish_structural_totals(
     return response.json()
 
 
+def _callable_totals(callables: list[dict[str, object]]) -> dict[str, int]:
+    """The function and file-scope totals a callable registry reports."""
+    top_level = sum(1 for item in callables if item["name"] == "<top-level>")
+    totals = {"total_functions": len(callables) - top_level}
+    if top_level:
+        totals["total_top_level_segments"] = top_level
+    return totals
+
+
 def _structural_callable(
     name: str,
     *,
@@ -1108,9 +1117,7 @@ def _publish_structural_callables(
         {
             "file_id": file_row["id"],
             "source_sha256": file_row["file_hash"],
-            "total_functions": len(
-                callables_by_file_id.get(int(file_row["id"]), [])
-            ),
+            **_callable_totals(callables_by_file_id.get(int(file_row["id"]), [])),
             "total_entry_points": int(
                 current_files_by_id[int(file_row["id"])].get("total_entry_points") or 0
             ),
@@ -2466,7 +2473,7 @@ def _post_structural_callables(
         {
             "file_id": file_row["id"],
             "source_sha256": file_row["file_hash"],
-            "total_functions": len(callables_by_file_id.get(int(file_row["id"]), [])),
+            **_callable_totals(callables_by_file_id.get(int(file_row["id"]), [])),
             "total_entry_points": 0,
             "total_sinks": 0,
             "total_exports": 0,

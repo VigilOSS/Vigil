@@ -74,6 +74,32 @@ def test_a_zero_callable_file_measured_at_file_scope_is_publishable() -> None:
 
 
 @pytest.mark.parametrize(
+    ("segments", "valid"),
+    [
+        ([{"line_start": 2, "line_end": 2}], True),
+        ([{"line_start": 2, "line_end": 2}, {"line_start": 2, "line_end": 3}], False),
+        ([{"line_start": 1, "line_end": 2}], False),
+        ([{"line_start": 3, "line_end": 9}], False),
+    ],
+)
+def test_top_level_segments_are_ordered_in_file_and_clear_of_callables(
+    segments: list[dict], valid: bool
+) -> None:
+    source = b"def f(): pass\nrun()\nrun()\n"
+    artifact = _artifact(source)
+    artifact.update({"total_lines": 3, "top_level_segments": segments})
+
+    def validate() -> None:
+        code_index._validate_analysis_artifact(artifact, rel_path="run.py", source_size=len(source))
+
+    if valid:
+        validate()
+    else:
+        with pytest.raises(ValueError):
+            validate()
+
+
+@pytest.mark.parametrize(
     ("status", "valid"),
     [
         ("resolved", True),

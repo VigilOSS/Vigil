@@ -351,6 +351,9 @@ def _prepare_repo_payload(
                         "source_sha256": source_sha,
                         "indexed_language": expected_language,
                         "total_functions": int(indexed.get("total_functions", 0)),
+                        "total_top_level_segments": len(
+                            indexed.get("top_level_segments", [])
+                        ),
                         "total_entry_points": int(indexed["signal_counts"]["entry_points"]),
                         "total_sinks": int(indexed["signal_counts"]["security_sinks"]),
                         "total_exports": int(indexed["total_exports"]),

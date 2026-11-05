@@ -3546,6 +3546,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                         "source_sha256": hashlib.sha256(raw).hexdigest(),
                         "indexed_language": "python",
                         "total_functions": 1,
+                        "total_top_level_segments": 0,
                         "total_entry_points": 0,
                         "total_sinks": 0,
                         "total_exports": 0,

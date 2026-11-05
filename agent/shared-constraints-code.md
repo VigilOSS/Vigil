@@ -277,11 +277,20 @@ reasoning quota. One `file` receipt may group several callables in the claimed f
 Name every covered callable with the exact structural-index identity, and use exact reviewed spans
 for non-callable source regions. A reviewed span cannot stand in for a registered callable it
 overlaps; include every overlapped callable as an exact `callable_ref`. A complete function index
-publishes exactly its reported callable total. If structural analysis is unsupported, the
-function dimension is truncated or unavailable, the index scanned no function scope, or the
-indexed file has source but no callable, only a whole-file reviewed span can prove the manual
-source review (and it must still name every retained callable it overlaps); a partial span cannot
-prove that omitted source is non-callable or was read:
+publishes exactly its reported callable total.
+
+File scope is a callable too. The artifact's `top_level_segments` are the file-scope lines between
+callables, registered as `<top-level>` callables (name and qualified name `<top-level>`, one per
+segment, not counted in `total_functions`). The file owes each segment a disposition like any other
+callable: cite it as an exact `callable_ref`, or cover its lines with reviewed spans, which may
+overlap a `<top-level>` segment without citing it. Naming a function never covers the file scope.
+
+Only a whole-file reviewed span can prove the manual source review (and it must still name every
+function it overlaps) when structural analysis is unsupported, the function dimension is truncated
+or unavailable, the index scanned no function scope, or the indexed file has source but no callable
+and no `<top-level>` segment. When `<top-level>` is a file's only callable, every reviewed span must
+cover all of its segment lines. A partial span there cannot prove that omitted source is
+non-callable or was read:
 
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
@@ -450,7 +459,8 @@ analysis receipts and reports it as `coverage_integrity` on the `code-dispatch d
 2. `functions_analyzed` is advisory self-reporting, never coverage proof. Each file's authoritative
    numerator is the union of exact `callable_refs` that name that file, including references from
    a current cross-file `call_chain`; `reviewed_spans` prove checked source that has no structural
-   callable identity but do not invent callable coverage.
+   callable identity but do not invent callable coverage. A `<top-level>` reference covers file
+   scope and never counts toward the function numerator.
 3. Cross-file callable coverage does not transfer lease ownership. Only a source receipt anchored
    to the claimed queue file can close its non-skipped review; referenced files retain
    their own queue, disposition, evidence, and closeout obligations.

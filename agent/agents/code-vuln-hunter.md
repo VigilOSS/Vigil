@@ -251,7 +251,7 @@ mechanical helpers may share a concise grouped `clean` receipt), every macro cal
 self-service already attempted. Produce `cwe_coverage` for every applicable vulnerability class
 (an explicit gap entry where effort is genuinely zero) and `cross_file_triggers` for any finding
 that connects elsewhere via the call graph. If the structural index was available, every listed
-callable has a disposition. `functions_analyzed` is advisory; the receipt's structural references
+callable has a disposition, including each `<top-level>` file-scope segment. `functions_analyzed` is advisory; the receipt's structural references
 are the coverage proof. Guidance hypotheses were checked after the skill's unconstrained pass
 (Steps 1-3), never before it.
 

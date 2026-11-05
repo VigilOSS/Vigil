@@ -14,6 +14,7 @@ from ..db import get_connection
 from ..services import code_analysis
 from ..services import code_analysis_support
 from ..services import code_fuzz_completion
+from ..services.code_analysis_support import TOP_LEVEL_CALLABLE_NAME
 from ..services.engagements import get_engagement_or_404
 from ..services.events import create_event_for_engagement
 from ..ws import broadcaster
@@ -472,6 +473,9 @@ class StructuralMetadataItem(BaseModel):
     source_sha256: str = Field(pattern=_SHA256_PATTERN)
     indexed_language: str = Field(max_length=64)
     total_functions: int = Field(ge=0)
+    # File-scope segments published as `<top-level>` callables. Reported apart
+    # from `total_functions`, which counts the callables the parser found.
+    total_top_level_segments: int = Field(default=0, ge=0)
     total_entry_points: int = Field(ge=0)
     total_sinks: int = Field(ge=0)
     total_exports: int = Field(ge=0)
@@ -603,17 +607,40 @@ class StructuralMetadataItem(BaseModel):
             *self.structural_unavailable_dimensions,
             *self.structural_truncated_dimensions,
         }
+        top_level = [
+            callable_record
+            for callable_record in self.callables
+            if TOP_LEVEL_CALLABLE_NAME
+            in {callable_record.name, callable_record.qualified_name}
+        ]
+        if any(
+            callable_record.name != callable_record.qualified_name
+            for callable_record in top_level
+        ):
+            raise ValueError(
+                f"{TOP_LEVEL_CALLABLE_NAME} callables must use it as name and qualified_name"
+            )
+        functions = len(self.callables) - len(top_level)
         if (
             "callables" in self.model_fields_set
             and not function_dimension_incomplete
-            and len(self.callables) != self.total_functions
+            and functions != self.total_functions
         ):
             raise ValueError(
                 "callables must exactly match total_functions when the function "
                 "dimension is complete"
             )
-        if len(self.callables) > self.total_functions:
+        if functions > self.total_functions:
             raise ValueError("callables cannot exceed total_functions")
+        if len(top_level) != self.total_top_level_segments:
+            raise ValueError(
+                f"{TOP_LEVEL_CALLABLE_NAME} callables must exactly match "
+                "total_top_level_segments"
+            )
+        if top_level and function_dimension_incomplete:
+            raise ValueError(
+                f"{TOP_LEVEL_CALLABLE_NAME} callables require a complete function dimension"
+            )
         identities = [
             (
                 callable_record.qualified_name,

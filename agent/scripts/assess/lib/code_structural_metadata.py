@@ -9,6 +9,10 @@ from assess.lib.treesitter_index import (
     UNSCANNED_SCOPE_DEGRADATION_REASON,
 )
 
+# The file scope's callable name. Its records are the `top_level_segments` the
+# indexer publishes beside `functions`; `total_functions` never counts them.
+# `orchestrator/backend/app/services/code_analysis_support.py` mirrors it.
+TOP_LEVEL_CALLABLE_NAME = "<top-level>"
 STRUCTURAL_DIMENSIONS = {
     "call_sites",
     "classes",
@@ -180,6 +184,24 @@ def validated_structural_metadata(
             )
         ):
             raise ValueError(f"structural include status is invalid for {rel_path}")
+    segments = indexed.get("top_level_segments", [])
+    previous_end = 0
+    for segment in segments if isinstance(segments, list) else [None]:
+        start = segment.get("line_start") if isinstance(segment, dict) else None
+        end = segment.get("line_end") if isinstance(segment, dict) else None
+        if (
+            type(start) is not int
+            or type(end) is not int
+            or start <= previous_end
+            or end < start
+            or end > int(indexed.get("total_lines") or 0)
+        ):
+            raise ValueError(f"structural top-level segments are invalid for {rel_path}")
+        previous_end = end
+    if segments and "functions" in {*unavailable, *truncated_dimensions}:
+        raise ValueError(
+            f"structural top-level segments require a complete function registry for {rel_path}"
+        )
     if reason is not None and (not isinstance(reason, str) or len(reason) > 128):
         raise ValueError(f"structural degradation reason is invalid for {rel_path}")
     return {
@@ -235,6 +257,23 @@ def validated_callable_records(indexed: dict[str, Any], *, rel_path: str) -> lis
             {
                 "name": name,
                 "qualified_name": qualified_name,
+                "start_line": start_line,
+                "end_line": end_line,
+            }
+        )
+    callable_lines = sorted(
+        (record["start_line"], record["end_line"]) for record in callable_records
+    )
+    for segment in indexed.get("top_level_segments", []):
+        start_line, end_line = segment["line_start"], segment["line_end"]
+        if any(start <= end_line and end >= start_line for start, end in callable_lines):
+            raise ValueError(
+                f"structural top-level segment overlaps a callable for {rel_path}"
+            )
+        callable_records.append(
+            {
+                "name": TOP_LEVEL_CALLABLE_NAME,
+                "qualified_name": TOP_LEVEL_CALLABLE_NAME,
                 "start_line": start_line,
                 "end_line": end_line,
             }
