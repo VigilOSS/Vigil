@@ -28,6 +28,9 @@ PARSER_PROTOCOL_SCHEMA = "vigil-structural-parser/v1"
 PARSER_CAPABILITY_DENIED_EXIT = 78
 PARSER_MEMORY_LIMIT_EXIT = 79
 SERVER_PROTOCOL_ERROR_EXIT = 65
+# What a ParserWorker writes into the server's private `request/` directory.
+REQUEST_SOURCE_NAME = "source.bin"
+REQUEST_NAME = "request.json"
 SERVER_FRAME_HEADER = struct.Struct("!I")
 MAX_SERVER_FRAME_BYTES = 64 * 1024
 _REQUEST_FIELDS = frozenset(
@@ -330,10 +333,16 @@ def serve(control_fd: int) -> int:
     except ValueError:
         return SERVER_PROTOCOL_ERROR_EXIT
     finally:
-        # A parent that leaves mid-request never leaves its child running.
+        # A parent that leaves mid-request never leaves its child running, and
+        # one killed before its own cleanup leaves no copy of the source behind.
         if active is not None:
             kill_process_group(active)
             os.waitpid(active, 0)
+        for name in (REQUEST_SOURCE_NAME, REQUEST_NAME):
+            try:
+                os.unlink(os.path.join("request", name))
+            except OSError:
+                pass
 
 
 def main(argv: list[str] | None = None) -> int:

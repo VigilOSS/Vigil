@@ -38,6 +38,8 @@ from pathlib import Path
 from typing import Any
 
 from assess.lib.parser_worker import (
+    REQUEST_NAME,
+    REQUEST_SOURCE_NAME,
     decode_server_frame,
     encode_server_frame,
     kill_process_group,
@@ -450,8 +452,8 @@ class ParserWorker:
         if self._root is None:
             raise ParserWorkerUnavailable("parser server has no request directory")
         request_dir = self._root / "request"
-        source_path = request_dir / "source.bin"
-        request_path = request_dir / "request.json"
+        source_path = request_dir / REQUEST_SOURCE_NAME
+        request_path = request_dir / REQUEST_NAME
         request = {
             "schema": PARSER_PROTOCOL_SCHEMA,
             "file_path": file_path,

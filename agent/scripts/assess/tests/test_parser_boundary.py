@@ -528,3 +528,22 @@ def test_a_build_holding_many_descriptors_still_parses_exactly() -> None:
 
     assert result["analysis_status"] == "complete"
     assert result["analysis_mode"] == "tree_sitter"
+
+
+def test_a_server_whose_parent_is_gone_removes_the_request_copy() -> None:
+    """A build killed by a signal never reaches its cleanup, so the server that
+    outlives it deletes the copied source it was handed."""
+    source = b"def parse(value):\n    return value\n"
+    worker = parser_boundary.ParserWorker()
+    try:
+        parser_boundary.index_file("warm.py", "python", source=source, worker=worker)
+        request_dir = worker._root / "request"
+        for name in ("source.bin", "request.json"):
+            (request_dir / name).write_bytes(b"<?php echo $acme_secret;\n")
+        process = worker._process
+        worker._control.close()  # the parent vanishes without close()
+        process.wait(timeout=10)
+
+        assert sorted(item.name for item in request_dir.iterdir()) == []
+    finally:
+        worker.close()
