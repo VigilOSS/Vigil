@@ -13,7 +13,11 @@ from pathlib import Path
 import pytest
 
 from assess.lib.code_languages import STRUCTURAL_SUPPORTED_LANGUAGES
-from assess.lib.treesitter_catalogues import _SINK_DEFINITIONS
+from assess.lib.treesitter_catalogues import (
+    _ENTRY_LINE_PATTERNS,
+    _GLOBAL_ENTRY_LINE_PATTERNS,
+    _SINK_DEFINITIONS,
+)
 from assess.lib.treesitter_common import _gate_literals, _literal_gate, _required_literals
 from assess.lib.treesitter_index import _function_scoped_reader_patterns, index_file
 from assess.lib.treesitter_streaming import (
@@ -98,6 +102,12 @@ def _catalogue_patterns() -> list[re.Pattern]:
         for language in STRUCTURAL_SUPPORTED_LANGUAGES
         for compiled in _function_scoped_reader_patterns(language)
     ]
+    patterns.extend(
+        re.compile(item["pattern"])
+        for table in (_ENTRY_LINE_PATTERNS, _GLOBAL_ENTRY_LINE_PATTERNS)
+        for items in table.values()
+        for item in items
+    )
     for language in STRUCTURAL_SUPPORTED_LANGUAGES:
         scanner = StreamingSecurityScanner("acme.txt", language)
         patterns.extend(pattern for _kind, pattern, _classes in scanner._sink_patterns)
@@ -107,15 +117,19 @@ def _catalogue_patterns() -> list[re.Pattern]:
     return patterns
 
 
-def test_no_catalogue_match_lies_on_a_line_its_gate_rejects() -> None:
+def _fixture_lines() -> list[str]:
     # The signal fixtures beside this file are a corpus written to match the
-    # catalogues; every line one of them matches must pass that pattern's gate.
-    lines = [
+    # catalogues.
+    return [
         line
         for glob in ("test_*_index_signals.py", "test_*catalogue*.py", "test_indexer_*.py")
         for path in sorted(Path(__file__).parent.glob(glob))
         for line in path.read_text(encoding="utf-8").splitlines()
     ]
+
+
+def test_no_catalogue_match_lies_on_a_line_its_gate_rejects() -> None:
+    lines = _fixture_lines()
     checked = 0
     for pattern in _catalogue_patterns():
         literals = _gate_literals(pattern)
@@ -130,6 +144,21 @@ def test_no_catalogue_match_lies_on_a_line_its_gate_rejects() -> None:
                 assert gate.search(lowered), (pattern.pattern, line)
                 assert any(literal in lowered for literal in literals)
     assert checked > 500
+
+
+def test_a_gated_entry_line_pattern_matches_exactly_where_it_searches() -> None:
+    from assess.lib.treesitter_index import _line_pattern_matches
+
+    lines = _fixture_lines()
+    matched = 0
+    for table in (_ENTRY_LINE_PATTERNS, _GLOBAL_ENTRY_LINE_PATTERNS):
+        for items in table.values():
+            for item in items:
+                for line in lines:
+                    expected = re.search(item["pattern"], line) is not None
+                    matched += expected
+                    assert _line_pattern_matches(item["pattern"], line) is expected
+    assert matched > 100
 
 
 ACME_C_TOOL = """\

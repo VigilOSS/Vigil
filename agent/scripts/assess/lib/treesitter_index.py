@@ -2399,6 +2399,21 @@ def _extract_ruby_imports(source: bytes) -> list[str]:
     return imports
 
 
+@lru_cache(maxsize=1024)
+def _gated_line_pattern(pattern: str) -> tuple[re.Pattern[str], frozenset[str] | None]:
+    compiled = re.compile(pattern)
+    return compiled, _gate_literals(compiled)
+
+
+def _line_pattern_matches(pattern: str, line: str) -> bool:
+    """Whether `re.search(pattern, line)` matches; a line holding none of the
+    literals every match requires is answered without running the pattern."""
+    compiled, literals = _gated_line_pattern(pattern)
+    if literals is not None and not any(literal in line for literal in literals):
+        return False
+    return compiled.search(line) is not None
+
+
 def _detect_top_level_entry_points(
     tree: Any,
     language: str,
@@ -2453,7 +2468,7 @@ def _detect_top_level_entry_points(
             )
             for candidate, text in candidate_lines:
                 identity = (candidate, pattern["kind"])
-                if identity in seen or not re.search(pattern["pattern"], text):
+                if identity in seen or not _line_pattern_matches(pattern["pattern"], text):
                     continue
                 if any(
                     entry["kind"] == pattern["kind"] and entry["line"] in statement_lines
@@ -3120,7 +3135,7 @@ def _detect_entry_points(
                 hit = line_pattern_hits.get((lp["pattern"], line_no))
                 if hit is None:
                     hit = line_pattern_hits[(lp["pattern"], line_no)] = (
-                        re.search(lp["pattern"], source_lines[line_no]) is not None
+                        _line_pattern_matches(lp["pattern"], source_lines[line_no])
                     )
                 if hit:
                     entry_points.append({
