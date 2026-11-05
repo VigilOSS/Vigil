@@ -9,6 +9,7 @@ partition the tree exactly, and an explicit include re-admits it.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -331,3 +332,89 @@ def test_a_collapsed_vendored_copy_admission_names_a_working_remedy(capsys):
     err = capsys.readouterr().err
     assert "vendored_copy/**" not in err
     assert "--include-path '<vendored-copy-dir>/**'" in err
+
+
+# --- ingest summary ------------------------------------------------------------
+
+
+class _FakeClient:
+    def __init__(self, *_args, **_kwargs) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def post(self, endpoint: str, payload: dict, **_options):
+        if endpoint == "code/repos/refresh/preview":
+            return {"repo_key": payload["repo_key"], "files": len(payload["files"])}
+        if endpoint == "code/repos/refresh/start":
+            return {"repo_id": 7, "refresh_token": "refresh-7"}
+        if endpoint == "code/repos/7/refresh/files":
+            return {"staged": len(payload["files"])}
+        if endpoint == "code/repos/7/refresh/commit":
+            return {
+                "repo_id": 7,
+                "repo_generation": 1,
+                "repo_role": "analysis",
+                "source_manifest_digest": "d" * 64,
+                "retired": 0,
+            }
+        if endpoint == "code/repos/7/lsp-config":
+            return {
+                "id": 7,
+                "active_generation": payload["repo_generation"],
+                "source_manifest_digest": payload["source_manifest_digest"],
+                "lsp_config": payload["lsp_config"],
+            }
+        raise AssertionError(f"Unexpected endpoint: {endpoint}")
+
+
+def _offline_ingest(monkeypatch, tmp_path) -> tuple[Path, Path]:
+    repo = tmp_path / "acme reports"
+    _write(repo, "app.py", "print('ok')\n")
+    engagement = tmp_path / "engagement"
+    engagement.mkdir()
+    monkeypatch.setattr(code_ingest, "AssessmentClient", _FakeClient)
+    monkeypatch.setattr(
+        code_ingest,
+        "load_config",
+        lambda *_args: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(engagement)
+        ),
+    )
+    monkeypatch.setattr(
+        code_ingest,
+        "_setup_ctags",
+        lambda *_args, **kwargs: {"available": False, **kwargs},
+    )
+    return repo, engagement
+
+
+def test_the_ingest_summary_prints_repo_id_and_the_follow_up_commands(
+    monkeypatch, tmp_path, capsys
+):
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+
+    code_ingest.run(_args(repo, name="acme-reports", dry_run=False, engagement_dir=str(engagement)))
+
+    out = capsys.readouterr().out
+    assert re.search(r"^Repository: acme-reports \(id: 7\)$", out, re.M)
+    assert re.search(r"^repo_id: 7$", out, re.M)
+    sealed = re.search(r"^Sealed source: (.+)$", out, re.M).group(1)
+    quoted = code_ingest.shlex.quote(sealed)
+    assert f"vigil assess code-index build --repo-id 7 {quoted}" in out
+    assert "vigil assess code-index sync --repo-id 7" in out
+
+
+def test_a_dry_run_previews_without_follow_up_commands(monkeypatch, tmp_path, capsys):
+    """A preview seals nothing, so there is no repo_id or sealed path to index."""
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+
+    code_ingest.run(_args(repo, name="acme-reports", dry_run=True, engagement_dir=str(engagement)))
+
+    # stdout is exactly the backend preview document.
+    preview = json.loads(capsys.readouterr().out)
+    assert preview["files"] == 1

@@ -26,12 +26,12 @@ vigil assess code-sourcemap-extract "$DIR/source-maps/<name>"
 # 3. Ingest into backend (use the printed source-map handoff when applicable)
 vigil assess code-ingest "<confirmed-source-directory>" --name <project-name> --language <primary-lang>
 
-# 4. Copy repo_id and the "Sealed source:" path from the ingest summary — it already points at
-#    the snapshot's source/ directory, which is what code-index binds to. Pass it unchanged.
+# 4. Run the build command the ingest summary prints under "Next:". It carries the repo_id and
+#    the "Sealed source:" path (the snapshot's source/ directory, which code-index binds to).
 vigil assess code-index build --repo-id <repo-id> <sealed-source-path>
 
 # 5. Sync structural metadata to backend
-vigil assess code-index sync
+vigil assess code-index sync --repo-id <repo-id>
 
 # 6. Verify the hard source/index transition contract separately from review-quality warnings
 vigil assess code-coverage --require-transition-ready classify-map
@@ -64,8 +64,9 @@ The `code-ingest` command:
   `file_id` (primary key). Retrieve the mapping via
   `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;
   queue fetch responses also include the full file object with `file_id`.
-- Prints the authoritative repo ID, active generation, source-manifest digest, sealed snapshot path,
-  and the exact index/sync follow-up commands
+- Prints the authoritative repo ID (also as a greppable `repo_id: <id>` line), active generation,
+  source-manifest digest, sealed snapshot path, and the exact `code-index build --repo-id` and
+  `code-index sync --repo-id` follow-up commands
 - Generates an advisory ctags symbol index outside the source tree when trusted ctags is available;
   its backend path is bound to the same generation and digest
 

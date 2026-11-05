@@ -2080,6 +2080,7 @@ def run(args) -> None:
 
     print("\n=== Code Ingest Summary ===")
     print(f"Repository: {repo_name} (id: {repo_id})")
+    print(f"repo_id: {repo_id}")
     print(f"Sealed source: {snapshot.source_path}")
     print(f"Snapshot digest: {snapshot.snapshot_digest}")
     print(f"Source manifest digest: {committed_digest}")
@@ -2119,6 +2120,13 @@ def run(args) -> None:
 
     if security_files:
         print(f"\nFiles with security-related commit history: {len(security_files)}")
+
+    print("\nNext:")
+    print(
+        f"  vigil assess code-index build --repo-id {repo_id} "
+        f"{shlex.quote(str(snapshot.source_path))}"
+    )
+    print(f"  vigil assess code-index sync --repo-id {repo_id}")
 
     if not lsp_ctags.get('available'):
         print("\nSymbol index: ctags not available", file=sys.stderr)
