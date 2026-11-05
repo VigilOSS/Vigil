@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,7 @@ from assess.lib.code_structural_identity import (
     STRUCTURAL_INDEX_SCHEMA,
     bind_structural_inputs,
     fetch_backend_file_inventory,
+    structural_indexer_digest,
     structural_input_digest,
 )
 from assess.lib.config import load_config
@@ -265,6 +267,16 @@ def _prepare_repo_payload(
         or Path(str(manifest.get("manifest_path") or "")).resolve() != manifest_path
     ):
         raise ValueError(f"repo {repo_id} structural manifest path differs from its identity")
+    if manifest.get("indexer_digest") != structural_indexer_digest():
+        # Publishing it is still valid; it just carries the old indexer's
+        # findings (file-scope segments, sinks, entry points).
+        print(
+            f"code-index sync: WARNING — repo {repo_id}: this structural index was built by a "
+            "different indexer than this install's. Run "
+            f"`vigil assess code-index build --repo-id {repo_id} {shlex.quote(str(source))}`, "
+            "then sync again, to publish what the current indexer reports.",
+            file=sys.stderr,
+        )
     updates: list[dict[str, Any]] = []
     degraded_paths: list[str] = []
     truncated_paths: list[str] = []

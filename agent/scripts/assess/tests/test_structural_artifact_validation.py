@@ -513,6 +513,28 @@ def test_indexer_upgrade_rebuilds_unchanged_snapshot_beside_history_and_sync_pub
     assert {item["callables"][0]["qualified_name"] for item in posts[0]["updates"]} == {"g"}
 
 
+def test_sync_of_an_index_another_indexer_built_names_the_rebuild(
+    index_project, monkeypatch, capsys,
+) -> None:
+    """After an upgrade, sync without a rebuild republishes what the old indexer
+    found; it says so and prints the build that refreshes it."""
+    args, repo, client_type = index_project
+    monkeypatch.setattr(code_index, "structural_indexer_digest", lambda: "a" * 64)
+    code_index.run(args)
+    capsys.readouterr()
+
+    monkeypatch.setattr(code_index_sync, "structural_indexer_digest", lambda: "a" * 64)
+    _sync_posts(args, client_type, monkeypatch)
+    assert "different indexer" not in capsys.readouterr().err
+
+    monkeypatch.setattr(code_index_sync, "structural_indexer_digest", lambda: "b" * 64)
+    posts = _sync_posts(args, client_type, monkeypatch)
+    err = capsys.readouterr().err
+    assert len(posts) == 1
+    assert "repo 7: this structural index was built by a different indexer" in err
+    assert f"vigil assess code-index build --repo-id 7 {repo['repo_path']}" in err
+
+
 def test_identical_rebuild_with_the_same_indexer_reuses_the_artifact(index_project) -> None:
     args, _repo, _client = index_project
     code_index.run(args)
