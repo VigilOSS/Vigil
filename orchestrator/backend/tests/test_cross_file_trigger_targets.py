@@ -6,6 +6,8 @@ path that is simply wrong is refused while the hunter still holds the lease.
 """
 from __future__ import annotations
 
+import pytest
+
 from test_code_analysis_api import (
     _claim_file_for_analysis,
     _classify_file,
@@ -136,6 +138,42 @@ def test_an_outside_snapshot_declaration_for_an_admitted_file_is_refused(
 
     assert refused.status_code == 400, refused.text
     assert "'src/helpers.py' is a file in generation" in refused.json()["detail"]
+
+
+@pytest.mark.parametrize("spelling", ["./src/helpers.py", "/src/helpers.py", "././src/helpers.py"])
+def test_a_rooted_or_dotted_spelling_names_the_same_snapshot_file(client, isolate_settings, spelling):
+    """A target is matched by its repository path whatever prefix the hunter
+    typed, so `outside_snapshot` cannot park an admitted file as external."""
+    engagement_key = "2026-11-05-trigger-dotted-spelling"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    _repo, parser, queue_item = _seed(client, engagement_key)
+    base = f"/engagements/{engagement_key}/assessment/code"
+    trigger = {"file_path": spelling, "reason": "shared helper", "vuln_class": "web-app-injection"}
+
+    refused = client.post(
+        f"{base}/analysis-results",
+        json=_result(queue_item, parser, [{**trigger, "outside_snapshot": True}]),
+    )
+    assert refused.status_code == 400, refused.text
+    assert "'src/helpers.py' is a file in generation" in refused.json()["detail"]
+
+    recorded = client.post(f"{base}/analysis-results", json=_result(queue_item, parser, [trigger]))
+    assert recorded.status_code == 201, recorded.text
+    triggers = client.get(f"{base}/triggers").json()
+    assert [(row["target_file_path"], row["target_file_id"] is not None) for row in triggers] == [
+        ("src/helpers.py", True)
+    ]
+
+    resolved = client.post(
+        f"{base}/triggers/resolve",
+        json={
+            "items": [{"file_path": spelling, "vuln_class": "web-app-injection"}],
+            "resolution_status": "not_applicable",
+            "resolution_note": "The helper escapes its input before use.",
+        },
+    )
+    assert resolved.status_code == 200, resolved.text
+    assert resolved.json()["resolved"] == 1
 
 
 def test_outside_snapshot_must_be_a_boolean(client, isolate_settings):

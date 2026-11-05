@@ -3824,6 +3824,15 @@ def _compute_coverage_integrity(
     }
 
 
+def _trigger_repository_path(value: Any) -> str:
+    """A trigger target as its repository path: a rooted or `./` spelling names
+    the same snapshot file, as finding locations do."""
+    path = str(value or "").strip().lstrip("/")
+    while path.startswith("./"):
+        path = path[2:].lstrip("/")
+    return path
+
+
 def _normalize_cross_file_triggers(
     cross_file_triggers: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
@@ -3836,7 +3845,7 @@ def _normalize_cross_file_triggers(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"cross_file_triggers entry {idx} must be an object",
             )
-        file_path = str(trigger.get("file_path", "")).strip()
+        file_path = _trigger_repository_path(trigger.get("file_path", ""))
         vuln_class = str(trigger.get("vuln_class", "")).strip()
         reason = str(trigger.get("reason", "")).strip()
         if not file_path:
@@ -9312,7 +9321,7 @@ def _requeue_selector(item: dict[str, Any], index: int) -> dict[str, Any]:
         selector["trigger_id"] = _require_strict_positive_id(
             item["trigger_id"], field_name=f"items[{index}].trigger_id"
         )
-    file_path = str(item.get("file_path", "")).strip()
+    file_path = _trigger_repository_path(item.get("file_path", ""))
     if file_path:
         selector["file_path"] = file_path
     if len(selector) != 1:
@@ -10082,7 +10091,7 @@ def resolve_code_triggers(
                     resolved += cursor.rowcount
                 continue
 
-            file_path = str(item.get("file_path", item.get("target_file_path", ""))).strip()
+            file_path = _trigger_repository_path(item.get("file_path", item.get("target_file_path", "")))
             if not file_path:
                 not_resolved.append(f"item[{idx}]")
                 continue
