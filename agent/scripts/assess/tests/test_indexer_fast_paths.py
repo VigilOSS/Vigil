@@ -78,8 +78,9 @@ def test_a_sources_only_scanner_keeps_the_source_signal_limit() -> None:
         (re.compile(r"(?<!->)(?<!::)\bunlink\s*\("), {"unlink"}),
         # An optional group requires nothing; the literal after it does.
         (re.compile(r"(?:ab)?cde"), {"cde"}),
-        # Every branch needs one of its own, or the alternation needs none.
-        (re.compile(r"->(?:(?:or)?(?:where|having)Raw|selectRaw)\s*\("), {"where", "having", "selectRaw"}),
+        # Every branch needs one of its own, or the alternation needs none;
+        # a run of literals extends through an alternation of spellings.
+        (re.compile(r"->(?:(?:or)?(?:where|having)Raw|selectRaw)\s*\("), {"whereRaw", "havingRaw", "selectRaw"}),
         (re.compile(r"\$\w+->(?:query|\w+Raw)\s*\("), {"query", "Raw"}),
         (re.compile(r"(?:ab)+c"), {"ab"}),
         (re.compile(r"\b\w+\s*\("), {"("}),
@@ -89,7 +90,9 @@ def test_a_sources_only_scanner_keeps_the_source_signal_limit() -> None:
         (re.compile(r"shell", re.IGNORECASE), None),
         # Bytes compare lowered, matching their ASCII-only case folding.
         (re.compile(rb"(?-i:\bSTDIN\b)|php://stdin", re.IGNORECASE), {b"stdin", b"php://stdin"}),
-        (re.compile(rb"\$_(?:GET|POST)\b", re.IGNORECASE), {b"get", b"post"}),
+        (re.compile(rb"\$_(?:GET|POST)\b", re.IGNORECASE), {b"$_get", b"$_post"}),
+        # A lookaround consumes nothing, so it does not end the run.
+        (re.compile(r"\$_SERVER(?!\s*\[)\b"), {"$_SERVER"}),
     ],
 )
 def test_required_literals_are_what_every_match_contains(pattern, expected) -> None:

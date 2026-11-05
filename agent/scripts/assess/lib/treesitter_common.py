@@ -7,6 +7,7 @@ from re import _constants as _sre_constants  # type: ignore[attr-defined]
 from re import _parser as _sre_parser  # type: ignore[attr-defined]
 from typing import Any
 
+_ZERO_WIDTH = (_sre_constants.AT, _sre_constants.ASSERT, _sre_constants.ASSERT_NOT)
 _REPEATS = (
     _sre_constants.MAX_REPEAT,
     _sre_constants.MIN_REPEAT,
@@ -14,17 +15,59 @@ _REPEATS = (
 )
 
 
+# The most spellings one literal requirement may carry, so the gate stays a
+# short alternation.
+_LITERAL_SPELLINGS_LIMIT = 64
+
+
+def _exact_spellings(items: Any, *, case_blind: bool) -> frozenset[tuple[int, ...]] | None:
+    """Every text a parsed sequence can match, when it is a finite literal set.
+
+    A sequence of literal characters, zero-width assertions and alternations
+    of such sequences matches only its spellings; anything else is None.
+    """
+    spellings: set[tuple[int, ...]] = {()}
+    for op, argument in items:
+        if op is _sre_constants.LITERAL:
+            spellings = {spelling + (argument,) for spelling in spellings}
+            continue
+        if op in _ZERO_WIDTH:
+            continue
+        if op is _sre_constants.BRANCH:
+            choices: set[tuple[int, ...]] = set()
+            for branch in argument[1]:
+                branch_spellings = _exact_spellings(branch, case_blind=case_blind)
+                if branch_spellings is None:
+                    return None
+                choices |= branch_spellings
+        elif op is _sre_constants.SUBPATTERN:
+            _group, add_flags, _del_flags, body = argument
+            if add_flags & _sre_constants.SRE_FLAG_IGNORECASE and not case_blind:
+                return None
+            body_spellings = _exact_spellings(body, case_blind=case_blind)
+            if body_spellings is None:
+                return None
+            choices = set(body_spellings)
+        else:
+            return None
+        if len(spellings) * len(choices) > _LITERAL_SPELLINGS_LIMIT:
+            return None
+        spellings = {spelling + choice for spelling in spellings for choice in choices}
+    return frozenset(spellings)
+
+
 def _literal_need(items: Any, *, case_blind: bool) -> frozenset[Any] | None:
     """Literals one of which every match of a parsed sequence contains.
 
-    A run of consecutive literal characters is matched verbatim; a group, an
-    alternation all of whose branches need a literal, and a repeat that must
-    match at least once pass their own requirement up. Anything else ends the
-    run. The longest-shortest candidate wins, so the literal is as selective
-    as the sequence allows.
+    A run of literal characters, extended through any alternation of literal
+    spellings it meets (`\\$_(?:GET|POST)` needs `$_GET` or `$_POST`), is
+    matched verbatim. A group, an alternation all of whose branches need a
+    literal, and a repeat that must match at least once pass their own
+    requirement up. Anything else ends the run. The longest-shortest
+    candidate wins, so the literal is as selective as the sequence allows.
     """
     best: frozenset[Any] | None = None
-    run: list[int] = []
+    run: set[tuple[int, ...]] = {()}
 
     def offer(candidate: frozenset[Any] | None) -> None:
         nonlocal best
@@ -32,16 +75,26 @@ def _literal_need(items: Any, *, case_blind: bool) -> frozenset[Any] | None:
             best = candidate
 
     def flush() -> None:
-        if run:
-            offer(frozenset({tuple(run)}))
-            run.clear()
+        nonlocal run
+        if all(run):
+            offer(frozenset(run))
+        run = {()}
 
     for op, argument in items:
         if op is _sre_constants.LITERAL:
-            run.append(argument)
+            run = {spelling + (argument,) for spelling in run}
             continue
-        if op is _sre_constants.AT:
-            # A zero-width anchor leaves its neighbours adjacent.
+        if op in _ZERO_WIDTH:
+            # An anchor or a lookaround consumes nothing, so its neighbours
+            # are adjacent in the matched text.
+            continue
+        spellings = (
+            _exact_spellings([(op, argument)], case_blind=case_blind)
+            if op in (_sre_constants.BRANCH, _sre_constants.SUBPATTERN)
+            else None
+        )
+        if spellings is not None and len(run) * len(spellings) <= _LITERAL_SPELLINGS_LIMIT:
+            run = {spelling + choice for spelling in run for choice in spellings}
             continue
         flush()
         if op is _sre_constants.SUBPATTERN:
