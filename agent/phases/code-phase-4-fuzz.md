@@ -100,7 +100,7 @@ summary is supplemental and never substitutes for the current envelope.
 
 **Operator-provided context:**
 - Build system type (Makefile/CMake/etc.) and the audited Kali toolchain-check result
-- Existing fuzzer inventory paths (from `rg 'LLVMFuzzerTestOneInput'` or `ls oss-fuzz/`)
+- Existing fuzzer inventory paths (from `rg -l 'LLVMFuzzerTestOneInput' "$snapshot_path"` or `ls "$snapshot_path/oss-fuzz/"`)
 - CWE pattern references: `buffer-overflow.md`, `format-string.md`, `integer-overflow.md`,
   `null-dereference.md`, `type-confusion.md`, `uninitialized-memory.md`, `use-after-free.md`, and
   `fuzz-harness-patterns.md`

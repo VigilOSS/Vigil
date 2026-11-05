@@ -28,11 +28,12 @@ All host-side:
 - `wc -l` — line counts for size estimation
 - `file` — file type identification for ambiguous extensions
 
-Run filesystem commands with `snapshot_path` as the explicit root or change into it first. Do not
-run ambient Git against `source_origin_path`; it is a mutable provenance location, not analysis
-state. `vigil assess code-history` is the one history surface: it binds every read to the HEAD the
-sealed snapshot recorded, passes Git only explicit commit ids, runs Git under Vigil-written
-configuration, and records its budgets and truncation in a receipt.
+Pass the absolute `snapshot_path` as the root of every filesystem command; a `cd` may not persist
+between calls (`agent/shared-constraints-code.md` §3). Do not run ambient Git against
+`source_origin_path`; it is a mutable provenance location, not analysis state.
+`vigil assess code-history` is the one history surface: it binds every read to the HEAD the sealed
+snapshot recorded, passes Git only explicit commit ids, runs Git under Vigil-written configuration,
+and records its budgets and truncation in a receipt.
 
 ## Methodology
 
@@ -41,9 +42,9 @@ configuration, and records its budgets and truncation in a receipt.
 Enumerate the full directory tree. Record file count and total line count per directory. Identify top-level organization pattern (flat, modular, monorepo, workspace).
 
 ```bash
-find . -type f -not -path './.git/*' | head -500
-find . -type d -not -path './.git/*' | sort
-find . -type f -name '*.c' -o -name '*.h' -o -name '*.rs' -o -name '*.go' -o -name '*.py' -o -name '*.js' -o -name '*.ts' | xargs wc -l | tail -1
+find "$snapshot_path" -type f -not -path '*/.git/*' | head -500
+find "$snapshot_path" -type d -not -path '*/.git/*' | sort
+find "$snapshot_path" -type f \( -name '*.c' -o -name '*.h' -o -name '*.rs' -o -name '*.go' -o -name '*.py' -o -name '*.js' -o -name '*.ts' \) | xargs wc -l | tail -1
 ```
 
 ### Step 2: Read Build System Files
@@ -160,24 +161,24 @@ For web applications, identify framework-specific route handlers and middleware:
 
 | Framework | Entry Point Pattern | Search Command |
 |-----------|---|---|
-| Django | `def view(request)`, `class ViewSet`, `path()`/`url()` in urls.py | `rg "def \w+\(request" --type py` and `rg "path\(\|url\(" urls.py` |
-| Flask | `@app.route()`, `@blueprint.route()` | `rg "@\w+\.route\(" --type py` |
-| FastAPI | `@app.get/post/put/delete()`, `@router.` | `rg "@(app\|router)\.(get\|post\|put\|delete\|patch)" --type py` |
-| Express | `app.get/post()`, `router.get/post()` | `rg "(app\|router)\.(get\|post\|put\|delete\|patch)\(" --type js` |
-| Next.js | `export default function` / `export async function GET` in route.ts/page.tsx | `rg "export.*(GET\|POST\|PUT\|DELETE\|default)" --type ts` |
-| Spring | `@RestController`, `@GetMapping`, `@PostMapping` | `rg "@(Rest)?Controller\|@(Get\|Post\|Put\|Delete\|Patch)Mapping" --type java` |
-| Rails | Controller actions, `resources :` in routes.rb | `rg "def (index\|show\|create\|update\|destroy\|new\|edit)" --type ruby` |
-| Go net/http | `http.HandleFunc`, `mux.Handle`, `mux.HandleFunc` | `rg "(HandleFunc\|\.Handle)\(" --type go` |
-| Gin (Go) | `r.GET/POST()`, `group.` | `rg "\.(GET\|POST\|PUT\|DELETE\|PATCH)\(" --type go` |
+| Django | `def view(request)`, `class ViewSet`, `path()`/`url()` in urls.py | `rg "def \w+\(request" --type py "$snapshot_path"` and `rg "path\(\|url\(" -g urls.py "$snapshot_path"` |
+| Flask | `@app.route()`, `@blueprint.route()` | `rg "@\w+\.route\(" --type py "$snapshot_path"` |
+| FastAPI | `@app.get/post/put/delete()`, `@router.` | `rg "@(app\|router)\.(get\|post\|put\|delete\|patch)" --type py "$snapshot_path"` |
+| Express | `app.get/post()`, `router.get/post()` | `rg "(app\|router)\.(get\|post\|put\|delete\|patch)\(" --type js "$snapshot_path"` |
+| Next.js | `export default function` / `export async function GET` in route.ts/page.tsx | `rg "export.*(GET\|POST\|PUT\|DELETE\|default)" --type ts "$snapshot_path"` |
+| Spring | `@RestController`, `@GetMapping`, `@PostMapping` | `rg "@(Rest)?Controller\|@(Get\|Post\|Put\|Delete\|Patch)Mapping" --type java "$snapshot_path"` |
+| Rails | Controller actions, `resources :` in routes.rb | `rg "def (index\|show\|create\|update\|destroy\|new\|edit)" --type ruby "$snapshot_path"` |
+| Go net/http | `http.HandleFunc`, `mux.Handle`, `mux.HandleFunc` | `rg "(HandleFunc\|\.Handle)\(" --type go "$snapshot_path"` |
+| Gin (Go) | `r.GET/POST()`, `group.` | `rg "\.(GET\|POST\|PUT\|DELETE\|PATCH)\(" --type go "$snapshot_path"` |
 
 Also identify middleware/interceptor registration patterns — these control auth, CORS, rate limiting, and request parsing for all routes:
 
 | Framework | Middleware Pattern | Search Command |
 |-----------|---|---|
-| Django | `MIDDLEWARE` in settings.py, `@decorator` on views | `rg "MIDDLEWARE" settings.py` |
-| Express | `app.use()` | `rg "app\.use\(" --type js` |
-| Spring | `@Component` + `Filter`/`HandlerInterceptor` | `rg "implements.*(Filter\|HandlerInterceptor)" --type java` |
-| FastAPI | `Depends()`, `@app.middleware` | `rg "Depends\(\|@app\.middleware" --type py` |
+| Django | `MIDDLEWARE` in settings.py, `@decorator` on views | `rg "MIDDLEWARE" -g settings.py "$snapshot_path"` |
+| Express | `app.use()` | `rg "app\.use\(" --type js "$snapshot_path"` |
+| Spring | `@Component` + `Filter`/`HandlerInterceptor` | `rg "implements.*(Filter\|HandlerInterceptor)" --type java "$snapshot_path"` |
+| FastAPI | `Depends()`, `@app.middleware` | `rg "Depends\(\|@app\.middleware" --type py "$snapshot_path"` |
 
 ### Step 8: Map Trust Boundaries
 

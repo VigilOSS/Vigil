@@ -105,10 +105,11 @@ structural-review debt, even when the architect classified the file as `skip`.
 
 ## 3. Full Sealed-Source Access
 
-Source code is read directly beneath `snapshot_path` via host Bash or client file tools. Keep that
-root explicit in commands (or change into it first); the mutable origin checkout is never an
-analysis root. This is NOT target-facing network work -- `vigil assess kali` is not needed for
-reading source files.
+Source code is read directly beneath `snapshot_path` via host Bash or client file tools. Pass the
+absolute `snapshot_path` (or a path beneath it) as the search/read root in every command; a client
+can reset the shell's working directory between calls, so a relative path or an earlier `cd` can
+silently search another tree. The mutable origin checkout is never an analysis root. This is NOT
+target-facing network work -- `vigil assess kali` is not needed for reading source files.
 
 Fuzz compilation never makes the sealed snapshot writable. The generation-bound derived-build
 procedure lives in `agent/skills/code-fuzz-campaign/SKILL.md`; it uses out-of-tree outputs when the
@@ -169,7 +170,11 @@ HEAD the sealed snapshot recorded, within recorded budgets, and writes receipts 
 
 2. **grep/rg** (call sites, patterns, and anything ctags cannot resolve)
    - Use for: finding all callers, tracing data flow, cross-module references
-   - Example: `rg 'packet_read_with_status\(' --type c` for call sites
+   - Example: `rg -n 'packet_read_with_status\(' --type c "$snapshot_path"` for call sites
+   - ripgrep recurses by default and its `-r` is `--replace`: `rg -rn foo` prints `n` in place of
+     each match, and `rg -r foo src` searches for `src`. Use `-n`/`-l`/`-C<n>`. ripgrep also skips
+     hidden paths and honours a repository's `.ignore`/`.rgignore`; add `-uu` before treating an
+     empty result as meaningful.
 
 3. **Direct file reads** when ctags/grep point to a location
 
@@ -202,7 +207,10 @@ strongest supported leads to a terminal evidence-backed disposition, kill a disp
 the exact guard/type/path evidence, and retain a genuinely inconclusive lead as `suspicious` or
 `needs-context` rather than converting uncertainty into `clean`. Account durably for every scoped
 file and analyzed function; an empty query, truncated index, failed tool, or absent in-repo caller
-is not proof of absence.
+is not proof of absence. Before you write that a caller, guard, sink, registration, or file is
+absent, rerun the same search (same root, flags, and filters) for something you know is present,
+such as the symbol's own definition, and cite both commands; an empty result counts only when that
+control matches.
 
 Before recording or escalating a finding, prove the applicable shipped product path, exact taint
 trace or supported operation/state/lifetime sequence, failed invariant, feasible preconditions,

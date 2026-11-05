@@ -82,11 +82,11 @@ From the abstract pattern, generate multiple concrete search queries to cast a w
 
 ```bash
 # Find all callers of the vulnerable sink
-rg "memcpy\s*\(" --type c -l
+rg "memcpy\s*\(" --type c -l "$snapshot_path"
 
 # Find project-specific wrappers
-rg "memcpy|memmove|bcopy" --type c -l  # files that use these
-rg "void\s+\w+copy\w*\s*\(" --type c   # functions with "copy" in name
+rg "memcpy|memmove|bcopy" --type c -l "$snapshot_path"  # files that use these
+rg "void\s+\w+copy\w*\s*\(" --type c "$snapshot_path"  # functions with "copy" in name
 ```
 
 **Code shape queries:**
@@ -96,11 +96,11 @@ rg "void\s+\w+copy\w*\s*\(" --type c   # functions with "copy" in name
 
 ```bash
 # Find strlen-derived size used in memcpy
-rg "strlen\(.+\)" --type c -l
-rg "len\s*=\s*strlen" --type c
+rg "strlen\(.+\)" --type c -l "$snapshot_path"
+rg "len\s*=\s*strlen" --type c "$snapshot_path"
 
 # Find allocation-copy patterns (common source of mismatched sizes)
-rg "malloc.*strlen" --type c -A5
+rg "malloc.*strlen" --type c -A5 "$snapshot_path"
 ```
 
 **Anti-pattern queries (absence of guards):**

@@ -81,10 +81,10 @@ caller search silently kills valid library/framework, CLI, and plugin defects.
 
 ```bash
 # Find all callers of the vulnerable function
-rg "function_name\s*\(" --type c -n
+rg "function_name\s*\(" --type c -n "$snapshot_path"
 
 # Trace upward through the call chain
-rg "caller_function\s*\(" --type c -n
+rg "caller_function\s*\(" --type c -n "$snapshot_path"
 
 # Use ctags for definition lookup
 grep '^parse_header_value\t' "$ctags_path"
@@ -158,13 +158,13 @@ production reachability from the built/exported product path, not from where the
 
 ```bash
 # Check for #ifdef around vulnerable code
-rg "#ifdef|#if defined|#if " [vulnerable-file] -n -C3
+rg "#ifdef|#if defined|#if " "$snapshot_path/[vulnerable-file]" -n -C3
 
 # Check build system for feature flags
-rg "FEATURE_NAME|CONFIG_OPTION" Makefile CMakeLists.txt Cargo.toml configure.ac
+rg "FEATURE_NAME|CONFIG_OPTION" -g Makefile -g CMakeLists.txt -g Cargo.toml -g configure.ac "$snapshot_path"
 
 # Check default configuration
-rg "FEATURE_NAME" .config defconfig
+rg "FEATURE_NAME" -g .config -g defconfig "$snapshot_path"
 ```
 
 **Decision:**
@@ -560,8 +560,8 @@ When you persist structured verification state, include:
       "tool": "mixed",
       "queries": [
         "grep '^parse_header_value\t' tags",
-        "rg 'parse_header_value\\s*\\(' --type c",
-        "rg 'validate_header_length\\s*\\(' --type c",
+        "rg 'parse_header_value\\s*\\(' --type c \"$snapshot_path\"",
+        "rg 'validate_header_length\\s*\\(' --type c \"$snapshot_path\"",
         "Read http.c lines 80-100",
         "Read test/http_tests.c test_oversized_header"
       ],
