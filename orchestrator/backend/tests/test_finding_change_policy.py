@@ -410,6 +410,39 @@ def test_reopening_a_verified_finding_to_draft_invalidates_it(client, isolate_se
     assert {"axis": "reopen", "effect": "invalidate"} in _change_policy(transition)["axes"]
 
 
+@pytest.mark.parametrize(
+    ("status", "patch", "effect", "outcome"),
+    [
+        pytest.param(None, {"severity": "critical"}, "invalidate", "keep", id="unreviewed-severity"),
+        pytest.param("blocked", {"summary": "Reworded."}, "claim_review", "keep", id="blocked-summary"),
+        pytest.param("confirmed", {"summary": "Reworded."}, "claim_review", "claim_review",
+                     id="confirmed-summary"),
+        pytest.param("confirmed", {"severity": "critical"}, "invalidate", "invalidate",
+                     id="confirmed-severity"),
+    ],
+)
+def test_transition_records_what_the_write_did_to_the_verdict(
+    client, isolate_settings, status, patch, effect, outcome
+):
+    """The audit carries the classified effect and the verdict outcome separately.
+
+    An unreviewed draft has no verdict a severity edit could invalidate, so its
+    history must not read as an invalidation; the outcome matches the write
+    response's verification_effect.
+    """
+    _seed(client, isolate_settings)
+    _record(client, "VA-336")
+    if status is not None:
+        _put_in_status(client, "VA-336", status)
+
+    response = client.patch(f"{BASE}/findings/VA-336", json=patch)
+
+    assert response.status_code == 200, response.text
+    assert response.json()["verification_effect"] == outcome
+    policy = _change_policy(_latest_transition(client, "VA-336"))
+    assert (policy["effect"], policy["outcome"]) == (effect, outcome)
+
+
 # --- one effect everywhere -----------------------------------------------------
 
 _STATUSES = ["confirmed", "downgraded", "pending_runtime_proof", "blocked", "disputed"]

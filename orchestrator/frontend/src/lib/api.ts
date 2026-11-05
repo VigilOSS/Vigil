@@ -362,10 +362,14 @@ export type AssessmentVerificationAudit = {
 /** What a finding write did to its verdict; the backend change policy owns it. */
 export type FindingVerificationEffect = "keep" | "claim_review" | "invalidate";
 
-/** `metadata.change_policy` on a finding transition: each changed axis and its effect. */
+/**
+ * `metadata.change_policy` on a finding transition: the classified effect, what it
+ * did to the stored verdict (`outcome`), and each changed axis with its effect.
+ */
 export type FindingChangePolicy = {
   version: number;
   effect: FindingVerificationEffect;
+  outcome: FindingVerificationEffect;
   axes: { axis: string; effect: FindingVerificationEffect }[];
 };
 

@@ -203,11 +203,17 @@ class FindingChange:
     def axes_with(self, effect: Effect) -> list[str]:
         return [axis for axis, axis_effect in self.axes if axis_effect is effect]
 
-    def audit(self) -> dict[str, Any]:
-        """The ``metadata.change_policy`` block written on the transition row."""
+    def audit(self, outcome: Outcome) -> dict[str, Any]:
+        """The ``metadata.change_policy`` block written on the transition row.
+
+        ``effect`` is the classification; ``outcome`` is what it did to the stored
+        verdict (the write response's ``verification_effect``). They differ when
+        the finding holds no verdict the effect applies to.
+        """
         return {
             "version": CHANGE_POLICY_VERSION,
             "effect": self.effect.value,
+            "outcome": outcome.value,
             "axes": [{"axis": axis, "effect": effect.value} for axis, effect in self.axes],
         }
 

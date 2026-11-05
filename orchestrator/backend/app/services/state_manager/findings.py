@@ -1128,7 +1128,7 @@ def _apply_relationship_change(
             artifact_ref="",
             metadata={
                 "relationship_change": relationship_change,
-                "change_policy": change.audit(),
+                "change_policy": change.audit(outcome),
             },
             before_content=_finding_content_snapshot(finding_record),
             after_content=_finding_content_snapshot(updated),
@@ -1986,9 +1986,7 @@ def create_finding(
                         slug=str(existing["slug"]),
                     ),
                 )
-            transition_metadata = {
-                **(transition_metadata or {}), "change_policy": change.audit(),
-            }
+            transition_metadata = dict(transition_metadata or {})
             if relationship_changes:
                 transition_metadata["relationship_change"] = (
                     relationship_changes[0]
@@ -2040,6 +2038,7 @@ def create_finding(
             elif relationship_changes and transition_action is None:
                 transition_action = "relationship_recorded"
                 transition_reason_code = transition_reason_code or "relationship_changed"
+            transition_metadata["change_policy"] = change.audit(outcome)
             verdict = finding_change_policy.response_fields(change, outcome)
         after_state = _finding_state_snapshot(finding)
         after_content = _finding_content_snapshot(finding)
@@ -3035,7 +3034,7 @@ def relocate_finding(
                 "from": from_location,
                 "to": canonical_location,
                 "verification_invalidated": verification_invalidated,
-                "change_policy": change.audit(),
+                "change_policy": change.audit(outcome),
             },
             before_content=before_content,
             after_content=_finding_content_snapshot(row),
@@ -3660,7 +3659,7 @@ def merge_findings(
                     "source_slug": source_slug,
                     "verification_invalidated": False,
                     "changed_axes": change.changed_axes,
-                    "change_policy": change.audit(),
+                    "change_policy": change.audit(outcome),
                 },
                 before_content=target_before_content,
                 after_content=target_after_content,

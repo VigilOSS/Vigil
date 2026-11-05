@@ -3200,10 +3200,17 @@ function hasVerificationAudit(audit: AssessmentVerificationAudit | undefined): b
 }
 
 const VERIFICATION_EFFECTS: readonly FindingVerificationEffect[] = ["keep", "claim_review", "invalidate"];
-const VERIFICATION_EFFECT_LABELS: Record<FindingVerificationEffect, string> = {
+// What the write did to the stored verdict.
+const VERIFICATION_OUTCOME_LABELS: Record<FindingVerificationEffect, string> = {
   keep: "Verdict kept",
-  claim_review: "Claim review",
+  claim_review: "Claim review pending",
   invalidate: "Verification invalidated",
+};
+// The rule an axis carries; it applies only when the finding holds a verdict it affects.
+const AXIS_EFFECT_LABELS: Record<FindingVerificationEffect, string> = {
+  keep: "Keeps verdict",
+  claim_review: "Needs claim review",
+  invalidate: "Invalidates verdict",
 };
 
 function isVerificationEffect(value: unknown): value is FindingVerificationEffect {
@@ -3217,13 +3224,15 @@ function parseChangePolicy(metadataJson: string): FindingChangePolicy | null {
     const value = (metadata as Record<string, unknown>).change_policy;
     if (!value || typeof value !== "object" || Array.isArray(value)) return null;
     const policy = value as Record<string, unknown>;
-    if (!isVerificationEffect(policy.effect) || !Array.isArray(policy.axes)) return null;
+    if (
+      !isVerificationEffect(policy.effect) || !isVerificationEffect(policy.outcome) || !Array.isArray(policy.axes)
+    ) return null;
     const axes = policy.axes.flatMap((item: unknown) => {
       if (!item || typeof item !== "object") return [];
       const { axis, effect } = item as Record<string, unknown>;
       return typeof axis === "string" && isVerificationEffect(effect) ? [{ axis, effect }] : [];
     });
-    return { version: Number(policy.version) || 0, effect: policy.effect, axes };
+    return { version: Number(policy.version) || 0, effect: policy.effect, outcome: policy.outcome, axes };
   } catch {
     return null;
   }
@@ -3382,10 +3391,10 @@ function ChangePolicyAudit({ policy }: { policy: FindingChangePolicy }) {
     <div className="tl-audit-record">
       <div className="tl-audit-title">Verdict effect</div>
       <dl>
-        <dt>Effect</dt><dd>{VERIFICATION_EFFECT_LABELS[policy.effect]}</dd>
+        <dt>Outcome</dt><dd>{VERIFICATION_OUTCOME_LABELS[policy.outcome]}</dd>
         {policy.axes.map(({ axis, effect }) => (
           <Fragment key={axis}>
-            <dt><code>{axis}</code></dt><dd>{VERIFICATION_EFFECT_LABELS[effect]}</dd>
+            <dt><code>{axis}</code></dt><dd>{AXIS_EFFECT_LABELS[effect]}</dd>
           </Fragment>
         ))}
       </dl>

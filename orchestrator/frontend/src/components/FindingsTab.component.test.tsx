@@ -365,7 +365,7 @@ describe("finding change policy audit", () => {
       verification_event_version: 2, from_severity: "high", to_severity: "high",
       reason_code: "claim_text_changed", reason_text: "", artifact_ref: "",
       metadata_json: JSON.stringify({ change_policy: {
-        version: 1, effect: "claim_review",
+        version: 1, effect: "claim_review", outcome: "claim_review",
         axes: [{ axis: "title", effect: "keep" }, { axis: "summary", effect: "claim_review" }],
       } }),
       created_at: new Date().toISOString(),
@@ -390,11 +390,49 @@ describe("finding change policy audit", () => {
 
     fireEvent.click(screen.getByText("View details"));
     expect(await screen.findByText("Verdict effect")).toBeTruthy();
-    // The overall effect, then the summary axis that raised it.
-    expect(screen.getAllByText("Claim review")).toHaveLength(2);
-    expect(screen.getByText("summary")).toBeTruthy();
-    expect(screen.getByText("title").closest("dt")?.nextElementSibling?.textContent).toBe("Verdict kept");
+    // What happened to the verdict, then the rule each changed axis carries.
+    expect(screen.getByText("Outcome").nextElementSibling?.textContent).toBe("Claim review pending");
+    expect(screen.getByText("summary").closest("dt")?.nextElementSibling?.textContent).toBe("Needs claim review");
+    expect(screen.getByText("title").closest("dt")?.nextElementSibling?.textContent).toBe("Keeps verdict");
     expect(container.textContent).not.toContain("[object Object]");
+  });
+
+  it("does not report an invalidation when the finding held no verdict", async () => {
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+      id: 15, actor: "operator", action: "details_patched",
+      from_workflow_status: "active", to_workflow_status: "active",
+      from_verification_status: "unreviewed", to_verification_status: "unreviewed",
+      verification_event_version: 0, from_severity: "high", to_severity: "critical",
+      reason_code: "", reason_text: "", artifact_ref: "",
+      metadata_json: JSON.stringify({ change_policy: {
+        version: 1, effect: "invalidate", outcome: "keep",
+        axes: [{ axis: "severity", effect: "invalidate" }],
+      } }),
+      created_at: new Date().toISOString(),
+      verification_audit: {
+        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
+        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
+        record_limit: 20, truncated: false,
+      },
+    });
+    const { container } = render(
+      <HistoryPane engagementKey="demo" findingSlug="VA-002" loading={false} error={null}
+        transitions={[{
+          id: 15, actor: "operator", action: "details_patched",
+          from_workflow_status: "active", to_workflow_status: "active",
+          from_verification_status: "unreviewed", to_verification_status: "unreviewed",
+          verification_event_version: 0, from_severity: "high", to_severity: "critical",
+          reason_code: "", artifact_ref: "", created_at: new Date().toISOString(),
+          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("View details"));
+    expect(await screen.findByText("Verdict effect")).toBeTruthy();
+    expect(screen.getByText("Outcome").nextElementSibling?.textContent).toBe("Verdict kept");
+    expect(screen.getByText("severity").closest("dt")?.nextElementSibling?.textContent).toBe("Invalidates verdict");
+    expect(container.textContent).not.toContain("Verification invalidated");
   });
 });
 
