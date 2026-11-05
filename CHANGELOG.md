@@ -5,7 +5,7 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
-## [Unreleased]
+## [2.4.0] - 2026-11-05
 
 After upgrading, run `vigil assess code-index build` and then `code-index sync` for each code
 repository in an existing engagement. Re-ingest a repository with `.inc`, `.phtml`, `.module`,
