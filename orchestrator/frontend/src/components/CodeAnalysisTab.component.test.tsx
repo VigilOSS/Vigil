@@ -665,6 +665,21 @@ describe("CodeAnalysisTab results", () => {
     await waitFor(() => expect(within(record).getByRole("button", { name: /^Source anchors/ }).textContent).toBe("Source anchors3"));
   });
 
+  it("counts cited file-scope segments apart from reviewed functions", async () => {
+    go("#/engagements/demo?tab=code&view=results&result=13&dtab=anchors");
+    const refs = [
+      { callable_key: "t1", file_id: 1, file_path: "public/report.php", name: "<top-level>", qualified_name: "<top-level>", start_line: 2, end_line: 3 },
+      { callable_key: "f1", file_id: 1, file_path: "public/report.php", name: "acme_render", qualified_name: "acme_render", start_line: 5, end_line: 8 },
+      { callable_key: "t2", file_id: 1, file_path: "public/report.php", name: "<top-level>", qualified_name: "<top-level>", start_line: 10, end_line: 10 },
+    ];
+    vi.mocked(codeApi.getCodeAnalysisResult).mockResolvedValue(
+      detailOf(result(13, { file_path: "public/report.php", callable_refs: refs, callable_ref_count: 3 })),
+    );
+    renderTab();
+    const record = await screen.findByRole("region", { name: "Analysis result record" });
+    expect(await within(record).findByText("1 function and 2 file-scope segments reviewed")).toBeTruthy();
+  });
+
   it("opens a deep-linked result and keeps the list on the page that holds it", async () => {
     go("#/engagements/demo?tab=code&view=results&result=31&dtab=review");
     vi.mocked(codeApi.getCodeAnalysisResultPosition).mockResolvedValue({ index: 30, total: 60, previous: result(30), next: result(32) });

@@ -19,7 +19,7 @@ import { JsonView } from "../JsonView";
 import { RecordBody, RecordCopyLinkButton, RecordHeader, RecordTabs } from "../record/RecordView";
 import { CardSkeleton } from "../Skeletons";
 import { EmptyState, StatusPill, humanizeStatus, statusTone } from "../ui";
-import { familyLabel, receiptAnchorNote } from "./codeLabels";
+import { familyLabel, receiptAnchorNote, reviewedCallablesLabel } from "./codeLabels";
 import { codeViewHref } from "./useCodeRoute";
 
 /** The result record's sections (`dtab` in the URL). */
@@ -229,7 +229,7 @@ export function CodeResultRecord({ engagementKey, resultId, row, section, onSect
             {callableCount > 0 ? (
               <>
                 <p className="section-title">
-                  {callableCount.toLocaleString()} {callableCount === 1 ? "function" : "functions"} reviewed
+                  {reviewedCallablesLabel(shown.callable_refs, callableCount)}
                 </p>
                 <ul className="cv-anchor-list">
                   {shown.callable_refs.map((ref) => (

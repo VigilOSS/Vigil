@@ -123,6 +123,29 @@ export function receiptAnchorNote(bindingStatus: string): string {
   return "No source anchors";
 }
 
+/** The structural index's name for a file-scope segment it publishes as a callable. */
+export const TOP_LEVEL_CALLABLE_NAME = "<top-level>";
+
+function counted(count: number, singular: string, plural: string): string {
+  return `${count.toLocaleString()} ${count === 1 ? singular : plural}`;
+}
+
+/**
+ * The heading over a receipt's cited callables. File-scope segments are
+ * callables but not functions, so they are counted apart once every ref is
+ * listed; a partial listing can only give the total.
+ */
+export function reviewedCallablesLabel(refs: { name: string }[], total: number): string {
+  if (refs.length < total) return `${counted(total, "callable", "callables")} reviewed`;
+  const segments = refs.filter((ref) => ref.name === TOP_LEVEL_CALLABLE_NAME).length;
+  const functions = refs.length - segments;
+  const parts = [
+    ...(functions > 0 ? [counted(functions, "function", "functions")] : []),
+    ...(segments > 0 ? [counted(segments, "file-scope segment", "file-scope segments")] : []),
+  ];
+  return `${parts.join(" and ")} reviewed`;
+}
+
 const FAMILY_WORDS: Record<string, string> = {
   dos: "DoS",
   ssrf: "SSRF",
