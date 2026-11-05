@@ -2889,6 +2889,25 @@ def _node_server_handler_arguments(
     return actual[-1:]
 
 
+def _php_controller_classes(classes: list[dict[str, Any]], file_path: str) -> set[int]:
+    """Ids of the classes whose public methods Laravel routes to.
+
+    Under an `Http\\Controllers` namespace or path any named class may be
+    routed, whatever it extends or is called.
+    """
+    in_controllers = "/http/controllers/" in f"/{file_path}".lower()
+    return {
+        id(cls)
+        for cls in classes
+        if not cls["name"].startswith("<anonymous@")
+        and (
+            in_controllers
+            or re.search(r"(?:^|\\)http\\controllers(?:\\|$)", cls["_php_namespace"], re.IGNORECASE)
+            or (cls["name"].endswith("Controller") and (cls.get("extends") or "").endswith("Controller"))
+        )
+    }
+
+
 def _detect_entry_points(
     tree: Any,
     functions: list[dict[str, Any]],
@@ -2896,6 +2915,7 @@ def _detect_entry_points(
     language: str,
     source_lines: list[str],
     source: bytes,
+    file_path: str = "",
 ) -> list[dict[str, Any]]:
     """Identify entry-point functions via annotations, names, and line patterns."""
     entry_points: list[dict[str, Any]] = []
@@ -2943,6 +2963,7 @@ def _detect_entry_points(
                 js_server_calls.append((node, handlers))
     go_http_aliases = _go_http_aliases(source_lines) if language == "go" else set()
     tornado_handlers = _tornado_handler_classes(classes) if language == "python" else set()
+    php_controllers = _php_controller_classes(classes, file_path) if language == "php" else set()
     # Nested callables share their lines -- a minified bundle is one line every
     # callable spans -- so each pattern reads each line once.
     line_pattern_hits: dict[tuple[str, int], bool] = {}
@@ -2972,13 +2993,11 @@ def _detect_entry_points(
             continue
         if (
             language == "php"
-            and cls is not None
-            and cls["name"].endswith("Controller")
-            and (cls.get("extends") or "").endswith("Controller")
-            and not func.get("is_closure")
-            and not func["name"].startswith("__")
-            and not func["annotations"]
             and not any(modifier in {"private", "protected"} for modifier in func["modifiers"])
+            and id(cls) in php_controllers
+            and not func.get("is_closure")
+            and (func["name"] == "__invoke" or not func["name"].startswith("__"))
+            and not func["annotations"]
         ):
             entry_points.append({
                 "name": func["name"],
@@ -5663,7 +5682,7 @@ def index_file(
             tree, functions, effective_lang, source_lines, source
         )
         entry_points = _detect_entry_points(
-            tree, functions, classes, effective_lang, source_lines, source
+            tree, functions, classes, effective_lang, source_lines, source, file_path
         )
         entry_points.extend(
             _detect_top_level_entry_points(

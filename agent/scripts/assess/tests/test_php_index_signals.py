@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import time
+
 import pytest
 
+from assess.lib import treesitter_index
 from assess.lib.treesitter_index import index_file
 from assess.lib.treesitter_streaming import StreamingSecurityScanner
 
@@ -49,6 +52,101 @@ class CacheController {
 
     assert indexed["analysis_status"] == "complete"
     assert not any(item["kind"] == "laravel_action" for item in indexed["entry_points"])
+
+
+def _laravel_actions(path: str, source: bytes) -> set[str]:
+    indexed = index_file(path, "php", source)
+    assert indexed["analysis_status"] == "complete"
+    return {item["name"] for item in indexed["entry_points"] if item["kind"] == "laravel_action"}
+
+
+@pytest.mark.parametrize("path,namespace", [
+    ("app/Http/Controllers/Billing/InvoiceController.php", "namespace App\\Http\\Controllers\\Billing;"),
+    ("modules/billing/InvoiceController.php", "namespace Acme\\Billing\\Http\\Controllers;"),
+    ("app/Http/Controllers/Billing/InvoiceController.php", ""),
+])
+def test_controller_under_a_controllers_namespace_or_path_extending_a_project_base_is_entry(
+    path: str, namespace: str,
+) -> None:
+    source = f"""<?php
+{namespace}
+class InvoiceController extends ApiBase {{
+    public function show($id) {{ return $id; }}
+}}
+""".encode()
+
+    assert _laravel_actions(path, source) == {"show"}
+
+
+def test_controller_with_no_parent_under_a_controllers_namespace_is_entry() -> None:
+    source = b"""<?php
+namespace App\\Http\\Controllers;
+class HealthController {
+    public function index() { return 'ok'; }
+}
+"""
+
+    assert _laravel_actions("app/Http/Controllers/HealthController.php", source) == {"index"}
+
+
+@pytest.mark.parametrize("name,parent", [
+    ("ProvisionServer", ""),
+    ("ShowProfileController", "extends Controller"),
+])
+def test_invokable_controller_invoke_is_entry(name: str, parent: str) -> None:
+    source = f"""<?php
+namespace App\\Http\\Controllers;
+class {name} {parent} {{
+    public function __construct() {{}}
+    public function __invoke($request) {{ return $request; }}
+}}
+""".encode()
+
+    indexed = index_file(f"app/Http/Controllers/{name}.php", "php", source)
+
+    assert {(item["name"], item["kind"]) for item in indexed["entry_points"]} == {
+        ("__construct", "constructor"),
+        ("__invoke", "laravel_action"),
+    }
+
+
+@pytest.mark.parametrize("path,declaration,action", [
+    ("app/Http/Controllers/ExportReport.php", "class ExportReport { public function run() { return 2; } }", "run"),
+    ("app/Http/Controllers/Requests/StoreUserRequest.php",
+     "class StoreUserRequest extends FormRequest { public function rules() { return []; } }", "rules"),
+])
+def test_any_named_class_under_a_controllers_namespace_routes_its_public_methods(
+    path: str, declaration: str, action: str,
+) -> None:
+    source = f"<?php\nnamespace App\\Http\\Controllers;\n{declaration}\n".encode()
+
+    assert _laravel_actions(path, source) == {action}
+
+
+def test_class_ending_in_controller_outside_a_controllers_namespace_is_not_entry() -> None:
+    source = b"""<?php
+namespace Acme\\Cache;
+class CacheController extends Store {
+    public function flush() { return 1; }
+    public function __invoke() { return 2; }
+}
+"""
+
+    assert _laravel_actions("src/Cache/CacheController.php", source) == set()
+
+
+def test_protected_and_private_methods_of_a_controllers_namespace_class_are_not_entry() -> None:
+    source = b"""<?php
+namespace App\\Http\\Controllers;
+class ReportController extends ApiBase {
+    public function show() { return $this->load(); }
+    protected function load() { return $this->format(); }
+    private function format() { return 'ok'; }
+    protected function __invoke() { return 1; }
+}
+"""
+
+    assert _laravel_actions("app/Http/Controllers/ReportController.php", source) == {"show"}
 
 
 def test_laravel_route_macro_is_not_http_route() -> None:
@@ -446,3 +544,54 @@ def test_a_call_on_a_withheld_php_declaration_line_is_unread_signal() -> None:
     assert indexed["call_sites"] == []
     assert indexed["analysis_status"] == "degraded"
     assert set(indexed["unavailable_dimensions"]) >= {"call_sites", "dataflow", "security_sinks"}
+
+
+def test_anonymous_invokable_inside_a_controller_action_stays_an_invocation_hook() -> None:
+    source = b"""<?php
+namespace App\\Http\\Controllers;
+class SignupController extends Controller {
+    public function store($request) {
+        return $request->validate(['name' => [new class {
+            public function __invoke($attribute, $value, $fail) { return $fail; }
+        }]]);
+    }
+}
+"""
+
+    indexed = index_file("app/Http/Controllers/SignupController.php", "php", source)
+
+    assert {(item["name"], item["kind"]) for item in indexed["entry_points"]} == {
+        ("store", "laravel_action"),
+        ("__invoke", "invocation_hook"),
+    }
+
+
+@pytest.mark.parametrize("path,namespace", [
+    ("app/http/controllers/HealthController.php", ""),
+    ("src/HealthController.php", "namespace App\\HTTP\\controllers;"),
+])
+def test_controllers_segment_matches_regardless_of_case(path: str, namespace: str) -> None:
+    source = f"<?php\n{namespace}\nclass HealthController {{ public function index() {{ return 1; }} }}\n".encode()
+
+    assert _laravel_actions(path, source) == {"index"}
+
+
+def test_controller_detection_stays_linear_in_a_many_class_file(monkeypatch: pytest.MonkeyPatch) -> None:
+    detect = treesitter_index._detect_entry_points
+    elapsed = []
+
+    def timed(*args, **kwargs):
+        started = time.perf_counter()
+        result = detect(*args, **kwargs)
+        elapsed.append(time.perf_counter() - started)
+        return result
+
+    monkeypatch.setattr(treesitter_index, "_detect_entry_points", timed)
+    source = ("<?php\nnamespace App\\Http\\Controllers;\n" + "".join(
+        f"class Acme{index}Controller extends Controller {{ public function show() {{ return {index}; }} }}\n"
+        for index in range(6000)
+    )).encode()
+
+    index_file("app/Http/Controllers/AcmeControllers.php", "php", source)
+
+    assert elapsed[0] < 0.5
