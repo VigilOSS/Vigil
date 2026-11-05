@@ -24,7 +24,6 @@ import math
 import os
 import queue
 import re
-import select
 import selectors
 import shutil
 import signal
@@ -271,16 +270,50 @@ def _performance_cpu_count() -> int | None:
     return value.value if value.value > 0 else None
 
 
+_CGROUP_CPU_MAX = Path("/sys/fs/cgroup/cpu.max")
+_CGROUP_V1_CPU = Path("/sys/fs/cgroup/cpu")
+
+
+def _scheduler_cpu_count() -> int:
+    """CPUs this process may be scheduled on (its affinity mask where known)."""
+    count = getattr(os, "process_cpu_count", None)
+    if count is not None:
+        return count() or 1
+    if hasattr(os, "sched_getaffinity"):
+        return len(os.sched_getaffinity(0)) or 1
+    return os.cpu_count() or 1
+
+
+def _cgroup_cpu_limit() -> int | None:
+    """Whole CPUs a Linux cgroup quota grants, rounded up, or None when unlimited."""
+    try:
+        quota_text, period_text = _CGROUP_CPU_MAX.read_text(encoding="ascii").split()[:2]
+    except (OSError, ValueError):
+        try:
+            quota_text = (_CGROUP_V1_CPU / "cpu.cfs_quota_us").read_text(encoding="ascii").strip()
+            period_text = (_CGROUP_V1_CPU / "cpu.cfs_period_us").read_text(encoding="ascii").strip()
+        except OSError:
+            return None
+    try:
+        quota, period = int(quota_text), int(period_text)
+    except ValueError:
+        return None  # `max`: no quota
+    if quota <= 0 or period <= 0:
+        return None
+    return max(1, math.ceil(quota / period))
+
+
 def default_parser_jobs() -> int:
     """Concurrent parses for a build: the usable cores, at most a fixed cap.
 
     The per-file CPU budget is the same for every job count; staying on fast
-    cores keeps a file's CPU time, and so its outcome, independent of the count.
+    cores, and within a container's CPU quota, keeps a file's CPU time and wall
+    clock, and so its outcome, independent of the count.
     """
-    usable = getattr(os, "process_cpu_count", os.cpu_count)() or 1
-    performance = _performance_cpu_count()
-    if performance is not None:
-        usable = min(usable, performance)
+    usable = _scheduler_cpu_count()
+    for limit in (_cgroup_cpu_limit(), _performance_cpu_count()):
+        if limit is not None:
+            usable = min(usable, limit)
     return max(1, min(usable, MAX_DEFAULT_PARSER_JOBS))
 
 
@@ -337,7 +370,10 @@ class ParserWorker:
         if self._root is None:
             self._root = Path(tempfile.mkdtemp(prefix="vigil-structural-parser-"))
             (self._root / "request").mkdir(mode=0o700)
-        parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        except OSError as exc:
+            raise ParserWorkerUnavailable("parser server socket could not open") from exc
         try:
             self._process = subprocess.Popen(
                 [
@@ -374,26 +410,28 @@ class ParserWorker:
         control = self._control
         if control is None:
             return None
-        while True:
-            try:
-                frame = decode_server_frame(self._buffer)
-            except ValueError:
-                return None
-            if frame is not None:
-                return frame
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                return None
-            readable, _, _ = select.select([control], [], [], remaining)
-            if not readable:
-                return None
-            try:
-                data = control.recv(4096)
-            except OSError:
-                return None
-            if not data:
-                return None
-            self._buffer.extend(data)
+        # A selector, unlike select(), polls a descriptor numbered past 1023.
+        with selectors.DefaultSelector() as selector:
+            selector.register(control, selectors.EVENT_READ)
+            while True:
+                try:
+                    frame = decode_server_frame(self._buffer)
+                except ValueError:
+                    return None
+                if frame is not None:
+                    return frame
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                if not selector.select(timeout=remaining):
+                    return None
+                try:
+                    data = control.recv(4096)
+                except OSError:
+                    return None
+                if not data:
+                    return None
+                self._buffer.extend(data)
 
     def run(
         self,
@@ -453,8 +491,16 @@ class ParserWorker:
         control = self._control
         if control is None:
             raise ParserWorkerUnavailable("parser server is not running")
-        stdout_read, stdout_write = os.pipe()
-        stderr_read, stderr_write = os.pipe()
+        try:
+            stdout_read, stdout_write = os.pipe()
+        except OSError as exc:
+            raise ParserWorkerUnavailable("parser request pipes could not open") from exc
+        try:
+            stderr_read, stderr_write = os.pipe()
+        except OSError as exc:
+            os.close(stdout_read)
+            os.close(stdout_write)
+            raise ParserWorkerUnavailable("parser request pipes could not open") from exc
         frame = encode_server_frame(
             {
                 "op": "run",

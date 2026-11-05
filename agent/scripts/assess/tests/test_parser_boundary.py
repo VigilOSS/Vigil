@@ -465,3 +465,66 @@ def test_pooled_worker_restarts_a_server_lost_mid_request(
     _assert_full_byte_fallback(lost, source, "parser_worker_crash")
     assert parsed["analysis_status"] == "complete"
     assert len(servers) == 2
+
+
+@pytest.mark.parametrize(
+    ("cpu_max", "expected"),
+    [("50000 100000\n", 1), ("250000 100000\n", 3), ("max 100000\n", 6)],
+    ids=["half-cpu", "fractional-quota", "unlimited"],
+)
+def test_default_jobs_stay_within_a_container_cpu_quota(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cpu_max: str, expected: int,
+) -> None:
+    """A CPU quota shares the same cores among all jobs, so jobs past it stretch
+    each child's wall clock into the backstop a serial build never meets."""
+    (tmp_path / "cpu.max").write_text(cpu_max)
+    monkeypatch.setattr(parser_boundary, "_CGROUP_CPU_MAX", tmp_path / "cpu.max")
+    monkeypatch.setattr(parser_boundary, "_scheduler_cpu_count", lambda: 6)
+    monkeypatch.setattr(parser_boundary, "_performance_cpu_count", lambda: None)
+
+    assert parser_boundary.default_parser_jobs() == expected
+
+
+def test_a_descriptor_the_host_cannot_poll_falls_back_to_the_streaming_scan(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every failure to reach the parser server is a typed fallback for that
+    file, never an exception that fails the whole build."""
+    source = b"def parse(value):\n    return value\n"
+
+    def exhausted():
+        raise OSError(24, "Too many open files")
+
+    with parser_boundary.ParserWorker() as worker:
+        warm = parser_boundary.index_file("warm.py", "python", source=source, worker=worker)
+        with monkeypatch.context() as patched:
+            patched.setattr(parser_boundary.os, "pipe", exhausted)
+            exhausted_fds = parser_boundary.index_file("app.py", "python", source=source, worker=worker)
+
+    assert warm["analysis_status"] == "complete"
+    assert exhausted_fds["analysis_mode"] != "tree_sitter"
+    assert exhausted_fds["degradation_reason"] == "parser_worker_launch_error"
+
+
+def test_a_build_holding_many_descriptors_still_parses_exactly() -> None:
+    """select() refuses a descriptor numbered past 1023; a large build holds
+    that many, and its parser replies must still be read."""
+    import resource
+
+    soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+    if hard != resource.RLIM_INFINITY and hard < 1200:
+        pytest.skip("descriptor limit too low to cross 1024")
+    resource.setrlimit(resource.RLIMIT_NOFILE, (max(soft, 1200), hard))
+    held = []
+    try:
+        while not held or held[-1] < 1100:
+            held.append(os.open(os.devnull, os.O_RDONLY))
+        source = b"def parse(value):\n    return value\n"
+        result = parser_boundary.index_file("app.py", "python", source=source)
+    finally:
+        for fd in held:
+            os.close(fd)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+    assert result["analysis_status"] == "complete"
+    assert result["analysis_mode"] == "tree_sitter"

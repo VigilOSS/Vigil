@@ -2159,7 +2159,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         helper_defaults=(
             ("output_dir", "<engagement_dir>/tools/analysis-state"),
-            ("jobs", "the usable performance cores, at most 8"),
+            ("jobs", "the usable performance cores within any CPU quota, at most 8"),
             ("aggregate manifest", "structural-index-manifest.json"),
             ("per-repo manifest", f"structural-index/<repo_id>/<generation>/{STRUCTURAL_INDEX_PATH_VERSION}/<source_manifest_digest>/<indexer_digest>/<structural_input_digest>/manifest.json"),
             ("per-file indexes", "the per-repo manifest's sibling files/<file-id>.json directory"),

@@ -85,8 +85,8 @@ The `code-index` command:
   untrusted file crosses the parser resource boundary, scans every byte with the bounded streaming
   security fallback instead of risking an operator-process OOM
 - Parses each file in its own resource-limited child process under a per-file CPU-time budget,
-  several files at once (`--jobs`, default the usable performance cores up to 8); every job
-  count publishes byte-identical artifacts
+  several files at once (`--jobs`, default the usable performance cores within any CPU quota, up
+  to 8); every job count publishes byte-identical artifacts
 - Parses the exact sealed bytes whose SHA-256 is recorded, and writes generation-scoped per-file
   JSON containing the function map, the `<top-level>` file-scope segments (`top_level_segments`),
   entry points, security sinks, exports, and call sites

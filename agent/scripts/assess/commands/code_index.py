@@ -165,7 +165,7 @@ def _register_build(subparsers) -> None:
         default=default_parser_jobs(),
         help=(
             "Files parsed at once, each in its own resource-limited parser process "
-            "(default: the usable performance cores, at most "
+            "(default: the usable performance cores within any CPU quota, at most "
             f"{MAX_DEFAULT_PARSER_JOBS}); output is identical for every value"
         ),
     )
