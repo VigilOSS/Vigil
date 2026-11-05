@@ -7,29 +7,71 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ## [Unreleased]
 
+After upgrading, run `vigil assess code-index build` and then `code-index sync` for each code
+repository in an existing engagement. Re-ingesting a repository of shipped or recovered bundles
+needs `--include-minified` to keep its file set.
+
+### Added
+
+- The structural index reads file scope in every tree-sitter language as `<top-level>`, so
+  module-level code, PHP pages, Go package variables and C macro bodies report sinks and calls.
+- Entry points `php_script`, `php_rendered_page`, `go_http_handler`, `node_http_server` and
+  `tornado_handler`, and Django, Flask and Tornado route-table rows.
+- Request sources `php://input`, `filter_input`, PHP header helpers, Tornado `self` accessors,
+  Node `req.url` and Go `r.URL.Path`, `r.Body` and `r.Form`.
+- Finding writes return `verification_effect` and `changed_axes`; `finding merge` and
+  `finding link` print the effect, and finding history shows it for each changed axis.
+- `run-audit obligation release` lets a proof run's producer release an unread source with a
+  reason; runs count `unread_sources` and `released_sources`.
+- `proof-run finish --reason` records why a run ended.
+- `code-dependencies` on a sealed source reports excluded build output and vendored copies with
+  the name and version their root files give.
+- The `code-ingest` summary prints `repo_id: <id>` and the exact `code-index build` and
+  `code-index sync --repo-id` commands.
+
 ### Changed
 
+- One change policy decides what each finding write does to a verdict: presentation edits keep
+  it, claim wording needs an independent claim review, and technical changes invalidate it.
+- `finding merge` keeps the target's severity, CVSS, CWE and verdict, and warns when the source
+  carries a stronger value.
+- `finding update --status draft` returns any verdict to unreviewed. An invalidating edit to a
+  false-positive finding is refused until it is reopened.
+- Root-cause grouping keeps verdicts; `--effect eliminates_finding` raises a claim review on a
+  verified sibling.
+- A proof run's `completed` request is refused with 409 while blockers remain, naming unread
+  sources first. A scan with open debt seals `partial`.
+- An indexed file with source but no callable, or with unscanned function scope, needs a
+  whole-file reviewed span as review proof.
+- `code-ingest` skips `vendor/` in any letter case, forge-archive copies, `.phps` files,
+  content-hashed chunks and minified JavaScript/CSS by default. `--include-path` and
+  `--include-minified` re-admit them.
 - `agent handoff` requires `--agent-id` and refuses a payload written for another dispatch.
 - Unknown `agent start` prompt-context keys are rejected by name; queue-fetch lane manifests
   show each leased item's scratch directory.
 - Buffer-overflow and use-after-free apply only to memory-unsafe languages.
-- PHP script scope counts as measured, so fully parsed PHP files without callables are complete;
-  a review of such a file still needs a whole-file span.
 
 ### Fixed
 
-- `code-index build` no longer refuses to rebuild an unchanged snapshot after a Vigil upgrade
-  changes the indexer; the new index sits beside the old one and `code-index sync` publishes it.
+- Security: Git over an ingested repository runs under configuration Vigil writes, so the
+  repository's and its submodules' filters, hooks, fsmonitor, signature programs and transports
+  never run, and a partial clone never fetches.
+- An obligation write cannot close an unread imported source; only a full read or a release does.
+- A tree-sitter file with no callable publishes as a `complete` artifact.
+- `code-index build` writes a new index beside the old one when an upgrade changes the indexer,
+  and `code-index sync` publishes it.
 - Rebuilding a structural index for the same snapshot rebinds its generation: unreferenced
   callables are replaced and receipt-bound callables keep their links when only their qualified
   name changes.
+- Go `r.URL.Query()` reads as request input, and `db.Query(` stays a SQL sink.
+- The security-history scan matches commit messages in any letter case.
 - Lease conflicts name the holder and distinguish a mistyped token, a wrong agent id and a
   reclaimed lease; lease commands name the dispatch agent id.
 - Requeueing a trigger whose target path is not in the snapshot says so and suggests the closest
   admitted path.
 - Merging findings keeps the surviving finding's provenance and snapshot attestation.
 - `proof-run start --for-finding` prints the run with its finding associations.
-- Finding reply fields are no longer described as both required and optional.
+- Finding reply fields are each described as either required or optional.
 - `source-read record` names the expected path when the supplied one does not match.
 - PHP enum and anonymous-class methods are qualified by their class; `->exec(` is SQL execution
   and `json_decode` is not deserialization.

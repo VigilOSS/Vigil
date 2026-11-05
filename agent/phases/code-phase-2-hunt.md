@@ -239,7 +239,9 @@ notes. If the worker directly read a degraded/unsupported/truncated file to disc
 Coverage Debt, close it through that normal result path; never label completed semantic review as
 `skipped`, because skip records intentionally unreviewed material and cannot clear the debt
 (`shared-constraints-code.md` §2). Every non-skipped receipt names exact structural callable
-identities or reviewed source spans; critical/high closeout fails without one. Per-file detail
+identities or reviewed source spans; critical/high closeout fails without one. A file whose index
+holds no callable, or scanned no function scope, closes only with a whole-file reviewed span
+(`shared-constraints-code.md` §6). Per-file detail
 derives from current receipts, evidenced receipts, and the union of structurally bound callables,
 so a submitted `functions_analyzed` or effort number alone is not proof of work.
 

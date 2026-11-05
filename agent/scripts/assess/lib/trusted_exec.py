@@ -146,7 +146,7 @@ def git_command(
 # Every Git call over source Vigil ingests goes through TargetGit. Git calls on
 # the operator's own checkout (remediation_vcs.py and remediation_regression.py,
 # which run that checkout's own test suite by design) are the operator's
-# repository and stay plain invocations. See ADR 0039.
+# repository and stay plain invocations. See ADR 0040.
 
 _GIT_METADATA_MAX_BYTES = 64 * 1024
 _GIT_CONFIG_MAX_BYTES = 1024 * 1024

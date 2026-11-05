@@ -59,6 +59,11 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `orchestrator/backend/app/api/assessment.py:FindingPatchRequest` owns patchable finding fields;
   `contract_registry.py:FINDING_PATCH_FIELDS` mirrors it. See:
   `orchestrator/backend/tests/test_finding_patch_contract_mirror.py`.
+- `orchestrator/backend/app/services/state_manager/finding_change_policy.py` owns each finding write's verdict
+  effect and the versioned claim digest (ADR 0039); `contract_registry.py:FINDING_CHANGE_EFFECTS` mirrors its
+  table. See: `orchestrator/backend/tests/test_finding_change_effects_contract_mirror.py`.
+- `code_analysis_support.py:structural_scope_requires_whole_file_review` owns when a whole-file span is a file's
+  only review proof; the receipt span gate and the coverage gate both ask it.
 - `orchestrator/backend/app/services/state_manager/cvss.py:base_score` owns CVSS v3.1/v4.0 base-vector
   validation and scoring for finding writes and report readiness; `finding_details.py` owns the
   generated schema vocabulary. See: `orchestrator/backend/tests/test_cvss40.py`.
@@ -83,8 +88,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEYS` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers and preflight consume them.
-- `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses —
-  input entries, digests, the image label, exclusions. Content, never mtime.
+- `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses (never mtime).
 - `tools/runtime_release.py` owns native-platform runtime publication, OCI release labels,
   multi-platform index validation, and the immutable pin written into matched release artifacts.
   `.github/workflows/runtime-release.yml` supplies tag identity, native runners, registry auth and draft uploads.
@@ -104,7 +108,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   It supplies session selectors, not application paths or endpoints; `client_checks.py:validate_context_binding` owns validation.
 - `src/vigil_cli/argv.py:passthrough_boundary` owns the opaque `--` boundary for universal CLI routing,
   startup forwarding and assessment root-flag hoisting; each parser retains ownership of its flags and validation.
-- `src/vigil_cli/prompts.py` owns shared terminal questions and searchable start pickers for engagement and remediation, using `term.py:fuzzy_pick` or the terminal filter;
+- `src/vigil_cli/prompts.py` owns shared terminal questions and searchable start pickers for engagement and remediation;
   `main.py` resolves engagement, client, then mode before preflight without changing ambient resolution for other commands.
 - `src/vigil_cli/engagement_recency.py` owns the declared meaningful-work timestamp projection and UTC comparison;
   it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
@@ -118,16 +122,15 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   respective assessment and backend paths. `VIGIL_OPERATOR_MODE` selects one prompt per
   session and never grants a track. Official starts repair only their selected engagement;
   `src/vigil_cli/install.py` repairs shared client files only under explicit maintenance flags.
-- `src/vigil_cli/engagements.py:engagement_source_state` owns registered original-directory or manual-folder source inventory. `engagement.json:source_dir` selects the origin; first ingest/refresh requires conversational confirmation and creates one sealed copy directly from it.
+- `src/vigil_cli/engagements.py:engagement_source_state` owns registered original-directory or manual-folder source inventory. `engagement.json:source_dir` selects the origin; first ingest/refresh needs conversational confirmation and seals one copy from it.
 - `orchestrator/backend/app/services/state_manager/app_units.py:score_application_units` and
   `depth_ledger.py` own the web-only terminal depth gate. See: ADR 0012.
 - `orchestrator/backend/app/services/state_manager/findings.py:finding_mode_sql` owns candidate mode classification.
   `dispatches.py:dispatch_mode_sql` applies it to durable proof claims, including prior owners; reads and counts share this predicate before pagination. Execution route does not select memory ownership.
-
----
-
 - `orchestrator/backend/app/api/assessment_operator.py:_CODE_ASSESSMENT_ROLES` defaults code-only dispatches to code;
   `agent/scripts/assess/commands/agent.py:_CODE_SOURCE_IDENTITY_ROLES` mirrors this set for source packets and CLI mode resolution.
+
+---
 
 ## Sync rules worth remembering
 
@@ -137,8 +140,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `agent/.opencode/assessment` and `agent/.zcode/assessment`; `src/vigil_cli/assessment_clients.py`
   stages their immutable workspace/plugin consumers separately from other workflow assets.
 - `agent/scripts/assess/lib/contracts.py` renders engagement binding into every command contract.
-- `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as **per-entry symlinks** (`<engagement>/.claude/commands/`, `<engagement>/.codex/skills/`), so an engagement never carries a stale copy and an operator-authored command of the same name wins.
-- `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` feed the generated `agent/schemas/*.json` through `orchestrator/backend/scripts/generate_agent_schemas.py`. Check drift with that script's `--check` mode.
+- `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as per-entry symlinks, so no stale copy exists and an operator-authored command of the same name wins.
+- `orchestrator/backend/app/api/assessment.py` and `orchestrator/backend/app/api/code_analysis.py` feed the generated `agent/schemas/*.json` through `orchestrator/backend/scripts/generate_agent_schemas.py` (`--check` for drift).
 - `agent/scripts/assess/lib/treesitter_index.py` owns parsing and dispatch;
   `treesitter_catalogues.py` owns sink/entry queries, `treesitter_common.py` shared helpers,
   `treesitter_lightweight.py` line-based extractors, and `treesitter_streaming.py` bounded fallback.
@@ -196,18 +199,20 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
 ### agent/ — prompts and the assessment CLI
 
 - `agent/scripts/assess/cli.py` — the authoritative subcommand registry for `vigil assess`, including the `kali` subgroup that owns all target-facing tool execution.
-- `agent/scripts/assess/lib/scope.py` — scope parsing, matching, and locked atomic mutation. There is deliberately **no outbound destination filtering**: `enforce_execution_policy` never refuses a command for its destination host. Staying inside the authorized roots is the operator's responsibility.
+- `agent/scripts/assess/lib/scope.py` — scope parsing, matching, and locked atomic mutation. There is deliberately no outbound destination filtering (`enforce_execution_policy` never refuses by destination host); staying in scope is the operator's responsibility.
 - `agent/scripts/assess/lib/config.py` — one fail-closed engagement-selection precedence for every `vigil assess` command: explicit `--engagement-dir`, else a root discovered from CWD, else the session variable exported by `vigil engagement start`.
+- `agent/scripts/assess/lib/trusted_exec.py:TargetGit` — every Git call over ingested source, under
+  Vigil-written config. See: ADR 0040.
 - `agent/scripts/assess/lib/code_snapshot.py` — race-checked, content-addressed source copies.
-  `orchestrator/backend/app/code_snapshot.py` independently attests them; new v3 snapshots use
-  decoded logical lines, while historical v2 snapshots retain their original attestation semantics. See: ADR 0026.
+  `orchestrator/backend/app/code_snapshot.py` independently attests them; v3 uses decoded logical lines,
+  historical v2 keeps its semantics. See: ADR 0026.
 - `agent/scripts/assess/lib/parser_boundary.py` + `parser_worker.py` — the structural-parser process boundary. Every typed failure becomes an explicit all-byte fallback with declared unavailable dimensions, never a silent skip. See: ADR 0029.
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
   neither rewrites authored content or masks credentials. Rendering helpers live in
   `agent/scripts/assess/lib/finding_render.py`.
   Submission owns exact `--body`/`--guidance` capture and `--prepare`; GHSA fields are owned by backend `finding_details.py`.
 - `agent/scripts/assess/commands/operator_checkpoint.py` — `vigil assess operator-checkpoint`, the operator's own durable state. References plus one intent note; every reference is existence-checked in the write transaction.
-- `agent/scripts/assess/commands/resume_brief.py` — a **read**. It observes abandoned command runs, jobs and host children and names the verb that reconciles them; the reconciling write is owned solely by `vigil assess kali sweep-orphans`.
+- `agent/scripts/assess/commands/resume_brief.py` — a read that names the reconciling verb for abandoned runs, jobs and host children; only `vigil assess kali sweep-orphans` writes.
 - `agent/scripts/hooks/` — shared host hooks for activity logging, compaction, post-compaction
   operator rehydration, and session end. Command filtering is deliberately absent (ADR 0019).
   `goose-hook-adapter.sh` adapts Goose tool names.
@@ -215,7 +220,7 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
 
 ### src/vigil_cli/ — the universal CLI
 
-- `src/vigil_cli/term.py` owns terminal-only Rich rendering and shared exact-candidate fuzzy selection with literal, temporary-file previews; callers retain plain/JSON output contracts.
+- `src/vigil_cli/term.py` owns terminal-only Rich rendering and fuzzy selection; callers keep plain/JSON output contracts.
 - `src/vigil_cli/application.py` — explicit/imported release resolution, bundle validation and persistent content-addressed assets/helper CLI. Never discover source from workspace or CWD.
 - `src/vigil_cli/workspace.py` — canonical private paths and in-place legacy adoption; `paths.py:workspace_root_for_engagement` resolves private ownership independently of application assets.
 - `vigil_build.py` — tracked publisher inputs, matched CLI/backend/agent/docs/legal bundle and locked prebuilt UI provenance; its sdist builds wheels without Git or Node.
@@ -240,8 +245,8 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   Resource-capacity preflight is advisory.
   `up.py:run_up` owns startup JSON/service states; `service_locks.py` serializes shared starts. `agent/scripts/assess/lib/kali_runtime_exec.py` owns first-use managed execution startup.
 - `src/vigil_cli/runtime_images.py` owns immutable release pins and label validation; `.github/workflows/runtime-release.yml` embeds the published multi-platform pin in matched artifacts.
-- `src/vigil_cli/mitmproxy.py` — the single owner of the proxy `docker build` argv, including the inputs-digest label without which the image can never be proven current.
-- `src/vigil_cli/oob_relay.py` — the single owner of the install's OOB relay-slot identity contract; `oob.py`, `install.py`, `up.py`, and `status.py` consume that record rather than deriving routes independently.
+- `src/vigil_cli/mitmproxy.py` owns the proxy `docker build` argv and its inputs-digest label.
+- `src/vigil_cli/oob_relay.py` owns the install's OOB relay-slot identity; `oob.py`, `install.py`, `up.py` and `status.py` consume it.
 
 ### orchestrator/backend
 
@@ -289,8 +294,10 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   resume brief and artifact index; output points to drill-down commands instead of embedding data.
   `artifact_index.py:_store_artifact` records finding-linked digest changes atomically in `activity.py`;
   registration and refresh expose change receipts to `agent/scripts/assess/commands/artifact.py`.
-- `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge so draft previews and the backend cannot fork the format.
-- `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py` owns sources and obligations, `run_evidence.py` owns linked receipts, and `run_comparisons.py` owns comparisons. `proofs.py` owns immutable evidence receipts. See: ADR 0028.
+- `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge, so previews and backend share one format.
+- `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py`
+  sources, obligations and the producer's source release; `run_evidence.py` linked receipts; `run_comparisons.py`
+  comparisons; `proofs.py` immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync. Explicit deletes are tombstoned so a later sync cannot resurrect them from leftover files.
 - `orchestrator/backend/app/api/remediation.py` and `services/remediation.py` — case/source
   resolution, canonical finding links, captured review policy/base, typed verification, shared

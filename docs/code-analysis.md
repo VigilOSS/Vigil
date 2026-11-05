@@ -81,6 +81,14 @@ publish a content-addressed read-only snapshot, then builds and syncs the
 structural index against the printed repo ID and snapshot path before driving
 classify+map → hunt → verify+variant.
 
+By default ingest leaves out `vendor/` in any letter case, forge-archive copies of other projects,
+`.phps` display copies, and minified or bundled JavaScript and CSS. Each excluded file stays
+fingerprinted in the snapshot's exclusion inventory, and `code-dependencies` reports the vendored
+copies. Re-admit a directory with `--include-path '<dir>/**'` and minified files with
+`--include-minified`, which a repository of shipped or recovered bundles needs. Git reads the
+repository's history and dirty state without running any program its configuration names
+([ADR 0040](adr/0040-target-repositories-never-configure-git-execution.md)).
+
 Specialists read the **sealed snapshot**; the mutable origin is retained only as
 provenance. At refresh commit, the backend independently validates the
 engagement-owned manifest, the real source bytes, the staged inventory, and the

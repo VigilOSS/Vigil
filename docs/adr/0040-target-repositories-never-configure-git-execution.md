@@ -1,4 +1,4 @@
-# ADR 0039 — Target repositories never configure Git execution
+# ADR 0040 — Target repositories never configure Git execution
 
 - Status: Accepted — implemented
 - Date: 2026-11-04
