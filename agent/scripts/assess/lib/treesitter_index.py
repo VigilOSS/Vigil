@@ -9,8 +9,9 @@ from __future__ import annotations
 
 import re
 import warnings
+from bisect import bisect_right
 from functools import lru_cache
-from typing import Any
+from typing import Any, NamedTuple
 
 from assess.lib.code_languages import (
     STRUCTURAL_SUPPORTED_LANGUAGES,
@@ -2141,23 +2142,28 @@ def _function_scan_lines(
 
 # Comment openers the per-line pattern readers skip. This is a cheap prefix
 # test, not a lexer, and it stays one: `*` is a `/* ... */` continuation and
-# `#` is a comment in Python, Ruby, PHP and shell but a preprocessor directive
-# in C and C++, which is close enough when a false skip costs one line of one
-# detector -- and nowhere near enough to decide whether a whole file holds any
-# source at all. That question is `_file_is_commentary_only`'s, and it asks the
-# grammar. `/*` is deliberately absent: a block comment can close mid-line and
-# `/* legacy */ system(cmd);` is a sink, so skipping the line would be a miss.
+# `#` is a comment in Python, Ruby, PHP and shell. It is nowhere near enough to
+# decide whether a whole file holds any source at all; that question is
+# `_file_is_commentary_only`'s, and it asks the grammar. `/*` is deliberately
+# absent: a block comment can close mid-line and `/* legacy */ system(cmd);` is
+# a sink, so skipping the line would be a miss.
 _LINE_COMMENT_PREFIXES = ("//", "#", "*")
+# Where `#` is code, it is not skipped. A C/C++ directive carries a macro body,
+# and `#define RUN(cmd) system(cmd)` is the wrapper every caller reaches the
+# sink through; a C# directive and a JavaScript `#private` field are
+# statements too.
+_HASH_IS_CODE_LANGUAGES = frozenset(
+    {"c", "cpp", "csharp", "go", "java", "javascript", "typescript"}
+)
+_HASH_IS_CODE_COMMENT_PREFIXES = ("//", "*")
 
-# Dimensions whose only reader is `_function_scan_lines`: `_detect_sinks` and
-# `_detect_call_sites` see nothing else, and the caller-parameter propagation
-# signal rides on the call sites. Public because `code-coverage` reads the
-# published list back and must ask the same question of it.
+# Dimensions whose only readers are the callable spans `_function_scan_lines`
+# returns and the file-scope complement `_file_scope_lines` returns:
+# `_detect_sinks` and `_detect_call_sites` see nothing else, and the
+# caller-parameter propagation signal rides on the call sites. Public because
+# `code-coverage` reads the published list back and must ask the same question
+# of it.
 FUNCTION_SCOPED_DIMENSIONS = frozenset({"call_sites", "dataflow", "security_sinks"})
-
-# Languages whose `<top-level>` scope is read even when the file declares no
-# callable, and whose file-scope entry patterns are the full registration table.
-SCRIPT_SCOPE_LANGUAGES = frozenset({"php"})
 
 # Commentary as the grammars label it. `expression_statement` is here for the
 # bare string Python and Ruby use as a docstring: the language evaluates it, so
@@ -2168,10 +2174,15 @@ _DOCSTRING_NODE_TYPES = frozenset({"string", "concatenated_string", "string_lite
 UNSCANNED_SCOPE_DEGRADATION_REASON = "unscanned_function_scope"
 
 
-def _is_scannable_source_line(text: str) -> bool:
-    """Whether a line is source the function-scoped pattern readers accept."""
+def _is_scannable_source_line(text: str, language: str | None = None) -> bool:
+    """Whether a line is source the pattern readers accept."""
     stripped = text.strip()
-    return bool(stripped) and not stripped.startswith(_LINE_COMMENT_PREFIXES)
+    prefixes = (
+        _HASH_IS_CODE_COMMENT_PREFIXES
+        if language in _HASH_IS_CODE_LANGUAGES
+        else _LINE_COMMENT_PREFIXES
+    )
+    return bool(stripped) and not stripped.startswith(prefixes)
 
 
 def _is_comment_node(node: Any) -> bool:
@@ -2219,48 +2230,24 @@ def _function_scoped_reader_patterns(language: str) -> tuple[re.Pattern[str], ..
     )
 
 
-def _unread_reader_signal(
-    functions: list[dict[str, Any]],
+def _withheld_reader_signal(
+    withheld: list[tuple[int, str]],
     language: str,
-    source_lines: list[str],
 ) -> bool:
-    """Whether source a function-scoped reader would have matched went unread.
+    """Whether a file-scope line the readers do not take carries a sink.
 
-    A callable covers its whole reported span, not only the segments
-    `_function_scan_lines` hands the detectors. The difference is the signature
-    line, which holds a parameter list and never a call site or a sink; reading
-    `def add(a, b):` as unread signal would make every file in every language
-    a gap.
-
-    "Would have matched" is likewise not "is any line at all". Imports, class
-    headers, type declarations and package statements sit outside every
-    callable in almost every file ever written; treating them as a gap would
-    leave 72% of this repository permanently degraded, and a flag that is
-    always on distinguishes nothing -- which is the ADR 0015 failure in the
-    other direction. A call and the sink catalogue are the two shapes these
-    readers key on, so a line carrying neither costs nothing by going unread.
-    The call test borrows `_detect_call_sites`' own noise vocabulary, so a
-    keyword or a CSS `var(--x)` is not mistaken for a call the reader missed.
+    `_file_scope_lines` holds back declaration header lines -- `class Foo(Base):`,
+    `package main` -- because the parenthesised list on one is a set of bases,
+    not a call, and reading them would put a phantom call site on every class.
+    A one-line `class Runner { static { exec(cmd); } }` is still source the
+    sink catalogue would have matched, and it went unread, so it is a gap.
+    Only the sink catalogue is asked: the call shape on these lines is exactly
+    the noise they are withheld for.
     """
-    scanned: set[int] = set()
-    for function in functions:
-        if function.get("is_declaration", False):
-            continue
-        scanned.update(
-            range(max(0, int(function["line_start"]) - 1), int(function["line_end"]))
-        )
     sink_patterns = _function_scoped_reader_patterns(language)
-    for index, line in enumerate(source_lines):
-        if index in scanned or not _is_scannable_source_line(line):
-            continue
-        if any(pattern.search(line) for pattern in sink_patterns):
-            return True
-        if any(
-            match.group(1).rsplit(".", 1)[-1] not in _CALL_NOISE
-            for match in _CALL_RE.finditer(line)
-        ):
-            return True
-    return False
+    return any(
+        pattern.search(line) for _index, line in withheld for pattern in sink_patterns
+    )
 
 
 def _unscanned_scope_dimensions(
@@ -2271,47 +2258,43 @@ def _unscanned_scope_dimensions(
     tree: Any,
     language: str,
     function_scoped_records: bool,
+    file_scope: _FileScope,
 ) -> set[str]:
     """Dimensions whose empty value is an unmade measurement, not a negative.
 
-    A file the parser handled cleanly can still contribute no scanned span: a
-    Laravel `routes/web.php`, a Blade template, a module-level script, a header
-    of prototypes. `security_sinks: []` there is an unmade measurement, not a
-    clean negative, and ADR 0015 forbids reporting the two as the same value.
+    Every line of a parsed file is one of: inside a callable span, read by the
+    file-scope readers, labelled by the grammar as something no reader could
+    match (commentary, a docstring, a declaration, inline HTML), or held back
+    as a declaration header. Only the last can hide a signal the readers never
+    saw, so the trio is declared when the readers **returned nothing** and a
+    held-back line carries a sink. Both halves are load-bearing:
 
-    The trio is declared when the readers **returned nothing** and either
-    bounded no scan at all, or left source they would have matched unread. Both
-    halves are load-bearing:
-
-    * Without the second, one callable buys a measurement of the whole file.
-      A PHP closure is a callable, so `Route::get('/health', function () {})`
-      turned a route file's unread `DB::statement(...)` into a claimed clean.
-    * Without the first, the flag cannot be raised at all once a callable has
-      reported something -- and it must not be. `unavailable` means zero on
-      both sides of the contract (`code_structural_metadata.validated_structural_metadata`
+    * Without the second, a file the readers genuinely read end to end and
+      found clean -- a constants module, a header of prototypes -- would be
+      declared debt, and a flag that is always on distinguishes nothing.
+    * Without the first, the flag could be raised once a reader has reported
+      something -- and it must not be. `unavailable` means zero on both sides
+      of the contract (`code_structural_metadata.validated_structural_metadata`
       and the backend's payload validator), so declaring a dimension that
       retained a record would either reject the whole repository's sync or
-      force the indexer to drop signal it really found. A non-empty list is not
-      a clean negative, so it is not the value ADR 0015 is about; what it does
-      not yet carry is a *partial* measurement, which this contract has no
-      slot for.
+      force the indexer to drop signal it really found.
+
+    The entry-point dimension is separate. Every entry rule but the file-scope
+    catalogue is keyed on a callable, so a file with no callable was measured
+    for entry points only in a language that has a file-scope catalogue.
     """
     if _file_is_commentary_only(tree, source_lines):
         return set()
     unscanned: set[str] = set()
-    scanned_any_scope = language in SCRIPT_SCOPE_LANGUAGES or any(
-        _function_scan_lines(function, source_lines)
-        for function in functions
-        if not function.get("is_declaration", False)
-    )
-    if not function_scoped_records and (
-        not scanned_any_scope
-        or _unread_reader_signal(functions, language, source_lines)
+    if not function_scoped_records and _withheld_reader_signal(
+        file_scope.withheld, language
     ):
         unscanned |= FUNCTION_SCOPED_DIMENSIONS
-    if not functions and not entry_points and language not in SCRIPT_SCOPE_LANGUAGES:
-        # Every entry-point rule but the top-level guard is keyed on a callable,
-        # so with no callable the catalogue never ran and the guard found nothing.
+    if (
+        not functions
+        and not entry_points
+        and language not in _GLOBAL_ENTRY_LINE_PATTERNS
+    ):
         unscanned.add("entry_points")
     return unscanned
 
@@ -2326,48 +2309,129 @@ _TOP_LEVEL_DECLARATION_PREFIXES = (
 )
 
 
-def _top_level_scan_lines(
-    functions: list[dict[str, Any]], language: str, source_lines: list[str]
-) -> list[tuple[int, str]]:
-    """Return executable-looking lines outside every reported callable span.
+# Grammar nodes outside every callable that hold nothing a reader could match:
+# a TypeScript interface member or a Go interface method reads as a call by its
+# shape alone, a C prototype is a declaration with a parameter list, and PHP's
+# inline HTML is document text whose prose (`Print this page`) is not PHP.
+_FILE_SCOPE_DECLARATION_NODE_TYPES: dict[str, frozenset[str]] = {
+    "go": frozenset({"type_declaration"}),
+    "typescript": frozenset({
+        "abstract_method_signature",
+        "ambient_declaration",
+        "function_signature",
+        "interface_declaration",
+        "method_signature",
+        "type_alias_declaration",
+    }),
+    "php": frozenset({"text"}),
+}
+# A C/C++ declaration is a prototype when its declarator is a bare function
+# declarator; `int (*hook)(int) = run;` carries an `init_declarator` instead.
+_PROTOTYPE_CONTAINER_TYPES = frozenset({"declaration", "field_declaration"})
 
-    The structural readers historically scanned callable bodies only. Once a
-    file had any callable record, executable module initializers beside those
-    callables disappeared from both sink and call-site results while metadata
-    still claimed complete coverage. Preserve the callable records and scan
-    their complement as the synthetic ``<top-level>`` scope.
+
+class _FileScope(NamedTuple):
+    """The file-scope complement of the callable spans, as the readers see it.
+
+    *scanned* is what the ``<top-level>`` scope reads, with grammar-labelled
+    content blanked out of each line. *withheld* is declaration header lines
+    the readers do not take.
     """
-    if not functions and language not in SCRIPT_SCOPE_LANGUAGES:
-        return []
-    callable_lines: set[int] = set()
-    for function in functions:
-        callable_lines.update(
-            range(max(0, int(function["line_start"]) - 1), int(function["line_end"]))
-        )
-    lines: list[tuple[int, str]] = []
-    for index, line in enumerate(source_lines):
-        stripped = line.strip()
-        if (
-            index in callable_lines
-            or not _is_scannable_source_line(line)
-            or stripped.startswith(_TOP_LEVEL_DECLARATION_PREFIXES)
-        ):
+
+    scanned: list[tuple[int, str]]
+    withheld: list[tuple[int, str]]
+
+
+def _callable_intervals(functions: list[dict[str, Any]]) -> list[tuple[int, int]]:
+    """Merged 0-based, inclusive line intervals covered by any callable span."""
+    spans = sorted(
+        (max(0, int(function["line_start"]) - 1), int(function["line_end"]) - 1)
+        for function in functions
+    )
+    merged: list[tuple[int, int]] = []
+    for start, end in spans:
+        if merged and start <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    return merged
+
+
+def _within_one_interval(
+    intervals: list[tuple[int, int]], starts: list[int], first: int, last: int
+) -> bool:
+    position = bisect_right(starts, first) - 1
+    return position >= 0 and intervals[position][1] >= last
+
+
+def _is_file_scope_unread_node(node: Any, language: str) -> bool:
+    if _is_comment_node(node):
+        return True
+    node_type = getattr(node, "type", "")
+    if node_type in _FILE_SCOPE_DECLARATION_NODE_TYPES.get(language, ()):
+        return True
+    return language in {"c", "cpp"} and node_type in _PROTOTYPE_CONTAINER_TYPES and any(
+        child.type == "function_declarator"
+        for child in getattr(node, "named_children", ()) or ()
+    )
+
+
+def _file_scope_lines(
+    tree: Any,
+    functions: list[dict[str, Any]],
+    language: str,
+    source_lines: list[str],
+    source: bytes,
+) -> _FileScope:
+    """Return the synthetic ``<top-level>`` scope: every line no callable covers.
+
+    Module initializers, PHP request scripts, Go package variables and C macro
+    bodies execute without any enclosing callable, so the readers take the
+    complement of the callable spans in every language and whether or not the
+    file has a callable at all. What the complement leaves out is decided by
+    the grammar, not by a line prefix: commentary, docstrings and declarations
+    are blanked out of the lines that hold them, which is what keeps a
+    docstring's `os.system(...)` example and an interface's `get(id)` member
+    from reading as a sink and a call.
+    """
+    intervals = _callable_intervals(functions)
+    starts = [start for start, _end in intervals]
+    masked: dict[int, list[tuple[int, int | None]]] = {}
+    root = getattr(tree, "root_node", None)
+    stack = list(reversed(list(getattr(root, "named_children", ()) or ())))
+    while stack:
+        node = stack.pop()
+        first, last = node.start_point[0], node.end_point[0]
+        if _within_one_interval(intervals, starts, first, last):
             continue
-        if language in {"c", "cpp"} and (
-            (stripped.endswith(";") and "(" in stripped and "=" not in stripped)
-            or (
-                language == "cpp"
-                and "::" in stripped
-                and re.match(r"^[~\w:<>,*&\s]+::[~\w]+\s*\(", stripped)
+        if _is_file_scope_unread_node(node, language):
+            start_line, start_column, end_line, end_column = _node_character_range(
+                node, source
             )
-        ):
-            # Function prototypes and out-of-class method signatures are
-            # declarations, not executable top-level calls. Initializers with
-            # an assignment stay visible because C++ global construction does
-            # execute before main.
+            for line_number in range(start_line, end_line + 1):
+                masked.setdefault(line_number - 1, []).append((
+                    start_column if line_number == start_line else 0,
+                    end_column if line_number == end_line else None,
+                ))
             continue
-        lines.append((index, line))
-    return lines
+        stack.extend(reversed(list(getattr(node, "named_children", ()) or ())))
+
+    scanned: list[tuple[int, str]] = []
+    withheld: list[tuple[int, str]] = []
+    for index, line in enumerate(source_lines):
+        if _within_one_interval(intervals, starts, index, index):
+            continue
+        for start, end in masked.get(index, ()):
+            stop = len(line) if end is None else min(end, len(line))
+            if start < stop:
+                line = line[:start] + " " * (stop - start) + line[stop:]
+        if not _is_scannable_source_line(line, language):
+            continue
+        if line.strip().startswith(_TOP_LEVEL_DECLARATION_PREFIXES):
+            withheld.append((index, line))
+        else:
+            scanned.append((index, line))
+    return _FileScope(scanned, withheld)
 
 
 def _java_fetch_call_matches_type(
@@ -2487,8 +2551,9 @@ def _detect_sinks(
     classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
+    file_scope_lines: list[tuple[int, str]],
 ) -> list[dict[str, Any]]:
-    """Detect security-sensitive API calls within function bodies using regex."""
+    """Detect security-sensitive API calls in callable bodies and file scope."""
     sinks: list[dict[str, Any]] = []
     java_class_receivers: dict[int, dict[str, str]] = {}
     java_class_for_line: dict[int, dict[str, Any]] = {}
@@ -2538,9 +2603,8 @@ def _detect_sinks(
         for func in functions
         if not func.get("is_declaration", False)
     ]
-    top_level_lines = _top_level_scan_lines(functions, language, source_lines)
-    if top_level_lines:
-        scopes.append(({"name": "<top-level>"}, top_level_lines))
+    if file_scope_lines:
+        scopes.append(({"name": "<top-level>"}, file_scope_lines))
 
     for func, scan_lines in scopes:
         java_fetch_receivers: dict[str, str] = {}
@@ -2570,7 +2634,7 @@ def _detect_sinks(
             for pat in lang_patterns:
                 compiled = re.compile(pat)
                 for line_idx, line_text in scan_lines:
-                    if not _is_scannable_source_line(line_text):
+                    if not _is_scannable_source_line(line_text, language):
                         continue
                     matches = compiled.finditer(line_text)
                     if language == "java" and sink_def["kind"] == "url_fetch":
@@ -2619,9 +2683,8 @@ def _detect_sinks(
     return sinks
 
 
-# Common language keywords to exclude from call-site detection. Module-level so
-# `_unread_reader_signal` asks the same question of an unread line that
-# `_detect_call_sites` would have asked of a read one.
+# Common language keywords to exclude from call-site detection. `defined` is
+# the C preprocessor's operator in `#if defined(X)`, which file scope reads.
 _CALL_NOISE = frozenset({
     "if", "else", "for", "while", "switch", "case", "return", "throw",
     "new", "delete", "try", "catch", "finally", "import", "from",
@@ -2639,6 +2702,7 @@ _CALL_NOISE = frozenset({
     "require", "include", "extend", "attr_accessor", "attr_reader",
     "echo", "isset", "empty", "unset", "array", "list",
     "foreach", "elseif", "endforeach", "endif", "endwhile",
+    "defined",
 })
 
 
@@ -2646,8 +2710,9 @@ def _detect_call_sites(
     functions: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
+    file_scope_lines: list[tuple[int, str]],
 ) -> list[dict[str, Any]]:
-    """Detect function calls within each function body using regex.
+    """Detect function calls in each callable body and in file scope.
 
     Each call site includes a ``passes_caller_params`` boolean indicating
     whether the call forwards any of the caller's parameter names as
@@ -2659,9 +2724,8 @@ def _detect_call_sites(
         for func in functions
         if not func.get("is_declaration", False)
     ]
-    top_level_lines = _top_level_scan_lines(functions, language, source_lines)
-    if top_level_lines:
-        scopes.append(({"name": "<top-level>", "params": []}, top_level_lines))
+    if file_scope_lines:
+        scopes.append(({"name": "<top-level>", "params": []}, file_scope_lines))
 
     for func, scan_lines in scopes:
         # Keyed on the line, not the function: a literal `exec("ls")` at the top
@@ -2679,7 +2743,7 @@ def _detect_call_sites(
                     param_names.add(tok)
 
         for line_idx, line_text in scan_lines:
-            if not _is_scannable_source_line(line_text):
+            if not _is_scannable_source_line(line_text, language):
                 continue
             for m in _CALL_RE.finditer(line_text):
                 callee = m.group(1)
@@ -3264,6 +3328,9 @@ def index_file(
         _enrich_qualified_names(functions, classes, effective_lang)
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
+        file_scope = _file_scope_lines(
+            tree, functions, effective_lang, source_lines, source
+        )
         entry_points = _detect_entry_points(
             tree, functions, classes, effective_lang, source_lines, source
         )
@@ -3272,8 +3339,12 @@ def index_file(
                 tree, effective_lang, source_lines, entry_points
             )
         )
-        sinks = _detect_sinks(functions, classes, effective_lang, source_lines)
-        call_sites = _detect_call_sites(functions, effective_lang, source_lines)
+        sinks = _detect_sinks(
+            functions, classes, effective_lang, source_lines, file_scope.scanned
+        )
+        call_sites = _detect_call_sites(
+            functions, effective_lang, source_lines, file_scope.scanned
+        )
         unscanned = _unscanned_scope_dimensions(
             functions,
             entry_points,
@@ -3281,6 +3352,7 @@ def index_file(
             tree=tree,
             language=effective_lang,
             function_scoped_records=bool(sinks or call_sites),
+            file_scope=file_scope,
         )
         export_lines = (
             _export_source_lines(tree, source)

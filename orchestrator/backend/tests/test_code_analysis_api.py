@@ -2177,7 +2177,7 @@ def test_non_skipped_span_requires_sealed_callable_publication(
             queue_item_id=claim["id"],
             disposition="clean",
             reviewed_spans=[
-                {"file_id": parser["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser["id"], "start_line": 1, "end_line": int(parser["loc"])}
             ],
             evidence="An unpublished registry cannot prove this span is non-callable.",
         ),
@@ -2194,7 +2194,7 @@ def test_non_skipped_span_requires_sealed_callable_publication(
             queue_item_id=claim["id"],
             disposition="clean",
             reviewed_spans=[
-                {"file_id": parser["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser["id"], "start_line": 1, "end_line": int(parser["loc"])}
             ],
             evidence="The sealed empty registry proves this span is non-callable.",
         ),
@@ -2312,7 +2312,7 @@ def test_critical_clean_close_rejects_anchored_skipped_receipt(
             queue_item_id=claim["id"],
             disposition="skipped",
             reviewed_spans=[
-                {"file_id": parser["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser["id"], "start_line": 1, "end_line": int(parser["loc"])}
             ],
             notes="This receipt explicitly did not review the file.",
         ),
@@ -2824,6 +2824,10 @@ def _owned(queue_item: dict[str, object], **payload: object) -> dict[str, object
                 """,
                 (queue_item["file_id"], queue_item["repo_generation"]),
             ).fetchone()
+            file_loc = connection.execute(
+                "SELECT loc FROM code_files WHERE id = ?",
+                (queue_item["file_id"],),
+            ).fetchone()["loc"]
         finally:
             connection.close()
         if callable_row is not None:
@@ -2837,11 +2841,12 @@ def _owned(queue_item: dict[str, object], **payload: object) -> dict[str, object
                 }
             ]
         else:
+            # With no callable to cite, a whole-file span is the review proof.
             payload["reviewed_spans"] = [
                 {
                     "file_id": queue_item["file_id"],
                     "start_line": 1,
-                    "end_line": 1,
+                    "end_line": max(1, int(file_loc or 0)),
                 }
             ]
     return {
@@ -5735,7 +5740,7 @@ def test_reclaimed_queue_lease_rejects_stale_result_and_closeout(client, isolate
             "agent_name": "old-agent",
             "lease_token": old_claim["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "partial result before worker loss",
             "evidence": "src/parser.py:1",
@@ -5818,7 +5823,7 @@ def test_lease_conflicts_distinguish_typo_name_mismatch_and_reclaim(client, isol
         return client.post(f"{base}/analysis-results", json={
             "queue_item_id": old_claim["id"], "file_id": parser_file["id"],
             "agent_name": agent_name, "lease_token": lease_token,
-            "reviewed_spans": [{"file_id": parser_file["id"], "start_line": 1, "end_line": 1}],
+            "reviewed_spans": [{"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}],
             "hypothesis": "h", "evidence": "src/parser.py:1", "disposition": "clean",
         })
 
@@ -5873,7 +5878,7 @@ def test_analysis_result_retry_is_idempotent_within_lease(client, isolate_settin
         "agent_name": "result-agent",
         "lease_token": claim["lease_token"],
         "reviewed_spans": [
-            {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+            {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
         ],
         "hypothesis": "input reaches parser",
         "evidence": "src/parser.py:1",
@@ -5920,7 +5925,7 @@ def test_analysis_result_explicit_supersession_replaces_one_source_receipt(
         "agent_name": "result-agent",
         "lease_token": claim["lease_token"],
         "reviewed_spans": [
-            {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+            {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
         ],
         "hypothesis": "input may reach parser",
         "evidence": "src/parser.py:1",
@@ -6159,7 +6164,7 @@ def test_suspicious_result_atomically_materializes_its_run_candidate(
         "agent_name": "result-agent",
         "lease_token": claim["lease_token"],
         "reviewed_spans": [
-            {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+            {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
         ],
         "hypothesis": "attacker length reaches allocation",
         "evidence": "src/parser.py:1",
@@ -6401,7 +6406,7 @@ def test_automatic_analysis_candidate_identity_persists_across_equivalent_scans(
                         {
                             "file_id": parser_file["id"],
                             "start_line": 1,
-                            "end_line": 1,
+                            "end_line": int(parser_file["loc"]),
                         }
                     ],
                 "hypothesis": "attacker length reaches allocation",
@@ -7613,7 +7618,7 @@ def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
             "agent_name": "code-vuln-hunter",
                 "lease_token": queue_item["lease_token"],
                 "reviewed_spans": [
-                    {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                    {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
                 ],
             "hypothesis": "Input is length checked before use.",
             "evidence": "Bounds are enforced before data is copied.",
@@ -7703,7 +7708,7 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "Input is bounded.",
             "evidence": "Reviewed all sinks.",
@@ -8372,7 +8377,7 @@ def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "Shared helper may carry taint into a sink path.",
             "evidence": "parse_message delegates to helper before finishing validation.",
@@ -8522,7 +8527,7 @@ def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "evidence": "External DLL implements the storage call.",
             "disposition": "clean",
@@ -8762,7 +8767,7 @@ def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_se
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "Shared helper may reintroduce taint.",
             "evidence": "parse_message delegates to helper before sink handling.",
@@ -8892,7 +8897,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
             queue_item_id=old_helper_claim["id"],
             disposition="clean",
             reviewed_spans=[
-                {"file_id": helper["id"], "start_line": 1, "end_line": 1}
+                {"file_id": helper["id"], "start_line": 1, "end_line": int(helper["loc"])}
             ],
             evidence="Reviewed the helper source before any cross-file hypothesis existed.",
         ),
@@ -9029,7 +9034,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
             queue_item_id=follow_up["id"],
             disposition="clean",
             reviewed_spans=[
-                {"file_id": helper["id"], "start_line": 1, "end_line": 1}
+                {"file_id": helper["id"], "start_line": 1, "end_line": int(helper["loc"])}
             ],
             evidence="Reviewed the helper source under the new parser contract.",
         ),
@@ -12938,8 +12943,6 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
                 {
                     "file_id": row["id"],
                     "source_sha256": row["file_hash"],
-                    # A tree-sitter file with no callable scans nothing, so it
-                    # cannot report a measured entry point under `complete`.
                     "total_functions": 0,
                     "total_entry_points": 0,
                     "total_sinks": 0,
@@ -13031,8 +13034,6 @@ def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof
                 {
                     "file_id": row["id"],
                     "source_sha256": row["file_hash"],
-                    # A tree-sitter file with no callable scans nothing, so it
-                    # cannot report a measured entry point under `complete`.
                     "total_functions": 0,
                     "total_entry_points": 0,
                     "total_sinks": 0,
@@ -13794,7 +13795,7 @@ def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, i
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "Late worker should not attach results to reclaimed work.",
             "evidence": "Queue row was reclaimed after validation.",
@@ -13863,7 +13864,7 @@ def test_analysis_result_uses_queue_item_file_id_for_coverage_gate(client, isola
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "All applicable network-input families were reviewed.",
             "evidence": "Direct static pass covered parser entry chains.",
@@ -13942,7 +13943,7 @@ def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isol
         "agent_name": "code-vuln-hunter",
         "lease_token": queue_item["lease_token"],
         "reviewed_spans": [
-            {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+            {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
         ],
         "hypothesis": "Shared helper may reintroduce taint.",
         "evidence": "helper normalizes attacker-controlled bytes.",
@@ -14089,7 +14090,7 @@ def test_analysis_results_include_linked_finding_lifecycle(client, isolate_setti
             "agent_name": "code-vuln-hunter",
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser_file["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser_file["id"], "start_line": 1, "end_line": int(parser_file["loc"])}
             ],
             "hypothesis": "Potential parser overflow",
             "evidence": "Attacker-controlled data reaches arithmetic.",

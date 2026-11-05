@@ -205,9 +205,11 @@ def test_public_file_patch_cannot_erase_structural_coverage_debt(
     assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}
 
 
-def test_total_functions_zero_is_not_flagged(client, isolate_settings):
-    # Without a structural index (total_functions=0) there is nothing to verify
-    # against, so the file is not flagged even when closed with no analysis.
+def test_a_zero_callable_file_closed_with_a_whole_file_span_is_not_flagged(
+    client, isolate_settings
+):
+    # With no callable to cite, the whole-file span the receipt gate demands is
+    # the file's review proof, so the closed file is covered.
     key = "2026-06-26-uncov-nostruct"
     write_engagement(isolate_settings["engagements_dir"], key)
     repo = _create_repo(client, key, repo_key=f"{key}-repo")
@@ -215,6 +217,20 @@ def test_total_functions_zero_is_not_flagged(client, isolate_settings):
     parser = next(f for f in files if f["file_path"] == "src/parser.py")
     _classify_file(client, key, int(parser["id"]), "critical", 100)
     queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
+    _record_fixture_source_receipt(
+        client,
+        key,
+        queue_item,
+        disposition="clean",
+        reviewed_spans=[
+            {
+                "file_id": queue_item["file_id"],
+                "start_line": 1,
+                "end_line": int(parser["loc"]),
+                "label": "whole-file manual review",
+            }
+        ],
+    )
     done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
     gate = _gate(client, key, repo["id"])
@@ -406,6 +422,35 @@ def test_low_effort_with_evidenced_callable_is_warn_not_uncovered(client, isolat
 # ---------------------------------------------------------------------------
 
 
+def _close_under_an_earlier_index(client, key, repo_id, files, parser, *, span):
+    """Close *parser* with *span* while the index still listed one callable.
+
+    The callable sits on the last line, clear of every span these tests record,
+    so the receipt is a legitimate partial span under that index. A later sync
+    (an indexer upgrade, a rebuilt snapshot index) can then publish the file
+    with no callable, which is the route by which a partial span survives on a
+    file that now owes a whole-file one.
+    """
+    loc = int(parser["loc"])
+    _publish_structural_callables(
+        client,
+        key,
+        repo_id,
+        files,
+        {int(parser["id"]): [_structural_callable("parse_tail", start_line=loc, end_line=loc)]},
+    )
+    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
+    _record_fixture_source_receipt(
+        client,
+        key,
+        queue_item,
+        disposition="clean",
+        reviewed_spans=[{"file_id": queue_item["file_id"], **span}],
+    )
+    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
+    assert done.status_code == 200, done.text
+
+
 def _publish_unscanned_scope(client, key, repo_id, files, parser):
     """Publish the shape a zero-callable tree-sitter file really produces."""
     base = f"/engagements/{key}/assessment/code"
@@ -456,10 +501,10 @@ def _publish_unscanned_scope(client, key, repo_id, files, parser):
 def test_unscanned_function_scope_is_not_exempt_from_the_uncovered_gate(
     client, isolate_settings
 ):
-    """A partial span closed before the index landed is the surviving route.
+    """A partial span closed under an earlier index is the surviving route.
 
     Recording now forces a whole-file span on such a file, but a review closed
-    against no structural metadata keeps its partial span when a later
+    while the index listed a callable keeps its partial span when a later
     `code-index sync` declares the scan scope unavailable. The zero-function
     skip read that as "nothing to verify against" and exempted the file.
     """
@@ -469,9 +514,10 @@ def test_unscanned_function_scope_is_not_exempt_from_the_uncovered_gate(
     files = _create_files(client, key, int(repo["id"]))
     parser = next(f for f in files if f["file_path"] == "src/parser.py")
     _classify_file(client, key, int(parser["id"]), "critical", 100)
-    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
-    done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
-    assert done.status_code == 200, done.text
+    _close_under_an_earlier_index(
+        client, key, int(repo["id"]), files, parser,
+        span={"start_line": 20, "end_line": 20},
+    )
     _publish_unscanned_scope(client, key, int(repo["id"]), files, parser)
 
     assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}
@@ -511,7 +557,7 @@ def test_a_partial_span_from_line_one_does_not_clear_an_unscanned_scope(
 ):
     """Whole-file means the whole file, not merely starting at line 1.
 
-    A review closed before the index landed keeps whatever span it recorded,
+    A review closed under an earlier index keeps whatever span it recorded,
     and that span is the only proof such a file can carry. Accepting one that
     starts at line 1 but stops short would let a single reviewed line stand in
     for source the index never scanned -- the escape valve reopened.
@@ -522,8 +568,105 @@ def test_a_partial_span_from_line_one_does_not_clear_an_unscanned_scope(
     files = _create_files(client, key, int(repo["id"]))
     parser = next(f for f in files if f["file_path"] == "src/parser.py")
     _classify_file(client, key, int(parser["id"]), "critical", 100)
-    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
     assert int(parser["loc"]) > 1
+    _close_under_an_earlier_index(
+        client, key, int(repo["id"]), files, parser,
+        span={
+            "start_line": 1,
+            "end_line": int(parser["loc"]) - 1,
+            "label": "read from the top, stopped one line short",
+        },
+    )
+    _publish_unscanned_scope(client, key, int(repo["id"]), files, parser)
+
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}
+
+
+# ---------------------------------------------------------------------------
+# A zero-callable file with source owes whole-file review proof, signals or not.
+# ---------------------------------------------------------------------------
+
+
+def _publish_zero_callable(client, key, repo_id, files, parser, *, signal_counts):
+    """Publish a complete zero-callable file the indexer measured at file scope."""
+    base = f"/engagements/{key}/assessment/code"
+    binding = client.get(f"{base}/repos/{repo_id}").json()
+    payload = _complete_structural_payload(
+        repo_id=int(repo_id),
+        repo_generation=int(binding["active_generation"]),
+        source_manifest_digest=str(binding["source_manifest_digest"]),
+        updates=[
+            {
+                "file_id": row["id"],
+                "source_sha256": row["file_hash"],
+                "total_functions": 0,
+                "total_entry_points": 0,
+                "total_sinks": 0,
+                "total_exports": 0,
+                "callables": [],
+            }
+            for row in files
+        ],
+    )
+    update = next(
+        item for item in payload["updates"] if item["file_id"] == parser["id"]
+    )
+    update.update(
+        {
+            "total_entry_points": signal_counts["entry_points"],
+            "total_sinks": signal_counts["security_sinks"],
+            "structural_signal_counts": signal_counts,
+        }
+    )
+    response = client.post(f"{base}/files/bulk-structural-metadata", json=payload)
+    assert response.status_code == 200, response.text
+
+
+_FILE_SCOPE_SIGNALS = {
+    "entry_points": 1,
+    "imports": 2,
+    "security_sinks": 1,
+    "security_sources": 1,
+}
+
+
+def test_a_zero_callable_file_with_signals_is_not_exempt_from_the_uncovered_gate(
+    client, isolate_settings
+):
+    """A critical page whose file scope reads request input and reaches a sink
+    has no callable to review, so "no functions" cannot mean "nothing to verify".
+    The review closed under an earlier index keeps its one-line span.
+    """
+    key = "2026-11-03-uncov-zero-callable-signal"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key=f"{key}-repo")
+    files = _create_files(client, key, int(repo["id"]))
+    parser = next(f for f in files if f["file_path"] == "src/parser.py")
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    _close_under_an_earlier_index(
+        client, key, int(repo["id"]), files, parser,
+        span={"start_line": 20, "end_line": 20},
+    )
+    _publish_zero_callable(
+        client, key, int(repo["id"]), files, parser, signal_counts=_FILE_SCOPE_SIGNALS
+    )
+
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}
+
+
+def test_a_whole_file_span_clears_a_zero_callable_file_with_signals(
+    client, isolate_settings
+):
+    key = "2026-11-03-uncov-zero-callable-span"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key=f"{key}-repo")
+    files = _create_files(client, key, int(repo["id"]))
+    parser = next(f for f in files if f["file_path"] == "src/parser.py")
+    _publish_zero_callable(
+        client, key, int(repo["id"]), files, parser, signal_counts=_FILE_SCOPE_SIGNALS
+    )
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    queue_item = _claim_file_for_analysis(client, key, int(parser["id"]))
     _record_fixture_source_receipt(
         client,
         key,
@@ -533,13 +676,44 @@ def test_a_partial_span_from_line_one_does_not_clear_an_unscanned_scope(
             {
                 "file_id": queue_item["file_id"],
                 "start_line": 1,
-                "end_line": int(parser["loc"]) - 1,
-                "label": "read from the top, stopped one line short",
+                "end_line": int(parser["loc"]),
+                "label": "whole-file manual review",
             }
         ],
     )
     done = _complete(client, key, queue_item, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
-    _publish_unscanned_scope(client, key, int(repo["id"]), files, parser)
+
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
+
+
+def test_a_zero_callable_file_carrying_only_imports_owes_a_whole_file_span(
+    client, isolate_settings
+):
+    """No signal is not no source: with no callable to cite, a one-line span
+    from a closed review stands for a file nobody proved was read end to end."""
+    key = "2026-11-03-uncov-zero-callable-imports"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    repo = _create_repo(client, key, repo_key=f"{key}-repo")
+    files = _create_files(client, key, int(repo["id"]))
+    parser = next(f for f in files if f["file_path"] == "src/parser.py")
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    _close_under_an_earlier_index(
+        client, key, int(repo["id"]), files, parser,
+        span={"start_line": 20, "end_line": 20},
+    )
+    _publish_zero_callable(
+        client,
+        key,
+        int(repo["id"]),
+        files,
+        parser,
+        signal_counts={
+            "entry_points": 0,
+            "imports": 4,
+            "security_sinks": 0,
+            "security_sources": 0,
+        },
+    )
 
     assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}

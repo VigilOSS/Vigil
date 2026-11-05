@@ -634,35 +634,20 @@ os.system("backup " + os.environ["TARGET"])
 """
 
 
-@pytest.mark.parametrize(
-    ("file_path", "language", "source"),
-    [
-        ("deploy.py", "python", MODULE_LEVEL_PYTHON),
-    ],
-)
-def test_a_file_with_no_scanned_function_never_reports_clean_sinks(
-    file_path: str, language: str, source: bytes
-) -> None:
-    """Python module calls remain outside a callable scan scope.
-
-    Each fixture carries an executable sink or route outside any function, so
-    `security_sinks: []` under `analysis_status: "complete"` is a measurement
-    the indexer never made (ADR 0015).
+def test_a_file_with_no_callable_reads_its_module_level_sink() -> None:
+    """Module-level code runs on import, so it is read as the `<top-level>`
+    scope whether or not the file defines a callable. Reporting the sink is
+    what keeps `security_sinks: []` from being a measurement the indexer never
+    made (ADR 0015).
     """
-    indexed = index_file(file_path, language, source)
+    indexed = index_file("deploy.py", "python", MODULE_LEVEL_PYTHON)
 
     assert indexed["total_functions"] == 0
-    assert indexed["security_sinks"] == []
-    assert indexed["analysis_status"] == "degraded"
-    assert indexed["degradation_reason"] == (
-        treesitter_index.UNSCANNED_SCOPE_DEGRADATION_REASON
-    )
-    assert indexed["unavailable_dimensions"] == [
-        "call_sites",
-        "dataflow",
-        "entry_points",
-        "security_sinks",
-    ]
+    assert [
+        (sink["kind"], sink["function"], sink["line"]) for sink in indexed["security_sinks"]
+    ] == [("process_exec", "<top-level>", _line_carrying("os.system", MODULE_LEVEL_PYTHON))]
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
 
 
 LARAVEL_ROUTES = b"""<?php
@@ -875,29 +860,23 @@ def test_a_file_with_no_scannable_source_is_not_coverage_debt(source: bytes) -> 
     assert indexed["unavailable_dimensions"] == []
 
 
-def test_a_top_level_main_guard_keeps_the_entry_dimension_measured() -> None:
-    """Python's guard pattern is scanned over program children, not functions.
-
-    Only the dimensions whose detector never ran may be declared unavailable;
-    an entry point that was actually found must stay reported.
-    """
-    indexed = index_file(
-        "cli.py",
-        "python",
-        b"import os\n\nif __name__ == '__main__':\n    os.system('go')\n",
-    )
+def test_a_top_level_main_guard_and_its_body_are_both_measured() -> None:
+    """Python's guard pattern is scanned over program children, and the guard's
+    body is file scope the sink reader takes like any other."""
+    source = b"import os\n\nif __name__ == '__main__':\n    os.system('go')\n"
+    indexed = index_file("cli.py", "python", source)
 
     assert [entry["kind"] for entry in indexed["entry_points"]] == ["main_guard"]
-    assert indexed["analysis_status"] == "degraded"
-    assert indexed["unavailable_dimensions"] == [
-        "call_sites",
-        "dataflow",
-        "security_sinks",
-    ]
+    assert [
+        (sink["kind"], sink["function"], sink["line"]) for sink in indexed["security_sinks"]
+    ] == [("process_exec", "<top-level>", 4)]
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
 
 
-def test_a_header_of_declarations_scans_no_body() -> None:
-    """`_detect_sinks` skips declarations, so a prototype header measures nothing."""
+def test_a_header_of_declarations_measures_clean() -> None:
+    """A prototype is a declaration the grammar labels and holds no executable
+    line, so a header of prototypes and guards was read end to end."""
     indexed = index_file(
         "api.h",
         "c",
@@ -905,7 +884,8 @@ def test_a_header_of_declarations_scans_no_body() -> None:
     )
 
     assert indexed["security_sinks"] == []
-    assert "security_sinks" in indexed["unavailable_dimensions"]
+    assert indexed["call_sites"] == []
+    assert indexed["unavailable_dimensions"] == []
 
 
 # --- 11. Readers that scan raw lines must skip commented-out source ---------
@@ -931,11 +911,10 @@ def test_a_commented_out_export_is_not_an_export(
     """`_detect_exports` scans raw lines, like `_detect_sinks` and
     `_detect_call_sites` -- but without their comment guard.
 
-    A fully commented-out module therefore published `total_functions: 0` with
-    a non-zero export count, which is precisely the shape the backend rejects:
-    no callable scope but signals proving there was source to scan. One dead
-    file then 400s the whole repository's `code-index sync`, because the sync
-    sends one `updates` list per repo and the rejection names no file.
+    A fully commented-out module therefore published a non-zero export count
+    for a file holding no source at all: an export nothing can import, feeding
+    reachability for code that does not exist. The module holds no source, so
+    the empty result is the measurement.
     """
     indexed = index_file(file_path, language, source)
 
@@ -983,19 +962,19 @@ def test_a_c_preprocessor_directive_is_source_not_commentary() -> None:
     """`#` opens a comment in Python, Ruby, PHP and shell -- and a preprocessor
     directive in C and C++.
 
-    The prefix list was written for a per-line sink skip, where a false skip
-    costs one line. Reused to decide whether a whole file holds *any* source,
-    it declared a header defining `system`/`popen` wrappers empty, and an empty
-    file measures its own emptiness: `complete`, no unavailable dimension,
-    `security_sinks: []`. Nothing read a line of it.
+    Read as a comment, a header defining `system`/`popen` wrappers holds no
+    source at all, and an empty file measures its own emptiness: `complete`,
+    `security_sinks: []`, with nothing having read a line of it. The macro
+    bodies are file scope, and the wrappers are the sinks every caller reaches.
     """
     indexed = index_file("macros.h", "c", C_MACRO_HEADER)
 
-    assert indexed["security_sinks"] == []
-    assert indexed["analysis_status"] == "degraded"
-    assert set(indexed["unavailable_dimensions"]) >= (
-        treesitter_index.FUNCTION_SCOPED_DIMENSIONS
-    )
+    assert {
+        (sink["function"], sink["line"]) for sink in indexed["security_sinks"]
+    } >= {
+        ("<top-level>", _line_carrying("system(cmd)", C_MACRO_HEADER)),
+        ("<top-level>", _line_carrying("popen(url", C_MACRO_HEADER)),
+    }
 
 
 @pytest.mark.parametrize(

@@ -40,7 +40,7 @@ def _artifact(source: bytes) -> dict:
     }
 
 
-@pytest.mark.parametrize("defect", ["identity", "duplicate", "registry_shortfall", "no_callable_scope"])
+@pytest.mark.parametrize("defect", ["identity", "duplicate", "registry_shortfall"])
 def test_build_rejects_artifact_shapes_sync_cannot_publish(defect: str) -> None:
     source = b"def f(): pass\n"
     artifact = _artifact(source)
@@ -49,15 +49,28 @@ def test_build_rejects_artifact_shapes_sync_cannot_publish(defect: str) -> None:
     elif defect == "duplicate":
         artifact["functions"] *= 2
         artifact["total_functions"] = 2
-    elif defect == "registry_shortfall":
-        artifact["total_functions"] = 2
     else:
-        artifact["functions"] = []
-        artifact["total_functions"] = 0
-        artifact["exports"] = [{"name": "Dead", "kind": "named_export", "line": 1}]
-        artifact["total_exports"] = 1
+        artifact["total_functions"] = 2
     with pytest.raises(ValueError):
         code_index._validate_analysis_artifact(artifact, rel_path="bad.py", source_size=len(source))
+
+
+def test_a_zero_callable_file_measured_at_file_scope_is_publishable() -> None:
+    """The `<top-level>` scope reads file scope, so a module-level script with
+    no callable can report what it found under `complete`."""
+    source = b"<?php\necho $_GET['q'];\n"
+    artifact = _artifact(source)
+    artifact.update({
+        "language": "php", "functions": [], "total_functions": 0,
+        "security_sinks": [{"kind": "xss_output", "line": 2, "function": "<top-level>",
+                            "snippet": "echo $_GET['q'];", "vuln_classes": ["web-app-injection"]}],
+        "security_sources": [{"kind": "http_request_input", "line": 2, "snippet": "$_GET['q']"}],
+        "entry_points": [{"name": "<top-level>", "line": 2, "kind": "php_script", "annotation": "$_GET"}],
+        "signal_counts": {"entry_points": 1, "imports": 0, "security_sinks": 1, "security_sources": 1},
+    })
+    code_index._validate_analysis_artifact(artifact, rel_path="page.php", source_size=len(source))
+    metadata = validated_structural_metadata(artifact, rel_path="page.php", source_size=len(source))
+    assert metadata["structural_analysis_status"] == "complete"
 
 
 @pytest.mark.parametrize("language,extension", [("javascript", "js"), ("typescript", "ts"), ("typescript", "tsx")])

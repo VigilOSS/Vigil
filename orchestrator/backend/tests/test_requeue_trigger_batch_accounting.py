@@ -119,7 +119,7 @@ def test_requeue_accepts_list_trigger_rows_and_rejects_selectorless_input(
             "agent_name": queue_item["agent_name"],
             "lease_token": queue_item["lease_token"],
             "reviewed_spans": [
-                {"file_id": parser["id"], "start_line": 1, "end_line": 1}
+                {"file_id": parser["id"], "start_line": 1, "end_line": int(parser["loc"])}
             ],
             "hypothesis": "The helper may carry unvalidated bytes.",
             "evidence": "parse() delegates to the helper before validating.",
@@ -342,7 +342,7 @@ def test_requeue_names_a_trigger_target_missing_from_the_snapshot_and_the_closes
             "file_id": parser["id"],
             "agent_name": queue_item["agent_name"],
             "lease_token": queue_item["lease_token"],
-            "reviewed_spans": [{"file_id": parser["id"], "start_line": 1, "end_line": 1}],
+            "reviewed_spans": [{"file_id": parser["id"], "start_line": 1, "end_line": int(parser["loc"])}],
             "hypothesis": "The helper may carry unvalidated bytes.",
             "evidence": "parse() delegates to the helper before validating.",
             "disposition": "clean",

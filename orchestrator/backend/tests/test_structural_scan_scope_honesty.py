@@ -1,12 +1,10 @@
 """A structural index that scanned no function scope must say so.
 
-`_detect_sinks` and `_detect_call_sites` read nothing but the spans
-`_function_scan_lines` hands them, so a file with no callable — a Laravel
-`routes/web.php`, a Blade template, a module-level script — reaches the backend
-with every function-scoped dimension empty and nothing scanned. Reporting that
-as `complete` is the false clean ADR 0015 exists to forbid, and it exempted the
-file from the reviewed-span, coverage-integrity and structural-debt surfaces
-that are meant to catch exactly it.
+A file whose function-scoped dimensions were never read reaches the backend
+with those dimensions declared unavailable; reporting it as `complete` is the
+false clean ADR 0015 exists to forbid. A file with no callable whose file scope
+the indexer did read is a real measurement, but with no callable to cite it
+still owes whole-file review proof.
 """
 from __future__ import annotations
 
@@ -15,11 +13,8 @@ import json
 from pathlib import Path
 
 import pytest
-from pydantic import ValidationError
 
-from app.api.code_analysis import StructuralMetadataItem
-from app.services.code_analysis import FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
-from app.services.code_analysis_support import SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
+from app.services.code_analysis_support import FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
 
 from tests.test_code_analysis_api import (
     _claim_file_for_analysis,
@@ -126,72 +121,117 @@ def test_an_unscanned_function_scope_publishes_as_declared_coverage_debt(
     assert persisted["structural_unavailable_dimensions"] == UNSCANNED_SCOPE_DIMENSIONS
 
 
-def test_a_zero_callable_file_cannot_claim_complete_over_scanned_source(
+def _file_scope_signal_update() -> dict[str, object]:
+    """A zero-callable file whose `<top-level>` scope the indexer read."""
+    return {
+        "total_entry_points": 1,
+        "total_sinks": 1,
+        "structural_signal_counts": {
+            "entry_points": 1,
+            "imports": 3,
+            "security_sinks": 1,
+            "security_sources": 1,
+        },
+    }
+
+
+def test_a_zero_callable_file_measured_at_file_scope_publishes_complete(
     client, isolate_settings
 ) -> None:
-    """The `zero-signal implies unavailable` direction the validator was missing.
-
-    Imports prove the file had source the parser read; no callable proves the
-    function-scoped detectors never ran over it. `complete` is then a claim the
-    indexer cannot have made.
-    """
-    engagement_key = "2026-09-17-unscanned-scope-reject"
-    _repo, _files, _parser, payload = _prepare(
+    """The indexer reads file scope as the `<top-level>` scope, so a module-level
+    script with no callable reports a real measurement under `complete`."""
+    engagement_key = "2026-09-17-unscanned-scope-file-scope"
+    _repo, _files, parser, payload = _prepare(
         client,
         isolate_settings,
         engagement_key,
-        parser_update={"structural_signal_counts": {
-            "entry_points": 0,
-            "imports": 3,
-            "security_sinks": 0,
-            "security_sources": 1,
-        }},
+        parser_update=_file_scope_signal_update(),
         counts=False,
     )
     base = f"/engagements/{engagement_key}/assessment/code"
 
     response = client.post(f"{base}/files/bulk-structural-metadata", json=payload)
 
-    assert response.status_code == 422, response.text
-    assert "callable scope" in response.text
+    assert response.status_code == 200, response.text
+    persisted = client.get(f"{base}/files/{parser['id']}").json()
+    assert persisted["structural_analysis_status"] == "complete"
+    assert persisted["total_functions"] == 0
+    assert persisted["total_sinks"] == 1
 
 
-def _zero_callable_complete_item(indexed_language: str) -> dict[str, object]:
-    return {
-        "file_id": 1,
-        "source_sha256": "0" * 64,
-        "indexed_language": indexed_language,
-        "total_functions": 0,
-        "total_entry_points": 0,
-        "total_sinks": 1,
-        "total_exports": 0,
-        "structural_analysis_status": "complete",
-        "structural_analysis_mode": "tree_sitter",
-        "structural_degradation_reason": None,
-        "structural_source_size": 12,
-        "structural_bytes_scanned": 12,
-        "structural_unavailable_dimensions": [],
-        "structural_artifact_truncated": False,
-        "structural_truncated_dimensions": [],
-        "structural_signal_counts": {
-            "entry_points": 0,
-            "imports": 2,
-            "security_sinks": 1,
-            "security_sources": 0,
-        },
-    }
+@pytest.mark.parametrize(
+    "parser_update",
+    [
+        pytest.param(_file_scope_signal_update(), id="file-scope-signals"),
+        pytest.param(
+            {"structural_signal_counts": {
+                "entry_points": 0,
+                "imports": 4,
+                "security_sinks": 0,
+                "security_sources": 0,
+            }},
+            id="imports-only",
+        ),
+        pytest.param({}, id="no-signal"),
+    ],
+)
+def test_a_partial_span_cannot_review_a_zero_callable_file(
+    client, isolate_settings, parser_update
+) -> None:
+    """With no callable to cite, a whole-file span is the only review proof a
+    zero-callable file with source can offer, whatever its signals: no signal
+    is a measurement of the readers, not proof that a reviewer read the file."""
+    engagement_key = "2026-09-17-zero-callable-signal-span"
+    _repo, _files, parser, payload = _prepare(
+        client,
+        isolate_settings,
+        engagement_key,
+        parser_update=parser_update,
+        counts=False,
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    assert client.post(
+        f"{base}/files/bulk-structural-metadata", json=payload
+    ).status_code == 200
+    claim = _claim_file_for_analysis(
+        client,
+        engagement_key,
+        int(parser["id"]),
+        publish_callable_registry=False,
+    )
 
+    partial = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            reviewed_spans=[{"file_id": parser["id"], "start_line": 1, "end_line": 1}],
+            evidence="One line cannot stand for a file-scope sink map.",
+        ),
+    )
 
-def test_a_script_scope_language_publishes_its_measured_file_scope() -> None:
-    """A PHP script is read as its own `<top-level>` scope, callable or not, so
-    the signals it reports there are a measurement. The same payload from a
-    language whose readers only enter callables stays rejected.
-    """
-    item = StructuralMetadataItem.model_validate(_zero_callable_complete_item("php"))
+    assert partial.status_code == 409, partial.text
+    assert "no callable" in partial.json()["detail"]
 
-    assert item.structural_analysis_status == "complete"
-    with pytest.raises(ValidationError, match="callable scope"):
-        StructuralMetadataItem.model_validate(_zero_callable_complete_item("python"))
+    whole_file = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            reviewed_spans=[
+                {
+                    "file_id": parser["id"],
+                    "start_line": 1,
+                    "end_line": parser["loc"],
+                    "label": "whole-file manual review",
+                }
+            ],
+            evidence="Every sealed source line was read by hand.",
+        ),
+    )
+    assert whole_file.status_code == 201, whole_file.text
 
 
 def test_a_measured_negative_with_callables_still_publishes_complete(
@@ -398,10 +438,7 @@ def test_an_unscanned_scope_file_is_named_in_structural_coverage_debt(
 
 
 # ---------------------------------------------------------------------------
-# The same rejection, one step earlier. `code-index sync` builds a single
-# `updates` list per repository, so the backend's 422 names no file and takes
-# the whole repo down with it: one dead, fully commented-out module is enough.
-# The index-time mirror fails on the artifact that produced it, by path.
+# The index-time mirror of the backend validator reads the same artifacts.
 # ---------------------------------------------------------------------------
 
 SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
@@ -466,17 +503,18 @@ def _complete_artifact(**overrides) -> dict:
         ),
     ],
 )
-def test_code_index_sync_rejects_a_complete_file_with_no_callable_scope(
+def test_code_index_sync_accepts_a_complete_file_measured_at_file_scope(
     overrides: dict,
 ) -> None:
     module = _sync_module()
 
-    with pytest.raises(ValueError, match="routes/web.php"):
-        module.validated_structural_metadata(
-            _complete_artifact(**overrides),
-            rel_path="routes/web.php",
-            source_size=12,
-        )
+    metadata = module.validated_structural_metadata(
+        _complete_artifact(**overrides),
+        rel_path="routes/web.php",
+        source_size=12,
+    )
+
+    assert metadata["structural_analysis_status"] == "complete"
 
 
 def test_the_backend_mirror_of_the_function_scoped_dimensions_is_exact() -> None:
@@ -490,12 +528,6 @@ def test_the_backend_mirror_of_the_function_scoped_dimensions_is_exact() -> None
     from assess.lib.treesitter_index import FUNCTION_SCOPED_DIMENSIONS
 
     assert FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS == FUNCTION_SCOPED_DIMENSIONS
-
-
-def test_the_backend_mirror_of_the_script_scope_languages_is_exact() -> None:
-    from assess.lib.treesitter_index import SCRIPT_SCOPE_LANGUAGES
-
-    assert SCRIPT_SCOPE_STRUCTURAL_LANGUAGES == SCRIPT_SCOPE_LANGUAGES
 
 
 def test_code_index_sync_accepts_a_complete_file_with_no_signal_at_all() -> None:

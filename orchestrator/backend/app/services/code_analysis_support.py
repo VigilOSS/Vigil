@@ -25,21 +25,20 @@ from .sql_like import like_contains
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
 STRUCTURAL_INDEX_SCHEMA = "structural-index/v7"
 STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
-# Dimensions the exact parser can only read inside a callable. When the index
-# declares one of them unavailable, the sink and call-site detectors returned
-# nothing over source they did not fully read, so the file owes the same
-# coverage proof as one with no function registry at all. A cross-tree mirror:
-# the single source of truth is `FUNCTION_SCOPED_DIMENSIONS` in
+# Dimensions the sink and call-site readers measure over callable spans and the
+# file-scope complement. When the index declares one of them unavailable, the
+# detectors returned nothing over source they did not fully read, so the file
+# owes the same coverage proof as one with no function registry at all. A
+# cross-tree mirror: the single source of truth is `FUNCTION_SCOPED_DIMENSIONS` in
 # `agent/scripts/assess/lib/treesitter_index.py`, produced there by
 # `_unscanned_scope_dimensions`, and the backend mirrors the agent tree rather
 # than importing from it (CODE-MAP.md). Keep the two lists identical.
 FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
     {"call_sites", "dataflow", "security_sinks"}
 )
-# Languages the exact parser reads as a `<top-level>` scope even with no
-# callable. Mirrors `SCRIPT_SCOPE_LANGUAGES` in the same agent module; keep
-# the two identical.
-SCRIPT_SCOPE_STRUCTURAL_LANGUAGES = frozenset({"php"})
+# Statuses under which the structural index measured a file, so its callable
+# registry is the review-proof vocabulary for that file.
+_INDEXED_STRUCTURAL_STATUSES = frozenset({"complete", "degraded"})
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
@@ -473,6 +472,30 @@ def _json_decode(value: Any, default: Any) -> Any:
         except json.JSONDecodeError:
             return default
     return default
+
+
+def structural_scope_requires_whole_file_review(file_row: dict[str, Any]) -> str:
+    """Why a file's only review proof is a whole-file span, or "" when it is not.
+
+    A file whose function-scoped dimensions were never scanned has nothing a
+    partial span can be read against. An indexed file with source but no
+    callable has no structural callable a receipt could cite, whatever its file
+    scope measured: no signal is a fact about the readers, not proof that a
+    reviewer read the file, so a partial span would stand for lines nobody
+    showed were read. The receipt span gate and the coverage gate both ask here.
+    """
+    if set(_json_decode(file_row.get("structural_unavailable_dimensions_json"), [])) & (
+        FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
+    ):
+        return "index scanned no function scope"
+    if (
+        str(file_row.get("structural_analysis_status") or "")
+        in _INDEXED_STRUCTURAL_STATUSES
+        and _safe_int(file_row.get("total_functions")) <= 0
+        and _safe_int(file_row.get("loc")) > 0
+    ):
+        return "registry holds no callable for this file"
+    return ""
 
 
 def _finding_snapshot_repo_id(finding: Any) -> int | None:
@@ -919,18 +942,10 @@ def _normalize_analysis_receipt_anchors(
             }
         ):
             incomplete_reason = "function registry is incomplete"
-        elif unavailable_dimensions & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS:
-            # A partial span has nothing to be read against here: the index
-            # never scanned a line of this file for callables or sinks.
-            incomplete_reason = "index scanned no function scope"
-        elif (
-            canonical_structural_language(file_rows[file_id].get("language", ""))
-            in SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
-            and not int(file_rows[file_id].get("total_functions") or 0)
-        ):
-            incomplete_reason = "file scope is the only scope it indexed"
         else:
-            incomplete_reason = ""
+            incomplete_reason = structural_scope_requires_whole_file_review(
+                file_rows[file_id]
+            )
         if incomplete_reason and (
             start_line != 1 or end_line != int(file_rows[file_id]["loc"])
         ):

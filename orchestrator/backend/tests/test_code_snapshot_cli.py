@@ -4609,9 +4609,11 @@ def test_javascript_complete_index_never_augments_ast_with_line_regex_callables(
         source=b"const parsedByAst = value => value;\n",
     )
 
-    # No callable means no span was ever handed to the sink reader, so the file
-    # declares that debt instead of claiming a clean read it never made.
+    # No callable means no callable-keyed entry rule ran, and JavaScript has no
+    # file-scope entry catalogue, so the file declares that debt instead of
+    # claiming a clean entry-point read it never made.
     assert indexed["analysis_status"] == "degraded"
+    assert indexed["unavailable_dimensions"] == ["entry_points"]
     assert indexed["functions"] == []
 
 
@@ -4800,9 +4802,9 @@ def test_exact_parser_attaches_bounded_security_source_detection(
         source=b"value = request.args['command']\n",
     )
 
-    # Sources are a whole-file scan, so they survive a file with no callable --
-    # which is separately declared as an unscanned function scope.
-    assert indexed["analysis_status"] == "degraded"
+    # Sources are a whole-file scan, so they survive a file with no callable,
+    # and the file scope that holds the read is measured by the other readers.
+    assert indexed["analysis_status"] == "complete"
     assert indexed["analysis_mode"] == "tree_sitter"
     assert indexed["signal_counts"]["security_sources"] == 1
     assert indexed["security_sources"][0]["line"] == 1

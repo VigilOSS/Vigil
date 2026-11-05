@@ -23,12 +23,10 @@ from . import code_fuzz_completion
 from .code_analysis_support import (
     ANALYSIS_REPO_ROLE,
     DEFAULT_VARIANT_RECEIPT_PAGE,
-    FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS,
     MAX_ADOPTED_LEASE_CHAIN,
     MAX_OPEN_LEASE_ROWS,
     MAX_PROGRESS_RECEIPTS,
     MAX_VARIANT_RECEIPT_PAGE,
-    SCRIPT_SCOPE_STRUCTURAL_LANGUAGES,
     STRUCTURAL_INDEX_SCHEMA,
     VARIANT_INPUT_IDENTITY_SCHEMA as VARIANT_INPUT_IDENTITY_SCHEMA,
     _CANONICAL_STRUCTURAL_LANGUAGES as _CANONICAL_STRUCTURAL_LANGUAGES,
@@ -104,6 +102,7 @@ from .code_analysis_support import (
     code_track_enabled,
     structural_index_state,
     structural_input_identity_digest,
+    structural_scope_requires_whole_file_review,
     variant_input_identity_digest,
 )
 from .events import _engagement_or_404
@@ -7356,7 +7355,7 @@ def code_coverage_summary(
                 )
             file_func_rows = connection.execute(
                 f"""
-                SELECT id, language, total_functions,
+                SELECT id, loc, total_functions, structural_analysis_status,
                        structural_unavailable_dimensions_json
                 FROM code_files
                 WHERE engagement_id = ? AND id IN ({placeholders})
@@ -7366,25 +7365,18 @@ def code_coverage_summary(
             file_total_functions = {
                 int(r["id"]): _safe_int(r["total_functions"]) for r in file_func_rows
             }
-            # A file whose function-scoped dimensions were never scanned has no
-            # callable to review and no sink map to review against. Counting it
-            # as "nothing to verify" is what let a zero-callable critical file
-            # close with no proof at all.
-            files_with_unscanned_scope = {
+            # A file whose function-scoped dimensions were never scanned, or an
+            # indexed file with source but no callable, has no structural
+            # callable a receipt could name. Counting it as "nothing to verify"
+            # is what let a zero-callable critical file close with no proof at
+            # all.
+            files_owing_whole_file_review = {
                 int(r["id"])
                 for r in file_func_rows
-                if set(
-                    _json_decode(r["structural_unavailable_dimensions_json"], [])
-                )
-                & FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS
-                or (
-                    canonical_structural_language(r["language"])
-                    in SCRIPT_SCOPE_STRUCTURAL_LANGUAGES
-                    and not _safe_int(r["total_functions"])
-                )
+                if structural_scope_requires_whole_file_review(dict(r))
             }
-            # With no callable registry a whole-file span is the only review
-            # proof left, which is exactly what the receipt gate now demands of
+            # With no callable to cite a whole-file span is the only review
+            # proof left, which is exactly what the receipt gate demands of
             # these files. A partial span from a review closed before the index
             # landed proves nothing about the source it never named.
             whole_file_span_file_ids = {
@@ -7428,7 +7420,7 @@ def code_coverage_summary(
                     efforts = file_efforts.get(fid, {})
                     max_effort = max(efforts.values(), default=0.0)
                     if max_effort >= 60 and (
-                        total_funcs > 0 or fid in files_with_unscanned_scope
+                        total_funcs > 0 or fid in files_owing_whole_file_review
                     ):
                         file_warnings.append(
                             f"effort={max_effort:.0f} with 0 source-review receipts"
@@ -7485,8 +7477,8 @@ def code_coverage_summary(
                 if not meta["review_completed"]:
                     continue
                 total_funcs = file_total_functions.get(fid, 0)
-                scope_unscanned = fid in files_with_unscanned_scope
-                if total_funcs <= 0 and not scope_unscanned:
+                owes_whole_file_review = fid in files_owing_whole_file_review
+                if total_funcs <= 0 and not owes_whole_file_review:
                     continue  # no structural index to verify against
                 applicable = file_applicable.get(fid, [])
                 if not applicable:
@@ -7500,7 +7492,7 @@ def code_coverage_summary(
                 )
                 if callables_reviewed > 0:
                     continue  # structurally attributable callable review was recorded
-                if scope_unscanned and fid in whole_file_span_file_ids:
+                if owes_whole_file_review and fid in whole_file_span_file_ids:
                     continue  # the only review proof this file can carry
                 file_path = str(meta["file_path"])
                 prefix = f"file:{file_path}"

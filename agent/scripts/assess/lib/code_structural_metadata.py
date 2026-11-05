@@ -4,7 +4,6 @@ from __future__ import annotations
 from typing import Any
 
 from assess.lib.treesitter_index import (
-    SCRIPT_SCOPE_LANGUAGES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
     UNSCANNED_SCOPE_DEGRADATION_REASON,
 )
@@ -155,28 +154,6 @@ def validated_structural_metadata(
     ):
         raise ValueError(
             f"structural function total must match retained callables for {rel_path}"
-        )
-    # The backend refuses this shape too, but it refuses one `updates` list per
-    # repository and names no file, so a single artifact like this takes the
-    # whole sync down with an opaque 400. With no callable, the exact parser
-    # handed no line to the function-scoped detectors; any other signal proves
-    # the file still had source to scan, so `complete` claims a measurement
-    # that cannot have happened. No signal at all stays legal -- a blank or
-    # comment-only file really does measure empty. A script-scope language reads
-    # its file scope as `<top-level>`, so its signals there were measured.
-    if (
-        status == "complete"
-        and mode == "tree_sitter"
-        and indexed.get("language") not in SCRIPT_SCOPE_LANGUAGES
-        and int(indexed["total_functions"]) == 0
-        and (
-            int(indexed["total_exports"])
-            or any(int(counts[dimension]) for dimension in SIGNAL_DIMENSIONS)
-        )
-    ):
-        raise ValueError(
-            "complete structural analysis has no callable scope to have measured "
-            f"the source it clearly scanned for {rel_path}"
         )
     unavailable_signals = set(unavailable).intersection(SIGNAL_DIMENSIONS)
     if (
