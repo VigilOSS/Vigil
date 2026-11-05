@@ -819,6 +819,205 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
     assert start["worktree_dirty"] is None
 
 
+class _BackendConnection:
+    """Serve AssessmentClient requests from the in-process backend.
+
+    ``on_commit`` stands in for the backend while a commit's response is lost: it
+    returns the response to deliver, or None for a socket read timeout.
+    """
+
+    def __init__(self, backend, on_commit, requests: list[tuple[str, str, bytes]]) -> None:
+        self._backend = backend
+        self._on_commit = on_commit
+        self._requests = requests
+        self.sock = None
+        self.timeout = None
+
+    def connect(self):
+        self.sock = SimpleNamespace(settimeout=lambda _seconds: None)
+
+    def request(self, method, path, body=None, headers=None):
+        self._requests.append((method, path, body or b""))
+        headers = headers or {}
+        if path.endswith("/refresh/commit"):
+            self._response = self._on_commit(path, body, headers)
+        else:
+            self._response = self._backend.request(method, path, content=body, headers=headers)
+
+    def getresponse(self):
+        if self._response is None:
+            raise TimeoutError("timed out")
+        response = self._response
+        return SimpleNamespace(status=response.status_code, read=lambda: response.content)
+
+    def close(self):
+        pass
+
+
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "landed", "landed-then-stale", "not-landed", "never-sent",
+        "pending-reingest", "taken-over", "snapshot-mismatch", "role-mismatch",
+    ],
+)
+def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
+    client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str
+) -> None:
+    from app import db as db_module
+    from assess.lib.client import AssessError, AssessmentClient
+    from tests.test_code_analysis_api import _verified_repo_payload
+    from tests.test_engagements_api import write_engagement
+
+    module = _load_command("code_ingest.py", "test_ingest_commit_timeout")
+    key = "2026-11-05-120000-ingest-timeout"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    assert client.get("/engagements").status_code == 200
+    with db_module.get_connection() as connection:
+        engagement = Path(connection.execute(
+            "SELECT engagement_root FROM engagements WHERE key = ?", (key,)
+        ).fetchone()["engagement_root"]).resolve()
+    repo = tmp_path / "acme-repo"
+    (repo / "node_modules" / "acme").mkdir(parents=True)
+    (repo / "main.py").write_text("print('acme')\n", encoding="utf-8")
+    (repo / "node_modules" / "acme" / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
+    monkeypatch.setattr(module, "load_config", lambda *_: SimpleNamespace(
+        base_url="http://example.test", engagement_key=key, engagement_dir=str(engagement),
+    ))
+    ctags_calls: list[dict] = []
+
+    def setup_ctags(*_args, **kwargs):
+        ctags_calls.append(kwargs)
+        return {"available": False, **kwargs}
+
+    monkeypatch.setattr(module, "_setup_ctags", setup_ctags)
+    clock = [0.0]
+    monkeypatch.setattr(module, "time", SimpleNamespace(
+        monotonic=lambda: clock[0],
+        sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds),
+    ))
+    base = f"/engagements/{key}/assessment/code"
+    requests: list[tuple[str, str, bytes]] = []
+
+    def forward(path, body, headers):
+        return client.post(path, content=body, headers=headers)
+
+    def sent(suffix):
+        return [json.loads(body) for _method, path, body in requests if path.endswith(suffix)]
+
+    def take_over(path, _body, _headers):
+        started = client.post(f"{base}/repos/refresh/start", json=sent("refresh/start")[-1])
+        assert started.status_code == 201, started.text
+        return None
+
+    def promote(payload, files):
+        started = client.post(f"{base}/repos/refresh/start", json=payload).json()
+        token = started["refresh_token"]
+        staged = client.post(
+            f"{base}/repos/{started['repo_id']}/refresh/files",
+            json={"refresh_token": token, "files": files},
+        )
+        assert staged.status_code == 200, staged.text
+        committed = client.post(
+            f"{base}/repos/{started['repo_id']}/refresh/commit",
+            json={"refresh_token": token, "manifest_complete": True},
+        )
+        assert committed.status_code == 200, committed.text
+
+    def other_snapshot(_path, _body, _headers):
+        files = [{"file_path": "other.py", "language": "python", "loc": 1}]
+        promote(_verified_repo_payload(client, key, "demo-repo", files), files)
+        return None
+
+    def other_role(_path, _body, _headers):
+        promote(
+            {**sent("refresh/start")[0], "repo_role": "analysis"},
+            [row for batch in sent("refresh/files") for row in batch["files"]],
+        )
+        return None
+
+    def refuse(*_args):
+        raise ConnectionRefusedError
+
+    on_commit = {
+        "landed": lambda *args: forward(*args) and None,
+        "landed-then-stale": lambda *args: forward(*args) and forward(*args),
+        "not-landed": lambda *_args: None,
+        "never-sent": refuse,
+        "pending-reingest": lambda *_args: None,
+        "taken-over": take_over,
+        "snapshot-mismatch": other_snapshot,
+        "role-mismatch": other_role,
+    }
+    hook = [on_commit[scenario]]
+
+    class BackendClient(AssessmentClient):
+        def _get_conn(self, connect_timeout: float = 2.0):
+            if self._conn is None:
+                self._conn = _BackendConnection(client, lambda *args: hook[0](*args), requests)
+            return self._conn
+
+    monkeypatch.setattr(module, "AssessmentClient", BackendClient)
+    skipped_root = engagement / "tools" / "analysis-state" / "skipped-artifacts"
+    args = _ingest_args(repo, engagement)
+    if scenario == "role-mismatch":
+        args.role = "reference"
+
+    if scenario.startswith("landed"):
+        module.run(args)
+        (row,) = client.get(f"{base}/repos").json()
+        assert row["pending_refresh_token"] == ""
+        assert row["active_generation"] == 1
+        assert [call["repo_generation"] for call in ctags_calls] == [1]
+        assert row["lsp_config"]["ctags"]["repo_generation"] == 1
+        assert row["lsp_config"]["ctags"]["source_manifest_digest"] == row["source_manifest_digest"]
+        manifest = (
+            skipped_root / str(row["id"]) / "1"
+            / f"{row['source_manifest_digest']}-{row['snapshot_digest']}.json"
+        )
+        assert "node_modules/acme/index.js" in manifest.read_text(encoding="utf-8")
+        return
+
+    if scenario in {"pending-reingest", "taken-over"}:
+        hook[0] = forward
+        module.run(args)
+        (published,) = client.get(f"{base}/repos").json()
+        (repo / "main.py").write_text("print('acme 2')\n", encoding="utf-8")
+        hook[0] = on_commit[scenario]
+    ctags_before = len(ctags_calls)
+    message = {
+        "not-landed": "still pending",
+        "pending-reingest": "still pending",
+        "never-sent": "Failed after 1 attempts",
+        "taken-over": "did not land",
+        "snapshot-mismatch": "did not land",
+        "role-mismatch": "not the requested 'reference'",
+    }[scenario]
+
+    with pytest.raises(AssessError, match=message):
+        module.run(args)
+
+    commit_index = max(
+        index for index, (_method, path, _body) in enumerate(requests)
+        if path.endswith("/refresh/commit")
+    )
+    after_commit = requests[commit_index + 1:]
+    assert any(method == "GET" for method, _path, _body in after_commit) == (scenario != "never-sent")
+    assert not any(path.endswith("/lsp-config") for _method, path, _body in after_commit)
+    assert (clock[0] >= 10) if scenario in {"not-landed", "pending-reingest"} else clock[0] == 0
+    assert len(ctags_calls) == ctags_before
+    if scenario in {"pending-reingest", "taken-over"}:
+        (row,) = client.get(f"{base}/repos").json()
+        assert row["pending_refresh_token"]
+        assert row["active_generation"] == published["active_generation"] == 1
+        assert row["snapshot_digest"] == published["snapshot_digest"]
+        assert row["lsp_config"] == published["lsp_config"]
+        return
+    assert not skipped_root.exists()
+    if scenario in {"not-landed", "never-sent"}:
+        assert client.get(f"{base}/repos").json() == []
+
+
 def test_code_ingest_authenticates_complete_exclusion_accounting(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

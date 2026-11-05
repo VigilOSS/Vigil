@@ -7,10 +7,15 @@ unretried ``[Errno 32] Broken pipe`` and took the whole sync down.
 from __future__ import annotations
 
 import http.client
+import socket
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from unittest.mock import Mock
 
 import pytest
 
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient, AssessTransportError
 
 
 def _response(status: int, body: bytes = b'{"ok": true}'):
@@ -26,6 +31,8 @@ def _response(status: int, body: bytes = b'{"ok": true}'):
 
 class _Conn:
     """One scripted connection: either raise on request() or return a response."""
+
+    sock = Mock()
 
     def __init__(self, outcome):
         self._outcome = outcome  # ("raise", exc) | ("respond", status)
@@ -118,3 +125,57 @@ def test_fresh_connect_failure_is_not_treated_as_stale(monkeypatch):
     with pytest.raises(AssessError, match="Failed after 3 attempts"):
         client._request_raw("GET", "/x", max_retries=3)
     assert len(made) == 3
+
+
+def test_a_sent_request_stays_sent_when_a_retry_cannot_connect(monkeypatch):
+    client = AssessmentClient("http://localhost:8000", "eng")
+    sent = _Conn(("respond", 200))
+    monkeypatch.setattr(sent, "getresponse", Mock(side_effect=TimeoutError()))
+    monkeypatch.setattr(client, "_get_conn", Mock(side_effect=[sent, ConnectionRefusedError()]))
+    monkeypatch.setattr("assess.lib.client.time.sleep", lambda _s: None)
+
+    with pytest.raises(AssessTransportError, match="Failed after 2 attempts") as raised:
+        client._request_raw("POST", "/x", body=b"{}", max_retries=2)
+    assert raised.value.request_sent
+
+
+def test_connect_and_read_each_get_their_own_timeout(monkeypatch):
+    opened: list[float] = []
+    create_connection = socket.create_connection
+
+    def record(address, timeout, *args):
+        opened.append(timeout)
+        return create_connection(address, timeout, *args)
+
+    monkeypatch.setattr(socket, "create_connection", record)
+
+    class _Handler(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            if self.path == "/slow":
+                time.sleep(0.6)
+            self.send_response(200)
+            self.send_header("Content-Length", "11")
+            self.end_headers()
+            self.wfile.write(b'{"ok":true}')
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        with AssessmentClient(f"http://127.0.0.1:{server.server_address[1]}", "eng") as client:
+            client._request_raw("POST", "/fast", body=b"{}", read_timeout=0.3, max_retries=1)
+            pooled = client._conn
+            status, _body = client._request_raw(
+                "POST", "/slow", body=b"{}", read_timeout=5.0, max_retries=1
+            )
+            assert status == 200
+            assert client._conn is pooled
+            assert opened == [2.0]
+    finally:
+        server.shutdown()
+        server.server_close()

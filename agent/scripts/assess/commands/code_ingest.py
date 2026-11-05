@@ -12,12 +12,20 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path, PurePosixPath
 
-from assess.lib.client import AssessmentClient, AssessError, DEFAULT_READ_TIMEOUT_SECONDS, require_write_result
+from assess.lib.client import (
+    AssessmentClient,
+    AssessError,
+    AssessTransportError,
+    DEFAULT_READ_TIMEOUT_SECONDS,
+    require_write_result,
+)
 from assess.lib.code_languages import detect_language
 from assess.lib.code_snapshot import (
     RootedSourceTree,
+    SealedSnapshot,
     SnapshotBuilder,
     SourceSnapshotRaceError,
     capture_regular_file,
@@ -137,6 +145,7 @@ _BUILD_REFERENCE_SCAN_BYTES = 64 * 1024
 _SCAN_PROGRESS_FILES = 1000
 _REFRESH_SECONDS_PER_FILE = 0.02
 _REFRESH_BYTES_PER_SECOND = 16 * 1024 * 1024
+_REFRESH_COMMIT_POLL_SECONDS = 5.0
 
 
 def _is_build_reference_file(path: str) -> bool:
@@ -274,6 +283,77 @@ def _require_refresh_commit_receipt(
             "commit code repository refresh", ", ".join(invalid)
         )
     return repo_generation, source_manifest_digest, repo_role
+
+
+def _confirm_refresh_commit(
+    client: AssessmentClient,
+    repo_id: int,
+    refresh_token: str,
+    snapshot: SealedSnapshot,
+    *,
+    requested_role: str | None,
+    wait_seconds: float,
+    error: AssessError,
+) -> tuple[int, str, str]:
+    """Recover the receipt of a refresh commit whose response never arrived.
+
+    Promotion keeps running after the client stops reading. Only a commit clears
+    this refresh's pending token, so a cleared token beside this sealed
+    snapshot's identity proves that a refresh with an identical sealed snapshot
+    landed, and the backend derives the manifest digest from that snapshot.
+    """
+    failure = str(error).splitlines()[0]
+    deadline = time.monotonic() + wait_seconds
+    while True:
+        try:
+            repo = client.get(f"code/repos/{repo_id}")
+        except AssessError as exc:
+            # A first ingest stays unpublished until its commit lands.
+            if not isinstance(exc, AssessTransportError) and not str(exc).startswith("HTTP 404"):
+                raise
+            repo = {"pending_refresh_token": refresh_token}
+        if repo.get("pending_refresh_token") != refresh_token:
+            break
+        if time.monotonic() >= deadline:
+            raise AssessError(
+                f"commit code repository refresh: {failure}; the refresh of repo_id "
+                f"{repo_id} was still pending {wait_seconds:.0f}s later, so it has not "
+                "landed. Re-run code-ingest; an unchanged source keeps its generation"
+            )
+        time.sleep(_REFRESH_COMMIT_POLL_SECONDS)
+    if (
+        repo.get("pending_refresh_token") != ""
+        or repo.get("snapshot_digest") != snapshot.snapshot_digest
+        or repo.get("snapshot_manifest_path") != str(snapshot.manifest_path)
+        or repo.get("source_snapshot_quality") != "verified"
+    ):
+        raise AssessError(
+            f"commit code repository refresh: {failure}; repo_id {repo_id} now holds "
+            "another refresh or snapshot, so this ingest's commit did not land. "
+            "Re-run code-ingest"
+        )
+    generation, digest, role = _require_refresh_commit_receipt(
+        {
+            "repo_id": repo.get("id"),
+            "repo_generation": repo.get("active_generation"),
+            "source_manifest_digest": repo.get("source_manifest_digest"),
+            # The row keeps no retirement count, and nothing after the commit reads one.
+            "retired": 0,
+            "repo_role": repo.get("repo_role"),
+        },
+        requested_repo_id=repo_id,
+    )
+    if requested_role is not None and role != requested_role:
+        raise AssessError(
+            f"commit code repository refresh: {failure}; repo_id {repo_id} holds this "
+            f"snapshot with role {role!r}, not the requested {requested_role!r}"
+        )
+    print(
+        f"  refresh commit response lost ({failure}); the backend promoted this "
+        f"snapshot as generation {generation}",
+        file=sys.stderr,
+    )
+    return generation, digest, role
 
 
 def _which(binary: str, *, source_root: str | os.PathLike[str] | None = None) -> str | None:
@@ -2074,14 +2154,28 @@ def run(args) -> None:
             _REFRESH_SECONDS_PER_FILE * (len(files) + len(skipped_records))
             + captured_bytes / _REFRESH_BYTES_PER_SECOND,
         )
-        commit = client.post(
-            f'code/repos/{repo_id}/refresh/commit',
-            {'refresh_token': refresh_token, 'manifest_complete': True},
-            **({"read_timeout": commit_timeout} if commit_timeout > DEFAULT_READ_TIMEOUT_SECONDS else {}),
-        )
-        repo_generation, committed_digest, committed_role = (
-            _require_refresh_commit_receipt(commit, requested_repo_id=repo_id)
-        )
+        try:
+            commit = client.post(
+                f'code/repos/{repo_id}/refresh/commit',
+                {'refresh_token': refresh_token, 'manifest_complete': True},
+                **({"read_timeout": commit_timeout} if commit_timeout > DEFAULT_READ_TIMEOUT_SECONDS else {}),
+            )
+        except AssessError as exc:
+            # A sent commit may still be promoting, and a resend of one that
+            # landed finds its token already spent.
+            lost = isinstance(exc, AssessTransportError) and exc.request_sent
+            spent = str(exc).startswith("HTTP 409") and "refresh token is stale" in str(exc)
+            if not lost and not spent:
+                raise
+            repo_generation, committed_digest, committed_role = _confirm_refresh_commit(
+                client, repo_id, refresh_token, snapshot,
+                requested_role=getattr(args, "role", None),
+                wait_seconds=commit_timeout, error=exc,
+            )
+        else:
+            repo_generation, committed_digest, committed_role = (
+                _require_refresh_commit_receipt(commit, requested_repo_id=repo_id)
+            )
 
         ctags_output = (
             engagement_dir

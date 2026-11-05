@@ -32,6 +32,14 @@ class AssessError(Exception):
     pass
 
 
+class AssessTransportError(AssessError):
+    """No HTTP response arrived; ``request_sent`` says whether any attempt's request went out."""
+
+    def __init__(self, message: str, *, request_sent: bool) -> None:
+        super().__init__(message)
+        self.request_sent = request_sent
+
+
 # Default response budget for one request. Named because a caller that needs to
 # widen it (a write whose server-side cost scales with its payload) has to be
 # able to say "the default, or more" without restating the number.
@@ -456,13 +464,18 @@ class AssessmentClient:
         # never re-sent.
         last_error: Exception | None = None
         stale_conn_retry_used = False
+        request_sent = False
         attempt = 0
         while attempt < retries:
             reused_conn = self._conn is not None
             try:
                 conn = self._get_conn(connect_timeout)
-                conn.timeout = read_timeout
+                if conn.sock is None:
+                    conn.timeout = connect_timeout
+                    conn.connect()
+                conn.sock.settimeout(read_timeout)
                 conn.request(method, path, body=body, headers=headers)
+                request_sent = True
                 resp = conn.getresponse()
                 resp_body = resp.read()
 
@@ -516,9 +529,10 @@ class AssessmentClient:
                     continue
                 break
 
-        raise AssessError(
+        raise AssessTransportError(
             f"Failed after {retries} attempts: {last_error}\n"
-            f"{self._orchestrator_hint()}"
+            f"{self._orchestrator_hint()}",
+            request_sent=request_sent,
         )
 
     def _request(
