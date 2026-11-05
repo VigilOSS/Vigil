@@ -432,6 +432,7 @@ Then run the code-mode state checks that do not exist in web/runtime engagements
 
 ```bash
 vigil assess code-coverage                  # File classification + analysis coverage
+vigil assess code-coverage --by-path        # Which directories still owe critical/high review
 vigil assess code-dispatch stats             # Queue state (pending/processing/done/needs-context)
 vigil assess code-coverage --cwe-matrix      # CWE effort state when Phase 2B or later is active
 vigil assess code-coverage --require-transition-ready <next-phase>

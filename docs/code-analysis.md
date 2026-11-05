@@ -145,6 +145,19 @@ fnmatch rules as `code-dispatch queue`. Repeat a flag to accept several values; 
 other filter still applies. The backend applies the scope inside the claim, so `fetch`
 never leases a row outside it.
 
+To see which directories still owe review, break coverage down by path:
+
+```bash
+vigil assess code-coverage --by-path                               # depth 2, most uncovered first
+vigil assess code-coverage --by-path --depth 3 --path-prefix src/billing --json
+```
+
+Each row groups an analysis repository's files by their first `--depth` directory
+segments and shows files, lines of code, analyzed critical and high files, the same
+analysis-status buckets as the summary, unreviewed structural debt, and accounted
+skips. The rows add up to the summary totals, and the debt column adds up to the
+structural debt that readiness blocks on. Reference repositories never appear.
+
 ## Runtime proof owed
 
 When a verifier accepts the source evidence but cannot run the decisive test, it records

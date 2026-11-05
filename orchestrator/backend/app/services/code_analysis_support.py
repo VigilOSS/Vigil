@@ -2398,6 +2398,79 @@ _CURRENT_ACCOUNTED_FILE_EXISTS_SQL = _current_terminal_review_exists_sql(
 )
 
 
+# Every bucket `_current_analysis_status_sql` can yield, in workflow order.
+CURRENT_ANALYSIS_STATUSES: tuple[str, ...] = (
+    "analyzed",
+    "queued",
+    "in_progress",
+    "needs_context",
+    "classified",
+    "pending",
+)
+
+
+def _latest_attempt_in_status_exists_sql(status_clause: str) -> str:
+    return f"""
+        EXISTS (
+            SELECT 1
+            FROM code_analysis_queue AS current_queue
+            JOIN code_repos AS current_queue_repo
+              ON current_queue_repo.id = files.repo_id
+             AND current_queue_repo.engagement_id = files.engagement_id
+            WHERE current_queue.engagement_id = files.engagement_id
+              AND current_queue.file_id = files.id
+              AND current_queue.repo_generation = current_queue_repo.active_generation
+              AND current_queue.source_superseded_at IS NULL
+              AND ({_latest_current_queue_attempt_sql(
+                  "current_queue", "current_queue_repo"
+              )})
+              AND current_queue.{status_clause}
+        )
+    """
+
+
+def _current_analysis_status_sql() -> str:
+    """One file's coverage status bucket, over a ``code_files`` alias ``files``.
+
+    The single owner of the status split the coverage summary and the
+    per-directory breakdown report, so a directory table always sums to the
+    summary. Overlapping active history reads as in progress: it is work the
+    queue has not settled, whatever the latest attempt says.
+    """
+    return f"""
+        CASE
+            WHEN ({_invalid_active_history_exists_sql("files")}) THEN 'in_progress'
+            WHEN {_latest_attempt_in_status_exists_sql("status = 'needs_context'")}
+            THEN 'needs_context'
+            WHEN {_latest_attempt_in_status_exists_sql("status IN ('processing', 'error')")}
+            THEN 'in_progress'
+            WHEN {_latest_attempt_in_status_exists_sql("status = 'pending'")} THEN 'queued'
+            WHEN ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}) THEN 'analyzed'
+            WHEN files.classification != 'unclassified' THEN 'classified'
+            ELSE 'pending'
+        END
+    """
+
+
+def _structural_debt_sql() -> str:
+    """True for a ``files`` row that is unreviewed structural-analysis debt.
+
+    A degraded, unsupported or truncated structural reading left the index
+    unable to vouch for the file, so only a successful source review clears it.
+    Readiness blocks on these rows and the per-directory breakdown counts them
+    through this one predicate.
+    """
+    return f"""
+        (
+            (
+                files.structural_analysis_status IN ('degraded', 'unsupported')
+                OR files.structural_artifact_truncated = 1
+            )
+            AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})
+        )
+    """
+
+
 def _suspicious_awaiting_verdict_sql() -> str:
     """Attempts whose file still awaits a verdict on a suspicious review.
 

@@ -2019,3 +2019,36 @@ def get_coverage(
     if detail == "cwe":
         return code_analysis.code_coverage_cwe_detail(engagement.id, repo_id=repo_id)
     return code_analysis.code_coverage_summary(engagement.id, repo_id=repo_id)
+
+
+@router.get("/coverage/by-path")
+def get_coverage_by_path(
+    engagement_key: str,
+    repo_id: int | None = Query(default=None),
+    depth: int = Query(
+        default=code_analysis.DEFAULT_COVERAGE_PATH_DEPTH,
+        ge=1,
+        le=code_analysis.MAX_COVERAGE_PATH_DEPTH,
+        description="Directory segments below the repository root each row groups by.",
+    ),
+    path_prefix: list[CodePathScope] | None = Query(
+        default=None,
+        max_length=MAX_PATH_SCOPE_VALUES,
+        description="Repeatable; a repository-relative directory or file path matched by whole segments.",
+    ),
+    limit: int = Query(
+        default=code_analysis.DEFAULT_COVERAGE_PATH_PAGE,
+        ge=1,
+        le=code_analysis.MAX_COVERAGE_PATH_PAGE,
+    ),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.code_coverage_by_path(
+        engagement.id,
+        repo_id=repo_id,
+        depth=depth,
+        path_prefix=path_prefix,
+        limit=limit,
+        offset=offset,
+    )

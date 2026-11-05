@@ -31,6 +31,7 @@ from .code_analysis_support import (
     _CANONICAL_STRUCTURAL_LANGUAGES as _CANONICAL_STRUCTURAL_LANGUAGES,
     _CURRENT_ACCOUNTED_FILE_EXISTS_SQL,
     _CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL,
+    CURRENT_ANALYSIS_STATUSES,
     _LEAD_OPEN_STATUS_PLACEHOLDERS,
     _LEAD_OPEN_STATUS_VALUES,
     _queue_lane_sql,
@@ -57,6 +58,7 @@ from .code_analysis_support import (
     _current_analysis_results_sql,
     _current_attempt_result_count_sql,
     _current_result_receipt_sql,
+    _current_analysis_status_sql,
     _current_suspicious_analysis_counts,
     _fetch_all,
     _file_path_scope_sql,
@@ -94,6 +96,7 @@ from .code_analysis_support import (
     _result_not_replaced_sql,
     _safe_int,
     _scalar_row,
+    _structural_debt_sql,
     _successful_terminal_review_row_sql,
     _sync_file_analysis_status,
     _sync_module_rollup,
@@ -6900,58 +6903,7 @@ def code_coverage_summary(
             SELECT current_analysis_status AS analysis_status, COUNT(*) AS total
             FROM (
                 SELECT files.id,
-                       CASE
-                           WHEN ({_invalid_active_history_exists_sql("files")})
-                           THEN 'in_progress'
-                           WHEN EXISTS (
-                               SELECT 1
-                               FROM code_analysis_queue AS current_queue
-                               JOIN code_repos AS current_queue_repo
-                                 ON current_queue_repo.id = files.repo_id
-                                AND current_queue_repo.engagement_id = files.engagement_id
-                               WHERE current_queue.engagement_id = files.engagement_id
-                                 AND current_queue.file_id = files.id
-                                 AND current_queue.repo_generation = current_queue_repo.active_generation
-                                 AND current_queue.source_superseded_at IS NULL
-                                 AND ({_latest_current_queue_attempt_sql(
-                                     "current_queue", "current_queue_repo"
-                                 )})
-                                 AND current_queue.status = 'needs_context'
-                           ) THEN 'needs_context'
-                           WHEN EXISTS (
-                               SELECT 1
-                               FROM code_analysis_queue AS current_queue
-                               JOIN code_repos AS current_queue_repo
-                                 ON current_queue_repo.id = files.repo_id
-                                AND current_queue_repo.engagement_id = files.engagement_id
-                               WHERE current_queue.engagement_id = files.engagement_id
-                                 AND current_queue.file_id = files.id
-                                 AND current_queue.repo_generation = current_queue_repo.active_generation
-                                 AND current_queue.source_superseded_at IS NULL
-                                 AND ({_latest_current_queue_attempt_sql(
-                                     "current_queue", "current_queue_repo"
-                                 )})
-                                 AND current_queue.status IN ('processing', 'error')
-                           ) THEN 'in_progress'
-                           WHEN EXISTS (
-                               SELECT 1
-                               FROM code_analysis_queue AS current_queue
-                               JOIN code_repos AS current_queue_repo
-                                 ON current_queue_repo.id = files.repo_id
-                                AND current_queue_repo.engagement_id = files.engagement_id
-                               WHERE current_queue.engagement_id = files.engagement_id
-                                 AND current_queue.file_id = files.id
-                                 AND current_queue.repo_generation = current_queue_repo.active_generation
-                                 AND current_queue.source_superseded_at IS NULL
-                                 AND ({_latest_current_queue_attempt_sql(
-                                     "current_queue", "current_queue_repo"
-                                 )})
-                                 AND current_queue.status = 'pending'
-                           ) THEN 'queued'
-                           WHEN ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}) THEN 'analyzed'
-                           WHEN files.classification != 'unclassified' THEN 'classified'
-                           ELSE 'pending'
-                       END AS current_analysis_status
+                       {_current_analysis_status_sql()} AS current_analysis_status
                 FROM code_files AS files
                 WHERE files.engagement_id = ?{repo_clause}
             ) AS current_files
@@ -7625,6 +7577,137 @@ def code_coverage_summary(
             "coverage_integrity": integrity_warnings,
             "uncovered_high_risk_files": uncovered_high_risk_files,
         },
+    }
+
+
+DEFAULT_COVERAGE_PATH_DEPTH = 2
+MAX_COVERAGE_PATH_DEPTH = 32
+DEFAULT_COVERAGE_PATH_PAGE = 50
+MAX_COVERAGE_PATH_PAGE = 1000
+
+
+def _coverage_directory(file_path: str, depth: int) -> str:
+    """The first ``depth`` directory segments of a path, or ``.`` at the root."""
+    directories = file_path.split("/")[:-1]
+    return "/".join(directories[:depth]) or "."
+
+
+def code_coverage_by_path(
+    engagement_id: int,
+    *,
+    repo_id: int | None = None,
+    depth: int = DEFAULT_COVERAGE_PATH_DEPTH,
+    path_prefix: list[str] | None = None,
+    limit: int = DEFAULT_COVERAGE_PATH_PAGE,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Break the coverage obligation down by directory.
+
+    Each row groups an analysis repository's admitted files by their first
+    ``depth`` directory segments and carries the same projections the summary
+    and readiness make, each read from its single owner: the status bucket
+    (`_current_analysis_status_sql`), analyzed-by-classification
+    (`_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL`), unreviewed structural debt
+    (`_structural_debt_sql`) and accounted skips (`_CURRENT_ACCOUNTED_FILE_EXISTS_SQL`
+    without a successful review). Reference repositories owe nothing and are
+    left out, as in the summary. Rows sort by uncovered critical+high files,
+    most first, then by path, so the directory owing the most high-risk review
+    leads.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    if not 1 <= depth <= MAX_COVERAGE_PATH_DEPTH:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"depth must be between 1 and {MAX_COVERAGE_PATH_DEPTH}",
+        )
+    clauses = ["files.engagement_id = ?", "files.retired_at IS NULL"]
+    params: list[Any] = [engagement.id]
+    if repo_id is not None:
+        clauses.append("files.repo_id = ?")
+        params.append(_coerce_int(repo_id, field_name="repo_id"))
+    path_scope, path_params = _file_path_scope_sql("files", path_prefix)
+    if path_scope:
+        clauses.append(path_scope)
+        params.extend(path_params)
+    with get_connection() as connection:
+        if repo_id is not None:
+            _get_published_repo_row(connection, engagement.id, int(repo_id))
+        file_rows = connection.execute(
+            f"""
+            SELECT files.repo_id, repos.repo_key, files.file_path, files.loc,
+                   files.classification, files.structural_analysis_status,
+                   files.structural_artifact_truncated,
+                   {_current_analysis_status_sql()} AS current_analysis_status,
+                   ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}) AS analyzed,
+                   {_structural_debt_sql()} AS structural_debt,
+                   (({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
+                    AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})) AS accounted_skip
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+             AND {_analysis_repo_sql("repos")}
+            WHERE {' AND '.join(clauses)}
+            """,
+            tuple(params),
+        ).fetchall()
+
+    directories: dict[tuple[int, str], dict[str, Any]] = {}
+    for row in file_rows:
+        key = (int(row["repo_id"]), _coverage_directory(str(row["file_path"]), depth))
+        entry = directories.get(key)
+        if entry is None:
+            entry = directories[key] = {
+                "repo_id": key[0],
+                "repo_key": str(row["repo_key"]),
+                "path": key[1],
+                "files": 0,
+                "loc": 0,
+                "by_classification": {},
+                "uncovered_critical_high": 0,
+                "by_status": dict.fromkeys(CURRENT_ANALYSIS_STATUSES, 0),
+                "structural_debt": {
+                    "count": 0, "degraded": 0, "unsupported": 0, "truncated": 0,
+                },
+                "accounted_skips": 0,
+            }
+        analyzed = bool(row["analyzed"])
+        classification = str(row["classification"])
+        entry["files"] += 1
+        entry["loc"] += _safe_int(row["loc"])
+        tier = entry["by_classification"].setdefault(
+            classification, {"count": 0, "analyzed": 0}
+        )
+        tier["count"] += 1
+        tier["analyzed"] += int(analyzed)
+        if classification in {"critical", "high"} and not analyzed:
+            entry["uncovered_critical_high"] += 1
+        entry["by_status"][str(row["current_analysis_status"])] += 1
+        if row["structural_debt"]:
+            debt = entry["structural_debt"]
+            debt["count"] += 1
+            structural_status = str(row["structural_analysis_status"] or "")
+            if structural_status in {"degraded", "unsupported"}:
+                debt[structural_status] += 1
+            if row["structural_artifact_truncated"]:
+                debt["truncated"] += 1
+        entry["accounted_skips"] += int(bool(row["accounted_skip"]))
+
+    ordered = sorted(
+        directories.values(),
+        key=lambda item: (-item["uncovered_critical_high"], item["path"], item["repo_id"]),
+    )
+    page = ordered[offset : offset + limit]
+    return {
+        "repo_id": repo_id,
+        "depth": depth,
+        "path_prefix": sorted(set(path_prefix or [])),
+        "total": len(ordered),
+        "offset": offset,
+        "count": len(page),
+        "has_more": offset + len(page) < len(ordered),
+        "directories": page,
     }
 
 
@@ -8318,11 +8401,7 @@ def code_readiness(
                         FROM code_files AS files
                         WHERE files.engagement_id = ? AND files.repo_id = ?
                           AND files.retired_at IS NULL
-                          AND (
-                            files.structural_analysis_status IN ('degraded', 'unsupported')
-                            OR files.structural_artifact_truncated = 1
-                          )
-                          AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})
+                          AND {_structural_debt_sql()}
                         ORDER BY files.file_path
                         """,
                         (engagement.id, repo_id),

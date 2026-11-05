@@ -1,10 +1,12 @@
 """vigil assess code-coverage — display code analysis coverage and gate status."""
 from __future__ import annotations
 
+import argparse
 from collections import Counter
 import json
 import sys
 from pathlib import Path
+from urllib.parse import urlencode
 
 # `code-dispatch` owns the lease vocabulary these verbs share; importing its age
 # renderer keeps one reading of "silent for" across the queue table, this report
@@ -79,7 +81,155 @@ def register(subparsers) -> None:
         "--debt-paths", action="store_true",
         help="List every path behind the next structural review debt gate",
     )
+    p.add_argument(
+        "--by-path",
+        action="store_true",
+        help=(
+            "Break coverage down by directory: files, LOC, analyzed critical/high, "
+            "status buckets, unreviewed structural debt and accounted skips"
+        ),
+    )
+    p.add_argument(
+        "--depth", type=_positive_int, default=None,
+        help="With --by-path: directory segments below the repository root to group by (default 2)",
+    )
+    p.add_argument(
+        "--path-prefix", action="append", default=None, metavar="PATH",
+        help=(
+            "With --by-path: only files at or under PATH, matched by whole segments "
+            "and case-sensitively; repeatable"
+        ),
+    )
+    p.add_argument(
+        "--limit", type=_positive_int, default=None,
+        help="With --by-path: directories per page (default 50)",
+    )
+    p.add_argument(
+        "--offset", type=_non_negative_int, default=None,
+        help="With --by-path: directories to skip",
+    )
+    p.add_argument(
+        "--json", dest="as_json", action="store_true",
+        help="With --by-path: emit the backend page as JSON",
+    )
     p.set_defaults(func=run)
+
+
+def _positive_int(value: str) -> int:
+    number = _non_negative_int(value)
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be an integer >= 1")
+    return number
+
+
+def _non_negative_int(value: str) -> int:
+    if not value.isdigit():
+        raise argparse.ArgumentTypeError("must be a non-negative integer")
+    return int(value)
+
+
+# Flags that only shape the --by-path view, and the views it cannot combine with.
+_BY_PATH_ONLY_OPTIONS = (
+    ("depth", "--depth"),
+    ("path_prefix", "--path-prefix"),
+    ("limit", "--limit"),
+    ("offset", "--offset"),
+    ("as_json", "--json"),
+)
+_BY_PATH_EXCLUSIVE_OPTIONS = (
+    ("cwe_matrix", "--cwe-matrix"),
+    ("require_gate_pass", "--require-gate-pass"),
+    ("require_transition_ready", "--require-transition-ready"),
+    ("debt_paths", "--debt-paths"),
+)
+
+
+def _refuse_misplaced_by_path_options(args) -> None:
+    if getattr(args, "by_path", False):
+        conflicts = [flag for field, flag in _BY_PATH_EXCLUSIVE_OPTIONS if getattr(args, field, None)]
+        if conflicts:
+            print(
+                f"ERROR: --by-path is its own view and cannot combine with {', '.join(conflicts)}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        return
+    misplaced = [
+        flag for field, flag in _BY_PATH_ONLY_OPTIONS if getattr(args, field, None) not in (None, False)
+    ]
+    if misplaced:
+        print(f"ERROR: {', '.join(misplaced)} requires --by-path", file=sys.stderr)
+        raise SystemExit(2)
+
+
+def _by_path_endpoint(args) -> str:
+    query: list[tuple[str, object]] = []
+    if getattr(args, "repo_id", None):
+        query.append(("repo_id", args.repo_id))
+    if getattr(args, "depth", None) is not None:
+        query.append(("depth", args.depth))
+    for prefix in sorted(set(getattr(args, "path_prefix", None) or [])):
+        query.append(("path_prefix", prefix))
+    if getattr(args, "limit", None) is not None:
+        query.append(("limit", args.limit))
+    if getattr(args, "offset", None) is not None:
+        query.append(("offset", args.offset))
+    return "code/coverage/by-path" + (f"?{urlencode(query)}" if query else "")
+
+
+def _run_by_path(cfg, args) -> None:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.get(_by_path_endpoint(args))
+    if getattr(args, "as_json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if not isinstance(result, dict):
+        print("Backend returned a non-object coverage-by-path page", file=sys.stderr)
+        raise SystemExit(1)
+    _print_coverage_by_path(result)
+
+
+def _tier_cell(row: dict, tier: str) -> str:
+    counts = (row.get("by_classification") or {}).get(tier) or {}
+    return f"{counts.get('analyzed', 0)}/{counts.get('count', 0)}"
+
+
+def _print_coverage_by_path(result: dict) -> None:
+    rows = [row for row in (result.get("directories") or []) if isinstance(row, dict)]
+    offset = int(result.get("offset", 0) or 0)
+    print(
+        f"=== Coverage by Path (depth {result.get('depth', '?')}; "
+        f"{len(rows)} of {result.get('total', len(rows))} directories, offset {offset}) ==="
+    )
+    if not rows:
+        print("No admitted analysis-repository files matched.")
+        return
+    print(
+        f"{'UNCOV':>5}  {'CRIT':>7}  {'HIGH':>7}  {'FILES':>6}  {'LOC':>8}  "
+        f"{'DONE':>5}  {'QUEUED':>6}  {'ACTIVE':>6}  {'NCTX':>5}  {'CLSF':>5}  {'PEND':>5}  "
+        f"{'DEBT':>5}  {'SKIPS':>5}  {'REPO':<16}  PATH"
+    )
+    for row in rows:
+        statuses = row.get("by_status") or {}
+        debt = row.get("structural_debt") or {}
+        print(
+            f"{row.get('uncovered_critical_high', 0)!s:>5}  "
+            f"{_tier_cell(row, 'critical'):>7}  {_tier_cell(row, 'high'):>7}  "
+            f"{row.get('files', 0)!s:>6}  {row.get('loc', 0)!s:>8}  "
+            f"{statuses.get('analyzed', 0)!s:>5}  {statuses.get('queued', 0)!s:>6}  "
+            f"{statuses.get('in_progress', 0)!s:>6}  {statuses.get('needs_context', 0)!s:>5}  "
+            f"{statuses.get('classified', 0)!s:>5}  {statuses.get('pending', 0)!s:>5}  "
+            f"{debt.get('count', 0)!s:>5}  {row.get('accounted_skips', 0)!s:>5}  "
+            f"{str(row.get('repo_key', '')):<16}  {row.get('path', '')}"
+        )
+    print(
+        "\nUNCOV = critical+high files without a successful review; CRIT/HIGH = analyzed/total. "
+        "DONE..PEND are the summary's analysis-status buckets (analyzed, queued, in progress, "
+        "needs context, classified, pending). DEBT = degraded/unsupported/truncated "
+        "structural analysis with no successful review; SKIPS = accounted skips."
+    )
+    if result.get("has_more"):
+        print(f"More directories: re-run with --offset {offset + len(rows)}")
 
 
 def _next_code_gate(engagement_dir: str) -> str | None:
@@ -170,7 +320,11 @@ def _readiness_endpoint(target: str) -> str:
 
 
 def run(args) -> None:
+    _refuse_misplaced_by_path_options(args)
     cfg = load_config(args.engagement_dir)
+    if getattr(args, "by_path", False):
+        _run_by_path(cfg, args)
+        return
     readiness_target = getattr(args, 'require_transition_ready', None)
     next_target = None if readiness_target else _next_code_gate(
         getattr(cfg, "engagement_dir", getattr(args, "engagement_dir", ""))
