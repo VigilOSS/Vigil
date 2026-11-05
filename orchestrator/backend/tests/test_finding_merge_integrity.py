@@ -253,10 +253,14 @@ def test_merge_medium_into_high_preserves_canonical_cvss_and_impact(client, isol
     assert mismatches == [], mismatches
 
 
-def test_merge_high_source_into_medium_target_lets_stronger_source_cvss_win(
+def test_merge_high_source_into_medium_target_warns_and_keeps_target_cvss(
     client, isolate_settings
 ) -> None:
-    """A stronger source may raise CVSS, but cannot overwrite canonical prose."""
+    """Merge never changes the target's technical claim or overwrites canonical prose.
+
+    A stronger source severity or CVSS comes back as a warning naming the explicit
+    edit, because changing either axis invalidates the target's verdict.
+    """
     _seed_engagement(client, isolate_settings)
     _create_cvss_finding(
         client, "MI-403",
@@ -271,11 +275,14 @@ def test_merge_high_source_into_medium_target_lets_stronger_source_cvss_win(
     assert response.status_code == 200, response.text
 
     target = response.json()["target"]
-    assert target["severity"] == "high"
+    assert target["severity"] == "medium"
     details = target["details"]
-    assert details["cvss_score"] == 8.1
-    assert details["cvss_vector"] == _HIGH_VECTOR
+    assert details["cvss_score"] == 5.3
+    assert details["cvss_vector"] == _MEDIUM_VECTOR
     assert details["impact"] == "Limited disclosure"
+    warnings = "\n".join(response.json()["warnings"])
+    assert "vigil assess finding update MI-403 --severity high" in warnings
+    assert _HIGH_VECTOR in warnings
 
 
 def test_merge_source_only_fills_missing_narrative_keys(
@@ -396,7 +403,7 @@ def test_merge_progressed_low_severity_source_keeps_canonical_high_cvss(
     target = response.json()["target"]
     assert target["severity"] == "high"
     details = target["details"]
-    # CVSS follows the severity winner (target/high), NOT the confidence winner (source/medium).
+    # Merge never moves the target's CVSS, whichever side wins on confidence.
     assert details["cvss_score"] == 8.1
     assert details["cvss_vector"] == _HIGH_VECTOR
 
@@ -787,15 +794,15 @@ def test_merge_completes_over_a_legacy_cvss_defect_and_reports_it(
     assert body["source"]["workflow_status"] == "merged"
     assert body["target"]["slug"] == "CV-903"
     # ... and the contradiction is stated, with the verb that repairs it.
-    assert len(body["warnings"]) == 1, body["warnings"]
-    warning = body["warnings"][0]
+    pair_warnings = [w for w in body["warnings"] if "contradictory CVSS pair" in w]
+    assert len(pair_warnings) == 1, body["warnings"]
+    warning = pair_warnings[0]
     assert expected_in_warning in warning
     assert "vigil assess finding update CV-903" in warning
 
-    # Merge correctly invalidates prior verification because it materially
-    # changes the target. Reconstruct the reportable legacy state through the
-    # real proof-backed verification path, then restore the historical defect
-    # that no public write contract permits.
+    # Reconstruct the reportable legacy state through the real proof-backed
+    # verification path, then restore the historical defect that no public
+    # write contract permits.
     repaired = {
         **stored,
         "cvss_score": 8.1,

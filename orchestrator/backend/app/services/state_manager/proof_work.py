@@ -21,7 +21,7 @@ from .finding_next_tests import (
     owes_runtime_proof, parking_transition_id_at, runtime_proof_owed_sql,
 )
 from .finding_snapshots import finding_code_snapshot_status
-from .findings import _current_claim_sha256
+from .finding_change_policy import CLAIM_DIGEST_VERSION, claim_digest, recorded_digest_version
 from ..engagements import get_engagement_view_or_404
 from ..scope_admission import admitted_host
 
@@ -68,7 +68,8 @@ def _binding(connection, engagement_id, finding, route, objective, hosts, view):
     provenance = json.loads(finding['provenance_json'] or '{}')
     source = provenance.get('code_snapshot')
     binding = {
-        'finding_claim_sha256': _current_claim_sha256(finding),
+        'finding_claim_sha256': claim_digest(finding),
+        'claim_digest_version': CLAIM_DIGEST_VERSION,
         # The park whose plan this work proves. A revised plan is a new park, so
         # work prepared for an earlier one becomes history, never the current item.
         'parking_transition_id': current_parking_transition_id(
@@ -133,8 +134,8 @@ def _owner_ended(work: dict) -> bool:
 
 
 # ``finding verify`` never sets ``unreviewed``; a finding whose work was prepared
-# while parked reads it only after a later edit reset its verification (a
-# material change, a reopen, or a relationship change). Nobody decided the owed
+# while parked reads it only after a later edit reset its verification (an
+# invalidating change or a reopen). Nobody decided the owed
 # proof, so open work goes stale rather than done, and the finding needs
 # re-verification before new proof work.
 _INVALIDATED_BLOCKER = (
@@ -219,6 +220,24 @@ def _stored_binding(connection, engagement_id, row) -> dict:
     return binding
 
 
+def _at_stored_digest_version(binding: dict, stored: dict, finding) -> dict:
+    """Compare a current binding with a stored one at the stored claim digest version.
+
+    Work prepared before the digest was versioned keeps its version-1 digest; it
+    stays current exactly as long as the claim it was prepared for is unchanged.
+    """
+    version = recorded_digest_version(stored)
+    if version == binding.get('claim_digest_version'):
+        return binding
+    projected = dict(binding)
+    projected['finding_claim_sha256'] = claim_digest(finding, version=version)
+    if 'claim_digest_version' in stored:
+        projected['claim_digest_version'] = version
+    else:
+        projected.pop('claim_digest_version', None)
+    return projected
+
+
 def _normalized_binding(binding: dict) -> dict:
     """Project pre-target-scoped bindings onto the current durable contract."""
     normalized = dict(binding)
@@ -274,7 +293,8 @@ def _serialize(connection, engagement_id, row, *, with_history=True, view=None):
         connection, engagement_id, finding['id'], data['route'], data['id'],
     )[0] if data['status'] == 'prepared' and data['owner_dispatch_id'] is None else None
     data['current'] = (
-        _normalized_binding(current) == _normalized_binding(stored)
+        _normalized_binding(_at_stored_digest_version(current, stored, finding))
+        == _normalized_binding(stored)
         and _source_current(current)
     )
     data['finding_title'] = finding['title']
@@ -534,16 +554,18 @@ def prepare_proof_work(engagement_id: int, *, finding_slug: str, route: str,
         hosts_json = _json(hosts)
         # Legacy bindings can normalize equal; reuse the newest live row before
         # any ended one, so an old stale or finished row cannot shadow it.
-        matches = [
-            row for row in connection.execute(
-                'SELECT id,status,binding_json,finding_id,created_at FROM assessment_proof_work '
-                'WHERE engagement_id=? AND finding_id=? AND route=? '
-                'AND objective=? AND target_hosts_json=? ORDER BY id DESC',
-                (engagement_id, finding['id'], route, objective, hosts_json),
-            )
-            if _normalized_binding(_stored_binding(connection, engagement_id, row))
-            == _normalized_binding(binding)
-        ]
+        matches = []
+        for row in connection.execute(
+            'SELECT id,status,binding_json,finding_id,created_at FROM assessment_proof_work '
+            'WHERE engagement_id=? AND finding_id=? AND route=? '
+            'AND objective=? AND target_hosts_json=? ORDER BY id DESC',
+            (engagement_id, finding['id'], route, objective, hosts_json),
+        ).fetchall():
+            stored = _stored_binding(connection, engagement_id, row)
+            if _normalized_binding(stored) == _normalized_binding(
+                _at_stored_digest_version(binding, stored, finding)
+            ):
+                matches.append(row)
         work_id = next((
             row['id'] for row in sorted(
                 matches, key=lambda row: row['status'] not in _LIVE_WORK_STATUSES)

@@ -34,7 +34,7 @@ def _active_relationship_identity(link: dict[str, Any] | Any | None) -> tuple[An
     """Identity of the active claim a verifier reviewed, excluding prose/order."""
     if link is None or link["retired_at"] is not None:
         return None
-    # Root-cause grouping changes what a confirmed finding claims to represent.
+    # Root-cause grouping is the relationship the finding change policy audits.
     # Evidence, related, contradiction, duplicate-intel, and proof-run links add
     # review context without changing the vulnerability already verified.
     if not _is_root_cause_link(link):
@@ -180,26 +180,25 @@ def _validate_proof_run_link_target(
         )
 
 
-def _invalidate_relationship_verification(
+def _record_relationship_change(
     connection,
     *,
     engagement_id: int,
     finding: dict[str, Any] | Any,
     actor: str,
     relationship_change: dict[str, Any] | None,
-    record_transition: bool = True,
-) -> tuple[dict[str, Any], bool]:
+) -> dict[str, Any]:
+    """Apply the finding change policy to a relationship write; return its verdict fields."""
     # ``findings`` owns the transition ledger and imports this module for merge
     # helpers, so the reverse dependency must resolve only after module loading.
-    from .findings import _invalidate_terminal_verification_for_relationship
+    from .findings import _apply_relationship_change
 
-    return _invalidate_terminal_verification_for_relationship(
+    return _apply_relationship_change(
         connection,
         engagement_id=engagement_id,
         finding=finding,
         actor=actor,
         relationship_change=relationship_change,
-        record_transition=record_transition,
     )
 
 
@@ -381,7 +380,7 @@ def create_finding_link(
             notes=notes,
             provenance=provenance,
         )
-        _invalidate_relationship_verification(
+        verdict = _record_relationship_change(
             connection,
             engagement_id=engagement.id,
             finding=finding,
@@ -392,7 +391,7 @@ def create_finding_link(
                 after=link,
             ),
         )
-        return link
+        return {**link, **verdict}
 
 def set_root_cause_link(
     engagement_id: int,
@@ -574,7 +573,7 @@ def set_root_cause_link(
             ).fetchone()
             assert updated_link is not None
             link = dict(updated_link)
-        _invalidate_relationship_verification(
+        verdict = _record_relationship_change(
             connection,
             engagement_id=engagement.id,
             finding=finding,
@@ -588,6 +587,7 @@ def set_root_cause_link(
     result = dict(link)
     result["finding_slug"] = finding_slug
     result.update(_root_cause_link_metadata(result))
+    result.update(verdict)
     return result
 
 def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str, Any]:
@@ -628,7 +628,7 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
             ).fetchone()
             for link in before_links
         ]
-        _invalidate_relationship_verification(
+        verdict = _record_relationship_change(
             connection,
             engagement_id=engagement.id,
             finding=finding,
@@ -639,7 +639,7 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
                 after=[link for link in after_links if link is not None],
             ),
         )
-    return {"finding_slug": finding_slug, "cleared": int(cursor.rowcount)}
+    return {"finding_slug": finding_slug, "cleared": int(cursor.rowcount), **verdict}
 
 def list_finding_links(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
@@ -836,7 +836,7 @@ def update_finding_link(
             (int(link_id),),
         ).fetchone()
         assert updated is not None
-        _invalidate_relationship_verification(
+        verdict = _record_relationship_change(
             connection,
             engagement_id=engagement.id,
             finding=finding,
@@ -849,6 +849,7 @@ def update_finding_link(
         )
     result = dict(updated)
     result["finding_slug"] = finding_slug
+    result.update(verdict)
     return result
 
 def list_finding_groups(engagement_id: int, *, root_slug: str | None = None) -> list[dict[str, Any]]:

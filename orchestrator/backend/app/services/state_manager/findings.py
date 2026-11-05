@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 import re
 import sqlite3
@@ -16,7 +15,7 @@ from ..search import (
     canonical_finding_alias,
     is_canonical_finding_slug,
 )
-from . import _common, run_accounting
+from . import _common, finding_change_policy, run_accounting
 from ._common import (
     DUPLICATE_LINK_KIND,
     FINDING_NOTES_MAX_LENGTH,
@@ -51,7 +50,6 @@ from .finding_details import (
 )
 from .links import (
     _active_finding_link,
-    _invalidate_relationship_verification,
     _is_root_cause_link,
     _relationship_change,
     _upsert_finding_link,
@@ -103,16 +101,6 @@ def finding_mode_sql(mode: str | None, *, location_sql: str = 'canonical_locatio
         return f" AND COALESCE({location_sql}, '') NOT LIKE 'file:%'"
     return ''
 
-
-_VERIFICATION_MATERIAL_DETAIL_KEYS = frozenset(
-    {
-        "cwe_id",
-        "cvss_score",
-        "cvss_vector",
-    }
-)
-
-_CLAIM_REVIEW_IGNORED_DETAIL_KEYS = frozenset({"correction_history"})
 
 _FINDING_PREFIX_BY_SOURCE = {
     "exploit-developer": "EX",
@@ -595,131 +583,44 @@ def _resolved_details(
     return _merge_object_text(existing_details_json, details)
 
 
-def _verification_material_details_changed(
-    existing_details_json: str,
-    details: dict[str, Any] | None,
-    details_mode: str,
-    *,
-    ignore_cvss: bool = False,
-) -> bool:
-    if details is None or details_mode == "append":
-        return False
-    before = _json_object(existing_details_json)
-    after = _json_object(
-        _resolved_details(existing_details_json, details, details_mode)
-    )
-    return any(
-        (key in before) != (key in after) or before.get(key) != after.get(key)
-        for key in _VERIFICATION_MATERIAL_DETAIL_KEYS
-        if not (ignore_cvss and key in _CVSS_KEYS)
-    )
+# Reproduction additions a verdict's own verifier may make without another review,
+# and the evidence fills that qualify alone.
+_ENRICHMENT_REVIEW_AXES = frozenset({"details.steps_to_reproduce", "details.repro_runs"})
+_ENRICHMENT_AXES = _ENRICHMENT_REVIEW_AXES | {"evidence_ref.fill", "evidence_type.fill"}
 
 
-def _cvss_score_band(score: float) -> str:
-    if score == 0:
-        return "info"
-    if score < 4:
-        return "low"
-    if score < 7:
-        return "medium"
-    if score < 9:
-        return "high"
-    return "critical"
+def _same_verifier_enrichment(
+    connection, engagement_id, before, after, dispatch_agent_id,
+    change: finding_change_policy.FindingChange,
+):
+    """Permit attributed reproduction additions without consuming another receipt.
 
-
-def _same_band_cvss_reduction(
-    existing_details_json: str,
-    details: dict[str, Any] | None,
-    details_mode: str,
-    severity: str,
-) -> tuple[float, float] | None:
-    if details is None or not any(key in details for key in _CVSS_KEYS):
-        return None
-    before = _json_object(existing_details_json).get("cvss_score")
-    after = _json_object(
-        _resolved_details(existing_details_json, details, details_mode)
-    ).get("cvss_score")
-    if (
-        isinstance(before, (int, float))
-        and not isinstance(before, bool)
-        and isinstance(after, (int, float))
-        and not isinstance(after, bool)
-        and float(after) < float(before)
-        and _cvss_score_band(float(before)) == severity
-        and _cvss_score_band(float(after)) == severity
-    ):
-        return float(before), float(after)
-    return None
-
-
-def _claim_review_details_changed(
-    existing_details_json: str,
-    details: dict[str, Any] | None,
-    details_mode: str,
-) -> bool:
-    if details is None:
-        return False
-    before = _json_object(existing_details_json)
-    after = _json_object(_resolved_details(existing_details_json, details, details_mode))
-    return any(
-        before.get(key) != after.get(key) or (key in before) != (key in after)
-        for key in before.keys() | after.keys()
-        if key not in _CLAIM_REVIEW_IGNORED_DETAIL_KEYS
-        and key not in _VERIFICATION_MATERIAL_DETAIL_KEYS
-    )
-
-
-def _proof_dependency_removed(
-    existing_details_json: str,
-    details: dict[str, Any] | None,
-    details_mode: str,
-) -> bool:
-    if details is None:
-        return False
-    before = _json_object(existing_details_json)
-    after = _json_object(_resolved_details(existing_details_json, details, details_mode))
-    return any(
-        key in before and key not in after
-        for key in ("evidence", "impact", "proof", "exploitability")
-    )
-
-
-def _same_verifier_enrichment(connection, engagement_id, before, after, dispatch_agent_id):
-    """Permit attributed documentation additions without consuming another receipt.
-
-    Prior evidence references, reproduction steps, and run IDs must survive in order. An existing
-    claim-review event remains on its explicit equivalence-review path.
+    The canonical verifier of the current verdict may append reproduction steps and
+    run IDs, retaining each original list as an exact prefix. Any other claim-review
+    or invalidating axis, and an existing claim-review event, keeps its normal path.
     """
-    if not dispatch_agent_id or _row_verification_status(before) not in {'confirmed', 'downgraded'}:
+    if not dispatch_agent_id or _row_verification_status(before) not in (
+        finding_change_policy.CLAIM_REVIEW_VERIFICATION_STATUSES
+    ):
+        return False
+    if not set(change.changed_axes) & _ENRICHMENT_AXES:
+        return False
+    if any(
+        axis not in _ENRICHMENT_REVIEW_AXES
+        for axis, effect in change.axes
+        if effect is not finding_change_policy.Effect.KEEP
+    ):
         return False
     if _claim_review_status(connection, engagement_id, before)['claim_transition_id'] is not None:
         return False
-    for key in ('title', 'severity', 'status', 'defect_family', 'root_cause_key',
-                'auth_context', 'canonical_location', 'summary', 'provenance_json'):
-        if before[key] != after[key]:
-            return False
-    old_ref, new_ref = str(before['evidence_ref'] or ''), str(after['evidence_ref'] or '')
-    if old_ref and new_ref != old_ref:
-        return False
-    if before['evidence_type'] and before['evidence_type'] != after['evidence_type']:
-        return False
     old_details, new_details = _json_object(before['details_json']), _json_object(after['details_json'])
-    changed = {key for key in old_details.keys() | new_details.keys()
-               if old_details.get(key) != new_details.get(key) or (key in old_details) != (key in new_details)}
-    if not changed <= {'steps_to_reproduce', 'repro_runs'}:
-        return False
-    if any(key not in new_details or not new_details[key] for key in changed):
-        return False
-    for key in ('steps_to_reproduce', 'repro_runs'):
-        if key not in changed:
-            continue
-        previous, current = old_details.get(key, []), new_details[key]
+    for axis in _ENRICHMENT_REVIEW_AXES & set(change.changed_axes):
+        key = axis.removeprefix("details.")
+        previous, current = old_details.get(key, []), new_details.get(key)
         if not isinstance(previous, list) or not isinstance(current, list):
             return False
         if current[:len(previous)] != previous:
             return False
-    if not changed and old_ref == new_ref and before['evidence_type'] == after['evidence_type']:
-        return False
     rows = connection.execute(
         "SELECT DISTINCT d.agent_id FROM assessment_finding_proof_receipts l "
         "JOIN assessment_proof_receipts p ON p.id=l.proof_receipt_id AND p.engagement_id=l.engagement_id "
@@ -759,41 +660,50 @@ def _validate_authored_repro_runs(
             )
 
 
-def _current_claim_sha256(row: dict[str, Any] | Any) -> str:
-    def get(key: str, default: str = "") -> Any:
-        if isinstance(row, dict):
-            return row.get(key, default)
-        return row[key] if key in row.keys() else default
+def _current_claim_decisions(
+    connection, engagement_id: int, row, transition_id: int
+) -> list[dict[str, Any]]:
+    """Equivalence decisions for this claim edit that still match the stored claim.
 
-    details = _json_object(get("details_json", "{}"))
-    details = {
-        key: value
-        for key, value in details.items()
-        if key not in _CLAIM_REVIEW_IGNORED_DETAIL_KEYS
-    }
-    claim = {
-        "title": str(get("title", "") or ""),
-        "summary": str(get("summary", "") or ""),
-        "severity": str(get("severity", "") or ""),
-        "defect_family": str(get("defect_family", "") or ""),
-        "root_cause_key": str(get("root_cause_key", "") or ""),
-        "auth_context": str(get("auth_context", "") or ""),
-        "canonical_location": str(get("canonical_location", "") or ""),
-        "evidence_ref": str(get("evidence_ref", "") or ""),
-        "details": details,
-    }
-    encoded = json.dumps(claim, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
+    Each decision is compared at the digest version it was recorded with, so a
+    decision recorded before the digest was versioned stays valid exactly as long
+    as the claim it reviewed is unchanged.
+    """
+    rows = connection.execute(
+        """
+        SELECT payload_json FROM assessment_dispatch_decisions
+        WHERE engagement_id = ? AND kind = 'claim_equivalence'
+          AND json_valid(payload_json)
+          AND json_extract(payload_json, '$.finding_slug') = ?
+          AND json_extract(payload_json, '$.claim_transition_id') = ?
+        ORDER BY id DESC
+        """,
+        (engagement_id, str(row["slug"]), transition_id),
+    ).fetchall()
+    digests: dict[int, str] = {}
+    matching = []
+    for decision in rows:
+        payload = _json_object(decision["payload_json"])
+        version = finding_change_policy.recorded_digest_version(payload)
+        if version not in digests:
+            digests[version] = finding_change_policy.claim_digest(row, version=version)
+        if payload.get("new_claim_sha256") == digests[version]:
+            matching.append(payload)
+    return matching
 
 
 def _claim_review_status(connection, engagement_id: int, row) -> dict[str, Any]:
-    digest = _current_claim_sha256(row)
-    if _row_verification_status(row) not in {"confirmed", "downgraded"}:
-        return {
-            "claim_review_pending": False,
-            "claim_transition_id": None,
-            "current_claim_sha256": digest,
-        }
+    digest = finding_change_policy.claim_digest(row)
+    audit = {
+        "claim_review_pending": False,
+        "claim_transition_id": None,
+        "current_claim_sha256": digest,
+        "claim_digest_version": finding_change_policy.CLAIM_DIGEST_VERSION,
+    }
+    if _row_verification_status(row) not in (
+        finding_change_policy.CLAIM_REVIEW_VERIFICATION_STATUSES
+    ):
+        return audit
     latest_verification = connection.execute(
         """
         SELECT COALESCE(MAX(id), 0) AS id
@@ -815,25 +725,12 @@ def _claim_review_status(connection, engagement_id: int, row) -> dict[str, Any]:
     transition_id = int(latest_pending["id"]) if latest_pending else None
     pending = transition_id is not None
     if pending:
-        decision = connection.execute(
-            """
-            SELECT payload_json FROM assessment_dispatch_decisions
-            WHERE engagement_id = ? AND kind = 'claim_equivalence'
-              AND json_valid(payload_json)
-              AND json_extract(payload_json, '$.finding_slug') = ?
-              AND json_extract(payload_json, '$.claim_transition_id') = ?
-              AND json_extract(payload_json, '$.new_claim_sha256') = ?
-            ORDER BY id DESC LIMIT 1
-            """,
-            (engagement_id, str(row["slug"]), transition_id, digest),
-        ).fetchone()
-        if decision is not None:
-            pending = _json_object(decision["payload_json"]).get("verdict") != "equivalent"
-    return {
-        "claim_review_pending": pending,
-        "claim_transition_id": transition_id,
-        "current_claim_sha256": digest,
-    }
+        decisions = _current_claim_decisions(connection, engagement_id, row, transition_id)
+        if decisions:
+            pending = decisions[0].get("verdict") != "equivalent"
+    audit["claim_review_pending"] = pending
+    audit["claim_transition_id"] = transition_id
+    return audit
 
 
 def validate_claim_equivalence_decision(
@@ -886,6 +783,17 @@ def validate_claim_equivalence_decision(
             status_code=status.HTTP_409_CONFLICT,
             detail="claim_equivalence transition is not the current claim edit",
         )
+    version = payload.setdefault(
+        "claim_digest_version", finding_change_policy.CLAIM_DIGEST_VERSION
+    )
+    if version != audit["claim_digest_version"]:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=(
+                "claim_equivalence claim_digest_version must be "
+                f"{audit['claim_digest_version']}, the version current_claim_sha256 is computed at"
+            ),
+        )
     if payload["new_claim_sha256"] != audit["current_claim_sha256"]:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -915,38 +823,16 @@ def validate_claim_equivalence_decision(
             detail="claim_equivalence requires a separate verifier dispatch",
         )
     if payload["verdict"] == "equivalent":
-        changed = connection.execute(
-            """
-            SELECT 1 FROM assessment_dispatch_decisions
-            WHERE engagement_id = ? AND kind = 'claim_equivalence'
-              AND json_valid(payload_json)
-              AND json_extract(payload_json, '$.finding_slug') = ?
-              AND json_extract(payload_json, '$.claim_transition_id') = ?
-              AND json_extract(payload_json, '$.new_claim_sha256') = ?
-              AND json_extract(payload_json, '$.verdict') = 'changed'
-            LIMIT 1
-            """,
-            (engagement_id, slug, audit["claim_transition_id"], audit["current_claim_sha256"]),
-        ).fetchone()
-        if changed is not None:
+        if any(
+            decision.get("verdict") == "changed"
+            for decision in _current_claim_decisions(
+                connection, engagement_id, row, audit["claim_transition_id"]
+            )
+        ):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="a changed verdict requires a new canonical finding edit before equivalence review",
             )
-
-
-def _merge_replaces_verification_material_details(
-    existing_details_json: str,
-    merged_details: dict[str, Any],
-) -> bool:
-    """Report only changed or removed dependencies, never additive detail."""
-
-    existing = _json_object(existing_details_json)
-    return any(
-        key in existing
-        and (key not in merged_details or existing[key] != merged_details[key])
-        for key in _VERIFICATION_MATERIAL_DETAIL_KEYS
-    )
 
 
 def _resolved_notes(
@@ -1182,71 +1068,72 @@ def _record_finding_transition(
     return dict(row)
 
 
-def _invalidate_terminal_verification_for_relationship(
+def _apply_relationship_change(
     connection,
     *,
     engagement_id: int,
     finding: dict[str, Any] | Any,
     actor: str,
     relationship_change: dict[str, Any] | None,
-    record_transition: bool = True,
-) -> tuple[dict[str, Any], bool]:
-    """Invalidate a terminal verdict when its reviewed relationship graph moves."""
-    finding_record = dict(finding)
-    if (
-        relationship_change is None
-        or _row_verification_status(finding_record)
-        not in TERMINAL_VERIFICATION_STATUSES
-    ):
-        return finding_record, False
+) -> dict[str, Any]:
+    """Resolve a relationship write's verdict effect and audit a regrouping.
 
-    before_state = _finding_state_snapshot(finding_record)
-    before_content = _finding_content_snapshot(finding_record)
-    cursor = connection.execute(
-        """
-        UPDATE assessment_findings
-        SET verification_status = 'unreviewed',
-            row_version = row_version + 1,
-            updated_at = CURRENT_TIMESTAMP
-        WHERE engagement_id = ? AND id = ? AND row_version = ?
-        """,
-        (
-            engagement_id,
-            int(finding_record["id"]),
-            int(finding_record["row_version"]),
-        ),
+    Generic links add review context and change nothing. A root-cause set,
+    retarget or clear is recorded as its own transition; ``eliminates_finding``
+    changes what the finding claims and raises a claim review.
+    """
+    change = finding_change_policy.classify_finding_change(
+        finding, finding, "link", [relationship_change or {"operation": "linked"}],
     )
-    if cursor.rowcount != 1:
-        _raise_stale_finding_conflict()
-    updated = connection.execute(
-        "SELECT * FROM assessment_findings WHERE id = ?",
-        (int(finding_record["id"]),),
-    ).fetchone()
-    assert updated is not None
-    updated_record = dict(updated)
-    if record_transition:
-        after_state = _finding_state_snapshot(updated_record)
+    outcome = finding_change_policy.verdict_outcome(
+        _row_verification_status(finding), change, operation="link"
+    )
+    if relationship_change is not None:
+        finding_record = dict(finding)
+        before_state = _finding_state_snapshot(finding_record)
+        updated = finding_record
+        if outcome is finding_change_policy.Outcome.INVALIDATE:
+            cursor = connection.execute(
+                """
+                UPDATE assessment_findings
+                SET verification_status = 'unreviewed',
+                    row_version = row_version + 1,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ? AND row_version = ?
+                """,
+                (engagement_id, int(finding_record["id"]), int(finding_record["row_version"])),
+            )
+            if cursor.rowcount != 1:
+                _raise_stale_finding_conflict()
+            updated = dict(connection.execute(
+                "SELECT * FROM assessment_findings WHERE id = ?", (int(finding_record["id"]),),
+            ).fetchone())
+        action = {
+            finding_change_policy.Outcome.INVALIDATE: "verification_invalidated",
+            finding_change_policy.Outcome.CLAIM_REVIEW: "claim_review_pending",
+        }.get(outcome, "relationship_recorded")
         _record_finding_transition(
             connection,
             engagement_id=engagement_id,
-            finding_id=int(updated_record["id"]),
+            finding_id=int(finding_record["id"]),
             actor=actor or "operator",
-            action="verification_invalidated",
+            action=action,
             before=before_state,
-            after=after_state,
+            after=_finding_state_snapshot(updated),
             reason_code="relationship_changed",
             reason_text=(
-                "A material finding relationship changed after terminal verification."
+                f"Root-cause relationship {relationship_change.get('operation', 'changed')}; "
+                f"verdict effect {outcome.value}."
             ),
             artifact_ref="",
             metadata={
-                "material_change": True,
                 "relationship_change": relationship_change,
+                "change_policy": change.audit(),
             },
-            before_content=before_content,
-            after_content=_finding_content_snapshot(updated_record),
+            before_content=_finding_content_snapshot(finding_record),
+            after_content=_finding_content_snapshot(updated),
         )
-    return updated_record, True
+    return finding_change_policy.response_fields(change, outcome)
 
 def _finding_slug(
     connection,
@@ -1524,6 +1411,7 @@ def create_finding(
     verification_normal_severity_band: str | None = None,
     verification_next_test: dict[str, Any] | None = None,
     run_candidate: dict[str, Any] | None = None,
+    change_operation: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     canonical_location = str(canonical_location).strip()
@@ -1641,7 +1529,8 @@ def create_finding(
                 and requested_family
                 and requested_family != existing_family
                 and existing_family in NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
-                and _row_verification_status(existing) == "confirmed"
+                and _row_verification_status(existing)
+                in finding_change_policy.CLAIM_REVIEW_VERIFICATION_STATUSES
             ):
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
@@ -2031,13 +1920,9 @@ def create_finding(
                 "target_ref": evidence_ref,
                 "notes": "",
                 "provenance": provenance or {},
-                # ``evidence_ref`` is already part of the finding mutation
-                # contract. Treating its automatically mirrored index link as a
-                # second relationship mutation would invalidate a terminal
-                # verdict during the verification write that establishes it,
-                # and would defeat sticky false-positive rediscovery. An
-                # explicitly authored evidence link still uses the relationship
-                # invalidation lifecycle.
+                # ``evidence_ref`` is already classified as a finding column by
+                # the change policy, so its automatically mirrored index link is
+                # not a second relationship change.
                 "implicit_evidence_ref": True,
             })
         finding_links: list[dict[str, Any]] = []
@@ -2082,100 +1967,80 @@ def create_finding(
             )
             if change is not None and not item.get("implicit_evidence_ref"):
                 relationship_changes.append(change)
-        if existing is not None and relationship_changes:
-            relationship_change = (
-                relationship_changes[0]
-                if len(relationship_changes) == 1
-                else {"operation": "recorded", "changes": relationship_changes}
+        verdict: dict[str, Any] | None = None
+        if existing is not None and code_snapshot_write_mode != "verify":
+            # The verdict effect is decided on the resolved stored rows, inside the
+            # write transaction, so a refusal rolls the whole write back.
+            operation = change_operation or code_snapshot_write_mode
+            change = finding_change_policy.classify_finding_change(
+                existing, finding, operation, relationship_changes,
             )
-            finding, relationship_invalidated = _invalidate_relationship_verification(
-                connection,
-                engagement_id=engagement.id,
-                finding=finding,
-                actor=transition_actor or source_name or "operator",
-                relationship_change=relationship_change,
-                record_transition=False,
+            outcome = finding_change_policy.verdict_outcome(
+                _row_verification_status(existing), change, operation=operation,
             )
-            if relationship_invalidated:
-                transition_action = "verification_invalidated"
-                transition_reason_code = "relationship_changed"
-                transition_reason_text = (
-                    "A material finding relationship changed after terminal verification."
+            if outcome is finding_change_policy.Outcome.REFUSE:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=finding_change_policy.KILLED_FINDING_REFUSAL.format(
+                        axes=", ".join(change.axes_with(finding_change_policy.Effect.INVALIDATE)),
+                        slug=str(existing["slug"]),
+                    ),
                 )
-                transition_metadata = {
-                    **(transition_metadata or {}),
-                    "material_change": True,
-                    "relationship_change": relationship_change,
-                }
-        if (
-            existing is not None
-            and code_snapshot_write_mode == "record"
-            and _row_verification_status(existing) in {"confirmed", "downgraded"}
-            and _row_verification_status(finding) in {"confirmed", "downgraded"}
-        ):
-            cvss_reduction = _same_band_cvss_reduction(
-                str(existing["details_json"]), details, details_mode,
-                str(existing["severity"]),
-            )
-            material_change = any(
-                str(existing[field] or "") != str(finding[field] or "")
-                for field in (
-                    "severity", "defect_family", "root_cause_key", "auth_context",
-                    "canonical_location", "evidence_ref",
+            transition_metadata = {
+                **(transition_metadata or {}), "change_policy": change.audit(),
+            }
+            if relationship_changes:
+                transition_metadata["relationship_change"] = (
+                    relationship_changes[0]
+                    if len(relationship_changes) == 1
+                    else {"operation": "recorded", "changes": relationship_changes}
                 )
-            ) or (bool(existing["evidence_type"]) and existing["evidence_type"] != finding["evidence_type"]) or _verification_material_details_changed(
-                str(existing["details_json"]), details, details_mode,
-                ignore_cvss=cvss_reduction is not None,
-            ) or _proof_dependency_removed(
-                str(existing["details_json"]), details, details_mode,
-            )
-            if material_change:
+            if any(axis.startswith("cvss.") for axis in change.changed_axes):
+                transition_metadata.update({
+                    "cvss_score_before": _json_object(existing["details_json"]).get("cvss_score"),
+                    "cvss_score_after": _json_object(finding["details_json"]).get("cvss_score"),
+                })
+            if (
+                code_snapshot_write_mode == "patch"
+                and outcome is not finding_change_policy.Outcome.INVALIDATE
+                and _same_verifier_enrichment(
+                    connection, engagement.id, existing, finding, dispatch_agent_id, change,
+                )
+            ):
+                outcome = finding_change_policy.Outcome.KEEP
+                transition_action = "details_patched"
+                transition_reason_code = "verifier_enrichment"
+                transition_metadata.update({
+                    "enrichment": True,
+                    "prior_claim_sha256": finding_change_policy.claim_digest(existing),
+                    "claim_sha256": finding_change_policy.claim_digest(finding),
+                })
+            elif outcome is finding_change_policy.Outcome.INVALIDATE:
                 connection.execute(
                     "UPDATE assessment_findings SET verification_status = 'unreviewed' WHERE id = ?",
                     (int(finding["id"]),),
                 )
                 finding["verification_status"] = "unreviewed"
-                transition_action = "verification_invalidated"
-                transition_reason_code = "finding_content_changed"
-                transition_reason_text = "A material finding claim changed after terminal verification."
-                transition_metadata = {
-                    **(transition_metadata or {}), "material_change": True,
-                }
-            elif (
-                str(existing["title"] or "") != str(finding["title"] or "")
-                or str(existing["summary"] or "") != str(finding["summary"] or "")
-                or _claim_review_details_changed(
-                    str(existing["details_json"]), details, details_mode,
+                invalidating = change.axes_with(finding_change_policy.Effect.INVALIDATE)
+                transition_action = transition_action or "verification_invalidated"
+                transition_reason_code = transition_reason_code or (
+                    "finding_reopened" if operation == "reopen" else "finding_content_changed"
                 )
-                or cvss_reduction is not None
-            ):
-                transition_action = "claim_review_pending"
-                transition_reason_code = "claim_text_changed"
-                transition_reason_text = "The finding claim was revised after terminal verification."
-                transition_metadata = {
-                    **(transition_metadata or {}), "claim_review_pending": True,
-                }
-                if cvss_reduction is not None:
-                    transition_metadata.update({
-                        "cvss_score_before": cvss_reduction[0],
-                        "cvss_score_after": cvss_reduction[1],
-                    })
-        if (existing is not None and code_snapshot_write_mode == 'patch'
-                and transition_reason_code != 'claim_retracted'
-                and _same_verifier_enrichment(connection, engagement.id, existing, finding, dispatch_agent_id)):
-            # Evaluate the stored, fully resolved payload under the same write transaction.
-            # Restore only this edit's conservative invalidation; never create a new verdict.
-            finding['verification_status'] = existing['verification_status']
-            connection.execute('UPDATE assessment_findings SET verification_status=? WHERE id=?',
-                               (finding['verification_status'], finding['id']))
-            transition_action = 'details_patched'
-            transition_reason_code = 'verifier_enrichment'
-            transition_metadata = {
-                **(transition_metadata or {}), 'enrichment': True,
-                'material_change': False, 'claim_review_pending': False,
-                'prior_claim_sha256': _current_claim_sha256(existing),
-                'claim_sha256': _current_claim_sha256(finding),
-            }
+                transition_reason_text = transition_reason_text or (
+                    f"Changed {', '.join(invalidating)} after verification; the prior verdict "
+                    "needs a fresh proof run."
+                )
+            elif outcome is finding_change_policy.Outcome.CLAIM_REVIEW:
+                transition_action = transition_action or "claim_review_pending"
+                transition_reason_code = transition_reason_code or "claim_text_changed"
+                transition_reason_text = transition_reason_text or (
+                    f"Changed {', '.join(change.axes_with(finding_change_policy.Effect.CLAIM_REVIEW))} "
+                    "after verification; an independent claim_equivalence review is pending."
+                )
+            elif relationship_changes and transition_action is None:
+                transition_action = "relationship_recorded"
+                transition_reason_code = transition_reason_code or "relationship_changed"
+            verdict = finding_change_policy.response_fields(change, outcome)
         after_state = _finding_state_snapshot(finding)
         after_content = _finding_content_snapshot(finding)
         terminal_verification_asserted = (
@@ -2233,6 +2098,8 @@ def create_finding(
             or verification_evidence_requested
             # A revised plan for a finding already parked is its own event.
             or verification_next_test is not None
+            # A root-cause regrouping is audited even when no column moved.
+            or (existing is not None and bool(relationship_changes))
         ):
             action = transition_action or (
                 _infer_transition_action(before_state, after_state)
@@ -2379,6 +2246,7 @@ def create_finding(
         # record. A backstop for the CLI-side preflight, so a raw POST is warned too.
         "duplicate_advisories": duplicate_advisories,
         "run_candidate": promoted_run_candidate,
+        **(verdict or {}),
         **verification_evidence,
     }
 
@@ -2550,79 +2418,23 @@ def patch_finding(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="merged findings cannot be reopened via patch",
             )
-        if existing_workflow == "false_positive" and workflow_status is not None and workflow_status != "false_positive":
-            verification_status = "unreviewed"
-        elif existing_verification == "disputed" and workflow_status is not None:
-            # CR-31 (clear-disputed): a `disputed` verdict previously could only
-            # be cleared by the verifier re-issuing finding verify (which lands
-            # `verified`, not a re-queue). Let a specialist reopen via finding update
-            # return it to `unreviewed` — re-queues for verification without
-            # forcing a verdict. Only on an explicit workflow reopen, and only out
-            # of `disputed` (does not touch verified/false_positive verdicts).
-            verification_status = "unreviewed"
-            if transition_action is None:
+        # Reopening for re-triage withdraws the prior verdict: an explicit draft, a
+        # workflow out of a kill, or any workflow decision on a disputed verdict.
+        if workflow_status is not None and (
+            workflow_status == "draft"
+            or existing_workflow == "false_positive"
+            or existing_verification == "disputed"
+        ):
+            change_operation = "reopen"
+            if existing_verification == "disputed" and transition_action is None:
+                # Re-queues a contested verdict for verification without forcing one.
                 transition_action = "verification_recleared"
-
-        cvss_reduction = _same_band_cvss_reduction(
-            str(existing["details_json"]), details, details_mode,
-            str(existing["severity"]),
-        )
-        material_change = any(
-            (
-                severity is not None and _normalize_severity(severity) != str(existing["severity"]),
-                defect_family is not None and defect_family != str(existing["defect_family"]),
-                root_cause_key is not None and root_cause_key != str(existing["root_cause_key"]),
-                auth_context is not None and auth_context != str(existing["auth_context"]),
-                canonical_location is not None
-                and canonical_location != str(existing["canonical_location"]),
-                evidence_ref is not None and evidence_ref != str(existing["evidence_ref"]),
-                evidence_type is not None and bool(existing["evidence_type"])
-                and evidence_type != existing["evidence_type"],
-                transition_reason_code == "claim_retracted",
-                _proof_dependency_removed(
-                    str(existing["details_json"]), details, details_mode
-                ),
-                _verification_material_details_changed(
-                    str(existing["details_json"]), details, details_mode,
-                    ignore_cvss=cvss_reduction is not None,
-                ),
-            )
-        )
-        verification_invalidated = (
-            material_change and existing_verification != "unreviewed"
-        )
-        claim_review_pending = (
-            not verification_invalidated
-            and existing_verification in {"confirmed", "downgraded"}
-            and (
-                title is not None and title != str(existing["title"])
-                or bool(summary) and summary != str(existing["summary"])
-                or _claim_review_details_changed(
-                    str(existing["details_json"]), details, details_mode
-                )
-                or cvss_reduction is not None
-            )
-        )
-        if verification_invalidated:
-            verification_status = "unreviewed"
-            transition_action = "verification_invalidated"
-            transition_metadata = {
-                **(transition_metadata or {}),
-                "material_change": True,
-            }
-        elif claim_review_pending:
-            transition_action = "claim_review_pending"
-            transition_metadata = {
-                **(transition_metadata or {}),
-                "claim_review_pending": True,
-            }
-            if cvss_reduction is not None:
-                transition_metadata.update({
-                    "cvss_score_before": cvss_reduction[0],
-                    "cvss_score_after": cvss_reduction[1],
-                })
+        elif transition_reason_code == "claim_retracted":
+            change_operation = "retract"
+        else:
+            change_operation = "patch"
     else:
-        verification_invalidated = False
+        change_operation = None
 
     result = create_finding(
         engagement.id,
@@ -2682,10 +2494,9 @@ def patch_finding(
         verification_severity_variance=verification_severity_variance,
         verification_normal_severity_band=verification_normal_severity_band,
         verification_next_test=verification_next_test,
+        change_operation=change_operation,
     )
-    result["finding"]["verification_invalidated"] = (
-        verification_invalidated and result["finding"]["verification_status"] == "unreviewed"
-    )
+    result["finding"]["verification_invalidated"] = bool(result.get("verification_invalidated"))
     return result
 
 # Documented (not hard-enforced) vocabulary for what a blocked finding is
@@ -3043,17 +2854,7 @@ def verify_finding(
     cvss_score = effective_details.get("cvss_score")
     normal_severity_band = None
     if isinstance(cvss_score, int | float) and not isinstance(cvss_score, bool):
-        score_value = float(cvss_score)
-        if score_value == 0:
-            normal_severity_band = "info"
-        elif score_value < 4:
-            normal_severity_band = "low"
-        elif score_value < 7:
-            normal_severity_band = "medium"
-        elif score_value < 9:
-            normal_severity_band = "high"
-        else:
-            normal_severity_band = "critical"
+        normal_severity_band = finding_change_policy.cvss_band(float(cvss_score))
 
     result = patch_finding(
         engagement.id,
@@ -3177,16 +2978,11 @@ def relocate_finding(
         merged_provenance[ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY] = from_location
         before_state = _finding_state_snapshot(existing)
         before_content = _finding_content_snapshot(existing)
-        verification_invalidated = before_state["verification_status"] != "unreviewed"
         cursor = connection.execute(
             """
             UPDATE assessment_findings
             SET canonical_location = ?,
                 provenance_json = ?,
-                verification_status = CASE
-                    WHEN ? = 1 THEN 'unreviewed'
-                    ELSE verification_status
-                END,
                 row_version = row_version + 1,
                 updated_at = CURRENT_TIMESTAMP
             WHERE id = ? AND row_version = ?
@@ -3194,7 +2990,6 @@ def relocate_finding(
             (
                 canonical_location,
                 _json_text(merged_provenance),
-                1 if verification_invalidated else 0,
                 int(existing["id"]),
                 expected_row_version,
             ),
@@ -3205,6 +3000,26 @@ def relocate_finding(
             "SELECT * FROM assessment_findings WHERE id = ?", (int(existing["id"]),)
         ).fetchone()
         assert row is not None
+        change = finding_change_policy.classify_finding_change(existing, row, "relocate")
+        outcome = finding_change_policy.verdict_outcome(
+            before_state["verification_status"], change, operation="relocate"
+        )
+        if outcome is finding_change_policy.Outcome.REFUSE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=finding_change_policy.KILLED_FINDING_REFUSAL.format(
+                    axes="canonical_location", slug=slug,
+                ),
+            )
+        verification_invalidated = outcome is finding_change_policy.Outcome.INVALIDATE
+        if verification_invalidated:
+            connection.execute(
+                "UPDATE assessment_findings SET verification_status = 'unreviewed' WHERE id = ?",
+                (int(existing["id"]),),
+            )
+            row = connection.execute(
+                "SELECT * FROM assessment_findings WHERE id = ?", (int(existing["id"]),)
+            ).fetchone()
         transition = _record_finding_transition(
             connection,
             engagement_id=engagement.id,
@@ -3219,8 +3034,8 @@ def relocate_finding(
             metadata={
                 "from": from_location,
                 "to": canonical_location,
-                "material_change": True,
                 "verification_invalidated": verification_invalidated,
+                "change_policy": change.audit(),
             },
             before_content=before_content,
             after_content=_finding_content_snapshot(row),
@@ -3228,7 +3043,11 @@ def relocate_finding(
         record = _serialize_finding_with_code_snapshot_status(
             connection, engagement.id, row
         )
-    return {"finding": record, "transition": transition}
+    return {
+        "finding": record,
+        "transition": transition,
+        **finding_change_policy.response_fields(change, outcome),
+    }
 
 
 def repair_finding_author(
@@ -3347,16 +3166,10 @@ def _merge_details_precedence(winner: dict[str, Any], loser: dict[str, Any]) -> 
     """Merge two ``details_json`` payloads so the WINNING side survives on key
     conflict while still inheriting keys the winner lacks from the loser.
 
-    ``merge_findings`` keeps the stronger finding's severity
-    (``_stronger_severity``) and its summary/evidence (``source_stronger``).
-    The canonical (kept) finding's CVSS/impact live as flat ``details_json``
-    keys (``cvss_score``/``cvss_vector``/``impact``), so its details MUST follow
-    the same side that won — otherwise a weaker duplicate overwrites the
-    canonical's CVSS/impact and trips the severity↔CVSS readiness gate. Seed
-    from the losing side (fill gaps), then overlay the winning side's non-empty
-    values (win conflicts). Empties are dropped with the same filter shared
-    ``_merge_object_text`` uses, so a blank winner value never clobbers a real
-    loser value.
+    Seed from the losing side (fill gaps), then overlay the winning side's
+    non-empty values (win conflicts). Empties are dropped with the same filter
+    shared ``_merge_object_text`` uses, so a blank winner value never clobbers a
+    real loser value.
     """
     def _non_empty(payload: dict[str, Any]) -> dict[str, Any]:
         return {key: value for key, value in payload.items() if value not in (None, "", [], {})}
@@ -3364,6 +3177,59 @@ def _merge_details_precedence(winner: dict[str, Any], loser: dict[str, Any]) -> 
     merged = _non_empty(loser)
     merged.update(_non_empty(winner))
     return _json_text(merged)
+
+
+def _merge_technical_warnings(
+    source, target, source_details: dict[str, Any], target_details: dict[str, Any],
+) -> list[str]:
+    """Name each stronger or missing technical value the merge left on the source.
+
+    The merged claim may warrant it, but changing a technical axis invalidates the
+    target's verdict, so it is an explicit, reviewed edit rather than a merge side effect.
+    """
+    source_slug, target_slug = str(source["slug"]), str(target["slug"])
+    source_severity = _normalize_severity(str(source["severity"]))
+    target_severity = _normalize_severity(str(target["severity"]))
+    warnings: list[str] = []
+    if SEVERITY_RANK[source_severity] > SEVERITY_RANK[target_severity]:
+        warnings.append(
+            f"merge kept {target_slug} at severity {target_severity}; {source_slug} "
+            f"carries {source_severity}. If the merged claim warrants it, run "
+            f"`vigil assess finding update {target_slug} --severity {source_severity}` "
+            "(a severity change invalidates the verdict and needs a fresh proof run)."
+        )
+    source_score = source_details.get("cvss_score")
+    target_score = target_details.get("cvss_score")
+    if (
+        isinstance(source_score, (int, float))
+        and not isinstance(source_score, bool)
+        and (
+            not isinstance(target_score, (int, float))
+            or isinstance(target_score, bool)
+            or source_score > target_score
+        )
+    ):
+        pair = json.dumps(
+            {key: source_details[key] for key in _CVSS_KEYS if key in source_details}
+        )
+        warnings.append(
+            f"merge kept {target_slug}'s CVSS ({target_score if target_score is not None else 'none'}); "
+            f"{source_slug} carries {source_score} ({source_details.get('cvss_vector', 'no vector')}). "
+            f"If it applies, run `vigil assess finding update {target_slug} --details-inline "
+            f"'{pair}'` (an exploitability or band change invalidates the verdict)."
+        )
+    for key in sorted(
+        finding_change_policy.TECHNICAL_DETAIL_KEYS - set(_CVSS_KEYS)
+    ):
+        value = source_details.get(key)
+        if value not in (None, "", [], {}) and value != target_details.get(key):
+            warnings.append(
+                f"merge kept {target_slug}'s {key} ({target_details.get(key) or 'none'}); "
+                f"{source_slug} carries {value}. If it applies, run "
+                f"`vigil assess finding update {target_slug} --details-inline "
+                f"'{json.dumps({key: value})}'` (this invalidates the verdict)."
+            )
+    return warnings
 
 
 def merge_findings(
@@ -3566,51 +3432,34 @@ def merge_findings(
         )
         source_details = _json_object(source["details_json"])
         target_details = _json_object(target["details_json"])
-        # The explicitly selected target is the canonical record. Source
-        # details fill missing keys but never overwrite canonical narrative.
+        # The explicitly selected target is the canonical record. Source details
+        # fill missing narrative keys but never overwrite canonical narrative, and
+        # merge never changes the target's technical claim: a stronger severity,
+        # CVSS or CWE on the source comes back as a warning for an explicit edit.
         merged_details_obj = _json_object(
-            _merge_details_precedence(target_details, source_details)
-        )
-        # CVSS-bearing keys are the exception: they must follow the SEVERITY winner
-        # (kept below via `_stronger_severity`), NOT the confidence winner. Otherwise
-        # a more-progressed but lower-severity duplicate leaves a higher-severity
-        # canonical carrying the duplicate's weaker CVSS and trips the severity↔CVSS
-        # readiness gate.
-        severity_winner_details = (
-            source_details
-            if (
-                _stronger_severity(target["severity"], source["severity"]) == source["severity"]
-                and source["severity"] != target["severity"]
+            _merge_details_precedence(
+                target_details,
+                {
+                    key: value
+                    for key, value in source_details.items()
+                    if key not in finding_change_policy.TECHNICAL_DETAIL_KEYS
+                },
             )
-            else target_details
         )
-        # The pair moves ATOMICALLY. Filling only the half the winner lacks from
-        # the loser manufactures a score that its own vector never produced — a
-        # mismatch neither input finding had. Once the winner declares either
-        # half, its absences win too.
-        if any(
-            severity_winner_details.get(key) not in (None, "", [], {})
-            for key in _CVSS_KEYS
-        ):
-            for _cvss_key in _CVSS_KEYS:
-                _cvss_value = severity_winner_details.get(_cvss_key)
-                if _cvss_value not in (None, "", [], {}):
-                    merged_details_obj[_cvss_key] = _cvss_value
-                else:
-                    merged_details_obj.pop(_cvss_key, None)
-        # A pair that still disagrees arrived WHOLE on one of the two inputs —
-        # the atomic move above means merge can never assemble a mismatch that
-        # neither side had. So refusing here would dead-end a correct duplicate
-        # consolidation over a data defect this caller did not author, and the
-        # two duplicates would stay separate in the report. Merge instead, and
-        # say so: `cvss_vector_score_mismatch` / `cvss_vector_invalid` in
-        # report-readiness still block the report until the pair is repaired.
-        merge_warnings: list[str] = []
+        merge_warnings = _merge_technical_warnings(
+            source, target, source_details, target_details
+        )
+        # A contradictory pair can only be the target's own, so refusing here would
+        # dead-end a correct duplicate consolidation over a data defect this caller
+        # did not author, and the two duplicates would stay separate in the report.
+        # Merge instead, and say so: `cvss_vector_score_mismatch` /
+        # `cvss_vector_invalid` in report-readiness still block the report until
+        # the pair is repaired.
         cvss_problem = _cvss_pair_disagreement(merged_details_obj)
         if cvss_problem is not None:
             merge_warnings.append(
                 f"merge completed, but {target_slug} carries a contradictory CVSS "
-                f"pair inherited from one of the two findings: {cvss_problem[1]}. "
+                f"pair: {cvss_problem[1]}. "
                 f"Repair it with `vigil assess finding update {target_slug} "
                 "--details-inline '{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'` "
                 "— the report is blocked until the pair agrees."
@@ -3628,9 +3477,6 @@ def merge_findings(
             "reason": reason,
             "source_name": source_name,
         }
-        merged_severity = _stronger_severity(
-            str(target["severity"]), str(source["severity"])
-        )
         merged_workflow = (
             target_workflow
             if source_workflow == "false_positive"
@@ -3650,38 +3496,6 @@ def merge_findings(
         ):
             merged_evidence_ref = str(source["evidence_ref"])
 
-        # A merge may add an independent evidence link without changing the
-        # claim a verifier adjudicated. Keep a terminal verdict in that case.
-        # If the canonical merge replaces any material input to that verdict,
-        # force another review and make the exact invalidating axes auditable.
-        replaced_verification_dependencies: list[str] = []
-        if merged_severity != str(target["severity"]):
-            replaced_verification_dependencies.append("severity")
-        if merged_workflow != target_workflow:
-            replaced_verification_dependencies.append("workflow_status")
-        if canonical_location != str(target["canonical_location"]):
-            replaced_verification_dependencies.append("canonical_location")
-        if merged_source_name != str(target["source_name"]):
-            replaced_verification_dependencies.append("source_name")
-        if merged_summary != str(target["summary"]):
-            replaced_verification_dependencies.append("summary")
-        if (
-            str(target["evidence_ref"])
-            and merged_evidence_ref != str(target["evidence_ref"])
-        ):
-            replaced_verification_dependencies.append("evidence_ref")
-        if _merge_replaces_verification_material_details(
-            str(target["details_json"]), merged_details_obj
-        ):
-            replaced_verification_dependencies.append("details")
-        verification_invalidated = bool(replaced_verification_dependencies) and (
-            _row_verification_status(target) in TERMINAL_VERIFICATION_STATUSES
-        )
-        merged_verification_status = (
-            "unreviewed"
-            if verification_invalidated
-            else _row_verification_status(target)
-        )
         source_links = connection.execute(
             "SELECT * FROM assessment_finding_links "
             "WHERE engagement_id = ? AND finding_id = ? AND retired_at IS NULL",
@@ -3709,9 +3523,7 @@ def merge_findings(
         target_cursor = connection.execute(
             """
             UPDATE assessment_findings
-            SET severity = ?,
-                status = ?,
-                verification_status = ?,
+            SET status = ?,
                 canonical_location = ?,
                 source_name = ?,
                 summary = ?,
@@ -3725,9 +3537,7 @@ def merge_findings(
             WHERE id = ? AND row_version = ?
             """,
             (
-                merged_severity,
                 merged_workflow,
-                merged_verification_status,
                 canonical_location,
                 merged_source_name,
                 merged_summary,
@@ -3778,6 +3588,26 @@ def merge_findings(
         source_row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (source["id"],)).fetchone()
         target_row = connection.execute("SELECT * FROM assessment_findings WHERE id = ?", (target["id"],)).fetchone()
         assert source_row is not None and target_row is not None
+        change = finding_change_policy.classify_finding_change(target, target_row, "merge")
+        outcome = finding_change_policy.verdict_outcome(
+            _row_verification_status(target), change, operation="merge"
+        )
+        if outcome in {
+            finding_change_policy.Outcome.INVALIDATE, finding_change_policy.Outcome.REFUSE,
+        }:
+            # Merge never resets a verdict by itself. Only a file/live merge into a
+            # verified live target moves a technical axis (the source location
+            # becomes canonical), and that is a relocation the operator decides.
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"merging {source_slug} into {target_slug} would change the verified "
+                    f"target's {', '.join(change.axes_with(finding_change_policy.Effect.INVALIDATE))} "
+                    "and invalidate its verdict, which merge never does; merge "
+                    f"{target_slug} into {source_slug} instead, or reopen {target_slug} with "
+                    f"`vigil assess finding update {target_slug} --status draft --reason \"...\"` first"
+                ),
+            )
         source_after = _finding_state_snapshot(source_row)
         target_after = _finding_state_snapshot(target_row)
         source_after_content = _finding_content_snapshot(source_row)
@@ -3817,29 +3647,20 @@ def merge_findings(
                 finding_id=int(target["id"]),
                 actor=source_name,
                 action=(
-                    "verification_invalidated"
-                    if verification_invalidated
+                    "claim_review_pending"
+                    if outcome is finding_change_policy.Outcome.CLAIM_REVIEW
                     else "operator_override"
                 ),
                 before=target_before,
                 after=target_after,
-                reason_code=(
-                    "merge_replaced_verification_dependency"
-                    if verification_invalidated
-                    else "merge"
-                ),
-                reason_text=(
-                    f"Merged {source_slug} into {target_slug} and invalidated "
-                    "verification because the merge replaced: "
-                    f"{', '.join(replaced_verification_dependencies)}. {reason}"
-                    if verification_invalidated
-                    else f"Merged {source_slug} into {target_slug}: {reason}"
-                ),
+                reason_code="merge",
+                reason_text=f"Merged {source_slug} into {target_slug}: {reason}",
                 artifact_ref="",
                 metadata={
                     "source_slug": source_slug,
-                    "verification_invalidated": verification_invalidated,
-                    "replaced_dependencies": replaced_verification_dependencies,
+                    "verification_invalidated": False,
+                    "changed_axes": change.changed_axes,
+                    "change_policy": change.audit(),
                 },
                 before_content=target_before_content,
                 after_content=target_after_content,
@@ -3848,9 +3669,11 @@ def merge_findings(
         "source": source_record,
         "target": target_record,
         "link": link,
-        # Always present so a consumer can read it unconditionally; non-empty
-        # only when the merge carried a pre-existing defect into the canonical.
+        # Always present so a consumer can read it unconditionally; non-empty when
+        # the source carries a stronger technical claim the merge did not take, or
+        # the canonical carries a pre-existing CVSS defect.
         "warnings": merge_warnings,
+        **finding_change_policy.response_fields(change, outcome),
     }
 
 def _validated_enum_filter(

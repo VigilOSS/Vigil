@@ -85,7 +85,7 @@ def test_runtime_invalidation_preserves_terminal_work_history(client, confirmed,
         assert work['event_count'] == 0
 
 
-def test_destructive_evidence_replacement_does_not_qualify_as_enrichment(client, confirmed):
+def test_evidence_replacement_does_not_qualify_as_enrichment(client, confirmed):
     assert client.patch(f'{BASE}/findings/VA-905', json={
         'dispatch_agent_id': 'VERIFY-1', 'evidence_ref': 'evidence/acme-original.txt',
     }).status_code == 200
@@ -93,7 +93,9 @@ def test_destructive_evidence_replacement_does_not_qualify_as_enrichment(client,
         'dispatch_agent_id': 'VERIFY-1', 'evidence_ref': 'evidence/acme-replacement.txt',
     })
     assert response.status_code == 200, response.text
-    assert client.get(f'{BASE}/findings/VA-905').json()['verification_status'] == 'unreviewed'
+    finding = client.get(f'{BASE}/findings/VA-905').json()
+    assert finding['verification_status'] == 'confirmed'
+    assert finding['verification_audit']['claim_review_pending'] is True
 
 
 def test_exploit_verifier_can_review_claim_equivalence_independently(client, confirmed):
@@ -143,7 +145,7 @@ def test_enrichment_evaluates_resolved_details_modes_and_retains_receipts(client
     assert 'already supports an earlier verification event' in reused.json()['detail']
 
 
-def test_same_verifier_removing_reproduction_dependencies_still_requires_review(client, confirmed):
+def test_same_verifier_removing_reproduction_dependencies_invalidates(client, confirmed):
     command, _ = confirmed
     assert client.patch(f'{BASE}/findings/VA-905', json={
         'dispatch_agent_id': 'VERIFY-1', 'details': {'repro_runs': [command['id']]},
@@ -154,7 +156,8 @@ def test_same_verifier_removing_reproduction_dependencies_still_requires_review(
         'expected_row_version': finding['row_version'], 'details': {},
     })
     assert response.status_code == 200, response.text
-    assert client.get(f'{BASE}/findings/VA-905').json()['verification_audit']['claim_review_pending'] is True
+    assert response.json()['changed_axes'] == ['details.repro_runs.removed']
+    assert client.get(f'{BASE}/findings/VA-905').json()['verification_status'] == 'unreviewed'
 
 
 def test_attribution_rejects_unknown_dispatch_without_mutation(client, confirmed):
@@ -270,4 +273,6 @@ def test_same_verifier_replacing_evidence_type_requires_review(client, confirmed
         'dispatch_agent_id': 'VERIFY-1', 'evidence_type': 'code-inferred',
     })
     assert response.status_code == 200, response.text
-    assert client.get(f'{BASE}/findings/VA-905').json()['verification_status'] == 'unreviewed'
+    finding = client.get(f'{BASE}/findings/VA-905').json()
+    assert finding['verification_status'] == 'confirmed'
+    assert finding['verification_audit']['claim_review_pending'] is True

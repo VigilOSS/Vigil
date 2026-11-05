@@ -926,7 +926,10 @@ def test_cross_track_merge_preserves_confirmation_when_source_adds_material_deta
     assert merged.status_code == 200, merged.text
     target = merged.json()["target"]
     assert target["verification_status"] == "confirmed"
-    assert target["details"]["cwe_id"] == "CWE-120"
+    # Merge never changes the target's technical claim; the CWE comes back as
+    # a warning for an explicit, reviewed edit.
+    assert "cwe_id" not in target["details"]
+    assert any("CWE-120" in warning for warning in merged.json()["warnings"])
     with db_module.get_connection() as connection:
         receipt_links = connection.execute(
             """
@@ -956,7 +959,7 @@ def test_cross_track_merge_preserves_confirmation_when_source_adds_material_deta
     }
 
 
-def test_cross_track_merge_invalidates_confirmation_when_claim_dependencies_are_replaced(
+def test_cross_track_merge_reviews_replaced_wording_and_never_takes_technical_claims(
     client, isolate_settings
 ) -> None:
     binding = _seed_repo(client, isolate_settings)
@@ -1016,21 +1019,29 @@ def test_cross_track_merge_invalidates_confirmation_when_claim_dependencies_are_
     )
 
     assert merged.status_code == 200, merged.text
-    assert merged.json()["target"]["verification_status"] == "unreviewed"
+    body = merged.json()
+    target = body["target"]
+    assert target["verification_status"] == "confirmed"
+    assert target["severity"] == "high"
+    for key in ("cvss_score", "cvss_vector"):
+        assert target["details"][key] == confirmed.json()["finding"]["details"][key]
+    assert body["verification_effect"] == "claim_review"
+    warnings = "\n".join(body["warnings"])
+    assert "--severity critical" in warnings
+    assert "9.8" in warnings
     transitions = client.get(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-062/transitions"
     ).json()
-    assert transitions[0]["action"] == "verification_invalidated"
-    assert transitions[0]["reason_code"] == "merge_replaced_verification_dependency"
+    assert transitions[0]["action"] == "claim_review_pending"
+    assert transitions[0]["reason_code"] == "merge"
     metadata = json.loads(transitions[0]["metadata_json"])
-    assert metadata["verification_invalidated"] is True
-    assert set(metadata["replaced_dependencies"]) >= {
-        "severity",
+    assert metadata["verification_invalidated"] is False
+    assert set(metadata["changed_axes"]) >= {
         "workflow_status",
         "summary",
-        "evidence_ref",
-        "details",
+        "evidence_ref.replace",
     }
+    assert metadata["change_policy"]["effect"] == "claim_review"
 
 
 def test_merge_keeps_target_code_snapshot_attestation_when_source_is_stronger(
@@ -1072,13 +1083,12 @@ def test_merge_keeps_target_code_snapshot_attestation_when_source_is_stronger(
     target = merged.json()["target"]
     assert target["provenance"]["code_snapshot_attestation"] == target_attestation
     assert target["code_snapshot_attestation_status"] == "attested"
-    assert "provenance" not in (
-        json.loads(
-            client.get(
-                f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-066/transitions"
-            ).json()[0]["metadata_json"]
-        )["replaced_dependencies"]
-    )
+    change_policy = json.loads(
+        client.get(
+            f"/engagements/{_ENGAGEMENT_KEY}/assessment/findings/VA-066/transitions"
+        ).json()[0]["metadata_json"]
+    )["change_policy"]
+    assert {"axis": "provenance", "effect": "keep"} in change_policy["axes"]
 
 
 def test_merge_cross_track_rejects_bare_file_prefix_without_source_identity(
@@ -1348,7 +1358,6 @@ def test_relocation_crosses_the_category_boundary_and_records_both_locations(
     [
         "confirmed",
         "downgraded",
-        "false_positive",
         "disputed",
         "pending_runtime_proof",
         "blocked",
@@ -1402,8 +1411,10 @@ def test_relocation_invalidates_a_reviewed_verification(
     assert transitions[0]["from_verification_status"] == reviewed_status
     assert transitions[0]["to_verification_status"] == "unreviewed"
     metadata = json.loads(transitions[0]["metadata_json"])
-    assert metadata["material_change"] is True
+    assert metadata["change_policy"]["effect"] == "invalidate"
     assert metadata["verification_invalidated"] is True
+    assert moved.json()["verification_effect"] == "invalidate"
+    assert "canonical_location" in moved.json()["changed_axes"]
 
 
 def test_relocation_into_file_still_requires_a_current_binding(

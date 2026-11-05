@@ -3381,7 +3381,7 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     assert merge_transition["reason_code"] == "merge"
     merge_metadata = json.loads(merge_transition["metadata_json"])
     assert merge_metadata["verification_invalidated"] is False
-    assert merge_metadata["replaced_dependencies"] == []
+    assert merge_metadata["change_policy"]["effect"] == "keep"
 
     with db_module.get_connection() as connection:
         target_proof_receipts_after = [

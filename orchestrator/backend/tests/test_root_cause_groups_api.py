@@ -144,25 +144,32 @@ def _confirm(client, slug: str, *, attempt: str = "") -> int:
     return int(receipt.json()["id"])
 
 
-def _assert_relationship_invalidation(
+def _assert_relationship_recorded(
     client,
     *,
     slug: str,
     receipt_id: int,
+    effect: str,
 ) -> dict:
+    """A regrouping keeps the verdict and is audited; eliminates_finding needs review."""
     base = f"/engagements/{ENGAGEMENT_KEY}/assessment"
     finding = client.get(f"{base}/findings/{slug}")
     assert finding.status_code == 200, finding.text
-    assert finding.json()["verification_status"] == "unreviewed"
+    assert finding.json()["verification_status"] == "confirmed"
+    assert finding.json()["verification_audit"]["claim_review_pending"] is (
+        effect == "claim_review"
+    )
     transitions = client.get(f"{base}/findings/{slug}/transitions")
     assert transitions.status_code == 200, transitions.text
     latest = transitions.json()[0]
-    assert latest["action"] == "verification_invalidated"
+    assert latest["action"] == (
+        "claim_review_pending" if effect == "claim_review" else "relationship_recorded"
+    )
     assert latest["from_verification_status"] == "confirmed"
-    assert latest["to_verification_status"] == "unreviewed"
+    assert latest["to_verification_status"] == "confirmed"
     assert latest["reason_code"] == "relationship_changed"
     metadata = json.loads(latest["metadata_json"])
-    assert metadata["material_change"] is True
+    assert metadata["change_policy"]["effect"] == effect
     receipts = client.get(
         f"{base}/proof-receipts", params={"finding_slug": slug}
     )
@@ -445,7 +452,7 @@ def test_generic_link_retarget_normalizes_selector_shape(client, isolate_setting
     assert kind_only.status_code == 422, kind_only.text
 
 
-def test_root_cause_relationship_changes_invalidate_terminal_verification(
+def test_root_cause_relationship_changes_keep_terminal_verification_and_are_audited(
     client, isolate_settings
 ):
     _seed(client, isolate_settings)
@@ -465,8 +472,8 @@ def test_root_cause_relationship_changes_invalidate_terminal_verification(
         },
     )
     assert created.status_code == 200, created.text
-    change = _assert_relationship_invalidation(
-        client, slug="RC-080", receipt_id=receipt_id
+    change = _assert_relationship_recorded(
+        client, slug="RC-080", receipt_id=receipt_id, effect="claim_review"
     )
     assert change["before"] is None
     assert change["after"]["target_ref"] == "RC-081"
@@ -482,8 +489,8 @@ def test_root_cause_relationship_changes_invalidate_terminal_verification(
         },
     )
     assert replaced.status_code == 200, replaced.text
-    change = _assert_relationship_invalidation(
-        client, slug="RC-080", receipt_id=receipt_id
+    change = _assert_relationship_recorded(
+        client, slug="RC-080", receipt_id=receipt_id, effect="claim_review"
     )
     assert change["before"]["target_ref"] == "RC-081"
     assert change["before"]["notes"] == "Original root-cause evidence."
@@ -500,8 +507,8 @@ def test_root_cause_relationship_changes_invalidate_terminal_verification(
         },
     )
     assert effect.status_code == 200, effect.text
-    change = _assert_relationship_invalidation(
-        client, slug="RC-080", receipt_id=receipt_id
+    change = _assert_relationship_recorded(
+        client, slug="RC-080", receipt_id=receipt_id, effect="claim_review"
     )
     assert change["before"]["root_cause_effect"] == "eliminates_finding"
     assert change["after"]["root_cause_effect"] == "eliminates_attack_path"
@@ -526,8 +533,8 @@ def test_root_cause_relationship_changes_invalidate_terminal_verification(
     cleared = client.delete(base)
     assert cleared.status_code == 200, cleared.text
     assert cleared.json()["cleared"] == 1
-    change = _assert_relationship_invalidation(
-        client, slug="RC-080", receipt_id=receipt_id
+    change = _assert_relationship_recorded(
+        client, slug="RC-080", receipt_id=receipt_id, effect="keep"
     )
     assert change["before"][0]["retired_at"] is None
     assert change["after"][0]["retired_at"] is not None
