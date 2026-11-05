@@ -203,3 +203,26 @@ int acme_main(void) { return 0; }
 
     assert [source["line"] for source in indexed["security_sources"]] == [2, 5]
     assert indexed["top_level_segments"] == [{"line_start": 5, "line_end": 5}]
+
+
+def test_lines_framed_in_place_read_like_lines_framed_through_the_buffer() -> None:
+    # A whole short line is scanned in place; a line split across chunks or
+    # longer than a window goes through the buffer. Both framings, every
+    # separator form and a separator split across chunks read the same.
+    source = (
+        b"<?php\r\n$a = $_GET['a'];\r\n// system($_GET['c']);\rsystem($b);\n"
+        b"$wide = '" + b"x" * 150 + b"' . $_POST['p'] . exec($c);\r\n\r\n$e = getenv('ACME');\r"
+    )
+    observed = []
+    for size in (3, 7, 64, len(source)):
+        scanner = StreamingSecurityScanner(
+            "public/acme.php", "php", window_bytes=64, overlap_bytes=16
+        )
+        for offset in range(0, len(source), size):
+            scanner.feed(source[offset : offset + size])
+        observed.append(scanner.finish(degradation_reason="test"))
+
+    assert all(result == observed[0] for result in observed)
+    assert observed[0]["total_lines"] == 7
+    assert [sink["line"] for sink in observed[0]["security_sinks"]] == [4, 5]
+    assert [source["line"] for source in observed[0]["security_sources"]] == [2, 5, 7]

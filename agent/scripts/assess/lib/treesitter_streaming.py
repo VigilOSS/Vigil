@@ -509,17 +509,25 @@ class StreamingSecurityScanner:
             if chunk.startswith(b"\n"):
                 position = 1
             self._pending_cr = False
+        # A separator found ahead of *position* is still the next one, so each
+        # kind is searched for again only once the scan has passed it.
+        carriage = newline = -2
         while position < len(chunk):
-            carriage = chunk.find(b"\r", position)
-            newline = chunk.find(b"\n", position)
+            if carriage != -1 and carriage < position:
+                carriage = chunk.find(b"\r", position)
+            if newline != -1 and newline < position:
+                newline = chunk.find(b"\n", position)
             separators = [value for value in (carriage, newline) if value >= 0]
             if not separators:
                 self._append_line_bytes(chunk[position:])
                 return
             separator = min(separators)
-            self._append_line_bytes(chunk[position:separator])
+            if self._line_buffer or separator - position >= self.window_bytes:
+                self._append_line_bytes(chunk[position:separator])
+                self._finish_line()
+            else:
+                self._finish_short_line(chunk[position:separator])
             byte = chunk[separator]
-            self._finish_line()
             position = separator + 1
             if byte == 0x0D:
                 if position < len(chunk) and chunk[position] == 0x0A:
@@ -549,6 +557,24 @@ class StreamingSecurityScanner:
             window = bytes(self._line_buffer[: self.window_bytes])
             self._scan_window(window, accept_before=self._stride)
             del self._line_buffer[: self._stride]
+
+    def _finish_short_line(self, line: bytes) -> None:
+        """`_append_line_bytes` then `_finish_line` for one whole line.
+
+        Only for a line shorter than a window that opens on an empty buffer,
+        which is every line's state until bytes are appended: it is scanned in
+        place instead of being copied through the buffer.
+        """
+        if line:
+            stripped = line.lstrip(b" \t\v\f")
+            if stripped:
+                self._line_comment = self._opens_a_comment(stripped)
+            self._scan_window(line, accept_before=len(line))
+        self.total_lines += 1
+        self._line_number += 1
+        self._line_had_bytes = False
+        self._line_comment = None
+        self._line_windows = 0
 
     def _finish_line(self) -> None:
         if self._line_buffer:
