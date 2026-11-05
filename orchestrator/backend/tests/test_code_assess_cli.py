@@ -800,6 +800,20 @@ def test_code_index_walk_repo_skips_named_pipes(tmp_path):
     assert files == [{"file_path": "main.py", "language": "python"}]
 
 
+def test_code_index_walk_repo_applies_the_ingest_directory_skip_rule(tmp_path):
+    module = _load_code_index_module()
+
+    repo_path = tmp_path / "repo"
+    (repo_path / "Vendor" / "acme").mkdir(parents=True)
+    (repo_path / "Vendor" / "acme" / "lib.php").write_text("<?php\n", encoding="utf-8")
+    (repo_path / "Build").mkdir()
+    (repo_path / "Build" / "Report.cs").write_text("class Report {}\n", encoding="utf-8")
+
+    files = module._walk_repo(str(repo_path))
+
+    assert files == [{"file_path": "Build/Report.cs", "language": "csharp"}]
+
+
 def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, tmp_path):
     module = _load_code_index_module()
     from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file

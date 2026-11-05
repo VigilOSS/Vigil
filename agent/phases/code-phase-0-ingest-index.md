@@ -52,7 +52,13 @@ The `code-ingest` command:
 - Detects language per file (extension + shebang)
 - Captures Git HEAD, branch, and dirty state through a trusted external Git executable when a Git
   marker exists, then rechecks the source before publication
-- Marks generated/vendored/test/doc files as `skip` candidates
+- Marks generated/vendored/test/doc files as `skip` candidates. The default policy excludes
+  `vendor/` in any letter case, a forge-archive copy (`<project>-master/` or `<project>-main/` whose
+  root holds `composer.json`, `package.json`, `VERSION` or a licence file), `.phps` source-display
+  copies, and minified JavaScript/CSS (`.min.*`, `.bundle.*`, content-hashed `*.chunk.*`, or a file
+  whose line shape is minified). A vendored-copy exclusion records the package name and version its
+  root files give. Re-admit a copy with `--include-path '<dir>/**'`, minified files with
+  `--include-minified`, and other skips with `--include-skipped`
 - Atomically refreshes the backend manifest — the backend assigns each file an integer
   `file_id` (primary key). Retrieve the mapping via
   `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;

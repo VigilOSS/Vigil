@@ -53,7 +53,46 @@ SKIP_EXTENSIONS = frozenset({
     '.zip', '.tar', '.gz', '.bz2', '.xz', '.7z', '.rar',
     '.mp3', '.mp4', '.wav', '.avi', '.mov', '.mkv',
     '.sqlite', '.sqlite3', '.db',
+    # A PHP source-display copy: the highlighted twin of a script, never the
+    # executed bytes.
+    '.phps',
 })
+
+# Matched regardless of case. Composer, Bundler and Go all write `vendor/`, and
+# a Windows-authored tree spells it `Vendor/`; PascalCase `Build/`, `Coverage/`
+# and `Target/` are ordinary .NET source directories, so the rest of SKIP_DIRS
+# stays exact.
+_CASE_INSENSITIVE_SKIP_DIRS = frozenset({'vendor'})
+
+# A source archive downloaded from a forge unpacks as `<project>-<branch>/`.
+# The name alone also describes first-party directories (`db-master/`), so a
+# directory is a vendored copy only when its root also carries the package
+# manifest or licence that marks it as someone else's distribution.
+VENDORED_COPY_REASON = 'skipped_dir:vendored_copy'
+_VENDORED_COPY_DIR_RE = re.compile(r'^.+-(?:master|main)$', re.IGNORECASE)
+_VENDORED_COPY_MANIFESTS = (('composer.json', 'composer'), ('package.json', 'npm'))
+_VENDORED_COPY_VERSION_FILE = 'VERSION'
+_VENDORED_COPY_LICENCE_PREFIXES = ('LICENSE', 'LICENCE', 'COPYING')
+_VENDORED_COPY_READ_BYTES = 64 * 1024
+_VENDORED_COPY_VERSION_RE = re.compile(r'^v?\d[\w.+-]{0,63}$')
+
+# Bundler output named by content hash (`main.3f2a1b9c.chunk.js`). An unhashed
+# `vendors.chunk.js` is as likely to be hand-written as generated, so the hash
+# segment is required.
+_HASHED_CHUNK_RE = re.compile(r'\.[0-9a-f]{8,32}\.chunk\.(?:js|css)$', re.IGNORECASE)
+_BUNDLE_SUFFIXES = ('.min.js', '.bundle.js', '.min.css', '.bundle.css')
+
+# Minified JavaScript and CSS shipped without a `.min.` name. The line shape
+# decides: the average non-empty line is long, and either most lines are long
+# or the short lines together are no more than a licence banner. A stylesheet
+# with one embedded data-URI line keeps hundreds of short rule lines, so it
+# stays source. These are admission policy, not parser resource limits, and
+# live here so tuning a parser bound never moves a repository's generation.
+_MINIFIED_CONTENT_SUFFIXES = ('.js', '.mjs', '.cjs', '.css')
+MINIFIED_MIN_BYTES = 8 * 1024
+MINIFIED_AVERAGE_LINE_BYTES = 200
+MINIFIED_LONG_LINE_BYTES = 500
+MINIFIED_MAX_SHORT_LINE_BYTES = 2 * 1024
 
 BUILD_ARTIFACT_DIRS = frozenset({'dist', 'build', '.next', '.nuxt'})
 
@@ -401,7 +440,11 @@ def register(subparsers) -> None:
     p.add_argument(
         "--include-minified",
         action="store_true",
-        help="Include .min.js/.bundle.js and .min.css/.bundle.css files instead of only listing them in the skipped manifest.",
+        help=(
+            "Include minified or bundled JavaScript/CSS (.min.*, .bundle.*, hashed *.chunk.*, "
+            "or a file whose line shape is minified) instead of only listing it in the "
+            "skipped manifest."
+        ),
     )
     p.add_argument(
         "--include-skipped",
@@ -484,10 +527,24 @@ def _effective_skip_dirs(args) -> frozenset[str]:
     return SKIP_DIRS
 
 
+def _named_skip_dir_reason(dirname: str, skip_dirs: frozenset[str] = SKIP_DIRS) -> str | None:
+    """The skip reason a directory earns by its name alone, or None."""
+    if dirname in skip_dirs:
+        return f"skipped_dir:{dirname}"
+    lowered = dirname.lower()
+    if lowered in _CASE_INSENSITIVE_SKIP_DIRS and lowered in skip_dirs:
+        return f"skipped_dir:{lowered}"
+    return None
+
+
 def _skip_file_reason(
     rel_path: str, filename: str, skip_dirs: frozenset[str] = SKIP_DIRS
 ) -> str | None:
-    """Return the skip reason for a file, or None if it is normally ingestible."""
+    """Return the path-only skip reason for a file, or None.
+
+    Vendored-copy directories and minified content need the tree itself;
+    `_SkipPolicy.file_reason` adds those for the ingest walks.
+    """
     if filename in SKIP_BASENAMES:
         return f'skipped_basename:{filename}'
     ext = Path(filename).suffix.lower()
@@ -498,14 +555,213 @@ def _skip_file_reason(
             return 'source_map'
         return f'skipped_extension:{ext}'
     lower_name = filename.lower()
-    if lower_name.endswith(('.min.js', '.bundle.js', '.min.css', '.bundle.css')):
+    if lower_name.endswith(_BUNDLE_SUFFIXES) or _HASHED_CHUNK_RE.search(lower_name):
         return 'minified_or_bundle'
     if lower_name.endswith(('.woff', '.woff2')):
         return 'skipped_extension:font'
     for part in PurePosixPath(rel_path.replace(os.sep, "/")).parts[:-1]:
-        if part in skip_dirs:
-            return f"skipped_dir:{part}"
+        reason = _named_skip_dir_reason(part, skip_dirs)
+        if reason:
+            return reason
     return None
+
+
+class _LineShape:
+    """Streaming line-length statistics for the minified-content rule."""
+
+    def __init__(self) -> None:
+        self.current = 0
+        self.lines = 0
+        self.long_lines = 0
+        self.short_line_bytes = 0
+        self.line_bytes = 0
+
+    def feed(self, chunk: bytes) -> None:
+        start = 0
+        while True:
+            newline = chunk.find(b"\n", start)
+            if newline < 0:
+                self.current += len(chunk) - start
+                return
+            self.current += newline - start
+            self._end_line()
+            start = newline + 1
+
+    def _end_line(self) -> None:
+        length = self.current
+        self.current = 0
+        if length == 0:
+            return
+        self.lines += 1
+        self.line_bytes += length
+        if length > MINIFIED_LONG_LINE_BYTES:
+            self.long_lines += 1
+        else:
+            self.short_line_bytes += length
+
+    def is_minified(self) -> bool:
+        self._end_line()
+        if not self.lines or self.line_bytes / self.lines <= MINIFIED_AVERAGE_LINE_BYTES:
+            return False
+        return (
+            self.long_lines * 2 >= self.lines
+            or self.short_line_bytes <= MINIFIED_MAX_SHORT_LINE_BYTES
+        )
+
+
+def _first_line_matching(text: str, pattern: re.Pattern[str]) -> tuple[int, str] | None:
+    for number, line in enumerate(text.splitlines(), 1):
+        if pattern.search(line):
+            return number, line.strip()
+    return None
+
+
+_JSON_NAME_LINE_RE = re.compile(r'^\s*"name"\s*:')
+_JSON_VERSION_LINE_RE = re.compile(r'^\s*"version"\s*:')
+
+
+class _SkipPolicy:
+    """One walk's skip decisions over a pinned source tree.
+
+    Admission, exclusion, the run loop and verification each build one, so the
+    tree-dependent rules (a vendored copy is recognized by its root files, a
+    minified file by its bytes) are asked the same question by every partition
+    pass. `_verify_source_inventory` re-runs both passes, so a file that changes
+    between reads fails the run instead of landing on the wrong side.
+    """
+
+    def __init__(self, source_tree: RootedSourceTree, args) -> None:
+        self.tree = source_tree
+        self.args = args
+        self.skip_dirs = _effective_skip_dirs(args)
+        self._vendored: dict[str, dict[str, object] | None] = {}
+        self._minified_by_content: set[str] = set()
+
+    def directory_reason(self, rel_dir: str, dirname: str) -> str | None:
+        named = _named_skip_dir_reason(dirname, self.skip_dirs)
+        if named:
+            return named
+        if self.vendored_copy(rel_dir) is not None:
+            return VENDORED_COPY_REASON
+        return None
+
+    def vendored_copy(self, rel_dir: str) -> dict[str, object] | None:
+        """Package identity of a vendored copy rooted at *rel_dir*, or None."""
+        if rel_dir in self._vendored:
+            return self._vendored[rel_dir]
+        identity = None
+        if _VENDORED_COPY_DIR_RE.match(PurePosixPath(rel_dir).name):
+            identity = self._read_vendored_identity(rel_dir)
+        self._vendored[rel_dir] = identity
+        return identity
+
+    def _read_text(self, rel_path: str) -> str | None:
+        captured = self.tree.capture(
+            rel_path, retain_spool=False, materialize_limit=_VENDORED_COPY_READ_BYTES
+        )
+        try:
+            if captured.materialized is None:
+                return None
+            return captured.materialized.decode("utf-8", errors="replace")
+        finally:
+            captured.close()
+
+    def _read_vendored_identity(self, rel_dir: str) -> dict[str, object] | None:
+        listing = next(self.tree.walk(rel_dir))
+        names = set(listing.regular_files)
+        manifests = [
+            (filename, ecosystem)
+            for filename, ecosystem in _VENDORED_COPY_MANIFESTS
+            if filename in names
+        ]
+        has_marker = (
+            bool(manifests)
+            or _VENDORED_COPY_VERSION_FILE in names
+            or any(name.upper().startswith(_VENDORED_COPY_LICENCE_PREFIXES) for name in names)
+        )
+        if not has_marker:
+            return None
+        identity: dict[str, object] = {
+            "ecosystem": "unknown",
+            "coordinate": re.sub(r"-(?:master|main)$", "", PurePosixPath(rel_dir).name, flags=re.I),
+            "version": "",
+            "version_source": "",
+            "evidence": [],
+        }
+        evidence: list[dict[str, object]] = []
+        for filename, ecosystem in manifests:
+            rel_path = f"{rel_dir}/{filename}"
+            text = self._read_text(rel_path)
+            if text is None:
+                continue
+            try:
+                document = json.loads(text)
+            except json.JSONDecodeError:
+                continue
+            name = document.get("name") if isinstance(document, dict) else None
+            if not isinstance(name, str) or not name.strip():
+                continue
+            identity["ecosystem"] = ecosystem
+            identity["coordinate"] = name.strip()
+            located = _first_line_matching(text, _JSON_NAME_LINE_RE)
+            if located:
+                evidence.append({"path": rel_path, "line": located[0], "text": located[1]})
+            version = document.get("version")
+            if isinstance(version, str) and version.strip():
+                identity["version"] = version.strip()
+                identity["version_source"] = filename
+                located = _first_line_matching(text, _JSON_VERSION_LINE_RE)
+                if located:
+                    evidence.append({"path": rel_path, "line": located[0], "text": located[1]})
+            break
+        if _VENDORED_COPY_VERSION_FILE in names and not identity["version"]:
+            rel_path = f"{rel_dir}/{_VENDORED_COPY_VERSION_FILE}"
+            text = self._read_text(rel_path) or ""
+            for number, line in enumerate(text.splitlines(), 1):
+                stripped = line.strip()
+                if not stripped:
+                    continue
+                if _VENDORED_COPY_VERSION_RE.match(stripped):
+                    identity["version"] = stripped
+                    identity["version_source"] = _VENDORED_COPY_VERSION_FILE
+                    evidence.append({"path": rel_path, "line": number, "text": stripped})
+                break
+        identity["evidence"] = evidence
+        return identity
+
+    def file_reason(self, rel_path: str, filename: str) -> str | None:
+        reason = _skip_file_reason(rel_path, filename, self.skip_dirs)
+        if reason:
+            return reason
+        parts = PurePosixPath(rel_path).parts[:-1]
+        for depth in range(1, len(parts) + 1):
+            if self.vendored_copy("/".join(parts[:depth])) is not None:
+                return VENDORED_COPY_REASON
+        return self._content_reason(rel_path, filename)
+
+    def _content_reason(self, rel_path: str, filename: str) -> str | None:
+        if not filename.lower().endswith(_MINIFIED_CONTENT_SUFFIXES):
+            return None
+        if self.tree.regular_file_size(rel_path) < MINIFIED_MIN_BYTES:
+            return None
+        shape = _LineShape()
+        self.tree.capture(rel_path, retain_spool=False, chunk_consumer=shape.feed).close()
+        if not shape.is_minified():
+            return None
+        self._minified_by_content.add(rel_path)
+        return 'minified_or_bundle'
+
+    def included_size_cap(self, rel_path: str) -> int | None:
+        """Byte cap on an explicitly included skipped file, or None for no cap.
+
+        The cap bounds artifacts a name rule skipped. A file skipped only for
+        its line shape is admitted source under every name rule, and a shipped
+        bundle repository consists of multi-megabyte chunks, so capping it would
+        leave `--include-minified` unable to restore the repository.
+        """
+        if rel_path in self._minified_by_content:
+            return None
+        return _max_included_skipped_bytes(self.args)
 
 
 def _should_skip_file(rel_path: str, filename: str) -> bool:
@@ -680,13 +936,17 @@ def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -
     for reason, count in census[:3]:
         print(f"  {reason}: {count}", file=sys.stderr)
     dominant = census[0][0] if census else ""
-    if dominant.startswith("skipped_dir:"):
+    if dominant == VENDORED_COPY_REASON:
+        remedy = "--include-path '<vendored-copy-dir>/**'"
+    elif dominant.startswith("skipped_dir:"):
         directory = dominant.split(":", 1)[1]
-        remedy = (
-            "--policy-preset package"
-            if directory in BUILD_ARTIFACT_DIRS
-            else f"--include-path '**/{directory}/**'"
-        )
+        if directory in BUILD_ARTIFACT_DIRS:
+            remedy = "--policy-preset package"
+        elif directory in _CASE_INSENSITIVE_SKIP_DIRS:
+            # The reason folds the letter case; the glob must match the tree.
+            remedy = f"--include-path '**/<{directory} dir, as cased in the tree>/**'"
+        else:
+            remedy = f"--include-path '**/{directory}/**'"
     elif dominant == "minified_or_bundle":
         remedy = "--include-minified"
     elif dominant:
@@ -695,7 +955,7 @@ def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -
         remedy = "--include-path '<glob>'"
     print(
         "  If those bytes are the executed product (a shipped bundle repo), "
-        f"re-run with {remedy} — it advances the repository generation by design.",
+        f"re-run with {remedy}. A changed admitted set advances the repository generation.",
         file=sys.stderr,
     )
 
@@ -709,7 +969,9 @@ def _should_descend_skipped_dir(rel_dir: str, dirname: str, args) -> bool:
     if getattr(args, "include_skipped", False) and dirname in BUILD_ARTIFACT_DIRS:
         return True
     for pattern in patterns:
-        if dirname in BUILD_ARTIFACT_DIRS and ("**" in pattern or ".min." in pattern or ".bundle." in pattern):
+        if dirname in BUILD_ARTIFACT_DIRS and (
+            "**" in pattern or ".min." in pattern or ".bundle." in pattern or ".chunk." in pattern
+        ):
             return True
         if pattern.startswith((f"{normalized}/", f"**/{normalized}/")):
             return True
@@ -739,14 +1001,18 @@ def _admitted_source_paths(
     source_tree: RootedSourceTree,
     args,
     snapshots_root: Path,
+    *,
+    included_skip_reasons: dict[str, str] | None = None,
 ):
     """Yield the exact path set eligible for the sealed source manifest.
 
     This predicate and `_collect_excluded_records` partition the same tree, so
     every admission rule here needs its exact mirror there — otherwise
-    `_verify_source_inventory` raises on every run.
+    `_verify_source_inventory` raises on every run. *included_skip_reasons*,
+    when given, receives the skip reason of each path admitted by an explicit
+    include, so the caller need not re-read a file to classify it.
     """
-    skip_dirs = _effective_skip_dirs(args)
+    policy = _SkipPolicy(source_tree, args)
     repo_root = source_tree.root.resolve()
     snapshots_resolved = snapshots_root.resolve(strict=False)
     try:
@@ -764,7 +1030,9 @@ def _admitted_source_paths(
                 relative == snapshots_relative or relative.is_relative_to(snapshots_relative)
             ):
                 continue
-            if dirname in skip_dirs and not _should_descend_skipped_dir(rel_dir, dirname, args):
+            if policy.directory_reason(rel_dir, dirname) and not _should_descend_skipped_dir(
+                rel_dir, dirname, args
+            ):
                 continue
             kept.append(dirname)
         listing.directories[:] = kept
@@ -776,7 +1044,7 @@ def _admitted_source_paths(
                 continue
             if _exclude_path_match(rel_path, args):
                 continue
-            skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
+            skip_reason = policy.file_reason(rel_path, filename)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if skip_reason and not include_reason:
                 continue
@@ -787,8 +1055,11 @@ def _admitted_source_paths(
                     raise SourceSnapshotRaceError(
                         f"{rel_path} changed while verifying the sealed source"
                     ) from exc
-                if size > _max_included_skipped_bytes(args):
+                cap = policy.included_size_cap(rel_path)
+                if cap is not None and size > cap:
                     continue
+                if included_skip_reasons is not None:
+                    included_skip_reasons[rel_path] = skip_reason
             yield rel_path
 
 
@@ -838,6 +1109,8 @@ def _source_hints(rel_path: str) -> dict[str, str]:
         if len(stem) == 2:
             hints['source_equivalent_candidate'] = f"{stem[0]}.{stem[1]}"
         hints['source_map_candidate'] = f"{rel_path}.map"
+    elif _HASHED_CHUNK_RE.search(lower):
+        hints['source_map_candidate'] = f"{rel_path}.map"
     elif lower.endswith('.map'):
         hints['mapped_artifact_candidate'] = rel_path[:-4]
     return hints
@@ -881,10 +1154,9 @@ def _captured_skipped_record(
 def _enumerate_rooted_skipped_dir(
     source_tree: RootedSourceTree,
     rel_dir: str,
-    dirname: str,
+    reason: str,
 ) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
-    reason = f"skipped_dir:{dirname}"
     for listing in source_tree.walk(rel_dir):
         for child_dirname in listing.directories:
             records.append(
@@ -952,7 +1224,7 @@ def _collect_excluded_records(
     `_admitted_source_paths`; the two are verified against each other on every
     run by `_verify_source_inventory`.
     """
-    skip_dirs = _effective_skip_dirs(args)
+    policy = _SkipPolicy(source_tree, args)
     records: list[dict[str, object]] = []
     repo_root = source_tree.root.resolve()
     snapshots_resolved = snapshots_root.resolve(strict=False)
@@ -976,18 +1248,18 @@ def _collect_excluded_records(
                 or relative.is_relative_to(snapshots_relative)
             ):
                 continue
-            if dirname in skip_dirs and not _should_descend_skipped_dir(
-                rel_dir, dirname, args
-            ):
-                records.append(
-                    {
-                        "path": rel_dir,
-                        "kind": "directory",
-                        "reason": f"skipped_dir:{dirname}",
-                    }
-                )
+            dir_reason = policy.directory_reason(rel_dir, dirname)
+            if dir_reason and not _should_descend_skipped_dir(rel_dir, dirname, args):
+                directory_record: dict[str, object] = {
+                    "path": rel_dir,
+                    "kind": "directory",
+                    "reason": dir_reason,
+                }
+                if dir_reason == VENDORED_COPY_REASON:
+                    directory_record["vendored_copy"] = policy.vendored_copy(rel_dir)
+                records.append(directory_record)
                 records.extend(
-                    _enumerate_rooted_skipped_dir(source_tree, rel_dir, dirname)
+                    _enumerate_rooted_skipped_dir(source_tree, rel_dir, dir_reason)
                 )
                 continue
             kept.append(dirname)
@@ -1020,7 +1292,7 @@ def _collect_excluded_records(
                 captured = source_tree.capture(rel_path, retain_spool=False)
                 records.append(_captured_skipped_record(rel_path, f"exclude_path:{exclude_pattern}", captured))
                 continue
-            skip_reason = _skip_file_reason(rel_path, filename, skip_dirs)
+            skip_reason = policy.file_reason(rel_path, filename)
             include_reason = _include_reason(rel_path, skip_reason, args)
             if not skip_reason:
                 continue
@@ -1030,8 +1302,8 @@ def _collect_excluded_records(
                     _captured_skipped_record(rel_path, skip_reason, captured)
                 )
                 continue
-            max_bytes = _max_included_skipped_bytes(args)
-            if captured.size > max_bytes:
+            max_bytes = policy.included_size_cap(rel_path)
+            if max_bytes is not None and captured.size > max_bytes:
                 records.append(
                     _captured_skipped_record(
                         rel_path,
@@ -1514,7 +1786,6 @@ def run(args) -> None:
     skipped = 0
     skipped_records: list[dict[str, object]] = []
     included_skipped = 0
-    effective_skip_dirs = _effective_skip_dirs(args)
     include_patterns = list(getattr(args, "include_path", []) or [])
     matched_include_patterns: set[str] = set()
     source_bindings: dict[str, tuple[str, int, bool]] = {}
@@ -1531,7 +1802,11 @@ def run(args) -> None:
         repo_root = Path(repo_path)
         with RootedSourceTree(repo_root) as source_tree:
             skipped_records = _collect_excluded_records(source_tree, args, snapshots_root)
-            for rel_path in _admitted_source_paths(source_tree, args, snapshots_root):
+            included_skip_reasons: dict[str, str] = {}
+            for rel_path in _admitted_source_paths(
+                source_tree, args, snapshots_root,
+                included_skip_reasons=included_skip_reasons,
+            ):
                 try:
                     captured = source_tree.capture(
                         rel_path,
@@ -1543,11 +1818,10 @@ def run(args) -> None:
                     ) from exc
                 try:
                     filename = Path(rel_path).name
-                    skip_reason = _skip_file_reason(rel_path, filename, effective_skip_dirs)
                     matched_include_patterns.update(
                         _include_path_matches(rel_path, include_patterns)
                     )
-                    if skip_reason and _include_reason(rel_path, skip_reason, args):
+                    if rel_path in included_skip_reasons:
                         included_skipped += 1
 
                     lang = _detect_language(filename)

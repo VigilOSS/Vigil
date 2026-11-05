@@ -15,7 +15,11 @@ from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import Any
 
-from assess.commands.code_ingest import SKIP_DIRS, _is_regular_file, _should_skip_file
+from assess.commands.code_ingest import (
+    _is_regular_file,
+    _named_skip_dir_reason,
+    _should_skip_file,
+)
 from assess.lib.client import AssessmentClient
 from assess.lib.code_snapshot import (
     MAX_JSON_ARTIFACT_BYTES,
@@ -152,7 +156,8 @@ def _walk_repo(repo_path: str) -> list[dict[str, str]]:
         dirnames[:] = [
             name
             for name in dirnames
-            if name not in SKIP_DIRS and not os.path.islink(os.path.join(dirpath, name))
+            if _named_skip_dir_reason(name) is None
+            and not os.path.islink(os.path.join(dirpath, name))
         ]
         for filename in filenames:
             absolute = os.path.join(dirpath, filename)
