@@ -110,8 +110,9 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     ],
     "php": [
         # `$_SERVER['argv']` is read below, as process and request input both.
+        # Variable names are case-sensitive, so `$_files` is a property.
         ("http_request_input",
-         r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b"),
+         r"(?-i:\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b)"),
         ("http_request_input", _PHP_SERVER_ARGV),
         # Idiomatic Laravel/Symfony/CodeIgniter never touches a superglobal:
         # the request arrives as an injected object, `$this->request`, or the

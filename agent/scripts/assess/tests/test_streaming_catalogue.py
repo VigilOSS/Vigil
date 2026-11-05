@@ -373,7 +373,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "go", r"\bos\.(?:Args|Getenv)\b", "source", GO_SOURCES_SRC, "main.go", "a := os.Args[1]", "process_input"),
     ("source", "ruby", r"\b(?:params\s*\[|request\.)", "source", RUBY_SOURCES_SRC, "app.rb", "id = params[:id]", "http_request_input"),
     ("source", "ruby", r"\b(?:ENV\s*\[|ARGV\b)", "source", RUBY_SOURCES_SRC, "app.rb", "e = ENV['HOME']", "process_input"),
-    ("source", "php", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
+    ("source", "php", r"(?-i:\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b)", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
     ("source", "php", r"(?:\$request|\$req|\$this->(?:request|input)|\brequest\s*\(\s*\))\s*->", "source", PHP_SOURCES_SRC, "index.php", "$page = $request->input('page');", "http_request_input"),
     ("source", "php", r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$legacy = Input::get('legacy');", "http_request_input"),
     ("source", "php", r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b|\b(?:getallheaders|apache_request_headers)\s*\(", "source",
