@@ -30,7 +30,7 @@ from assess.lib.treesitter_catalogues import (
     _IMPORT_QUERIES,
     _SINK_DEFINITIONS,
 )
-from assess.lib.treesitter_common import _php_import_record
+from assess.lib.treesitter_common import _php_import_record, _snippet
 from assess.lib.treesitter_lightweight import (
     _blade_template_sources,
     _extract_blade,
@@ -2518,8 +2518,9 @@ _HASH_IS_CODE_COMMENT_PREFIXES = ("//", "*")
 
 # Dimensions whose only readers are the callable spans `_function_scan_lines`
 # returns and the file-scope complement `_file_scope_lines` returns:
-# `_detect_sinks` and `_detect_call_sites` see nothing else, and the
-# caller-parameter propagation signal rides on the call sites. Public because
+# `_detect_sinks` and `_detect_call_sites` see nothing else, PHP's parse-tree
+# call reader skips the same withheld lines, and the caller-parameter
+# propagation signal rides on the call sites. Public because
 # `code-coverage` reads the published list back and must ask the same question
 # of it.
 FUNCTION_SCOPED_DIMENSIONS = frozenset({"call_sites", "dataflow", "security_sinks"})
@@ -2592,17 +2593,23 @@ def _function_scoped_reader_patterns(language: str) -> tuple[re.Pattern[str], ..
 def _withheld_reader_signal(
     withheld: list[tuple[int, str]],
     language: str,
+    *,
+    withheld_call: bool = False,
 ) -> bool:
-    """Whether a file-scope line the readers do not take carries a sink.
+    """Whether a file-scope line the readers do not take carries signal.
 
     `_file_scope_lines` holds back declaration header lines -- `class Foo(Base):`,
     `package main` -- because the parenthesised list on one is a set of bases,
     not a call, and reading them would put a phantom call site on every class.
     A one-line `class Runner { static { exec(cmd); } }` is still source the
     sink catalogue would have matched, and it went unread, so it is a gap.
-    Only the sink catalogue is asked: the call shape on these lines is exactly
-    the noise they are withheld for.
+    For the line readers only the sink catalogue is asked: the call shape on
+    these lines is exactly the noise they are withheld for. PHP's call sites
+    come from the parse tree, which tells a real call from a header, so
+    *withheld_call* carries its answer for the same lines.
     """
+    if withheld_call:
+        return True
     sink_patterns = _function_scoped_reader_patterns(language)
     return any(
         pattern.search(line) for _index, line in withheld for pattern in sink_patterns
@@ -2618,6 +2625,7 @@ def _unscanned_scope_dimensions(
     language: str,
     function_scoped_records: bool,
     file_scope: _FileScope,
+    withheld_call: bool = False,
 ) -> set[str]:
     """Dimensions whose empty value is an unmade measurement, not a negative.
 
@@ -2646,7 +2654,7 @@ def _unscanned_scope_dimensions(
         return set()
     unscanned: set[str] = set()
     if not function_scoped_records and _withheld_reader_signal(
-        file_scope.withheld, language
+        file_scope.withheld, language, withheld_call=withheld_call
     ):
         unscanned |= FUNCTION_SCOPED_DIMENSIONS
     if (
@@ -3061,8 +3069,9 @@ def _detect_sinks(
     return sinks
 
 
-# Common language keywords to exclude from call-site detection. `defined` is
-# the C preprocessor's operator in `#if defined(X)`, which file scope reads.
+# Common language keywords to exclude from the line-read call sites of every
+# language but PHP. `defined` is the C preprocessor's operator in
+# `#if defined(X)`, which file scope reads.
 _CALL_NOISE = frozenset({
     "if", "else", "for", "while", "switch", "case", "return", "throw",
     "new", "delete", "try", "catch", "finally", "import", "from",
@@ -3151,6 +3160,203 @@ def _detect_call_sites(
                 })
 
     return calls
+
+
+# PHP's call shapes, read from the parse tree rather than off a line: a method
+# call, a static call and a construction are their own nodes, so `->delete()`,
+# `::make()` and `new Invoice()` are calls by grammar and not by spelling.
+_PHP_CALL_KINDS = {
+    "function_call_expression": "function",
+    "member_call_expression": "method",
+    "nullsafe_member_call_expression": "nullsafe_method",
+    "scoped_call_expression": "static",
+    "object_creation_expression": "new",
+}
+_PHP_CALLABLE_NODE_TYPES = frozenset(
+    {"anonymous_function", "arrow_function", "function_definition", "method_declaration"}
+)
+_PHP_CALL_QUERY = "\n".join((
+    "[" + " ".join(f"({node_type})" for node_type in _PHP_CALL_KINDS) + "] @call",
+    "[" + " ".join(f"({node_type})" for node_type in sorted(_PHP_CALLABLE_NODE_TYPES)) + "] @callable",
+))
+# Language constructs that read like a function call. The grammar gives most of
+# them their own node; `isset`, `empty`, `exit` and `die` parse as calls, and a
+# construct is never a function a caller could reach. PHP keywords ignore case.
+_PHP_CALL_CONSTRUCTS = frozenset({
+    "die", "echo", "empty", "exit", "include", "include_once", "isset", "print",
+    "require", "require_once", "unset",
+})
+_PHP_PARAMETER_TYPES = frozenset(
+    {"property_promotion_parameter", "simple_parameter", "variadic_parameter"}
+)
+_PHP_SELF_RECEIVERS = frozenset({"$this", "self", "static"})
+# A receiver is the object or scope text of a call, which a fluent chain makes
+# arbitrarily long; the bound keeps it a readable citation, not a copy.
+_PHP_CALL_TEXT_LIMIT = 120
+
+
+def _php_parameter_names(callable_node: Any, source: bytes) -> frozenset[str]:
+    """The variable names a PHP callable's parameters bind, without `$`."""
+    parameters = callable_node.child_by_field_name("parameters")
+    names: set[str] = set()
+    for parameter in parameters.named_children if parameters is not None else ():
+        variable = (
+            parameter.child_by_field_name("name")
+            if parameter.type in _PHP_PARAMETER_TYPES
+            else None
+        )
+        if variable is not None:
+            names.add(_node_text(variable, source).lstrip("$"))
+    return frozenset(names)
+
+
+def _php_arguments_use(arguments: Any, names: frozenset[str], source: bytes) -> bool:
+    """Whether a variable named in *names* appears anywhere in *arguments*."""
+    stack = [arguments]
+    while stack:
+        node = stack.pop()
+        if node.type == "variable_name":
+            name = node.named_children[0] if node.named_children else None
+            if name is not None and _node_text(name, source) in names:
+                return True
+            continue
+        stack.extend(node.named_children)
+    return False
+
+
+def _php_call_text(node: Any, source: bytes) -> str:
+    return _snippet(" ".join(_node_text(node, source).split()), _PHP_CALL_TEXT_LIMIT)
+
+
+def _php_call_shape(call: Any) -> tuple[Any, Any, Any] | None:
+    """`(callee node, receiver node, arguments node)` of one PHP call node."""
+    if call.type == "function_call_expression":
+        return call.child_by_field_name("function"), None, call.child_by_field_name("arguments")
+    if call.type == "object_creation_expression":
+        children = call.named_children
+        target = next(
+            (child for child in children if child.type in {"name", "qualified_name", "variable_name"}),
+            None,
+        )
+        if target is None:
+            # `new class (...) { ... }`: the anonymous class is a class record,
+            # and its constructor is a callable of its own.
+            return None
+        arguments = next((child for child in children if child.type == "arguments"), None)
+        return target, None, arguments
+    receiver = call.child_by_field_name("scope" if call.type == "scoped_call_expression" else "object")
+    return call.child_by_field_name("name"), receiver, call.child_by_field_name("arguments")
+
+
+def _detect_php_call_sites(
+    tree: Any,
+    functions: list[dict[str, Any]],
+    source: bytes,
+    withheld: list[tuple[int, str]],
+) -> tuple[list[dict[str, Any]], bool]:
+    """PHP call sites from the parse tree, and whether a withheld line held one.
+
+    Each call is attributed to its innermost callable, or to `<top-level>`,
+    and kept once per line per callee. `passes_caller_params` holds when an
+    argument mentions a variable one of the caller's parameters binds. A call
+    on a declaration header line the file-scope readers withhold is not
+    recorded, because the sink readers do not read that line either; the
+    second value reports that such a call exists, so the gap is declared.
+    """
+    parser = _get_parser("php")
+    if parser is None:
+        return [], False
+    captures = _ts_query_captures(parser.language, _PHP_CALL_QUERY, tree.root_node)
+    callable_nodes = {
+        (node.start_byte, node.end_byte): node for node in captures.get("callable", [])
+    }
+    callables = [
+        function for function in functions if not function.get("is_declaration", False)
+    ]
+    starts = [function["_start_byte"] for function in callables]
+    # Callable spans nest, so the innermost callable holding a call is the last
+    # one opening before it or one of that callable's enclosing callables.
+    enclosing: list[int] = []
+    open_callables: list[int] = []
+    for index, function in enumerate(callables):
+        while open_callables and callables[open_callables[-1]]["_end_byte"] <= function["_start_byte"]:
+            open_callables.pop()
+        enclosing.append(open_callables[-1] if open_callables else -1)
+        open_callables.append(index)
+    parameter_names: dict[int, frozenset[str]] = {}
+    withheld_lines = {index for index, _line in withheld}
+    sites: dict[int, dict[tuple[str, int], dict[str, Any]]] = {}
+    withheld_call = False
+
+    for call in captures.get("call", []):
+        shape = _php_call_shape(call)
+        if shape is None or shape[0] is None:
+            continue
+        target, receiver_node, arguments = shape
+        callee = _php_call_text(
+            target.named_children[-1] if target.type == "qualified_name" else target, source
+        )
+        call_kind = _PHP_CALL_KINDS[call.type]
+        if call_kind == "function" and callee.lower() in _PHP_CALL_CONSTRUCTS:
+            continue
+        receiver = _php_call_text(receiver_node, source) if receiver_node is not None else ""
+
+        position = bisect_right(starts, call.start_byte) - 1
+        while position >= 0 and callables[position]["_end_byte"] < call.end_byte:
+            position = enclosing[position]
+        caller = callables[position] if position >= 0 else None
+        node = (
+            callable_nodes.get((caller["_start_byte"], caller["_end_byte"]))
+            if caller is not None
+            else None
+        )
+        if node is not None and callee == caller["name"] and (
+            (call_kind == "function" and node.type == "function_definition")
+            or (node.type == "method_declaration" and receiver in _PHP_SELF_RECEIVERS)
+        ):
+            # Direct recursion. A same-named call through another receiver --
+            # `parent::__construct()` in a constructor -- is a different callee.
+            continue
+        line_index = target.start_point[0]
+        if caller is None and line_index in withheld_lines:
+            withheld_call = True
+            continue
+
+        names: frozenset[str] = frozenset()
+        if node is not None:
+            if position not in parameter_names:
+                parameter_names[position] = _php_parameter_names(node, source)
+            names = parameter_names[position]
+        passes_params = bool(
+            names and arguments is not None and _php_arguments_use(arguments, names, source)
+        )
+        scope_sites = sites.setdefault(position, {})
+        existing = scope_sites.get((callee, line_index))
+        if existing is not None:
+            existing["passes_caller_params"] = existing["passes_caller_params"] or passes_params
+            continue
+        scope_sites[(callee, line_index)] = {
+            "caller": caller["name"] if caller is not None else "<top-level>",
+            "callee": callee,
+            "line": line_index + 1,
+            "passes_caller_params": passes_params,
+            "receiver": receiver,
+            "call_kind": call_kind,
+            "_column": target.start_point[1],
+        }
+
+    # Callers in source order and `<top-level>` last, each read top to bottom:
+    # the order the line readers produce, which decides what the signal limit keeps.
+    calls: list[dict[str, Any]] = []
+    for position in [*range(len(callables)), -1]:
+        ordered = sorted(
+            sites.get(position, {}).values(),
+            key=lambda record: (record["line"], record["_column"]),
+        )
+        for site in ordered:
+            del site["_column"]
+        calls.extend(ordered)
+    return calls, withheld_call
 
 
 def _detect_exports(
@@ -3733,9 +3939,15 @@ def index_file(
         sinks = _detect_sinks(
             functions, classes, effective_lang, source_lines, file_scope.scanned
         )
-        call_sites = _detect_call_sites(
-            functions, effective_lang, source_lines, file_scope.scanned
-        )
+        withheld_call = False
+        if effective_lang == "php":
+            call_sites, withheld_call = _detect_php_call_sites(
+                tree, functions, source, file_scope.withheld
+            )
+        else:
+            call_sites = _detect_call_sites(
+                functions, effective_lang, source_lines, file_scope.scanned
+            )
         unscanned = _unscanned_scope_dimensions(
             functions,
             entry_points,
@@ -3744,6 +3956,7 @@ def index_file(
             language=effective_lang,
             function_scoped_records=bool(sinks or call_sites),
             file_scope=file_scope,
+            withheld_call=withheld_call,
         )
         export_lines = (
             _export_source_lines(tree, source)

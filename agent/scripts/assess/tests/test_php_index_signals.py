@@ -301,3 +301,93 @@ def test_streaming_fallback_keeps_php_inclusion_imports() -> None:
     assert [item["line"] for item in observed["import_targets"]] == [2, 3]
     assert "include 'acme/header.php'" in observed["import_targets"][0]["raw"]
     assert "require_once __DIR__" in observed["import_targets"][1]["raw"]
+
+
+ACME_REPOSITORY = b"""<?php
+namespace Acme\\Storage;
+
+class AcmeRepo extends BaseRepo
+{
+    public function __construct($x) { parent::__construct($x); }
+
+    public function purge($id, $model)
+    {
+        DB::select("select 1");
+        $model->delete();
+        $model?->restore($id);
+        $copy = new \\Acme\\Storage\\Snapshot($model);
+        acme_log(1); acme_audit($id);
+        $this->mailer->send(
+            $id,
+        );
+        $format = function ($row) use ($id) { return acme_format($row); };
+        $this->purge($id, $model);
+        return $this->db->query($id);
+    }
+}
+
+acme_boot();
+"""
+
+
+def _calls(indexed: dict) -> list[tuple]:
+    return [
+        (call["caller"], call["line"], call["callee"], call["receiver"], call["call_kind"],
+         call["passes_caller_params"])
+        for call in indexed["call_sites"]
+    ]
+
+
+def test_php_call_sites_are_read_from_the_parse_tree() -> None:
+    indexed = index_file("src/AcmeRepo.php", "php", ACME_REPOSITORY)
+
+    assert _calls(indexed) == [
+        ("__construct", 6, "__construct", "parent", "static", True),
+        ("purge", 10, "select", "DB", "static", False),
+        ("purge", 11, "delete", "$model", "method", False),
+        ("purge", 12, "restore", "$model", "nullsafe_method", True),
+        ("purge", 13, "Snapshot", "", "new", True),
+        ("purge", 14, "acme_log", "", "function", False),
+        ("purge", 14, "acme_audit", "", "function", True),
+        ("purge", 15, "send", "$this->mailer", "method", True),
+        ("purge", 20, "query", "$this->db", "method", True),
+        ("$format", 18, "acme_format", "", "function", True),
+        ("<top-level>", 24, "acme_boot", "", "function", False),
+    ]
+
+
+def test_php_language_constructs_are_not_call_sites_but_methods_named_like_them_are() -> None:
+    source = b"""<?php
+function acme_render($doc, $printer)
+{
+    if (isset($doc) && !empty($doc)) { $printer->print($doc); }
+    $printer->list($doc);
+    eval($doc);
+    $doc or exit(1);
+    $doc or die("missing");
+    unset($doc);
+    Acme\\Shell::exit($doc);
+}
+"""
+
+    indexed = index_file("src/render.php", "php", source)
+
+    assert [(call["line"], call["callee"]) for call in indexed["call_sites"]] == [
+        (4, "print"),
+        (5, "list"),
+        (6, "eval"),
+        (10, "exit"),
+    ]
+
+
+def test_a_call_on_a_withheld_php_declaration_line_is_unread_signal() -> None:
+    """`namespace Acme; acme_run(...)` is one line the file-scope readers hold
+    back. The parse tree knows the call is real, so leaving it unread is a gap
+    and not a clean measurement."""
+    source = b"<?php\nnamespace Acme; acme_run($_GET['task']);\n"
+
+    indexed = index_file("public/run.php", "php", source)
+
+    assert indexed["call_sites"] == []
+    assert indexed["analysis_status"] == "degraded"
+    assert set(indexed["unavailable_dimensions"]) >= {"call_sites", "dataflow", "security_sinks"}
