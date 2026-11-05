@@ -4651,11 +4651,11 @@ def test_javascript_complete_index_never_augments_ast_with_line_regex_callables(
         source=b"const parsedByAst = value => value;\n",
     )
 
-    # No callable means no callable-keyed entry rule ran, and JavaScript has no
-    # file-scope entry catalogue, so the file declares that debt instead of
-    # claiming a clean entry-point read it never made.
-    assert indexed["analysis_status"] == "degraded"
-    assert indexed["unavailable_dimensions"] == ["entry_points"]
+    # The stubbed tree holds no callable and no file-scope statement, so the
+    # empty registry is the AST's answer: no line regex fills it in, and with
+    # no code anywhere an entry point could live the entry read is measured.
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
     assert indexed["functions"] == []
 
 

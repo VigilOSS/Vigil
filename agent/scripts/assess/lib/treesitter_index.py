@@ -12,7 +12,7 @@ import re
 import threading
 import warnings
 from bisect import bisect_left, bisect_right
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from functools import lru_cache
 from typing import Any, NamedTuple
 
@@ -3485,6 +3485,7 @@ def _unscanned_scope_dimensions(
     function_scoped_records: bool,
     file_scope: _FileScope,
     withheld_call: bool = False,
+    executable_file_scope: Callable[[], bool] = lambda: True,
 ) -> set[str]:
     """Dimensions whose empty value is an unmade measurement, not a negative.
 
@@ -3507,7 +3508,9 @@ def _unscanned_scope_dimensions(
 
     The entry-point dimension is separate. Every entry rule but the file-scope
     catalogue is keyed on a callable, so a file with no callable was measured
-    for entry points only in a language that has a file-scope catalogue.
+    for entry points only in a language that has a file-scope catalogue, or
+    when *executable_file_scope* says no file-scope code runs: a file of types,
+    enums or macros has nowhere an entry point could live.
     """
     if _file_is_commentary_only(tree, source_lines):
         return set()
@@ -3520,6 +3523,7 @@ def _unscanned_scope_dimensions(
         not functions
         and not entry_points
         and language not in _GLOBAL_ENTRY_LINE_PATTERNS
+        and executable_file_scope()
     ):
         unscanned.add("entry_points")
     return unscanned
@@ -5690,6 +5694,10 @@ def index_file(
             function_scoped_records=bool(sinks or call_sites),
             file_scope=file_scope,
             withheld_call=withheld_call,
+            executable_file_scope=lambda: bool(_executable_file_scope_lines(
+                tree, functions, effective_lang, source,
+                {sink["line"] - 1 for sink in sinks if sink["function"] == "<top-level>"},
+            )),
         )
         export_lines = (
             _export_source_lines(tree, source)

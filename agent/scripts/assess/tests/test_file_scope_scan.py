@@ -106,13 +106,13 @@ declare function spawn(cmd: string): void;
 
 
 def test_typescript_declarations_carry_no_call_sites() -> None:
-    """A type-only module has no callable and no file-scope entry catalogue, so
-    the entry dimension stays unavailable -- but the trio is measured."""
+    """A type-only module has no callable and no file-scope code that runs, so
+    every dimension, entry points included, is measured empty."""
     indexed = index_file("acme/types.ts", "typescript", TYPESCRIPT_TYPES)
 
     assert indexed["call_sites"] == []
     assert indexed["security_sinks"] == []
-    assert indexed["unavailable_dimensions"] == ["entry_points"]
+    assert indexed["unavailable_dimensions"] == []
 
 
 GO_INTERFACE = b"""package store
@@ -128,7 +128,7 @@ def test_a_go_interface_declaration_carries_no_call_sites() -> None:
     indexed = index_file("store/store.go", "go", GO_INTERFACE)
 
     assert indexed["call_sites"] == []
-    assert indexed["unavailable_dimensions"] == ["entry_points"]
+    assert indexed["unavailable_dimensions"] == []
 
 
 GO_PACKAGE_STATE = b"""package acme
@@ -191,6 +191,32 @@ def test_a_header_of_prototypes_is_measured_clean() -> None:
     assert indexed["call_sites"] == []
     assert indexed["analysis_status"] == "complete"
     assert indexed["unavailable_dimensions"] == []
+
+
+@pytest.mark.parametrize(
+    ("path", "language", "source"),
+    [
+        ("acme/types.ts", "typescript", b"export interface Invoice {\n  id: string;\n  total: number;\n}\n"),
+        ("acme/types.go", "go", b"package acme\n\ntype Invoice struct {\n\tID string\n}\n\nconst Limit = 10\n"),
+        ("acme/Color.java", "java", b"package acme;\n\npublic enum Color { RED, GREEN }\n"),
+        ("acme/Color.cs", "csharp", b"namespace Acme;\n\npublic enum Color { Red, Green }\n"),
+        ("acme/limits.h", "c", b"#ifndef ACME_LIMITS_H\n#define ACME_LIMITS_H\n#define ACME_MAX 16\n#endif\n"),
+        ("acme/index.js", "javascript", b"module.exports = { retries: 3 };\n"),
+    ],
+)
+def test_a_declaration_only_file_measures_its_entry_points(path: str, language: str, source: bytes) -> None:
+    """A file with no callable and no executable file scope has nowhere an entry
+    point could live, so its empty entry dimension is a measurement."""
+    indexed = index_file(path, language, source)
+
+    assert indexed["analysis_status"] == "complete"
+    assert indexed["unavailable_dimensions"] == []
+
+
+def test_file_scope_code_without_an_entry_catalogue_keeps_entry_points_unmeasured() -> None:
+    indexed = index_file("acme/routes.js", "javascript", b"router.get('/users', users.list);\n")
+
+    assert "entry_points" in indexed["unavailable_dimensions"]
 
 
 JAVA_ONE_LINE_CLASS = b"""class Runner { static { Runtime.getRuntime().exec(System.getenv("CMD")); } }
