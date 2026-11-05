@@ -32,6 +32,7 @@ from assess.lib.treesitter_catalogues import (
     _IMPORT_QUERIES,
     _PHP_CLI_ENTRY_EVIDENCE,
     _PHP_FILE_INCLUSION_VULN_CLASSES,
+    _PHP_SERVER_ARGV,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record, _snippet
@@ -2330,11 +2331,12 @@ def _detect_top_level_entry_points(
 
 @lru_cache(maxsize=None)
 def _php_request_input_patterns() -> tuple[re.Pattern[str], ...]:
-    """The canonical PHP request-input table, compiled as the source scan reads it."""
+    """The canonical PHP request-input table, compiled as the source scan reads
+    it, less `$_SERVER['argv']`, which is command-line evidence first."""
     return tuple(
         re.compile(pattern, re.IGNORECASE)
         for kind, pattern in _STREAM_SOURCE_PATTERNS["php"]
-        if kind == "http_request_input"
+        if kind == "http_request_input" and pattern != _PHP_SERVER_ARGV
     )
 
 

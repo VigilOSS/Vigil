@@ -374,7 +374,6 @@ function acme_main(array $argv) {
     [
         b"$target = $argv[1];",
         b"$count = $argc;",
-        b"$target = $_SERVER['argv'][1];",
         b"$options = getopt('f:');",
         b"$line = fgets(STDIN);",
     ],
@@ -390,6 +389,41 @@ def test_process_arguments_and_stdin_are_process_input(line: bytes) -> None:
         assert [record["kind"] for record in observed["security_sources"]] == [
             "process_input"
         ]
+
+
+PHP_ARGV_IN_A_METHOD = b"""<?php
+namespace Acme\\Boot;
+
+class EnvironmentDetector
+{
+    public function detect(): string
+    {
+        $args = $_SERVER['argv'] ?? [];
+        return $args[1] ?? 'production';
+    }
+}
+"""
+
+
+def test_server_argv_is_both_process_and_request_input() -> None:
+    """Under a web SAPI with `register_argc_argv` on, PHP fills
+    `$_SERVER['argv']` and `argc` from the query string."""
+    for observed in (
+        index_file("src/EnvironmentDetector.php", "php", PHP_ARGV_IN_A_METHOD),
+        treesitter_index._fallback_from_bytes(
+            "src/EnvironmentDetector.php", "php", PHP_ARGV_IN_A_METHOD, degradation_reason="test"
+        ),
+    ):
+        assert sorted(
+            (record["kind"], record["line"]) for record in observed["security_sources"]
+        ) == [("http_request_input", 8), ("process_input", 8)]
+
+
+def test_server_argv_in_a_cli_script_is_no_request_page() -> None:
+    source = b"#!/usr/bin/env php\n<?php\n$opts = $_SERVER['argv'];\n"
+    indexed = index_file("bin/acme-sync.php", "php", source)
+
+    assert [entry["kind"] for entry in indexed["entry_points"]] == ["php_cli_script"]
 
 
 def test_other_server_fields_stay_request_input() -> None:

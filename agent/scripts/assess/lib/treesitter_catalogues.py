@@ -553,8 +553,13 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
 # every match as `process_input`, and the file-scope entry reader names the
 # first one it finds as `php_cli_script` evidence. Both compile case-blind, as
 # PHP's own function names are; `STDIN` is a case-sensitive constant.
+# `$_SERVER['argv']`/`['argc']` is the command line under the CLI SAPI, and
+# the query string under a web SAPI with `register_argc_argv` on, so the
+# source table reads it as both. It is never `php_script` evidence: a script
+# reading it is a command-line script first.
+_PHP_SERVER_ARGV = r"\$_SERVER\s*\[\s*['\"]arg[vc]['\"]\s*\]"
 _PHP_CLI_INPUT_PATTERNS: tuple[tuple[str, str], ...] = (
-    ("argv", r"\$arg[vc]\b|\$_SERVER\s*\[\s*['\"]arg[vc]['\"]\s*\]"),
+    ("argv", r"\$arg[vc]\b|" + _PHP_SERVER_ARGV),
     ("getopt", r"\bgetopt\s*\("),
     ("stdin", r"(?-i:\bSTDIN\b)|php://stdin"),
     ("readline", r"(?<!->)(?<!::)\breadline\s*\("),

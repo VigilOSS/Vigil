@@ -9,6 +9,7 @@ from assess.lib.treesitter_catalogues import (
     _ENTRY_LINE_PATTERNS,
     _PHP_CLI_INPUT_PATTERNS,
     _PHP_FILE_INCLUSION_VULN_CLASSES,
+    _PHP_SERVER_ARGV,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record
@@ -108,9 +109,10 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         ("template_input", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}"),
     ],
     "php": [
-        # `$_SERVER['argv']` is the command line, not the request.
+        # `$_SERVER['argv']` is read below, as process and request input both.
         ("http_request_input",
          r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b"),
+        ("http_request_input", _PHP_SERVER_ARGV),
         # Idiomatic Laravel/Symfony/CodeIgniter never touches a superglobal:
         # the request arrives as an injected object, `$this->request`, or the
         # `request()` helper. Anchored on the request object rather than on
