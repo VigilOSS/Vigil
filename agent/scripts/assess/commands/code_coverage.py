@@ -614,8 +614,44 @@ def _print_cwe_matrix(files: list[dict]) -> None:
             row += f" | {cell:^{col_width}}"
         print(row)
 
+    _print_path_hints(files)
     _print_structural_verification(files)
     print()
+
+
+def _print_path_hints(files: list[dict]) -> None:
+    """List the families each file's path suggests, apart from the owed columns.
+
+    A path word points at a family worth considering; only the role label
+    makes it required, so these never carry a threshold flag.
+    """
+    rows: list[str] = []
+    for f in files:
+        hints = f.get('path_suggested_families') or []
+        if not hints:
+            continue
+        efforts = {
+            cwe.get('family', ''): cwe
+            for cwe in f.get('cwe_coverage', [])
+            if isinstance(cwe, dict)
+        }
+        cells = []
+        for fam in hints:
+            entry = efforts.get(fam)
+            if entry is None:
+                cells.append(fam)
+            elif _is_not_applicable_cwe_entry(entry):
+                cells.append(f"{fam} N/A")
+            else:
+                cells.append(f"{fam} {_format_effort(_coerce_effort(entry.get('effort', 0)))}")
+        rows.append(
+            f"  {f.get('file_path', '?')} ({f.get('classification', '')}): {', '.join(cells)}"
+        )
+    if not rows:
+        return
+    print("\n--- Path Hints (advisory; a role label makes them required) ---")
+    for row in rows:
+        print(row)
 
 
 def _unscanned_structural_scope(file_row: dict) -> bool:

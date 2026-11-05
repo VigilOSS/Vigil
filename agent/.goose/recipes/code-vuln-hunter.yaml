@@ -87,13 +87,21 @@ instructions: |2
   - [ ] **Call graph excerpt available** -- shows how functions connect to entry points and other modules
   - [ ] **Guidance hypotheses available** (optional -- test AFTER broad analysis, see the skill's Step 4)
   - [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from
-        dispatch context `applicable_vuln_classes`)
+        dispatch context `applicable_vuln_classes`), plus any `path_suggested_vuln_classes`
   - [ ] **C/C++ baseline families present** -- `error-handling` and `algorithmic-dos` cover partial
         I/O, cleanup/resource leaks, unbounded work, retries, allocation, and retention even when no
         classic memory-corruption family fires
   - [ ] Sealed-source access confirmed -- can Read, `rg`, and Glob beyond the file batch while
         keeping `snapshot_path` as the source root
   - [ ] Audit trail plan ready -- every grouped source receipt will include `audit_metadata`
+
+  `path_suggested_vuln_classes` are hints: a word in the file's path (`Checkout`, `refunds`,
+  `webhooks`) marks the file as one to consider for that workflow family. Check whether the code
+  actually moves value, grants something once or verifies a one-time code; record a `cwe_coverage`
+  entry when you review the family, and flag what the reading shows. `done` never requires a hint.
+  The families in `applicable_vuln_classes` are required because the architect's role label or the
+  file's slot types named them, and covering all of them is a good sign that still leaves the rest
+  of the file's behaviour yours to read.
 
   Load the CWE pattern reference for a class as its signal appears in the code, from
   `agent/references/code-vuln-patterns/` -- not as a precondition to starting. If a class in

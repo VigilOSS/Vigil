@@ -249,20 +249,26 @@ A file may have multiple slot types. Record the primary slot type and any second
 Config files that define how commands are executed, what plugins load, what crypto parameters
 apply, or what access policies are enforced should receive `EXEC-POLICY` and classification
 `high` regardless of language.
-Use a precise role label for each critical/high file because the backend derives additional coverage
-families from the role label, the language and the file's path. Prefer labels like `auth_handler`,
+Use a precise role label for each critical/high file because the backend derives additional required
+coverage families from the role label and the language. Prefer labels like `auth_handler`,
 `crypto_impl`, `error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, and
 `deserializer` over generic labels like `handler` or `utils`. Name what a transactional file moves:
 `refund_service`, `booking_controller`, `seat_hold_handler`, `quota_manager`, `store_credit_ledger`,
-`coupon_redeem_controller`, `payment_webhook`, `otp_verifier`, or `password_reset_controller`. Whole
-words such as refund, booking, hold, quota, credit, coupon, wallet, balance, payment, checkout,
-inventory and webhook add `race-condition` and `business-logic`; otp, mfa, totp, passcode and
-password reset add `rate-limit`. The backend also reads these words from the file's directories and
-name when the structural index analyzes the file's language. It skips paths under a `test`, `tests`,
-`spec`, `__tests__`, `fixtures`, `docs`, `locale`, `locales`, `i18n`, `translations` or `migrations`
-directory; test-named files (`test_*`, `*_test`, `*_spec`, `*.test`, `*.spec`); HTML, CSS,
-Dockerfile, Blade, Twig and FreeMarker files; and `.phtml` files. If ingestion guessed
-the language wrong, emit a `language` correction in the classification record.
+`coupon_redeem_controller`, `payment_webhook`, `otp_verifier`, or `password_reset_controller`. In a
+role, whole words such as refund, booking, hold, quota, credit, coupon, wallet, balance, payment,
+checkout, inventory and webhook make `race-condition` and `business-logic` required, and otp, mfa,
+totp, passcode and password reset make `rate-limit` required: the hunter's `done` is refused without
+them and the effort gate holds the file to them. Write such a role only for a file you read as
+moving value, granting something once or checking a one-time code; a `Checkout` directory also
+holds value objects, events and views that do none of that.
+
+The backend reads the same words from the file's directories and name as hints. A path match lists
+the families in `path_suggested_vuln_classes` for the hunter to consider and never makes them
+required. Hints come only from languages the structural index analyzes, and skip paths under a
+`test`, `tests`, `spec`, `__tests__`, `fixtures`, `docs`, `locale`, `locales`, `i18n`,
+`translations` or `migrations` directory; test-named files (`test_*`, `*_test`, `*_spec`, `*.test`,
+`*.spec`); HTML, CSS, Dockerfile, Blade, Twig and FreeMarker files; and `.phtml` files. If ingestion
+guessed the language wrong, emit a `language` correction in the classification record.
 
 ## Classification Decision Framework
 

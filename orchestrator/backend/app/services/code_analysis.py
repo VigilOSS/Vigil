@@ -3627,10 +3627,16 @@ def _hydrate_claimed_queue_item(
     file_row = file_rows[int(row["file_id"])]
     item["file"] = _hydrate_code_file(file_row)
     item["repo"] = _hydrate_code_repo(repo_rows[int(file_row["repo_id"])])
+    slot_types = item["file"].get("slot_types", [])
+    language = str(item["file"].get("language", ""))
+    role = str(item["file"].get("role", ""))
     item["applicable_vuln_classes"] = _applicable_families_for_file(
-        item["file"].get("slot_types", []),
-        language=str(item["file"].get("language", "")),
-        role=str(item["file"].get("role", "")),
+        slot_types, language=language, role=role
+    )
+    item["path_suggested_vuln_classes"] = _path_suggested_families_for_file(
+        slot_types,
+        language=language,
+        role=role,
         file_path=str(item["file"].get("file_path", "")),
     )
     # B2: prior art bound to this file travels with the claim. Nearly every
@@ -3687,12 +3693,7 @@ def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[d
             ),
         )
 
-    applicable = _applicable_families_for_file(
-        slot_types,
-        language=language,
-        role=role,
-        file_path=str(file_row.get("file_path", "")),
-    )
+    applicable = _applicable_families_for_file(slot_types, language=language, role=role)
     if classification in {"critical", "high"} and not applicable:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -4770,10 +4771,14 @@ def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
             )
         recorded_entries = list(merged.get(file_id, {}).values())
         recorded_families = sorted(merged.get(file_id, {}))
-        applicable = _applicable_families_for_file(
-            _json_decode(file_row.get("slot_types_json"), []),
-            language=str(file_row.get("language", "")),
-            role=str(file_row.get("role", "")),
+        slot_types = _json_decode(file_row.get("slot_types_json"), [])
+        language = str(file_row.get("language", ""))
+        role = str(file_row.get("role", ""))
+        applicable = _applicable_families_for_file(slot_types, language=language, role=role)
+        path_suggested = _path_suggested_families_for_file(
+            slot_types,
+            language=language,
+            role=role,
             file_path=str(file_row.get("file_path", "")),
         )
         integrity = _compute_coverage_integrity(
@@ -4805,6 +4810,7 @@ def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
         ),
         "adopted_leases": _adopted_lease_identities(queue_row.get("adopted_leases_json")),
         "applicable_vuln_classes": applicable,
+        "path_suggested_vuln_classes": path_suggested,
         "recorded_cwe_families": recorded_families,
         "missing_cwe_families": [
             family for family in applicable if family not in recorded_families
@@ -7322,7 +7328,6 @@ def code_coverage_summary(
                 slot_types,
                 language=meta.get("language", ""),
                 role=meta.get("role", ""),
-                file_path=str(meta["file_path"]),
             )
             if not applicable:
                 msg = (
@@ -9061,13 +9066,16 @@ ROLE_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], .
     (("llm", "prompt", "rag", "mcp", "embedding"), {"all": ["ai-ml-security"]}),
 )
 
-# Matched against whole words of the role label and of the file's own path
-# (`_context_words`, `_workflow_path_words`), never as substrings as the role
-# rows above are: `load_balancer` is not a balance and `placeholder` holds
+# Matched against whole words (`_context_words`), never as substrings as the
+# role rows above are: `load_balancer` is not a balance and `placeholder` holds
 # nothing. A hyphenated entry is a phrase of consecutive words. Request handlers
 # run concurrently across requests, so a file that moves money, stock, quota or
 # one-time grants owes check-then-act and workflow review whatever its slot
-# types say.
+# types say. The architect's role label makes these families required. The
+# file's own path (`_workflow_path_words`) only suggests them: a directory word
+# such as `Checkout` names whole trees of value objects and helpers that never
+# move anything, so a path match is a hint that never blocks closeout or the
+# effort gate.
 WORKFLOW_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
     (
         (
@@ -9100,9 +9108,9 @@ _WORKFLOW_PATH_SKIPPED_SEGMENTS = frozenset(
         "locales", "i18n", "translations", "migrations",
     }
 )
-# PHP the index reads as `php` that is still a page template (`.phtml`) or a
-# test case (`.phpt`), skipped like the template languages and test names.
-_WORKFLOW_PATH_SKIPPED_SUFFIXES = (".phtml", ".phpt")
+# PHP the index reads as `php` that is still a page template, skipped like the
+# template languages.
+_WORKFLOW_PATH_SKIPPED_SUFFIXES = (".phtml",)
 _WORD_PATTERN = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+")
 
 
@@ -9165,17 +9173,33 @@ def _apply_grouped_families(
             families.update(group_families)
 
 
+def _workflow_families(words: list[str], language: str) -> set[str]:
+    """The `WORKFLOW_CONTEXT_VULN_CLASSES` families whole ``words`` name."""
+    families: set[str] = set()
+    for keywords, mapping in WORKFLOW_CONTEXT_VULN_CLASSES:
+        if any(_has_context_keyword(words, keyword) for keyword in keywords):
+            _apply_grouped_families(
+                families,
+                mapping,
+                is_native=language in NATIVE_LANGUAGES,
+                lang_known=bool(language),
+                is_memory_unsafe=language in MEMORY_UNSAFE_LANGUAGES,
+            )
+    return families
+
+
 def _applicable_families_for_file(
     slot_types: list[str],
     *,
     language: str = "",
     role: str = "",
-    file_path: str = "",
 ) -> list[str]:
     """Compute canonical applicable vulnerability classes for a classified file.
 
-    Recomputed on every read, never stored, so a row added here applies to
-    every open engagement at once.
+    These are required: `done` refuses a result that omits one and the
+    coverage gate holds each to its effort threshold. Recomputed on every
+    read, never stored, so a row added here applies to every open engagement
+    at once.
     """
     lang_lower = language.lower().strip()
     is_native = lang_lower in NATIVE_LANGUAGES
@@ -9207,21 +9231,7 @@ def _applicable_families_for_file(
                 is_memory_unsafe=is_memory_unsafe,
             )
 
-    # Role and path are separate sources, so a phrase never spans the two.
-    context_words = (_context_words(role), _workflow_path_words(file_path, lang_lower))
-    for keywords, mapping in WORKFLOW_CONTEXT_VULN_CLASSES:
-        if any(
-            _has_context_keyword(words, keyword)
-            for words in context_words
-            for keyword in keywords
-        ):
-            _apply_grouped_families(
-                families,
-                mapping,
-                is_native=is_native,
-                lang_known=lang_known,
-                is_memory_unsafe=is_memory_unsafe,
-            )
+    families |= _workflow_families(_context_words(role), lang_lower)
 
     if lang_lower == "freemarker":
         # FILE-CONTENT describes a template's input, not a native parser. Its
@@ -9231,6 +9241,25 @@ def _applicable_families_for_file(
         families.difference_update({"type-confusion", "deserialization"})
 
     return sorted(families)
+
+
+def _path_suggested_families_for_file(
+    slot_types: list[str],
+    *,
+    language: str = "",
+    role: str = "",
+    file_path: str = "",
+) -> list[str]:
+    """Workflow families the file's path suggests beyond what it already requires.
+
+    Advisory only: a hint points a hunter at a family worth considering, and
+    never blocks `done`, counts toward the effort gate, or becomes a
+    readiness reason. Writing a transactional role is what makes them required.
+    """
+    lang_lower = language.lower().strip()
+    suggested = _workflow_families(_workflow_path_words(file_path, lang_lower), lang_lower)
+    required = _applicable_families_for_file(slot_types, language=language, role=role)
+    return sorted(suggested.difference(required))
 
 
 def _applicable_families_for_slots(slot_types: list[str], language: str = "") -> list[str]:
@@ -10130,7 +10159,8 @@ def code_coverage_cwe_detail(
     repo_id: int | None = None,
 ) -> dict[str, Any]:
     """Return per-file coverage with accumulated CWE coverage from queue done
-    records, plus applicable_families from `_applicable_families_for_file`."""
+    records, plus applicable_families from `_applicable_families_for_file` and
+    the advisory path_suggested_families from `_path_suggested_families_for_file`."""
     engagement = _engagement_or_404(engagement_id)
 
     repo_clause = f"""
@@ -10291,10 +10321,13 @@ def code_coverage_cwe_detail(
         for fr in file_rows:
             fid = int(fr["file_id"])
             slot_types = _json_decode(fr["slot_types_json"], [])
-            applicable = _applicable_families_for_file(
+            language = fr["language"] or ""
+            role = fr["role"] or ""
+            applicable = _applicable_families_for_file(slot_types, language=language, role=role)
+            path_suggested = _path_suggested_families_for_file(
                 slot_types,
-                language=fr["language"] or "",
-                role=fr["role"] or "",
+                language=language,
+                role=role,
                 file_path=str(fr["file_path"] or ""),
             )
             merged_entries = list(cwe_by_file.get(fid, {}).values())
@@ -10333,6 +10366,7 @@ def code_coverage_cwe_detail(
                 ),
                 "slot_types": slot_types,
                 "applicable_families": applicable,
+                "path_suggested_families": path_suggested,
                 "cwe_coverage": merged_entries,
                 "analysis_effort": {
                     **result_effort,

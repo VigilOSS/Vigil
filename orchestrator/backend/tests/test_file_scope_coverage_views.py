@@ -5,8 +5,8 @@ the coverage views read them through separate projections: the summary gate
 (`structural_review_gaps`), the function-coverage numerators
 (`function_callable_link_sql`), the per-directory breakdown and readiness
 (`_current_analysis_status_sql`, `_structural_debt_sql`), path-scoped queue
-listing and claims (`_file_path_scope_sql`) and the applicable families
-(`_applicable_families_for_file`). One repository with a mixed PHP file, a
+listing and claims (`_file_path_scope_sql`) and the families a path suggests
+(`_path_suggested_families_for_file`). One repository with a mixed PHP file, a
 script that is all file scope, a declarations-only file and an `.inc` fragment
 runs through all of them, so the views are pinned to each other rather than
 each to its own fixture.
@@ -275,7 +275,7 @@ def test_directory_rows_agree_with_the_summary_and_readiness(client, isolate_set
     assert page["directories"][0]["path"] == "payments"
 
 
-def test_path_scope_selects_php_fragments_and_their_workflow_families(client, isolate_settings):
+def test_path_scope_selects_php_fragments_and_their_workflow_hints(client, isolate_settings):
     key = "2026-11-05-file-scope-views-path-scope"
     base, _repo_id, ids, _registry = _reviewed_repo(client, isolate_settings, key)
 
@@ -290,4 +290,4 @@ def test_path_scope_selects_php_fragments_and_their_workflow_families(client, is
     assert claimed.status_code == 200, claimed.text
     claims = claimed.json()
     assert [claim["file_id"] for claim in claims] == [ids[FRAGMENT_PATH]]
-    assert {"race-condition", "business-logic"} <= set(claims[0]["applicable_vuln_classes"])
+    assert claims[0]["path_suggested_vuln_classes"] == ["business-logic", "race-condition"]

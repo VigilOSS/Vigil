@@ -252,6 +252,22 @@ def test_progress_reports_what_the_claimed_item_still_owes(
     assert "hunter-a" in out
 
 
+def test_progress_lists_path_hints_apart_from_what_closeout_owes(
+    fake_client, tmp_path, capsys
+):
+    fake_client.get_payload = {
+        **_PROGRESS,
+        "path_suggested_vuln_classes": ["business-logic", "race-condition"],
+    }
+    code_dispatch._progress(_config(tmp_path), "41", as_json=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    (owed,) = [line for line in lines if "still owed at closeout" in line]
+    assert "path-traversal" in owed and "race-condition" not in owed
+    (hints,) = [line for line in lines if "race-condition" in line]
+    assert "business-logic" in hints and "advisory" in hints
+
+
 def test_progress_json_is_the_raw_backend_payload(fake_client, tmp_path, capsys):
     fake_client.get_payload = _PROGRESS
     code_dispatch._progress(_config(tmp_path), "41", as_json=True)

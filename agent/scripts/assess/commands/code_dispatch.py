@@ -893,6 +893,12 @@ def _progress(cfg, item_id: str, *, as_json: bool) -> None:
         "  cwe families still owed at closeout: "
         f"{', '.join(result.get('missing_cwe_families') or []) or 'none'}"
     )
+    path_hints = result.get("path_suggested_vuln_classes") or []
+    if path_hints:
+        print(
+            "  path hints to consider (advisory, never owed): "
+            + ", ".join(path_hints)
+        )
     integrity = result.get("coverage_integrity")
     if isinstance(integrity, dict):
         blockers = integrity.get("authoritative_blockers") or []

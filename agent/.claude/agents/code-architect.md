@@ -115,11 +115,11 @@ A file may have multiple slot types. Record primary and secondary.
 Use an explicit role label that preserves the security context — examples:
 `auth_handler`, `crypto_impl`, `error_handler`, `memory_allocator`,
 `graphql_resolver`, `llm_orchestrator`, `deserializer`.
-The backend derives additional applicable vulnerability classes from the role, the language and
-the file's path, so vague roles like `handler` or `utils` lose coverage signal. Name what a
-transactional file moves (`refund_service`, `seat_hold_handler`, `otp_verifier`);
-`code-architecture-mapping` lists the words that add `race-condition`, `business-logic` and
-`rate-limit`.
+The backend derives additional required vulnerability classes from the role and the language, so
+vague roles like `handler` or `utils` lose coverage signal. Name what a transactional file moves
+(`refund_service`, `seat_hold_handler`, `otp_verifier`): those role words make `race-condition`,
+`business-logic` or `rate-limit` required, and `code-architecture-mapping` lists them. The same
+words in a file's path only suggest the families to the hunter.
 If ingestion guessed the language wrong, include a `language` correction on the
 classification record.
 

@@ -132,15 +132,21 @@ one oversized mixed batch to a single agent.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
 - **Applicable vulnerability classes** -- pass the backend-computed `applicable_vuln_classes` list
   through unmodified (`_applicable_families_for_file` in
-  `orchestrator/backend/app/services/code_analysis.py` derives it from slot types, language, role
-  and the file's path over the canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`); do
-  not hand-copy a slot->class table, it drifts from the backend. This is a coverage floor, not a
+  `orchestrator/backend/app/services/code_analysis.py` derives it from slot types, language and
+  role over the canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`); do not hand-copy a
+  slot->class table, it drifts from the backend. This is a coverage floor, not a
   ceiling -- every named class gets an effort score, and anything else the reading surfaces is
   still the hunter's to flag. For every C/C++ file, sanity-check that the list includes
   `error-handling` and `algorithmic-dos`: cleanup/partial-I/O failures and attacker-controlled
   CPU, allocation, retry, or retention are baseline review surfaces, not optional memory-safety
   extras. A missing baseline family is a dispatch-input defect to repair before review, not
   permission to omit it.
+- **Path hints** -- pass `path_suggested_vuln_classes` through beside it. A whole word of the
+  file's path (`Checkout`, `refunds`, `webhooks`) marks the file as one to consider for
+  race-condition, business-logic or rate-limit review. The hunter checks whether the code moves
+  value or grants something once and records coverage for a family it reviews; `done` never
+  requires a hint. A Phase 1 role label naming the workflow (`refund_service`, `payment_webhook`,
+  `otp_verifier`) is what makes those families required.
 - **Guidance hypotheses** -- labeled "check AFTER broad analysis." The skill's Steps 3-4 already
   define why the first pass runs unconstrained by these hypotheses and checks them second (not
   re-derived here); "unconstrained" means not pre-anchored to the architect's guesses, not exempt
@@ -303,9 +309,11 @@ Phase 2B closes effort gaps Phase 2A left open, using the CWE effort matrix.
 vigil assess code-coverage --cwe-matrix
 ```
 
-Shows, per critical/high file: expected classes (derived from slot types, language, role and
-path, exactly as `applicable_vuln_classes`), current effort per class, threshold flags (`!` = below
-threshold), and callable coverage derived from exact references on current receipts.
+Shows, per critical/high file: expected classes (derived from slot types, language and role,
+exactly as `applicable_vuln_classes`), current effort per class, threshold flags (`!` = below
+threshold), and callable coverage derived from exact references on current receipts. A separate
+Path Hints list names the families each file's path suggests, with any effort recorded against
+them; hints carry no threshold and never block.
 `functions_analyzed` remains advisory context only. These scores steer review depth; they do not
 authorize or block a phase transition. If no warning represents a material gap, record that
 judgment and continue to 2C/2D. Pending cross-file triggers remain a separate structural-readiness
