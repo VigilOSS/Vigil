@@ -25,6 +25,7 @@ from assess.lib.code_snapshot import (
 )
 from assess.lib.config import load_config
 from assess.lib.contracts import CODE_REPO_ROLES
+from assess.lib.security_history import SECURITY_HISTORY_GIT_GREP
 from assess.lib.trusted_exec import (
     git_layout,
     run_target_git,
@@ -1749,7 +1750,7 @@ def _git_security_files(repo_path: str, history_args: list[str] | None = None) -
                     *history_args,
                     # Commit messages capitalize freely: "Security fix", "cve-2026-1".
                     '--regexp-ignore-case',
-                    '--grep=CVE\\|security\\|vulnerability\\|fix.*vuln\\|buffer.overflow\\|use.after.free',
+                    f'--grep={SECURITY_HISTORY_GIT_GREP}',
                     '--format=commit:%H',
                     '--name-only',
                 ],

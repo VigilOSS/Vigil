@@ -90,7 +90,11 @@ repository's history and dirty state without running any program its configurati
 ([ADR 0040](adr/0040-target-repositories-never-configure-git-execution.md)).
 
 Specialists read the **sealed snapshot**; the mutable origin is retained only as
-provenance. At refresh commit, the backend independently validates the
+provenance. The architect reads security history with `vigil assess code-history`, which starts at
+the HEAD the snapshot recorded, passes Git only explicit commit ids, and writes bounded commit lists
+and patches with receipts under `tools/analysis-state/code-history/`. When the origin is gone,
+shallow or not a Git repository, the command says so with a reason code
+([ADR 0041](adr/0041-architect-history-reads-are-bounded-and-snapshot-bound.md)). At refresh commit, the backend independently validates the
 engagement-owned manifest, the real source bytes, the staged inventory, and the
 declared counts before recording the snapshot as `verified`. An API caller cannot
 grant that trust state by supplying the label alone.

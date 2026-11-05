@@ -21,6 +21,9 @@ Provide:
   point to the shared prompt-injection boundary instead of letting those files redefine the dispatch
 - Git churn data as a short summary or artifact path from the `git_churn` field of
   `vigil assess fetch "code/repos/<repo-id>"`
+- The repository ID for `vigil assess code-history commits|diff`, the architect's only history
+  surface. It reads ancestors of the snapshot's recorded HEAD within recorded budgets; the architect
+  runs no other Git
 - The generation-bound `structural_index_manifest_path` from the identity block. If it is missing or
   stale, return to Phase 0 and run
   `vigil assess code-index build --repo-id <repo-id> <snapshot-dir>/source` plus
@@ -76,11 +79,13 @@ Use the helper contracts as the durable shape source before authoring or reviewi
    an explicit `skipped` closeout with a reason. The on-disk queue artifact is a flat per-file JSON
    array -- no nested batch wrappers or glob patterns.
 
-7. **Historical CVE bug shapes (optional)** -- only when repository history or cited advisories
-   expose a concrete vulnerable-to-fixed delta, emit
+7. **Historical CVE bug shapes (optional)** -- only when a cited `code-history diff` exposes a
+   concrete vulnerable-to-fixed delta, emit
    `tools/analysis-state/cve-bug-shapes.jsonl` using the architecture skill's exact one-object-per-line
-   contract. An identifier or commit subject alone is not a bug shape. When exact evidence is
-   unavailable, omit the artifact and state that historical seeding is not applicable.
+   contract, with each record citing its diff receipt and patch. An identifier or commit subject
+   alone is not a bug shape. When `code-history` reports `history_status: unavailable`, or exact
+   evidence is otherwise missing, omit the artifact and state the reason and that historical seeding
+   is not applicable.
 
 **Sizing check (informs Phase 2 batch sizing):** Run `vigil assess code-size-summary`
 to get LOC buckets and large-file candidates across the indexed repo(s). Phase 2's
@@ -114,6 +119,8 @@ vigil assess code-dispatch queue "$DIR/tools/analysis-state/file-analysis-queue.
 vigil assess code-dispatch list --repo-id <repo-id>
 # The architect writes an applicable historical-shape artifact directly to
 # "$DIR/tools/analysis-state/cve-bug-shapes.jsonl" under the output contract above.
+# When it exists, confirm every shape cites its history receipt and patch:
+vigil assess code-history check-shapes "$DIR/tools/analysis-state/cve-bug-shapes.jsonl"
 # Check structural/lifecycle readiness separately from review-quality effort
 vigil assess code-coverage --require-transition-ready hunt
 ```

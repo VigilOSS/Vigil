@@ -155,7 +155,10 @@ or harness change is new coverage even against the same target. Full decision ta
 Git provenance and churn are ingest-time metadata on the backend repository record. The sealed
 snapshot deliberately contains no `.git`, and specialists do not run ambient Git against the
 mutable origin. Use the supplied `git_head`, branch/dirty state, and churn summary as historical
-context; they are navigation evidence, not source identity or vulnerability proof.
+context; they are navigation evidence, not source identity or vulnerability proof. The one history
+surface is `vigil assess code-history`, which `code-architect` runs: it reads only ancestors of the
+HEAD the sealed snapshot recorded, within recorded budgets, and writes receipts under
+`tools/analysis-state/code-history/`. Other roles read those cited artifacts and run no Git.
 
 ### Cross-Reference Tools (priority order)
 
