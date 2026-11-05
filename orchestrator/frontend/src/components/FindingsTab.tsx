@@ -1,4 +1,4 @@
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { Fragment, lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import type {
   AssessmentAttackChainDetail,
   AssessmentAttackChainLink,
@@ -10,6 +10,8 @@ import type {
   AssessmentFindingTransitionSummary,
   AssessmentProofReceipt,
   AssessmentConfirmCheck,
+  FindingChangePolicy,
+  FindingVerificationEffect,
   AssessmentVerificationAudit,
   FindingDetails,
   FindingPocRequest,
@@ -3197,6 +3199,36 @@ function hasVerificationAudit(audit: AssessmentVerificationAudit | undefined): b
   );
 }
 
+const VERIFICATION_EFFECTS: readonly FindingVerificationEffect[] = ["keep", "claim_review", "invalidate"];
+const VERIFICATION_EFFECT_LABELS: Record<FindingVerificationEffect, string> = {
+  keep: "Verdict kept",
+  claim_review: "Claim review",
+  invalidate: "Verification invalidated",
+};
+
+function isVerificationEffect(value: unknown): value is FindingVerificationEffect {
+  return typeof value === "string" && (VERIFICATION_EFFECTS as readonly string[]).includes(value);
+}
+
+function parseChangePolicy(metadataJson: string): FindingChangePolicy | null {
+  try {
+    const metadata: unknown = JSON.parse(metadataJson);
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+    const value = (metadata as Record<string, unknown>).change_policy;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const policy = value as Record<string, unknown>;
+    if (!isVerificationEffect(policy.effect) || !Array.isArray(policy.axes)) return null;
+    const axes = policy.axes.flatMap((item: unknown) => {
+      if (!item || typeof item !== "object") return [];
+      const { axis, effect } = item as Record<string, unknown>;
+      return typeof axis === "string" && isVerificationEffect(effect) ? [{ axis, effect }] : [];
+    });
+    return { version: Number(policy.version) || 0, effect: policy.effect, axes };
+  } catch {
+    return null;
+  }
+}
+
 function parseConfirmCheck(metadataJson: string): AssessmentConfirmCheck | null {
   try {
     const metadata: unknown = JSON.parse(metadataJson);
@@ -3250,11 +3282,12 @@ function HistoryRow({
     ? transition.has_snapshot
     : [transition.details_before_json, transition.details_after_json, transition.notes_before_json, transition.notes_after_json].some(Boolean);
   const confirmCheck = detail ? parseConfirmCheck(detail.metadata_json) : null;
+  const changePolicy = detail ? parseChangePolicy(detail.metadata_json) : null;
   // The compact projection deliberately omits verification-audit bodies and
   // counts. Keep every summary row drill-downable so an audit-only transition
   // cannot disappear merely because it has no narrative or content snapshot.
   const canExpand = isTransitionSummary(transition) || Boolean(
-    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck,
+    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck || changePolicy,
   );
 
   const loadDetail = (open: boolean) => {
@@ -3327,6 +3360,7 @@ function HistoryRow({
             )}
             {detail?.verification_audit && <VerificationAudit audit={detail.verification_audit} />}
             {confirmCheck && <ConfirmCheckAudit check={confirmCheck} />}
+            {changePolicy && <ChangePolicyAudit policy={changePolicy} />}
             {detail && [detail.details_before_json, detail.details_after_json, detail.notes_before_json, detail.notes_after_json].some(Boolean) && (
               <details className="detail-disclosure history-snapshot">
                 <summary>Changed content</summary>
@@ -3339,6 +3373,22 @@ function HistoryRow({
           </div>
         </details>
       )}
+    </div>
+  );
+}
+
+function ChangePolicyAudit({ policy }: { policy: FindingChangePolicy }) {
+  return (
+    <div className="tl-audit-record">
+      <div className="tl-audit-title">Verdict effect</div>
+      <dl>
+        <dt>Effect</dt><dd>{VERIFICATION_EFFECT_LABELS[policy.effect]}</dd>
+        {policy.axes.map(({ axis, effect }) => (
+          <Fragment key={axis}>
+            <dt><code>{axis}</code></dt><dd>{VERIFICATION_EFFECT_LABELS[effect]}</dd>
+          </Fragment>
+        ))}
+      </dl>
     </div>
   );
 }

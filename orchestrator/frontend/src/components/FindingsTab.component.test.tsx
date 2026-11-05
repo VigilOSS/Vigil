@@ -356,6 +356,48 @@ describe("HistoryPane", () => {
   });
 });
 
+describe("finding change policy audit", () => {
+  it("renders the verdict effect and each changed axis from transition metadata", async () => {
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+      id: 14, actor: "operator", action: "claim_review_pending",
+      from_workflow_status: "active", to_workflow_status: "active",
+      from_verification_status: "confirmed", to_verification_status: "confirmed",
+      verification_event_version: 2, from_severity: "high", to_severity: "high",
+      reason_code: "claim_text_changed", reason_text: "", artifact_ref: "",
+      metadata_json: JSON.stringify({ change_policy: {
+        version: 1, effect: "claim_review",
+        axes: [{ axis: "title", effect: "keep" }, { axis: "summary", effect: "claim_review" }],
+      } }),
+      created_at: new Date().toISOString(),
+      verification_audit: {
+        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
+        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
+        record_limit: 20, truncated: false,
+      },
+    });
+    const { container } = render(
+      <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
+        transitions={[{
+          id: 14, actor: "operator", action: "claim_review_pending",
+          from_workflow_status: "active", to_workflow_status: "active",
+          from_verification_status: "confirmed", to_verification_status: "confirmed",
+          verification_event_version: 2, from_severity: "high", to_severity: "high",
+          reason_code: "claim_text_changed", artifact_ref: "", created_at: new Date().toISOString(),
+          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("View details"));
+    expect(await screen.findByText("Verdict effect")).toBeTruthy();
+    // The overall effect, then the summary axis that raised it.
+    expect(screen.getAllByText("Claim review")).toHaveLength(2);
+    expect(screen.getByText("summary")).toBeTruthy();
+    expect(screen.getByText("title").closest("dt")?.nextElementSibling?.textContent).toBe("Verdict kept");
+    expect(container.textContent).not.toContain("[object Object]");
+  });
+});
+
 describe("finding claim review state", () => {
   it("shows the pending independent review transition and current claim digest", async () => {
     const finding = {

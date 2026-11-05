@@ -354,8 +354,26 @@ export type AssessmentVerificationAudit = {
   claim_review_pending?: boolean;
   claim_transition_id?: number | null;
   current_claim_sha256?: string;
+  claim_digest_version?: number;
   record_limit: number;
   truncated: boolean;
+};
+
+/** What a finding write did to its verdict; the backend change policy owns it. */
+export type FindingVerificationEffect = "keep" | "claim_review" | "invalidate";
+
+/** `metadata.change_policy` on a finding transition: each changed axis and its effect. */
+export type FindingChangePolicy = {
+  version: number;
+  effect: FindingVerificationEffect;
+  axes: { axis: string; effect: FindingVerificationEffect }[];
+};
+
+/** Verdict fields on finding patch, merge, relocate and link responses. */
+export type FindingVerdictEffect = {
+  verification_effect: FindingVerificationEffect;
+  verification_invalidated: boolean;
+  changed_axes: string[];
 };
 
 export type AssessmentConfirmCheck = {
