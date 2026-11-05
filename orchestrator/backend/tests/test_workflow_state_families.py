@@ -56,6 +56,8 @@ def test_transactional_roles_owe_race_and_business_logic_review(role):
         ("internal/payouts/handler.go", "go"),
         ("lib/vouchers/apply.rb", "ruby"),
         ("src/main/java/com/acme/entitlement/Grants.java", "java"),
+        ("includes/payment.inc", "php"),
+        ("modules/acme_checkout/acme_checkout.module", "php"),
     ],
 )
 def test_transactional_paths_owe_race_and_business_logic_review(file_path, language):
@@ -128,6 +130,8 @@ def test_one_time_code_and_reset_files_owe_rate_limit_review(role, file_path):
         ("", "templates/emails/refund.ftl", "freemarker"),
         ("", "resources/views/checkout.blade.php", "blade"),
         ("", "templates/checkout.html.twig", "twig"),
+        ("", "app/design/frontend/checkout/cart.phtml", "php"),
+        ("", "ext/wallet/refund_basic.phpt", "php"),
     ],
 )
 def test_words_that_merely_contain_a_token_and_non_source_paths_owe_nothing_new(

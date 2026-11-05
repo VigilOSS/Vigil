@@ -9100,6 +9100,9 @@ _WORKFLOW_PATH_SKIPPED_SEGMENTS = frozenset(
         "locales", "i18n", "translations", "migrations",
     }
 )
+# PHP the index reads as `php` that is still a page template (`.phtml`) or a
+# test case (`.phpt`), skipped like the template languages and test names.
+_WORKFLOW_PATH_SKIPPED_SUFFIXES = (".phtml", ".phpt")
 _WORD_PATTERN = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+")
 
 
@@ -9119,6 +9122,8 @@ def _workflow_path_words(file_path: str, language: str) -> list[str]:
         return []
     directories, name = segments[:-1], segments[-1]
     if any(segment.lower() in _WORKFLOW_PATH_SKIPPED_SEGMENTS for segment in directories):
+        return []
+    if name.lower().endswith(_WORKFLOW_PATH_SKIPPED_SUFFIXES):
         return []
     stem = name.rsplit(".", 1)[0] if "." in name.lstrip(".") else name
     lowered = stem.lower()
