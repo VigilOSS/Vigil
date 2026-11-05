@@ -111,7 +111,7 @@ def register(subparsers) -> None:
     obligation_update.set_defaults(func=_run_obligation_update)
     obligation_release = obligation_actions.add_parser(
         "release",
-        help="Release an unread proof-run source the producer will not read.",
+        help="Release an unread or accepted-gap proof-run source the producer will not read.",
     )
     obligation_release.add_argument("run_id", type=int)
     obligation_release.add_argument("obligation_id", type=int)
