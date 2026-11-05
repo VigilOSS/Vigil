@@ -408,6 +408,7 @@ class StreamingSecurityScanner:
         signal_limit: int = STRUCTURAL_SIGNAL_LIMIT,
         window_bytes: int = STREAMING_SCAN_WINDOW_BYTES,
         overlap_bytes: int = STREAMING_SCAN_OVERLAP_BYTES,
+        sources_only: bool = False,
     ) -> None:
         if signal_limit < 1:
             raise ValueError("signal_limit must be positive")
@@ -415,6 +416,11 @@ class StreamingSecurityScanner:
             raise ValueError("streaming scan window must exceed its positive overlap")
         self.file_path = file_path
         self.language = language
+        # Every structurally parsed file reads its taint sources through this
+        # scanner and keeps nothing else, so that caller skips the other
+        # readers. Sources depend only on line framing, comment detection and
+        # their own patterns, none of which the skipped readers touch.
+        self.sources_only = sources_only
         self.signal_limit = signal_limit
         self.window_bytes = window_bytes
         self.overlap_bytes = overlap_bytes
@@ -437,11 +443,16 @@ class StreamingSecurityScanner:
         self.security_sources: list[dict[str, Any]] = []
         self.signal_counts = {dimension: 0 for dimension in _SIGNAL_DIMENSIONS}
         self._truncated: set[str] = set()
-        self._sink_patterns = self._compile_sink_patterns()
         self._source_patterns = [
             (kind, _byte_pattern(pattern))
             for kind, pattern in _STREAM_SOURCE_PATTERNS.get(language, [])
         ]
+        self._sink_patterns: list[tuple[str, re.Pattern[bytes], list[str]]] = []
+        self._entry_patterns: list[tuple[str, re.Pattern[bytes]]] = []
+        self._import_patterns: list[re.Pattern[bytes]] = []
+        if sources_only:
+            return
+        self._sink_patterns = self._compile_sink_patterns()
         self._entry_patterns = [
             (item["kind"], _byte_pattern(item["pattern"]))
             for item in (
@@ -627,7 +638,7 @@ class StreamingSecurityScanner:
     def _scan_window(self, window: bytes, *, accept_before: int) -> None:
         if self._line_comment is True:
             return
-        if self.language == "php":
+        if self.language == "php" and not self.sources_only:
             self._read_php_use(window[:accept_before])
         self._line_windows += 1
         for kind, pattern, vuln_classes in self._sink_patterns:
@@ -763,6 +774,14 @@ def streaming_security_fallback(
     return scanner.finish(degradation_reason=degradation_reason)
 
 
+def _scan_bytes(
+    scanner: StreamingSecurityScanner, source: bytes, *, degradation_reason: str
+) -> dict[str, Any]:
+    for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES):
+        scanner.feed(source[offset : offset + STREAMING_SCAN_WINDOW_BYTES])
+    return scanner.finish(degradation_reason=degradation_reason)
+
+
 def _fallback_from_bytes(
     file_path: str,
     language: str,
@@ -770,10 +789,9 @@ def _fallback_from_bytes(
     *,
     degradation_reason: str,
 ) -> dict[str, Any]:
-    return streaming_security_fallback(
-        file_path,
-        language,
-        (source[offset : offset + STREAMING_SCAN_WINDOW_BYTES] for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES)),
+    return _scan_bytes(
+        StreamingSecurityScanner(file_path, language),
+        source,
         degradation_reason=degradation_reason,
     )
 
@@ -794,9 +812,8 @@ def _attach_bounded_security_sources(
         counts["security_sources"] = len(indexed["security_sources"])
         indexed["signal_counts"] = counts
         return indexed
-    observed = _fallback_from_bytes(
-        file_path,
-        language,
+    observed = _scan_bytes(
+        StreamingSecurityScanner(file_path, language, sources_only=True),
         source,
         degradation_reason="bounded_security_source_scan",
     )
