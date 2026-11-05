@@ -903,6 +903,55 @@ def test_a_literal_file_scope_return_opens_no_segment(source: bytes) -> None:
     assert _segments(index_file("src/stop.php", "php", source)) == []
 
 
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(
+            b"<?php\n$plugin->version = 2026110500;\n$plugin->maturity = MATURITY_STABLE;\n",
+            id="constant-assignment",
+        ),
+        pytest.param(
+            b"<?php\n$capabilities = [\n    'acme:view' => ['riskbitmask' => RISK_SPAM | RISK_XSS],\n];\n",
+            id="constant-operators-in-array",
+        ),
+        pytest.param(
+            b"<?php\nreturn [\n    'providers' => [Acme\\Mail::class],\n    'level' => E_ALL & ~E_NOTICE,\n];\n",
+            id="class-constants-return",
+        ),
+        pytest.param(
+            b"<?php\n$config['temp_dir'] = ACME_ROOT . 'temp/';\n$string['title'] = 'Acme ' . 'portal';\n",
+            id="constant-concatenation",
+        ),
+        pytest.param(b"<?php\nglobal $CFG;\n", id="file-scope-global"),
+        pytest.param(
+            b"<?php\nif (!is_callable('acme_hash')) {\n    function acme_hash() { return 1; }\n}\n",
+            id="is-callable-guard",
+        ),
+    ],
+)
+def test_constant_valued_php_file_scope_opens_no_segment(source: bytes) -> None:
+    """A value built only from literals, constants and operators over them is
+    fixed when the file loads; a reviewer has nothing in it to read."""
+    assert _segments(index_file("local/acme/version.php", "php", source)) == []
+
+
+@pytest.mark.parametrize(
+    ("source", "segments"),
+    [
+        pytest.param(b"<?php\n$plugin->maturity = acme_maturity();\n", [(2, 2)], id="call"),
+        pytest.param(b"<?php\n$config['dir'] = $root . 'temp/';\n", [(2, 2)], id="variable"),
+        pytest.param(b"<?php\nreturn [Acme\\Mail::create()];\n", [(2, 2)], id="static-call"),
+        pytest.param(
+            b"<?php\nif (!is_callable($hook)) {\n    function acme_hook() { return 1; }\n}\n",
+            [(2, 2)],
+            id="runtime-probe",
+        ),
+    ],
+)
+def test_a_php_value_computed_at_load_still_opens_a_segment(source: bytes, segments: list) -> None:
+    assert _segments(index_file("local/acme/settings.php", "php", source)) == segments
+
+
 def test_an_anonymous_migration_class_owes_only_its_head() -> None:
     source = b"""<?php
 use Acme\\Schema\\Migration;

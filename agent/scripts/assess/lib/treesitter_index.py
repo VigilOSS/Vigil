@@ -3905,7 +3905,7 @@ _PHP_DECLARING_CALLS = frozenset({"define", "class_alias"})
 # read nothing but the symbol table.
 _PHP_EXISTENCE_PROBES = frozenset({
     "defined", "function_exists", "class_exists", "interface_exists",
-    "trait_exists", "enum_exists",
+    "trait_exists", "enum_exists", "is_callable",
 })
 _PHP_EXIT_NAMES = frozenset({"die", "exit"})
 # Operands a constant expression is built from: constant and class-constant
@@ -3919,12 +3919,21 @@ _PHP_CONSTANT_OPERATOR_TYPES = frozenset({
 
 
 def _php_constant_expression(node: Any) -> bool:
-    """Whether a PHP value is fixed at compile time: no variable, no call."""
-    if node.type in _PHP_CONSTANT_NAME_TYPES or _is_literal_value(node):
-        return True
-    return node.type in _PHP_CONSTANT_OPERATOR_TYPES and all(
-        _php_constant_expression(child) for child in node.named_children
-    )
+    """Whether a PHP value is fixed at compile time: no variable, no call.
+
+    Literals, arrays of constant values, constant and class-constant names and
+    operators over them all qualify (`RISK_SPAM | RISK_XSS`, `ROOT . 'tmp/'`,
+    `[Mail::class]`).
+    """
+    stack = [node]
+    while stack:
+        current = stack.pop()
+        if current.type in _PHP_CONSTANT_NAME_TYPES or _is_literal_value(current):
+            continue
+        if current.type not in _PHP_CONSTANT_OPERATOR_TYPES and current.type not in _LITERAL_CONTAINER_TYPES:
+            return False
+        stack.extend(child for child in current.named_children if not _is_comment_node(child))
+    return True
 
 
 def _php_global_call_name(node: Any, source: bytes) -> str:
@@ -4085,12 +4094,17 @@ def _is_executable_file_scope_node(node: Any, language: str, source: bytes) -> b
         and _php_declares_only(node.named_children[0], source)
     ):
         return False
+    # A PHP value built from literals and constants is fixed when the file loads.
+    fixed_value = _php_constant_expression if language == "php" else _is_literal_value
+    if language == "php" and node_type == "global_declaration":
+        # `global $CFG;` at file scope names a variable already in scope.
+        return False
     if node_type == "return_statement":
         # A file that returns a literal -- a configuration array, a bare
         # `return;` -- computes nothing; what it returns is read where it is
         # included.
         return any(
-            not _is_literal_value(child)
+            not fixed_value(child)
             for child in node.named_children
             if not _is_comment_node(child)
         )
@@ -4117,8 +4131,8 @@ def _is_executable_file_scope_node(node: Any, language: str, source: bytes) -> b
             return False
     values = _binding_values(node)
     if values is not None:
-        return any(not _is_literal_value(value) for value in values)
-    return not _is_literal_value(node)
+        return any(not fixed_value(value) for value in values)
+    return not fixed_value(node)
 
 
 def _has_descendant_type(node: Any, node_type: str) -> bool:
