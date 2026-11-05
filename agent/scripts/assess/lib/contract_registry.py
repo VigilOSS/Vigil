@@ -2330,7 +2330,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "confidence",
             "finding_slug when disposition=finding",
             "cwe_coverage",
-            "cross_file_triggers",
+            "cross_file_triggers entries with file_path, reason, vuln_class, and outside_snapshot=true only for a target outside this repository's snapshot",
         ),
         helper_defaults=(
             ("file_id", "derived by the backend from queue_item_id; optional client-side consistency check only"),
@@ -2341,6 +2341,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("audit_metadata", "{}"),
             ("cwe_coverage", "[]"),
             ("cross_file_triggers", "[]"),
+            ("cross_file_triggers[].outside_snapshot", "false"),
         ),
         notes=(
             "Record analysis results only for queue items fetched by code-dispatch. queue_item_id, agent_name, and lease_token are required; agent_name is the dispatch agent_id the lease was fetched under, never the role name; reclaimed leases reject stale writes.",
@@ -2353,6 +2354,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "For finding and suspicious dispositions, include concrete inline evidence or an engagement-owned evidence_ref before closeout; the backend verifies that evidence on the active lease.",
             "When file_id is supplied, the backend treats it as a consistency check and rejects it if it differs from the queue item's file.",
             "For a confirmed finding, run finding record first, then put that slug in finding_slug.",
+            "Each cross_file_triggers file_path is checked against the claimed repository's current generation before anything is recorded: a missing path refuses the whole result with the closest admitted path and the lease stays held. outside_snapshot=true records the target pending for code-dispatch resolve-triggers and is refused for a path that is a snapshot file.",
         ),
         common_mistakes=(
             ("file_id-only result", "include queue_item_id; file_id is optional and queue-derived"),
@@ -2361,6 +2363,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("artifact path only in notes", "put an engagement-owned path in evidence_ref so evidence-aware closeout can verify it"),
             ("confidence in finding record", "confidence belongs in code-record analysis, not finding record"),
             ("cross_file_triggers object wrapper", "cross_file_triggers is a bare array on the analysis result"),
+            ("outside_snapshot on a mistyped trigger path", "correct file_path to the admitted file; outside_snapshot is only for a target the snapshot cannot hold"),
         ),
         examples=(
             {
@@ -2385,7 +2388,19 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "cwe_coverage": [
                     {"family": "buffer-overflow", "effort": 85, "notes": "All parser entry chains traced"}
                 ],
-                "cross_file_triggers": [],
+                "cross_file_triggers": [
+                    {
+                        "file_path": "src/url_helpers.c",
+                        "reason": "parse_message passes the attacker-sized len to url_decode(), which sizes its own copy",
+                        "vuln_class": "buffer-overflow",
+                    },
+                    {
+                        "file_path": "libacme_codec.so",
+                        "reason": "parse_message hands the decoded body to acme_codec_read() in a prebuilt library outside the checkout",
+                        "vuln_class": "buffer-overflow",
+                        "outside_snapshot": True,
+                    },
+                ],
             },
             # An unsupported-language file has no registered callables, so the
             # span IS its coverage evidence — and the whole-file span is the only

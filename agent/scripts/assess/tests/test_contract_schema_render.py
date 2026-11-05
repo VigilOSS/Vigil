@@ -178,3 +178,25 @@ def test_every_depth_blocker_kind_transition_phase_raises_is_named_in_a_contract
     )
     for kind in sorted(kinds):
         assert kind in published, kind
+
+
+def test_code_record_examples_demonstrate_both_cross_file_trigger_targets() -> None:
+    # A trigger target is checked against the current generation, and only an
+    # explicit outside_snapshot flag records a target the snapshot cannot hold.
+    # Examples that only ever show `[]` never teach either shape, and every
+    # example must still pass the bundled schema the CLI enforces.
+    from assess.lib.schema_validation import collect_validation_errors, load_schema
+
+    contract = contracts.get_contract("code-record analysis")
+    assert contract is not None
+    schema = load_schema(contract.schema_name)
+
+    for example in contract.examples:
+        assert collect_validation_errors(example, schema) == []
+    triggers = [
+        trigger
+        for example in contract.examples
+        for trigger in example.get("cross_file_triggers") or []
+    ]
+    assert any(not trigger.get("outside_snapshot") for trigger in triggers)
+    assert any(trigger.get("outside_snapshot") is True for trigger in triggers)
