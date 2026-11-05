@@ -14,7 +14,7 @@ from assess.lib.treesitter_catalogues import (
     _PHP_STREAM_EXTRACT,
     _SINK_DEFINITIONS,
 )
-from assess.lib.treesitter_common import _php_import_record
+from assess.lib.treesitter_common import _gate_literals, _literal_gate, _php_import_record
 from assess.lib.treesitter_lightweight import (
     _LUA_DYNAMIC_REDIS_COMMAND_RE,
     _PS_SINK_PATTERNS,
@@ -450,21 +450,35 @@ class StreamingSecurityScanner:
         self._sink_patterns: list[tuple[str, re.Pattern[bytes], list[str]]] = []
         self._entry_patterns: list[tuple[str, re.Pattern[bytes]]] = []
         self._import_patterns: list[re.Pattern[bytes]] = []
-        if sources_only:
-            return
-        self._sink_patterns = self._compile_sink_patterns()
-        self._entry_patterns = [
-            (item["kind"], _byte_pattern(item["pattern"]))
-            for item in (
-                _ENTRY_ANNOTATIONS.get(language, []) + _ENTRY_LINE_PATTERNS.get(language, [])
-            )
-        ] + [
-            (kind, _byte_pattern(pattern))
-            for kind, pattern in _STREAM_EXTRA_ENTRY_PATTERNS.get(language, [])
-        ]
-        self._import_patterns = [
-            _byte_pattern(pattern) for pattern in _STREAM_IMPORT_PATTERNS.get(language, [])
-        ]
+        if not sources_only:
+            self._sink_patterns = self._compile_sink_patterns()
+            self._entry_patterns = [
+                (item["kind"], _byte_pattern(item["pattern"]))
+                for item in (
+                    _ENTRY_ANNOTATIONS.get(language, []) + _ENTRY_LINE_PATTERNS.get(language, [])
+                )
+            ] + [
+                (kind, _byte_pattern(pattern))
+                for kind, pattern in _STREAM_EXTRA_ENTRY_PATTERNS.get(language, [])
+            ]
+            self._import_patterns = [
+                _byte_pattern(pattern) for pattern in _STREAM_IMPORT_PATTERNS.get(language, [])
+            ]
+        # Most windows hold no literal any pattern requires. One search of the
+        # lowered window rules those out; only the patterns the gate does not
+        # cover still run there, in their catalogue order.
+        self._literal_gate = _literal_gate((
+            *(pattern for _kind, pattern, _classes in self._sink_patterns),
+            *(pattern for _kind, pattern in self._source_patterns),
+            *(pattern for _kind, pattern in self._entry_patterns),
+            *self._import_patterns,
+        ))
+        self._ungated_patterns = (
+            [entry for entry in self._sink_patterns if _gate_literals(entry[1]) is None],
+            [entry for entry in self._source_patterns if _gate_literals(entry[1]) is None],
+            [entry for entry in self._entry_patterns if _gate_literals(entry[1]) is None],
+            [pattern for pattern in self._import_patterns if _gate_literals(pattern) is None],
+        )
 
     def _compile_sink_patterns(
         self,
@@ -641,7 +655,12 @@ class StreamingSecurityScanner:
         if self.language == "php" and not self.sources_only:
             self._read_php_use(window[:accept_before])
         self._line_windows += 1
-        for kind, pattern, vuln_classes in self._sink_patterns:
+        sink_patterns, source_patterns, entry_patterns, import_patterns = (
+            (self._sink_patterns, self._source_patterns, self._entry_patterns, self._import_patterns)
+            if self._literal_gate is None or self._literal_gate.search(window.lower())
+            else self._ungated_patterns
+        )
+        for kind, pattern, vuln_classes in sink_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue
@@ -662,7 +681,7 @@ class StreamingSecurityScanner:
                 if kind == "file_inclusion":
                     sink["argument_shape"] = "unclassified"
                 self._retain("security_sinks", sink)
-        for kind, pattern in self._source_patterns:
+        for kind, pattern in source_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue
@@ -675,7 +694,7 @@ class StreamingSecurityScanner:
                         "detection": "heuristic_streaming",
                     },
                 )
-        for kind, pattern in self._entry_patterns:
+        for kind, pattern in entry_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue
@@ -689,7 +708,7 @@ class StreamingSecurityScanner:
                         "detection": "heuristic_streaming",
                     },
                 )
-        for pattern in self._import_patterns:
+        for pattern in import_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue

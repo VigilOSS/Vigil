@@ -1,7 +1,127 @@
 """Small shared primitives for structural index extractors."""
 from __future__ import annotations
 
+import re
+from functools import lru_cache
+from re import _constants as _sre_constants  # type: ignore[attr-defined]
+from re import _parser as _sre_parser  # type: ignore[attr-defined]
 from typing import Any
+
+_REPEATS = (
+    _sre_constants.MAX_REPEAT,
+    _sre_constants.MIN_REPEAT,
+    _sre_constants.POSSESSIVE_REPEAT,
+)
+
+
+def _literal_need(items: Any, *, case_blind: bool) -> frozenset[Any] | None:
+    """Literals one of which every match of a parsed sequence contains.
+
+    A run of consecutive literal characters is matched verbatim; a group, an
+    alternation all of whose branches need a literal, and a repeat that must
+    match at least once pass their own requirement up. Anything else ends the
+    run. The longest-shortest candidate wins, so the literal is as selective
+    as the sequence allows.
+    """
+    best: frozenset[Any] | None = None
+    run: list[int] = []
+
+    def offer(candidate: frozenset[Any] | None) -> None:
+        nonlocal best
+        if candidate and (best is None or min(map(len, candidate)) > min(map(len, best))):
+            best = candidate
+
+    def flush() -> None:
+        if run:
+            offer(frozenset({tuple(run)}))
+            run.clear()
+
+    for op, argument in items:
+        if op is _sre_constants.LITERAL:
+            run.append(argument)
+            continue
+        if op is _sre_constants.AT:
+            # A zero-width anchor leaves its neighbours adjacent.
+            continue
+        flush()
+        if op is _sre_constants.SUBPATTERN:
+            _group, add_flags, _del_flags, body = argument
+            if add_flags & _sre_constants.SRE_FLAG_IGNORECASE and not case_blind:
+                continue
+            offer(_literal_need(body, case_blind=case_blind))
+        elif op is _sre_constants.ATOMIC_GROUP:
+            offer(_literal_need(argument, case_blind=case_blind))
+        elif op is _sre_constants.BRANCH:
+            branches = [_literal_need(branch, case_blind=case_blind) for branch in argument[1]]
+            if all(branches):
+                offer(frozenset().union(*branches))  # type: ignore[arg-type]
+        elif op in _REPEATS and argument[0] >= 1:
+            offer(_literal_need(argument[2], case_blind=case_blind))
+    flush()
+    return best
+
+
+@lru_cache(maxsize=None)
+def _required_literals(pattern: re.Pattern[Any]) -> frozenset[Any] | None:
+    """Substrings one of which every match of *pattern* contains, or None.
+
+    They let a line reader skip text no match could occur in, without
+    running the pattern. A bytes pattern yields lowercase literals for text
+    lowered the same ASCII-only way its case-blind matching works. A str
+    pattern yields exact literals, and none when it is case-blind: Unicode
+    case folding (`ſ` matches `s`) is not `str.lower`. None means the
+    pattern needs no literal and must always run.
+    """
+    is_bytes = isinstance(pattern.pattern, bytes)
+    flags = pattern.flags
+    if is_bytes and flags & re.LOCALE:
+        return None
+    if not is_bytes and flags & re.IGNORECASE:
+        return None
+    try:
+        parsed = _sre_parser.parse(pattern.pattern, flags)
+    except Exception:  # noqa: BLE001 - an unreadable pattern just runs ungated
+        return None
+    need = _literal_need(parsed, case_blind=is_bytes)
+    if need is None:
+        return None
+    if is_bytes:
+        return frozenset(bytes(codes).lower() for codes in need)
+    return frozenset("".join(map(chr, codes)) for codes in need)
+
+
+# A literal shorter than this (`e`, `$`, a backtick) is in nearly every line,
+# so a pattern requiring one is left ungated rather than defeating the gate.
+_GATE_LITERAL_MIN_LENGTH = 3
+
+
+def _gate_literals(pattern: re.Pattern[Any]) -> frozenset[Any] | None:
+    """The literals a gate admits *pattern* by, or None to always run it."""
+    literals = _required_literals(pattern)
+    if literals is None or min(map(len, literals)) < _GATE_LITERAL_MIN_LENGTH:
+        return None
+    return literals
+
+
+@lru_cache(maxsize=256)
+def _literal_gate(patterns: tuple[re.Pattern[Any], ...]) -> re.Pattern[Any] | None:
+    """One search that finds any literal some gated pattern requires.
+
+    Text it does not match cannot match any pattern `_gate_literals` gates;
+    bytes text must be lowered first. None when no pattern is gated.
+    """
+    literals = {
+        literal
+        for pattern in patterns
+        for literal in (_gate_literals(pattern) or ())
+    }
+    if not literals:
+        return None
+    ordered = sorted(literals, key=lambda literal: (-len(literal), literal))
+    if isinstance(ordered[0], bytes):
+        return re.compile(b"|".join(re.escape(literal) for literal in ordered))
+    return re.compile("|".join(re.escape(literal) for literal in ordered))
+
 
 def _snippet(line: str, limit: int = 120) -> str:
     s = line.strip()

@@ -8,7 +8,13 @@ reference is always the unoptimised reading of the same Acme fixture.
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
+import pytest
+
+from assess.lib.code_languages import STRUCTURAL_SUPPORTED_LANGUAGES
+from assess.lib.treesitter_common import _gate_literals, _literal_gate, _required_literals
+from assess.lib.treesitter_index import _function_scoped_reader_patterns
 from assess.lib.treesitter_streaming import (
     StreamingSecurityScanner,
     _attach_bounded_security_sources,
@@ -59,3 +65,67 @@ def test_a_sources_only_scanner_keeps_the_source_signal_limit() -> None:
     assert sources_only["signal_counts"]["security_sources"] == 12
     assert "security_sources" in sources_only["truncated_dimensions"]
     assert re.search(r"\$_GET", sources_only["security_sources"][0]["snippet"])
+
+
+@pytest.mark.parametrize(
+    "pattern, expected",
+    [
+        (re.compile(r"(?<!->)(?<!::)\bunlink\s*\("), {"unlink"}),
+        # An optional group requires nothing; the literal after it does.
+        (re.compile(r"(?:ab)?cde"), {"cde"}),
+        # Every branch needs one of its own, or the alternation needs none.
+        (re.compile(r"->(?:(?:or)?(?:where|having)Raw|selectRaw)\s*\("), {"where", "having", "selectRaw"}),
+        (re.compile(r"\$\w+->(?:query|\w+Raw)\s*\("), {"query", "Raw"}),
+        (re.compile(r"(?:ab)+c"), {"ab"}),
+        (re.compile(r"\b\w+\s*\("), {"("}),
+        (re.compile(r"\b\w+\b"), None),
+        # A case-blind str literal is not a substring test.
+        (re.compile(r"(?i:exec)\s*\(\s*shell"), {"shell"}),
+        (re.compile(r"shell", re.IGNORECASE), None),
+        # Bytes compare lowered, matching their ASCII-only case folding.
+        (re.compile(rb"(?-i:\bSTDIN\b)|php://stdin", re.IGNORECASE), {b"stdin", b"php://stdin"}),
+        (re.compile(rb"\$_(?:GET|POST)\b", re.IGNORECASE), {b"get", b"post"}),
+    ],
+)
+def test_required_literals_are_what_every_match_contains(pattern, expected) -> None:
+    assert _required_literals(pattern) == (None if expected is None else frozenset(expected))
+
+
+def _catalogue_patterns() -> list[re.Pattern]:
+    patterns: list[re.Pattern] = [
+        compiled
+        for language in STRUCTURAL_SUPPORTED_LANGUAGES
+        for compiled in _function_scoped_reader_patterns(language)
+    ]
+    for language in STRUCTURAL_SUPPORTED_LANGUAGES:
+        scanner = StreamingSecurityScanner("acme.txt", language)
+        patterns.extend(pattern for _kind, pattern, _classes in scanner._sink_patterns)
+        patterns.extend(pattern for _kind, pattern in scanner._source_patterns)
+        patterns.extend(pattern for _kind, pattern in scanner._entry_patterns)
+        patterns.extend(scanner._import_patterns)
+    return patterns
+
+
+def test_no_catalogue_match_lies_on_a_line_its_gate_rejects() -> None:
+    # The signal fixtures beside this file are a corpus written to match the
+    # catalogues; every line one of them matches must pass that pattern's gate.
+    lines = [
+        line
+        for glob in ("test_*_index_signals.py", "test_*catalogue*.py", "test_indexer_*.py")
+        for path in sorted(Path(__file__).parent.glob(glob))
+        for line in path.read_text(encoding="utf-8").splitlines()
+    ]
+    checked = 0
+    for pattern in _catalogue_patterns():
+        literals = _gate_literals(pattern)
+        if literals is None:
+            continue
+        gate = _literal_gate((pattern,))
+        for line in lines:
+            text = line.encode() if isinstance(pattern.pattern, bytes) else line
+            if pattern.search(text):
+                checked += 1
+                lowered = text.lower() if isinstance(text, bytes) else text
+                assert gate.search(lowered), (pattern.pattern, line)
+                assert any(literal in lowered for literal in literals)
+    assert checked > 500
