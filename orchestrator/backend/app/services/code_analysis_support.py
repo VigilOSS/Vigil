@@ -2272,8 +2272,8 @@ def _analysis_repo_files_sql(files_alias: str) -> str:
 
 
 # Registered on the connection that runs a glob-scoped query. fnmatchcase is the
-# dialect queue submission matches globs with, so a glob scopes listing, claims
-# and coverage exactly as it selects files to queue.
+# dialect queue submission matches globs with, so a glob scopes listing and
+# claims exactly as it selects files to queue.
 PATH_GLOB_SQL_FUNCTION = "vigil_path_glob"
 
 

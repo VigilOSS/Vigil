@@ -8,17 +8,35 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 ## [Unreleased]
 
 After upgrading, run `vigil assess code-index build` and then `code-index sync` for each code
-repository in an existing engagement. Re-ingesting a repository of shipped or recovered bundles
-needs `--include-minified` to keep its file set.
+repository in an existing engagement. Re-ingest a repository with `.inc`, `.phtml`, `.module`,
+`.install`, `.theme`, `.php5`, `.php7` or `.phpt` files to index them; its generation moves.
+Re-ingesting a repository of shipped or recovered bundles needs `--include-minified` to keep its
+file set. Transactional, webhook and one-time-code files in open engagements owe their new
+families at once: run `code-coverage --cwe-matrix`, then reanalyse each file or record the family
+`not_applicable`.
 
 ### Added
 
 - The structural index reads file scope in every tree-sitter language as `<top-level>`, so
   module-level code, PHP pages, Go package variables and C macro bodies report sinks and calls.
-- Entry points `php_script`, `php_rendered_page`, `go_http_handler`, `node_http_server` and
-  `tornado_handler`, and Django, Flask and Tornado route-table rows.
+- File-scope code that runs is reviewed as `<top-level>` callables, one per segment;
+  declarations and comments open none.
+- Entry points `php_script`, `php_rendered_page`, `php_cli_script`, `go_http_handler`,
+  `node_http_server` and `tornado_handler`, and Django, Flask and Tornado route-table rows.
 - Request sources `php://input`, `filter_input`, PHP header helpers, Tornado `self` accessors,
   Node `req.url` and Go `r.URL.Path`, `r.Body` and `r.Form`.
+- PHP CLI arguments, `getopt`, `STDIN` and `readline` are `process_input` sources.
+- PHP `include`/`require` are `kind: include` import edges, each with a status resolved against
+  the snapshot and its exclusions. Include sinks carry the argument and its shape.
+- `.inc`, `.phtml`, `.module`, `.install`, `.theme`, `.php5`, `.php7` and `.phpt` files index as
+  PHP; `.inc`, `.module`, `.install` and `.theme` only when their first lines open a PHP tag.
+- PHP sinks for Laravel and WordPress raw SQL, property-held database handles, Laravel, WordPress
+  and Guzzle HTTP, file delete/copy/`readfile`/`move_uploaded_file`, backticks, `pcntl_exec`,
+  `mail()`'s fifth argument and `extract()`.
+- Calls through a runtime-chosen function, method or class are `dynamic_invocation` sinks.
+- `code-dispatch list` and `fetch` take repeatable `--path-prefix` and `--path-glob` scopes.
+- `code-coverage --by-path` breaks coverage down by directory.
+- Business-logic and request-level race-condition references for code review.
 - Finding writes return `verification_effect` and `changed_axes`; `finding merge` and
   `finding link` print the effect, and finding history shows it for each changed axis.
 - `run-audit obligation release` lets a proof run's producer release an unread source, or one
@@ -44,8 +62,15 @@ needs `--include-minified` to keep its file set.
   verified sibling.
 - A proof run's `completed` request is refused with 409 while blockers remain, naming unread
   sources first. A scan with open debt seals `partial`.
-- An indexed file with source but no callable, or with unscanned function scope, needs a
-  whole-file reviewed span as review proof.
+- Review proof covers each `<top-level>` segment by its exact callable ref or a covering span;
+  citing a function never covers file scope, and function counts, the receipt view's included,
+  exclude it.
+- An indexed file with source but no callable or segment, or with unscanned function scope, needs
+  a whole-file reviewed span as review proof.
+- Transactional and webhook files owe race-condition and business-logic review, and OTP, MFA and
+  password-reset files owe rate-limit, from whole role and path words.
+- PHP `assert()` is a sink only with a string or variable argument, and `hash()` only with a weak
+  or chosen algorithm.
 - `code-ingest` skips `vendor/` in any letter case, forge-archive copies, `.phps` files,
   content-hashed chunks and minified JavaScript/CSS by default. `--include-path` and
   `--include-minified` re-admit them.
@@ -90,6 +115,7 @@ needs `--include-minified` to keep its file set.
 - `source-read record` names the expected path when the supplied one does not match.
 - PHP enum and anonymous-class methods are qualified by their class; `->exec(` is SQL execution
   and `json_decode` is not deserialization.
+- Deeply nested source is indexed from the parse tree.
 
 ## [2.3.2] - 2026-11-03
 

@@ -10130,7 +10130,7 @@ def code_coverage_cwe_detail(
     repo_id: int | None = None,
 ) -> dict[str, Any]:
     """Return per-file coverage with accumulated CWE coverage from queue done
-    records, plus applicable_families computed from file slot_types."""
+    records, plus applicable_families from `_applicable_families_for_file`."""
     engagement = _engagement_or_404(engagement_id)
 
     repo_clause = f"""
