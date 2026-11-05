@@ -4184,9 +4184,17 @@ def _php_call_shape(call: Any) -> tuple[Any, Any, Any] | None:
 _PHP_AST_SINK_QUERY = "\n".join((
     "(shell_command_expression) @shell",
     "(function_call_expression) @call",
+    "(member_call_expression) @method",
+    "(nullsafe_member_call_expression) @method",
+    "(scoped_call_expression) @method",
     "(object_creation_expression) @new",
 ))
-_PHP_DYNAMIC_CALLERS = frozenset({"call_user_func", "call_user_func_array"})
+_PHP_DYNAMIC_CALLERS = frozenset({
+    "call_user_func", "call_user_func_array", "forward_static_call", "forward_static_call_array",
+})
+# Callees that name their function in the source text: `acme_render(...)`,
+# `\Acme\render(...)`. Every other callee is a value chosen at run time.
+_PHP_NAMED_CALLEE_TYPES = frozenset({"name", "qualified_name", "relative_name"})
 _PHP_LITERAL_CALLABLE_TYPES = frozenset({"anonymous_function", "arrow_function"})
 _PHP_GUZZLE_CLIENT = "GuzzleHttp\\Client"
 
@@ -4238,8 +4246,12 @@ def _php_ast_sinks(
         ]
         if function is None:
             continue
-        if function.type == "variable_name":
-            found.append(("dynamic_invocation", call))
+        callee = function
+        while callee.type == "parenthesized_expression" and callee.named_children:
+            callee = callee.named_children[0]
+        if callee.type not in _PHP_NAMED_CALLEE_TYPES:
+            if not _php_literal_callable(callee):
+                found.append(("dynamic_invocation", call))
             continue
         name = _node_text(function, source).lstrip("\\").lower()
         if name in _PHP_DYNAMIC_CALLERS and values:
@@ -4250,6 +4262,12 @@ def _php_ast_sinks(
             len(values) >= 5 or any(value.type == "variadic_unpacking" for value in values)
         ):
             found.append(("process_exec", call))
+    for method_call in captures.get("method", []):
+        # `$client->$fn()`, `$client->{$fn}()`, `Acme::$fn()`: the method is a
+        # value chosen at run time.
+        method = method_call.child_by_field_name("name")
+        if method is not None and method.type != "name" and not _php_literal_string(method):
+            found.append(("dynamic_invocation", method_call))
     for creation in captures.get("new", []):
         target = next(
             (

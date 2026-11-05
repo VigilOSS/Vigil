@@ -67,6 +67,17 @@ def _kinds(statement: str, *, prelude: str = "") -> set[str]:
         pytest.param("$fn($id);", "dynamic_invocation", id="variable-function"),
         pytest.param("$o = new $cls($id);", "dynamic_invocation", id="variable-class"),
         pytest.param("$o = new $this->handler($id);", "dynamic_invocation", id="property-class"),
+        pytest.param("$client->$fn($id);", "dynamic_invocation", id="variable-method"),
+        pytest.param("$client->{$fn}($id);", "dynamic_invocation", id="braced-variable-method"),
+        pytest.param("$client?->$fn($id);", "dynamic_invocation", id="nullsafe-variable-method"),
+        pytest.param("Acme::$fn($id);", "dynamic_invocation", id="variable-static-method"),
+        pytest.param("[$client, $fn]($id);", "dynamic_invocation", id="array-callable"),
+        pytest.param("($this->callback)($id);", "dynamic_invocation", id="property-callable"),
+        pytest.param("$this->handlers[$fn]($id);", "dynamic_invocation", id="subscript-callable"),
+        pytest.param("forward_static_call($fn, $id);", "dynamic_invocation", id="forward-static-call"),
+        pytest.param(
+            "forward_static_call_array([$cls, $fn], [$id]);", "dynamic_invocation", id="forward-static-call-array"
+        ),
         pytest.param("assert($data);", "eval_exec", id="assert-variable"),
         pytest.param("assert('$id > 0');", "eval_exec", id="assert-string"),
         pytest.param("hash('md5', $data);", "crypto", id="hash-weak"),
@@ -93,6 +104,12 @@ def test_a_guzzle_client_built_by_its_imported_name_is_a_fetch() -> None:
         pytest.param(
             "call_user_func(function () { return 1; });", "dynamic_invocation", "", id="closure-callable"
         ),
+        pytest.param("$client->render($id);", "dynamic_invocation", "", id="named-method"),
+        pytest.param("Acme::render($id);", "dynamic_invocation", "", id="named-static-method"),
+        pytest.param("$client->{'render'}($id);", "dynamic_invocation", "", id="braced-literal-method"),
+        pytest.param("(function ($v) { return $v; })($id);", "dynamic_invocation", "", id="immediate-closure"),
+        pytest.param("(fn ($v) => $v)($id);", "dynamic_invocation", "", id="immediate-arrow"),
+        pytest.param("[$client, 'render']($id);", "dynamic_invocation", "", id="literal-array-callable"),
         pytest.param("$fn($id);", "eval_exec", "", id="variable-function-evaluates-nothing"),
         pytest.param("$o = new $cls($id);", "eval_exec", "", id="variable-class-evaluates-nothing"),
         pytest.param("call_user_func($fn, $id);", "eval_exec", "", id="callback-evaluates-nothing"),

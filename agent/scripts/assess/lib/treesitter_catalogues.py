@@ -255,7 +255,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
     },
     {
         # A call through a callable chosen at runtime -- PHP's `$fn(...)`,
-        # `new $cls(...)` and a non-literal `call_user_func(_array)` callback
+        # `$obj->$method(...)`, `new $cls(...)` and a non-literal
+        # `call_user_func(_array)` or `forward_static_call(_array)` callback
         # -- runs whatever the value names but evaluates no source text. The
         # PHP parse-tree reader emits it; no line pattern can tell the
         # callable apart from a literal one.
