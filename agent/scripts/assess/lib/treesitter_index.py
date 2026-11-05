@@ -1663,8 +1663,8 @@ def _extract_php_imports(tree: Any, source: bytes) -> list[dict[str, Any]]:
 
     A declaration imports several names at once -- `use A, B as C;` and the
     grouped `use Acme\\Http\\{Request, function respond};` -- and its
-    `function`/`const` keyword sits on the declaration or on one member of a
-    group. A trait `use` inside a class body and a closure's `use ($x)` are
+    `function`/`const` keyword sits on the declaration, on its first clause, or
+    on one member of a group. A trait `use` inside a class body and a closure's `use ($x)` are
     different nodes and import nothing.
     """
     parser = _get_parser("php")
@@ -1682,6 +1682,15 @@ def _extract_php_imports(tree: Any, source: bytes) -> list[dict[str, Any]]:
                 None,
             )
             prefix = _node_text(prefix_node, source) if prefix_node is not None else ""
+        elif not declared_kind:
+            # `use function A, B;` parses the keyword onto the first clause only,
+            # yet it governs every name the declaration lists.
+            first = next(
+                (child for child in declaration.named_children if child.type == "namespace_use_clause"),
+                None,
+            )
+            if first is not None:
+                declared_kind = _php_use_kind(first.child_by_field_name("type"), source)
         for clause in (group or declaration).named_children:
             if clause.type != "namespace_use_clause":
                 continue

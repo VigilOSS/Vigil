@@ -217,6 +217,8 @@ use Acme\\Models\\{
     Ledger, // the books
     Journal as Book
 };
+use function Acme\\Support\\round_money, Acme\\Support\\format_tax;
+use const Acme\\Support\\VAT_CAP, Acme\\Support\\VAT_FLOOR;
 
 final class InvoiceController
 {
@@ -245,6 +247,10 @@ PHP_USE_IMPORTS = [
     ("class", "Acme\\Contracts\\Payable", "", 10),
     ("class", "Acme\\Models\\Ledger", "", 12),
     ("class", "Acme\\Models\\Journal", "Book", 13),
+    ("function", "Acme\\Support\\round_money", "", 15),
+    ("function", "Acme\\Support\\format_tax", "", 15),
+    ("const", "Acme\\Support\\VAT_CAP", "", 16),
+    ("const", "Acme\\Support\\VAT_FLOOR", "", 16),
 ]
 
 
