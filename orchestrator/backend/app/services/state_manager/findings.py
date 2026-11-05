@@ -618,6 +618,9 @@ def _same_verifier_enrichment(
     for axis in _ENRICHMENT_REVIEW_AXES & set(change.changed_axes):
         key = axis.removeprefix("details.")
         previous, current = old_details.get(key, []), new_details.get(key)
+        if key == "repro_runs":
+            previous = finding_change_policy.comparable_run_ids(previous)
+            current = finding_change_policy.comparable_run_ids(current)
         if not isinstance(previous, list) or not isinstance(current, list):
             return False
         if current[:len(previous)] != previous:
@@ -1626,6 +1629,14 @@ def create_finding(
                     defect_family=defect_family,
                     canonical_location=canonical_location,
                 )
+        if existing is not None and isinstance(details, dict) and "repro_runs" in details:
+            # The same runs in the other id spelling (5 vs "5") keep the stored
+            # list, so the reproduction digest a verdict bound is unchanged.
+            stored_runs = _json_object(existing["details_json"]).get("repro_runs")
+            if stored_runs is not None and finding_change_policy.comparable_run_ids(
+                stored_runs
+            ) == finding_change_policy.comparable_run_ids(details["repro_runs"]):
+                details = {**details, "repro_runs": stored_runs}
         # A ``blocked`` status REQUIRES a ``block_reason`` on the create/record
         # path too — not only via /verify. Without this guard, POST /findings with
         # verification_status='blocked' and no block_reason would 201 and then

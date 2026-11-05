@@ -618,3 +618,38 @@ def test_legacy_proof_work_binding_stays_current(client, isolate_settings):
     })
     assert reprepared.status_code in {200, 201}, reprepared.text
     assert reprepared.json()["id"] == work["id"]
+
+
+def _command_run(client, tag: str) -> int:
+    response = client.post(f"{BASE}/command-runs", json={
+        "run_uuid": f"change-policy-run-{tag}", "command": f"curl https://acme.example/{tag}",
+        "tool_name": "curl", "agent_name": "VERIFY-B", "phase": "verify", "status": "completed",
+        "return_code": 0, "started_at": "2026-09-25T12:00:00Z",
+        "completed_at": "2026-09-25T12:00:01Z", "stdout": "ok",
+    })
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
+
+
+def test_repro_run_ids_resent_as_strings_keep_the_verdict(client, isolate_settings) -> None:
+    """`details.repro_runs` accepts an id as 5 or "5"; the same run in the other
+    spelling is the same reproduction, never a dropped one."""
+    _seed(client, isolate_settings)
+    first, second = _command_run(client, "a"), _command_run(client, "b")
+    _record(client, "VA-710", details={"evidence": "x", "impact": "y", "repro_runs": [first]})
+    _put_in_status(client, "VA-710", "confirmed")
+
+    resent = client.patch(f"{BASE}/findings/VA-710", json={"details": {"repro_runs": [str(first)]}})
+
+    assert resent.status_code == 200, resent.text
+    assert resent.json()["verification_effect"] == "keep"
+    assert resent.json()["finding"]["verification_status"] == "confirmed"
+    # The stored spelling stays, so the reproduction digest the latest check
+    # bound still matches.
+    assert resent.json()["finding"]["details"]["repro_runs"] == [first]
+
+    appended = client.patch(
+        f"{BASE}/findings/VA-710", json={"details": {"repro_runs": [first, str(second)]}}
+    )
+    assert appended.status_code == 200, appended.text
+    assert "details.repro_runs.removed" not in appended.json()["changed_axes"]

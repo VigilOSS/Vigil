@@ -308,12 +308,24 @@ def _cvss_axes(before: dict[str, Any], after: dict[str, Any]) -> list[tuple[str,
     return axes
 
 
+def comparable_run_ids(value: Any) -> Any:
+    """`details.repro_runs` with each id as an int: writes accept 5 and "5" alike."""
+    if not isinstance(value, list):
+        return value
+    return [
+        int(entry.strip()) if isinstance(entry, str) and entry.strip().isdigit() else entry
+        for entry in value
+    ]
+
+
 def _detail_axes(before: dict[str, Any], after: dict[str, Any]) -> list[tuple[str, Effect]]:
     axes: list[tuple[str, Effect]] = []
     for key in sorted(before.keys() | after.keys()):
         if key in CVSS_DETAIL_KEYS:
             continue
         old, new = before.get(key), after.get(key)
+        if key == "repro_runs":
+            old, new = comparable_run_ids(old), comparable_run_ids(new)
         if old == new and (key in before) == (key in after):
             continue
         if not _present(old) and not _present(new):
