@@ -7,6 +7,8 @@ provenance that makes that identity auditable.
 
 from __future__ import annotations
 
+import difflib
+import re
 import sqlite3
 from typing import Any
 
@@ -38,6 +40,168 @@ _CODE_SNAPSHOT_WRITE_MODES = CODE_SNAPSHOT_WRITE_MODES
 
 def is_file_finding(canonical_location: str) -> bool:
     return str(canonical_location or "").strip().startswith("file:")
+
+
+_LINE_SEGMENT = re.compile(r"([0-9]+)(?:-([0-9]+))?")
+
+
+def parse_file_location(canonical_location: str) -> tuple[str, int | None, int | None]:
+    """Split ``file:<path>[:<line>[-<end>]][:<column>]`` into path and lines.
+
+    ``:null`` is the documented form for a decompiled file without line mapping
+    and cites no line. A trailing column is ignored.
+    """
+
+    body = str(canonical_location or "").strip()[len("file:"):]
+    segments = body.split(":")
+    if len(segments) > 1 and segments[-1] == "null":
+        return ":".join(segments[:-1]), None, None
+    if (
+        len(segments) > 2
+        and _LINE_SEGMENT.fullmatch(segments[-2])
+        and re.fullmatch(r"[0-9]+", segments[-1])
+    ):
+        segments.pop()
+    if len(segments) > 1:
+        match = _LINE_SEGMENT.fullmatch(segments[-1])
+        if match:
+            end = int(match[2]) if match[2] is not None else None
+            return ":".join(segments[:-1]), int(match[1]), end
+    return body, None, None
+
+
+def closest_snapshot_path(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    repo_id: int,
+    repo_generation: int,
+    path: str,
+) -> str | None:
+    """The generation's file nearest ``path``: same basename first, then spelling."""
+
+    paths = [
+        str(row["file_path"])
+        for row in connection.execute(
+            """
+            SELECT file_path FROM code_source_generation_files
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+            """,
+            (engagement_id, repo_id, repo_generation),
+        ).fetchall()
+    ]
+    basename = path.rsplit("/", 1)[-1]
+    same_name = [candidate for candidate in paths if candidate.rsplit("/", 1)[-1] == basename]
+    closest = difflib.get_close_matches(
+        path, same_name or paths, n=1, cutoff=0 if same_name else 0.6
+    )
+    return closest[0] if closest else None
+
+
+def snapshot_location_problem(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    repo_id: int,
+    repo_generation: int,
+    path: str,
+    line: int | None = None,
+    *,
+    end_line: int | None = None,
+) -> tuple[dict[str, Any] | None, str]:
+    """Look ``path`` (and its lines) up in one sealed generation's file roster.
+
+    Returns ``(file_row, "")`` when the citation resolves, else ``(row_or_None,
+    reason)``. Callers that refuse use :func:`resolve_snapshot_location`.
+    """
+
+    row = connection.execute(
+        """
+        SELECT file_id AS id, file_path, file_hash, language, loc
+        FROM code_source_generation_files
+        WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+          AND file_path = ?
+        """,
+        (engagement_id, repo_id, repo_generation, path),
+    ).fetchone()
+    if row is None:
+        roster = connection.execute(
+            """
+            SELECT 1 FROM code_source_generation_files
+            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+            LIMIT 1
+            """,
+            (engagement_id, repo_id, repo_generation),
+        ).fetchone()
+        if roster is None:
+            return None, (
+                f"generation {repo_generation} of repository {repo_id} has no files "
+                "in its sealed roster, so nothing in it can be cited; re-ingest the "
+                "repository so its current generation records the files it holds"
+            )
+        reason = f"'{path}' is not a file in generation {repo_generation} of repository {repo_id}"
+        closest = closest_snapshot_path(
+            connection, engagement_id, repo_id, repo_generation, path
+        )
+        if closest is not None:
+            reason += f"; closest admitted path: {closest!r}"
+        return None, reason
+    file_row = dict(row)
+    loc = int(file_row["loc"] or 0)
+    for number in (line, end_line):
+        if number is not None and not 1 <= number <= loc:
+            return file_row, f"line {number} is outside {path} ({loc} lines)"
+    return file_row, ""
+
+
+def resolve_snapshot_location(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    repo_id: int,
+    repo_generation: int,
+    path: str,
+    line: int | None,
+    *,
+    end_line: int | None = None,
+) -> dict[str, Any]:
+    """Return the sealed file row a citation names, or refuse it with 400.
+
+    The one check that a cited path is a file in the generation, and each cited
+    line lies inside it, for finding locations, lead bindings and cross-file
+    triggers alike.
+    """
+
+    file_row, problem = snapshot_location_problem(
+        connection, engagement_id, repo_id, repo_generation, path, line,
+        end_line=end_line,
+    )
+    if problem:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=problem)
+    assert file_row is not None
+    return file_row
+
+
+def require_cited_file_location(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    binding: dict[str, Any],
+    canonical_location: str,
+) -> dict[str, Any]:
+    """Resolve a ``file:`` finding location in the generation its binding seals."""
+
+    path, line, end_line = parse_file_location(canonical_location)
+    if end_line is not None and line is not None and end_line < line:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"line range {line}-{end_line} in {canonical_location!r} runs backwards",
+        )
+    return resolve_snapshot_location(
+        connection,
+        engagement_id,
+        int(binding["repo_id"]),
+        int(binding["repo_generation"]),
+        path,
+        line,
+        end_line=end_line,
+    )
 
 
 def _code_snapshot_binding(

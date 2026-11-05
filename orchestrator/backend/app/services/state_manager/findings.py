@@ -87,6 +87,7 @@ from .finding_snapshots import (
     finding_has_current_code_snapshot as finding_has_current_code_snapshot,
     is_file_finding,
     load_code_repo_snapshot_states,
+    require_cited_file_location,
 )
 from ..sql_like import like_contains
 
@@ -1501,6 +1502,25 @@ def create_finding(
                 connection, engagement.id,
                 _json_object(existing["provenance_json"]),
             )
+        # A ``file:`` location names a file, and lines inside it, in the generation
+        # its binding seals. Checked on every write that asserts a binding or moves
+        # the location, here, before anything below can touch the verdict.
+        if is_file_finding(canonical_location):
+            cited_binding = None
+            if code_snapshot_write_mode == "record" or incoming_binding is not None:
+                cited_binding = incoming_binding
+            elif (
+                code_snapshot_write_mode == "patch"
+                and existing is not None
+                and canonical_location != str(existing["canonical_location"] or "")
+            ):
+                cited_binding = _code_snapshot_binding(
+                    _json_object(existing["provenance_json"]), strict=False
+                )
+            if cited_binding is not None:
+                require_cited_file_location(
+                    connection, engagement.id, cited_binding, canonical_location
+                )
         if code_snapshot_write_mode == "record":
             record_author = _require_record_author_dispatch(
                 connection,
@@ -2960,7 +2980,12 @@ def relocate_finding(
                 if CODE_SNAPSHOT_PROVENANCE_KEY in incoming_provenance
                 else merged_provenance
             )
-            _require_current_code_snapshot(connection, engagement.id, binding_source)
+            binding = _require_current_code_snapshot(
+                connection, engagement.id, binding_source
+            )
+            require_cited_file_location(
+                connection, engagement.id, binding, canonical_location
+            )
             merged_provenance.update(incoming_provenance)
         else:
             merged_provenance.update(incoming_provenance)

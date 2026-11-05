@@ -23,6 +23,7 @@ from types import SimpleNamespace
 
 import pytest
 from app import db as db_module
+from tests.code_snapshot_fixtures import seal_generation_files
 from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 
 # Put agent/scripts on sys.path so assess.* imports resolve (mirrors
@@ -122,6 +123,16 @@ def _seed(client) -> list[dict]:
                       '/tmp/eval-capture-repo', 1, ?, 'verified')
             """,
             (engagement_id, source_manifest_digest),
+        )
+        # The schema example cites this file; a bound finding must name a file
+        # in its sealed generation.
+        seal_generation_files(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=int(cursor.lastrowid),
+            repo_generation=1,
+            source_manifest_digest=source_manifest_digest,
+            files={"lib/urlapi.c": 2000},
         )
     code_snapshot = {
         "repo_id": int(cursor.lastrowid),

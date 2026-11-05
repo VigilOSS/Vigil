@@ -171,6 +171,31 @@ def test_a_line_range_outside_the_bound_file_is_refused(client, isolate_settings
     assert str(parser["loc"]) in response.json()["detail"]
 
 
+def test_a_path_absent_from_the_snapshot_is_refused_with_the_closest_path(
+    client, isolate_settings
+):
+    engagement_key = "2026-11-04-lead-bind-missing"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo, _files = _seed_repo_with_files(client, engagement_key)
+    lead = _record_lead(client, engagement_key, "Missing file prior art")
+
+    response = _bind(
+        client,
+        engagement_key,
+        note_id=int(lead["id"]),
+        repo_id=int(repo["id"]),
+        file_path="src/parsers.py",
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert (
+        f"'src/parsers.py' is not a file in generation {repo['active_generation']} "
+        f"of repository {repo['id']}"
+    ) in detail
+    assert "closest admitted path: 'src/parser.py'" in detail
+
+
 def test_rebinding_the_same_lead_and_file_refines_one_binding(client, isolate_settings):
     engagement_key = "2026-09-16-lead-bind-refine"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)

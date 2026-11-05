@@ -347,7 +347,12 @@ def test_requeue_names_a_trigger_target_missing_from_the_snapshot_and_the_closes
             "evidence": "parse() delegates to the helper before validating.",
             "disposition": "clean",
             "cross_file_triggers": [
-                {"file_path": "lib/helpers.py", "reason": "shared helper", "vuln_class": "web-app-injection"}
+                {
+                    "file_path": "lib/helpers.py",
+                    "reason": "shared helper",
+                    "vuln_class": "web-app-injection",
+                    "outside_snapshot": True,
+                }
             ],
         },
     )
@@ -359,5 +364,9 @@ def test_requeue_names_a_trigger_target_missing_from_the_snapshot_and_the_closes
     assert requeued.status_code == 201, requeued.text
     [label] = requeued.json()["not_found"]
     assert f"trigger:{trigger['id']}" in label
-    assert "lib/helpers.py" in label and "not in the repository snapshot" in label
-    assert "src/helpers.py" in label
+    generation = client.get(f"{base}/repos/{repo['id']}").json()["active_generation"]
+    assert (
+        f"'lib/helpers.py' is not a file in generation {generation} "
+        f"of repository {repo['id']}"
+    ) in label
+    assert "closest admitted path: 'src/helpers.py'" in label

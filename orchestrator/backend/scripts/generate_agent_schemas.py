@@ -953,7 +953,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                             "properties": {
                                 "file_path": {
                                     "type": "string",
-                                    "description": "Repo-relative path to the file that should be re-analyzed (e.g., 'src/url_helpers.c').",
+                                    "description": "Repo-relative path, exactly as `vigil assess fetch 'code/files?repo_id=<id>'` lists it, of the file that should be re-analyzed (e.g., 'src/url_helpers.c'). It must be a file in the source repository's current generation unless outside_snapshot is true; a missing path is refused with the closest admitted path.",
                                 },
                                 "reason": {
                                     "type": "string",
@@ -963,10 +963,15 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                                     "type": "string",
                                     "description": "Vulnerability class to focus on in the downstream file (matches cwe_coverage family names, e.g., 'buffer-overflow').",
                                 },
+                                "outside_snapshot": {
+                                    "type": "boolean",
+                                    "default": False,
+                                    "description": "True only when the target genuinely lies outside this repository's snapshot (a binary, a dependency outside the checkout, a file in another repository). The trigger is then recorded pending for an external-context resolution. Refused when the path is a file in the snapshot.",
+                                },
                             },
                         },
                         "default": [],
-                        "description": "Files reachable via call graph whose analysis should be (re)triggered based on findings in this file. Only emit when a taint flow actually crosses the file boundary.",
+                        "description": "Files reachable via call graph whose analysis should be (re)triggered based on findings in this file. Only emit when a taint flow actually crosses the file boundary. Each file_path is checked against the source repository's current generation before anything is recorded, so a refused result leaves the lease held for a corrected resubmission.",
                     },
                 },
             },

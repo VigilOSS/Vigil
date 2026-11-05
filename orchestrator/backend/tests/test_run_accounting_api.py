@@ -10,6 +10,7 @@ import pytest
 from app import db as db_module
 from app.config import settings
 from app.services import state_manager
+from tests.code_snapshot_fixtures import seal_generation_files
 from tests.test_engagements_api import write_engagement
 
 
@@ -1098,6 +1099,14 @@ def test_promoted_candidate_cannot_complete_before_its_finding_is_verified(
             (engagement_id, "c" * 64),
         )
         repo_id = int(cursor.lastrowid)
+        seal_generation_files(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=repo_id,
+            repo_generation=4,
+            source_manifest_digest="c" * 64,
+            files={"src/candidate.py": 40},
+        )
         connection.commit()
     finding = client.post(
         f"{BASE}/findings",
@@ -1934,6 +1943,14 @@ def test_finding_record_can_atomically_promote_its_underlying_run_candidate(
             (engagement_id, "c" * 64),
         )
         repo_id = int(cursor.lastrowid)
+        seal_generation_files(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=repo_id,
+            repo_generation=4,
+            source_manifest_digest="c" * 64,
+            files={"src/parser.c": 40, "src/other.c": 40},
+        )
         connection.commit()
     command = client.post(
         f"{BASE}/command-runs",

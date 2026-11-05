@@ -256,6 +256,11 @@ metadata instead of looking complete in the queue history.
 queues the target files if not already queued or completed. A `list-triggers` row is directly
 consumable as input; each input names exactly one target with exactly one selector. Unprocessed
 triggers are gate-blocking: the phase does not pass until each is queued or already completed.
+Recording checks each target against the source repository's current generation, so every
+recorded trigger names an admitted file unless the hunter declared it `outside_snapshot`. Those
+stay pending with no target file; close each with `code-dispatch resolve-triggers` and
+`external_context_unavailable`, naming what lies outside the snapshot, or ingest the missing
+source and re-hunt.
 
 Requeue applies per target, not per batch. Unblocked targets commit even when a sibling target is
 refused, so a blocked target is a reason to reconcile that one file -- not to re-run the batch. The

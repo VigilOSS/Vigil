@@ -227,7 +227,9 @@ Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
 Coverage gaps and context-expansion requests live in the handoff's `coverage_gaps`
 and `open_questions`. Cross-file triggers are recorded on the analysis row, not
-duplicated in markdown.
+duplicated in markdown. A trigger target must be a file in the current snapshot, or carry
+`"outside_snapshot": true` when it genuinely lies outside it (the skill's Cross-File Triggers
+block); a mistyped target refuses the analysis record while you still hold the lease.
 
 ## Output Contract (Dispatch Response)
 

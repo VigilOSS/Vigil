@@ -13,6 +13,7 @@ from app.api.assessment import (
 from app.services.state_manager import findings as findings_service
 from fastapi import HTTPException
 from pydantic import ValidationError
+from tests.code_snapshot_fixtures import seal_generation_files
 from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
 _CODE_SNAPSHOT = {
@@ -54,6 +55,12 @@ def _write_code_engagement(engagements_dir: Path) -> None:
     (engagement_dir / "findings.md").write_text("# Findings\n", encoding="utf-8")
 
 
+# The files the bound findings below cite. A finding's ``file:`` location must
+# name a file, and a line inside it, in the generation its binding seals.
+_SEEDED_FILE_PATHS = ("src/parser.c", "src/other.c", "src/bound.c")
+_SEEDED_FILE_LOC = 200
+
+
 def _seed_repo(client, isolate_settings, *, quality: str = "verified") -> dict[str, object]:
     _write_code_engagement(isolate_settings["engagements_dir"])
     assert client.get("/engagements").status_code == 200
@@ -73,8 +80,17 @@ def _seed_repo(client, isolate_settings, *, quality: str = "verified") -> dict[s
             """,
             (engagement_id, _CODE_SNAPSHOT["source_manifest_digest"], quality),
         )
+        repo_id = int(cursor.lastrowid)
+        seal_generation_files(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=repo_id,
+            repo_generation=3,
+            source_manifest_digest=str(_CODE_SNAPSHOT["source_manifest_digest"]),
+            files={path: _SEEDED_FILE_LOC for path in _SEEDED_FILE_PATHS},
+        )
     return {
-        "repo_id": int(cursor.lastrowid),
+        "repo_id": repo_id,
         "repo_generation": 3,
         "source_manifest_digest": _CODE_SNAPSHOT["source_manifest_digest"],
     }
@@ -122,13 +138,40 @@ def _record(client, payload: dict[str, object]):
     )
 
 
-def _advance_repo(binding: dict[str, object]) -> dict[str, object]:
+def _advance_repo(
+    binding: dict[str, object], *, dropped_paths: tuple[str, ...] = ()
+) -> dict[str, object]:
+    """Promote the next generation, carrying the roster forward minus ``dropped_paths``."""
     current = {
         **binding,
         "repo_generation": int(binding["repo_generation"]) + 1,
         "source_manifest_digest": "8e" * 32,
     }
     with db_module.get_connection() as connection:
+        roster = {
+            str(row["file_path"]): int(row["loc"])
+            for row in connection.execute(
+                """
+                SELECT file_path, loc FROM code_source_generation_files
+                WHERE repo_id = ? AND repo_generation = ?
+                """,
+                (binding["repo_id"], binding["repo_generation"]),
+            ).fetchall()
+            if str(row["file_path"]) not in dropped_paths
+        }
+        engagement_id = int(
+            connection.execute(
+                "SELECT engagement_id FROM code_repos WHERE id = ?", (binding["repo_id"],)
+            ).fetchone()["engagement_id"]
+        )
+        seal_generation_files(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=int(binding["repo_id"]),
+            repo_generation=int(current["repo_generation"]),
+            source_manifest_digest=str(current["source_manifest_digest"]),
+            files=roster,
+        )
         connection.execute(
             """
             UPDATE code_repos
@@ -1444,19 +1487,39 @@ def test_relocation_into_file_still_requires_a_current_binding(
 
 
 def _ingest_file(repo_id: int, file_path: str) -> None:
-    """Seed one row of the backend's file inventory for this repo."""
+    """Admit one file to the backend's inventory and the repo's current generation."""
     with db_module.get_connection() as connection:
         engagement_id = int(
             connection.execute(
                 "SELECT id FROM engagements WHERE key = ?", (_ENGAGEMENT_KEY,)
             ).fetchone()["id"]
         )
+        generation = int(
+            connection.execute(
+                "SELECT active_generation FROM code_repos WHERE id = ?", (repo_id,)
+            ).fetchone()["active_generation"]
+        )
         connection.execute(
             """
-            INSERT INTO code_files (engagement_id, repo_id, file_path, language)
-            VALUES (?, ?, ?, 'ruby')
+            INSERT OR IGNORE INTO code_files (engagement_id, repo_id, file_path, language, loc)
+            VALUES (?, ?, ?, 'ruby', ?)
             """,
-            (engagement_id, repo_id, file_path),
+            (engagement_id, repo_id, file_path, _SEEDED_FILE_LOC),
+        )
+        file_id = int(
+            connection.execute(
+                "SELECT id FROM code_files WHERE repo_id = ? AND file_path = ?",
+                (repo_id, file_path),
+            ).fetchone()["id"]
+        )
+        connection.execute(
+            """
+            INSERT OR IGNORE INTO code_source_generation_files (
+                engagement_id, repo_id, repo_generation, file_id, file_path,
+                file_hash, loc
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (engagement_id, repo_id, generation, file_id, file_path, "ab" * 32, _SEEDED_FILE_LOC),
         )
 
 
@@ -1469,6 +1532,7 @@ def test_the_origin_path_form_and_the_repo_relative_form_collide(
     it removes the origin root the author echoed rather than an arbitrary
     leading directory."""
     binding = _seed_repo(client, isolate_settings)
+    _ingest_file(int(binding["repo_id"]), "pkg/x.rb")
     with db_module.get_connection() as connection:
         connection.execute(
             "UPDATE code_repos SET source_origin_path = ? WHERE id = ?",

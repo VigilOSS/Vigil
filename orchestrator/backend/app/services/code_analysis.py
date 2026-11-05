@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import difflib
 import hashlib
 import json
 import sqlite3
@@ -106,6 +105,10 @@ from .code_analysis_support import (
     variant_input_identity_digest,
 )
 from .events import _engagement_or_404
+from .state_manager.finding_snapshots import (
+    resolve_snapshot_location,
+    snapshot_location_problem,
+)
 from .state_manager.findings import (
     finding_code_snapshot_status,
     is_file_finding,
@@ -3783,12 +3786,65 @@ def _normalize_cross_file_triggers(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"cross_file_triggers entry {idx} is missing reason",
             )
+        if "outside_snapshot" in trigger and type(trigger["outside_snapshot"]) is not bool:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"cross_file_triggers entry {idx} outside_snapshot must be a boolean",
+            )
         normalized = dict(trigger)
         normalized["file_path"] = file_path
         normalized["vuln_class"] = vuln_class
         normalized["reason"] = reason
         normalized_by_key[(file_path, vuln_class, reason)] = normalized
     return list(normalized_by_key.values())
+
+
+def _validate_cross_file_trigger_targets(
+    connection,
+    engagement_id: int,
+    *,
+    source_file_row: dict[str, Any],
+    cross_file_triggers: list[dict[str, Any]],
+) -> None:
+    """Hold each trigger target to the source repository's current snapshot.
+
+    A target the snapshot genuinely lacks (a binary, a dependency outside the
+    checkout, a file in another repository) is declared ``outside_snapshot`` and
+    recorded as a pending obligation; any other missing path is a typo that would
+    block the coverage gate on a file nobody can review. Runs before the result
+    writes anything, so the caller keeps its lease and can resubmit.
+    """
+    if not cross_file_triggers:
+        return
+    repo_id = int(source_file_row["repo_id"])
+    generation = int(
+        _get_published_repo_row(connection, engagement_id, repo_id)["active_generation"]
+    )
+    for trigger in cross_file_triggers:
+        target_path = str(trigger["file_path"])
+        file_row, problem = snapshot_location_problem(
+            connection, engagement_id, repo_id, generation, target_path
+        )
+        if trigger.get("outside_snapshot") is True:
+            if file_row is not None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"cross_file_triggers target '{target_path}' is declared "
+                        f"outside_snapshot, but '{target_path}' is a file in generation "
+                        f"{generation} of repository {repo_id}; drop outside_snapshot"
+                    ),
+                )
+            continue
+        if problem:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"cross_file_triggers target: {problem}. Correct file_path, or set "
+                    "outside_snapshot: true when the target genuinely lies outside "
+                    "this repository's snapshot"
+                ),
+            )
 
 
 def _record_cross_file_triggers(
@@ -4986,6 +5042,12 @@ def create_analysis_result(
             engagement.id,
             {int(queue_item_id): queue_row},
             action="record analysis results",
+        )
+        _validate_cross_file_trigger_targets(
+            connection,
+            engagement.id,
+            source_file_row=file_row,
+            cross_file_triggers=normalized_cross_file_triggers,
         )
         receipt_kind = str(result.get("receipt_kind") or "file")
         has_source_anchors = bool(
@@ -7682,48 +7744,11 @@ def _require_lead_note(connection, engagement_id: int, note_id: int) -> dict[str
     return note
 
 
-def _require_current_generation_file(
-    connection, engagement_id: int, repo: dict[str, Any], file_path: str
-) -> dict[str, Any]:
-    repo_id = int(repo["id"])
-    active_generation = int(repo.get("active_generation", 0) or 0)
-    row = connection.execute(
-        """
-        SELECT files.*
-        FROM code_files AS files
-        JOIN code_source_generation_files AS generation_files
-          ON generation_files.file_id = files.id
-         AND generation_files.engagement_id = files.engagement_id
-         AND generation_files.repo_id = files.repo_id
-         AND generation_files.repo_generation = ?
-        WHERE files.engagement_id = ? AND files.repo_id = ?
-          AND files.file_path = ? AND files.retired_at IS NULL
-        """,
-        (active_generation, engagement_id, repo_id, file_path),
-    ).fetchone()
-    if row is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=(
-                f"'{file_path}' is not a file in the current generation "
-                f"({active_generation}) of repository {repo_id}; list the sealed "
-                f"inventory with vigil assess fetch 'code/files?repo_id={repo_id}'"
-            ),
-        )
-    return dict(row)
-
-
 def _validate_lead_binding_lines(
-    file_row: dict[str, Any],
     line_start: int | None,
     line_end: int | None,
 ) -> tuple[int | None, int | None]:
-    """Whole-file (both None) or an exact range inside the sealed file.
-
-    ``loc`` is the physical line count taken from the sealed snapshot, so a
-    range past it names code that does not exist — a typo worth refusing at
-    write time rather than handing a specialist a dead pointer.
-    """
+    """Whole-file (both None) or an ordered range; the snapshot checks its bounds."""
     if line_start is None and line_end is None:
         return None, None
     if line_start is None:
@@ -7736,16 +7761,6 @@ def _validate_lead_binding_lines(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"line_end {end} precedes line_start {line_start}",
-        )
-    loc = int(file_row.get("loc", 0) or 0)
-    if loc and end > loc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"line range {line_start}-{end} falls outside "
-                f"{file_row['file_path']}, which has {loc} line(s) in the "
-                "current generation"
-            ),
         )
     return line_start, end
 
@@ -7773,10 +7788,18 @@ def bind_code_lead(
         connection.execute("BEGIN IMMEDIATE")
         _require_lead_note(connection, engagement.id, note_id)
         repo = _get_repo_rows(connection, engagement.id, {repo_id})[repo_id]
-        file_row = _require_current_generation_file(
-            connection, engagement.id, repo, file_path
+        start, end = _validate_lead_binding_lines(line_start, line_end)
+        # A range past the sealed file names code that does not exist, a typo
+        # worth refusing now rather than handing a specialist a dead pointer.
+        file_row = resolve_snapshot_location(
+            connection,
+            engagement.id,
+            repo_id,
+            int(repo.get("active_generation", 0) or 0),
+            file_path,
+            start,
+            end_line=end,
         )
-        start, end = _validate_lead_binding_lines(file_row, line_start, line_end)
         connection.execute(
             """
             INSERT INTO code_lead_bindings (
@@ -9098,24 +9121,6 @@ def _requeue_target_by_file_id(connection, engagement_id: int, file_id: int) -> 
     ).fetchone()
 
 
-def _closest_admitted_path_hint(connection, engagement_id: int, selector: dict[str, Any]) -> str:
-    target = str(selector["file_path"])
-    paths = [
-        str(row["file_path"])
-        for row in connection.execute(
-            """
-            SELECT file_path FROM code_files
-            WHERE engagement_id = ? AND repo_id = ? AND retired_at IS NULL
-            """,
-            (engagement_id, int(selector["repo_id"])),
-        ).fetchall()
-    ]
-    basename = target.rsplit("/", 1)[-1]
-    same_name = [path for path in paths if path.rsplit("/", 1)[-1] == basename]
-    closest = difflib.get_close_matches(target, same_name or paths, n=1, cutoff=0 if same_name else 0.6)
-    return f"; closest admitted path: {closest[0]!r}" if closest else ""
-
-
 def _resolve_requeue_target(
     connection, engagement_id: int, selector: dict[str, Any]
 ) -> tuple[Any, str, str]:
@@ -9135,7 +9140,8 @@ def _resolve_requeue_target(
         trigger = connection.execute(
             """
             SELECT triggers.target_file_id, triggers.target_file_path,
-                   source_files.repo_id AS source_repo_id
+                   source_files.repo_id AS source_repo_id,
+                   source_repos.active_generation AS source_repo_generation
             FROM code_analysis_triggers AS triggers
             JOIN code_files AS source_files
               ON source_files.id = triggers.source_file_id
@@ -9167,10 +9173,15 @@ def _resolve_requeue_target(
             connection, engagement_id, selector
         )
         if outcome == "not_found":
-            label += (
-                f": target path {selector['file_path']!r} is not in the repository snapshot"
-                + _closest_admitted_path_hint(connection, engagement_id, selector)
+            _row, problem = snapshot_location_problem(
+                connection,
+                engagement_id,
+                int(trigger["source_repo_id"]),
+                int(trigger["source_repo_generation"]),
+                selector["file_path"],
             )
+            if problem:
+                label += f": {problem}"
         return row, outcome, label
 
     file_path = str(selector["file_path"])

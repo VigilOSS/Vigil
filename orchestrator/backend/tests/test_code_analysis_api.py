@@ -690,6 +690,42 @@ def _append_repo_files(
     return _refresh_repo_files(client, engagement_key, repo_id, manifest)
 
 
+def _ensure_repo_file(
+    client,
+    engagement_key: str,
+    repo_id: int,
+    file_path: str,
+    *,
+    language: str = "python",
+    loc: int = 80,
+) -> dict[str, object]:
+    """Admit ``file_path`` to the repo's current generation so findings can cite it.
+
+    Returns the repo as it reads afterwards, since admitting a file promotes a
+    new generation.
+    """
+    base = f"/engagements/{engagement_key}/assessment/code"
+    listed = client.get(f"{base}/files?repo_id={repo_id}&limit=10000").json()["items"]
+    if not any(row["file_path"] == file_path for row in listed):
+        _append_repo_files(
+            client,
+            engagement_key,
+            repo_id,
+            [
+                {
+                    "file_path": file_path,
+                    "language": language,
+                    "loc": loc,
+                    "file_hash": _source_hash(f"cited-{file_path}"),
+                    "header_snippet": "",
+                    "git_churn_score": 0,
+                    "has_past_cve_fix": False,
+                }
+            ],
+        )
+    return client.get(f"{base}/repos/{repo_id}").json()
+
+
 def _classify_file(
     client,
     engagement_key: str,
@@ -730,6 +766,7 @@ def _create_code_parent_finding(
 ) -> dict[str, object]:
     author_agent_id = f"AUTHOR-{slug}"
     _ensure_finding_author_dispatch(client, engagement_key, author_agent_id)
+    _ensure_repo_file(client, engagement_key, repo_id, file_path)
     response = client.post(
         f"/engagements/{engagement_key}/assessment/findings",
         json={
@@ -8651,6 +8688,7 @@ def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate
                     "file_path": "bin/StorageService.dll",
                     "reason": "implementation not present in source snapshot",
                     "vuln_class": "web-app-injection",
+                    "outside_snapshot": True,
                 }
             ],
         },
@@ -9330,7 +9368,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
             "defect_family": "trust-boundary-bypass",
             "root_cause_key": "scope-repo-a-parser",
             "auth_context": "anonymous",
-            "canonical_location": "file:repo_a_only.py:12",
+            "canonical_location": "file:repo_a_only.py:8",
             "summary": "Repo A finding should stay scoped to repo A coverage.",
             "evidence_ref": "findings.md",
             "notes": "",
@@ -9365,7 +9403,7 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
             "defect_family": "sink-exposure",
             "root_cause_key": "scope-repo-b-helper",
             "auth_context": "anonymous",
-            "canonical_location": "file:repo_b_only.py:20",
+            "canonical_location": "file:repo_b_only.py:9",
             "summary": "Repo B finding should stay scoped to repo B coverage.",
             "evidence_ref": "findings.md",
             "notes": "",
@@ -17631,6 +17669,9 @@ def test_confirmed_memory_finding_forces_fuzz_and_terminal_receipt_gates_complet
         isolate_settings["engagements_dir"], engagement_key
     )
     repo = _create_repo(client, engagement_key, repo_key="fuzz-forced-campaign")
+    repo = _ensure_repo_file(
+        client, engagement_key, int(repo["id"]), "src/parser.cpp", language="cpp"
+    )
     state_dir = engagement_dir / "tools" / "fuzz-state"
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "applicability.json").write_text("{}", encoding="utf-8")
@@ -17892,6 +17933,9 @@ def test_fuzz_forcing_covers_all_native_memory_families_and_draft_reopens(
         isolate_settings["engagements_dir"], engagement_key
     )
     repo = _create_repo(client, engagement_key, repo_key="fuzz-native-families")
+    repo = _ensure_repo_file(
+        client, engagement_key, int(repo["id"]), "src/parser.cpp", language="cpp"
+    )
     evidence = engagement_dir / "tools" / "fuzz-state" / "applicability.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text("{}", encoding="utf-8")
@@ -18045,6 +18089,9 @@ def test_fuzz_decision_history_is_bounded_paginated_and_marks_superseded_rows(
         isolate_settings["engagements_dir"], engagement_key
     )
     repo = _create_repo(client, engagement_key, repo_key="fuzz-decision-history")
+    repo = _ensure_repo_file(
+        client, engagement_key, int(repo["id"]), "src/parser.cpp", language="cpp"
+    )
     evidence = engagement_dir / "tools" / "fuzz-state" / "applicability.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text('{"revision":1}', encoding="utf-8")
@@ -18096,6 +18143,9 @@ def test_new_forced_finding_invalidates_not_required_and_allows_strengthening(
         isolate_settings["engagements_dir"], engagement_key
     )
     repo = _create_repo(client, engagement_key, repo_key="fuzz-decision-strengthen")
+    repo = _ensure_repo_file(
+        client, engagement_key, int(repo["id"]), "src/parser.cpp", language="cpp"
+    )
     evidence = engagement_dir / "tools" / "fuzz-state" / "applicability.json"
     evidence.parent.mkdir(parents=True, exist_ok=True)
     evidence.write_text("{}", encoding="utf-8")

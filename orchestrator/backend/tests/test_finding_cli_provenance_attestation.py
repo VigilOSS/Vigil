@@ -22,6 +22,7 @@ from types import SimpleNamespace
 
 import pytest
 from app import db as db_module
+from tests.code_snapshot_fixtures import seal_generation_files
 from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 
 _ENGAGEMENT_KEY = "2026-09-18-cli-attestation"
@@ -137,7 +138,7 @@ def code_engagement(client, isolate_settings):
                 "SELECT id FROM engagements WHERE key = ?", (_ENGAGEMENT_KEY,)
             ).fetchone()["id"]
         )
-        connection.execute(
+        cursor = connection.execute(
             """
             INSERT INTO code_repos (
                 engagement_id, repo_key, name, repo_path, active_generation,
@@ -145,6 +146,14 @@ def code_engagement(client, isolate_settings):
             ) VALUES (?, 'bound-repo', 'Bound repo', '/tmp/bound-repo', ?, ?, 'verified')
             """,
             (engagement_id, _REPO_GENERATION, _DIGEST),
+        )
+        seal_generation_files(
+            connection,
+            engagement_id=engagement_id,
+            repo_id=int(cursor.lastrowid),
+            repo_generation=_REPO_GENERATION,
+            source_manifest_digest=_DIGEST,
+            files={"src/parser.c": 200},
         )
     return engagement_dir
 
