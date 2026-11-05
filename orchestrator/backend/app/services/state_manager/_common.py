@@ -365,6 +365,10 @@ def _row_verification_status(row: dict[str, Any] | Any) -> VerificationStatus:
 def _is_suppressed_workflow_status(workflow_status: str) -> bool:
     return _normalize_workflow_status(workflow_status) in {"merged", "false_positive"}
 
+def is_file_finding(canonical_location: str) -> bool:
+    return str(canonical_location or "").strip().startswith("file:")
+
+
 def _serialize_finding_record(row: dict[str, Any] | Any) -> dict[str, Any]:
     record = dict(row)
     # Read-path serialization must not crash on invalid DB values. Validation

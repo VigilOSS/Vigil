@@ -1330,6 +1330,50 @@ def test_draft_marks_missing_repro_runs_with_a_needs_marker(tmp_path, monkeypatc
     assert body.index("[NEEDS: details.repro_runs") > body.index("## OPERATOR DETAILS")
 
 
+def _source_finding() -> dict:
+    finding = _finding(details=_complete_details())
+    finding["canonical_location"] = "file:src/orders.c:88"
+    finding["reproduction_basis"] = "source"
+    finding["proof_receipts"] = [
+        {"id": 31, "evidence_kind": "source_observation"},
+        {"id": 32, "evidence_kind": "source_observation"},
+    ]
+    return finding
+
+
+@pytest.mark.parametrize("draft", [True, False])
+def test_a_source_derived_finding_names_its_receipts_instead_of_missing_runs(
+    tmp_path, monkeypatch, capsys, draft
+):
+    """A finding reproduced by reading source has no command run to cite."""
+    fake = _FakeClient(_source_finding())
+    _install(monkeypatch, tmp_path, fake)
+    argv = ["submission", "VA-047", "--platform", "bugcrowd"] + (["--draft"] if draft else [])
+    export_submission.run(_parse(argv, str(tmp_path)))
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "[NEEDS: details.repro_runs" not in body
+    assert "source-derived: proof receipts 31, 32" in body
+    assert body.index("source-derived") > body.index("## OPERATOR DETAILS")
+    assert not any("repro_runs is empty" in a for a in _context(tmp_path)["advisories"])
+
+
+def test_a_runtime_basis_finding_still_marks_missing_repro_runs(tmp_path, monkeypatch, capsys):
+    finding = _source_finding()
+    finding["reproduction_basis"] = "runtime"
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+    export_submission.run(
+        _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
+    )
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "[NEEDS: details.repro_runs" in body
+    assert "source-derived" not in body
+
+
 @pytest.mark.parametrize("draft", [True, False])
 def test_unresolved_repro_runs_advise_but_never_block(tmp_path, monkeypatch, capsys, draft):
     """A declared run the audit log cannot produce is reported, not refused.

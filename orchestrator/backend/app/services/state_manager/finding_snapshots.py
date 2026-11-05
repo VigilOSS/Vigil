@@ -15,10 +15,11 @@ from typing import Any
 from fastapi import HTTPException, status
 
 from . import _common
-from ._common import _json_object, _serialize_finding_record
+from ._common import _json_object, _serialize_finding_record, is_file_finding
 from .finding_details import validate_stored_reply_sequence_identity
 from .finding_next_tests import current_next_test
 from .proofs import proof_receipts_for_finding
+from .repro_currentness import reproduction_basis_for_receipts
 
 CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
 # Names the binding an audited relocation out of ``file:`` reserved rather than
@@ -36,10 +37,6 @@ SUPERSEDED_CODE_SNAPSHOT_PROVENANCE_KEY = "superseded_code_snapshot"
 CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY = "code_snapshot_attestation"
 CODE_SNAPSHOT_WRITE_MODES = frozenset({"record", "patch", "verify"})
 _CODE_SNAPSHOT_WRITE_MODES = CODE_SNAPSHOT_WRITE_MODES
-
-
-def is_file_finding(canonical_location: str) -> bool:
-    return str(canonical_location or "").strip().startswith("file:")
 
 
 _LINE_SEGMENT = re.compile(r"([0-9]+)(?:-([0-9]+))?")
@@ -534,6 +531,9 @@ def _serialize_finding_with_code_snapshot_status(
     )
     record["proof_receipts"] = proof_receipts_for_finding(
         connection, engagement_id, int(record["id"])
+    )
+    record["reproduction_basis"] = reproduction_basis_for_receipts(
+        str(record.get("canonical_location") or ""), record["proof_receipts"]
     )
     record["next_test"] = current_next_test(
         connection, engagement_id, int(record["id"]), str(record["verification_status"]),

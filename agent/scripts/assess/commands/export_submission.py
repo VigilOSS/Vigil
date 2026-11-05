@@ -83,7 +83,10 @@ unresolved ids as advisories because a fetch can fail transiently. New authored
 run ids are validated when recorded, and final publication separately requires
 a current independent reproduction decision covering the authored ids. Unresolved
 ids are named in the render, on stderr, and in the context JSON
-(``repro_runs_unresolved``) so the report-writer can correct them.
+(``repro_runs_unresolved``) so the report-writer can correct them. A finding whose
+``reproduction_basis`` is ``source`` (a file finding verified only by
+source_observation receipts) has no run to name; the render cites its proof
+receipts instead and raises no missing-runs advisory.
 
 THE REHEARSAL IS ADVISED ON HERE and gated at final publication. The Phase-8
 reproduction rehearsal — an agent that EXECUTES the steps from a cold start — is
@@ -631,6 +634,11 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
     return runs
 
 
+def _source_derived(finding: dict) -> bool:
+    """The backend's ``reproduction_basis``: only source_observation receipts behind it."""
+    return finding.get("reproduction_basis") == "source"
+
+
 def _repro_runs(client, finding: dict) -> tuple[list[dict], list[str]]:
     """The command runs the finding DECLARES as its reproduction, in step order.
 
@@ -1066,6 +1074,18 @@ def _operator_details_block(
                 "finding rather than writing that step from the prose.",
                 "",
             ]
+    elif resolved["steps"] and _source_derived(finding):
+        # A source-derived code finding is reproduced by reading the cited source;
+        # its proof receipts stand where command runs would.
+        receipt_ids = ", ".join(
+            str(receipt.get("id")) for receipt in finding.get("proof_receipts") or []
+        )
+        lines += [
+            f"- **Reproduction basis:** source-derived: proof receipts {receipt_ids} "
+            "(source_observation) back these steps; no command run applies. Transcribe "
+            "the steps from the cited source lines those receipts observed.",
+            "",
+        ]
     elif resolved["steps"] and draft:
         lines += [
             "[NEEDS: details.repro_runs — the command-run ids behind these steps "
@@ -1650,7 +1670,12 @@ def run(args) -> None:
         # nobody can tell them apart from a reconstruction, and that ambiguity is
         # what burns a triage round. Suppressed when ids WERE declared and failed —
         # there the actionable message is "fix these ids", not "add some".
-        if resolved["steps"] and not repro_runs and not repro_unresolved:
+        if (
+            resolved["steps"]
+            and not repro_runs
+            and not repro_unresolved
+            and not _source_derived(finding)
+        ):
             advisories.append(
                 "steps_to_reproduce is authored but details.repro_runs is empty — no "
                 "command run stands behind these steps, so the reproduction cannot be "

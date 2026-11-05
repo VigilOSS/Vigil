@@ -125,7 +125,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "repro_runs": {
         "type": "array",
         "items": {"type": ["string", "integer"]},
-        "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. Newly authored ids must resolve in this engagement; legacy missing ids are reported as advisories. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased.",
+        "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. Newly authored ids must resolve in this engagement; legacy missing ids are reported as advisories. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. Leave it empty for a source-derived file finding (`reproduction_basis` `source`: every current verification receipt is a source_observation); its proof receipts back the steps and no run is owed.",
     },
     "attack_scenario": {
         "type": "string",

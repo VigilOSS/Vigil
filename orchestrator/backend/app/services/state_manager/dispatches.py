@@ -1221,7 +1221,7 @@ def record_decision(
                 raise HTTPException(status_code=422, detail="blind triage requires a recorded reviewer dispatch distinct from report writing")
         if kind == "repro_rehearsal":
             connection.execute("BEGIN IMMEDIATE")
-            from .repro_currentness import reproduction_sha256
+            from .repro_currentness import reproduction_basis, reproduction_sha256
 
             required = ("finding_slug", "verdict", "proof_mode", "verifier_dispatch_agent_id")
             if (
@@ -1240,10 +1240,21 @@ def record_decision(
             ).fetchone()
             if finding is None:
                 raise HTTPException(status_code=404, detail="reproduction finding not found")
-            if payload["proof_mode"] in {"source", "fuzz"} and not str(
+            if payload["proof_mode"] == "fuzz" and not str(
                 finding["canonical_location"] or ""
             ).startswith("file:"):
-                raise HTTPException(status_code=422, detail="source or fuzz reproduction requires a file finding")
+                raise HTTPException(status_code=422, detail="fuzz reproduction requires a file finding")
+            if payload["proof_mode"] == "source" and reproduction_basis(
+                connection, engagement.id, finding
+            ) != "source":
+                raise HTTPException(
+                    status_code=422,
+                    detail=(
+                        "source reproduction requires a source-derived file finding: "
+                        "every current verification receipt must be a source_observation; "
+                        "rehearse a finding with runtime receipts live or by fuzz"
+                    ),
+                )
             reviewer = connection.execute(
                 "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
                 (engagement.id, payload["verifier_dispatch_agent_id"]),

@@ -31,6 +31,7 @@ from .findings import (
 )
 from .links import _root_cause_link_metadata
 from .proofs import proof_evidence_health_issues_for_finding
+from .repro_currentness import reproduction_basis
 
 _MARKDOWN_PATH_REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_:/.-])"
@@ -560,10 +561,14 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
+    reproduction_bases: dict[int, str] = {}
     with _common.get_connection() as connection:
         for row in candidates:
             if row.get("verification_status") not in {"confirmed", "downgraded"}:
                 continue
+            reproduction_bases[int(row["id"])] = reproduction_basis(
+                connection, engagement.id, row
+            )
             for issue in proof_evidence_health_issues_for_finding(
                 connection, engagement.id, int(row["id"])
             ):
@@ -628,8 +633,14 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         # finding that carries no reproduction at all, while this one says the
         # steps cannot be told apart from a reconstruction — real, but not worth
         # gating every finding recorded before ``repro_runs`` existed. It fires
-        # only where there is something to back up.
-        if not is_blue and details.get("steps_to_reproduce") and not details.get("repro_runs"):
+        # only where there is something to back up, and never for a source-derived
+        # code finding, whose steps are backed by its source proof receipts.
+        if (
+            not is_blue
+            and details.get("steps_to_reproduce")
+            and not details.get("repro_runs")
+            and reproduction_bases.get(int(row["id"])) != "source"
+        ):
             advisories.append(
                 {
                     "kind": "finding_repro_runs_missing",
