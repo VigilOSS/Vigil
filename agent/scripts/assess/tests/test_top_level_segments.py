@@ -4,8 +4,9 @@ A segment is a review obligation, so declarations never open one: namespace
 and package lines, imports, `declare(...)`, PHP tags, comments, attributes,
 decorators, and class, interface, trait, enum and function declarations
 including their headers. Statements that run when the file is loaded or
-requested do: calls, output, control flow, inclusions, `define()`, and
-bindings whose value is not a literal. A file-scope line that carries a sink
+requested do: calls, output, control flow, inclusions, a `define()` of a
+computed value, and bindings whose value is not a literal. A line inside one
+that holds only closing punctuation owes nothing of its own. A file-scope line that carries a sink
 or a source always counts, so a reported `<top-level>` sink is never left
 without an obligation. The file-scope readers themselves are unchanged.
 """
@@ -238,12 +239,12 @@ function now() { return ACME_CLOCK; }
 @pytest.mark.parametrize(
     ("path", "language", "source", "segments"),
     [
-        pytest.param("public/index.php", "php", PHP_FRONT_CONTROLLER, [(6, 7), (11, 13)], id="php-front-controller"),
+        pytest.param("public/index.php", "php", PHP_FRONT_CONTROLLER, [(7, 7), (11, 12)], id="php-front-controller"),
         pytest.param("views/page.php", "php", PHP_INLINE_OUTPUT, [(4, 4)], id="php-inline-output"),
         pytest.param("acme/app.py", "python", PYTHON_SIDE_EFFECTS, [(3, 3), (10, 11)], id="python-side-effects"),
         pytest.param("acme/state.go", "go", GO_VAR, [(5, 5)], id="go-var-initializer"),
         pytest.param("src/server.js", "javascript", JS_SERVER, [(3, 3), (7, 8)], id="js-module-side-effects"),
-        pytest.param("Runner.java", "java", JAVA_STATIC_INITIALIZER, [(2, 4)], id="java-static-initializer"),
+        pytest.param("Runner.java", "java", JAVA_STATIC_INITIALIZER, [(2, 3)], id="java-static-initializer"),
         pytest.param("acme/macros.c", "c", C_MACRO_SINK, [(2, 2)], id="c-macro-sink"),
         pytest.param("config/app.php", "php", PHP_CONSTANTS, [(4, 4)], id="php-const-constructs-object"),
     ],
@@ -358,7 +359,7 @@ final class Terminal
     assert ("process_exec", "<top-level>", 7) in {
         (sink["kind"], sink["function"], sink["line"]) for sink in indexed["security_sinks"]
     }
-    assert _segments(indexed) == [(6, 8)]
+    assert _segments(indexed) == [(6, 7)]
 
 
 @pytest.mark.parametrize(
@@ -367,7 +368,7 @@ final class Terminal
         pytest.param(
             "src/registry.js", "javascript",
             b"class Registry {\n  static {\n    register(Registry);\n  }\n\n  size() { return 1; }\n}\n",
-            [(2, 4)], id="js-static-block",
+            [(2, 3)], id="js-static-block",
         ),
         pytest.param(
             "acme/runner.py", "python",

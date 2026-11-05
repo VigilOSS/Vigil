@@ -3577,6 +3577,181 @@ def _php_output_lines(node: Any, source: bytes) -> list[int]:
     ]
 
 
+# PHP builtins whose calls with constant arguments only declare a name:
+# `define()` is the call spelling of a constant declaration, and
+# `class_alias()` names a class that already exists. Both run nothing a
+# reviewer could read.
+_PHP_DECLARING_CALLS = frozenset({"define", "class_alias"})
+# Probes that ask whether a name is declared; with a literal argument they
+# read nothing but the symbol table.
+_PHP_EXISTENCE_PROBES = frozenset({
+    "defined", "function_exists", "class_exists", "interface_exists",
+    "trait_exists", "enum_exists",
+})
+_PHP_EXIT_NAMES = frozenset({"die", "exit"})
+# Operands a constant expression is built from: constant and class-constant
+# names (`__DIR__`, `Invoice::class`) and operators over them.
+_PHP_CONSTANT_NAME_TYPES = frozenset({
+    "name", "qualified_name", "class_constant_access_expression",
+})
+_PHP_CONSTANT_OPERATOR_TYPES = frozenset({
+    "binary_expression", "unary_op_expression", "parenthesized_expression",
+})
+
+
+def _php_constant_expression(node: Any) -> bool:
+    """Whether a PHP value is fixed at compile time: no variable, no call."""
+    if node.type in _PHP_CONSTANT_NAME_TYPES or _is_literal_value(node):
+        return True
+    return node.type in _PHP_CONSTANT_OPERATOR_TYPES and all(
+        _php_constant_expression(child) for child in node.named_children
+    )
+
+
+def _php_global_call_name(node: Any, source: bytes) -> str:
+    """The lowercased name of a call to a global PHP function, else ''."""
+    if node.type != "function_call_expression":
+        return ""
+    function = node.child_by_field_name("function")
+    if function is None or function.type not in {"name", "qualified_name"}:
+        return ""
+    name = _node_text(function, source)
+    name = name[1:] if name.startswith("\\") else name
+    return "" if "\\" in name else name.lower()
+
+
+def _php_constant_arguments(call: Any) -> bool:
+    arguments = call.child_by_field_name("arguments")
+    return all(
+        argument.type == "argument"
+        and argument.named_children
+        and _php_constant_expression(argument.named_children[-1])
+        for argument in (arguments.named_children if arguments is not None else ())
+        if not _is_comment_node(argument)
+    )
+
+
+def _php_literal_exit(node: Any, source: bytes) -> bool:
+    """`die`, `exit;`, `exit(1)`, `die('No direct access')`: an exit whose
+    message, if any, is a constant."""
+    if node.type == "expression_statement" and len(node.named_children) == 1:
+        node = node.named_children[0]
+    if node.type == "exit_statement":
+        return all(_php_constant_expression(child) for child in node.named_children)
+    if node.type == "name":
+        return _node_text(node, source).lower() in _PHP_EXIT_NAMES
+    return _php_global_call_name(node, source) in _PHP_EXIT_NAMES and _php_constant_arguments(node)
+
+
+def _php_existence_probe(node: Any, source: bytes, *, combined: bool = False) -> bool:
+    """`defined('X')`, `!\\function_exists('x')`: a literal declaration probe.
+
+    *combined* also accepts the probes joined by `&&`, `||`, `and` and `or`,
+    the shape an `if` condition takes; a guard's left operand is one probe.
+    """
+    while node.type == "parenthesized_expression" and len(node.named_children) == 1:
+        node = node.named_children[0]
+    if node.type == "unary_op_expression":
+        operator = node.child_by_field_name("operator")
+        argument = node.child_by_field_name("argument")
+        if operator is None or argument is None or operator.type != "!":
+            return False
+        return _php_existence_probe(argument, source, combined=combined)
+    if combined and node.type == "binary_expression":
+        operator = node.child_by_field_name("operator")
+        left = node.child_by_field_name("left")
+        right = node.child_by_field_name("right")
+        return (
+            operator is not None and left is not None and right is not None
+            and operator.type.lower() in {"&&", "||", "and", "or"}
+            and _php_existence_probe(left, source, combined=True)
+            and _php_existence_probe(right, source, combined=True)
+        )
+    return (
+        _php_global_call_name(node, source) in _PHP_EXISTENCE_PROBES
+        and _php_constant_arguments(node)
+    )
+
+
+def _php_declares_only(node: Any, source: bytes) -> bool:
+    """A literal declaring call, or a direct-access guard.
+
+    `defined('ACME') || die();` and `\\defined('_JEXEC') or die;` stop a
+    file requested on its own and run nothing when it is included, which is
+    the only way it does anything; `defined('X') or define('X', 1);` is a
+    guarded constant declaration.
+    """
+    if _php_global_call_name(node, source) in _PHP_DECLARING_CALLS:
+        return _php_constant_arguments(node)
+    if node.type != "binary_expression":
+        return False
+    operator = node.child_by_field_name("operator")
+    left = node.child_by_field_name("left")
+    right = node.child_by_field_name("right")
+    return (
+        operator is not None and left is not None and right is not None
+        and operator.type.lower() in {"||", "or"}
+        and left.type == "function_call_expression"
+        and _php_existence_probe(left, source)
+        and (_php_literal_exit(right, source) or _php_declares_only(right, source))
+    )
+
+
+def _php_existence_guarded_statements(node: Any, source: bytes) -> list[Any] | None:
+    """The statements an `if` over literal existence probes holds, or None.
+
+    `if (!function_exists('x')) { function x() {...} }` declares a function
+    and `if (!defined('X')) { die(...); }` is a direct-access guard. The
+    conditions read nothing, so the statement is a container: what runs is
+    each branch's own statements, less an exit that only enforces the guard.
+    An `elseif` whose condition reads anything else makes it ordinary code.
+    """
+    if node.type != "if_statement":
+        return None
+    branches = [node, *_field_children(node, "alternative")]
+    bodies: list[Any] = []
+    for branch in branches:
+        condition = branch.child_by_field_name("condition")
+        body = branch.child_by_field_name("body")
+        if body is None or (branch.type != "else_clause" and (
+            condition is None or not _php_existence_probe(condition, source, combined=True)
+        )):
+            return None
+        bodies.append(body)
+    return [
+        statement
+        for body in bodies
+        for statement in (
+            body.named_children if body.type in {"compound_statement", "colon_block"} else [body]
+        )
+        if not _php_literal_exit(statement, source)
+    ]
+
+
+# A line whose code is only closing punctuation, with at most a trailing line
+# comment: the `};` that ends an anonymous class, the `);` after a closure.
+_CLOSING_PUNCTUATION_LINE = re.compile(r"[\]\)\};,\s]*(?:(?://|#).*)?")
+
+
+def _holds_code(text: str, language: str) -> bool:
+    """Whether a line of an executing statement holds code a segment owes.
+
+    Blank lines, commentary and closing punctuation inside a statement run
+    nothing of their own. They are only ever read at a segment's edge, where
+    a statement spans a callable, so no line that starts or ends a statement
+    is lost.
+    """
+    stripped = text.strip()
+    if not _is_scannable_source_line(stripped, language):
+        return False
+    if stripped.startswith("/*"):
+        close = stripped.find("*/")
+        if close < 0:
+            return False
+        stripped = stripped[close + 2:]
+    return not _CLOSING_PUNCTUATION_LINE.fullmatch(stripped)
+
+
 def _is_executable_file_scope_node(node: Any, language: str, source: bytes) -> bool:
     """Whether one file-scope statement runs when the file is loaded or requested."""
     node_type = node.type
@@ -3584,6 +3759,22 @@ def _is_executable_file_scope_node(node: Any, language: str, source: bytes) -> b
         # A constant expression runs nothing, except the `new` PHP allows
         # in a global constant's initializer, which runs a constructor.
         return _has_descendant_type(node, "object_creation_expression")
+    if (
+        language == "php"
+        and node_type == "expression_statement"
+        and len(node.named_children) == 1
+        and _php_declares_only(node.named_children[0], source)
+    ):
+        return False
+    if node_type == "return_statement":
+        # A file that returns a literal -- a configuration array, a bare
+        # `return;` -- computes nothing; what it returns is read where it is
+        # included.
+        return any(
+            not _is_literal_value(child)
+            for child in node.named_children
+            if not _is_comment_node(child)
+        )
     if (
         _is_comment_node(node)
         or node_type in _FILE_SCOPE_INERT_TYPES.get(language, ())
@@ -3666,6 +3857,15 @@ def _executable_file_scope_lines(
             bisect_left(signals, node.start_point[0]):bisect_right(signals, node.end_point[0])
         ]
 
+    source_rows = source.split(b"\n")
+
+    def code_lines(rows: Iterable[int]) -> list[int]:
+        return [
+            row for row in rows
+            if row < len(source_rows)
+            and _holds_code(source_rows[row].decode("utf-8", errors="replace"), language)
+        ]
+
     root = getattr(tree, "root_node", None)
     stack = list(reversed(list(getattr(root, "named_children", ()) or ())))
     while stack:
@@ -3686,6 +3886,11 @@ def _executable_file_scope_lines(
             ]
             stack.extend(reversed(list(children)))
             continue
+        if language == "php" and (
+            guarded := _php_existence_guarded_statements(node, source)
+        ) is not None:
+            stack.extend(reversed(guarded))
+            continue
         if node.type in class_types:
             body = node.child_by_field_name("body")
             for member in body.named_children if body is not None else ():
@@ -3700,14 +3905,14 @@ def _executable_file_scope_lines(
                     if block.type in initializers
                 ]
                 for block in blocks:
-                    lines.update(range(block.start_point[0], block.end_point[0] + 1))
+                    lines.update(code_lines(range(block.start_point[0], block.end_point[0] + 1)))
                 if not blocks and _carries_file_scope_signal(member, language):
                     lines.update(signals_within(member))
             continue
         if language == "php" and node.type in {"text", "text_interpolation"}:
             lines.update(_php_output_lines(node, source))
         elif _is_executable_file_scope_node(node, language, source):
-            lines.update(_content_lines(node, source))
+            lines.update(code_lines(_content_lines(node, source)))
         elif _carries_file_scope_signal(node, language):
             lines.update(signals_within(node))
     return {

@@ -588,3 +588,260 @@ def test_the_top_level_scope_is_published_as_callable_records() -> None:
         ("<top-level>", "<top-level>", 2, 3),
         ("<top-level>", "<top-level>", 10, 10),
     ]
+
+
+# --- 6. File-scope statements that carry nothing to review -------------------
+
+PHP_INVOICE_CLASS = """<?php
+namespace Acme\\Billing;
+
+class Invoice
+{
+    public function total(): int
+    {
+        return 1;
+    }
+}
+"""
+
+
+def test_a_literal_class_alias_opens_no_segment() -> None:
+    source = (PHP_INVOICE_CLASS + "\nclass_alias(Invoice::class, 'Acme_Billing_Invoice');\n").encode()
+    indexed = index_file("src/Invoice.php", "php", source)
+
+    assert _segments(indexed) == []
+    assert indexed["total_functions"] == 1
+
+
+def test_a_class_alias_of_a_runtime_value_is_still_owed() -> None:
+    source = b"<?php\nclass_alias($legacy, 'Acme_Legacy');\n"
+
+    assert _segments(index_file("src/legacy.php", "php", source)) == [(2, 2)]
+
+
+@pytest.mark.parametrize(
+    "guard",
+    [
+        pytest.param("defined('ACME_INTERNAL') || die();", id="or-operator"),
+        pytest.param("defined('ACME_INTERNAL') or die('No direct access');", id="or-keyword"),
+        pytest.param("\\defined('_JEXEC') or die;", id="qualified-die"),
+        pytest.param("defined('ACME_INTERNAL') or exit;", id="or-exit"),
+        pytest.param("defined('ACME_INTERNAL') || exit(1);", id="exit-call"),
+        pytest.param("if (!defined('ACME_INTERNAL')) {\n    die('No direct access');\n}", id="if-die"),
+        pytest.param("if (!defined('ACME_INTERNAL')) {\n    exit;\n}", id="if-exit"),
+        pytest.param("if (!\\defined('ACME_INTERNAL')) die();", id="if-unbraced"),
+    ],
+)
+def test_a_direct_access_guard_opens_no_segment(guard: str) -> None:
+    source = (
+        "<?php\n" + guard + "\n\nclass acme_widget\n{\n"
+        "    public function render(): string\n    {\n        return 'x';\n    }\n}\n"
+    ).encode()
+
+    assert _segments(index_file("src/widget.php", "php", source)) == []
+
+
+def test_a_guard_before_a_request_script_leaves_only_the_script_owed() -> None:
+    source = b"<?php\ndefined('ACME_INTERNAL') || die();\n$id = $_GET['id'];\necho $id;\n"
+    indexed = index_file("public/view.php", "php", source)
+
+    assert _segments(indexed) == [(3, 4)]
+    assert ("php_script", "<top-level>", 3) in _entries(indexed)
+
+
+def test_a_guard_whose_exit_message_is_computed_is_still_owed() -> None:
+    source = b"<?php\ndefined('ACME_INTERNAL') || die($reason);\n"
+
+    assert _segments(index_file("src/guarded.php", "php", source)) == [(2, 2)]
+
+
+def test_a_literal_constant_definition_opens_no_segment() -> None:
+    source = b"""<?php
+define('ACME_VERSION', '1.2.0');
+define('ACME_ROOT', __DIR__ . '/..');
+
+function acme_version(): string
+{
+    return ACME_VERSION;
+}
+"""
+
+    assert _segments(index_file("src/version.php", "php", source)) == []
+
+
+def test_a_constant_defined_from_a_call_is_still_owed() -> None:
+    source = b"<?php\ndefine('ACME_HOME', getenv('ACME_HOME'));\n"
+
+    assert _segments(index_file("src/home.php", "php", source)) == [(2, 2)]
+
+
+def test_a_literal_configuration_return_is_owed_as_a_whole_file() -> None:
+    source = b"""<?php
+return [
+    'name' => 'acme',
+    'debug' => false,
+    'hosts' => ['app.example.com', 'api.example.com'],
+];
+"""
+    indexed = index_file("config/app.php", "php", source)
+
+    assert _segments(indexed) == []
+    assert indexed["total_functions"] == 0
+    assert indexed["analysis_status"] == "complete"
+
+
+def test_a_configuration_return_reading_the_environment_is_owed() -> None:
+    source = b"""<?php
+return [
+    'name' => 'acme',
+    'key' => getenv('ACME_KEY'),
+];
+"""
+    indexed = index_file("config/keys.php", "php", source)
+
+    assert _segments(indexed) == [(2, 4)]
+    assert [record["kind"] for record in indexed["security_sources"]] == ["process_input"]
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        pytest.param(b"<?php\nreturn;\n", id="bare"),
+        pytest.param(b"<?php\nreturn 'acme';\n", id="literal"),
+    ],
+)
+def test_a_literal_file_scope_return_opens_no_segment(source: bytes) -> None:
+    assert _segments(index_file("src/stop.php", "php", source)) == []
+
+
+def test_an_anonymous_migration_class_owes_only_its_head() -> None:
+    source = b"""<?php
+use Acme\\Schema\\Migration;
+
+return new class extends Migration {
+    public function up(): void
+    {
+        $this->create('invoices');
+    }
+};
+"""
+
+    assert _segments(index_file("database/migrations/create_invoices.php", "php", source)) == [(4, 4)]
+
+
+def test_blank_lines_between_anonymous_class_members_open_no_segment() -> None:
+    source = b"""<?php
+
+return new class extends Migration
+{
+    public function shouldRun(): bool
+    {
+        return false;
+    }
+
+    /**
+     * Run the migration.
+     */
+    public function up(): void
+    {
+        $this->create('invoices');
+    }
+};
+"""
+
+    assert _segments(index_file("database/migrations/create_invoices.php", "php", source)) == [(3, 4)]
+
+
+def test_a_route_group_owes_its_head_and_keeps_its_route() -> None:
+    source = b"""<?php
+use Illuminate\\Support\\Facades\\Route;
+
+Route::group(
+    ['prefix' => 'billing'],
+    function () {
+        Route::get('/invoices', [InvoiceController::class, 'index']);
+    }
+);
+"""
+    indexed = index_file("routes/web.php", "php", source)
+
+    assert _segments(indexed) == [(4, 5)]
+    assert "laravel_route" in {kind for kind, _name, _line in _entries(indexed)}
+
+
+def test_a_function_exists_guard_owes_nothing_around_its_definition() -> None:
+    source = b"""<?php
+if (!function_exists('acme_helper')) {
+    /**
+     * Acme helper.
+     *
+     * @return int
+     */
+    function acme_helper(): int
+    {
+        return 2;
+    }
+}
+"""
+    indexed = index_file("src/helpers.php", "php", source)
+
+    assert _segments(indexed) == []
+    assert indexed["total_functions"] == 1
+
+
+def test_every_branch_of_a_combined_existence_guard_is_a_container() -> None:
+    source = b"""<?php
+if (interface_exists(\\Acme\\Runner::class) && !class_exists('AcmeRunner')) {
+    class AcmeRunner
+    {
+        public function run(): int
+        {
+            return 1;
+        }
+    }
+} else {
+    class_alias(\\Acme\\LegacyRunner::class, 'AcmeRunner');
+}
+"""
+
+    assert _segments(index_file("src/runner.php", "php", source)) == []
+
+
+def test_an_elseif_that_reads_a_value_makes_the_guard_ordinary_code() -> None:
+    source = b"""<?php
+if (!defined('ACME_ROOT')) {
+    define('ACME_ROOT', __DIR__);
+} elseif ($strict) {
+    exit;
+}
+"""
+
+    assert _segments(index_file("src/root.php", "php", source)) == [(2, 5)]
+
+
+def test_code_inside_an_existence_guard_is_still_owed() -> None:
+    source = b"""<?php
+if (!class_exists('Acme\\\\Kernel')) {
+    require __DIR__ . '/kernel.php';
+}
+"""
+
+    assert _segments(index_file("src/load.php", "php", source)) == [(3, 3)]
+
+
+@pytest.mark.parametrize(
+    ("source", "segments"),
+    [
+        pytest.param(b"<?php\nrequire_once __DIR__ . '/bootstrap.php';\n", [(2, 2)], id="literal-require"),
+        pytest.param(b"<h1>Acme</h1>\n", [(1, 1)], id="inline-html"),
+        pytest.param(b"<?php\n$app->run();\n", [(2, 2)], id="call"),
+    ],
+)
+def test_statements_that_run_still_open_segments(source: bytes, segments: list) -> None:
+    assert _segments(index_file("public/index.php", "php", source)) == segments
+
+
+def test_a_literal_module_return_opens_no_javascript_segment() -> None:
+    source = b"const acme = require('./acme');\nacme.start();\nreturn;\n"
+
+    assert _segments(index_file("bin/acme.js", "javascript", source)) == [(1, 2)]

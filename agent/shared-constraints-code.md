@@ -283,7 +283,10 @@ file-scope segment.
 
 File scope is a callable too. The artifact's `top_level_segments` are the file-scope code between
 callables that runs when the file is loaded or requested. Import, namespace and `use` lines, type
-and constant declarations, literal-valued bindings and comments open none. PHP `include`/`require`
+and constant declarations (a literal `define()` included), literal `class_alias()` calls,
+`defined()` direct-access guards, literal returns, literal-valued bindings, comments and closing
+punctuation open none, and an `if` over `function_exists()`-style probes owes only the code inside
+it. PHP `include`/`require`
 statements and inline HTML open one, as do bindings with computed values such as
 `const db = require('db')`, and a sink or source the index reports in file-scope code that can run.
 They are registered as `<top-level>` callables (name and qualified name `<top-level>`, one per

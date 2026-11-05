@@ -306,3 +306,35 @@ def test_an_upgrade_that_adds_file_scope_keeps_receipts_and_surfaces_the_new_obl
     done = _complete(client, key, reclaim, _network_input_coverage(default_effort=80))
     assert done.status_code == 200, done.text
     assert _uncovered_paths(_gate(client, key, repo_id)) == set()
+
+
+def test_a_literal_configuration_file_owes_a_whole_file_span() -> None:
+    """A file that only returns a literal array opens no `<top-level>`
+    segment, so with no callable either the review owes the whole file."""
+    import json
+
+    from app.services.code_analysis_support import structural_review_obligation
+
+    source = b"""<?php
+return [
+    'name' => 'acme',
+    'hosts' => ['app.example.com'],
+];
+"""
+    indexed = index_file("config/app.php", "php", source)
+    obligation = structural_review_obligation(
+        {
+            "loc": len(source.splitlines()),
+            "structural_analysis_status": indexed["analysis_status"],
+            "structural_unavailable_dimensions_json": json.dumps(indexed["unavailable_dimensions"]),
+            "structural_truncated_dimensions_json": json.dumps(indexed["truncated_dimensions"]),
+            "total_functions": indexed["total_functions"],
+        },
+        tuple(
+            (segment["line_start"], segment["line_end"])
+            for segment in indexed["top_level_segments"]
+        ),
+    )
+
+    assert obligation.whole_file_reason == "registry holds no callable for this file"
+    assert obligation.top_level_spans == ()
