@@ -152,7 +152,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "python": [r"\bcursor\.execute\s*\(", r"\.execute\s*\("],
             "javascript": [r"\.query\s*\(", r"\.execute\s*\("],
             "typescript": [r"\.query\s*\(", r"\.execute\s*\("],
-            "go": [r"\b\w+\.Query\s*\(", r"\b\w+\.QueryRow\s*\(", r"\b\w+\.Exec\s*\("],
+            # `r.URL.Query()` reads the query string in every net/http handler;
+            # a `URL` receiver is never a database handle.
+            "go": [r"\b(?!URL\.)\w+\.Query\s*\(", r"\b\w+\.QueryRow\s*\(", r"\b\w+\.Exec\s*\("],
             "ruby": [r"\b\w+\.execute\s*\(", r"\bActiveRecord.*\.find_by_sql\s*\(",
                      r"\b\w+\.where\s*\(.*\braw\b"],
             "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",

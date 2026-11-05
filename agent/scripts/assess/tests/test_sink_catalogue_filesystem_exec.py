@@ -361,6 +361,10 @@ func readAllModern(name string) ([]byte, error) {
 	return os.ReadFile(name)
 }
 
+func runQuery(db *sql.DB, name string) (*sql.Rows, error) {
+	return db.Query("SELECT * FROM users WHERE name = ?", name)
+}
+
 func runQueryRow(db *sql.DB, id int) *sql.Row {
 	return db.QueryRow("SELECT * FROM users WHERE id = ?", id)
 }
@@ -761,6 +765,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "typescript", r"\.query\s*\(", 'pool.query("SELECT * FROM users WHERE name = ?", [name])', ["sqli"]),
     ("sql_exec", "typescript", r"\.execute\s*\(", "client.execute(sql, params)", ["sqli"]),
     # ---- sql_exec : go (treesitter_index.py:275) ----
+    ("sql_exec", "go", r"\b(?!URL\.)\w+\.Query\s*\(", 'db.Query("SELECT * FROM users WHERE name = ?", name)', ["sqli"]),
     ("sql_exec", "go", r"\b\w+\.QueryRow\s*\(", 'db.QueryRow("SELECT * FROM users WHERE id = ?", id)', ["sqli"]),
     ("sql_exec", "go", r"\b\w+\.Exec\s*\(", 'db.Exec("DELETE FROM users WHERE name = ?", name)', ["sqli"]),
     # ---- sql_exec : ruby (treesitter_index.py:276-277) ----
@@ -933,14 +938,6 @@ _EXCLUDED: dict[tuple[str, str, str], str] = {
     ("sql_exec", "java", r"\.execute\s*\("):
         "misrouted: false positive verified on ExecutorService.execute(Runnable) (JDK stdlib, java.util.concurrent)",
 
-    # --- sql_exec / go: fires, but collides with the single most common
-    # line shape in any Go HTTP handler. Verified: `r.URL.Query().Get("name")`
-    # (net/http stdlib -- reading a query-string parameter) produces a
-    # sql_exec/sql-injection sink with zero SQL involved. QueryRow/Exec are
-    # unaffected (verified) and remain the precise patterns for this family.
-    ("sql_exec", "go", r"\b\w+\.Query\s*\("):
-        "misrouted: false positive verified on r.URL.Query() (net/http stdlib) -- fires in nearly every Go HTTP handler",
-
     # --- sql_exec / ruby: requires the literal receiver "ActiveRecord",
     # which no idiomatic Rails code writes. Verified: `User.find_by_sql(...)`
     # (the actual idiom -- called on the model subclass) does NOT match;
@@ -1001,11 +998,12 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
     # (5 file_path, 7 sql_exec, 2 process_exec), all of which fire LIVE on
     # idiomatic C# -- so the case table gains 14 rows and _EXCLUDED gains
     # nothing. PHP's four inclusion constructs still account for the
-    # file_path (34) / file_inclusion (4) split described above.
+    # file_path (34) / file_inclusion (4) split described above. Go's
+    # `.Query(` excludes a `URL` receiver, so it is LIVE in the case table.
     # file_path=40, file_inclusion=4, sql_exec=30, process_exec=35 -> 109.
     assert len(all_patterns) == 109
-    assert len(tested) == 103
-    assert len(excluded) == 6
+    assert len(tested) == 104
+    assert len(excluded) == 5
 
 
 def test_case_table_has_no_duplicate_rows() -> None:

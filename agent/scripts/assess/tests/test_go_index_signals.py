@@ -81,3 +81,23 @@ func fetch(client *nethttp.Client, req *nethttp.Request) {
     indexed = index_file("fetch.go", "go", source.encode())
     assert indexed["analysis_status"] == "complete"
     assert not any(sink["kind"] == "url_fetch" for sink in indexed["security_sinks"])
+
+
+def test_reading_the_query_string_is_not_a_sql_sink_but_db_query_is() -> None:
+    source = """package main
+import (
+    "database/sql"
+    "net/http"
+)
+func search(w http.ResponseWriter, r *http.Request) {
+    name := r.URL.Query().Get("name")
+    rows, _ := db.Query("SELECT id FROM users WHERE name = '" + name + "'")
+    _ = rows
+}
+var db *sql.DB
+"""
+    indexed = index_file("search.go", "go", source.encode())
+    sql_lines = [sink["snippet"] for sink in indexed["security_sinks"] if sink["kind"] == "sql_exec"]
+    assert sql_lines == [
+        "rows, _ := db.Query(\"SELECT id FROM users WHERE name = '\" + name + \"'\")"
+    ]
