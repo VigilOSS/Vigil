@@ -33,6 +33,7 @@ from assess.lib.code_structural_identity import (
     STRUCTURAL_INDEX_SCHEMA,
     bind_structural_inputs,
     fetch_backend_file_inventory,
+    structural_indexer_digest,
     structural_input_digest,
 )
 from assess.lib.code_structural_metadata import (
@@ -381,6 +382,7 @@ def _validate_existing_generation(
         "repo_generation",
         "source_manifest_digest",
         "structural_input_digest",
+        "indexer_digest",
         "source_path",
         "source_snapshot_manifest_path",
         "snapshot_digest",
@@ -1072,9 +1074,12 @@ def run(args) -> None:
         print("Cannot build structural index: --max-tree-sitter-bytes must be positive", file=sys.stderr)
         sys.exit(1)
 
+    indexer_digest = structural_indexer_digest()
     structural_root = out_base / "structural-index"
     generation_parent = structural_root / str(repo_id) / str(generation)
-    identity_parent = generation_parent / STRUCTURAL_INDEX_PATH_VERSION / source_digest
+    identity_parent = (
+        generation_parent / STRUCTURAL_INDEX_PATH_VERSION / source_digest / indexer_digest
+    )
     try:
         durable_anchor = _nearest_existing_directory(out_base)
         _ensure_safe_directory_chain(identity_parent, durable_anchor)
@@ -1249,6 +1254,7 @@ def run(args) -> None:
             "repo_generation": generation,
             "source_manifest_digest": source_digest,
             "structural_input_digest": input_digest,
+            "indexer_digest": indexer_digest,
             "source_path": str(source_path),
             "source_snapshot_manifest_path": str(source_path.parent / "manifest.json"),
             "snapshot_digest": snapshot_digest,

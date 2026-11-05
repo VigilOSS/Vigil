@@ -3,14 +3,31 @@ from __future__ import annotations
 
 import hashlib
 import json
+from importlib import metadata
+from pathlib import Path
 from typing import Any
 
 from assess.lib.code_languages import canonical_backend_language
 
 STRUCTURAL_INPUT_IDENTITY_SCHEMA = "structural-input-identity/v1"
+STRUCTURAL_INDEXER_IDENTITY_SCHEMA = "structural-indexer-identity/v1"
 STRUCTURAL_INDEX_SCHEMA = "structural-index/v7"
 STRUCTURAL_AGGREGATE_SCHEMA = "structural-index-aggregate/v4"
 STRUCTURAL_INDEX_PATH_VERSION = "v7"
+STRUCTURAL_INDEXER_INPUTS = (
+    "commands/code_index.py",
+    "lib/code_languages.py",
+    "lib/code_snapshot.py",
+    "lib/code_structural_identity.py",
+    "lib/code_structural_metadata.py",
+    "lib/parser_boundary.py",
+    "lib/parser_worker.py",
+    "lib/treesitter_catalogues.py",
+    "lib/treesitter_common.py",
+    "lib/treesitter_index.py",
+    "lib/treesitter_lightweight.py",
+    "lib/treesitter_streaming.py",
+)
 
 
 def parse_code_file_page(
@@ -159,6 +176,30 @@ def structural_input_digest(
             }
             for rel_path in sorted(bound)
         ],
+    }
+    canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(canonical).hexdigest()
+
+
+def structural_indexer_digest() -> str:
+    """Hash the indexer sources and loaded parser packages that shape artifacts."""
+
+    from assess.lib import treesitter_index
+    from vigil_cli.image_freshness import inputs_digest
+
+    assess_root = Path(__file__).resolve().parents[1]
+    modules = [treesitter_index.tree_sitter, *treesitter_index._GRAMMAR_MODULES.values()]
+    payload = {
+        "schema": STRUCTURAL_INDEXER_IDENTITY_SCHEMA,
+        "inputs": inputs_digest(
+            [assess_root / rel_path for rel_path in STRUCTURAL_INDEXER_INPUTS],
+            root=assess_root,
+        ),
+        "packages": {
+            module.__name__: metadata.version(module.__name__)
+            for module in modules
+            if module is not None
+        },
     }
     canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(canonical).hexdigest()

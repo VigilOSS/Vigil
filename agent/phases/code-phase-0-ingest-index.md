@@ -85,8 +85,11 @@ The `code-index` command:
   every indexed language. Its `path_to_index` map is the only supported file-to-index lookup; the
   backend's `structural_index_schema` and `structural_index_manifest_path` record the accepted
   contract and location. A language-only correction creates a distinct immutable derived artifact
-  while retaining the old one as history. Rebuild and sync after upgrading from v6; v7 uses a
-  separate immutable directory and keeps historical v6 artifacts unchanged
+  while retaining the old one as history. The artifact path also carries an indexer digest over
+  the indexer sources and parser package versions, so rebuilding an unchanged snapshot after a
+  Vigil upgrade writes a new immutable artifact beside the old one and sync publishes it; a
+  same-indexer rebuild with different output fails closed. Rebuild and sync after upgrading
+  from v6; v7 uses a separate immutable directory and keeps historical v6 artifacts unchanged
 - Upgrades only the exact writer-shaped legacy v3 aggregate during build, after the new v7 artifact
   is complete: unique keys, numeric/digest/path bindings, and debt-count invariants are validated;
   its exact bytes are then retained at

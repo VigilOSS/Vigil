@@ -18,6 +18,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 ### Fixed
 
+- `code-index build` no longer refuses to rebuild an unchanged snapshot after a Vigil upgrade
+  changes the indexer; the new index sits beside the old one and `code-index sync` publishes it.
 - Rebuilding a structural index for the same snapshot rebinds its generation: unreferenced
   callables are replaced and receipt-bound callables keep their links when only their qualified
   name changes.

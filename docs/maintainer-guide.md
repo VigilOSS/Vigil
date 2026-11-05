@@ -348,6 +348,7 @@ Declared lists do need upkeep, and each has a guard test that fails before you c
 | `COPY` in `agent/docker/mitmproxy/Dockerfile` | `mitmproxy.py:mitmproxy_image_inputs` **and** `_proxy_build_context` | `test_every_proxy_dockerfile_copy_is_covered_by_the_declared_image_inputs` + the staged-context test |
 | frontend/report build config or source dir | `restart_manifest.py:frontend_build_inputs` / `report_build_inputs` | `test_*_build_config_files_are_all_declared_inputs`, `test_*_source_directories_are_all_declared_inputs` |
 | backend dependency manifest | `app/main.py:_BACKEND_DEPENDENCY_MANIFESTS` | `test_every_top_level_dependency_manifest_is_a_declared_input` |
+| `assess.*` import in a structural indexer library | `code_structural_identity.py:STRUCTURAL_INDEXER_INPUTS` | `test_structural_indexer_inputs_declare_every_assess_module_their_libraries_import` |
 
 A new consumer that bakes or caches managed content needs the same three parts: a declared input
 set, a digest stamped where the artifact lives, and a row from `consumer_states`.

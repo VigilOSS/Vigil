@@ -1914,12 +1914,13 @@ _CONTRACTS: dict[str, CommandContract] = {
         helper_defaults=(
             ("output_dir", "<engagement_dir>/tools/analysis-state"),
             ("aggregate manifest", "structural-index-manifest.json"),
-            ("per-repo manifest", f"structural-index/<repo_id>/<generation>/{STRUCTURAL_INDEX_PATH_VERSION}/<source_manifest_digest>/<structural_input_digest>/manifest.json"),
+            ("per-repo manifest", f"structural-index/<repo_id>/<generation>/{STRUCTURAL_INDEX_PATH_VERSION}/<source_manifest_digest>/<indexer_digest>/<structural_input_digest>/manifest.json"),
             ("per-file indexes", "the per-repo manifest's sibling files/<file-id>.json directory"),
         ),
         notes=(
             "The aggregate manifest is keyed by numeric backend repo ID, so multiple source repos share one engagement analysis-state tree without relative-path collisions.",
             "The build binds every artifact to the sealed snapshot, backend repository generation, source-manifest digest, source-file hash, and current canonical backend language. A language correction creates a new immutable structural-input identity without replacing the older derived artifact; an origin checkout is not an accepted input.",
+            "The indexer digest covers the indexer sources and loaded parser package versions. Rebuilding an unchanged snapshot after an indexer upgrade writes a new immutable artifact beside the older one and repoints the aggregate; a rebuild with the same indexer whose output differs fails closed.",
             "Each per-file artifact declares complete/degraded/unsupported analysis, parser mode, bytes scanned, unavailable/truncated dimensions, and full observed signal counts. Resource-bounded files receive an all-byte streaming security fallback plus explicit debt instead of a silent structural skip.",
             f"After a complete {STRUCTURAL_INDEX_PATH_VERSION} artifact validates, build can upgrade exactly the writer-shaped structural-index-aggregate/v3 contract in place: unique keys, canonical numeric/digest/path bindings, and self-consistent debt counts are required before it retains the exact bytes under structural-index/history/aggregates/v3/<sha256>.json. It then atomically starts v4 with only the freshly rebuilt repo and never imports stale v3 repo pointers; malformed and unknown schemas fail closed.",
             "The default output directory is the one code-index sync consumes, so indexing and sync stay in one engagement-owned tree.",

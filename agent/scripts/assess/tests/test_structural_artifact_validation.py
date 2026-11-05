@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ast
 import copy
 import hashlib
 import json
@@ -10,7 +11,11 @@ import pytest
 
 from assess.commands import code_index, code_index_sync
 from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
-from assess.lib.code_structural_identity import bind_structural_inputs, structural_input_digest
+from assess.lib.code_structural_identity import (
+    STRUCTURAL_INDEXER_INPUTS,
+    bind_structural_inputs,
+    structural_input_digest,
+)
 from assess.lib.code_structural_metadata import validated_structural_metadata
 from assess.lib.treesitter_index import index_file
 
@@ -381,3 +386,104 @@ def test_build_activity_counts_processed_errors_without_claiming_indexed_artifac
         assert f"errors={count}" in line
     assert "invalid structural artifacts" in captured.err
     assert captured.out == ""
+
+
+def _renamed_artifact(source: bytes) -> dict:
+    artifact = _artifact(source)
+    artifact["functions"][0].update(name="g", qualified_name="g")
+    return artifact
+
+
+def _sync_posts(args, client_type, monkeypatch) -> list[dict]:
+    posts: list[dict] = []
+
+    def post(_self, endpoint, payload, **_kwargs):
+        assert endpoint == "code/files/bulk-structural-metadata"
+        posts.append(payload)
+        return {field: payload[field] for field in (
+            "repo_id", "repo_generation", "source_manifest_digest",
+            "structural_input_digest", "structural_index_schema",
+        )} | {"updated": len(payload["updates"])}
+
+    monkeypatch.setattr(client_type, "post", post)
+    code_index_sync.run(SimpleNamespace(
+        manifest=str(Path(args.output_dir) / "structural-index-manifest.json"), index_dir=None,
+        repo_id=None, repo_key=None, engagement_dir=args.engagement_dir,
+    ))
+    return posts
+
+
+def _current_manifest(args) -> Path:
+    output = Path(args.output_dir)
+    top = json.loads((output / "structural-index-manifest.json").read_text())
+    return output / top["repos"]["7"]["manifest_path"]
+
+
+def test_indexer_upgrade_rebuilds_unchanged_snapshot_beside_history_and_sync_publishes_it(
+    index_project, monkeypatch,
+) -> None:
+    args, _repo, client_type = index_project
+    monkeypatch.setattr(code_index, "structural_indexer_digest", lambda: "a" * 64)
+    code_index.run(args)
+    old_manifest = _current_manifest(args)
+    old_bytes = {path: path.read_bytes() for path in old_manifest.parent.rglob("*.json")}
+
+    monkeypatch.setattr(code_index, "structural_indexer_digest", lambda: "b" * 64)
+    monkeypatch.setattr(code_index, "index_file", lambda _path, _language, source, **_kwargs: _renamed_artifact(source))
+    code_index.run(args)
+
+    new_manifest = _current_manifest(args)
+    assert new_manifest != old_manifest
+    assert {path: path.read_bytes() for path in old_bytes} == old_bytes
+    assert old_manifest.stat().st_mode & 0o777 == 0o444
+    built = json.loads(new_manifest.read_text())
+    assert built["indexer_digest"] == "b" * 64
+    assert built["structural_input_digest"] == json.loads(old_bytes[old_manifest])["structural_input_digest"]
+    posts = _sync_posts(args, client_type, monkeypatch)
+    assert [payload["structural_index_manifest_path"] for payload in posts] == [str(new_manifest)]
+    assert {item["callables"][0]["qualified_name"] for item in posts[0]["updates"]} == {"g"}
+
+
+def test_identical_rebuild_with_the_same_indexer_reuses_the_artifact(index_project) -> None:
+    args, _repo, _client = index_project
+    code_index.run(args)
+    manifest = _current_manifest(args)
+    first = {path: path.read_bytes() for path in Path(args.output_dir, "structural-index").rglob("*.json")}
+
+    code_index.run(args)
+
+    assert _current_manifest(args) == manifest
+    assert {path: path.read_bytes() for path in Path(args.output_dir, "structural-index").rglob("*.json")} == first
+
+
+def test_rebuild_with_the_same_indexer_and_different_output_is_refused(index_project, monkeypatch, capsys) -> None:
+    args, _repo, _client = index_project
+    code_index.run(args)
+    manifest = _current_manifest(args)
+    aggregate = (Path(args.output_dir) / "structural-index-manifest.json").read_bytes()
+
+    monkeypatch.setattr(code_index, "index_file", lambda _path, _language, source, **_kwargs: _renamed_artifact(source))
+    with pytest.raises(SystemExit) as exc:
+        code_index.run(args)
+
+    assert exc.value.code == 1
+    assert "existing generation-scoped index conflicts with the requested build" in capsys.readouterr().err
+    assert (Path(args.output_dir) / "structural-index-manifest.json").read_bytes() == aggregate
+    assert len(list(Path(args.output_dir, "structural-index").rglob("manifest.json"))) == 1
+    assert _current_manifest(args) == manifest
+
+
+def test_structural_indexer_inputs_declare_every_assess_module_their_libraries_import() -> None:
+    assess_root = Path(code_index.__file__).resolve().parents[1]
+    imported: set[str] = set()
+    for rel_path in STRUCTURAL_INDEXER_INPUTS:
+        if not rel_path.startswith("lib/"):
+            continue
+        for node in ast.walk(ast.parse((assess_root / rel_path).read_text(encoding="utf-8"))):
+            if not isinstance(node, ast.ImportFrom) or not (node.module or "").startswith("assess."):
+                continue
+            package = node.module.removeprefix("assess.").replace(".", "/")
+            for alias in node.names:
+                candidate = f"{package}/{alias.name}.py"
+                imported.add(candidate if (assess_root / candidate).is_file() else f"{package}.py")
+    assert imported <= set(STRUCTURAL_INDEXER_INPUTS)

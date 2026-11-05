@@ -248,15 +248,17 @@ def _prepare_repo_payload(
             f"repo {repo_id} structural input digest/language identity differs from the backend"
         )
     manifest_path = Path(str(manifest["_resolved_manifest_path"])).resolve()
-    expected_manifest_path = (
-        index_root
-        / str(repo_id)
-        / str(generation)
-        / STRUCTURAL_INDEX_PATH_VERSION
-        / digest
-        / expected_input_digest
-        / "manifest.json"
-    )
+    identity_root = index_root / str(repo_id) / str(generation) / STRUCTURAL_INDEX_PATH_VERSION / digest
+    if "indexer_digest" in manifest:
+        indexer_digest = manifest["indexer_digest"]
+        if (
+            not isinstance(indexer_digest, str)
+            or len(indexer_digest) != 64
+            or not set(indexer_digest) <= set("0123456789abcdef")
+        ):
+            raise ValueError(f"repo {repo_id} structural indexer digest is invalid")
+        identity_root = identity_root / indexer_digest
+    expected_manifest_path = identity_root / expected_input_digest / "manifest.json"
     if (
         _under(index_root, manifest_path, label=f"repo {repo_id} manifest")
         != expected_manifest_path.resolve()

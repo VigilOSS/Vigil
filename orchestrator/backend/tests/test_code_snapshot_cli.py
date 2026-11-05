@@ -1696,6 +1696,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         if STRUCTURAL_INDEX_PATH_VERSION in path.parts
     ]
 
+    indexer_digest = module.structural_indexer_digest()
     identity_parent = (
         output
         / "structural-index"
@@ -1703,6 +1704,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         / "4"
         / STRUCTURAL_INDEX_PATH_VERSION
         / server_digest
+        / indexer_digest
     )
     final_dir = identity_parent / input_digest
     chain_paths: list[Path] = []
@@ -2017,9 +2019,11 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         "4",
         STRUCTURAL_INDEX_PATH_VERSION,
         server_digest,
+        indexer_digest,
         input_digest,
         "manifest.json",
     )
+    assert built["indexer_digest"] == indexer_digest
     assert built["schema"] == STRUCTURAL_INDEX_SCHEMA
     assert built["repo_id"] == 7
     assert built["repo_generation"] == 4
@@ -2040,9 +2044,10 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
     assert unsupported["unavailable_dimensions"]
     assert unsupported["total_functions"] == 0
     assert unsupported["source_sha256"] == hashlib.sha256(notes).hexdigest()
-    assert f"/7/4/{STRUCTURAL_INDEX_PATH_VERSION}/{server_digest}/{built['structural_input_digest']}/" in (
-        f"/{manifests[0].relative_to(output / 'structural-index')}/"
-    )
+    assert (
+        f"/7/4/{STRUCTURAL_INDEX_PATH_VERSION}/{server_digest}/{indexer_digest}/"
+        f"{built['structural_input_digest']}/"
+    ) in f"/{manifests[0].relative_to(output / 'structural-index')}/"
     aggregate = json.loads(aggregate_path.read_text(encoding="utf-8"))
     assert aggregate["schema"] == "structural-index-aggregate/v4"
     assert set(aggregate["repos"]) == {"7"}
