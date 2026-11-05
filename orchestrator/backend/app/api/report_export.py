@@ -149,6 +149,7 @@ _FINDING_FIELDS = (
     "remediation",
     "steps_to_reproduce",
     "repro_runs",
+    "reproduction_basis",
     "cwe_id",
     "owasp_category",
     "cvss_score",

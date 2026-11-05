@@ -191,7 +191,11 @@ function FindingBlock({
           <h4>Steps to reproduce</h4>
           {/* Verbatim — the author's numbering is what other sections cite. */}
           <div className="rpt-steps">{steps}</div>
-          <ReproRunProvenance runIds={reproRunIds(finding.repro_runs)} draft={draft} />
+          <ReproRunProvenance
+            runIds={reproRunIds(finding.repro_runs)}
+            draft={draft}
+            basis={finding.reproduction_basis}
+          />
         </div>
       )}
       {curl && (

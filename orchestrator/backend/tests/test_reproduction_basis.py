@@ -166,3 +166,19 @@ def test_an_unverified_file_finding_has_runtime_basis(client, isolate_settings):
     _recorded(client, isolate_settings, "VA-404")
 
     assert client.get(f"{BASE}/findings/VA-404").json()["reproduction_basis"] == "runtime"
+
+
+def test_the_report_payload_carries_each_finding_reproduction_basis(
+    client, isolate_settings
+):
+    # The delivered report names what backs a reproduction; without the basis it
+    # can only call a source-derived finding's steps unbacked.
+    from app.api import report_export
+
+    _recorded(client, isolate_settings, "VA-405")
+    _confirm(client, "VA-405", _verification_receipt(client, "cvv-va-405", "VA-405"))
+
+    operator = client.get(f"{BASE}/report-findings?mode=draft").json()
+    [record] = [row for row in operator["standalone"] if row["slug"] == "VA-405"]
+    assert record["reproduction_basis"] == "source"
+    assert "reproduction_basis" in report_export._FINDING_FIELDS

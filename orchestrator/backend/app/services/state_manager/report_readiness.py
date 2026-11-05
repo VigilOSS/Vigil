@@ -134,6 +134,9 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
             record["claim_review_pending"] = _claim_review_status(
                 connection, engagement.id, row,
             )["claim_review_pending"]
+            record["reproduction_basis"] = reproduction_basis(
+                connection, engagement.id, record
+            )
             records.append(record)
     # A ``blocked`` verification status (blocked-for-provisioning, hunting.md)
     # is NOT a report candidate: the primitive was never reached, so it is neither
@@ -561,14 +564,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
-    reproduction_bases: dict[int, str] = {}
     with _common.get_connection() as connection:
         for row in candidates:
             if row.get("verification_status") not in {"confirmed", "downgraded"}:
                 continue
-            reproduction_bases[int(row["id"])] = reproduction_basis(
-                connection, engagement.id, row
-            )
             for issue in proof_evidence_health_issues_for_finding(
                 connection, engagement.id, int(row["id"])
             ):
@@ -639,7 +638,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             not is_blue
             and details.get("steps_to_reproduce")
             and not details.get("repro_runs")
-            and reproduction_bases.get(int(row["id"])) != "source"
+            and row.get("reproduction_basis") != "source"
         ):
             advisories.append(
                 {

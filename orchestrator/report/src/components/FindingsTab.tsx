@@ -59,7 +59,11 @@ function FindingDetail({ finding, draft }: { finding: ReportFinding; draft: bool
           <h4>Steps to reproduce</h4>
           {/* Verbatim — the author's numbering is what other sections cite. */}
           <div className="rpt-steps">{stepsText(finding.steps_to_reproduce)}</div>
-          <ReproRunProvenance runIds={reproRunIds(finding.repro_runs)} draft={draft} />
+          <ReproRunProvenance
+            runIds={reproRunIds(finding.repro_runs)}
+            draft={draft}
+            basis={finding.reproduction_basis}
+          />
         </section>
       )}
       {curl && (

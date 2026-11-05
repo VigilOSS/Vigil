@@ -64,13 +64,33 @@ export function CopyMarkdownButton({ finding }: { finding: ReportFinding }) {
  * only while drafting: the operator reviewing a draft is the reader who can
  * still go and get the run ids, and a delivered report should not be carrying
  * the note at all — the finding should have been sent back instead.
+ *
+ * A `source` reproduction basis (the verdict rests only on source-observation
+ * receipts) has no run to name: the cited source lines back its steps, as
+ * `export submission` states, so that is what the report says instead.
  */
-export function ReproRunProvenance({ runIds, draft }: { runIds: string[]; draft: boolean }) {
+export function ReproRunProvenance({
+  runIds,
+  draft,
+  basis,
+}: {
+  runIds: string[];
+  draft: boolean;
+  basis?: string;
+}) {
   if (runIds.length > 0) {
     return (
       <p className="rpt-steps-runs">
         Command runs behind these steps:{" "}
         <span className="rpt-mono">{runIds.map((id) => `#${id}`).join(" · ")}</span>
+      </p>
+    );
+  }
+  if (basis === "source") {
+    return (
+      <p className="rpt-steps-runs">
+        Derived from source review: the cited source lines back these steps, and no command run
+        applies.
       </p>
     );
   }

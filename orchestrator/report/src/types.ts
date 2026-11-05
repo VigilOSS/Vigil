@@ -83,6 +83,10 @@ export interface ReportFinding {
   // so a reader can tell a reproduction that was executed from one that was
   // written; see lib/steps.ts:reproRunIds.
   repro_runs?: string | string[];
+  // `source` when the verdict rests only on source-observation receipts: the
+  // cited source lines back the steps and no command run applies. Otherwise
+  // `runtime`.
+  reproduction_basis?: string;
   cwe_id?: string;
   owasp_category?: string;
   cvss_score?: number | null;
