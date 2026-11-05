@@ -4917,10 +4917,13 @@ def _php_ast_sinks(
             ),
             None,
         )
-        if target is None or target.type in {"declaration_list", "base_clause"}:
+        if target is None or target.type in {"declaration_list", "base_clause", "anonymous_class"}:
             continue
-        if target.type in {"variable_name", *_PHP_PROPERTY_TYPES}:
-            found.append(("dynamic_invocation", creation))
+        if target.type not in {"name", "qualified_name"}:
+            # `new $cls`, `new $this->handler`, `new $classes[$mode]`,
+            # `new ($factory)`: the class is a value chosen at run time.
+            if not _is_literal_value(target):
+                found.append(("dynamic_invocation", creation))
             continue
         text = _node_text(target, source)
         if (
