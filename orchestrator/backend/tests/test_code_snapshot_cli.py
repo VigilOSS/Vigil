@@ -1659,7 +1659,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
     parser_fails = False
     parser_cancelled = False
 
-    def fake_index(path, language, source=None, *, result_validator=None):
+    def fake_index(path, language, source=None, *, result_validator=None, **_kwargs):
         assert callable(result_validator)
         if parser_cancelled:
             raise KeyboardInterrupt

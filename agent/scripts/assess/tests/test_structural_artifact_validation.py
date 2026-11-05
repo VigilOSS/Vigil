@@ -393,6 +393,8 @@ def test_build_reports_phases_and_sparse_monotonic_file_activity(
     index_project, monkeypatch, capsys
 ) -> None:
     args, _repo, _client = index_project
+    # The fake clock advances inside each parse, so parses run one at a time.
+    args.jobs = 1
     clock = [100.0]
     durations = iter([29.0, 2.0])
     monkeypatch.setattr(code_index, "monotonic", lambda: clock[0], raising=False)
@@ -429,6 +431,7 @@ def test_build_activity_counts_processed_errors_without_claiming_indexed_artifac
     index_project, monkeypatch, capsys
 ) -> None:
     args, _repo, _client = index_project
+    args.jobs = 1
     clock = [100.0]
     monkeypatch.setattr(code_index, "monotonic", lambda: clock[0], raising=False)
 

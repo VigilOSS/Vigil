@@ -1,19 +1,35 @@
-"""Resource-limited child process for structural parser execution."""
+"""Resource-limited child process for structural parser execution.
+
+``--serve <fd>`` runs the warm fork server a parent ``ParserWorker`` drives
+over a Unix socket. The server never reads source bytes: it loads every
+grammar once, then forks one fresh child per request. Each child takes the
+request's resource limits and the audit guard before it opens the request, so
+every file still parses in its own limited process from the same warm state.
+"""
 from __future__ import annotations
 
+import gc
 import hashlib
 import json
 import os
 import resource
+import signal
+import socket
 import stat
+import struct
 import sys
+import traceback
+import warnings
 from pathlib import Path
-from typing import Any
+from typing import Any, NoReturn
 
 
 PARSER_PROTOCOL_SCHEMA = "vigil-structural-parser/v1"
 PARSER_CAPABILITY_DENIED_EXIT = 78
 PARSER_MEMORY_LIMIT_EXIT = 79
+SERVER_PROTOCOL_ERROR_EXIT = 65
+SERVER_FRAME_HEADER = struct.Struct("!I")
+MAX_SERVER_FRAME_BYTES = 64 * 1024
 _REQUEST_FIELDS = frozenset(
     {
         "schema",
@@ -150,8 +166,180 @@ def _write_envelope(payload: dict[str, Any]) -> None:
         offset += os.write(sys.stdout.fileno(), encoded[offset:])
 
 
+def encode_server_frame(payload: dict[str, Any]) -> bytes:
+    body = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    if len(body) > MAX_SERVER_FRAME_BYTES:
+        raise ValueError("parser server frame is too large")
+    return SERVER_FRAME_HEADER.pack(len(body)) + body
+
+
+def decode_server_frame(buffer: bytearray) -> dict[str, Any] | None:
+    """Pop one complete frame from *buffer*, or return None while it is partial."""
+    if len(buffer) < SERVER_FRAME_HEADER.size:
+        return None
+    (size,) = SERVER_FRAME_HEADER.unpack_from(buffer)
+    if size > MAX_SERVER_FRAME_BYTES:
+        raise ValueError("parser server frame is too large")
+    end = SERVER_FRAME_HEADER.size + size
+    if len(buffer) < end:
+        return None
+    payload = json.loads(bytes(buffer[SERVER_FRAME_HEADER.size : end]))
+    del buffer[:end]
+    if not isinstance(payload, dict):
+        raise ValueError("parser server frame is not an object")  # noqa: TRY004
+    return payload
+
+
+def _receive_frame(
+    control: socket.socket, buffer: bytearray, *, max_fds: int = 0,
+) -> tuple[dict[str, Any] | None, list[int]]:
+    fds: list[int] = []
+    while True:
+        frame = decode_server_frame(buffer)
+        if frame is not None:
+            return frame, fds
+        if max_fds and not fds:
+            data, received, flags, _address = socket.recv_fds(control, 4096, max_fds)
+            fds.extend(received)
+            if flags & getattr(socket, "MSG_CTRUNC", 0):
+                raise ValueError("parser server descriptors were truncated")
+        else:
+            data = control.recv(4096)
+        if not data:
+            for fd in fds:
+                os.close(fd)
+            return None, []
+        buffer.extend(data)
+
+
+def _close_inherited_descriptors() -> None:
+    directory = "/proc/self/fd" if os.path.isdir("/proc/self/fd") else "/dev/fd"
+    try:
+        descriptors = [int(name) for name in os.listdir(directory)]
+    except (OSError, ValueError):
+        descriptors = list(range(3, 1024))
+    for fd in descriptors:
+        if fd > 2:
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+
+
+def _run_forked_request(frame: dict[str, Any], fds: list[int]) -> NoReturn:
+    code = 1
+    try:
+        os.setsid()
+        os.dup2(fds[0], 1)
+        os.dup2(fds[1], 2)
+        _close_inherited_descriptors()
+        os.chdir(str(frame["cwd"]))
+        os.environ.update({str(key): str(value) for key, value in frame["limits"].items()})
+        request_path = str(frame["request"])
+        command = frame.get("command")
+        if command:
+            for restored in (signal.SIGPIPE, signal.SIGXFSZ):
+                signal.signal(restored, signal.SIG_DFL)
+            arguments = [str(item) for item in command] + [request_path]
+            os.execvpe(arguments[0], arguments, dict(os.environ))
+        code = main([request_path])
+    except SystemExit as exc:
+        code = exc.code if isinstance(exc.code, int) else 1
+    except BaseException:  # noqa: BLE001 - report like an uncaught child exception
+        try:
+            traceback.print_exc()
+        except BaseException:  # noqa: BLE001, S110 - the exit status still reports the crash
+            pass
+        code = 1
+    finally:
+        for stream in (sys.stdout, sys.stderr):
+            try:
+                stream.flush()
+            except BaseException:  # noqa: BLE001, S110 - unflushed diagnostics are capped anyway
+                pass
+        os._exit(code)
+
+
+def kill_process_group(pid: int) -> None:
+    """SIGKILL a request child's session, or the child alone before setsid."""
+    for kill in (os.killpg, os.kill):
+        try:
+            kill(pid, signal.SIGKILL)
+            return
+        except OSError:
+            continue
+
+
+def _warm_parsers() -> None:
+    """Load every grammar and query plan once so forked children start warm."""
+    from assess.lib.treesitter_index import SUPPORTED_LANGUAGES, index_file
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        for language in sorted(SUPPORTED_LANGUAGES):
+            try:
+                index_file("warm", language, source=b"\n")
+            except Exception:  # noqa: BLE001, S112 - the child reports its own grammar failure
+                continue
+    # Children's collections then skip the warm objects instead of copying
+    # their pages on write; new objects are collected as before.
+    gc.freeze()
+
+
+def serve(control_fd: int) -> int:
+    """Fork one limited child per request; never read request bytes here."""
+    control = socket.socket(fileno=control_fd)
+    buffer = bytearray()
+    active: int | None = None
+    _warm_parsers()
+    try:
+        control.sendall(encode_server_frame({"ready": True}))
+        while True:
+            frame, fds = _receive_frame(control, buffer, max_fds=2)
+            if frame is None:
+                return 0
+            if frame.get("op") != "run" or len(fds) != 2:
+                for fd in fds:
+                    os.close(fd)
+                return SERVER_PROTOCOL_ERROR_EXIT
+            try:
+                pid = os.fork()
+            except OSError:
+                pid = -1
+            if pid == 0:
+                _run_forked_request(frame, fds)
+            for fd in fds:
+                os.close(fd)
+            if pid < 0:
+                control.sendall(encode_server_frame({"error": "fork"}))
+                continue
+            active = pid
+            control.sendall(encode_server_frame({"pid": pid}))
+            # The parent may kill the child's group until it asks for the
+            # reap, so the pid cannot be recycled under it.
+            reap, _ = _receive_frame(control, buffer)
+            if reap is None or reap.get("op") != "reap":
+                return 0 if reap is None else SERVER_PROTOCOL_ERROR_EXIT
+            _, status = os.waitpid(pid, 0)
+            active = None
+            control.sendall(
+                encode_server_frame({"returncode": os.waitstatus_to_exitcode(status)})
+            )
+    except (BrokenPipeError, ConnectionResetError):
+        return 0
+    except ValueError:
+        return SERVER_PROTOCOL_ERROR_EXIT
+    finally:
+        # A parent that leaves mid-request never leaves its child running.
+        if active is not None:
+            kill_process_group(active)
+            os.waitpid(active, 0)
+
+
 def main(argv: list[str] | None = None) -> int:
     arguments = sys.argv[1:] if argv is None else argv
+    if len(arguments) == 2 and arguments[0] == "--serve":
+        return serve(int(arguments[1]))
     if len(arguments) != 1:
         return 64
     try:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 from pathlib import Path
@@ -184,39 +185,37 @@ def test_giant_line_uses_bounded_streaming_fallback() -> None:
 
 
 def test_cancellation_terminates_in_flight_worker_without_returning_partial_coverage(
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     source = b"def parse():\n    return 1\n"
+    pid_file = tmp_path / "worker.pid"
+    command = _python_command(
+        "import os, pathlib, signal; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); signal.pause()"
+    )
     callback_calls = 0
-    worker_pids: list[int] = []
-    real_popen = parser_boundary.subprocess.Popen
-
-    def observe_worker(*args, **kwargs):
-        process = real_popen(*args, **kwargs)
-        worker_pids.append(process.pid)
-        return process
 
     def cancellation_requested() -> bool:
         nonlocal callback_calls
         callback_calls += 1
-        return bool(worker_pids) and callback_calls >= 3
+        return pid_file.exists() and bool(pid_file.read_text())
 
-    monkeypatch.setattr(parser_boundary.subprocess, "Popen", observe_worker)
-
-    with pytest.raises(parser_boundary.ParserBoundaryCancelled):
-        parser_boundary.index_file(
-            "app.py",
-            "python",
-            source=source,
-            worker_command=_python_command("import signal; signal.pause()"),
-            cancellation_requested=cancellation_requested,
-        )
+    with parser_boundary.ParserWorker() as worker:
+        with pytest.raises(parser_boundary.ParserBoundaryCancelled):
+            parser_boundary.index_file(
+                "app.py",
+                "python",
+                source=source,
+                worker=worker,
+                worker_command=command,
+                cancellation_requested=cancellation_requested,
+            )
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(pid_file.read_text()), 0)
+        parsed = parser_boundary.index_file("app.py", "python", source=source, worker=worker)
 
     assert callback_calls >= 3
-    assert worker_pids
-    for pid in worker_pids:
-        with pytest.raises(ProcessLookupError):
-            os.kill(pid, 0)
+    assert parsed["analysis_status"] == "complete"
 
 
 def test_parser_worker_audit_guard_denies_socket_creation() -> None:
@@ -347,3 +346,122 @@ def test_preflight_decodes_utf8_across_chunks_and_checks_final_sequence(suffix, 
         worker_command=_python_command("import os; os._exit(73)"),
     )
     _assert_full_byte_fallback(result, source, reason)
+
+
+def _real_worker_after(prelude: str) -> list[str]:
+    """A worker command that runs *prelude* and then the real parser worker."""
+    return _python_command(
+        prelude
+        + "\nimport sys\nfrom assess.lib.parser_worker import main\n"
+        + "raise SystemExit(main(sys.argv[1:]))"
+    )
+
+
+def test_pooled_worker_times_out_a_cpu_bound_file_and_serves_the_next_one() -> None:
+    source = b"def parse(value):\n    return value\n"
+    with parser_boundary.ParserWorker() as worker:
+        exhausted = parser_boundary.index_file(
+            "spin.py",
+            "python",
+            source=source,
+            timeout_seconds=0.5,
+            worker=worker,
+            worker_command=_python_command("while True:\n    pass"),
+        )
+        parsed = parser_boundary.index_file("parse.py", "python", source=source, worker=worker)
+
+    _assert_full_byte_fallback(exhausted, source, "parser_worker_timeout")
+    assert parsed["analysis_status"] == "complete"
+    assert parsed["analysis_mode"] == "tree_sitter"
+
+
+def test_waiting_for_a_cpu_does_not_spend_the_parser_time_budget() -> None:
+    source = b"def parse(value):\n    return value\n"
+
+    result = parser_boundary.index_file(
+        "parse.py",
+        "python",
+        source=source,
+        timeout_seconds=0.5,
+        worker_command=_real_worker_after("import time\ntime.sleep(1.0)"),
+    )
+
+    assert result["analysis_status"] == "complete"
+    assert result["analysis_mode"] == "tree_sitter"
+
+
+@pytest.mark.parametrize(
+    ("command", "memory_limit_bytes", "expected_reason"),
+    [
+        (
+            _python_command("import os; os._exit(73)"),
+            parser_boundary.DEFAULT_MEMORY_LIMIT_BYTES,
+            "parser_worker_crash",
+        ),
+        (
+            _python_command(
+                "import signal; blocks = [bytearray(1024 * 1024) for _ in range(256)]; "
+                "signal.pause()"
+            ),
+            128 * 1024 * 1024,
+            "parser_worker_memory_limit",
+        ),
+    ],
+    ids=["crash", "memory-limit"],
+)
+def test_pooled_worker_survives_a_failed_file(
+    command: list[str], memory_limit_bytes: int, expected_reason: str
+) -> None:
+    source = b"def parse(value):\n    return value\n"
+    with parser_boundary.ParserWorker() as worker:
+        failed = parser_boundary.index_file(
+            "app.py",
+            "python",
+            source=source,
+            memory_limit_bytes=memory_limit_bytes,
+            worker=worker,
+            worker_command=command,
+        )
+        parsed = parser_boundary.index_file("parse.py", "python", source=source, worker=worker)
+
+    _assert_full_byte_fallback(failed, source, expected_reason)
+    assert parsed["analysis_status"] == "complete"
+
+
+def test_pooled_worker_restarts_a_server_lost_mid_request(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    servers: list[int] = []
+    real_popen = parser_boundary.subprocess.Popen
+
+    def observe_server(*args, **kwargs):
+        process = real_popen(*args, **kwargs)
+        servers.append(process.pid)
+        return process
+
+    monkeypatch.setattr(parser_boundary.subprocess, "Popen", observe_server)
+    source = b"def parse(value):\n    return value\n"
+    pid_file = tmp_path / "worker.pid"
+    command = _python_command(
+        "import os, pathlib, time; "
+        f"pathlib.Path({str(pid_file)!r}).write_text(str(os.getpid())); time.sleep(0.5)"
+    )
+
+    killed: list[int] = []
+
+    def lose_server() -> bool:
+        if not killed and pid_file.exists() and pid_file.read_text():
+            os.kill(servers[0], signal.SIGKILL)
+            killed.append(servers[0])
+        return False
+
+    with parser_boundary.ParserWorker() as worker:
+        lost = parser_boundary.index_file(
+            "app.py", "python", source=source, worker=worker, worker_command=command,
+            cancellation_requested=lose_server,
+        )
+        parsed = parser_boundary.index_file("parse.py", "python", source=source, worker=worker)
+
+    _assert_full_byte_fallback(lost, source, "parser_worker_crash")
+    assert parsed["analysis_status"] == "complete"
+    assert len(servers) == 2

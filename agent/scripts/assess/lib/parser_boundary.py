@@ -1,22 +1,48 @@
-"""Parent-owned process boundary for structural source parsers."""
+"""Parent-owned process boundary for structural source parsers.
+
+Every file parses in its own child process. A ``ParserWorker`` owns one warm
+fork server (``parser_worker --serve``) that forks that child, so a build pays
+interpreter start-up and grammar loading once per worker instead of once per
+file. The parent still owns each child's limits: it reads the child's kernel
+CPU and resident-memory accounting while it collects the output, kills the
+child's process group on any limit, and only then lets the server reap it.
+
+The time limit is CPU time the child itself spent, so a file waiting for a
+core behind other parsers keeps its whole budget. A wall-clock backstop of
+``PARSER_WALL_TIMEOUT_FACTOR`` times the budget still ends a child that stops
+making progress without using CPU. Where the platform exposes no per-process
+CPU accounting, the budget is wall-clock time.
+"""
 from __future__ import annotations
 
 import codecs
+import ctypes
+import ctypes.util
 import hashlib
 import json
 import math
 import os
+import queue
 import re
+import select
 import selectors
+import shutil
 import signal
+import socket
 import subprocess
 import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from assess.lib.parser_worker import (
+    decode_server_frame,
+    encode_server_frame,
+    kill_process_group,
+)
 from assess.lib.treesitter_index import (
     STREAMING_SCAN_WINDOW_BYTES,
     streaming_security_fallback,
@@ -25,6 +51,10 @@ from assess.lib.treesitter_index import (
 
 PARSER_PROTOCOL_SCHEMA = "vigil-structural-parser/v1"
 DEFAULT_PARSER_TIMEOUT_SECONDS = 15.0
+PARSER_WALL_TIMEOUT_FACTOR = 4
+MAX_DEFAULT_PARSER_JOBS = 8
+PARSER_SERVER_STARTUP_SECONDS = 60.0
+PARSER_REAP_SECONDS = 2.0
 DEFAULT_MAX_RESULT_BYTES = 64 * 1024 * 1024
 DEFAULT_MAX_EXACT_SOURCE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_LINE_BYTES = 1024 * 1024
@@ -94,39 +124,12 @@ def _has_giant_line(
     return False
 
 
-def _terminate_worker(process: subprocess.Popen[bytes]) -> None:
-    if process.poll() is not None:
-        return
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except OSError:
-        process.terminate()
-    try:
-        process.wait(timeout=0.25)
-        return
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except OSError:
-        process.kill()
-    process.wait(timeout=1)
-
-
-def _worker_environment(
-    *,
-    timeout_seconds: float,
-    max_result_bytes: int,
-    memory_limit_bytes: int,
-) -> dict[str, str]:
+def _worker_environment() -> dict[str, str]:
     scripts_root = Path(__file__).resolve().parents[2]
     environment = {
         "PATH": os.environ.get("PATH", ""),
         "PYTHONDONTWRITEBYTECODE": "1",
         "PYTHONIOENCODING": "utf-8:strict",
-        "VIGIL_PARSER_CPU_SECONDS": str(max(1, math.ceil(timeout_seconds) + 1)),
-        "VIGIL_PARSER_MEMORY_BYTES": str(memory_limit_bytes),
-        "VIGIL_PARSER_MAX_RESULT_BYTES": str(max_result_bytes),
     }
     existing_python_path = os.environ.get("PYTHONPATH", "")
     environment["PYTHONPATH"] = os.pathsep.join(
@@ -135,17 +138,80 @@ def _worker_environment(
     return environment
 
 
-def _process_resident_bytes(pid: int) -> int | None:
-    proc_statm = Path("/proc") / str(pid) / "statm"
-    if proc_statm.is_file():
-        try:
-            fields = proc_statm.read_text(encoding="ascii").split()
-            return int(fields[1]) * int(os.sysconf("SC_PAGE_SIZE"))
-        except (IndexError, OSError, ValueError):
+def _request_limits(
+    *,
+    timeout_seconds: float,
+    max_result_bytes: int,
+    memory_limit_bytes: int,
+) -> dict[str, str]:
+    return {
+        "VIGIL_PARSER_CPU_SECONDS": str(max(1, math.ceil(timeout_seconds) + 1)),
+        "VIGIL_PARSER_MEMORY_BYTES": str(memory_limit_bytes),
+        "VIGIL_PARSER_MAX_RESULT_BYTES": str(max_result_bytes),
+    }
+
+
+class _DarwinRUsage(ctypes.Structure):
+    _fields_ = [
+        ("ri_uuid", ctypes.c_uint8 * 16),
+        ("ri_user_time", ctypes.c_uint64),
+        ("ri_system_time", ctypes.c_uint64),
+        ("ri_pkg_idle_wkups", ctypes.c_uint64),
+        ("ri_interrupt_wkups", ctypes.c_uint64),
+        ("ri_pageins", ctypes.c_uint64),
+        ("ri_wired_size", ctypes.c_uint64),
+        ("ri_resident_size", ctypes.c_uint64),
+        ("ri_phys_footprint", ctypes.c_uint64),
+        ("ri_proc_start_abstime", ctypes.c_uint64),
+        ("ri_proc_exit_abstime", ctypes.c_uint64),
+    ]
+
+
+class _MachTimebase(ctypes.Structure):
+    _fields_ = [("numer", ctypes.c_uint32), ("denom", ctypes.c_uint32)]
+
+
+def _darwin_usage_probe() -> Callable[[int], tuple[int | None, float | None]] | None:
+    library = ctypes.util.find_library("proc")
+    if sys.platform != "darwin" or library is None:
+        return None
+    try:
+        libproc = ctypes.CDLL(library, use_errno=True)
+        libc = ctypes.CDLL(None)
+        timebase = _MachTimebase()
+        if libc.mach_timebase_info(ctypes.byref(timebase)) != 0 or not timebase.denom:
             return None
+    except (AttributeError, OSError):
+        return None
+    # rusage CPU times are Mach absolute-time ticks.
+    seconds_per_tick = timebase.numer / timebase.denom / 1e9
+
+    def probe(pid: int) -> tuple[int | None, float | None]:
+        usage = _DarwinRUsage()
+        if libproc.proc_pid_rusage(pid, 0, ctypes.byref(usage)) != 0:
+            return None, None
+        cpu = (usage.ri_user_time + usage.ri_system_time) * seconds_per_tick
+        return int(usage.ri_resident_size), cpu
+
+    return probe
+
+
+def _proc_usage(pid: int) -> tuple[int | None, float | None]:
+    base = Path("/proc") / str(pid)
+    try:
+        resident = int((base / "statm").read_text(encoding="ascii").split()[1])
+        # The command name is parenthesized and may hold spaces.
+        fields = (base / "stat").read_text(encoding="ascii").rsplit(")", 1)[1].split()
+        ticks = int(fields[11]) + int(fields[12])
+    except (IndexError, OSError, ValueError):
+        return None, None
+    return resident * _PAGE_SIZE, ticks / _CLOCK_TICKS
+
+
+def _ps_usage(pid: int) -> tuple[int | None, float | None]:
     ps_path = Path("/bin/ps")
     if not ps_path.is_file():
-        return None
+        return None, None
     try:
         completed = subprocess.run(
             [str(ps_path), "-o", "rss=", "-p", str(pid)],
@@ -155,73 +221,446 @@ def _process_resident_bytes(pid: int) -> int | None:
             timeout=0.25,
         )
         if completed.returncode != 0 or not completed.stdout.strip():
-            return None
-        return int(completed.stdout.strip()) * 1024
+            return None, None
+        return int(completed.stdout.strip()) * 1024, None
     except (OSError, subprocess.TimeoutExpired, ValueError):
-        return None
+        return None, None
 
 
-def _collect_worker_output(
-    process: subprocess.Popen[bytes],
-    *,
-    timeout_seconds: float,
-    max_result_bytes: int,
-    memory_limit_bytes: int,
-    cancellation_requested: Callable[[], bool] | None,
-) -> tuple[bytes, bytes, str | None]:
-    if process.stdout is None or process.stderr is None:
-        raise RuntimeError("parser worker pipes were not created")
-    selector = selectors.DefaultSelector()
-    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-    stdout = bytearray()
-    stderr = bytearray()
-    deadline = time.monotonic() + timeout_seconds
-    failure: str | None = None
+if Path("/proc/self/stat").is_file():
+    _PAGE_SIZE = int(os.sysconf("SC_PAGE_SIZE"))
+    _CLOCK_TICKS = float(os.sysconf("SC_CLK_TCK"))
+    _process_usage: Callable[[int], tuple[int | None, float | None]] = _proc_usage
+    CPU_TIME_LIMITS = True
+else:
+    _darwin_probe = _darwin_usage_probe()
+    _process_usage = _darwin_probe or _ps_usage
+    CPU_TIME_LIMITS = _darwin_probe is not None
+
+
+def _write_request_file(path: Path, data: bytes) -> None:
+    """Create a read-only request file; never reuse or follow an existing entry."""
+    flags = (
+        os.O_WRONLY | os.O_CREAT | os.O_EXCL
+        | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
+    )
+    path.unlink(missing_ok=True)
+    fd = os.open(path, flags, 0o400)
     try:
-        while selector.get_map():
-            if cancellation_requested is not None and cancellation_requested():
-                _terminate_worker(process)
-                raise ParserBoundaryCancelled("structural parser cancelled")
-            resident_bytes = _process_resident_bytes(process.pid)
-            if resident_bytes is not None and resident_bytes > memory_limit_bytes:
-                failure = "parser_worker_memory_limit"
-                _terminate_worker(process)
-                break
+        view = memoryview(data)
+        while view:
+            view = view[os.write(fd, view):]
+    finally:
+        os.close(fd)
+
+
+def _performance_cpu_count() -> int | None:
+    """Apple silicon's performance cores: efficiency cores stretch CPU time."""
+    if sys.platform != "darwin":
+        return None
+    try:
+        libc = ctypes.CDLL(None)
+        value = ctypes.c_int(0)
+        size = ctypes.c_size_t(ctypes.sizeof(value))
+        if libc.sysctlbyname(
+            b"hw.perflevel0.logicalcpu", ctypes.byref(value), ctypes.byref(size), None, 0,
+        ) != 0:
+            return None
+    except (AttributeError, OSError):
+        return None
+    return value.value if value.value > 0 else None
+
+
+def default_parser_jobs() -> int:
+    """Concurrent parses for a build: the usable cores, at most a fixed cap.
+
+    The per-file CPU budget is the same for every job count; staying on fast
+    cores keeps a file's CPU time, and so its outcome, independent of the count.
+    """
+    usable = getattr(os, "process_cpu_count", os.cpu_count)() or 1
+    performance = _performance_cpu_count()
+    if performance is not None:
+        usable = min(usable, performance)
+    return max(1, min(usable, MAX_DEFAULT_PARSER_JOBS))
+
+
+class ParserWorkerUnavailable(OSError):
+    """Raised when the warm parser server cannot start or answer a request."""
+
+
+class ParserWorker:
+    """One warm fork server that runs each parse request in a fresh child.
+
+    A worker serves one request at a time. It starts on first use, and a server
+    that fails or stops answering is discarded and restarted by the next
+    request, so one file's failure never reaches another file.
+    """
+
+    def __init__(self) -> None:
+        self._process: subprocess.Popen[bytes] | None = None
+        self._control: socket.socket | None = None
+        self._root: Path | None = None
+        self._buffer = bytearray()
+
+    def __enter__(self) -> ParserWorker:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        self._discard()
+        if self._root is not None:
+            shutil.rmtree(self._root, ignore_errors=True)
+            self._root = None
+
+    def _discard(self) -> None:
+        control, process = self._control, self._process
+        self._control = None
+        self._process = None
+        self._buffer.clear()
+        if control is not None:
+            # The server kills and reaps an in-flight child when its socket closes.
+            control.close()
+        if process is not None:
+            try:
+                process.wait(timeout=PARSER_REAP_SECONDS)
+            except subprocess.TimeoutExpired:
+                kill_process_group(process.pid)
+                process.wait(timeout=PARSER_REAP_SECONDS)
+
+    def _start(self) -> socket.socket:
+        if self._control is not None and self._process is not None:
+            if self._process.poll() is None:
+                return self._control
+            self._discard()
+        if self._root is None:
+            self._root = Path(tempfile.mkdtemp(prefix="vigil-structural-parser-"))
+            (self._root / "request").mkdir(mode=0o700)
+        parent, child = socket.socketpair(socket.AF_UNIX, socket.SOCK_STREAM)
+        try:
+            self._process = subprocess.Popen(
+                [
+                    sys.executable,
+                    "-m",
+                    "assess.lib.parser_worker",
+                    "--serve",
+                    str(child.fileno()),
+                ],
+                # An empty private directory: `-m` puts the cwd on sys.path.
+                cwd=self._root,
+                env=_worker_environment(),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+                close_fds=True,
+                pass_fds=(child.fileno(),),
+            )
+        except OSError as exc:
+            parent.close()
+            raise ParserWorkerUnavailable("parser server did not start") from exc
+        finally:
+            child.close()
+        self._control = parent
+        ready = self._reply(time.monotonic() + PARSER_SERVER_STARTUP_SECONDS)
+        if ready != {"ready": True}:
+            self._discard()
+            raise ParserWorkerUnavailable("parser server did not become ready")
+        return parent
+
+    def _reply(self, deadline: float) -> dict[str, Any] | None:
+        """Wait for one server frame; None means the server is unusable."""
+        control = self._control
+        if control is None:
+            return None
+        while True:
+            try:
+                frame = decode_server_frame(self._buffer)
+            except ValueError:
+                return None
+            if frame is not None:
+                return frame
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                failure = "parser_worker_timeout"
-                _terminate_worker(process)
-                break
-            events = selector.select(timeout=min(0.05, remaining))
-            for key, _ in events:
-                chunk = os.read(key.fileobj.fileno(), _READ_SIZE)
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                destination = stdout if key.data == "stdout" else stderr
-                destination.extend(chunk)
-                cap = (
-                    max_result_bytes
-                    if key.data == "stdout"
-                    else MAX_WORKER_DIAGNOSTIC_BYTES
-                )
-                if len(destination) > cap:
-                    failure = (
-                        "parser_worker_result_limit"
-                        if key.data == "stdout"
-                        else "parser_worker_diagnostic_limit"
-                    )
-                    _terminate_worker(process)
+                return None
+            readable, _, _ = select.select([control], [], [], remaining)
+            if not readable:
+                return None
+            try:
+                data = control.recv(4096)
+            except OSError:
+                return None
+            if not data:
+                return None
+            self._buffer.extend(data)
+
+    def run(
+        self,
+        *,
+        file_path: str,
+        language: str,
+        source: bytes,
+        command: Sequence[str] | None,
+        timeout_seconds: float,
+        max_result_bytes: int,
+        memory_limit_bytes: int,
+        cancellation_requested: Callable[[], bool] | None,
+    ) -> tuple[bytes, int | None, str | None]:
+        """Parse one source; return the child's stdout, exit status, and limit failure."""
+        self._start()
+        if self._root is None:
+            raise ParserWorkerUnavailable("parser server has no request directory")
+        request_dir = self._root / "request"
+        source_path = request_dir / "source.bin"
+        request_path = request_dir / "request.json"
+        request = {
+            "schema": PARSER_PROTOCOL_SCHEMA,
+            "file_path": file_path,
+            "language": language,
+            "source_path": str(source_path),
+            "source_size": len(source),
+            "source_sha256": hashlib.sha256(source).hexdigest(),
+        }
+        try:
+            _write_request_file(source_path, source)
+            _write_request_file(
+                request_path,
+                json.dumps(request, sort_keys=True, separators=(",", ":")).encode("utf-8"),
+            )
+            return self._run_request(
+                request_path,
+                command=command,
+                timeout_seconds=timeout_seconds,
+                max_result_bytes=max_result_bytes,
+                memory_limit_bytes=memory_limit_bytes,
+                cancellation_requested=cancellation_requested,
+            )
+        finally:
+            request_path.unlink(missing_ok=True)
+            source_path.unlink(missing_ok=True)
+
+    def _run_request(
+        self,
+        request_path: Path,
+        *,
+        command: Sequence[str] | None,
+        timeout_seconds: float,
+        max_result_bytes: int,
+        memory_limit_bytes: int,
+        cancellation_requested: Callable[[], bool] | None,
+    ) -> tuple[bytes, int | None, str | None]:
+        control = self._control
+        if control is None:
+            raise ParserWorkerUnavailable("parser server is not running")
+        stdout_read, stdout_write = os.pipe()
+        stderr_read, stderr_write = os.pipe()
+        frame = encode_server_frame(
+            {
+                "op": "run",
+                "request": str(request_path),
+                "cwd": str(request_path.parent),
+                "command": list(command) if command is not None else None,
+                "limits": _request_limits(
+                    timeout_seconds=timeout_seconds,
+                    max_result_bytes=max_result_bytes,
+                    memory_limit_bytes=memory_limit_bytes,
+                ),
+            }
+        )
+        try:
+            sent = socket.send_fds(control, [frame], [stdout_write, stderr_write])
+            if sent < len(frame):
+                control.sendall(frame[sent:])
+        except OSError as exc:
+            os.close(stdout_read)
+            os.close(stderr_read)
+            self._discard()
+            raise ParserWorkerUnavailable("parser server rejected the request") from exc
+        finally:
+            os.close(stdout_write)
+            os.close(stderr_write)
+        started = time.monotonic()
+        wall_seconds = (
+            timeout_seconds * PARSER_WALL_TIMEOUT_FACTOR if CPU_TIME_LIMITS else timeout_seconds
+        )
+        launched = self._reply(started + wall_seconds)
+        pid = launched.get("pid") if launched is not None else None
+        if type(pid) is not int or pid <= 0:
+            os.close(stdout_read)
+            os.close(stderr_read)
+            self._discard()
+            raise ParserWorkerUnavailable("parser server could not fork a request")
+        try:
+            return self._collect(
+                pid,
+                stdout_read=stdout_read,
+                stderr_read=stderr_read,
+                deadline=started + wall_seconds,
+                timeout_seconds=timeout_seconds,
+                max_result_bytes=max_result_bytes,
+                memory_limit_bytes=memory_limit_bytes,
+                cancellation_requested=cancellation_requested,
+            )
+        except BaseException:
+            # The server kills the unreaped child when its socket closes.
+            self._discard()
+            raise
+        finally:
+            os.close(stdout_read)
+            os.close(stderr_read)
+
+    def _collect(
+        self,
+        pid: int,
+        *,
+        stdout_read: int,
+        stderr_read: int,
+        deadline: float,
+        timeout_seconds: float,
+        max_result_bytes: int,
+        memory_limit_bytes: int,
+        cancellation_requested: Callable[[], bool] | None,
+    ) -> tuple[bytes, int | None, str | None]:
+        control = self._control
+        if control is None:
+            raise ParserWorkerUnavailable("parser server is not running")
+        selector = selectors.DefaultSelector()
+        selector.register(stdout_read, selectors.EVENT_READ, "stdout")
+        selector.register(stderr_read, selectors.EVENT_READ, "stderr")
+        stdout = bytearray()
+        stderr = bytearray()
+        open_streams = 2
+        reaping = False
+        returncode: int | None = None
+        failure: str | None = None
+        try:
+            while returncode is None:
+                if cancellation_requested is not None and cancellation_requested():
+                    kill_process_group(pid)
+                    self._reap(pid, reaping=reaping)
+                    raise ParserBoundaryCancelled("structural parser cancelled")
+                resident_bytes, cpu_seconds = _process_usage(pid)
+                if resident_bytes is not None and resident_bytes > memory_limit_bytes:
+                    failure = "parser_worker_memory_limit"
                     break
-            if failure is not None:
-                break
-    finally:
-        selector.close()
-        if process.poll() is None:
-            _terminate_worker(process)
-    process.wait(timeout=1)
-    return bytes(stdout), bytes(stderr), failure
+                if cpu_seconds is not None and cpu_seconds > timeout_seconds:
+                    failure = "parser_worker_timeout"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    failure = "parser_worker_timeout"
+                    break
+                for key, _ in selector.select(timeout=min(0.05, remaining)):
+                    if key.data == "control":
+                        returncode = self._status_reply(control)
+                        if returncode is None and self._control is None:
+                            failure = "parser_worker_crash"
+                        break
+                    chunk = os.read(key.fd, _READ_SIZE)
+                    if not chunk:
+                        selector.unregister(key.fd)
+                        open_streams -= 1
+                        continue
+                    destination = stdout if key.data == "stdout" else stderr
+                    destination.extend(chunk)
+                    cap = (
+                        max_result_bytes
+                        if key.data == "stdout"
+                        else MAX_WORKER_DIAGNOSTIC_BYTES
+                    )
+                    if len(destination) > cap:
+                        failure = (
+                            "parser_worker_result_limit"
+                            if key.data == "stdout"
+                            else "parser_worker_diagnostic_limit"
+                        )
+                        break
+                if failure is not None:
+                    break
+                if open_streams == 0 and not reaping:
+                    # Both pipes closed: ask the server for the exit status
+                    # while the CPU, memory, and wall limits keep running.
+                    try:
+                        control.sendall(encode_server_frame({"op": "reap"}))
+                    except OSError:
+                        self._discard()
+                        failure = "parser_worker_crash"
+                        break
+                    selector.register(control, selectors.EVENT_READ, "control")
+                    reaping = True
+        finally:
+            selector.close()
+        if failure is not None:
+            kill_process_group(pid)
+            if self._control is not None:
+                returncode = self._reap(pid, reaping=reaping)
+        return bytes(stdout), returncode, failure
+
+    def _status_reply(self, control: socket.socket) -> int | None:
+        """Read toward the reap reply; discard a server that closes or garbles it."""
+        try:
+            data = control.recv(4096)
+            if data:
+                self._buffer.extend(data)
+                reply = decode_server_frame(self._buffer)
+                if reply is None:
+                    return None
+                status = reply.get("returncode")
+                if type(status) is int:
+                    return status
+        except (OSError, ValueError):
+            pass
+        self._discard()
+        return None
+
+    def _reap(self, pid: int, *, reaping: bool) -> int | None:
+        """Collect a killed child's status, discarding a server that stalls."""
+        control = self._control
+        try:
+            if control is None:
+                raise ParserWorkerUnavailable("parser server is not running")
+            if not reaping:
+                control.sendall(encode_server_frame({"op": "reap"}))
+            reply = self._reply(time.monotonic() + PARSER_REAP_SECONDS)
+        except OSError:
+            reply = None
+        status = reply.get("returncode") if reply is not None else None
+        if type(status) is not int:
+            kill_process_group(pid)
+            self._discard()
+            return None
+        return status
+
+
+class ParserWorkerPool:
+    """A fixed set of parser workers, each leased to one parse at a time."""
+
+    def __init__(self, size: int) -> None:
+        if type(size) is not int or size < 1:
+            raise ValueError("parser worker pool size must be a positive integer")
+        self._workers = [ParserWorker() for _ in range(size)]
+        self._idle: queue.SimpleQueue[ParserWorker] = queue.SimpleQueue()
+        for worker in self._workers:
+            self._idle.put(worker)
+
+    def __enter__(self) -> ParserWorkerPool:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    @contextmanager
+    def lease(self) -> Iterator[ParserWorker]:
+        worker = self._idle.get()
+        try:
+            yield worker
+        finally:
+            self._idle.put(worker)
+
+    def close(self) -> None:
+        for worker in self._workers:
+            worker.close()
 
 
 def _decode_worker_result(
@@ -277,10 +716,17 @@ def index_file(
     max_result_bytes: int = DEFAULT_MAX_RESULT_BYTES,
     memory_limit_bytes: int = DEFAULT_MEMORY_LIMIT_BYTES,
     worker_command: Sequence[str] | None = None,
+    worker: ParserWorker | None = None,
     cancellation_requested: Callable[[], bool] | None = None,
     result_validator: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
-    """Parse one materialized source value in a resource-bounded child process."""
+    """Parse one materialized source value in a resource-bounded child process.
+
+    *timeout_seconds* is the child's CPU-time budget where the platform
+    accounts it. *worker* reuses a warm server across files; without one, a
+    single-use server parses this file. *worker_command* replaces the parser
+    program the child runs and receives the request path as its last argument.
+    """
     if source is None:
         raise ValueError("bounded structural parsing requires materialized source bytes")
     if not isinstance(source, bytes):
@@ -322,75 +768,75 @@ def index_file(
             cancellation_requested=cancellation_requested,
         )
 
-    with tempfile.TemporaryDirectory(prefix="vigil-structural-parser-") as temporary:
-        root = Path(temporary)
-        source_path = root / "source.bin"
-        request_path = root / "request.json"
-        source_path.write_bytes(source)
-        source_path.chmod(0o400)
-        request = {
-            "schema": PARSER_PROTOCOL_SCHEMA,
-            "file_path": file_path,
-            "language": language,
-            "source_path": str(source_path),
-            "source_size": len(source),
-            "source_sha256": hashlib.sha256(source).hexdigest(),
-        }
-        request_path.write_text(
-            json.dumps(request, sort_keys=True, separators=(",", ":")),
-            encoding="utf-8",
-        )
-        request_path.chmod(0o400)
-        command = list(worker_command) if worker_command is not None else [
-            sys.executable,
-            "-m",
-            "assess.lib.parser_worker",
-            str(request_path),
-        ]
-        try:
-            process = subprocess.Popen(
-                command,
-                cwd=root,
-                env=_worker_environment(
-                    timeout_seconds=float(timeout_seconds),
-                    max_result_bytes=max_result_bytes,
-                    memory_limit_bytes=memory_limit_bytes,
-                ),
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                start_new_session=True,
-                close_fds=True,
-            )
-        except OSError:
-            return _fallback(
-                file_path, language, source, reason="parser_worker_launch_error",
+    if worker is None:
+        with ParserWorker() as single_use:
+            return _parse_in_worker(
+                single_use, file_path, language, source,
+                timeout_seconds=float(timeout_seconds),
+                max_result_bytes=max_result_bytes,
+                memory_limit_bytes=memory_limit_bytes,
+                worker_command=worker_command,
                 cancellation_requested=cancellation_requested,
+                result_validator=result_validator,
             )
-        output, _diagnostics, failure = _collect_worker_output(
-            process,
-            timeout_seconds=float(timeout_seconds),
+    return _parse_in_worker(
+        worker, file_path, language, source,
+        timeout_seconds=float(timeout_seconds),
+        max_result_bytes=max_result_bytes,
+        memory_limit_bytes=memory_limit_bytes,
+        worker_command=worker_command,
+        cancellation_requested=cancellation_requested,
+        result_validator=result_validator,
+    )
+
+
+def _parse_in_worker(
+    worker: ParserWorker,
+    file_path: str,
+    language: str,
+    source: bytes,
+    *,
+    timeout_seconds: float,
+    max_result_bytes: int,
+    memory_limit_bytes: int,
+    worker_command: Sequence[str] | None,
+    cancellation_requested: Callable[[], bool] | None,
+    result_validator: Callable[[dict[str, Any]], None] | None,
+) -> dict[str, Any]:
+    try:
+        output, returncode, failure = worker.run(
+            file_path=file_path,
+            language=language,
+            source=source,
+            command=worker_command,
+            timeout_seconds=timeout_seconds,
             max_result_bytes=max_result_bytes,
             memory_limit_bytes=memory_limit_bytes,
             cancellation_requested=cancellation_requested,
         )
-        if failure is None and process.returncode != 0:
-            failure = {
-                PARSER_CAPABILITY_DENIED_EXIT: "parser_worker_capability_denied",
-                PARSER_MEMORY_LIMIT_EXIT: "parser_worker_memory_limit",
-            }.get(process.returncode, "parser_worker_crash")
-        if failure is None:
-            result, failure = _decode_worker_result(
-                output,
-                source_size=len(source),
-                result_validator=result_validator,
-            )
-            if result is not None:
-                return result
+    except ParserWorkerUnavailable:
         return _fallback(
-            file_path,
-            language,
-            source,
-            reason=failure or "parser_worker_malformed_output",
+            file_path, language, source, reason="parser_worker_launch_error",
             cancellation_requested=cancellation_requested,
         )
+    if failure is None and returncode != 0:
+        failure = {
+            PARSER_CAPABILITY_DENIED_EXIT: "parser_worker_capability_denied",
+            PARSER_MEMORY_LIMIT_EXIT: "parser_worker_memory_limit",
+            -signal.SIGXCPU: "parser_worker_timeout",
+        }.get(returncode, "parser_worker_crash")
+    if failure is None:
+        result, failure = _decode_worker_result(
+            output,
+            source_size=len(source),
+            result_validator=result_validator,
+        )
+        if result is not None:
+            return result
+    return _fallback(
+        file_path,
+        language,
+        source,
+        reason=failure or "parser_worker_malformed_output",
+        cancellation_requested=cancellation_requested,
+    )

@@ -1,8 +1,10 @@
 """vigil assess code-index — generation-bound structural indexing."""
 from __future__ import annotations
 
+import argparse
 import errno
 import fcntl
+import functools
 import hashlib
 import json
 import os
@@ -10,6 +12,9 @@ import shutil
 import stat
 import sys
 import tempfile
+import threading
+from collections.abc import Callable
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 from time import monotonic
@@ -23,6 +28,7 @@ from assess.commands.code_ingest import (
 from assess.lib.client import AssessmentClient
 from assess.lib.code_snapshot import (
     MAX_JSON_ARTIFACT_BYTES,
+    CapturedSourceFile,
     RootedSourceTree,
     SOURCE_MANIFEST_SCHEMAS,
     capture_regular_file,
@@ -45,7 +51,13 @@ from assess.lib.code_structural_metadata import (
     validated_structural_metadata,
 )
 from assess.lib.config import load_config, resolve_engagement_dir
-from assess.lib.parser_boundary import ParserBoundaryCancelled, index_file
+from assess.lib.parser_boundary import (
+    MAX_DEFAULT_PARSER_JOBS,
+    ParserBoundaryCancelled,
+    ParserWorkerPool,
+    default_parser_jobs,
+    index_file,
+)
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     PhpIncludeResolver,
@@ -147,7 +159,27 @@ def _register_build(subparsers) -> None:
             "all-bytes streaming security fallback"
         ),
     )
+    parser.add_argument(
+        "--jobs",
+        type=_parser_jobs,
+        default=default_parser_jobs(),
+        help=(
+            "Files parsed at once, each in its own resource-limited parser process "
+            "(default: the usable performance cores, at most "
+            f"{MAX_DEFAULT_PARSER_JOBS}); output is identical for every value"
+        ),
+    )
     parser.set_defaults(func=run)
+
+
+def _parser_jobs(value: str) -> int:
+    try:
+        jobs = int(value)
+    except ValueError:
+        jobs = 0
+    if jobs < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return jobs
 
 
 def _walk_repo(repo_path: str) -> list[dict[str, str]]:
@@ -986,6 +1018,35 @@ def _validate_analysis_artifact(
     validated_callable_records(indexed, rel_path=rel_path)
 
 
+def _raise(exc: Exception) -> dict[str, Any]:
+    raise exc
+
+
+def _parse_captured(
+    parsers: ParserWorkerPool,
+    cancelled: threading.Event,
+    rel_path: str,
+    language: str,
+    captured: CapturedSourceFile,
+) -> dict[str, Any]:
+    # The parser reads the file at its repository path: path-derived values,
+    # such as an include glued onto a raised directory, never see directories
+    # above the snapshot.
+    with parsers.lease() as worker:
+        return index_file(
+            rel_path,
+            language,
+            source=captured.materialized,
+            worker=worker,
+            cancellation_requested=cancelled.is_set,
+            result_validator=functools.partial(
+                _validate_analysis_artifact,
+                rel_path=rel_path,
+                source_size=captured.size,
+            ),
+        )
+
+
 def run(args) -> None:
     """Build atomically, reporting activity only at synchronous file boundaries.
 
@@ -1079,6 +1140,10 @@ def run(args) -> None:
     if max_tree_sitter_bytes < 1:
         print("Cannot build structural index: --max-tree-sitter-bytes must be positive", file=sys.stderr)
         sys.exit(1)
+    jobs = getattr(args, "jobs", None) or default_parser_jobs()
+    if type(jobs) is not int or jobs < 1:
+        print("Cannot build structural index: --jobs must be a positive integer", file=sys.stderr)
+        sys.exit(1)
 
     indexer_digest = structural_indexer_digest()
     structural_root = out_base / "structural-index"
@@ -1109,7 +1174,7 @@ def run(args) -> None:
     degraded_file_paths: list[str] = []
     truncated_file_paths: list[str] = []
     analysis_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
-    errors: list[str] = []
+    errors: list[tuple[int, str]] = []
     include_resolver = PhpIncludeResolver(
         {str(entry["file_path"]): str(entry["language"]) for entry in selected},
         excluded_paths=(
@@ -1118,115 +1183,188 @@ def run(args) -> None:
             if isinstance(record, dict)
         ),
     )
+    cancelled = threading.Event()
+    processed = 0
+    # The first failure by snapshot order, as a serial build would raise it.
+    fatal: tuple[int, Exception] | None = None
+
+    def capture_entry(
+        source_tree: RootedSourceTree, entry: dict[str, Any], parsers: ParserWorkerPool,
+    ) -> tuple[str, str, CapturedSourceFile | None, Callable[[], dict[str, Any]], bool, bool]:
+        """Capture one file and return how to produce its artifact."""
+        rel_path = str(entry["file_path"])
+        try:
+            language = str(entry["language"])
+            sealed_source_file_path(source_path, rel_path)
+            supported = language in SUPPORTED_LANGUAGES
+            scanner = (
+                StreamingSecurityScanner(rel_path, language)
+                if supported and int(entry.get("size") or 0) > max_tree_sitter_bytes
+                else None
+            )
+            captured = source_tree.capture(
+                rel_path,
+                retain_spool=False,
+                materialize_limit=max_tree_sitter_bytes if supported else None,
+                chunk_consumer=scanner.feed if scanner is not None else None,
+            )
+            if captured.sha256 != entry.get("source_sha256") or captured.size != entry.get("size"):
+                raise ValueError(f"snapshot file no longer matches manifest: {rel_path}")
+        except Exception as exc:  # noqa: BLE001 - recorded in snapshot order below
+            return rel_path, "", None, functools.partial(_raise, exc), False, False
+        if supported and captured.materialized is not None:
+            parse = functools.partial(
+                _parse_captured, parsers, cancelled, rel_path, language, captured,
+            )
+            return rel_path, language, captured, parse, False, True
+        if supported and scanner is not None:
+            finish = functools.partial(
+                scanner.finish, degradation_reason="tree_sitter_resource_limit",
+            )
+            return rel_path, language, captured, finish, False, False
+
+        def unsupported() -> dict[str, Any]:
+            indexed = _unsupported_index(rel_path, language, source_size=captured.size)
+            indexed["total_lines"] = captured.loc
+            return indexed
+
+        return rel_path, language, captured, unsupported, True, False
+
+    def record(
+        position: int,
+        rel_path: str,
+        language: str,
+        captured: CapturedSourceFile | None,
+        produce: Callable[[], dict[str, Any]],
+        unsupported: bool,
+    ) -> None:
+        """Stage one artifact; any completion order publishes the same bytes."""
+        nonlocal processed, last_activity_at, skipped_unsupported, fatal
+        try:
+            if unsupported:
+                skipped_unsupported += 1
+            indexed = produce()
+            if captured is None:
+                raise RuntimeError(f"source capture did not complete for {rel_path}")
+            if indexed.get("language") != language:
+                raise ValueError(f"structural parser language differs for {rel_path}")
+            if language == "php":
+                include_resolver.resolve(indexed, rel_path=rel_path)
+            _validate_analysis_artifact(
+                indexed,
+                rel_path=rel_path,
+                source_size=captured.size,
+            )
+            signal_counts = indexed["signal_counts"]
+            indexed["total_entry_points"] = int(signal_counts["entry_points"])
+            indexed["total_security_sinks"] = int(signal_counts["security_sinks"])
+            indexed.update(
+                {
+                    "file_path": rel_path,
+                    "repo_id": repo_id,
+                    "repo_generation": generation,
+                    "source_manifest_digest": source_digest,
+                    "structural_input_digest": input_digest,
+                    "source_sha256": captured.sha256,
+                }
+            )
+            filename = f"{_file_id(repo_id, generation, rel_path)}.json"
+            path = files_dir / filename
+            index_bytes = (json.dumps(indexed, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            path.write_bytes(index_bytes)
+            files_manifest[rel_path] = {
+                "index_path": str((final_dir / "files" / filename).relative_to(structural_root)),
+                "source_sha256": captured.sha256,
+                "language": language,
+                "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
+                "analysis_status": indexed["analysis_status"],
+                "analysis_mode": indexed["analysis_mode"],
+                "artifact_truncated": indexed["artifact_truncated"],
+            }
+            lang_counts[language] = lang_counts.get(language, 0) + 1
+            status = str(indexed["analysis_status"])
+            analysis_status_counts[status] += 1
+            if status == "degraded":
+                degraded_file_paths.append(rel_path)
+            if indexed["artifact_truncated"]:
+                truncated_file_paths.append(rel_path)
+            totals["total_functions"] += int(indexed.get("total_functions", 0))
+            totals["total_entry_points"] += int(signal_counts["entry_points"])
+            totals["total_security_sinks"] += int(signal_counts["security_sinks"])
+            totals["total_exports"] += int(indexed["total_exports"])
+        except ValueError as exc:
+            errors.append((position, f"{rel_path}: {exc}"))
+        except ParserBoundaryCancelled:
+            raise
+        except Exception as exc:  # noqa: BLE001 - re-raised in snapshot order below
+            if fatal is None or position < fatal[0]:
+                fatal = (position, exc)
+            return
+        processed += 1
+        now = monotonic()
+        if now - last_activity_at >= 30:
+            print(
+                f"code-index: indexing activity: processed={processed}/{len(selected)} "
+                f"indexed={len(files_manifest)} errors={len(errors)} "
+                f"elapsed={int(now - started_at)}s (staged artifacts)",
+                file=sys.stderr,
+                flush=True,
+            )
+            last_activity_at = now
+
     try:
         print(
-            f"code-index: indexing: processing {len(selected)} file(s) into staged artifacts",
+            f"code-index: indexing: processing {len(selected)} file(s) into staged artifacts "
+            f"with {jobs} parser worker(s)",
             file=sys.stderr,
             flush=True,
         )
         last_activity_at = monotonic()
-        with RootedSourceTree(source_path) as source_tree:
-            for processed, entry in enumerate(selected, 1):
-                rel_path = str(entry["file_path"])
-                try:
-                    language = str(entry["language"])
-                    sealed_source_file_path(source_path, rel_path)
-                    supported = language in SUPPORTED_LANGUAGES
-                    scanner = (
-                        StreamingSecurityScanner(rel_path, language)
-                        if supported and int(entry.get("size") or 0) > max_tree_sitter_bytes
-                        else None
+        with ParserWorkerPool(jobs) as parsers, RootedSourceTree(source_path) as source_tree:
+            # One file parses at a time on the build thread for --jobs 1;
+            # otherwise threads drive the workers and the build thread keeps
+            # at most two files per worker in flight.
+            executor = (
+                ThreadPoolExecutor(max_workers=jobs, thread_name_prefix="code-index-parser")
+                if jobs > 1
+                else None
+            )
+            in_flight: dict[Future[dict[str, Any]], tuple[int, str, str, CapturedSourceFile | None]] = {}
+
+            def drain(*, until: int) -> None:
+                while len(in_flight) > until:
+                    done, _ = wait(in_flight, return_when=FIRST_COMPLETED)
+                    for future in sorted(done, key=lambda item: in_flight[item][0]):
+                        position, rel_path, language, captured = in_flight.pop(future)
+                        record(position, rel_path, language, captured, future.result, False)
+
+            try:
+                for position, entry in enumerate(selected):
+                    if fatal is not None:
+                        break
+                    rel_path, language, captured, produce, unsupported, parses = capture_entry(
+                        source_tree, entry, parsers,
                     )
-                    captured = source_tree.capture(
-                        rel_path,
-                        retain_spool=False,
-                        materialize_limit=max_tree_sitter_bytes if supported else None,
-                        chunk_consumer=scanner.feed if scanner is not None else None,
-                    )
-                    if captured.sha256 != entry.get("source_sha256") or captured.size != entry.get("size"):
-                        raise ValueError(f"snapshot file no longer matches manifest: {rel_path}")
-                    if supported and captured.materialized is not None:
-                        # The parser reads the file at its repository path:
-                        # path-derived values, such as an include glued onto a
-                        # raised directory, never see directories above the
-                        # snapshot.
-                        indexed = index_file(
-                            rel_path,
-                            language,
-                            source=captured.materialized,
-                            result_validator=lambda result: _validate_analysis_artifact(
-                                result,
-                                rel_path=rel_path,
-                                source_size=captured.size,
-                            ),
-                        )
-                    elif supported and scanner is not None:
-                        indexed = scanner.finish(degradation_reason="tree_sitter_resource_limit")
-                    else:
-                        skipped_unsupported += 1
-                        indexed = _unsupported_index(rel_path, language, source_size=captured.size)
-                        indexed["total_lines"] = captured.loc
-                    if indexed.get("language") != language:
-                        raise ValueError(f"structural parser language differs for {rel_path}")
-                    if language == "php":
-                        include_resolver.resolve(indexed, rel_path=rel_path)
-                    _validate_analysis_artifact(
-                        indexed,
-                        rel_path=rel_path,
-                        source_size=captured.size,
-                    )
-                    signal_counts = indexed["signal_counts"]
-                    indexed["total_entry_points"] = int(signal_counts["entry_points"])
-                    indexed["total_security_sinks"] = int(signal_counts["security_sinks"])
-                    indexed.update(
-                        {
-                            "file_path": rel_path,
-                            "repo_id": repo_id,
-                            "repo_generation": generation,
-                            "source_manifest_digest": source_digest,
-                            "structural_input_digest": input_digest,
-                            "source_sha256": captured.sha256,
-                        }
-                    )
-                    filename = f"{_file_id(repo_id, generation, rel_path)}.json"
-                    path = files_dir / filename
-                    index_bytes = (json.dumps(indexed, indent=2, sort_keys=True) + "\n").encode("utf-8")
-                    path.write_bytes(index_bytes)
-                    files_manifest[rel_path] = {
-                        "index_path": str((final_dir / "files" / filename).relative_to(structural_root)),
-                        "source_sha256": captured.sha256,
-                        "language": language,
-                        "index_sha256": hashlib.sha256(index_bytes).hexdigest(),
-                        "analysis_status": indexed["analysis_status"],
-                        "analysis_mode": indexed["analysis_mode"],
-                        "artifact_truncated": indexed["artifact_truncated"],
-                    }
-                    lang_counts[language] = lang_counts.get(language, 0) + 1
-                    status = str(indexed["analysis_status"])
-                    analysis_status_counts[status] += 1
-                    if status == "degraded":
-                        degraded_file_paths.append(rel_path)
-                    if indexed["artifact_truncated"]:
-                        truncated_file_paths.append(rel_path)
-                    totals["total_functions"] += int(indexed.get("total_functions", 0))
-                    totals["total_entry_points"] += int(signal_counts["entry_points"])
-                    totals["total_security_sinks"] += int(signal_counts["security_sinks"])
-                    totals["total_exports"] += int(indexed["total_exports"])
-                except ValueError as exc:
-                    errors.append(f"{rel_path}: {exc}")
-                now = monotonic()
-                if now - last_activity_at >= 30:
-                    print(
-                        f"code-index: indexing activity: processed={processed}/{len(selected)} "
-                        f"indexed={len(files_manifest)} errors={len(errors)} "
-                        f"elapsed={int(now - started_at)}s (staged artifacts)",
-                        file=sys.stderr,
-                        flush=True,
-                    )
-                    last_activity_at = now
+                    if executor is None or not parses:
+                        record(position, rel_path, language, captured, produce, unsupported)
+                        continue
+                    in_flight[executor.submit(produce)] = (position, rel_path, language, captured)
+                    drain(until=2 * jobs - 1)
+                drain(until=0)
+            except BaseException:
+                cancelled.set()
+                raise
+            finally:
+                if executor is not None:
+                    executor.shutdown(wait=True, cancel_futures=True)
             source_tree.verify_root_identity()
+        if fatal is not None:
+            raise fatal[1]
         if errors:
-            raise ValueError("invalid structural artifacts:\n" + "\n".join(errors))
+            raise ValueError(
+                "invalid structural artifacts:\n"
+                + "\n".join(message for _position, message in sorted(errors))
+            )
 
         print(
             "code-index: publication: rechecking backend binding before publishing staged artifacts",
