@@ -4444,6 +4444,13 @@ _CALL_NOISE = frozenset({
 })
 
 
+@lru_cache(maxsize=8192)
+def _parameter_name_pattern(name: str) -> re.Pattern[str]:
+    """A caller parameter named as a whole word. Names recur across files and
+    a per-call compile would churn the regex cache every other reader uses."""
+    return re.compile(r"\b" + re.escape(name) + r"\b")
+
+
 def _detect_call_sites(
     functions: list[dict[str, Any]],
     language: str,
@@ -4499,7 +4506,7 @@ def _detect_call_sites(
                     call_end = m.end()
                     rest_of_line = line_text[call_end:]
                     for pn in param_names:
-                        if re.search(r'\b' + re.escape(pn) + r'\b', rest_of_line):
+                        if _parameter_name_pattern(pn).search(rest_of_line):
                             passes_params = True
                             break
 

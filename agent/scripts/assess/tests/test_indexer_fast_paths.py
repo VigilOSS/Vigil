@@ -226,3 +226,19 @@ def test_lines_framed_in_place_read_like_lines_framed_through_the_buffer() -> No
     assert observed[0]["total_lines"] == 7
     assert [sink["line"] for sink in observed[0]["security_sinks"]] == [4, 5]
     assert [source["line"] for source in observed[0]["security_sources"]] == [2, 5, 7]
+
+
+def test_a_call_passes_caller_params_only_for_a_whole_parameter_name() -> None:
+    # Parameter patterns are compiled once per name across files; a name
+    # that merely starts with a parameter (`username`, `users`) is not one.
+    source = b'''def acme(user, user_id, *args):
+    lookup(user_id)
+    render(username)
+    audit(args.count, "user")
+    notify(users)
+'''
+    indexed = index_file("acme/views.py", "python", source)
+
+    assert [
+        (call["callee"], call["passes_caller_params"]) for call in indexed["call_sites"]
+    ] == [("lookup", True), ("render", False), ("audit", True), ("notify", False)]
