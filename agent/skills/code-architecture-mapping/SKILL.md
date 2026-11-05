@@ -252,8 +252,15 @@ apply, or what access policies are enforced should receive `EXEC-POLICY` and cla
 Use a precise role label for each critical/high file because the backend derives additional
 coverage families from role + language. Prefer labels like `auth_handler`, `crypto_impl`,
 `error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, and
-`deserializer` over generic labels like `handler` or `utils`. If ingestion guessed the
-language wrong, emit a `language` correction in the classification record.
+`deserializer` over generic labels like `handler` or `utils`. Name what a transactional file
+moves: `refund_service`, `booking_controller`, `seat_hold_handler`, `quota_manager`,
+`store_credit_ledger`, `coupon_redeem_controller`, `payment_webhook`, `otp_verifier`, or
+`password_reset_controller`. Whole words such as refund, booking, hold, quota, credit, coupon,
+wallet, balance, payment, checkout, inventory and webhook add `race-condition` and
+`business-logic`; otp, mfa, totp, passcode and password reset add `rate-limit`. The backend also
+reads these words from the file's directories and name, outside test, docs, locale and
+migration directories. If ingestion guessed the language wrong, emit a `language` correction
+in the classification record.
 
 ## Classification Decision Framework
 

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import sqlite3
 import uuid
 from collections import Counter
@@ -3630,6 +3631,7 @@ def _hydrate_claimed_queue_item(
         item["file"].get("slot_types", []),
         language=str(item["file"].get("language", "")),
         role=str(item["file"].get("role", "")),
+        file_path=str(item["file"].get("file_path", "")),
     )
     # B2: prior art bound to this file travels with the claim. Nearly every
     # admitted file already carries a queue row by hunt time (A5), so this is
@@ -3685,7 +3687,12 @@ def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[d
             ),
         )
 
-    applicable = _applicable_families_for_file(slot_types, language=language, role=role)
+    applicable = _applicable_families_for_file(
+        slot_types,
+        language=language,
+        role=role,
+        file_path=str(file_row.get("file_path", "")),
+    )
     if classification in {"critical", "high"} and not applicable:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -4767,6 +4774,7 @@ def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
             _json_decode(file_row.get("slot_types_json"), []),
             language=str(file_row.get("language", "")),
             role=str(file_row.get("role", "")),
+            file_path=str(file_row.get("file_path", "")),
         )
         integrity = _compute_coverage_integrity(
             connection,
@@ -7314,6 +7322,7 @@ def code_coverage_summary(
                 slot_types,
                 language=meta.get("language", ""),
                 role=meta.get("role", ""),
+                file_path=str(meta["file_path"]),
             )
             if not applicable:
                 msg = (
@@ -9052,6 +9061,85 @@ ROLE_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], .
     (("llm", "prompt", "rag", "mcp", "embedding"), {"all": ["ai-ml-security"]}),
 )
 
+# Matched against whole words of the role label and of the file's own path
+# (`_context_words`, `_workflow_path_words`), never as substrings as the role
+# rows above are: `load_balancer` is not a balance and `placeholder` holds
+# nothing. A hyphenated entry is a phrase of consecutive words. Request handlers
+# run concurrently across requests, so a file that moves money, stock, quota or
+# one-time grants owes check-then-act and workflow review whatever its slot
+# types say.
+WORKFLOW_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
+    (
+        (
+            "booking", "reservation", "hold", "quota", "credit", "refund", "coupon",
+            "voucher", "redeem", "redemption", "wallet", "balance", "ledger",
+            "payment", "checkout", "payout", "withdraw", "withdrawal", "inventory",
+            "entitlement",
+        ),
+        {"all": ["race-condition", "business-logic"]},
+    ),
+    # Providers retry and replay deliveries, often concurrently, and each one
+    # usually settles a payment or grants something.
+    (("webhook", "ipn"), {"all": ["race-condition", "business-logic"]}),
+    # A short secret is only as strong as the limit on guessing it.
+    (
+        ("otp", "mfa", "totp", "passcode", "password-reset", "reset-password"),
+        {"all": ["rate-limit"]},
+    ),
+)
+
+# Path words come only from production source the index reads as code. Markup,
+# style and template languages name pages, and these directories hold tests,
+# documentation, translations and schema history rather than request handling.
+_WORKFLOW_PATH_SKIPPED_LANGUAGES = frozenset(
+    {"html", "css", "dockerfile", "freemarker", "blade", "twig"}
+)
+_WORKFLOW_PATH_SKIPPED_SEGMENTS = frozenset(
+    {
+        "test", "tests", "spec", "__tests__", "docs", "fixtures", "locale",
+        "locales", "i18n", "translations", "migrations",
+    }
+)
+_WORD_PATTERN = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+")
+
+
+def _context_words(text: str) -> list[str]:
+    """Split on non-alphanumerics and camelCase boundaries, lower-cased."""
+    return [word.lower() for word in _WORD_PATTERN.findall(text)]
+
+
+def _workflow_path_words(file_path: str, language: str) -> list[str]:
+    if (
+        language not in STRUCTURALLY_ANALYZED_LANGUAGES
+        or language in _WORKFLOW_PATH_SKIPPED_LANGUAGES
+    ):
+        return []
+    segments = [segment for segment in file_path.split("/") if segment]
+    if not segments:
+        return []
+    directories, name = segments[:-1], segments[-1]
+    if any(segment.lower() in _WORKFLOW_PATH_SKIPPED_SEGMENTS for segment in directories):
+        return []
+    stem = name.rsplit(".", 1)[0] if "." in name.lstrip(".") else name
+    lowered = stem.lower()
+    if lowered.startswith("test_") or lowered.endswith(("_test", "_spec", ".test", ".spec")):
+        return []
+    return [word for segment in (*directories, stem) for word in _context_words(segment)]
+
+
+def _has_context_keyword(words: list[str], keyword: str) -> bool:
+    """True when ``keyword`` (a word or hyphenated phrase) occurs as whole words.
+
+    The phrase's last word may carry a plural ``s``.
+    """
+    phrase = keyword.split("-")
+    width = len(phrase)
+    for start in range(len(words) - width + 1):
+        window = words[start : start + width]
+        if window[:-1] == phrase[:-1] and window[-1] in (phrase[-1], f"{phrase[-1]}s"):
+            return True
+    return False
+
 
 def _apply_grouped_families(
     families: set[str],
@@ -9077,8 +9165,13 @@ def _applicable_families_for_file(
     *,
     language: str = "",
     role: str = "",
+    file_path: str = "",
 ) -> list[str]:
-    """Compute canonical applicable vulnerability classes for a classified file."""
+    """Compute canonical applicable vulnerability classes for a classified file.
+
+    Recomputed on every read, never stored, so a row added here applies to
+    every open engagement at once.
+    """
     lang_lower = language.lower().strip()
     is_native = lang_lower in NATIVE_LANGUAGES
     is_memory_unsafe = lang_lower in MEMORY_UNSAFE_LANGUAGES
@@ -9101,6 +9194,22 @@ def _applicable_families_for_file(
 
     for keywords, mapping in ROLE_CONTEXT_VULN_CLASSES:
         if any(keyword in role_lower for keyword in keywords):
+            _apply_grouped_families(
+                families,
+                mapping,
+                is_native=is_native,
+                lang_known=lang_known,
+                is_memory_unsafe=is_memory_unsafe,
+            )
+
+    # Role and path are separate sources, so a phrase never spans the two.
+    context_words = (_context_words(role), _workflow_path_words(file_path, lang_lower))
+    for keywords, mapping in WORKFLOW_CONTEXT_VULN_CLASSES:
+        if any(
+            _has_context_keyword(words, keyword)
+            for words in context_words
+            for keyword in keywords
+        ):
             _apply_grouped_families(
                 families,
                 mapping,
@@ -10181,6 +10290,7 @@ def code_coverage_cwe_detail(
                 slot_types,
                 language=fr["language"] or "",
                 role=fr["role"] or "",
+                file_path=str(fr["file_path"] or ""),
             )
             merged_entries = list(cwe_by_file.get(fid, {}).values())
             total_functions = int(fr["total_functions"] or 0)

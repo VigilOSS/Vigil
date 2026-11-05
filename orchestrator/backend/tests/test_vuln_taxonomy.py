@@ -83,13 +83,17 @@ def test_every_skill_vuln_class_is_canonical():
 
 def test_code_families_subset_of_canonical():
     """Code alignment-by-inclusion: every class the code track validates against
-    (`SLOT_VULN_CLASSES` + `ROLE_CONTEXT_VULN_CLASSES`) is canonical."""
+    (`SLOT_VULN_CLASSES` + `ROLE_CONTEXT_VULN_CLASSES` +
+    `WORKFLOW_CONTEXT_VULN_CLASSES`) is canonical."""
     canonical = vuln_taxonomy.all_classes()
     code_classes: set[str] = set()
     for groups in code_analysis.SLOT_VULN_CLASSES.values():
         for families in groups.values():
             code_classes.update(families)
-    for _keywords, groups in code_analysis.ROLE_CONTEXT_VULN_CLASSES:
+    for _keywords, groups in (
+        *code_analysis.ROLE_CONTEXT_VULN_CLASSES,
+        *code_analysis.WORKFLOW_CONTEXT_VULN_CLASSES,
+    ):
         for families in groups.values():
             code_classes.update(families)
     assert code_classes, "code track family lists are empty — wrong module?"

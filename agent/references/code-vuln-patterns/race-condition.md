@@ -1,7 +1,7 @@
 ---
-description: State machine bugs, async refactoring artifacts, signal handler races
+description: State machine bugs, async refactoring artifacts, signal handler races, request-level check-then-act on balances, quotas and one-time grants
 skill: code-vulnerability-analysis, code-variant-analysis
-languages: C/C++, Python, JS
+languages: C/C++, Python, JS, PHP, Ruby, Java, Go
 ---
 
 # Race Conditions — State Machine & Async Bugs
@@ -310,6 +310,108 @@ but if a worker communicates with multiple workers, there's no global ordering g
 
 ---
 
+## Request-Level Concurrency in Web and API Handlers
+
+A request handler is single-threaded per request and concurrent across requests. Every
+worker process, thread, async task and replica runs the same handler at once, so "this
+module has no threads" never rules a race out. The shared state is the database, the
+cache, or a file, and the check and the act are separate statements. An attacker opens
+20 to 100 connections and sends the same request in one burst; the window is the round
+trip between the read and the write.
+
+### Database check-then-act
+
+```python
+def redeem(request, code):
+    coupon = Coupon.objects.get(code=code)
+    if coupon.used:                          # check: every concurrent request sees False
+        raise AlreadyRedeemed()
+    request.user.wallet.credit(coupon.value)  # act: credited once per request
+    coupon.used = True
+    coupon.save()                             # last writer wins; nothing failed
+```
+
+The read and the write are two statements with no lock and no condition on the write.
+Look for any `SELECT` (ORM `get`, `find`, `first`, `exists`, `count`) whose result
+decides an `INSERT` or `UPDATE` of the same row or of a row it guards. Safe forms move
+the check into the write so the database arbitrates it:
+
+```sql
+UPDATE coupons SET used = 1 WHERE code = ? AND used = 0   -- then require rowcount == 1
+UPDATE wallets SET balance = balance - ? WHERE id = ? AND balance >= ?
+```
+
+A guarded update is only safe when the code checks the affected row count. An `UPDATE`
+that matched zero rows raises nothing in most drivers.
+
+### Row locks and their scope
+
+`SELECT ... FOR UPDATE` (Django `select_for_update()`, Rails `lock` / `with_lock`,
+Laravel `lockForUpdate()`, JPA `PESSIMISTIC_WRITE`, GORM `clause.Locking`) serializes
+callers only inside one transaction that spans both the read and the write. Check:
+
+- The lock and the write share a transaction. A lock taken in a helper that commits, or
+  under autocommit, is released before the write runs.
+- Every path that writes the row takes the same lock. A second endpoint that updates
+  the balance without it reopens the window.
+- SQLite ignores `FOR UPDATE`. MySQL's default REPEATABLE READ lets a plain `SELECT`
+  return a stale snapshot inside a transaction; only a locking read sees the latest row.
+- Optimistic locking (a `version` or `lock_version` column) helps only when the stale
+  write is rejected and the request fails or retries. Catching the conflict and writing
+  anyway defeats it.
+
+### Unique constraints as the arbiter
+
+"One per user", "one review per order", "first claim wins" and "redeem once" belong in a
+unique index, so the second insert fails no matter how requests interleave. An
+application-level `if not exists(...)` followed by `create(...)` races. When the
+constraint exists, confirm the handler treats the duplicate-key error as refusal and does
+not fall back to a path that grants the benefit anyway.
+
+### Idempotency keys and double submit
+
+Payment captures, refunds, transfers, order placement and webhook processing must be
+idempotent. Look for:
+
+- An idempotency key that is checked with a read and recorded after the side effect, so
+  two concurrent requests with the same key both pass the check.
+- A key stored without a unique constraint, or scoped so loosely that two users collide.
+- Webhook handlers that dedupe on an event id they record only after processing.
+  Providers retry and can deliver the same event concurrently.
+- Front-end double-submit protection (a disabled button, a client token) with no server
+  check behind it.
+- Background jobs enqueued per request that each apply the effect, such as two refund
+  jobs for one refund request.
+
+### Balance, quota and inventory TOCTOU
+
+Any "is there enough?" read followed by a separate decrement is a race unless the
+decrement is conditional or locked:
+
+```javascript
+const account = await Account.findById(id);
+if (account.balance < amount) throw new Error("insufficient funds");
+await transferOut(amount);                                              // side effect first
+await Account.updateOne({ _id: id }, { balance: account.balance - amount });  // stale value
+```
+
+Writing back a value computed from the earlier read (`balance - amount`) instead of an
+atomic expression (`$inc`, `balance = balance - ?`, `F('balance') - amount`, `decrement`)
+loses concurrent updates even when the check is correct. The same shape covers seat and
+stock holds, rate and usage quotas, free-tier limits, gift-card balances, loyalty points,
+invite counts and single-use links. Cache-backed counters (Redis `GET` then `SET`) race
+the same way. `INCRBY`, `DECRBY` and Lua scripts are atomic; a separate read and write
+are not.
+
+### Multi-step workflow races
+
+A state check on one request and a state change on another (`status == 'pending'` then
+`status = 'refunded'`) races when both requests act on the same order. Look for
+transitions guarded only by an in-memory read, and for a cancel or refund path that runs
+concurrently with fulfilment or capture.
+
+---
+
 ## Detection Questions
 
 1. **"Can these two code paths execute concurrently, and do they share mutable state?"**
@@ -331,6 +433,17 @@ but if a worker communicates with multiple workers, there's no global ordering g
 5. **"Does any signal handler or interrupt handler access non-atomic shared state?"**
    Signal handlers may interrupt at any point. If they access global state that's
    being modified, the state may be inconsistent.
+
+6. **"If this request arrives 50 times at once, which reads return the same answer?"**
+   For each handler that spends, grants, reserves or marks something used, find the
+   read that decides it and the write that records it. A read and a write that are
+   separate statements without a lock, a guarded update or a unique constraint are a
+   finding candidate, whatever the module's threading model.
+
+7. **"What makes this operation happen once?"**
+   Name the mechanism: a unique index, an idempotency key with a constraint, a
+   conditional update with a row-count check, or a lock held across read and write.
+   "The UI disables the button" and "it is fast" are not mechanisms.
 
 ---
 

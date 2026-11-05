@@ -182,8 +182,11 @@ instructions: |2
 
   REQUIRED output section. Declare:
   - Functions where analysis was blocked and why
-  - Pattern categories from the loaded reference that could not be applied (e.g., "race-condition
-    patterns not applicable -- single-threaded module")
+  - Pattern categories from the loaded reference that could not be applied, with the reason the
+    code gives (e.g., "race-condition patterns not applicable -- pure parser with no database,
+    cache, file or shared in-memory state"). A request handler is concurrent across requests even
+    when the module starts no threads, so "single-threaded" never excuses a check-then-act on
+    shared state
   - Cross-module taint paths that terminated at an unresolved callee
   - Error paths that could not be fully traced due to missing callee source
 

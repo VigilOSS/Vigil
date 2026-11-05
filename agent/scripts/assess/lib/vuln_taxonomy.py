@@ -8,7 +8,8 @@ that drifted independently:
   * the hand-maintained ``BUCKET_SKILLS`` dict        — bucket -> skill
   * ``surface_type`` (``surfaces.VALID_SURFACE_TYPES``) — web depth semantics
   * the code track's family lists (``code_analysis.SLOT_VULN_CLASSES`` /
-    ``ROLE_CONTEXT_VULN_CLASSES``)                     — CWE / memory-safety
+    ``ROLE_CONTEXT_VULN_CLASSES`` / ``WORKFLOW_CONTEXT_VULN_CLASSES``)
+                                                       — CWE / memory-safety
 
 ``vuln_class`` is the single canonical term. The
 canonical class set below is the UNION of the web attack classes and the code
