@@ -261,7 +261,7 @@ password reset add `rate-limit`. The backend also reads these words from the fil
 name when the structural index analyzes the file's language. It skips paths under a `test`, `tests`,
 `spec`, `__tests__`, `fixtures`, `docs`, `locale`, `locales`, `i18n`, `translations` or `migrations`
 directory; test-named files (`test_*`, `*_test`, `*_spec`, `*.test`, `*.spec`); HTML, CSS,
-Dockerfile, Blade, Twig and FreeMarker files; and `.phtml` and `.phpt` files. If ingestion guessed
+Dockerfile, Blade, Twig and FreeMarker files; and `.phtml` files. If ingestion guessed
 the language wrong, emit a `language` correction in the classification record.
 
 ## Classification Decision Framework

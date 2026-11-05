@@ -37,9 +37,10 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".rb": "ruby",
     ".php": "php",
     # PHP source under the other names the interpreter is pointed at: include
-    # fragments and templates, Drupal's module/install/theme files, the
-    # version-suffixed scripts old servers dispatch on, and the test-case files
-    # php-src and PHPUnit run.
+    # fragments and templates, Drupal's module/install/theme files, and the
+    # version-suffixed scripts old servers dispatch on. A `.phpt` test case is
+    # a runner document whose sections are prose, INI and expected output, so
+    # it is not one of them.
     ".inc": "php",
     ".phtml": "php",
     ".module": "php",
@@ -47,7 +48,6 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".theme": "php",
     ".php5": "php",
     ".php7": "php",
-    ".phpt": "php",
     ".cs": "csharp",
     # C# script files (`dotnet script`, Roslyn `.csx`). Same language as `.cs`;
     # tree-sitter reads them with the C# grammar like any other source.

@@ -14,7 +14,8 @@ import json
 import pytest
 
 from assess.commands import code_ingest
-from assess.lib.code_languages import detect_language
+from assess.lib.code_languages import detect_language, structural_language_for_file
+from assess.lib.treesitter_index import index_file
 from test_code_ingest_vendored_minified import _args, _offline_ingest, _write
 
 PHP_FRAGMENTS = {
@@ -79,3 +80,45 @@ def test_ingest_reads_each_shared_extension_by_its_content(monkeypatch, tmp_path
     }
     assert {path: languages[path] for path in PHP_FRAGMENTS} == dict.fromkeys(PHP_FRAGMENTS, "php")
     assert {path: languages[path] for path in OTHER_FORMATS} == dict.fromkeys(OTHER_FORMATS, "")
+
+
+PHPT_CASE = """--TEST--
+Acme login rejects an empty password
+--GET--
+user=acme
+--FILE--
+<?php
+echo $_GET['user'];
+?>
+--EXPECT--
+acme
+"""
+
+
+def test_a_phpt_case_is_admitted_but_is_not_php(monkeypatch, tmp_path, capsys) -> None:
+    """A `.phpt` file is a test-runner document whose sections are prose, INI
+    and expected output; only its `--FILE--` section is PHP. Read whole as PHP,
+    the sections become inline HTML and the file a requestable page, so it
+    stays in the snapshot with no language and no structural record."""
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+    login = "<?php\n$user = $_GET['user'];\necho $user;\n"
+    _write(repo, "src/login.php", login)
+    _write(repo, "tests/login.phpt", PHPT_CASE)
+    _PreviewClient.payloads = []
+    monkeypatch.setattr(code_ingest, "AssessmentClient", _PreviewClient)
+
+    code_ingest.run(_args(repo, name="acme-login", dry_run=True, engagement_dir=str(engagement)))
+    capsys.readouterr()
+
+    languages = {
+        str(record["file_path"]): str(record["language"])
+        for record in _PreviewClient.payloads[0]["files"]
+    }
+    assert languages["src/login.php"] == "php"
+    assert languages["tests/login.phpt"] == ""
+    assert detect_language("tests/acme_login.phpt") is None
+    assert detect_language("tests/acme_login.phpt", header=PHPT_CASE) is None
+    assert structural_language_for_file("tests/acme_login.phpt") is None
+    assert [
+        entry["kind"] for entry in index_file("src/login.php", "php", login.encode())["entry_points"]
+    ] == ["php_script"]
