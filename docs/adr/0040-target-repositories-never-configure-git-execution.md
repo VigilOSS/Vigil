@@ -41,8 +41,11 @@ private metadata directory for the call:
 - objects and the index (with a split index's shared part beside it) are read
   in place through `GIT_OBJECT_DIRECTORY` and `GIT_INDEX_FILE`; refs, packed refs, reftable, the worktree list, the
   shallow boundary and `info/` are linked as data, so HEAD, every ref `--all`
-  reaches (other worktrees' HEADs and a linked worktree's own refs included),
-  grafts and exclude rules mean what they mean to the repository's Git;
+  reaches (other worktrees' HEADs and a linked worktree's own refs included)
+  and exclude rules mean what they mean to the repository's Git;
+- replace refs, a grafts file and the commit-graph are not read, so a commit's
+  parents and content are its object's bytes and an origin rewritten after
+  ingest without moving HEAD reports the same history;
 - status stops at the gitlink commit (`--ignore-submodules=dirty`), and Vigil
   inspects each checked-out submodule worktree through its own `TargetGit`;
 - lazy fetch is disabled and the partial-clone extension is not carried.

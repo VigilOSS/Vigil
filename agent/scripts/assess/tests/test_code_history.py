@@ -247,6 +247,41 @@ def test_commits_walk_the_recorded_head_after_the_origin_moves(tmp_path, monkeyp
     assert artifact.parent == _history_tree(engagement) / str(_REPO_ID) / str(_GENERATION) / commits["uaf"]
 
 
+def test_replace_refs_grafts_and_commit_graphs_never_rewrite_the_recorded_history(
+    tmp_path, monkeypatch, capsys, git_bin,
+):
+    repo, commits = _history_repo(tmp_path)
+    engagement = _engagement(tmp_path)
+    _bind(monkeypatch, engagement, repo, git_bin)
+    first = _run_json(capsys, "commits", "--repo-id", str(_REPO_ID), "--match", "all")
+    first_bytes = (engagement / first["output"]["path"]).read_bytes()
+    first_diff = _run_json(capsys, "diff", "--repo-id", str(_REPO_ID), "--commit", commits["cve_fix"])
+
+    # The origin keeps HEAD and every branch, but swaps the fix for a benign
+    # commit, grafts an unrelated side commit into the history and writes a
+    # commit-graph over the rewritten view.
+    tree = _git(repo, "rev-parse", f"{commits['initial']}^{{tree}}")
+    benign = _git(repo, "commit-tree", tree, "-p", commits["initial"], "-m", "Rename helpers")
+    _git(repo, "replace", commits["cve_fix"], benign)
+    _git(repo, "checkout", "-q", "-b", "side", commits["initial"])
+    _write(repo, "notes/side.txt", "unrelated side work\n")
+    side = _commit(repo, "Side work", "2026-05-09T09:00:00Z")
+    _git(repo, "checkout", "-q", "main")
+    (repo / ".git" / "info").mkdir(exist_ok=True)
+    (repo / ".git" / "info" / "grafts").write_text(f"{commits['readme']} {side}\n", encoding="utf-8")
+    _git(repo, "commit-graph", "write", "--reachable")
+
+    second = _run_json(capsys, "commits", "--repo-id", str(_REPO_ID), "--match", "all")
+    second_diff = _run_json(capsys, "diff", "--repo-id", str(_REPO_ID), "--commit", commits["cve_fix"])
+    code, _out, err = _run(capsys, "diff", "--repo-id", str(_REPO_ID), "--commit", side)
+
+    assert (engagement / second["output"]["path"]).read_bytes() == first_bytes
+    assert second_diff["output"]["sha256"] == first_diff["output"]["sha256"]
+    assert second_diff["files"] == [{"status": "M", "path": "src/upload.py"}]
+    assert code != 0
+    assert "Cannot bind code history" in err
+
+
 def test_security_match_classifies_ids_and_keywords_case_insensitively(
     tmp_path, monkeypatch, capsys, git_bin,
 ):

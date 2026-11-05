@@ -139,9 +139,12 @@ def git_command(
 # GIT_DIR. It points GIT_DIR at a private directory whose config Vigil writes,
 # reads objects and the index in place, and links the refs, worktree list,
 # shallow boundary and info/ files Git reads as data. Every ref, HEAD, worktree
-# HEAD, grafts file and exclude rule therefore means what it means to the
-# repository's own Git; only the settings in _CARRIED_CONFIG and _FORMAT_CONFIG
-# cross over, each validated as a value no program can hide in.
+# HEAD and exclude rule therefore means what it means to the repository's own
+# Git; only the settings in _CARRIED_CONFIG and _FORMAT_CONFIG cross over, each
+# validated as a value no program can hide in. A commit's parents and content
+# are its object's bytes: replace refs, a grafts file and a commit-graph are
+# views the origin can rewrite after ingest without moving HEAD, so none of
+# them is read.
 #
 # Every Git call over source Vigil ingests goes through TargetGit. Git calls on
 # the operator's own checkout (remediation_vcs.py and remediation_regression.py,
@@ -350,6 +353,8 @@ class TargetGit:
                 "GIT_OBJECT_DIRECTORY": str(layout.common_dir / "objects"),
                 "GIT_NO_LAZY_FETCH": "1",
                 "GIT_ATTR_NOSYSTEM": "1",
+                "GIT_NO_REPLACE_OBJECTS": "1",
+                "GIT_GRAFT_FILE": str(root / "no-grafts"),
             }
         )
         return environment
@@ -401,6 +406,7 @@ class TargetGit:
                 "bare = false",
                 "hooksPath = /dev/null",
                 "fsmonitor = false",
+                "commitGraph = false",
             ]
         }
         carried: dict[str, str | frozenset[str]] = dict(_CARRIED_CONFIG)

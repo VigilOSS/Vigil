@@ -589,6 +589,8 @@ def test_git_provenance_uses_safe_flags_and_strips_case_insensitive_git_environm
             "GIT_OBJECT_DIRECTORY": str(repo.resolve() / ".git" / "objects"),
             "GIT_NO_LAZY_FETCH": "1",
             "GIT_ATTR_NOSYSTEM": "1",
+            "GIT_NO_REPLACE_OBJECTS": "1",
+            "GIT_GRAFT_FILE": str(private_git_dir.parent / "no-grafts"),
         }
     assert any(command[-3:] == ["rev-parse", "--verify", "HEAD^{commit}"] for command, _ in calls)
     assert any(
