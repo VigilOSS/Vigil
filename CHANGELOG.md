@@ -21,13 +21,16 @@ needs `--include-minified` to keep its file set.
   Node `req.url` and Go `r.URL.Path`, `r.Body` and `r.Form`.
 - Finding writes return `verification_effect` and `changed_axes`; `finding merge` and
   `finding link` print the effect, and finding history shows it for each changed axis.
-- `run-audit obligation release` lets a proof run's producer release an unread source with a
-  reason; runs count `unread_sources` and `released_sources`.
+- `run-audit obligation release` lets a proof run's producer release an unread source, or one
+  recorded as an accepted gap, with a reason; runs count `unread_sources` and `released_sources`.
 - `proof-run finish --reason` records why a run ended.
 - `code-dependencies` on a sealed source reports excluded build output and vendored copies with
   the name and version their root files give.
 - The `code-ingest` summary prints `repo_id: <id>` and the exact `code-index build` and
   `code-index sync --repo-id` commands.
+- `vigil assess code-history commits|diff|check-shapes` gives the code architect bounded security
+  history from the snapshot's recorded HEAD and checks bug shapes against their cited diffs.
+- PHP constructors list their promoted parameters.
 
 ### Changed
 
@@ -50,6 +53,17 @@ needs `--include-minified` to keep its file set.
 - Unknown `agent start` prompt-context keys are rejected by name; queue-fetch lane manifests
   show each leased item's scratch directory.
 - Buffer-overflow and use-after-free apply only to memory-unsafe languages.
+- PHP symbols are qualified by namespace; a rebuild rebinds receipts to the qualified names.
+- Each name in a PHP `use` declaration is its own normalised import.
+- PHP call sites come from the parse tree and carry `receiver` and `call_kind`.
+- Finding and lead-binding file citations, and trigger targets, must exist in the sealed
+  snapshot; refusals name the closest path, and `outside_snapshot: true` marks an external target.
+- A code finding verified only from source reports `reproduction_basis: source`; it skips the
+  `repro_runs` advisory and export marker, and the HTML report says its cited source backs the steps.
+- Code-track searches are rooted at the absolute snapshot path, and an empty search counts only
+  beside a matching positive control.
+- Trusted inputs are advisory with cited reasons, Phase 2C re-reads files with one finding, and a
+  relayed correction applies after its cited evidence is re-opened.
 
 ### Fixed
 
@@ -57,6 +71,7 @@ needs `--include-minified` to keep its file set.
   repository's and its submodules' filters, hooks, fsmonitor, signature programs and transports
   never run, and a partial clone never fetches.
 - An obligation write cannot close an unread imported source; only a full read or a release does.
+  A full read also resolves a deferred, blocked or accepted-gap source.
 - A tree-sitter file with no callable publishes as a `complete` artifact.
 - `code-index build` writes a new index beside the old one when an upgrade changes the indexer,
   and `code-index sync` publishes it.
