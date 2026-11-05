@@ -9,86 +9,94 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 
 After upgrading, run `vigil assess code-index build` and then `code-index sync` for each code
 repository in an existing engagement. Re-ingest a repository with `.inc`, `.phtml`, `.module`,
-`.install`, `.theme`, `.php5`, `.php7` or `.phpt` files to index them; its generation moves.
-Re-ingesting a repository of shipped or recovered bundles needs `--include-minified` to keep its
-file set. Transactional, webhook and one-time-code files in open engagements owe their new
-families at once: run `code-coverage --cwe-matrix`, then reanalyse each file or record the family
-`not_applicable`.
+`.install`, `.theme`, `.php5` or `.php7` files to index them; its generation moves. Re-ingesting
+shipped or recovered bundles needs `--include-minified` to keep their file set. Files whose role
+label names a transactional, webhook or one-time-code workflow owe their new families at once:
+run `code-coverage --cwe-matrix`, then reanalyse each file or record the family `not_applicable`.
 
 ### Added
 
-- The structural index reads file scope in every tree-sitter language as `<top-level>`, so
-  module-level code, PHP pages, Go package variables and C macro bodies report sinks and calls.
-- File-scope code that runs is reviewed as `<top-level>` callables, one per segment;
-  declarations and comments open none.
+- File scope in every tree-sitter language indexes as `<top-level>` callables, so module-level
+  code, PHP pages, Go package variables and C macro bodies report sinks and calls. Each segment
+  of file-scope code that runs is reviewed like a function. Declarations, imports, comments and
+  literal values open none, nor in PHP do values built from literals and named constants, literal
+  `define()` and `class_alias()` calls, direct-access guards and existence-probe blocks.
 - Entry points `php_script`, `php_rendered_page`, `php_cli_script`, `go_http_handler`,
   `node_http_server` and `tornado_handler`, and Django, Flask and Tornado route-table rows.
-- Request sources `php://input`, `filter_input`, PHP header helpers, Tornado `self` accessors,
-  Node `req.url` and Go `r.URL.Path`, `r.Body` and `r.Form`.
-- PHP CLI arguments, `getopt`, `STDIN` and `readline` are `process_input` sources.
-- PHP `include`/`require` are `kind: include` import edges, each with a status resolved against
-  the snapshot and its exclusions. Include sinks carry the argument and its shape.
-- `.inc`, `.phtml`, `.module`, `.install`, `.theme`, `.php5`, `.php7` and `.phpt` files index as
-  PHP; `.inc`, `.module`, `.install` and `.theme` only when their first lines open a PHP tag.
+- Request sources `php://input`, `filter_input`, PHP header helpers, Moodle `optional_param` and
+  `required_param`, `getRequest()` accessors, Tornado `self` accessors, Node `req.url` and Go
+  `r.URL.Path`, `r.Body` and `r.Form`. PHP CLI arguments, `getopt`, `STDIN` and `readline` are
+  `process_input`; `$_SERVER['argv']` is both.
+- PHP `include`/`require` are `kind: include` import edges with a status resolved against the
+  snapshot and its exclusions; include sinks carry the argument and its shape.
+- `.inc`, `.phtml`, `.module`, `.install`, `.theme`, `.php5` and `.php7` files index as PHP;
+  `.inc`, `.module`, `.install` and `.theme` only when their first lines open a PHP tag.
 - PHP sinks for Laravel and WordPress raw SQL, property-held database handles, Laravel, WordPress
   and Guzzle HTTP, file delete/copy/`readfile`/`move_uploaded_file`, backticks, `pcntl_exec`,
-  `mail()`'s fifth argument and `extract()`.
-- Calls through a runtime-chosen function, method or class are `dynamic_invocation` sinks.
-- `code-dispatch list` and `fetch` take repeatable `--path-prefix` and `--path-glob` scopes.
-- `code-coverage --by-path` breaks coverage down by directory.
+  `mail()`'s fifth argument and `extract()`. PHP calls and `new` through a runtime-chosen
+  function, method or class are `dynamic_invocation` sinks.
+- `code-dispatch list` and `fetch` take repeatable `--path-prefix` and `--path-glob` scopes, and
+  `code-coverage --by-path` breaks coverage down by directory.
 - Business-logic and request-level race-condition references for code review.
-- Finding writes return `verification_effect` and `changed_axes`; `finding merge` and
-  `finding link` print the effect, and finding history shows it for each changed axis.
-- `run-audit obligation release` lets a proof run's producer release an unread source, or one
-  recorded as an accepted gap, with a reason; runs count `unread_sources` and `released_sources`.
-- `proof-run finish --reason` records why a run ended.
+- Finding writes return `verification_effect` and `changed_axes`; `finding merge`, `finding link`
+  and finding history show the effect.
+- `run-audit obligation release` lets a proof run's producer release an unread or accepted-gap
+  source with a reason; runs count `unread_sources` and `released_sources`.
+  `proof-run finish --reason` records why a run ended.
 - `code-dependencies` on a sealed source reports excluded build output and vendored copies with
   the name and version their root files give.
 - The `code-ingest` summary prints `repo_id: <id>` and the exact `code-index build` and
-  `code-index sync --repo-id` commands.
+  `code-index sync --repo-id` commands. `code-index sync` prints the build command when the
+  index came from a different indexer.
 - `vigil assess code-history commits|diff|check-shapes` gives the code architect bounded security
   history from the snapshot's recorded HEAD and checks bug shapes against their cited diffs.
-- PHP constructors list their promoted parameters.
+  Commits are read by object id, so replace refs, grafts and commit-graphs never change it.
 
 ### Changed
 
 - One change policy decides what each finding write does to a verdict: presentation edits keep
   it, claim wording needs an independent claim review, and technical changes invalidate it.
-- `finding merge` keeps the target's severity, CVSS, CWE and verdict, and warns when the source
-  carries a stronger value.
-- `finding update --status draft` returns any verdict to unreviewed. An invalidating edit to a
+  `finding merge` keeps the target's severity, CVSS, CWE and verdict and warns when the source
+  carries a stronger value. A root-cause link with `--effect eliminates_attack_path` keeps a
+  verdict; the default `eliminates_finding` raises a claim review on a verified sibling.
+- `finding update --status draft` returns any verdict to unreviewed, and an invalidating edit to a
   false-positive finding is refused until it is reopened.
-- Root-cause grouping keeps verdicts; `--effect eliminates_finding` raises a claim review on a
-  verified sibling.
 - A proof run's `completed` request is refused with 409 while blockers remain, naming unread
   sources first. A scan with open debt seals `partial`.
-- Review proof covers each `<top-level>` segment by its exact callable ref or a covering span;
-  citing a function never covers file scope, and function counts, the receipt view's included,
-  exclude it.
-- An indexed file with source but no callable or segment, or with unscanned function scope, needs
-  a whole-file reviewed span as review proof.
-- Transactional and webhook files owe race-condition and business-logic review, and OTP, MFA and
-  password-reset files owe rate-limit, from whole role and path words.
-- PHP `assert()` is a sink only with a string or variable argument, and `hash()` only with a weak
-  or chosen algorithm.
-- `code-ingest` skips `vendor/` in any letter case, forge-archive copies, `.phps` files,
-  content-hashed chunks and minified JavaScript/CSS by default. `--include-path` and
-  `--include-minified` re-admit them.
-- `agent handoff` requires `--agent-id` and refuses a payload written for another dispatch.
-- Unknown `agent start` prompt-context keys are rejected by name; queue-fetch lane manifests
-  show each leased item's scratch directory.
+- Review proof covers each `<top-level>` segment by its exact callable ref or a covering span, and
+  function counts exclude segments. A file with unscanned function scope, or one that reports an
+  entry point, sink or source with no callable or segment, needs a whole-file reviewed span.
+- Race-condition and business-logic review is required for files whose role label names a
+  transactional or webhook workflow, and rate-limit for OTP, MFA and password-reset roles. Whole
+  words of a file's path list these families as advisory `path_suggested_vuln_classes`.
+- `code-ingest` skips `vendor/` (in another letter case only when it holds package-manager
+  output), forge-archive copies of another project, `.phps` files, content-hashed chunks and
+  minified JavaScript/CSS. `--include-path` and `--include-minified` re-admit them.
+- `code-index build` parses files in parallel from warm fork servers (`--jobs`, default the usable
+  performance cores within any CPU quota, up to 8). Artifacts are identical for every job count,
+  and the per-file limit is on that file's own CPU time.
+- The structural indexer uses about 80% less CPU per file with identical output.
+- PHP symbols are qualified by namespace, enum and anonymous-class methods by their class, and a
+  rebuild rebinds receipts to the qualified names. Each name in a `use` declaration is its own
+  normalised import, call sites come from the parse tree with `receiver` and `call_kind`, and
+  constructors list their promoted parameters.
+- PHP `->exec(` and `->query(` are SQL execution except on scheduler, Redis, XPath, GraphQL-client
+  and console-test receivers. `extract()` is mass assignment only as the builtin call, `assert()`
+  is a sink only with a string or variable argument, `hash()` only with a weak or chosen
+  algorithm, and `json_decode` is not deserialization.
 - Buffer-overflow and use-after-free apply only to memory-unsafe languages.
-- PHP symbols are qualified by namespace; a rebuild rebinds receipts to the qualified names.
-- Each name in a PHP `use` declaration is its own normalised import.
-- PHP call sites come from the parse tree and carry `receiver` and `call_kind`.
 - Finding and lead-binding file citations, and trigger targets, must exist in the sealed
   snapshot; refusals name the closest path, and `outside_snapshot: true` marks an external target.
 - A code finding verified only from source reports `reproduction_basis: source`; it skips the
-  `repro_runs` advisory and export marker, and the HTML report says its cited source backs the steps.
+  `repro_runs` advisory and export marker, and the HTML report says its cited source backs the
+  steps.
 - Code-track searches are rooted at the absolute snapshot path, and an empty search counts only
   beside a matching positive control.
 - Trusted inputs are advisory with cited reasons, Phase 2C re-reads files with one finding, and a
   relayed correction applies after its cited evidence is re-opened.
+- `agent handoff` requires `--agent-id` and refuses a payload written for another dispatch.
+  `agent start` rejects unknown prompt-context keys by name, and queue-fetch lane manifests show
+  each leased item's scratch directory.
 
 ### Fixed
 
@@ -97,13 +105,13 @@ families at once: run `code-coverage --cwe-matrix`, then reanalyse each file or 
   never run, and a partial clone never fetches.
 - An obligation write cannot close an unread imported source; only a full read or a release does.
   A full read also resolves a deferred, blocked or accepted-gap source.
-- A tree-sitter file with no callable publishes as a `complete` artifact.
+- A tree-sitter file with no callable publishes as a `complete` artifact, in every language when
+  no file-scope code runs (a types module, an enum, a header of macros).
 - `code-index build` writes a new index beside the old one when an upgrade changes the indexer,
-  and `code-index sync` publishes it.
-- Rebuilding a structural index for the same snapshot rebinds its generation: unreferenced
-  callables are replaced and receipt-bound callables keep their links when only their qualified
-  name changes.
-- Go `r.URL.Query()` reads as request input, and `db.Query(` stays a SQL sink.
+  and `code-index sync` publishes it. Rebuilding for the same snapshot rebinds its generation:
+  unreferenced callables are replaced and receipt-bound callables keep their links when only
+  their qualified name changes.
+- Go `r.URL.Query()` reads as request input, and `db.Query(` is a SQL sink.
 - The security-history scan matches commit messages in any letter case.
 - Lease conflicts name the holder and distinguish a mistyped token, a wrong agent id and a
   reclaimed lease; lease commands name the dispatch agent id.
@@ -111,11 +119,8 @@ families at once: run `code-coverage --cwe-matrix`, then reanalyse each file or 
   admitted path.
 - Merging findings keeps the surviving finding's provenance and snapshot attestation.
 - `proof-run start --for-finding` prints the run with its finding associations.
-- Finding reply fields are each described as either required or optional.
 - `source-read record` names the expected path when the supplied one does not match.
-- PHP enum and anonymous-class methods are qualified by their class; `->exec(` is SQL execution
-  and `json_decode` is not deserialization.
-- Deeply nested source is indexed from the parse tree.
+- Deeply nested source indexes from the parse tree without a recursion failure.
 
 ## [2.3.2] - 2026-11-03
 

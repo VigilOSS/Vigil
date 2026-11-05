@@ -47,11 +47,11 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   `unverified_*`, and "looked and saw nothing" stays distinct from "could not look".
 - `agent/scripts/assess/commands/code_dispatch.py:submit_queue_items` owns the audited write into
   `code_analysis_queue`; `code-dispatch queue/reanalyze` and `code-lead queue` go through it.
-- `orchestrator/backend/app/services/state_manager/coverage.py:PROBE_RESULT_STATUSES` owns result outcomes (only
+- `state_manager/coverage.py:PROBE_RESULT_STATUSES` owns result outcomes (only
   `tested` and `signal` cover a class); its `CoverageStatus` has the CLI mirror `agent/scripts/assess/commands/resolve.py:_COVERAGE_STATUSES`.
-- `orchestrator/backend/app/services/state_manager/command_run_queries.py:_RUN_NEEDS_ATTENTION_SQL` (twin
+- `state_manager/command_run_queries.py:_RUN_NEEDS_ATTENTION_SQL` (twin
   `command_run_attention_reasons`) owns "run needs attention"; `command_runs.py:_derive_tool_bin` owns `tool_bin`; `db.py` re-derives old rows once.
-- `orchestrator/backend/app/services/state_manager/_common.py:SUBMISSION_STATUSES` and `VERIFICATION_STATUSES` own
+- `state_manager/_common.py:SUBMISSION_STATUSES` and `VERIFICATION_STATUSES` own
   submission and finding verification status; `contract_registry.py` mirrors both under the same names.
 - `api/assessment.py:FindingPatchRequest` owns patchable finding fields;
   `contract_registry.py:FINDING_PATCH_FIELDS` mirrors it. See:
@@ -69,7 +69,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `code_analysis_support.py:_file_path_scope_sql` owns path scoping for queue list, claims and by-path coverage
   (`test_code_queue_path_scope.py`); `_current_analysis_status_sql`/`_structural_debt_sql` own the status buckets and
   debt the summary, readiness and by-path share (`test_code_coverage_by_path.py`).
-- `code_analysis.py:WORKFLOW_CONTEXT_VULN_CLASSES` owns the families whole role and path words add, recomputed on
+- `code_analysis.py:WORKFLOW_CONTEXT_VULN_CLASSES` owns the workflow families: role words require them
+  (`_applicable_families_for_file`), path words only suggest them (`_path_suggested_families_for_file`). Recomputed on
   every read. See: `test_workflow_state_families.py`.
 - `orchestrator/backend/app/services/state_manager/cvss.py:base_score` owns CVSS v3.1/v4.0 base-vector
   validation and scoring for finding writes and report readiness; `finding_details.py` owns the
@@ -214,6 +215,8 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   `orchestrator/backend/app/code_snapshot.py` independently attests them; v3 uses decoded logical lines,
   historical v2 keeps its semantics. See: ADR 0026.
 - `agent/scripts/assess/lib/parser_boundary.py` + `parser_worker.py` — the structural-parser process boundary. Every typed failure is an explicit all-byte fallback declaring unavailable dimensions. See: ADR 0029.
+  `ParserWorkerPool` leases warm fork servers that fork one limited child per file; `code-index build --jobs` sizes it;
+  every count publishes identical bytes. See: `test_code_index_parallel_build.py`.
 - `agent/scripts/assess/commands/export_submission.py` and `export_reply.py` assemble and present;
   neither rewrites authored content or masks credentials. Rendering helpers live in
   `agent/scripts/assess/lib/finding_render.py`.
@@ -240,7 +243,7 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   The canonical engagement wizard creates remediation projects.
   External-reference joins resolve to numeric case identity; identity/finalization/publication share a case lock.
   Branch finalization retains retry intent across local VCS and backend registration.
-- `src/vigil_cli/remediation_regression.py` — paired red/green receipts; `agent/scripts/assess/lib/remediation_regression.py` owns disposable sources; `orchestrator/backend/app/services/remediation_regression.py` validates provenance.
+- `src/vigil_cli/remediation_regression.py` — paired red/green receipts; `agent/scripts/assess/lib/remediation_regression.py` owns disposable sources; backend `services/remediation_regression.py` validates provenance.
 - `src/vigil_cli/remediation_sessions.py` owns role routing and Claude native binding/attachment; launch receipts correlate job names with host UUIDs, and `start --session-id` recovers without redispatch.
   `join --fresh` replaces the case conversation under its session lock, preserving binding history and requiring consent before stopping a running worker.
 - `src/vigil_cli/remediation_clients.py` owns OpenCode repository launch and ZCode's context-bound plugin preparation/workspace opening, without native conversation receipts. `agent/.zcode/hooks/` restores defensive case context.
@@ -276,18 +279,18 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   `code_analysis.py` derives variant currency and stale-parent diagnostics from receipts.
   The Code view reads `analysis-results/page` (`scope=current|awaiting_verdict`) and `{id}[/position]` (`analysis-results`
   is the CLI listing), `analysis-queue?current_only=` lanes (stats SQL), `repos/review-progress`, readiness `track_enabled`.
-- `orchestrator/backend/app/services/state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, live approval independent of bindings, derived `queue_state`/`reverification_required`, and explicit release after execution ends.
+- `state_manager/proof_work.py` owns current proof preparation, atomic dispatch claims, live approval independent of bindings, derived `queue_state`/`reverification_required`, and explicit release after execution ends.
   `api/assessment_proof_work.py` and `commands/proof_work.py` expose it; finding status and its `next_test` still own proof owed.
   `_early_proof_eligible` admits initial unreviewed work without changing the parked obligation roster or reviving invalidated verification.
   `orchestrator/backend/app/services/scope_admission.py` bridges to the canonical agent scope matcher.
-- `orchestrator/backend/app/services/state_manager/finding_next_tests.py` owns runtime proof plans, written with the parking transition,
+- `state_manager/finding_next_tests.py` owns runtime proof plans, written with the parking transition,
   and `owes_runtime_proof`/`runtime_proof_owed_sql` (parked, not merged). Proof work binds the current park.
   `contract_registry.py:NEXT_TEST_FIELDS`/`NEXT_TEST_ROUTE_HINTS`, `agent/scripts/assess/lib/next_test.py` bounds and `finding_next_tests.py:NEXT_TEST_FIELDS`
   mirror `api/assessment.py:FindingNextTestRequest`. See: `orchestrator/backend/tests/test_finding_next_test_contract_mirror.py`.
 - `orchestrator/backend/app/services/state_manager/` — the live-state package; `__init__.py` re-exports it so
   public `state_manager.<fn>` paths stay stable.
-- `orchestrator/backend/app/services/state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.
-- `orchestrator/backend/app/services/state_manager/command_runs.py` owns run writes and output integrity; `command_run_queries.py`, `assessment_jobs.py`, and `host_liveness.py` own their reads and ledgers.
+- `state_manager/coverage_readiness.py` owns readiness and per-host verdicts; `finding_snapshots.py` owns finding snapshot/author provenance.
+- `state_manager/command_runs.py` owns run writes and output integrity; `command_run_queries.py`, `assessment_jobs.py`, and `host_liveness.py` own their reads and ledgers.
 - `orchestrator/backend/app/services/submission_versions.py` — CLI/UI submission snapshots; neither changes submission status nor submits externally. See ADR 0025.
   `_ELIGIBLE_ATTACHMENT_SQL` owns what the attachment picker offers (never internal submission-workspace files);
   `publication_readiness` and `attachment_page` back the read-only readiness and attachment routes in `api/submissions.py`.
@@ -302,7 +305,7 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   `artifact_index.py:_store_artifact` records finding-linked digest changes atomically in `activity.py`;
   registration and refresh expose change receipts to `agent/scripts/assess/commands/artifact.py`.
 - `orchestrator/backend/app/reply_render.py` — the versioned exact-bytes outbound renderer; `agent/scripts/assess/lib/reply_render.py` is an import-only bridge, so previews and backend share one format.
-- `orchestrator/backend/app/services/state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py`
+- `state_manager/run_accounting.py` owns run identity and lifecycle; `run_inventory.py`
   sources, obligations and the producer's source release; `run_evidence.py` linked receipts; `run_comparisons.py`
   comparisons; `proofs.py` immutable evidence receipts. See: ADR 0028.
 - `orchestrator/backend/app/services/engagements.py` — filesystem-to-DB sync; explicit deletes are tombstoned so leftover files cannot resurrect them.
