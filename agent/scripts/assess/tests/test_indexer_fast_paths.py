@@ -486,3 +486,32 @@ def test_a_source_scan_is_skipped_only_when_no_window_could_match(language, sour
     assert not StreamingSecurityScanner("acme.src", language).retains_nothing_from(source)
     assert attached["security_sources"] == full["security_sources"]
     assert bool(full["security_sources"]) is (language == "c" and not skipped)
+
+
+def test_a_shared_query_pass_belongs_to_the_thread_that_opened_it() -> None:
+    import threading
+
+    from assess.lib import treesitter_index
+
+    parser = treesitter_index._get_parser("php")
+    tree = parser.parse(ACME_PHP_CONTROLLER)
+    queries = treesitter_index._whole_tree_queries("php", parser.language)
+    treesitter_index._SHARED_TREE_QUERIES.open(tree.root_node, parser.language, queries)
+    seen: list[object] = []
+    try:
+        worker = threading.Thread(
+            target=lambda: seen.append(
+                treesitter_index._SHARED_TREE_QUERIES.captures(
+                    parser.language, queries[0], tree.root_node
+                )
+            )
+        )
+        worker.start()
+        worker.join()
+        assert treesitter_index._SHARED_TREE_QUERIES.captures(
+            parser.language, queries[0], tree.root_node
+        )
+    finally:
+        treesitter_index._SHARED_TREE_QUERIES.close()
+
+    assert seen == [None]

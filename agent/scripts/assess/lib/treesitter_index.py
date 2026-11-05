@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import posixpath
 import re
+import threading
 import warnings
 from bisect import bisect_left, bisect_right
 from collections.abc import Iterable
@@ -131,7 +132,7 @@ def _compiled_ts_query(lang_obj: Any, query_str: str) -> Any:
     return lang_obj.query(query_str)
 
 
-class _SharedTreeQueries:
+class _SharedTreeQueries(threading.local):
     """One cursor pass answering every whole-tree query the extractors run.
 
     A cursor walks the whole tree whatever its pattern count, and each
@@ -139,7 +140,8 @@ class _SharedTreeQueries:
     tree's family are matched together the first time one is asked, and each
     answer is the matches of its own patterns in the order its own cursor
     returns them. `index_file` opens the pass for the tree it parsed and closes
-    it when it is done; any other query runs on its own.
+    it when it is done; any other query runs on its own. Each thread has its
+    own pass, so concurrent indexing never reads another file's matches.
     """
 
     def __init__(self) -> None:
