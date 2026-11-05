@@ -186,3 +186,34 @@ def test_root_commit_diffs_cannot_seed_a_shape(tmp_path, monkeypatch, capsys, gi
         [_shape(commits, root, vulnerable_revision=commits["initial"], fixed_revision=commits["initial"])],
     )
     assert errors
+
+
+def test_only_parent_headers_directly_after_the_tree_are_parents() -> None:
+    """Git reads a commit's parents from the `parent` lines that follow `tree`;
+    a later `parent` header is unknown text, never an ancestor to diff against."""
+    from assess.lib.code_history import parse_commit_object
+
+    tree, parent, stray = "a" * 40, "b" * 40, "c" * 40
+    raw = (
+        f"tree {tree}\nparent {parent}\nauthor Acme <dev@acme.example> 1 +0000\n"
+        f"committer Acme <dev@acme.example> 1 +0000\nparent {stray}\nparent :/Update readme\n\nFix\n"
+    ).encode()
+    root = f"tree {tree}\nauthor Acme <dev@acme.example> 1 +0000\nparent {stray}\n\nRoot\n".encode()
+
+    assert parse_commit_object(raw, truncated=False).parents == (parent,)
+    assert parse_commit_object(root, truncated=False).parents == ()
+
+
+def test_a_git_call_the_host_cannot_start_is_a_history_read_error() -> None:
+    """An argument list past the host limit (E2BIG) is reported like any other
+    failed Git read instead of escaping the verb as a traceback."""
+    import errno
+
+    from assess.commands import code_history
+
+    class _HostLimitedGit:
+        def run(self, arguments, **options):
+            raise OSError(errno.E2BIG, "Argument list too long", "git")
+
+    with pytest.raises(code_history.HistoryReadError, match="Argument list too long"):
+        code_history._run(_HostLimitedGit(), ["diff-tree", "-p"])

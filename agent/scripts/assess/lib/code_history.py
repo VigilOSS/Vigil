@@ -118,10 +118,22 @@ def parse_commit_object(raw: bytes, *, truncated: bool) -> CommitObject:
     if not separator:
         header, message = raw, b""
     values: dict[bytes, list[bytes]] = {}
+    # Git takes parents only from the `parent` lines directly after `tree`; a
+    # later one is unknown header text, so the target cannot add an ancestor.
+    parents: list[str] = []
+    in_parents = False
     for line in header.split(b"\n"):
         if not line or line.startswith(b" "):
             continue  # continuation of a multi-line header (gpgsig, mergetag)
         key, _space, value = line.partition(b" ")
+        if key == b"parent":
+            parent = full_object_id(value.decode("ascii", errors="replace"))
+            if in_parents and parent is not None:
+                parents.append(parent)
+            else:
+                in_parents = False
+            continue
+        in_parents = key == b"tree" and b"tree" not in values
         values.setdefault(key, []).append(value)
 
     def first(key: bytes) -> bytes | None:
@@ -130,7 +142,7 @@ def parse_commit_object(raw: bytes, *, truncated: bool) -> CommitObject:
 
     return CommitObject(
         tree=(first(b"tree") or b"").decode("ascii", errors="replace"),
-        parents=tuple(value.decode("ascii", errors="replace") for value in values.get(b"parent", [])),
+        parents=tuple(parents),
         author=first(b"author"),
         committer=first(b"committer"),
         encoding=first(b"encoding"),

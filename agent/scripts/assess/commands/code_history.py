@@ -298,6 +298,9 @@ def _run(git: TargetGit, arguments: list[str], *, check: bool = True, **options)
         result = git.run(arguments, timeout=GIT_TIMEOUT_SECONDS, **options)
     except subprocess.TimeoutExpired as exc:
         raise HistoryReadError(f"git {arguments[0]} timed out after {GIT_TIMEOUT_SECONDS}s") from exc
+    except OSError as exc:
+        # The host refused to start Git, e.g. an argument list past its limit.
+        raise HistoryReadError(f"git {arguments[0]} could not start: {exc}") from exc
     if check and result.returncode != 0:
         detail = (result.stderr or b"").decode("utf-8", errors="replace").strip()
         raise HistoryReadError(f"git {' '.join(arguments[:2])} failed: {detail}")
