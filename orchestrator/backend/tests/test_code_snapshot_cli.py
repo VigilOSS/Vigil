@@ -9,6 +9,7 @@ import select
 import signal
 import stat
 import sys
+import time
 import tracemalloc
 from collections.abc import Callable
 from pathlib import Path
@@ -4878,6 +4879,202 @@ def test_javascript_index_extracts_every_common_assigned_callable_with_exact_spa
     for function in functions.values():
         assert function["source_span"]["end_byte"] > function["source_span"]["start_byte"]
         assert function["body_span"]["end_byte"] > function["body_span"]["start_byte"]
+
+
+def _minified_namespace_bundle(classes: int) -> bytes:
+    """A synthetic bundler namespace object of inlined minified classes."""
+    members = ",".join(
+        f"Acme{index}Mirror:class{{constructor(){{Np(this,\"id\",{index}),"
+        "this.onChange=e=>{this.map.set(e,this.id++)}}add(e){return this.map.get(e)}}"
+        for index in range(classes)
+    )
+    return (
+        b"var Ap=Object.defineProperty,Np=(e,t,n)=>t in e?Ap(e,t,{value:n}):e[t]=n;"
+        b"var AcmeSdk=Object.freeze(Object.defineProperty({__proto__:null,"
+        + members.encode()
+        + b'},Symbol.toStringTag,{value:"Module"}));\n'
+    )
+
+
+def _assert_publishable_callables(indexed: dict, rel_path: str) -> None:
+    from app.api.code_analysis import StructuralCallableRecord
+    from assess.lib.code_structural_metadata import validated_callable_records
+
+    for record in validated_callable_records(indexed, rel_path=rel_path):
+        StructuralCallableRecord.model_validate(record)
+
+
+def test_javascript_namespace_object_never_names_a_callable_by_its_source_text() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    source = _minified_namespace_bundle(12)
+    indexed = index_file("vendor/acme-sdk.min.js", "javascript", source=source)
+
+    functions = indexed["functions"]
+    assert {function["name"] for function in functions} == {
+        "Np", "constructor", "onChange", "add",
+    }
+    assert {
+        function["qualified_name"].split("@", 1)[0]
+        for function in functions
+        if function["name"] == "onChange"
+    } == {"this.onChange"}
+    assert not any("{" in function["qualified_name"] for function in functions)
+    _assert_publishable_callables(indexed, "vendor/acme-sdk.min.js")
+
+
+_LONG_NAMESPACE_TARGET = b"{__proto__:null," + b",".join(
+    b"acme%d:%d" % (index, index) for index in range(20)
+) + b"}"
+
+
+def test_javascript_define_property_names_an_over_long_target_by_position() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    indexed = index_file(
+        "vendor/acme-sdk.min.js",
+        "javascript",
+        source=(
+            b"Object.defineProperty(" + _LONG_NAMESPACE_TARGET
+            + b',"render",{value:function(e){return e}});\n'
+        ),
+    )
+
+    assert [
+        (function["name"], function["qualified_name"]) for function in indexed["functions"]
+    ] == [("render", "<anonymous@1:22>.render")]
+
+
+def test_typescript_member_owners_keep_their_source_names() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    indexed = index_file(
+        "src/boot.ts",
+        "typescript",
+        source=(
+            b"foo!.bar = function(){};\n"
+            b"(window as any).boot = function(){};\n"
+            b"(<any>window).legacy = function(){};\n"
+            b"(foo as Bar).method = function(){};\n"
+            b"obj.items![0] = function(){};\n"
+            b"class A { [`tmpl`]() {} }\n"
+        ),
+    )
+
+    assert [
+        (function["name"], function["qualified_name"]) for function in indexed["functions"]
+    ] == [
+        ("bar", "foo!.bar"),
+        ("boot", "(window as any).boot"),
+        ("legacy", "(<any>window).legacy"),
+        ("method", "(foo as Bar).method"),
+        ("items![0]", "obj.items![0]"),
+        ("[`tmpl`]", "A.[`tmpl`]"),
+    ]
+
+
+def test_javascript_long_member_chain_owner_indexes_completely_and_quickly() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    started = time.perf_counter()
+    indexed = index_file(
+        "vendor/acme-chain.js", "javascript", source=b"f()" + b".a" * 8000 + b"=function(){};\n"
+    )
+
+    assert time.perf_counter() - started < 2
+    assert indexed["analysis_status"] == "complete"
+    assert [
+        (function["name"], function["qualified_name"]) for function in indexed["functions"]
+    ] == [("<anonymous@1:0>", "<anonymous@1:0>")]
+
+
+def test_javascript_dot_key_callable_gets_a_positional_name() -> None:
+    from assess.lib.treesitter_index import index_file
+
+    indexed = index_file(
+        "vendor/acme-selectors.js", "javascript", source=b'var t={".":function(e){return e}};\n'
+    )
+
+    assert [
+        (function["name"], function["qualified_name"]) for function in indexed["functions"]
+    ] == [("<anonymous@1:11>", ".")]
+    _assert_publishable_callables(indexed, "vendor/acme-selectors.js")
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "language", "source"),
+    [
+        (
+            "src/acme.cpp",
+            "cpp",
+            b"template<> void Acme<" + b"int," * 400 + b"int>::run() { }\n",
+        ),
+        (
+            "vendor/acme-i18n.min.js",
+            "javascript",
+            b'var t={"' + b"acme " * 120 + b'label":function(e){return e}};\n',
+        ),
+        ("bin/acme.sh", "shell", b"acme" + b"_x" * 300 + b"() { echo acme; }\n"),
+    ],
+    ids=["cpp-template-scope", "javascript-string-key", "shell-function"],
+)
+def test_every_derived_callable_name_fits_the_backend_caps(
+    rel_path: str, language: str, source: bytes
+) -> None:
+    from assess.lib.treesitter_index import index_file
+
+    indexed = index_file(rel_path, language, source=source)
+
+    assert indexed["analysis_status"] == "complete"
+    assert len(indexed["functions"]) == 1
+    _assert_publishable_callables(indexed, rel_path)
+
+
+_LONG_OWNER = "Acme" + "A" * 1016
+
+
+@pytest.mark.parametrize(
+    ("rel_path", "language", "source"),
+    [
+        ("src/Acme.java", "java", f"class {_LONG_OWNER}{{void m(int a){{}} void m(String b){{}}}}\n"),
+        ("src/acme.js", "javascript", f"class {_LONG_OWNER}{{m(a){{}} m(b){{}}}}\n"),
+        ("src/acme.php", "php", f"<?php class {_LONG_OWNER}{{function m($a){{}} function m($b){{}}}}\n"),
+    ],
+    ids=["java", "javascript", "php"],
+)
+def test_a_disambiguated_qualified_name_still_fits_the_backend_cap(
+    rel_path: str, language: str, source: str
+) -> None:
+    from assess.lib.treesitter_index import index_file
+
+    indexed = index_file(rel_path, language, source=source.encode())
+
+    assert len(indexed["functions"]) == 2
+    _assert_publishable_callables(indexed, rel_path)
+
+
+@pytest.mark.parametrize("language", ["html", "twig"])
+@pytest.mark.parametrize("action", ["/search", "/" + "s" * 600], ids=["short", "over-long"])
+def test_same_line_lightweight_callables_keep_distinct_identities(language: str, action: str) -> None:
+    from assess.lib.treesitter_index import index_file
+
+    form = f'<form action="{action}"></form>'
+    indexed = index_file("templates/search.html", language, source=f"{form}{form}\n".encode())
+
+    assert len(indexed["functions"]) == 2
+    _assert_publishable_callables(indexed, "templates/search.html")
+
+
+def test_indexer_name_caps_mirror_the_backend_callable_record() -> None:
+    from app.api.code_analysis import StructuralCallableRecord
+    from assess.lib.treesitter_index import (
+        STRUCTURAL_CALLABLE_NAME_LIMIT,
+        STRUCTURAL_QUALIFIED_NAME_LIMIT,
+    )
+
+    fields = StructuralCallableRecord.model_json_schema()["properties"]
+    assert fields["name"]["maxLength"] == STRUCTURAL_CALLABLE_NAME_LIMIT
+    assert fields["qualified_name"]["maxLength"] == STRUCTURAL_QUALIFIED_NAME_LIMIT
 
 
 def test_javascript_sink_attribution_uses_callable_body_span_on_minified_lines() -> None:

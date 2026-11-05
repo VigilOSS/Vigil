@@ -2812,6 +2812,84 @@ def test_php_namespace_qualification_rebinds_receipt_bound_callables_with_unchan
     assert correction.status_code == 201, correction.text
 
 
+def test_javascript_expression_owner_rebinds_receipt_bound_callables_with_unchanged_spans(
+    client, isolate_settings
+) -> None:
+    """An index that named a callable after an object literal's source text is
+    rebuilt with a positional owner: the name and span hold, so receipts follow."""
+    target = b"{__proto__:null," + b",".join(b"acme%d:%d" % (index, index) for index in range(20)) + b"}"
+    source = b"Object.defineProperty(" + target + b',"render",{value:function(e){return e}});\n'
+    indexed = index_file("vendor/acme-sdk.min.js", "javascript", source)
+    upgraded = [
+        _structural_callable(
+            function["name"],
+            start_line=function["line_start"],
+            end_line=function["line_end"],
+            qualified_name=function["qualified_name"],
+        )
+        for function in indexed["functions"]
+    ]
+    assert [item["qualified_name"] for item in upgraded] == ["<anonymous@1:22>.render"]
+    previous = [{**upgraded[0], "qualified_name": f"{target.decode()}.render"}]
+
+    engagement_key = "2026-11-05-javascript-owner-rebind"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="javascript-owner-rebind-repo")
+    repo_id = int(repo["id"])
+    _create_files(client, engagement_key, repo_id)
+    files = _append_repo_files(
+        client,
+        engagement_key,
+        repo_id,
+        [
+            {
+                "file_path": "vendor/acme-sdk.min.js",
+                "language": "javascript",
+                "loc": indexed["total_lines"],
+                "file_hash": _source_hash("acme-sdk-bundle"),
+                "header_snippet": "Object.defineProperty({__proto__:null,",
+                "git_churn_score": 0,
+                "has_past_cve_fix": False,
+            }
+        ],
+    )
+    bundle_id = int(next(row for row in files if row["file_path"] == "vendor/acme-sdk.min.js")["id"])
+    _publish_structural_callables(client, engagement_key, repo_id, files, {bundle_id: previous})
+    _classify_file(client, engagement_key, bundle_id, "critical", 100)
+    claim = _claim_file_for_analysis(client, engagement_key, bundle_id)
+    receipt = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            callable_refs=[{"file_id": bundle_id, **item} for item in previous],
+            reviewed_spans=[],
+            evidence="render was reviewed against the sealed source",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert receipt.status_code == 201, receipt.text
+
+    rebuilt = _post_structural_callables(
+        client, engagement_key, repo_id, files, {bundle_id: upgraded}
+    )
+
+    assert rebuilt.status_code == 200, rebuilt.text
+    assert {
+        qualified_name
+        for file_id, qualified_name, _start_line, _end_line in _registered_callables(repo_id)
+        if file_id == bundle_id
+    } == {"<anonymous@1:22>.render"}
+    stored = client.get(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results/{receipt.json()['id']}"
+    )
+    assert stored.status_code == 200, stored.text
+    assert [ref["qualified_name"] for ref in stored.json()["callable_refs"]] == [
+        "<anonymous@1:22>.render"
+    ]
+
+
 def test_complete_structural_publication_rejects_callable_registry_shortfall(
     client, isolate_settings
 ) -> None:

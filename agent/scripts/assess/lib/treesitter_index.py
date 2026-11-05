@@ -872,6 +872,19 @@ def _normalized_javascript_target(value: str) -> str:
     return value.replace(".prototype.", ".").removesuffix(".prototype")
 
 
+# An owner or key longer than this, or spanning lines, is code rather than a
+# name a reader would search for, such as a bundler's namespace object.
+_JAVASCRIPT_NAME_TEXT_LIMIT = 128
+
+
+def _javascript_name_text(node: Any, source: bytes) -> str:
+    text = _node_text(node, source)
+    if len(text) <= _JAVASCRIPT_NAME_TEXT_LIMIT and "\n" not in text:
+        return text
+    line, column, _end_line, _end_column = _node_character_range(node, source)
+    return f"<anonymous@{line}:{column}>"
+
+
 def _javascript_define_property_name(node: Any, source: bytes) -> str | None:
     current = node.parent
     while current is not None:
@@ -883,9 +896,12 @@ def _javascript_define_property_name(node: Any, source: bytes) -> str | None:
             values = list(arguments.named_children) if arguments is not None else []
             if len(values) < 3:
                 return None
-            target = _normalized_javascript_target(_node_text(values[0], source))
+            descriptor = values[2]
+            if not descriptor.start_byte <= node.start_byte < descriptor.end_byte:
+                return None
+            target = _normalized_javascript_target(_javascript_name_text(values[0], source))
             property_node = values[1]
-            property_name = _node_text(property_node, source).strip("'\"`")
+            property_name = _javascript_name_text(property_node, source).strip("'\"`")
             if not target or not property_name:
                 return None
             return f"{target}.{property_name}"
@@ -896,7 +912,7 @@ def _javascript_define_property_name(node: Any, source: bytes) -> str | None:
 def _javascript_callable_name(node: Any, source: bytes) -> str:
     explicit_name = node.child_by_field_name("name")
     if explicit_name is not None:
-        return _node_text(explicit_name, source)
+        return _javascript_name_text(explicit_name, source)
 
     define_property_name = _javascript_define_property_name(node, source)
     if define_property_name:
@@ -906,15 +922,15 @@ def _javascript_callable_name(node: Any, source: bytes) -> str:
     if parent is not None and parent.type == "variable_declarator":
         name = parent.child_by_field_name("name")
         if name is not None:
-            return _node_text(name, source)
+            return _javascript_name_text(name, source)
     if parent is not None and parent.type == "assignment_expression":
         left = parent.child_by_field_name("left")
         if left is not None:
-            return _normalized_javascript_target(_node_text(left, source))
+            return _normalized_javascript_target(_javascript_name_text(left, source))
     if parent is not None and parent.type in {"pair", "public_field_definition"}:
         key = parent.child_by_field_name("key") or parent.child_by_field_name("name")
         if key is not None:
-            return _node_text(key, source).strip("'\"`")
+            return _javascript_name_text(key, source).strip("'\"`")
 
     line, column, _end_line, _end_column = _node_character_range(node, source)
     return f"<anonymous@{line}:{column}>"
@@ -5279,6 +5295,7 @@ def _enrich_qualified_names(
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
     language: str,
+    source: bytes,
 ) -> None:
     """Set qualified_name to ClassName.method for methods inside classes."""
     if language == "cpp":
@@ -5322,6 +5339,7 @@ def _enrich_qualified_names(
                     func.get("_cpp_declared_scope", ""),
                     func["name"],
                 )
+        _bound_callable_names(functions, source)
         return
 
     if language == "php":
@@ -5341,6 +5359,7 @@ def _enrich_qualified_names(
             if cls["_start_byte"] <= func["_start_byte"] and func["_end_byte"] <= cls["_end_byte"]:
                 func["qualified_name"] = f"{owner}.{func['name']}"
 
+    _bound_callable_names(functions, source)
     _disambiguate_qualified_names(functions)
 
 
@@ -5367,6 +5386,29 @@ def _disambiguate_qualified_names(functions: list[dict[str, Any]]) -> None:
         func["qualified_name"] = (
             f"{func['qualified_name']}@{func['line_start']}:{suffix}"
         )
+
+
+# `api/code_analysis.py:StructuralCallableRecord` caps both names, and
+# `code-index sync` refuses the whole repository over one callable past either.
+STRUCTURAL_CALLABLE_NAME_LIMIT = 512
+STRUCTURAL_QUALIFIED_NAME_LIMIT = 1024
+
+
+def _bound_callable_names(functions: list[dict[str, Any]], source: bytes) -> None:
+    """Name a callable by its position when a derived name is empty or past the cap."""
+    for func in functions:
+        name_fits = 0 < len(func["name"]) <= STRUCTURAL_CALLABLE_NAME_LIMIT
+        # Leaves room for the `@line:offset` `_disambiguate_qualified_names` may append.
+        qualified_fits = 0 < len(func["qualified_name"]) <= STRUCTURAL_QUALIFIED_NAME_LIMIT - 32
+        if name_fits and qualified_fits:
+            continue
+        start = func.get("_start_byte")
+        column = 0 if start is None else _source_character_column(source, start)
+        position = f"<anonymous@{func['line_start']}:{column}>"
+        if not name_fits:
+            func["name"] = position
+        if not qualified_fits:
+            func["qualified_name"] = position
 
 
 def _cpp_function_identity(function: dict[str, Any]) -> tuple[Any, ...]:
@@ -5549,9 +5591,12 @@ def index_file(
     # Lightweight regex-based extractors run regardless of tree-sitter availability
     if language in LIGHTWEIGHT_LANGUAGES:
         try:
+            indexed = _index_lightweight(file_path, language, source_lines, total_lines)
+            _bound_callable_names(indexed["functions"], source)
+            _disambiguate_qualified_names(indexed["functions"])
             return _complete_index_metadata(
                 _attach_bounded_security_sources(
-                    _index_lightweight(file_path, language, source_lines, total_lines),
+                    indexed,
                     file_path=file_path,
                     language=language,
                     source=source,
@@ -5677,7 +5722,7 @@ def index_file(
         )
 
         effective_lang = "typescript" if parse_lang == "tsx" else language
-        _enrich_qualified_names(functions, classes, effective_lang)
+        _enrich_qualified_names(functions, classes, effective_lang, source)
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
         file_scope = _file_scope_lines(
