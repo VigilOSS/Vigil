@@ -195,9 +195,9 @@ def test_streaming_says_only_dynamic_or_unclassified_and_never_contradicts() -> 
         assert target["construct"] == exact_by_line[line]["construct"]
 
 
-def test_the_structural_build_resolves_includes_against_the_sealed_snapshot(
-    tmp_path, monkeypatch, request
-) -> None:
+def _build(tmp_path, monkeypatch, request, files: dict[str, bytes], *, excluded_entries=()):
+    """Seal *files* as a snapshot, run `code-index build` over it, and return
+    a reader for each file's structural artifact."""
     import hashlib
     import json
     from pathlib import Path
@@ -206,11 +206,6 @@ def test_the_structural_build_resolves_includes_against_the_sealed_snapshot(
     from assess.commands import code_index
     from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
 
-    files = {
-        "public/index.php": b"<?php\nrequire __DIR__ . '/../lib/boot.inc';\ninclude 'missing.php';\n",
-        "lib/boot.inc": b"<?php\nrequire_once __DIR__ . '/README';\n",
-        "lib/README": b"Acme boot notes\n",
-    }
     origin = tmp_path / "origin"
     builder = SnapshotBuilder(tmp_path / "snapshots", "acme")
     rows = []
@@ -223,7 +218,8 @@ def test_the_structural_build_resolves_includes_against_the_sealed_snapshot(
         rows.append({"id": file_id, "repo_id": 7, "file_path": rel_path, "language": language,
                      "file_hash": hashlib.sha256(raw).hexdigest()})
     snapshot = builder.finish(repo_key="acme", repo_name="acme", source_origin_path=str(origin),
-                              git={"head": "", "branch": "", "dirty": None})
+                              git={"head": "", "branch": "", "dirty": None},
+                              excluded_entries=list(excluded_entries))
 
     def make_writable() -> None:
         for item in snapshot.source_path.parent.rglob("*"):
@@ -268,10 +264,48 @@ def test_the_structural_build_resolves_includes_against_the_sealed_snapshot(
         index_path = manifest["files"][rel_path]["index_path"]
         return json.loads(Path(output / "structural-index" / index_path).read_text())
 
+    return artifact
+
+
+def test_the_structural_build_resolves_includes_against_the_sealed_snapshot(
+    tmp_path, monkeypatch, request
+) -> None:
+    artifact = _build(tmp_path, monkeypatch, request, {
+        "public/index.php": b"<?php\nrequire __DIR__ . '/../lib/boot.inc';\ninclude 'missing.php';\n",
+        "lib/boot.inc": b"<?php\nrequire_once __DIR__ . '/README';\n",
+        "lib/README": b"Acme boot notes\n",
+    })
+
     assert [(t["line"], t["status"], t["resolved"]) for t in _includes(artifact("public/index.php"))] == [
         (2, "resolved", "lib/boot.inc"),
         (3, "ambiguous", ""),
     ]
     assert [(t["status"], t["resolved"]) for t in _includes(artifact("lib/boot.inc"))] == [
         ("target_unindexed", "lib/README"),
+    ]
+
+
+def test_a_target_ingest_excluded_is_named_as_excluded(tmp_path, monkeypatch, request) -> None:
+    """`code-ingest` leaves `vendor/` out of the snapshot on purpose, so the
+    Composer autoloader a front controller requires is not absent: the sealed
+    exclusion inventory says where it went."""
+    artifact = _build(
+        tmp_path,
+        monkeypatch,
+        request,
+        {"public/index.php": b"<?php\nrequire __DIR__ . '/../vendor/autoload.php';\n"
+                             b"require __DIR__ . '/../missing.php';\n"
+                             b"require 'vendor/autoload.php';\n"
+                             b"require __DIR__ . '/../vendorx/boot.php';\n"},
+        excluded_entries=[{"path": "vendor", "kind": "directory", "reason": "skipped_dir:vendor"}],
+    )
+
+    assert [
+        (t["line"], t["status"], t.get("excluded_entry"))
+        for t in _includes(artifact("public/index.php"))
+    ] == [
+        (2, "target_excluded", "vendor"),
+        (3, "target_absent", None),
+        (4, "ambiguous", "vendor"),
+        (5, "target_absent", None),
     ]

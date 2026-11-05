@@ -1111,7 +1111,12 @@ def run(args) -> None:
     analysis_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
     errors: list[str] = []
     include_resolver = PhpIncludeResolver(
-        {str(entry["file_path"]): str(entry["language"]) for entry in selected}
+        {str(entry["file_path"]): str(entry["language"]) for entry in selected},
+        excluded_paths=(
+            str(record.get("path") or "")
+            for record in source_manifest.get("excluded_entries", [])
+            if isinstance(record, dict)
+        ),
     )
     try:
         print(

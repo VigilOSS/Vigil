@@ -11,6 +11,7 @@ import posixpath
 import re
 import warnings
 from bisect import bisect_left, bisect_right
+from collections.abc import Iterable
 from functools import lru_cache
 from typing import Any, NamedTuple
 
@@ -1766,7 +1767,8 @@ _PHP_PATH_CONSTANTS = {"DIRECTORY_SEPARATOR": "/"}
 _PHP_URL_PATH = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _PHP_INCLUDE_CANDIDATE_LIMIT = 20
 PHP_INCLUDE_STATUSES = frozenset({
-    "resolved", "dynamic", "ambiguous", "target_absent", "target_unindexed", "unclassified",
+    "resolved", "dynamic", "ambiguous", "target_absent", "target_excluded", "target_unindexed",
+    "unclassified",
 })
 
 
@@ -2131,15 +2133,21 @@ class PhpIncludeResolver:
 
     A `__DIR__`-anchored path names one file: `resolved` when the snapshot
     holds it and the structural index reads its language, `target_unindexed`
-    when it is in the snapshot under a language no extractor reads, and
-    `target_absent` when it is not there or leaves the repository. A path the
-    interpreter looks up through `include_path` or the working directory names
-    no single file, so it is `ambiguous` and lists the snapshot files it could
-    be, nearest first.
+    when it is in the snapshot under a language no extractor reads,
+    `target_excluded` when it lies at or under an entry of the sealed exclusion
+    inventory (*excluded_paths*, such as `vendor/`), and `target_absent` when it
+    is not there or leaves the repository. A path the interpreter looks up
+    through `include_path` or the working directory names no single file, so it
+    is `ambiguous` and lists the snapshot files it could be, nearest first, and
+    the exclusion entry holding the path from the including file's directory or
+    the repository root when one does.
     """
 
-    def __init__(self, snapshot_languages: dict[str, str]) -> None:
+    def __init__(
+        self, snapshot_languages: dict[str, str], excluded_paths: Iterable[str] = ()
+    ) -> None:
         self.snapshot_languages = snapshot_languages
+        self.excluded_paths = frozenset(path for path in excluded_paths if path)
         self._by_basename: dict[str, list[str]] = {}
         for path in sorted(snapshot_languages):
             self._by_basename.setdefault(path.rsplit("/", 1)[-1], []).append(path)
@@ -2162,7 +2170,10 @@ class PhpIncludeResolver:
         repo_path = _repo_join(directory, target["path"])
         language = self.snapshot_languages.get(repo_path) if repo_path is not None else None
         if repo_path is None or language is None:
-            target["status"] = "target_absent"
+            excluded = self._excluded_entry(repo_path)
+            target["status"] = "target_absent" if excluded is None else "target_excluded"
+            if excluded is not None:
+                target["excluded_entry"] = excluded
             return
         target["resolved"] = repo_path
         target["status"] = (
@@ -2190,6 +2201,25 @@ class PhpIncludeResolver:
         target["status"] = "ambiguous"
         target["candidates"] = candidates[:_PHP_INCLUDE_CANDIDATE_LIMIT]
         target["candidate_count"] = len(candidates)
+        excluded = next(
+            (entry for entry in map(self._excluded_entry, ordered[:2]) if entry is not None), None
+        )
+        if excluded is not None:
+            target["excluded_entry"] = excluded
+
+    def _excluded_entry(self, repo_path: str | None) -> str | None:
+        """The outermost exclusion entry at or above *repo_path*, if any."""
+        if repo_path is None or not self.excluded_paths:
+            return None
+        parts = repo_path.split("/")
+        return next(
+            (
+                prefix
+                for prefix in ("/".join(parts[:depth]) for depth in range(1, len(parts) + 1))
+                if prefix in self.excluded_paths
+            ),
+            None,
+        )
 
 
 def _extract_import_records(
