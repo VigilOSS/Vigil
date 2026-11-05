@@ -4197,13 +4197,13 @@ def _php_ast_sinks(
         if function is None:
             continue
         if function.type == "variable_name":
-            found.append(("eval_exec", call))
+            found.append(("dynamic_invocation", call))
             continue
         name = _node_text(function, source).lstrip("\\").lower()
         if name in _PHP_DYNAMIC_CALLERS and values:
             callable_value = values[0].named_children[0] if values[0].named_children else None
             if values[0].type != "argument" or callable_value is None or not _php_literal_callable(callable_value):
-                found.append(("eval_exec", call))
+                found.append(("dynamic_invocation", call))
         elif name == "mail" and (
             len(values) >= 5 or any(value.type == "variadic_unpacking" for value in values)
         ):
@@ -4219,7 +4219,7 @@ def _php_ast_sinks(
         if target is None or target.type in {"declaration_list", "base_clause"}:
             continue
         if target.type in {"variable_name", *_PHP_PROPERTY_TYPES}:
-            found.append(("eval_exec", creation))
+            found.append(("dynamic_invocation", creation))
             continue
         text = _node_text(target, source)
         if (

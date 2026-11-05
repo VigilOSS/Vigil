@@ -60,10 +60,13 @@ def _kinds(statement: str, *, prelude: str = "") -> set[str]:
         pytest.param("pcntl_exec($path, [$id]);", "process_exec", id="pcntl-exec"),
         pytest.param("mail($to, 'Acme', $data, '', '-f' . $id);", "process_exec", id="mail-fifth-arg"),
         pytest.param("extract($data);", "mass_assignment", id="extract"),
-        pytest.param("call_user_func($fn, $id);", "eval_exec", id="call-user-func"),
-        pytest.param("call_user_func_array([$client, $fn], [$id]);", "eval_exec", id="call-user-func-array"),
-        pytest.param("$fn($id);", "eval_exec", id="variable-function"),
-        pytest.param("$o = new $cls($id);", "eval_exec", id="variable-class"),
+        pytest.param("call_user_func($fn, $id);", "dynamic_invocation", id="call-user-func"),
+        pytest.param(
+            "call_user_func_array([$client, $fn], [$id]);", "dynamic_invocation", id="call-user-func-array"
+        ),
+        pytest.param("$fn($id);", "dynamic_invocation", id="variable-function"),
+        pytest.param("$o = new $cls($id);", "dynamic_invocation", id="variable-class"),
+        pytest.param("$o = new $this->handler($id);", "dynamic_invocation", id="property-class"),
         pytest.param("assert($data);", "eval_exec", id="assert-variable"),
         pytest.param("assert('$id > 0');", "eval_exec", id="assert-string"),
         pytest.param("hash('md5', $data);", "crypto", id="hash-weak"),
@@ -85,9 +88,14 @@ def test_a_guzzle_client_built_by_its_imported_name_is_a_fetch() -> None:
     [
         pytest.param("$c = new Client($id);", "url_fetch", "use Acme\\Mail\\Client;\n", id="other-client"),
         pytest.param("mail($to, 'Acme', $data, '');", "process_exec", "", id="mail-four-args"),
-        pytest.param("call_user_func('acme_render', $id);", "eval_exec", "", id="literal-callable"),
-        pytest.param("call_user_func([$client, 'render'], $id);", "eval_exec", "", id="literal-method"),
-        pytest.param("call_user_func(function () { return 1; });", "eval_exec", "", id="closure-callable"),
+        pytest.param("call_user_func('acme_render', $id);", "dynamic_invocation", "", id="literal-callable"),
+        pytest.param("call_user_func([$client, 'render'], $id);", "dynamic_invocation", "", id="literal-method"),
+        pytest.param(
+            "call_user_func(function () { return 1; });", "dynamic_invocation", "", id="closure-callable"
+        ),
+        pytest.param("$fn($id);", "eval_exec", "", id="variable-function-evaluates-nothing"),
+        pytest.param("$o = new $cls($id);", "eval_exec", "", id="variable-class-evaluates-nothing"),
+        pytest.param("call_user_func($fn, $id);", "eval_exec", "", id="callback-evaluates-nothing"),
         pytest.param("assert($id > 0, 'positive');", "eval_exec", "", id="assert-condition"),
         pytest.param("hash('sha256', $data);", "crypto", "", id="hash-strong"),
         pytest.param("$this->query->get('id');", "sql_exec", "", id="query-bag"),
@@ -123,3 +131,14 @@ def test_streaming_reads_the_catalogue_rows_it_shares() -> None:
     )
 
     assert "sql_exec" in {sink["kind"] for sink in streamed["security_sinks"] if sink["line"] == 3}
+
+
+def test_a_dynamic_invocation_is_an_injection_sink_of_its_own_kind() -> None:
+    """Calling a callable chosen at runtime runs code the attacker may pick
+    but evaluates no source text, so it is not filed with `eval`."""
+    indexed = index_file("src/acme.php", "php", _php("$fn($id);"))
+
+    assert [
+        (sink["kind"], sink["vuln_classes"], sink["function"])
+        for sink in indexed["security_sinks"]
+    ] == [("dynamic_invocation", ["injection"], "acme_handler")]
