@@ -259,8 +259,8 @@ Coverage Debt, close it through that normal result path; never label completed s
 (`shared-constraints-code.md` §2). Every non-skipped receipt names exact structural callable
 identities or reviewed source spans; critical/high closeout fails without one. File scope is
 owed as `<top-level>` callables, one per segment, which a function receipt does not cover. A file
-whose index holds no callable at all, or scanned no function scope, closes only with a whole-file
-reviewed span (`shared-constraints-code.md` §6). Per-file detail
+whose index reports signals but holds no callable at all, or scanned no function scope, closes only
+with a whole-file reviewed span (`shared-constraints-code.md` §6). Per-file detail
 derives from current receipts, evidenced receipts, and the union of structurally bound callables,
 so a submitted `functions_analyzed` or effort number alone is not proof of work.
 

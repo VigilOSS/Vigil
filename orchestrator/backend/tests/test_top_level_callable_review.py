@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
+
 from app import db as db_module
 
 from tests.test_code_analysis_api import (
@@ -262,6 +264,38 @@ def test_a_script_whose_only_callable_is_top_level_needs_all_of_its_lines(client
     assert cited.status_code == 201, cited.text
 
 
+def test_a_receipt_that_cites_every_segment_may_add_a_narrow_span(client, isolate_settings) -> None:
+    """Cited segments are proven by reference, so a span that only points at
+    the sink line inside them is a highlight, never a partial claim."""
+    key = "2026-11-05-top-level-highlight"
+    repo_id, files, ids = _setup(client, isolate_settings, key)
+    registry = _publish(client, key, repo_id, files, ids)
+    # The script reads request input into a SQL sink, as its index reports.
+    connection = sqlite3.connect(str(db_module.database_path()))
+    try:
+        connection.execute(
+            "UPDATE code_files SET total_sinks = 1, total_entry_points = 1,"
+            " structural_signal_counts_json = ? WHERE id = ?",
+            (
+                '{"entry_points": 1, "imports": 0, "security_sinks": 1, "security_sources": 1}',
+                ids[SCRIPT_PATH],
+            ),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    claim = _claim_file_for_analysis(client, key, ids[SCRIPT_PATH])
+
+    highlighted = _receipt(
+        client,
+        key,
+        claim,
+        callable_refs=_refs(ids[SCRIPT_PATH], registry[ids[SCRIPT_PATH]]),
+        reviewed_spans=[{"file_id": ids[SCRIPT_PATH], "start_line": 4, "end_line": 4, "label": "sql sink"}],
+    )
+    assert highlighted.status_code == 201, highlighted.text
+
+
 def test_an_upgrade_that_adds_file_scope_keeps_receipts_and_surfaces_the_new_obligation(
     client, isolate_settings
 ) -> None:
@@ -308,9 +342,10 @@ def test_an_upgrade_that_adds_file_scope_keeps_receipts_and_surfaces_the_new_obl
     assert _uncovered_paths(_gate(client, key, repo_id)) == set()
 
 
-def test_a_literal_configuration_file_owes_a_whole_file_span() -> None:
-    """A file that only returns a literal array opens no `<top-level>`
-    segment, so with no callable either the review owes the whole file."""
+def test_a_literal_configuration_file_owes_no_structural_proof() -> None:
+    """A file that only returns a literal array opens no `<top-level>` segment:
+    the index read its whole file scope and found nothing that runs, so no
+    callable or span is owed. A mandatory proof needs something to prove."""
     import json
 
     from app.services.code_analysis_support import structural_review_obligation
@@ -325,6 +360,7 @@ return [
     obligation = structural_review_obligation(
         {
             "loc": len(source.splitlines()),
+            "language": "php",
             "structural_analysis_status": indexed["analysis_status"],
             "structural_unavailable_dimensions_json": json.dumps(indexed["unavailable_dimensions"]),
             "structural_truncated_dimensions_json": json.dumps(indexed["truncated_dimensions"]),
@@ -336,5 +372,50 @@ return [
         ),
     )
 
-    assert obligation.whole_file_reason == "registry holds no callable for this file"
-    assert obligation.top_level_spans == ()
+    assert not obligation.owed
+
+
+@pytest.mark.parametrize(
+    ("file_path", "language", "source"),
+    [
+        ("web/site.css", "css", b"body {\n  color: #333;\n}\n.acme { margin: 0; }\n"),
+        ("web/about.html", "html", b"<!doctype html>\n<html>\n<body><p>Acme</p></body>\n</html>\n"),
+    ],
+)
+def test_a_complete_stylesheet_or_markup_page_owes_nothing(
+    file_path: str, language: str, source: bytes,
+) -> None:
+    """A stylesheet or a page of markup has no callable and no file-scope code
+    the index reads, so it owes no review a span could prove."""
+    import json
+
+    from app.services.code_analysis_support import structural_review_obligation
+
+    indexed = index_file(file_path, language, source)
+    assert indexed["analysis_status"] == "complete"
+    obligation = structural_review_obligation(
+        {
+            "loc": len(source.splitlines()),
+            "language": language,
+            "structural_analysis_status": indexed["analysis_status"],
+            "structural_unavailable_dimensions_json": json.dumps(indexed["unavailable_dimensions"]),
+            "structural_truncated_dimensions_json": json.dumps(indexed["truncated_dimensions"]),
+            "total_functions": indexed["total_functions"],
+        },
+    )
+
+    assert not obligation.owed
+
+
+
+def test_the_span_requirement_reads_segments_in_line_order() -> None:
+    """Registry rows come back in insertion order, which a rebuild that keeps
+    receipt-bound segments can leave out of line order."""
+    from app.services.code_analysis_support import StructuralReviewObligation
+
+    requirement = StructuralReviewObligation(
+        top_level_spans=((20, 22), (2, 3))
+    ).span_requirement(30)
+
+    assert requirement is not None
+    assert requirement[0] == (2, 22)

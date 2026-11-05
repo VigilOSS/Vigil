@@ -160,9 +160,9 @@ def test_a_zero_callable_file_measured_at_file_scope_publishes_complete(
 
 
 @pytest.mark.parametrize(
-    "parser_update",
+    ("parser_update", "partial_status"),
     [
-        pytest.param(_file_scope_signal_update(), id="file-scope-signals"),
+        pytest.param(_file_scope_signal_update(), 409, id="file-scope-signals"),
         pytest.param(
             {"structural_signal_counts": {
                 "entry_points": 0,
@@ -170,17 +170,19 @@ def test_a_zero_callable_file_measured_at_file_scope_publishes_complete(
                 "security_sinks": 0,
                 "security_sources": 0,
             }},
+            201,
             id="imports-only",
         ),
-        pytest.param({}, id="no-signal"),
+        pytest.param({}, 201, id="no-signal"),
     ],
 )
-def test_a_partial_span_cannot_review_a_zero_callable_file(
-    client, isolate_settings, parser_update
+def test_a_zero_callable_file_owes_a_whole_file_span_only_for_its_signals(
+    client, isolate_settings, parser_update, partial_status
 ) -> None:
-    """With no callable to cite, a whole-file span is the only review proof a
-    zero-callable file with source can offer, whatever its signals: no signal
-    is a measurement of the readers, not proof that a reviewer read the file."""
+    """With no callable to cite, a file whose readers report an entry point,
+    sink or source can prove its review only with a whole-file span. A file
+    that reports none (or only imports) has nothing a mandatory span proves,
+    so a partial span is an ordinary citation."""
     engagement_key = "2026-09-17-zero-callable-signal-span"
     _repo, _files, parser, payload = _prepare(
         client,
@@ -211,8 +213,9 @@ def test_a_partial_span_cannot_review_a_zero_callable_file(
         ),
     )
 
-    assert partial.status_code == 409, partial.text
-    assert "no callable" in partial.json()["detail"]
+    assert partial.status_code == partial_status, partial.text
+    if partial_status == 409:
+        assert "no callable" in partial.json()["detail"]
 
     whole_file = client.post(
         f"{base}/analysis-results",

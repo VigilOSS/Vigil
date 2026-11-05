@@ -687,11 +687,11 @@ def test_a_whole_file_span_clears_a_zero_callable_file_with_signals(
     assert _uncovered_paths(_gate(client, key, repo["id"])) == set()
 
 
-def test_a_zero_callable_file_carrying_only_imports_owes_a_whole_file_span(
+def test_a_zero_callable_file_carrying_only_imports_owes_no_whole_file_span(
     client, isolate_settings
 ):
-    """No signal is not no source: with no callable to cite, a one-line span
-    from a closed review stands for a file nobody proved was read end to end."""
+    """Imports only name other files: with no callable, segment, entry point,
+    sink or source, the closed review's one-line span is an ordinary citation."""
     key = "2026-11-03-uncov-zero-callable-imports"
     write_engagement(isolate_settings["engagements_dir"], key)
     repo = _create_repo(client, key, repo_key=f"{key}-repo")
@@ -716,4 +716,4 @@ def test_a_zero_callable_file_carrying_only_imports_owes_a_whole_file_span(
         },
     )
 
-    assert _uncovered_paths(_gate(client, key, repo["id"])) == {"src/parser.py"}
+    assert _uncovered_paths(_gate(client, key, repo["id"])) == set()

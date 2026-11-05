@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
 from pathlib import Path
@@ -34,6 +34,10 @@ STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 # `agent/scripts/assess/lib/treesitter_index.py`, produced there by
 # `_unscanned_scope_dimensions`, and the backend mirrors the agent tree rather
 # than importing from it (CODE-MAP.md). Keep the two lists identical.
+_INDEXED_STRUCTURAL_STATUSES = frozenset({"complete", "degraded"})
+# Signals that put a file's source on the review path. Imports only name other
+# files; a zero-callable file holding nothing else has nothing a span proves.
+_REVIEW_SIGNAL_COUNTS = ("entry_points", "security_sinks", "security_sources")
 FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
     {"call_sites", "dataflow", "security_sinks"}
 )
@@ -44,7 +48,6 @@ FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
 TOP_LEVEL_CALLABLE_NAME = "<top-level>"
 # Statuses under which the structural index measured a file, so its callable
 # registry is the review-proof vocabulary for that file.
-_INDEXED_STRUCTURAL_STATUSES = frozenset({"complete", "degraded"})
 VARIANT_INPUT_IDENTITY_SCHEMA = "variant-input-identity/v1"
 MAX_VARIANT_RECEIPT_PAGE = 500
 DEFAULT_VARIANT_RECEIPT_PAGE = 100
@@ -513,7 +516,7 @@ class StructuralReviewObligation:
 
     *whole_file_reason* says why a whole-file span is the only span that proves
     a review: the function registry is incomplete, the index scanned no
-    function scope, or an indexed file with source has no callable at all.
+    function scope, or an indexed file reports signals but no callable.
     *owes_callable* holds when the registry has functions, so a receipt must
     name one. *top_level_spans* are the file's `<top-level>` segments; each is
     discharged by an exact `callable_ref` or by reviewed spans that cover it,
@@ -532,8 +535,9 @@ class StructuralReviewObligation:
         """The lines every reviewed span must cover on its own, and the refusal.
 
         A file whose only callable is `<top-level>` keeps the whole-file rule
-        over its source lines: a partial span would stand for file-scope lines
-        nobody showed were read. Elsewhere spans add up across receipts.
+        over the source lines of the segments a receipt does not cite: a
+        partial span would stand for file-scope lines nobody showed were read.
+        Elsewhere spans add up across receipts.
         """
         if self.whole_file_reason:
             return (1, loc), (
@@ -541,7 +545,8 @@ class StructuralReviewObligation:
                 f"{self.whole_file_reason}"
             )
         if self.top_level_spans and not self.owes_callable:
-            first, last = self.top_level_spans[0][0], self.top_level_spans[-1][1]
+            first = min(start for start, _end in self.top_level_spans)
+            last = max(end for _start, end in self.top_level_spans)
             return (first, last), (
                 f"reviewed spans must cover every {TOP_LEVEL_CALLABLE_NAME} source line "
                 f"({first}-{last}) while the structural registry holds no other callable"
@@ -581,6 +586,17 @@ def _spans_cover(spans: list[tuple[int, int]], target: tuple[int, int]) -> bool:
     return reached >= target[1]
 
 
+def _carries_review_signal(file_row: dict[str, Any]) -> bool:
+    counts = _json_decode(file_row.get("structural_signal_counts_json"), {})
+    if not isinstance(counts, dict):
+        counts = {}
+    return (
+        any(_safe_int(counts.get(name)) > 0 for name in _REVIEW_SIGNAL_COUNTS)
+        or _safe_int(file_row.get("total_entry_points")) > 0
+        or _safe_int(file_row.get("total_sinks")) > 0
+    )
+
+
 def structural_review_obligation(
     file_row: dict[str, Any],
     top_level_spans: tuple[tuple[int, int], ...] = (),
@@ -589,10 +605,12 @@ def structural_review_obligation(
 
     A file whose function registry is incomplete, or whose function-scoped
     dimensions were never scanned, has nothing a partial span can be read
-    against. An indexed file with source but no callable and no file-scope
-    segment has no structural callable a receipt could cite: no signal is a
-    fact about the readers, not proof that a reviewer read the file. Every
-    `<top-level>` segment is owed like any other callable.
+    against. Every `<top-level>` segment is owed like any other callable. An
+    indexed file with no callable or segment owes a whole-file span only when
+    its readers report an entry point, sink or source: signals with nothing to
+    cite cannot mean nothing to verify. Without one, no reader found anything
+    a span would show was reviewed (a stylesheet, markup, a literal config or
+    language table), so a mandatory span would prove no review.
     """
     if _safe_int(file_row.get("loc")) <= 0:
         return StructuralReviewObligation()
@@ -609,8 +627,9 @@ def structural_review_obligation(
         analysis_status in _INDEXED_STRUCTURAL_STATUSES
         and total_functions <= 0
         and not top_level_spans
+        and _carries_review_signal(file_row)
     ):
-        reason = "registry holds no callable for this file"
+        reason = "registry holds no callable for this file's signals"
     return StructuralReviewObligation(
         whole_file_reason=reason,
         owes_callable=total_functions > 0,
@@ -679,7 +698,8 @@ def structural_review_gaps(
         int(row["id"]): dict(row)
         for row in connection.execute(
             f"""
-            SELECT id, loc, total_functions, structural_analysis_status,
+            SELECT id, loc, total_functions, total_entry_points, total_sinks,
+                   structural_signal_counts_json, structural_analysis_status,
                    structural_unavailable_dimensions_json,
                    structural_truncated_dimensions_json
             FROM code_files
@@ -1190,11 +1210,15 @@ def _normalize_analysis_receipt_anchors(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="reviewed span must fall within the sealed file",
             )
-        top_level_spans = tuple(
-            (int(row["start_line"]), int(row["end_line"]))
+        # A segment the receipt cites is proven by reference, so a span over it
+        # is a highlight; only uncited segments bound what a span must cover.
+        # The obligation itself is read from every segment, as the coverage
+        # gate reads it.
+        top_level_rows = [
+            (int(row["id"]), int(row["start_line"]), int(row["end_line"]))
             for row in connection.execute(
                 """
-                SELECT start_line, end_line
+                SELECT id, start_line, end_line
                 FROM code_structural_callables
                 WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
                   AND file_id = ? AND name = ?
@@ -1207,9 +1231,17 @@ def _normalize_analysis_receipt_anchors(
                     TOP_LEVEL_CALLABLE_NAME,
                 ),
             ).fetchall()
+        ]
+        obligation = structural_review_obligation(
+            file_rows[file_id], tuple((start, end) for _id, start, end in top_level_rows)
         )
-        requirement = structural_review_obligation(
-            file_rows[file_id], top_level_spans
+        requirement = replace(
+            obligation,
+            top_level_spans=tuple(
+                (start, end)
+                for callable_id, start, end in top_level_rows
+                if callable_id not in seen_callable_ids
+            ),
         ).span_requirement(int(file_rows[file_id]["loc"]))
         if requirement is not None and (
             start_line > requirement[0][0] or end_line < requirement[0][1]

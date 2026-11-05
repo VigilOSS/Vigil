@@ -275,8 +275,8 @@ system($_GET['cmd']);
 
 
 def test_a_zero_callable_declarations_file_has_no_segment() -> None:
-    """With no callable and no executable file scope, the backend's whole-file
-    span rule is what applies, as it did before segments existed."""
+    """With no callable and no executable file scope there is nothing to cite,
+    and the backend owes it no review proof unless a reader reports a signal."""
     source = b"""<?php
 namespace Acme;
 
