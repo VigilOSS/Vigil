@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any
 
 from assess.lib.treesitter_index import (
+    PHP_INCLUDE_STATUSES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
     UNSCANNED_SCOPE_DEGRADATION_REASON,
 )
@@ -167,6 +168,18 @@ def validated_structural_metadata(
         )
     ):
         raise ValueError(f"unavailable structural dimension contains signals for {rel_path}")
+    for target in indexed["import_targets"]:
+        if not isinstance(target, dict) or target.get("kind") != "include":
+            continue
+        include_status = target.get("status")
+        if not isinstance(include_status, str) or not (
+            include_status in PHP_INCLUDE_STATUSES
+            or (
+                include_status.startswith("constant_unresolved:")
+                and include_status != "constant_unresolved:"
+            )
+        ):
+            raise ValueError(f"structural include status is invalid for {rel_path}")
     if reason is not None and (not isinstance(reason, str) or len(reason) > 128):
         raise ValueError(f"structural degradation reason is invalid for {rel_path}")
     return {

@@ -73,6 +73,33 @@ def test_a_zero_callable_file_measured_at_file_scope_is_publishable() -> None:
     assert metadata["structural_analysis_status"] == "complete"
 
 
+@pytest.mark.parametrize(
+    ("status", "valid"),
+    [
+        ("resolved", True),
+        ("constant_unresolved:ACME_ROOT", True),
+        ("unclassified", True),
+        ("constant_unresolved:", False),
+        ("found", False),
+    ],
+)
+def test_an_include_record_carries_a_known_status(status: str, valid: bool) -> None:
+    source = b"<?php\nrequire __DIR__ . '/boot.php';\n"
+    artifact = _artifact(source)
+    artifact.update({
+        "language": "php", "functions": [], "total_functions": 0,
+        "imports": ["__DIR__ . '/boot.php'"],
+        "import_targets": [{"raw": "__DIR__ . '/boot.php'", "resolved": "", "kind": "include",
+                            "construct": "require", "line": 2, "status": status}],
+        "signal_counts": {"entry_points": 0, "imports": 1, "security_sinks": 0, "security_sources": 0},
+    })
+    if valid:
+        validated_structural_metadata(artifact, rel_path="index.php", source_size=len(source))
+    else:
+        with pytest.raises(ValueError):
+            validated_structural_metadata(artifact, rel_path="index.php", source_size=len(source))
+
+
 @pytest.mark.parametrize("language,extension", [("javascript", "js"), ("typescript", "ts"), ("typescript", "tsx")])
 def test_block_comment_exports_are_empty_and_publishable(language: str, extension: str) -> None:
     source = b"\xef\xbb\xbf/*\r\nexport const Dead = 1;\r\nexport class Gone {}\r\nmodule.exports = Dead;\r\n*/\r\n"

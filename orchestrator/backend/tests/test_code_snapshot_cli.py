@@ -461,6 +461,14 @@ def test_trusted_tool_resolution_ignores_repo_relative_and_empty_path_entries(
         ("config.mts", "typescript"),
         ("legacy.cts", "typescript"),
         ("Dockerfile.prod", "dockerfile"),
+        ("includes/common.inc", "php"),
+        ("views/page.phtml", "php"),
+        ("modules/acme/acme.module", "php"),
+        ("modules/acme/acme.install", "php"),
+        ("themes/acme/template.theme", "php"),
+        ("legacy/index.php5", "php"),
+        ("legacy/index.php7", "php"),
+        ("tests/basic.phpt", "php"),
     ],
 )
 def test_ingest_language_detection_matches_structural_index(

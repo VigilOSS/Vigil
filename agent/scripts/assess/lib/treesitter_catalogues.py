@@ -505,6 +505,25 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
     ],
 }
 
+# What a PHP command-line script reads instead of a request: its arguments and
+# its standard input. One table, two readers: the bounded source scan reports
+# every match as `process_input`, and the file-scope entry reader names the
+# first one it finds as `php_cli_script` evidence. Both compile case-blind, as
+# PHP's own function names are; `STDIN` is a case-sensitive constant.
+_PHP_CLI_INPUT_PATTERNS: tuple[tuple[str, str], ...] = (
+    ("argv", r"\$arg[vc]\b|\$_SERVER\s*\[\s*['\"]arg[vc]['\"]\s*\]"),
+    ("getopt", r"\bgetopt\s*\("),
+    ("stdin", r"(?-i:\bSTDIN\b)|php://stdin"),
+    ("readline", r"(?<!->)(?<!::)\breadline\s*\("),
+)
+# A runtime SAPI check reads no input but only ever guards a script that
+# expects to run from a shell. The shebang is read off the first source bytes:
+# the grammar parses it as inline text, which is not HTML.
+_PHP_CLI_ENTRY_EVIDENCE: tuple[tuple[str, str], ...] = (
+    ("sapi_check", r"(?-i:\bPHP_SAPI\b)|\bphp_sapi_name\s*\("),
+    *_PHP_CLI_INPUT_PATTERNS,
+)
+
 _GLOBAL_ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
     # Django's `urlpatterns` is a module-level list whose every `path(` /
     # `re_path(` / `url(` row is a route. Anchored against an attribute or a

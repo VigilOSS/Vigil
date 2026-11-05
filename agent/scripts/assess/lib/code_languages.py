@@ -35,6 +35,18 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".kts": "kotlin",
     ".rb": "ruby",
     ".php": "php",
+    # PHP source under the other names the interpreter is pointed at: include
+    # fragments and templates, Drupal's module/install/theme files, the
+    # version-suffixed scripts old servers dispatch on, and the test-case files
+    # php-src and PHPUnit run.
+    ".inc": "php",
+    ".phtml": "php",
+    ".module": "php",
+    ".install": "php",
+    ".theme": "php",
+    ".php5": "php",
+    ".php7": "php",
+    ".phpt": "php",
     ".cs": "csharp",
     # C# script files (`dotnet script`, Roslyn `.csx`). Same language as `.cs`;
     # tree-sitter reads them with the C# grammar like any other source.

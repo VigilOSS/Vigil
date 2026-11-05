@@ -720,18 +720,20 @@ def test_an_empty_closure_does_not_hide_executable_top_level_scope() -> None:
 
 
 @pytest.mark.parametrize(
-    ("source", "sink_kinds"),
+    ("source", "sink_kinds", "entry_kinds"),
     [
         pytest.param(
             b"<?php\nrequire_once __DIR__ . '/bootstrap.php';\n"
             b"$report = AcmeReport::build($argv[1]);\n"
             b"mail('ops@example.com', 'Acme nightly', $report);\n",
             ["file_inclusion"],
+            ["php_cli_script"],
             id="legacy-script",
         ),
         pytest.param(
             b"<?php\n\n$settings = [\n    'strict' => true,\n"
             b"    'baseurl' => 'https://acme.example/',\n];\n",
+            [],
             [],
             id="settings-array",
         ),
@@ -739,11 +741,13 @@ def test_an_empty_closure_does_not_hide_executable_top_level_scope() -> None:
             b"<?php\nnamespace Acme\\Billing;\n\nenum Status: string\n{\n"
             b"    case Paid = 'paid';\n    case Void = 'void';\n}\n",
             [],
+            [],
             id="enum-cases",
         ),
         pytest.param(
             b"<?php\nnamespace Acme\\Billing;\n\n"
             b"class DeclinedException extends \\Exception\n{\n}\n",
+            [],
             [],
             id="empty-class",
         ),
@@ -751,13 +755,14 @@ def test_an_empty_closure_does_not_hide_executable_top_level_scope() -> None:
             b"<?php\nnamespace Acme\\Models;\n\nclass Invoice extends Model\n{\n"
             b"    protected $table = 'invoices';\n}\n",
             [],
+            [],
             id="property-only-class",
         ),
-        pytest.param(b"<?php\nconst ACME_TIMEOUT = 30;\n", [], id="constant-only"),
+        pytest.param(b"<?php\nconst ACME_TIMEOUT = 30;\n", [], [], id="constant-only"),
     ],
 )
 def test_a_php_file_without_callables_is_measured_by_its_script_scope(
-    source: bytes, sink_kinds: list[str]
+    source: bytes, sink_kinds: list[str], entry_kinds: list[str]
 ) -> None:
     """PHP's `<top-level>` scope is read whether or not the file declares a
     callable, and the file-scope entry patterns run over every program child.
@@ -767,7 +772,7 @@ def test_a_php_file_without_callables_is_measured_by_its_script_scope(
 
     assert indexed["total_functions"] == 0
     assert [sink["kind"] for sink in indexed["security_sinks"]] == sink_kinds
-    assert indexed["entry_points"] == []
+    assert [entry["kind"] for entry in indexed["entry_points"]] == entry_kinds
     assert indexed["analysis_status"] == "complete"
     assert indexed["unavailable_dimensions"] == []
     metadata = validated_structural_metadata(

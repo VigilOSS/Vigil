@@ -312,6 +312,95 @@ def test_a_shebang_is_not_inline_html() -> None:
     )
 
 
+def test_a_shebang_makes_the_file_a_cli_script() -> None:
+    indexed = index_file("bin/count.php", "php", PHP_CLI_SCRIPT)
+
+    assert [
+        (entry["kind"], entry["name"], entry["line"], entry["annotation"])
+        for entry in indexed["entry_points"]
+    ] == [("php_cli_script", "<top-level>", 1, "shebang")]
+
+
+@pytest.mark.parametrize(
+    ("line", "evidence"),
+    [
+        pytest.param(b"if (PHP_SAPI !== 'cli') { exit(1); }", "sapi_check", id="php-sapi"),
+        pytest.param(b"if (php_sapi_name() != 'cli') { exit(1); }", "sapi_check", id="sapi-name"),
+        pytest.param(b"$target = $argv[1];", "argv", id="argv"),
+        pytest.param(b"if ($argc < 2) { exit(1); }", "argv", id="argc"),
+        pytest.param(b"$target = $_SERVER['argv'][1];", "argv", id="server-argv"),
+        pytest.param(b"$options = getopt('f:');", "getopt", id="getopt"),
+        pytest.param(b"$line = fgets(STDIN);", "stdin", id="stdin"),
+        pytest.param(b"$answer = readline('Continue? ');", "readline", id="readline"),
+    ],
+)
+def test_file_scope_cli_evidence_is_a_cli_entry_naming_it(line: bytes, evidence: str) -> None:
+    indexed = index_file("bin/acme-sync.php", "php", b"<?php\n" + line + b"\n")
+
+    assert [
+        (entry["kind"], entry["line"], entry["annotation"])
+        for entry in indexed["entry_points"]
+    ] == [("php_cli_script", 2, evidence)]
+
+
+def test_a_dual_mode_script_is_both_a_web_and_a_cli_entry() -> None:
+    source = b"""<?php
+if (PHP_SAPI === 'cli') {
+    $id = $argv[1];
+} else {
+    $id = $_GET['id'];
+}
+"""
+    indexed = index_file("tools/report.php", "php", source)
+
+    assert sorted(
+        (entry["kind"], entry["annotation"]) for entry in indexed["entry_points"]
+    ) == [("php_cli_script", "sapi_check"), ("php_script", "request_input")]
+
+
+def test_cli_input_inside_a_function_does_not_make_the_file_a_cli_script() -> None:
+    source = b"""<?php
+function acme_main(array $argv) {
+    return $argv[1];
+}
+"""
+    indexed = index_file("src/cli.php", "php", source)
+
+    assert all(entry["kind"] != "php_cli_script" for entry in indexed["entry_points"])
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        b"$target = $argv[1];",
+        b"$count = $argc;",
+        b"$target = $_SERVER['argv'][1];",
+        b"$options = getopt('f:');",
+        b"$line = fgets(STDIN);",
+    ],
+)
+def test_process_arguments_and_stdin_are_process_input(line: bytes) -> None:
+    source = b"<?php\n" + line + b"\n"
+    for observed in (
+        index_file("bin/acme-sync.php", "php", source),
+        treesitter_index._fallback_from_bytes(
+            "bin/acme-sync.php", "php", source, degradation_reason="test"
+        ),
+    ):
+        assert [record["kind"] for record in observed["security_sources"]] == [
+            "process_input"
+        ]
+
+
+def test_other_server_fields_stay_request_input() -> None:
+    source = b"<?php\n$ip = $_SERVER['REMOTE_ADDR'];\n"
+    indexed = index_file("acme/ip.php", "php", source)
+
+    assert [record["kind"] for record in indexed["security_sources"]] == [
+        "http_request_input"
+    ]
+
+
 PHP_CLASS_FILE = b"""<?php
 
 class ReportController

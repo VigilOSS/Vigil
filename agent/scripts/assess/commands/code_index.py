@@ -48,6 +48,7 @@ from assess.lib.config import load_config, resolve_engagement_dir
 from assess.lib.parser_boundary import ParserBoundaryCancelled, index_file
 from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
+    PhpIncludeResolver,
     StreamingSecurityScanner,
     language_for_file,
 )
@@ -1109,6 +1110,9 @@ def run(args) -> None:
     truncated_file_paths: list[str] = []
     analysis_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
     errors: list[str] = []
+    include_resolver = PhpIncludeResolver(
+        {str(entry["file_path"]): str(entry["language"]) for entry in selected}
+    )
     try:
         print(
             f"code-index: indexing: processing {len(selected)} file(s) into staged artifacts",
@@ -1155,6 +1159,8 @@ def run(args) -> None:
                         indexed["total_lines"] = captured.loc
                     if indexed.get("language") != language:
                         raise ValueError(f"structural parser language differs for {rel_path}")
+                    if language == "php":
+                        include_resolver.resolve(indexed, rel_path=rel_path)
                     _validate_analysis_artifact(
                         indexed,
                         rel_path=rel_path,

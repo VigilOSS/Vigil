@@ -63,7 +63,7 @@ import json
 
 import pytest
 
-from assess.lib import treesitter_index
+from assess.lib import treesitter_catalogues, treesitter_index, treesitter_streaming
 from assess.lib.parser_boundary import DEFAULT_MAX_LINE_BYTES
 from assess.lib.parser_boundary import index_file as boundary_index_file
 from assess.lib.treesitter_index import (
@@ -172,6 +172,7 @@ function handle() {
     $f = $_FILES['f'];
     $s = $_SERVER['REMOTE_ADDR'];
     $e = getenv('HOME');
+    $job = $argv[1];
 }
 
 function handleFramework(Request $request) {
@@ -372,13 +373,14 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "go", r"\bos\.(?:Args|Getenv)\b", "source", GO_SOURCES_SRC, "main.go", "a := os.Args[1]", "process_input"),
     ("source", "ruby", r"\b(?:params\s*\[|request\.)", "source", RUBY_SOURCES_SRC, "app.rb", "id = params[:id]", "http_request_input"),
     ("source", "ruby", r"\b(?:ENV\s*\[|ARGV\b)", "source", RUBY_SOURCES_SRC, "app.rb", "e = ENV['HOME']", "process_input"),
-    ("source", "php", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
+    ("source", "php", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
     ("source", "php", r"(?:\$request|\$req|\$this->(?:request|input)|\brequest\s*\(\s*\))\s*->", "source", PHP_SOURCES_SRC, "index.php", "$page = $request->input('page');", "http_request_input"),
     ("source", "php", r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$legacy = Input::get('legacy');", "http_request_input"),
     ("source", "php", r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b|\b(?:getallheaders|apache_request_headers)\s*\(", "source",
      "<?php\n$body = file_get_contents('php://input');\n",
      "hook.php", "php://input", "http_request_input"),
     ("source", "php", r"\bgetenv\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
+    ("source", "php", "|".join(pattern for _evidence, pattern in treesitter_catalogues._PHP_CLI_INPUT_PATTERNS), "source", PHP_SOURCES_SRC, "index.php", "$job = $argv[1];", "process_input"),
     ("source", "blade", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
     ("source", "c", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", C_SOURCES_SRC, "main.c", 'char *a = argv[1];', "process_input"),
     ("source", "cpp", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", CPP_SOURCES_SRC, "main.cpp", 'char *a = argv[1];', "process_input"),
@@ -405,7 +407,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "java", r"\bimport\s+[\w.*]+", "import", JAVA_IMPORT_SRC, "x.java", "import java.util.List;", None),
     ("import", "go", r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])", "import", GO_IMPORT_SRC, "x.go", "import (", None),
     ("import", "ruby", r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+", "import", RUBY_IMPORT_SRC, "x.rb", "require 'json'", None),
-    ("import", "php", r"\b(?:include|include_once|require|require_once)\b[^\r\n;]*", "import", PHP_IMPORT_SRC, "x.php", "include 'a.php';", None),
+    ("import", "php", treesitter_streaming._PHP_STREAM_INCLUDE, "import", PHP_IMPORT_SRC, "x.php", "include 'a.php';", None),
     ("import", "csharp", r"\busing\s+(?:static\s+)?[^\r\n;=]+", "import", CSHARP_IMPORT_SRC, "Repo.cs", "using System.Data", None),
     ("import", "c", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", C_IMPORT_SRC, "x.c", "#include <stdio.h>", None),
     ("import", "cpp", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", CPP_IMPORT_SRC, "x.cpp", "#include <iostream>", None),
@@ -732,8 +734,8 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 99, (
-        f"expected 99 streaming catalogue entries (39 sources + 23 imports + "
+    assert len(real_keys) == 100, (
+        f"expected 100 streaming catalogue entries (40 sources + 23 imports + "
         f"25 extra sinks + 12 extra entry points), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )

@@ -7,6 +7,7 @@ sites.  All tree-sitter imports are guarded so the module remains importable
 """
 from __future__ import annotations
 
+import posixpath
 import re
 import warnings
 from bisect import bisect_right
@@ -28,6 +29,7 @@ from assess.lib.treesitter_catalogues import (
     _FUNCTION_QUERIES,
     _GLOBAL_ENTRY_LINE_PATTERNS,
     _IMPORT_QUERIES,
+    _PHP_CLI_ENTRY_EVIDENCE,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record, _snippet
@@ -1720,13 +1722,389 @@ def _extract_php_imports(tree: Any, source: bytes) -> list[dict[str, Any]]:
     return records
 
 
+# --- PHP inclusion -----------------------------------------------------------
+#
+# `include`/`require` load and run another file, so each is an import edge.
+# The argument is evaluated the way the interpreter would compute a fixed path:
+# string literals, `__DIR__` and `__FILE__`, `dirname()` and `realpath()` of
+# those, `.` concatenation, and constants the same file defines. Anything else
+# -- a variable, a property, a call -- is `dynamic`, and a constant the file
+# does not define names itself. The per-file reader never sees the repository,
+# so a path it computes stays `unclassified` until `PhpIncludeResolver` checks
+# it against the sealed snapshot.
+
+_PHP_INCLUDE_CONSTRUCTS = {
+    "include_expression": "include",
+    "include_once_expression": "include_once",
+    "require_expression": "require",
+    "require_once_expression": "require_once",
+}
+_PHP_INCLUDE_QUERY = "\n".join((
+    "[" + " ".join(f"({node_type})" for node_type in _PHP_INCLUDE_CONSTRUCTS) + "] @include",
+    "(function_call_expression function: (name)) @call",
+    "(const_element) @const",
+))
+_PHP_CLASS_LIKE_TYPES = frozenset(
+    {"class_declaration", "interface_declaration", "trait_declaration", "enum_declaration"}
+)
+_PHP_STRING_TYPES = frozenset({"string", "encapsed_string", "heredoc", "nowdoc"})
+_PHP_STRING_PART_TYPES = frozenset({
+    "string_content", "string_value", "escape_sequence", "heredoc_start",
+    "heredoc_body", "heredoc_end", "nowdoc_body", "nowdoc_string",
+})
+_PHP_STRING_ESCAPES = {"\\\\": "\\", "\\'": "'", '\\"': '"', "\\$": "$"}
+# Paths are written with `/` on every platform the repository targets.
+_PHP_PATH_CONSTANTS = {"DIRECTORY_SEPARATOR": "/"}
+_PHP_URL_PATH = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
+_PHP_INCLUDE_CANDIDATE_LIMIT = 20
+PHP_INCLUDE_STATUSES = frozenset({
+    "resolved", "dynamic", "ambiguous", "target_absent", "target_unindexed", "unclassified",
+})
+
+
+class _PhpPath(NamedTuple):
+    """A statically known path: plain text, or text after the including file's
+    directory raised *levels* times by `dirname()`."""
+
+    anchored: bool
+    levels: int
+    text: str
+
+
+class _PhpPathEvaluator:
+    """Evaluate one include argument, recording why a value is not static."""
+
+    def __init__(
+        self,
+        source: bytes,
+        constants: dict[str, list[Any]],
+        file_name: str,
+    ) -> None:
+        self.source = source
+        self.constants = constants
+        self.file_name = file_name
+        self.dynamic = False
+        self.unresolved: list[str] = []
+
+    def _not_static(self) -> None:
+        self.dynamic = True
+
+    def value(self, node: Any, active: frozenset[str] = frozenset()) -> _PhpPath | None:
+        node_type = node.type
+        if node_type == "parenthesized_expression":
+            inner = node.named_children[0] if node.named_children else None
+            return self.value(inner, active) if inner is not None else None
+        if node_type in _PHP_STRING_TYPES:
+            return self._string(node)
+        if node_type in {"name", "qualified_name"}:
+            return self._constant(_node_text(node, self.source).lstrip("\\"), active)
+        if node_type == "class_constant_access_expression":
+            self.unresolved.append(_node_text(node, self.source))
+            return None
+        if node_type == "binary_expression":
+            operator = node.child_by_field_name("operator")
+            left = node.child_by_field_name("left")
+            right = node.child_by_field_name("right")
+            if operator is None or operator.type != "." or left is None or right is None:
+                self._not_static()
+                return None
+            return self._concat(self.value(left, active), self.value(right, active))
+        if node_type == "function_call_expression":
+            return self._call(node, active)
+        self._not_static()
+        return None
+
+    def _string(self, node: Any) -> _PhpPath | None:
+        parts: list[str] = []
+        stack = list(reversed(node.named_children))
+        while stack:
+            child = stack.pop()
+            if child.type not in _PHP_STRING_PART_TYPES:
+                self._not_static()
+                return None
+            if child.type == "escape_sequence":
+                text = _node_text(child, self.source)
+                parts.append(_PHP_STRING_ESCAPES.get(text, text))
+            elif child.named_children:
+                stack.extend(reversed(child.named_children))
+            elif child.type in {"string_content", "string_value", "nowdoc_string"}:
+                parts.append(_node_text(child, self.source))
+        return _PhpPath(False, 0, "".join(parts))
+
+    def _constant(self, name: str, active: frozenset[str]) -> _PhpPath | None:
+        magic = name.upper()
+        if magic == "__DIR__":
+            return _PhpPath(True, 0, "")
+        if magic == "__FILE__":
+            return _PhpPath(True, 0, "/" + self.file_name)
+        if name in _PHP_PATH_CONSTANTS:
+            return _PhpPath(False, 0, _PHP_PATH_CONSTANTS[name])
+        definitions = self.constants.get(name, [])
+        if name not in active and definitions:
+            values = {self.value(definition, active | {name}) for definition in definitions}
+            if len(values) == 1 and None not in values:
+                return values.pop()
+        if not self.dynamic:
+            self.unresolved.append(name)
+        return None
+
+    def _concat(self, left: _PhpPath | None, right: _PhpPath | None) -> _PhpPath | None:
+        if left is None or right is None:
+            return None
+        if right.anchored:
+            if left.anchored or left.text:
+                self._not_static()
+                return None
+            return right
+        return _PhpPath(left.anchored, left.levels, left.text + right.text)
+
+    def _call(self, node: Any, active: frozenset[str]) -> _PhpPath | None:
+        function = node.child_by_field_name("function")
+        name = _node_text(function, self.source).lstrip("\\").lower() if function is not None else ""
+        arguments = node.child_by_field_name("arguments")
+        values = [
+            argument.named_children[0]
+            for argument in (arguments.named_children if arguments is not None else ())
+            if argument.type == "argument" and argument.named_children
+        ]
+        if name == "realpath" and len(values) == 1:
+            return self.value(values[0], active)
+        if name == "dirname" and len(values) in {1, 2}:
+            levels = 1
+            if len(values) == 2:
+                if values[1].type != "integer":
+                    self._not_static()
+                    return None
+                levels = int(_node_text(values[1], self.source), 0)
+            path = self.value(values[0], active)
+            for _level in range(levels):
+                path = _php_dirname(path) if path is not None else None
+            return path
+        self._not_static()
+        return None
+
+
+def _php_dirname(path: _PhpPath) -> _PhpPath:
+    """PHP's `dirname()`, which is string arithmetic and never touches a disk."""
+    text = path.text.rstrip("/") if path.text not in {"", "/"} else path.text
+    if not path.anchored:
+        head = text.rsplit("/", 1)[0] if "/" in text else "."
+        return _PhpPath(False, 0, head or "/")
+    if not text:
+        return _PhpPath(True, path.levels + 1, "")
+    if "/" not in text:
+        # `__DIR__ . 'x'` glued a name onto the directory itself.
+        return _PhpPath(True, path.levels + 1, "")
+    head = text.rsplit("/", 1)[0]
+    return _PhpPath(True, path.levels, head)
+
+
+def _php_defined_constants(captures: dict[str, list[Any]], source: bytes) -> dict[str, list[Any]]:
+    """Value nodes of every global constant the file defines, by name."""
+    constants: dict[str, list[Any]] = {}
+    for call in captures.get("call", []):
+        function = call.child_by_field_name("function")
+        if function is None or _node_text(function, source).lower() != "define":
+            continue
+        arguments = call.child_by_field_name("arguments")
+        values = [
+            argument.named_children[0]
+            for argument in (arguments.named_children if arguments is not None else ())
+            if argument.type == "argument" and argument.named_children
+        ]
+        if len(values) < 2 or values[0].type not in {"string", "encapsed_string"}:
+            continue
+        name_parts = [child for child in values[0].named_children if child.type != "string_content"]
+        if name_parts:
+            continue
+        constants.setdefault(
+            "".join(_node_text(child, source) for child in values[0].named_children), []
+        ).append(values[1])
+    for element in captures.get("const", []):
+        ancestor = element.parent
+        while ancestor is not None and ancestor.type not in _PHP_CLASS_LIKE_TYPES:
+            ancestor = ancestor.parent
+        if ancestor is not None:
+            continue
+        children = element.named_children
+        if len(children) == 2 and children[0].type == "name":
+            constants.setdefault(_node_text(children[0], source), []).append(children[1])
+    return constants
+
+
+class _PhpIncludeSite(NamedTuple):
+    node: Any
+    construct: str
+    argument: Any | None
+
+
+def _php_include_sites(tree: Any, source: bytes) -> tuple[list[_PhpIncludeSite], dict[str, list[Any]]]:
+    """Every inclusion construct in the file, in source order, and the file's constants."""
+    parser = _get_parser("php")
+    if parser is None:
+        return [], {}
+    captures = _ts_query_captures(parser.language, _PHP_INCLUDE_QUERY, tree.root_node)
+    sites = [
+        _PhpIncludeSite(
+            node,
+            _PHP_INCLUDE_CONSTRUCTS[node.type],
+            next((child for child in node.named_children if not _is_comment_node(child)), None),
+        )
+        for node in sorted(captures.get("include", []), key=lambda item: item.start_byte)
+    ]
+    return sites, _php_defined_constants(captures, source)
+
+
+def _php_include_target(
+    site: _PhpIncludeSite,
+    source: bytes,
+    constants: dict[str, list[Any]],
+    file_path: str,
+) -> dict[str, Any]:
+    """The `import_targets` record of one inclusion, before snapshot resolution."""
+    record: dict[str, Any] = {
+        "raw": _php_call_text(site.argument, source) if site.argument is not None else "",
+        "resolved": "",
+        "kind": "include",
+        "construct": site.construct,
+        "line": site.node.start_point[0] + 1,
+    }
+    evaluator = _PhpPathEvaluator(source, constants, file_path.replace("\\", "/").rsplit("/", 1)[-1])
+    path = evaluator.value(site.argument) if site.argument is not None else None
+    if evaluator.dynamic or site.argument is None:
+        record["status"] = "dynamic"
+    elif evaluator.unresolved:
+        record["status"] = f"constant_unresolved:{evaluator.unresolved[0]}"
+    elif path is not None:
+        record.update(_php_static_include_target(path, file_path))
+    else:
+        record["status"] = "dynamic"
+    return record
+
+
+def _php_static_include_target(path: _PhpPath, file_path: str) -> dict[str, str]:
+    if path.anchored:
+        segments = [".."] * path.levels
+        text = path.text
+        if text and not text.startswith("/"):
+            # The name was glued onto a directory: `__DIR__ . 'x.php'` is a
+            # sibling of that directory whose name starts with the directory's.
+            directories = [part for part in file_path.replace("\\", "/").split("/")[:-1] if part]
+            if path.levels >= len(directories):
+                return {"status": "target_absent", "anchor": "file_dir", "path": text}
+            segments.append("..")
+            text = directories[len(directories) - 1 - path.levels] + text
+        relative = posixpath.normpath("/".join([*segments, text.lstrip("/")]).strip("/") or ".")
+        return {"status": "unclassified", "anchor": "file_dir", "path": relative}
+    text = path.text
+    if not text or _PHP_URL_PATH.match(text):
+        return {"status": "target_absent", "anchor": "url" if text else "include_path", "path": text}
+    if text.startswith("/") or re.match(r"^[A-Za-z]:[\\/]", text):
+        return {"status": "target_absent", "anchor": "absolute", "path": text}
+    anchor = (
+        "working_directory"
+        if text in {".", ".."} or text.startswith(("./", "../"))
+        else "include_path"
+    )
+    return {"status": "unclassified", "anchor": anchor, "path": posixpath.normpath(text)}
+
+
+def _extract_php_include_targets(tree: Any, source: bytes, file_path: str) -> list[dict[str, Any]]:
+    sites, constants = _php_include_sites(tree, source)
+    return [_php_include_target(site, source, constants, file_path) for site in sites]
+
+
+def _repo_join(directory: str, path: str) -> str | None:
+    """`directory/path` as a repository path, or None when it leaves the root."""
+    parts: list[str] = []
+    for part in [*directory.split("/"), *path.split("/")]:
+        if part in {"", "."}:
+            continue
+        if part == "..":
+            if not parts:
+                return None
+            parts.pop()
+        else:
+            parts.append(part)
+    return "/".join(parts)
+
+
+class PhpIncludeResolver:
+    """Resolve the static PHP include paths the per-file reader computed.
+
+    A `__DIR__`-anchored path names one file: `resolved` when the snapshot
+    holds it and the structural index reads its language, `target_unindexed`
+    when it is in the snapshot under a language no extractor reads, and
+    `target_absent` when it is not there or leaves the repository. A path the
+    interpreter looks up through `include_path` or the working directory names
+    no single file, so it is `ambiguous` and lists the snapshot files it could
+    be, nearest first.
+    """
+
+    def __init__(self, snapshot_languages: dict[str, str]) -> None:
+        self.snapshot_languages = snapshot_languages
+        self._by_basename: dict[str, list[str]] = {}
+        for path in sorted(snapshot_languages):
+            self._by_basename.setdefault(path.rsplit("/", 1)[-1], []).append(path)
+
+    def resolve(self, indexed: dict[str, Any], *, rel_path: str) -> None:
+        directory = posixpath.dirname(rel_path)
+        for target in indexed.get("import_targets", []):
+            if (
+                target.get("kind") != "include"
+                or target.get("status") != "unclassified"
+                or "anchor" not in target
+            ):
+                continue
+            if target["anchor"] == "file_dir":
+                self._resolve_anchored(target, directory)
+            else:
+                self._resolve_ambiguous(target, directory)
+
+    def _resolve_anchored(self, target: dict[str, Any], directory: str) -> None:
+        repo_path = _repo_join(directory, target["path"])
+        language = self.snapshot_languages.get(repo_path) if repo_path is not None else None
+        if repo_path is None or language is None:
+            target["status"] = "target_absent"
+            return
+        target["resolved"] = repo_path
+        target["status"] = (
+            "resolved" if language in STRUCTURAL_SUPPORTED_LANGUAGES else "target_unindexed"
+        )
+
+    def _resolve_ambiguous(self, target: dict[str, Any], directory: str) -> None:
+        path = target["path"]
+        ordered = [_repo_join(directory, path), _repo_join("", path)]
+        if target["anchor"] == "include_path":
+            suffix = "/" + path
+            ordered.extend(
+                candidate
+                for candidate in self._by_basename.get(path.rsplit("/", 1)[-1], [])
+                if candidate.endswith(suffix)
+            )
+        candidates: list[str] = []
+        for candidate in ordered:
+            if (
+                candidate is not None
+                and candidate in self.snapshot_languages
+                and candidate not in candidates
+            ):
+                candidates.append(candidate)
+        target["status"] = "ambiguous"
+        target["candidates"] = candidates[:_PHP_INCLUDE_CANDIDATE_LIMIT]
+        target["candidate_count"] = len(candidates)
+
+
 def _extract_import_records(
-    tree: Any, language: str, source: bytes
+    tree: Any, language: str, source: bytes, file_path: str
 ) -> tuple[list[str], list[dict[str, Any]]]:
     """The `imports` strings and their `import_targets`, one entry per import."""
     query_language = _query_language_family(language)
     if query_language == "php":
-        targets = _extract_php_imports(tree, source)
+        targets = sorted(
+            [*_extract_php_imports(tree, source), *_extract_php_include_targets(tree, source, file_path)],
+            key=lambda target: target["line"],
+        )
         return [target["raw"] for target in targets], targets
     imports = _extract_imports_ts(tree, language, source)
     return imports, _resolve_import_targets(imports, query_language)
@@ -1825,8 +2203,18 @@ def _php_request_input_patterns() -> tuple[re.Pattern[str], ...]:
     )
 
 
-def _detect_php_file_scope_entry(file_scope: _FileScope) -> list[dict[str, Any]]:
-    """A PHP file whose file scope runs on a request is itself the entry point.
+@lru_cache(maxsize=None)
+def _php_cli_evidence_patterns() -> tuple[tuple[str, re.Pattern[str]], ...]:
+    return tuple(
+        (evidence, re.compile(pattern, re.IGNORECASE))
+        for evidence, pattern in _PHP_CLI_ENTRY_EVIDENCE
+    )
+
+
+def _detect_php_file_scope_entry(
+    file_scope: _FileScope, source: bytes
+) -> list[dict[str, Any]]:
+    """A PHP file whose file scope runs on a request or a command is itself the entry point.
 
     Classic PHP has no router: the web server maps a URL to the file and runs
     its top-level statements, so a page reading `$_GET` at file scope is an
@@ -1835,26 +2223,57 @@ def _detect_php_file_scope_entry(file_scope: _FileScope) -> list[dict[str, Any]]
     inline HTML blanked, so a `$_GET` named in a comment or in page prose is
     not a read. Inline HTML alone marks a rendered page: the server sends it
     back when the file is requested, but nothing in it proves request input
-    reaches the file, so it carries its own, weaker kind. One record per file
-    -- the file is the entry, not each line that reads input.
+    reaches the file, so it carries its own, weaker kind. A script run from a
+    shell is the same shape with another input: a shebang, a SAPI check, or a
+    read of its arguments or standard input at file scope makes it a
+    `php_cli_script`, whose annotation names that evidence. A dual-mode file
+    is both. One record per kind -- the file is the entry, not each line that
+    reads input.
     """
+    entries: list[dict[str, Any]] = []
     patterns = _php_request_input_patterns()
-    for index, line in file_scope.scanned:
-        if any(pattern.search(line) for pattern in patterns):
-            return [{
-                "name": "<top-level>",
-                "line": index + 1,
-                "kind": "php_script",
-                "annotation": "request_input",
-            }]
-    if file_scope.inline_text_lines:
-        return [{
+    request_line = next(
+        (
+            index + 1
+            for index, line in file_scope.scanned
+            if any(pattern.search(line) for pattern in patterns)
+        ),
+        None,
+    )
+    if request_line is not None:
+        entries.append({
+            "name": "<top-level>",
+            "line": request_line,
+            "kind": "php_script",
+            "annotation": "request_input",
+        })
+    elif file_scope.inline_text_lines:
+        entries.append({
             "name": "<top-level>",
             "line": file_scope.inline_text_lines[0],
             "kind": "php_rendered_page",
             "annotation": "inline_html",
-        }]
-    return []
+        })
+    cli_evidence: tuple[int, str] | None = (1, "shebang") if source.startswith(b"#!") else None
+    if cli_evidence is None:
+        cli_patterns = _php_cli_evidence_patterns()
+        cli_evidence = next(
+            (
+                (index + 1, evidence)
+                for index, line in file_scope.scanned
+                for evidence, pattern in cli_patterns
+                if pattern.search(line)
+            ),
+            None,
+        )
+    if cli_evidence is not None:
+        entries.append({
+            "name": "<top-level>",
+            "line": cli_evidence[0],
+            "kind": "php_cli_script",
+            "annotation": cli_evidence[1],
+        })
+    return entries
 
 
 # Call nodes, per grammar family, for the walk from a callable to the call that
@@ -3926,7 +4345,7 @@ def index_file(
     try:
         functions = _extract_functions_ts(tree, parse_lang, source)
         classes = _extract_classes_ts(tree, parse_lang, source)
-        imports, import_targets = _extract_import_records(tree, parse_lang, source)
+        imports, import_targets = _extract_import_records(tree, parse_lang, source, file_path)
 
         effective_lang = "typescript" if parse_lang == "tsx" else language
         _enrich_qualified_names(functions, classes, effective_lang)
@@ -3944,7 +4363,7 @@ def index_file(
             )
         )
         if effective_lang == "php":
-            entry_points.extend(_detect_php_file_scope_entry(file_scope))
+            entry_points.extend(_detect_php_file_scope_entry(file_scope, source))
         sinks = _detect_sinks(
             functions, classes, effective_lang, source_lines, file_scope.scanned
         )

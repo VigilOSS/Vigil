@@ -7,6 +7,7 @@ from typing import Any
 from assess.lib.treesitter_catalogues import (
     _ENTRY_ANNOTATIONS,
     _ENTRY_LINE_PATTERNS,
+    _PHP_CLI_INPUT_PATTERNS,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _php_import_record
@@ -106,7 +107,9 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         ("template_input", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}"),
     ],
     "php": [
-        ("http_request_input", r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER)\b"),
+        # `$_SERVER['argv']` is the command line, not the request.
+        ("http_request_input",
+         r"\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b"),
         # Idiomatic Laravel/Symfony/CodeIgniter never touches a superglobal:
         # the request arrives as an injected object, `$this->request`, or the
         # `request()` helper. Anchored on the request object rather than on
@@ -124,6 +127,7 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
          r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b"
          r"|\b(?:getallheaders|apache_request_headers)\s*\("),
         ("process_input", r"\bgetenv\s*\("),
+        ("process_input", "|".join(pattern for _evidence, pattern in _PHP_CLI_INPUT_PATTERNS)),
     ],
     "csharp": [
         # Classic ASP.NET reads request data off the `Request` object; the
@@ -169,6 +173,18 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     ],
 }
 
+# PHP's inclusion constructs as a line can show them. A keyword written as a
+# method (`$this->include(`), a static call, a variable (`$include`) or a
+# quoted array key is not one. The parse tree tells the rest -- a comment, a
+# string -- apart; a line cannot, so this reader only ever says `dynamic`
+# (the argument interpolates a variable) or `unclassified`.
+_PHP_STREAM_INCLUDE = (
+    r"(?<![\w$>:'\"\\])(include_once|include|require_once|require)\b"
+    r"(?!\s*(?:=>|::))[^\r\n;]*"
+)
+_PHP_STREAM_SINGLE_QUOTED = re.compile(rb"'(?:[^'\\]|\\.)*'")
+_PHP_STREAM_INTERPOLATION = re.compile(rb"(?<!\\)\$(?:[A-Za-z_\x80-\xff]|\{)")
+
 _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
     "blade": [
         r"@(?:extends|include(?:First|Unless|When|If)?|component|each)\s*\([^\r\n)]*",
@@ -181,8 +197,9 @@ _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
     "go": [r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])"],
     "ruby": [r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+"],
     # A namespace `use` is read as a statement by `StreamingSecurityScanner`,
-    # so it publishes the same one-record-per-name shape the parser does.
-    "php": [r"\b(?:include|include_once|require|require_once)\b[^\r\n;]*"],
+    # so it publishes the same one-record-per-name shape the parser does. This
+    # row is the inclusion construct; see `_PHP_STREAM_INCLUDE`.
+    "php": [_PHP_STREAM_INCLUDE],
     "csharp": [r"\busing\s+(?:static\s+)?[^\r\n;=]+"],
     "c": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
     "cpp": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
@@ -624,15 +641,26 @@ class StreamingSecurityScanner:
                 if match.start() >= accept_before:
                     continue
                 raw = self._snippet(window, match.start(), match.end())
-                self._retain_import(
-                    raw,
-                    {
-                        "raw": raw,
-                        "resolved": "",
-                        "line": self._line_number,
-                        "detection": "heuristic_streaming",
-                    },
-                )
+                target: dict[str, Any] = {
+                    "raw": raw,
+                    "resolved": "",
+                    "line": self._line_number,
+                    "detection": "heuristic_streaming",
+                }
+                if self.language == "php":
+                    argument = match.group()[len(match.group(1)):]
+                    target.update({
+                        "kind": "include",
+                        "construct": match.group(1).decode("ascii").lower(),
+                        "status": (
+                            "dynamic"
+                            if _PHP_STREAM_INTERPOLATION.search(
+                                _PHP_STREAM_SINGLE_QUOTED.sub(b"''", argument)
+                            )
+                            else "unclassified"
+                        ),
+                    })
+                self._retain_import(raw, target)
 
     def finish(self, *, degradation_reason: str) -> dict[str, Any]:
         if self._line_had_bytes:
