@@ -427,3 +427,35 @@ def test_indexing_a_parsed_file_walks_no_tree_in_python(language, monkeypatch) -
 
     assert indexed["analysis_mode"] == "tree_sitter"
     assert indexed == expected
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        # All ASCII, CRLF endings, one minified line holding several callables.
+        b"function a(){return 1}\r\nconst b=()=>2;function c(){return a()+b()}\r\n",
+        # Multibyte text before callables on the same line, and a form feed,
+        # which ends a line for str.splitlines but not for the parser.
+        "const t='éè€';function a(){return t}\f function b(){return '\U0001f600'}\n".encode(),
+    ],
+)
+def test_character_columns_count_decoded_characters_from_the_line_start(source) -> None:
+    from assess.lib import treesitter_index
+
+    def reference(offset: int) -> int:
+        line_start = source.rfind(b"\n", 0, offset) + 1
+        return len(source[line_start:offset].decode("utf-8", errors="replace"))
+
+    tree = treesitter_index._get_parser("javascript").parse(source)
+    nodes = list(treesitter_index._walk_named_nodes(tree.root_node))
+    other = "x = 'é'\n".encode()
+    for node in nodes:
+        # Alternating sources must not reuse the other source's answer.
+        treesitter_index._source_character_column(other, len(other) - 1)
+        assert treesitter_index._node_character_range(node, source) == (
+            node.start_point[0] + 1,
+            reference(node.start_byte),
+            node.end_point[0] + 1,
+            reference(node.end_byte),
+        )
+    assert len(nodes) > 15

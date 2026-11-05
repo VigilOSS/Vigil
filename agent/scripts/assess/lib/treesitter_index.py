@@ -710,17 +710,37 @@ def _cpp_qualifier_signature(function_declarator: Any, source: bytes) -> tuple[s
     )
 
 
-def _source_character_column(source: bytes, byte_offset: int) -> int:
-    line_start = source.rfind(b"\n", 0, byte_offset) + 1
+# The source last asked for a column and whether it is all ASCII, where a
+# column in characters is the column in bytes. Decoding each line prefix
+# instead is quadratic on a minified line that thousands of nodes share.
+_ASCII_SOURCE: tuple[bytes | None, bool] = (None, False)
+
+
+def _source_character_column(
+    source: bytes, byte_offset: int, line_start: int | None = None
+) -> int:
+    global _ASCII_SOURCE
+    if line_start is None:
+        line_start = source.rfind(b"\n", 0, byte_offset) + 1
+    cached_source, is_ascii = _ASCII_SOURCE
+    if cached_source is not source:
+        is_ascii = source.isascii()
+        _ASCII_SOURCE = (source, is_ascii)
+    if is_ascii:
+        return byte_offset - line_start
     return len(source[line_start:byte_offset].decode("utf-8", errors="replace"))
 
 
 def _node_character_range(node: Any, source: bytes) -> tuple[int, int, int, int]:
+    # A tree-sitter point's column is the byte offset from its row's start,
+    # and rows end only at `\n`: the line start needs no search.
+    start_row, start_column = node.start_point
+    end_row, end_column = node.end_point
     return (
-        node.start_point[0] + 1,
-        _source_character_column(source, node.start_byte),
-        node.end_point[0] + 1,
-        _source_character_column(source, node.end_byte),
+        start_row + 1,
+        _source_character_column(source, node.start_byte, node.start_byte - start_column),
+        end_row + 1,
+        _source_character_column(source, node.end_byte, node.end_byte - end_column),
     )
 
 
