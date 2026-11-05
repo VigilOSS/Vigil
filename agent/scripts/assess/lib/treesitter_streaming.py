@@ -185,6 +185,9 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     "freemarker": [
         ("template_input", r"[$#]\{[^}\r\n]+\}"),
     ],
+    "twig": [
+        ("template_input", r"\{\{[^}\r\n]+\}\}"),
+    ],
 }
 
 # PHP's inclusion constructs as a line can show them. A keyword written as a
@@ -228,6 +231,10 @@ _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
     "css": [r"@import\s+(?:url\()?\s*['\"]?[^'\"\s)]+"],
     "freemarker": [
         r"<#(?:include|import)\s[^\r\n>]*",
+        r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+",
+    ],
+    "twig": [
+        r"\{%[-~]?\s*(?:extends|include|embed|import|from)\b[^\r\n%]*",
         r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+",
     ],
 }
@@ -277,6 +284,12 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
             ["ssti", "injection"],
         ),
     ],
+    "twig": [
+        ("unescaped_output", r"\{\{[^}\r\n]*\|\s*raw\b[^}\r\n]*\}\}|\{%[-~]?\s*autoescape\s+false\b", ["xss", "ssti"]),
+        ("template_interpolation", r"\{\{(?![^}\r\n]*\|\s*raw\b)[^}\r\n]+\}\}", ["xss", "ssti"]),
+        ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
+        ("twig_dynamic_evaluation", r"\btemplate_from_string\s*\(", ["ssti", "injection"]),
+    ],
 }
 
 # Line-level shapes of the structural entry rules that read a signature or a
@@ -305,6 +318,7 @@ _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
         ("html_form", r"<form\b"),
         ("freemarker_macro", r"<#(?:macro|function)\s"),
     ],
+    "twig": [("html_form", r"<form\b")],
 }
 
 

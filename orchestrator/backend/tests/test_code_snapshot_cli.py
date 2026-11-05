@@ -468,6 +468,7 @@ def test_trusted_tool_resolution_ignores_repo_relative_and_empty_path_entries(
         ("themes/acme/template.theme", "php"),
         ("legacy/index.php5", "php"),
         ("legacy/index.php7", "php"),
+        ("templates/base.html.twig", "twig"),
     ],
 )
 def test_ingest_language_detection_matches_structural_index(

@@ -65,7 +65,7 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".html": "html",
     ".htm": "html",
     ".tpl": "html",
-    ".twig": "html",
+    ".twig": "twig",
     # FreeMarker server templates. ``.ftlh``/``.ftlx`` are the same language
     # with an implied HTML/XML output format.
     ".ftl": "freemarker",
@@ -124,6 +124,7 @@ STRUCTURAL_SUPPORTED_LANGUAGES = frozenset(
         "html",
         "css",
         "freemarker",
+        "twig",
     }
 )
 
@@ -146,6 +147,9 @@ CODE_LANGUAGE_ALIASES = {
 # included (never `<?xml`); a caller with no header gets the name's answer.
 PHP_TAG_REQUIRED_EXTENSIONS = frozenset({".inc", ".module", ".install", ".theme"})
 _PHP_OPEN_TAG = re.compile(r"<\?(?:php(?![A-Za-z0-9_])|=|(?=\s))", re.IGNORECASE)
+# Smarty, Twig and plain HTML all name templates `.tpl`. One is Twig when its
+# header opens a `{{` or `{%` delimiter, which Smarty's `{$var}`/`{if}` never do.
+_TWIG_DELIMITER = re.compile(r"\{[{%]")
 
 # Longest first, so a future `.foo.blade.php` cannot be decided by a shorter
 # sibling key that happens to be scanned earlier.
@@ -158,7 +162,7 @@ def detect_language(file_path: str, header: str | None = None) -> str | None:
     """Return the canonical language for a repository-relative filename.
 
     *header* is the file's leading text, when the caller has read it; it
-    decides the extensions in `PHP_TAG_REQUIRED_EXTENSIONS`.
+    decides the extensions in `PHP_TAG_REQUIRED_EXTENSIONS` and `.tpl`.
     """
 
     name = Path(file_path).name
@@ -178,6 +182,8 @@ def detect_language(file_path: str, header: str | None = None) -> str | None:
         and not _PHP_OPEN_TAG.search(header)
     ):
         return None
+    if suffix == ".tpl" and header is not None and _TWIG_DELIMITER.search(header):
+        return "twig"
     return LANGUAGE_BY_EXTENSION.get(suffix)
 
 

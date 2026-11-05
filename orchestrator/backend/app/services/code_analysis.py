@@ -9061,6 +9061,7 @@ STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
         "lua",
         "html",
         "css",
+        "twig",
         "dockerfile",
     }
 )

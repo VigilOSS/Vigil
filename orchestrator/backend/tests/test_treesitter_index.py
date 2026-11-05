@@ -64,6 +64,7 @@ _PARSER_DISTRIBUTIONS = {
     ("index.html", "html"),
     ("page.htm", "html"),
     ("card.tpl", "html"),
+    ("templates/base.html.twig", "twig"),
     ("themes/base/login/login.ftl", "freemarker"),
     ("page.ftlh", "freemarker"),
     ("feed.ftlx", "freemarker"),
@@ -91,7 +92,7 @@ def test_supported_languages_includes_new():
 
 
 def test_supported_languages_includes_lightweight():
-    for lang in ("blade", "dockerfile", "shell", "lua", "html", "css", "freemarker"):
+    for lang in ("blade", "dockerfile", "shell", "lua", "html", "css", "freemarker", "twig"):
         assert lang in SUPPORTED_LANGUAGES
 
 

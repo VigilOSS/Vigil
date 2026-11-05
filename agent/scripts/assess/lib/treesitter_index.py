@@ -54,6 +54,7 @@ from assess.lib.treesitter_lightweight import (
     _extract_lua,
     _extract_powershell,
     _extract_shell,
+    _extract_twig,
 )
 from assess.lib.treesitter_streaming import (
     _SIGNAL_DIMENSIONS,
@@ -240,7 +241,7 @@ _TS_SUPPORTED_LANGUAGES = frozenset({
 # Lightweight regex/line-based extractors (pure-python, no tree-sitter grammar)
 LIGHTWEIGHT_LANGUAGES = frozenset({
     "blade", "dockerfile", "shell", "powershell", "lua", "html", "css",
-    "freemarker",
+    "freemarker", "twig",
 })
 
 # Combined set used by consumers (code_index.py / code_index_sync.py / assess
@@ -5464,6 +5465,7 @@ def _index_lightweight(
         "lua": _extract_lua,
         "html": _extract_html,
         "css": _extract_css,
+        "twig": _extract_twig,
     }
     local_docker_sources: list[str] = []
     if language == "dockerfile":

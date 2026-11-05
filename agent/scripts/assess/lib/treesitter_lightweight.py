@@ -907,6 +907,100 @@ def _extract_blade(
     return funcs, entry_points, sinks, exports, imports
 
 
+# --- Twig (Symfony/Drupal server templates) ---------------------------------
+
+_TWIG_CLOSERS = {"%": "%}", "{": "}}", "#": "#}"}
+_TWIG_ENDVERBATIM_RE = re.compile(r"\{%[-~]?\s*endverbatim\s*[-~]?%\}")
+_TWIG_RAW_RE = re.compile(r"\|\s*raw\b")
+# A composition tag names its template with a literal, or a list of them, or
+# with an expression chosen at render time, which a list may also hold.
+_TWIG_IMPORT_RE = re.compile(
+    r"\s*(?:extends|include|embed|import|from)\b\s*"
+    r"(?:(\[)?\s*(['\"])([^'\"]*)\2(?!\s*~)((?:\s*,\s*(['\"])[^'\"]*\5)*\s*,?\s*\])?)?"
+)
+_TWIG_DYNAMIC_RE = re.compile(
+    r"\btemplate_from_string\s*\(|\b(?:include|source)\s*\((?!\s*(['\"])[^'\"]*\1\s*[,)])"
+)
+
+
+def _twig_constructs(text: str):
+    """Yield ``(start, opener, inner)`` for each Twig tag and output.
+
+    Each closer is searched for once past the point it was last missed, so an
+    unterminated `{{` cannot make every later opener rescan the file. Comments
+    and `verbatim` blocks render nothing Twig evaluates and are skipped whole.
+    """
+    unclosed: set[str] = set()
+    index = 0
+    while (start := text.find("{", index)) >= 0:
+        opener = text[start + 1 : start + 2]
+        closer = _TWIG_CLOSERS.get(opener)
+        if closer is None or opener in unclosed:
+            index = start + 1
+            continue
+        end = text.find(closer, start + 2)
+        if end < 0:
+            unclosed.add(opener)
+            index = start + 2
+            continue
+        index = end + 2
+        inner = text[start + 2 : end].strip("-~")
+        if opener == "%" and inner.strip() == "verbatim":
+            close = _TWIG_ENDVERBATIM_RE.search(text, index)
+            index = len(text) if close is None else close.end()
+        elif opener != "#":
+            yield start, opener, inner
+
+
+def _extract_twig(
+    source_lines: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[str]]:
+    """Index a Twig template.
+
+    As for Blade, the HTML pass runs first and its mustache rule is replaced
+    by Twig's own constructs, so a `{# #}` comment or `verbatim` block reports
+    no sink. Every output stays a hint: `|raw` and an `{% autoescape false %}`
+    tag are `unescaped_output`, and a template chosen at render time is
+    `twig_dynamic_evaluation`.
+    """
+    funcs, entry_points, sinks, exports, imports = _extract_html(
+        source_lines, template_comments=("{#", "#}")
+    )
+    sinks = [sink for sink in sinks if sink["kind"] != "template_interpolation"]
+
+    text = "\n".join(source_lines)
+    line_starts = [0]
+    for line in source_lines:
+        line_starts.append(line_starts[-1] + len(line) + 1)
+
+    def flag(kind: str, start: int, vuln_classes: list[str]) -> None:
+        line = bisect.bisect_right(line_starts, start)
+        sinks.append({
+            "kind": kind,
+            "line": line,
+            "function": "<template>",
+            "snippet": _snippet(source_lines[line - 1]),
+            "vuln_classes": vuln_classes,
+        })
+
+    for start, opener, inner in _twig_constructs(text):
+        dynamic = bool(_TWIG_DYNAMIC_RE.search(inner))
+        if opener == "{":
+            raw = _TWIG_RAW_RE.search(inner)
+            flag("unescaped_output" if raw else "template_interpolation", start, ["xss", "ssti"])
+        elif inner.split()[:2] == ["autoescape", "false"]:
+            flag("unescaped_output", start, ["xss", "ssti"])
+        elif (composed := _TWIG_IMPORT_RE.match(inner)) is not None:
+            if composed.group(2):
+                imports.append(composed.group(3))
+            if not composed.group(2) or (composed.group(1) and not composed.group(4)):
+                dynamic = True
+        if dynamic:
+            flag("twig_dynamic_evaluation", start, ["ssti", "injection"])
+
+    return funcs, entry_points, sinks, exports, imports
+
+
 # --- CSS / SCSS -------------------------------------------------------------
 
 _CSS_IMPORT_RE = re.compile(r"@import\s+(?:url\()?\s*['\"]?([^'\"\s)]+)", re.IGNORECASE)
@@ -1626,4 +1720,4 @@ def _extract_freemarker(
 # ---------------------------------------------------------------------------
 
 
-__all__ = ['_DOCKER_INSTR_RE', '_DOCKER_SECRET_NAMES', '_DOCKER_URL_RE', '_extract_dockerfile', '_SHELL_FUNC_PAREN_RE', '_SHELL_FUNC_KW_RE', '_SHELL_SOURCE_RE', '_extract_shell', '_find_enclosing_func', '_PS_FUNC_RE', '_PS_PARAM_BLOCK_RE', '_PS_FUNC_SIGNATURE_RE', '_PS_PARAM_NAME_RE', '_PS_IMPORT_RE', '_PS_DOT_SOURCE_RE', '_PS_SINK_PATTERNS', '_PS_LITERAL_ASSIGNMENT_RE', '_PS_COMPILED_SINKS', '_ps_balanced_span', '_ps_declared_params', '_ps_block_end', '_extract_powershell', '_LUA_FUNC_RE', '_LUA_LOCAL_FUNC_ASSIGN_RE', '_LUA_DYNAMIC_REDIS_COMMAND_RE', '_extract_lua', '_HTML_TAG_RE', '_HTML_ATTR_RE', '_HTML_INLINE_HANDLER_RE', '_HTML_JS_URL_RE', '_HTML_MUSTACHE_RE', '_HTML_ASP_RE', '_mask_delimited_comments', '_extract_html', '_BLADE_CONSTRUCT_RE', '_BLADE_IMPORT_RE', '_BLADE_SLOT_RE', '_blade_echoes', '_blade_template_sources', '_extract_blade', '_CSS_IMPORT_RE', '_CSS_URL_RE', '_CSS_EXPRESSION_RE', '_CSS_BEHAVIOR_RE', '_CSS_BINDING_RE', '_extract_css', 'FREEMARKER_ESCAPE_OBSERVATIONS', 'FREEMARKER_OUTPUT_CONTEXTS', '_FREEMARKER_ESCAPER_BUILTINS', '_FREEMARKER_ESCAPE_SUPPRESSORS', '_FREEMARKER_ESCAPE_SCOPES', '_FREEMARKER_ESCAPING_FORMATS', '_FREEMARKER_ESCAPING_EXTENSIONS', '_FREEMARKER_FORM_FIELD_TAGS', '_FREEMARKER_URL_ATTRIBUTES', '_FREEMARKER_URL_VULN_CLASSES', '_FREEMARKER_BUILTIN_RE', '_FREEMARKER_DIRECTIVE_NAME_RE', '_FREEMARKER_CALLABLE_RE', '_FREEMARKER_TAG_NAME_RE', '_FREEMARKER_ATTRIBUTE_NAME_RE', '_FREEMARKER_STRING_LITERAL_RE', '_FREEMARKER_OUTPUT_FORMAT_RE', '_FREEMARKER_AUTO_ESC_RE', '_FREEMARKER_EVENT_ATTRIBUTE_RE', '_FREEMARKER_SCALAR_LITERAL_RE', '_FREEMARKER_DYNAMIC_EVAL_RE', '_FREEMARKER_MAX_EXPRESSION_CHARS', '_freemarker_split_top_level', '_freemarker_interpolation_end', '_freemarker_attribute_value_end', '_freemarker_span_interpolations', '_freemarker_builtins', '_freemarker_observed_escapers', '_freemarker_value_operands', '_freemarker_escape_observation', '_freemarker_scope_escaping', '_freemarker_attribute_context', '_freemarker_callable_params', '_freemarker_directive_end', '_freemarker_tag_regions', '_extract_freemarker']
+__all__ = ['_DOCKER_INSTR_RE', '_DOCKER_SECRET_NAMES', '_DOCKER_URL_RE', '_extract_dockerfile', '_SHELL_FUNC_PAREN_RE', '_SHELL_FUNC_KW_RE', '_SHELL_SOURCE_RE', '_extract_shell', '_find_enclosing_func', '_PS_FUNC_RE', '_PS_PARAM_BLOCK_RE', '_PS_FUNC_SIGNATURE_RE', '_PS_PARAM_NAME_RE', '_PS_IMPORT_RE', '_PS_DOT_SOURCE_RE', '_PS_SINK_PATTERNS', '_PS_LITERAL_ASSIGNMENT_RE', '_PS_COMPILED_SINKS', '_ps_balanced_span', '_ps_declared_params', '_ps_block_end', '_extract_powershell', '_LUA_FUNC_RE', '_LUA_LOCAL_FUNC_ASSIGN_RE', '_LUA_DYNAMIC_REDIS_COMMAND_RE', '_extract_lua', '_HTML_TAG_RE', '_HTML_ATTR_RE', '_HTML_INLINE_HANDLER_RE', '_HTML_JS_URL_RE', '_HTML_MUSTACHE_RE', '_HTML_ASP_RE', '_mask_delimited_comments', '_extract_html', '_BLADE_CONSTRUCT_RE', '_BLADE_IMPORT_RE', '_BLADE_SLOT_RE', '_blade_echoes', '_blade_template_sources', '_extract_blade', '_TWIG_CLOSERS', '_TWIG_ENDVERBATIM_RE', '_TWIG_RAW_RE', '_TWIG_IMPORT_RE', '_TWIG_DYNAMIC_RE', '_twig_constructs', '_extract_twig', '_CSS_IMPORT_RE', '_CSS_URL_RE', '_CSS_EXPRESSION_RE', '_CSS_BEHAVIOR_RE', '_CSS_BINDING_RE', '_extract_css', 'FREEMARKER_ESCAPE_OBSERVATIONS', 'FREEMARKER_OUTPUT_CONTEXTS', '_FREEMARKER_ESCAPER_BUILTINS', '_FREEMARKER_ESCAPE_SUPPRESSORS', '_FREEMARKER_ESCAPE_SCOPES', '_FREEMARKER_ESCAPING_FORMATS', '_FREEMARKER_ESCAPING_EXTENSIONS', '_FREEMARKER_FORM_FIELD_TAGS', '_FREEMARKER_URL_ATTRIBUTES', '_FREEMARKER_URL_VULN_CLASSES', '_FREEMARKER_BUILTIN_RE', '_FREEMARKER_DIRECTIVE_NAME_RE', '_FREEMARKER_CALLABLE_RE', '_FREEMARKER_TAG_NAME_RE', '_FREEMARKER_ATTRIBUTE_NAME_RE', '_FREEMARKER_STRING_LITERAL_RE', '_FREEMARKER_OUTPUT_FORMAT_RE', '_FREEMARKER_AUTO_ESC_RE', '_FREEMARKER_EVENT_ATTRIBUTE_RE', '_FREEMARKER_SCALAR_LITERAL_RE', '_FREEMARKER_DYNAMIC_EVAL_RE', '_FREEMARKER_MAX_EXPRESSION_CHARS', '_freemarker_split_top_level', '_freemarker_interpolation_end', '_freemarker_attribute_value_end', '_freemarker_span_interpolations', '_freemarker_builtins', '_freemarker_observed_escapers', '_freemarker_value_operands', '_freemarker_escape_observation', '_freemarker_scope_escaping', '_freemarker_attribute_context', '_freemarker_callable_params', '_freemarker_directive_end', '_freemarker_tag_regions', '_extract_freemarker']

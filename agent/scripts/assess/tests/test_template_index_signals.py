@@ -1,10 +1,18 @@
-"""Signals from HTML, CSS, Blade and FreeMarker as rendered source."""
+"""Signals from HTML, CSS, Blade, Twig and FreeMarker as rendered source."""
 
 from __future__ import annotations
 
+import json
+import time
+
 import pytest
 
+from assess.commands import code_ingest
+from assess.lib import treesitter_index
+from assess.lib.code_languages import detect_language
 from assess.lib.treesitter_index import StreamingSecurityScanner, index_file
+from test_code_ingest_vendored_minified import _args, _offline_ingest, _write
+from test_php_shared_extensions import _PreviewClient
 
 
 def test_multiline_html_form_and_script_attributes_are_indexed() -> None:
@@ -138,3 +146,186 @@ def test_multiline_form_is_entry_in_html_compatible_templates(language: str, pat
 
     assert any(item["kind"] == "html_form" and item["annotation"] == "/search"
                for item in indexed["entry_points"])
+
+
+def _twig_sinks(source: str) -> list[tuple[str, int]]:
+    indexed = index_file("templates/page.html.twig", "twig", source.encode())
+    assert indexed["analysis_status"] == "complete"
+    return [(sink["kind"], sink["line"]) for sink in indexed["security_sinks"]]
+
+
+@pytest.mark.parametrize("path,header,language", [
+    ("templates/base.html.twig", None, "twig"),
+    ("templates/mail.twig", None, "twig"),
+    ("themes/acme/card.tpl", None, "html"),
+    ("themes/acme/card.tpl", "{% extends 'base.tpl' %}\n", "twig"),
+    ("themes/acme/card.tpl", "<p>{{ name }}</p>\n", "twig"),
+    ("themes/acme/card.tpl", "<p>{$name|escape}</p>\n{if $admin}x{/if}\n", "html"),
+    ("themes/acme/card.tpl", "<p>Acme</p>\n", "html"),
+])
+def test_twig_language_detection(path: str, header: str | None, language: str) -> None:
+    assert detect_language(path, header=header) == language
+    assert "twig" in treesitter_index.SUPPORTED_LANGUAGES
+    assert "twig" in treesitter_index.LIGHTWEIGHT_LANGUAGES
+
+
+def test_ingest_reads_a_tpl_file_as_twig_only_when_it_opens_a_twig_delimiter(
+    monkeypatch, tmp_path, capsys,
+) -> None:
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+    _write(repo, "themes/acme/twig.tpl", "{% block body %}{{ name }}{% endblock %}\n")
+    _write(repo, "themes/acme/smarty.tpl", "<p>{$name}</p>\n")
+    _PreviewClient.payloads = []
+    monkeypatch.setattr(code_ingest, "AssessmentClient", _PreviewClient)
+
+    code_ingest.run(_args(repo, name="acme-themes", dry_run=True, engagement_dir=str(engagement)))
+    assert json.loads(capsys.readouterr().out)["files"] == 3
+
+    languages = {
+        str(record["file_path"]): str(record["language"])
+        for record in _PreviewClient.payloads[0]["files"]
+    }
+    assert languages["themes/acme/twig.tpl"] == "twig"
+    assert languages["themes/acme/smarty.tpl"] == "html"
+
+
+def test_escaped_twig_output_in_body_text_is_not_a_raw_sink() -> None:
+    indexed = index_file(
+        "templates/page.html.twig", "twig",
+        b"<p>Hello {{ user.name }}</p>\n<p title=\"{{ user.title }}\">{{ user.bio|e }}</p>\n",
+    )
+
+    sinks = indexed["security_sinks"]
+    assert [(sink["kind"], sink["line"]) for sink in sinks] == [
+        ("template_interpolation", 1),
+        ("template_interpolation", 2),
+        ("template_interpolation", 2),
+    ]
+    assert all(sink["vuln_classes"] == ["xss", "ssti"] for sink in sinks)
+    assert all(set(sink) == {"kind", "line", "function", "snippet", "vuln_classes"} for sink in sinks)
+
+
+def test_twig_raw_filter_is_unescaped_output() -> None:
+    source = "<h1>{{ user.name }}</h1>\n<div>{{ user.bio|raw }}</div>\n<div>{{- note | striptags | raw -}}</div>\n"
+
+    assert _twig_sinks(source) == [
+        ("template_interpolation", 1),
+        ("unescaped_output", 2),
+        ("unescaped_output", 3),
+    ]
+
+
+def test_twig_autoescape_false_tag_is_unescaped_output() -> None:
+    source = """\
+<p>{{ before }}</p>
+{% autoescape false %}
+  <p>{{ inside }}</p>
+  {% autoescape 'html' %}<p>{{ nested }}</p>{% endautoescape %}
+  <p>{{
+    multiline }}</p>
+{% endautoescape %}
+<p>{{ after }}</p>
+"""
+
+    assert _twig_sinks(source) == [
+        ("template_interpolation", 1),
+        ("unescaped_output", 2),
+        ("template_interpolation", 3),
+        ("template_interpolation", 4),
+        ("template_interpolation", 5),
+        ("template_interpolation", 8),
+    ]
+    scanner = StreamingSecurityScanner("templates/page.html.twig", "twig")
+    scanner.feed(source.encode())
+    assert ("unescaped_output", 2) in {
+        (sink["kind"], sink["line"])
+        for sink in scanner.finish(degradation_reason="source_too_large")["security_sinks"]
+    }
+
+
+@pytest.mark.parametrize("construct", [
+    "{{ template_from_string(page.body) }}",
+    "{% include page.template %}",
+    "{% extends layout %}",
+    "{% embed 'partials/' ~ name %}{% endembed %}",
+    "{% include ['partials/a.html.twig', page.template] %}",
+    "{% include [page.template, 'partials/a.html.twig'] %}",
+    "{% import macros as forms %}",
+    "{{ include(name) }}",
+    "{{ source(page.path) }}",
+])
+def test_twig_template_chosen_at_render_time_is_dynamic_evaluation(construct: str) -> None:
+    indexed = index_file("templates/page.html.twig", "twig", f"<p>Acme</p>\n{construct}\n".encode())
+
+    dynamic = [sink for sink in indexed["security_sinks"] if sink["kind"] == "twig_dynamic_evaluation"]
+    assert [(sink["line"], sink["vuln_classes"]) for sink in dynamic] == [(2, ["ssti", "injection"])]
+
+
+@pytest.mark.parametrize("construct", [
+    "{% include 'partials/header.html.twig' %}",
+    "{% include ['partials/a.html.twig', 'partials/b.html.twig'] with {'x': 1} %}",
+    "{{ include('partials/header.html.twig', {'x': 1}) }}",
+    "{{ source('partials/logo.svg') }}",
+])
+def test_twig_template_named_by_a_literal_is_not_dynamic_evaluation(construct: str) -> None:
+    indexed = index_file("templates/page.html.twig", "twig", f"{construct}\n".encode())
+
+    assert not any(sink["kind"] == "twig_dynamic_evaluation" for sink in indexed["security_sinks"])
+
+
+def test_twig_comments_and_verbatim_blocks_are_not_outputs() -> None:
+    source = """\
+{# <p>{{ user.bio|raw }}</p> {% include 'dead.twig' %} #}
+{% verbatim %}<p>{{ user.bio|raw }}</p>{% endverbatim %}
+<p>{{ user.name }}</p>
+"""
+
+    indexed = index_file("templates/page.html.twig", "twig", source.encode())
+
+    assert indexed["analysis_status"] == "complete"
+    assert [(sink["kind"], sink["line"]) for sink in indexed["security_sinks"]] == [
+        ("template_interpolation", 3)
+    ]
+    assert not indexed["imports"]
+
+
+@pytest.mark.parametrize("unit,repeat", [("<a ", 30_000), ("{{ ", 16_000), ("{% ", 16_000), ("{# ", 16_000)])
+def test_unterminated_twig_constructs_index_in_linear_time(unit: str, repeat: int) -> None:
+    started = time.monotonic()
+    indexed = index_file("templates/page.html.twig", "twig", (unit * repeat).encode())
+
+    assert time.monotonic() - started < 5
+    assert indexed["analysis_status"] == "complete"
+
+
+def test_twig_template_composition_is_recorded_as_imports() -> None:
+    source = """\
+{% extends 'layouts/base.html.twig' %}
+{% import "macros/forms.html.twig" as forms %}
+{% from 'macros/ui.html.twig' import button %}
+{% block body %}
+  {%- include ['partials/a.html.twig', 'partials/b.html.twig'] -%}
+  {% embed "partials/card.html.twig" %}{% endembed %}
+  <script src="/js/app.js"></script>
+{% endblock %}
+"""
+
+    indexed = index_file("templates/page.html.twig", "twig", source.encode())
+
+    assert indexed["imports"] == [
+        "/js/app.js",
+        "layouts/base.html.twig",
+        "macros/forms.html.twig",
+        "macros/ui.html.twig",
+        "partials/a.html.twig",
+        "partials/card.html.twig",
+    ]
+
+
+def test_twig_template_keeps_html_entry_points() -> None:
+    indexed = index_file(
+        "templates/login.html.twig", "twig",
+        b'<form action="{{ path(\'login\') }}" method="post"></form>\n',
+    )
+
+    assert [item["kind"] for item in indexed["entry_points"]] == ["html_form"]

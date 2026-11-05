@@ -121,6 +121,7 @@ _CANONICAL_STRUCTURAL_LANGUAGES = frozenset(
         "sql",
         "html",
         "css",
+        "twig",
         "xml",
         "json",
         "yaml",

