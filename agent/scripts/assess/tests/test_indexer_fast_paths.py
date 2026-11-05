@@ -172,3 +172,18 @@ def test_sinks_follow_catalogue_order_whatever_lines_the_gate_admits() -> None:
         (sink["kind"], sink["line"], sink["function"]) for sink in indexed["security_sinks"]
     ] == expected
     assert len({line for _kind, line, _name in expected}) == 4
+
+
+def test_callables_sharing_a_minified_line_each_read_its_registrations() -> None:
+    # One line spans both callables, so the second reads the line-pattern
+    # answers the first already computed for it.
+    source = (
+        b'function outer(){function inner(){return 1}'
+        b'module.exports=inner;app.get("/acme",inner)}\n'
+    )
+    indexed = index_file("dist/acme.min.js", "javascript", source)
+
+    assert [(entry["name"], entry["kind"]) for entry in indexed["entry_points"]] == [
+        ("outer", "module_exports"),
+        ("inner", "express_route"),
+    ]

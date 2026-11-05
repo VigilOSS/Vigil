@@ -2776,6 +2776,9 @@ def _detect_entry_points(
                 js_server_calls.append((node, handlers))
     go_http_aliases = _go_http_aliases(source_lines) if language == "go" else set()
     tornado_handlers = _tornado_handler_classes(classes) if language == "python" else set()
+    # Nested callables share their lines -- a minified bundle is one line every
+    # callable spans -- so each pattern reads each line once.
+    line_pattern_hits: dict[tuple[str, int], bool] = {}
 
     for func in functions:
         if func.get("is_declaration", False):
@@ -2984,7 +2987,12 @@ def _detect_entry_points(
                     for call, _ in js_route_calls
                 ):
                     continue
-                if re.search(lp["pattern"], source_lines[line_no]):
+                hit = line_pattern_hits.get((lp["pattern"], line_no))
+                if hit is None:
+                    hit = line_pattern_hits[(lp["pattern"], line_no)] = (
+                        re.search(lp["pattern"], source_lines[line_no]) is not None
+                    )
+                if hit:
                     entry_points.append({
                         "name": func["name"],
                         "line": func["line_start"],
