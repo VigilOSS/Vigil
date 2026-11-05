@@ -276,6 +276,45 @@ def test_request_input_beyond_the_superglobals_is_a_source_and_an_entry(line: by
     assert _entries(indexed) == [("php_script", "<top-level>", 2)]
 
 
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(b"$id = required_param('id', PARAM_INT);", id="moodle-required"),
+        pytest.param(b"$sort = optional_param('sort', 'name', PARAM_ALPHA);", id="moodle-optional"),
+        pytest.param(b"$ids = optional_param_array('ids', [], PARAM_INT);", id="moodle-optional-array"),
+        pytest.param(b"$ids = required_param_array('ids', PARAM_INT);", id="moodle-required-array"),
+        pytest.param(b"$id = $this->getRequest()->getParam('id');", id="get-request-param"),
+        pytest.param(b"$q = $context->getRequest()->getVal('q');", id="get-request-val"),
+    ],
+)
+def test_framework_request_accessors_are_request_input(line: bytes) -> None:
+    source = b"<?php\n" + line + b"\n"
+    for observed in (
+        index_file("public/acme/view.php", "php", source),
+        treesitter_index._fallback_from_bytes(
+            "public/acme/view.php", "php", source, degradation_reason="test"
+        ),
+    ):
+        assert [record["kind"] for record in observed["security_sources"]] == [
+            "http_request_input"
+        ]
+    assert ("php_script", "<top-level>", 2) in _entries(index_file("public/acme/view.php", "php", source))
+
+
+@pytest.mark.parametrize(
+    "line",
+    [
+        pytest.param(b"function optional_param($name, $default, $type) {}", id="definition"),
+        pytest.param(b"$form->optional_param('id');", id="method"),
+        pytest.param(b"$this->getRequest()->setPostValue('id', 7);", id="request-setter"),
+    ],
+)
+def test_request_accessor_lookalikes_are_not_request_input(line: bytes) -> None:
+    indexed = index_file("lib/acme.php", "php", b"<?php\n" + line + b"\n")
+
+    assert indexed["security_sources"] == []
+
+
 PHP_RENDERED_PAGE = b"""<?php require 'header.php'; ?>
 <html>
   <body>

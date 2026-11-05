@@ -125,6 +125,14 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         # accessors that only ever read request data.
         ("http_request_input",
          r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\("),
+        # The request readers of the frameworks that wrap them: Moodle's page
+        # parameter functions, and the read accessors of the request a Magento,
+        # Zend or MediaWiki controller reaches through `getRequest()`.
+        ("http_request_input",
+         r"(?<![\w$>:])(?<!function )(?:optional|required)_param(?:_array)?\s*\("
+         r"|\bgetRequest\s*\(\s*\)\s*->\s*(?:get(?:Params?|Post(?:Value)?|Query(?:Value)?"
+         r"|Cookie|Header|Content|Files|Val|RawVal|Text|Int|Bool|Array|Check)\s*\("
+         r"|(?:query|request|cookies|files|headers)\b)"),
         # The raw request body, the filtered superglobal reads, and the header
         # helpers: request input that names no superglobal at all.
         ("http_request_input",

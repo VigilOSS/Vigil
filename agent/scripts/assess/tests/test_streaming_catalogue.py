@@ -379,6 +379,10 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "php", r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b|\b(?:getallheaders|apache_request_headers)\s*\(", "source",
      "<?php\n$body = file_get_contents('php://input');\n",
      "hook.php", "php://input", "http_request_input"),
+    ("source", "php", next(
+        pattern for _kind, pattern in treesitter_index._STREAM_SOURCE_PATTERNS["php"] if "_param(?:_array)?" in pattern
+    ), "source", "<?php\n$id = required_param('id', PARAM_INT);\n", "view.php",
+     "$id = required_param('id', PARAM_INT);", "http_request_input"),
     ("source", "php", treesitter_catalogues._PHP_SERVER_ARGV, "source",
      "<?php\n$opts = $_SERVER['argv'];\n", "bin/sync.php", "$opts = $_SERVER['argv'];", "http_request_input"),
     ("source", "php", r"\bgetenv\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
@@ -737,8 +741,8 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 102, (
-        f"expected 102 streaming catalogue entries (41 sources + 23 imports + "
+    assert len(real_keys) == 103, (
+        f"expected 103 streaming catalogue entries (42 sources + 23 imports + "
         f"26 extra sinks + 12 extra entry points), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
