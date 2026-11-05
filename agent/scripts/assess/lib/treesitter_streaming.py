@@ -9,6 +9,7 @@ from assess.lib.treesitter_catalogues import (
     _ENTRY_LINE_PATTERNS,
     _SINK_DEFINITIONS,
 )
+from assess.lib.treesitter_common import _php_import_record
 from assess.lib.treesitter_lightweight import (
     _LUA_DYNAMIC_REDIS_COMMAND_RE,
     _PS_SINK_PATTERNS,
@@ -179,7 +180,9 @@ _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
     "java": [r"\bimport\s+[\w.*]+"],
     "go": [r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])"],
     "ruby": [r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+"],
-    "php": [r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*"],
+    # A namespace `use` is read as a statement by `StreamingSecurityScanner`,
+    # so it publishes the same one-record-per-name shape the parser does.
+    "php": [r"\b(?:include|include_once|require|require_once)\b[^\r\n;]*"],
     "csharp": [r"\busing\s+(?:static\s+)?[^\r\n;=]+"],
     "c": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
     "cpp": [r"#\s*include\s*[<\"][^>\"]+[>\"]"],
@@ -272,6 +275,59 @@ def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
     return re.compile(pattern.encode("ascii"), re.IGNORECASE)
 
 
+# PHP's namespace `use` statement, read line by line where no parse tree
+# exists. A trait `use` inside a class body is spelled identically, so a
+# statement only counts until a class-like declaration opens and again after
+# the next `namespace`: imports precede the declarations that use them.
+_PHP_USE_STATEMENT = re.compile(rb"^\s*(?:<\?php\s+)?use\s+(?=[\\A-Za-z_\x80-\xff])", re.IGNORECASE)
+_PHP_CLASS_DECLARATION = re.compile(
+    rb"^\s*(?:(?:abstract|final|readonly)\s+)*(?:class|interface|trait|enum)\b", re.IGNORECASE
+)
+_PHP_NAMESPACE_DECLARATION = re.compile(rb"^\s*namespace\b", re.IGNORECASE)
+_PHP_USE_STATEMENT_LIMIT = STREAMING_SCAN_WINDOW_BYTES
+_PHP_USE_COMMENT = re.compile(r"//[^\n]*|#[^\n]*|/\*.*?\*/", re.DOTALL)
+_PHP_USE_KIND = re.compile(r"\s*(function|const)\s+", re.IGNORECASE)
+_PHP_USE_CLAUSE = re.compile(
+    r"\s*(?:(?P<kind>function|const)\s+)?"
+    r"(?P<name>\\?[^\W\d]\w*(?:\s*\\\s*[^\W\d]\w*)*)"
+    r"(?:\s+as\s+(?P<alias>[^\W\d]\w*))?\s*",
+    re.IGNORECASE,
+)
+
+
+def _php_use_clauses(body: str) -> list[tuple[str, str, str, int]]:
+    """`(kind, name, alias, offset)` for each name one `use` statement imports.
+
+    *body* is the statement after its `use` keyword. A group spells its shared
+    prefix once (`Acme\\Http\\{Request, function respond}`), and a
+    `function`/`const` keyword belongs to the statement or to one member.
+    """
+    body = _PHP_USE_COMMENT.sub(lambda match: re.sub(r"[^\n]", " ", match.group(0)), body)
+    declared = _PHP_USE_KIND.match(body)
+    start = declared.end() if declared else 0
+    prefix = ""
+    end = len(body)
+    brace = body.find("{", start)
+    if brace >= 0:
+        prefix = "".join(body[start:brace].split()).rstrip("\\")
+        close = body.find("}", brace)
+        start, end = brace + 1, close if close >= 0 else len(body)
+    clauses: list[tuple[str, str, str, int]] = []
+    offset = start
+    for segment in body[start:end].split(","):
+        clause = _PHP_USE_CLAUSE.fullmatch(segment)
+        if clause is not None:
+            name = clause.group("name")
+            clauses.append((
+                (clause.group("kind") or (declared.group(1) if declared else "") or "class").lower(),
+                f"{prefix}\\{name}" if prefix else name,
+                clause.group("alias") or "",
+                offset + clause.start("name"),
+            ))
+        offset += len(segment) + 1
+    return clauses
+
+
 # Languages whose line comments open with `#`. An allowlist, because a leading
 # `#` is *code* in the rest of what this scanner serves: a C preprocessor
 # directive, a FreeMarker `#{...}` numeric interpolation, a Lua length operator.
@@ -311,6 +367,10 @@ class StreamingSecurityScanner:
         self._line_number = 1
         self._line_had_bytes = False
         self._line_comment: bool | None = None
+        self._line_windows = 0
+        self._php_use_open = True
+        self._php_use_pending: list[tuple[int, bytearray]] | None = None
+        self._php_use_pending_bytes = 0
         self._pending_cr = False
         self.bytes_scanned = 0
         self.total_lines = 0
@@ -417,6 +477,7 @@ class StreamingSecurityScanner:
         self._line_buffer.clear()
         self._line_had_bytes = False
         self._line_comment = None
+        self._line_windows = 0
 
     @staticmethod
     def _snippet(window: bytes, start: int, end: int) -> str:
@@ -424,6 +485,62 @@ class StreamingSecurityScanner:
         right = min(len(window), max(end + 72, start + 120))
         text = window[left:right].decode("utf-8", errors="replace").strip()
         return text if len(text) <= 120 else text[:117] + "..."
+
+    def _retain_import(self, raw: str, target: dict[str, Any]) -> None:
+        self.signal_counts["imports"] += 1
+        if len(self.imports) < self.signal_limit:
+            self.imports.append(raw)
+            self.import_targets.append(target)
+        else:
+            self._truncated.add("imports")
+
+    def _read_php_use(self, text: bytes) -> None:
+        """Accumulate one PHP `use` statement across lines, then publish it."""
+        if self._php_use_pending is None:
+            if self._line_windows:
+                return
+            if _PHP_NAMESPACE_DECLARATION.match(text):
+                self._php_use_open = True
+            elif _PHP_CLASS_DECLARATION.match(text):
+                self._php_use_open = False
+            statement = _PHP_USE_STATEMENT.match(text) if self._php_use_open else None
+            if statement is None:
+                return
+            text = text[statement.end():]
+            self._php_use_pending = []
+            self._php_use_pending_bytes = 0
+        terminator = min(
+            (index for index in (text.find(b";"), text.find(b"?>")) if index >= 0),
+            default=-1,
+        )
+        segment = text if terminator < 0 else text[:terminator]
+        if self._php_use_pending and self._php_use_pending[-1][0] == self._line_number:
+            # The next window of one long line continues the same text.
+            self._php_use_pending[-1][1].extend(segment)
+        else:
+            self._php_use_pending.append((self._line_number, bytearray(segment)))
+        self._php_use_pending_bytes += len(segment)
+        if terminator >= 0 or self._php_use_pending_bytes >= _PHP_USE_STATEMENT_LIMIT:
+            self._publish_php_use()
+
+    def _publish_php_use(self) -> None:
+        segments = [
+            (line, text.decode("utf-8", errors="replace"))
+            for line, text in self._php_use_pending or []
+        ]
+        self._php_use_pending = None
+        body = "\n".join(text for _line, text in segments)
+        starts: list[tuple[int, int]] = []
+        offset = 0
+        for line, text in segments:
+            starts.append((offset, line))
+            offset += len(text) + 1
+        for kind, name, alias, position in _php_use_clauses(body):
+            line = next(line for start, line in reversed(starts) if start <= position)
+            record = _php_import_record(kind, name, alias, line)
+            self._retain_import(
+                record["raw"], {**record, "detection": "heuristic_streaming"}
+            )
 
     def _retain(self, dimension: str, record: dict[str, Any] | str) -> None:
         self.signal_counts[dimension] += 1
@@ -436,6 +553,9 @@ class StreamingSecurityScanner:
     def _scan_window(self, window: bytes, *, accept_before: int) -> None:
         if self._line_comment is True:
             return
+        if self.language == "php":
+            self._read_php_use(window[:accept_before])
+        self._line_windows += 1
         for kind, pattern, vuln_classes in self._sink_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
@@ -483,23 +603,21 @@ class StreamingSecurityScanner:
                 if match.start() >= accept_before:
                     continue
                 raw = self._snippet(window, match.start(), match.end())
-                self.signal_counts["imports"] += 1
-                if len(self.imports) < self.signal_limit:
-                    self.imports.append(raw)
-                    self.import_targets.append(
-                        {
-                            "raw": raw,
-                            "resolved": "",
-                            "line": self._line_number,
-                            "detection": "heuristic_streaming",
-                        }
-                    )
-                else:
-                    self._truncated.add("imports")
+                self._retain_import(
+                    raw,
+                    {
+                        "raw": raw,
+                        "resolved": "",
+                        "line": self._line_number,
+                        "detection": "heuristic_streaming",
+                    },
+                )
 
     def finish(self, *, degradation_reason: str) -> dict[str, Any]:
         if self._line_had_bytes:
             self._finish_line()
+        if self._php_use_pending is not None:
+            self._publish_php_use()
         truncated = sorted(self._truncated)
         unavailable = set(STREAMING_FALLBACK_BASELINE_UNAVAILABLE)
         for dimension, patterns in (

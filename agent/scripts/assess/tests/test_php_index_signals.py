@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from assess.lib.treesitter_index import index_file
+from assess.lib.treesitter_streaming import StreamingSecurityScanner
 
 
 def test_laravel_controller_public_action_is_candidate_entry() -> None:
@@ -200,3 +201,103 @@ namespace {
         ("acme_root", "acme_root"),
         ("$probe", "$probe"),
     ]
+
+
+PHP_USE_DECLARATIONS = b"""<?php
+namespace Acme\\Billing;
+
+use Acme\\Models\\Invoice;
+use Acme\\Models\\Customer as Client, Acme\\Models\\Order;
+use function Acme\\Support\\format_money;
+use const Acme\\Support\\VAT_RATE;
+use Acme\\Http\\{Request, Response as Reply, function respond, const STATUS_OK};
+use FUNCTION Acme\\Util\\{slugify, truncate AS clip};
+use \\Acme\\Contracts\\Payable;
+use Acme\\Models\\{
+    Ledger, // the books
+    Journal as Book
+};
+
+final class InvoiceController
+{
+    use Acme\\Concerns\\Loggable;
+
+    public function show($id)
+    {
+        return array_map(function ($row) use ($id) { return $row; }, []);
+    }
+}
+"""
+
+# (kind, fully qualified name, alias, line) for every name the file imports.
+PHP_USE_IMPORTS = [
+    ("class", "Acme\\Models\\Invoice", "", 4),
+    ("class", "Acme\\Models\\Customer", "Client", 5),
+    ("class", "Acme\\Models\\Order", "", 5),
+    ("function", "Acme\\Support\\format_money", "", 6),
+    ("const", "Acme\\Support\\VAT_RATE", "", 7),
+    ("class", "Acme\\Http\\Request", "", 8),
+    ("class", "Acme\\Http\\Response", "Reply", 8),
+    ("function", "Acme\\Http\\respond", "", 8),
+    ("const", "Acme\\Http\\STATUS_OK", "", 8),
+    ("function", "Acme\\Util\\slugify", "", 9),
+    ("function", "Acme\\Util\\truncate", "clip", 9),
+    ("class", "Acme\\Contracts\\Payable", "", 10),
+    ("class", "Acme\\Models\\Ledger", "", 12),
+    ("class", "Acme\\Models\\Journal", "Book", 13),
+]
+
+
+def _use_imports(targets: list[dict]) -> list[tuple[str, str, str, int]]:
+    return [
+        (item["kind"], item["qualified_name"], item["alias"], item["line"])
+        for item in targets
+        if "kind" in item
+    ]
+
+
+def test_php_use_declarations_are_one_normalised_import_per_name() -> None:
+    indexed = index_file("src/InvoiceController.php", "php", PHP_USE_DECLARATIONS)
+
+    assert _use_imports(indexed["import_targets"]) == PHP_USE_IMPORTS
+    assert indexed["imports"] == [name for _kind, name, _alias, _line in PHP_USE_IMPORTS]
+    assert all(item["raw"] == item["qualified_name"] for item in indexed["import_targets"])
+    assert indexed["signal_counts"]["imports"] == len(PHP_USE_IMPORTS)
+
+
+def test_only_php_class_imports_resolve_to_a_namespace_path() -> None:
+    indexed = index_file("src/InvoiceController.php", "php", PHP_USE_DECLARATIONS)
+    resolved = {item["qualified_name"]: item["resolved"] for item in indexed["import_targets"]}
+
+    assert resolved["Acme\\Models\\Invoice"] == "Acme/Models/Invoice"
+    assert resolved["Acme\\Support\\format_money"] == ""
+    assert resolved["Acme\\Http\\STATUS_OK"] == ""
+
+
+def test_streaming_fallback_reads_php_use_declarations_like_the_parser() -> None:
+    scanner = StreamingSecurityScanner("src/InvoiceController.php", "php")
+    for offset in range(0, len(PHP_USE_DECLARATIONS), 7):
+        scanner.feed(PHP_USE_DECLARATIONS[offset : offset + 7])
+    observed = scanner.finish(degradation_reason="tree_sitter_syntax_error")
+
+    assert _use_imports(observed["import_targets"]) == PHP_USE_IMPORTS
+    assert [
+        raw for raw, item in zip(observed["imports"], observed["import_targets"]) if "kind" in item
+    ] == [name for _kind, name, _alias, _line in PHP_USE_IMPORTS]
+    parsed = index_file("src/InvoiceController.php", "php", PHP_USE_DECLARATIONS)
+    assert [
+        {key: value for key, value in item.items() if key != "detection"}
+        for item in observed["import_targets"]
+        if "kind" in item
+    ] == parsed["import_targets"]
+
+
+def test_streaming_fallback_keeps_php_inclusion_imports() -> None:
+    source = b"<?php\ninclude 'acme/header.php';\nrequire_once __DIR__ . '/bootstrap.php';\n"
+    scanner = StreamingSecurityScanner("public/index.php", "php")
+    scanner.feed(source)
+    observed = scanner.finish(degradation_reason="tree_sitter_syntax_error")
+
+    assert [item["line"] for item in observed["import_targets"]] == [2, 3]
+    assert "include 'acme/header.php'" in observed["import_targets"][0]["raw"]
+    assert "require_once __DIR__" in observed["import_targets"][1]["raw"]

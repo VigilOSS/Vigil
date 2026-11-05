@@ -405,7 +405,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "java", r"\bimport\s+[\w.*]+", "import", JAVA_IMPORT_SRC, "x.java", "import java.util.List;", None),
     ("import", "go", r"\bimport\s*(?:\([^\r\n]*|[\"`][^\"`]+[\"`])", "import", GO_IMPORT_SRC, "x.go", "import (", None),
     ("import", "ruby", r"\b(?:require|require_relative|load)\s*\(?\s*['\"][^'\"]+", "import", RUBY_IMPORT_SRC, "x.rb", "require 'json'", None),
-    ("import", "php", r"\b(?:include|include_once|require|require_once|use)\b[^\r\n;]*", "import", PHP_IMPORT_SRC, "x.php", "include 'a.php';", None),
+    ("import", "php", r"\b(?:include|include_once|require|require_once)\b[^\r\n;]*", "import", PHP_IMPORT_SRC, "x.php", "include 'a.php';", None),
     ("import", "csharp", r"\busing\s+(?:static\s+)?[^\r\n;=]+", "import", CSHARP_IMPORT_SRC, "Repo.cs", "using System.Data", None),
     ("import", "c", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", C_IMPORT_SRC, "x.c", "#include <stdio.h>", None),
     ("import", "cpp", r"#\s*include\s*[<\"][^>\"]+[>\"]", "import", CPP_IMPORT_SRC, "x.cpp", "#include <iostream>", None),

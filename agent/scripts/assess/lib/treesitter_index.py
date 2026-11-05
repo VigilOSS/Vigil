@@ -30,6 +30,7 @@ from assess.lib.treesitter_catalogues import (
     _IMPORT_QUERIES,
     _SINK_DEFINITIONS,
 )
+from assess.lib.treesitter_common import _php_import_record
 from assess.lib.treesitter_lightweight import (
     _blade_template_sources,
     _extract_blade,
@@ -1637,8 +1638,6 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
                 text = _node_text(path_node, source).strip('"`')
             if text.startswith("."):
                 continue
-        elif query_language == "php":
-            text = text.removeprefix("use").strip().rstrip(";")
         elif query_language == "csharp":
             # `using System.Data.SqlClient;` -> `System.Data.SqlClient`, and
             # `using static System.Math;` -> `System.Math`. A `using alias =
@@ -1653,6 +1652,75 @@ def _extract_imports_ts(tree: Any, language: str, source: bytes) -> list[str]:
         imports.append(text)
 
     return imports
+
+
+def _php_use_kind(keyword: Any, source: bytes) -> str:
+    return _node_text(keyword, source).lower() if keyword is not None else ""
+
+
+def _extract_php_imports(tree: Any, source: bytes) -> list[dict[str, Any]]:
+    """One normalised record per name each PHP `use` declaration imports.
+
+    A declaration imports several names at once -- `use A, B as C;` and the
+    grouped `use Acme\\Http\\{Request, function respond};` -- and its
+    `function`/`const` keyword sits on the declaration or on one member of a
+    group. A trait `use` inside a class body and a closure's `use ($x)` are
+    different nodes and import nothing.
+    """
+    parser = _get_parser("php")
+    if parser is None:
+        return []
+    captures = _ts_query_captures(parser.language, _IMPORT_QUERIES["php"], tree.root_node)
+    records: list[dict[str, Any]] = []
+    for declaration in sorted(captures.get("imp", []), key=lambda node: node.start_byte):
+        declared_kind = _php_use_kind(declaration.child_by_field_name("type"), source)
+        group = declaration.child_by_field_name("body")
+        prefix = ""
+        if group is not None:
+            prefix_node = next(
+                (child for child in declaration.named_children if child.type == "namespace_name"),
+                None,
+            )
+            prefix = _node_text(prefix_node, source) if prefix_node is not None else ""
+        for clause in (group or declaration).named_children:
+            if clause.type != "namespace_use_clause":
+                continue
+            alias = clause.child_by_field_name("alias")
+            name = next(
+                (
+                    child
+                    for child in clause.named_children
+                    if child.type in {"name", "qualified_name"}
+                    and (alias is None or child.start_byte != alias.start_byte)
+                ),
+                None,
+            )
+            if name is None:
+                continue
+            text = _node_text(name, source)
+            records.append(
+                _php_import_record(
+                    _php_use_kind(clause.child_by_field_name("type"), source)
+                    or declared_kind
+                    or "class",
+                    f"{prefix}\\{text}" if prefix else text,
+                    _node_text(alias, source) if alias is not None else "",
+                    clause.start_point[0] + 1,
+                )
+            )
+    return records
+
+
+def _extract_import_records(
+    tree: Any, language: str, source: bytes
+) -> tuple[list[str], list[dict[str, Any]]]:
+    """The `imports` strings and their `import_targets`, one entry per import."""
+    query_language = _query_language_family(language)
+    if query_language == "php":
+        targets = _extract_php_imports(tree, source)
+        return [target["raw"] for target in targets], targets
+    imports = _extract_imports_ts(tree, language, source)
+    return imports, _resolve_import_targets(imports, query_language)
 
 
 def _extract_ruby_imports(source: bytes) -> list[str]:
@@ -3220,9 +3288,6 @@ def _resolve_import_targets(
                 target["resolved"] = imp + ".rb" if not imp.endswith(".rb") else imp
             else:
                 target["resolved"] = imp
-        elif language == "php":
-            parts = imp.strip().rstrip(";")
-            target["resolved"] = parts.replace("\\", "/")
         elif language in ("c", "cpp"):
             if not imp.startswith("<"):
                 target["resolved"] = imp
@@ -3646,7 +3711,7 @@ def index_file(
     try:
         functions = _extract_functions_ts(tree, parse_lang, source)
         classes = _extract_classes_ts(tree, parse_lang, source)
-        imports = _extract_imports_ts(tree, parse_lang, source)
+        imports, import_targets = _extract_import_records(tree, parse_lang, source)
 
         effective_lang = "typescript" if parse_lang == "tsx" else language
         _enrich_qualified_names(functions, classes, effective_lang)
@@ -3686,7 +3751,6 @@ def index_file(
             else source_lines
         )
         exports = _detect_exports(functions, classes, effective_lang, export_lines)
-        import_targets = _resolve_import_targets(imports, effective_lang)
         security_observations: dict[str, Any] = {}
         _attach_bounded_security_sources(
             security_observations,

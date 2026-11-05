@@ -20,3 +20,20 @@ def _empty_func(name: str, line_start: int, line_end: int) -> dict[str, Any]:
         "annotations": [],
         "is_entry_point": False,
     }
+
+def _php_import_record(kind: str, name: str, alias: str, line: int) -> dict[str, Any]:
+    """One name a PHP `use` declaration imports, as every PHP reader publishes it.
+
+    `raw` is the fully qualified name, so `imports` and `import_targets` stay one
+    entry per imported name. Only a class import names something a file can
+    declare; a function or a constant resolves to no file.
+    """
+    qualified_name = "".join(name.split()).lstrip("\\")
+    return {
+        "raw": qualified_name,
+        "resolved": qualified_name.replace("\\", "/") if kind == "class" else "",
+        "kind": kind,
+        "qualified_name": qualified_name,
+        "alias": alias,
+        "line": line,
+    }
