@@ -5,6 +5,66 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [Unreleased]
+
+After upgrading, re-ingest each code repository, then run `code-index build` and `code-index sync`.
+Re-ingesting admits first-party `vendor/`, `env/` and `*-main/`/`*-master/` directories, legacy
+PHP extensions and PHP `.tpl` templates, and moves the generation. URL-COMPONENT and NETWORK-INPUT
+files owe their new families: run `code-coverage --cwe-matrix`, then reanalyse each file or record
+the family `not_applicable`.
+
+### Added
+
+- Twig templates (`.twig`, and `.tpl` with Twig delimiters) index as `twig`: every output is an
+  XSS and SSTI hint, `|raw` and `{% autoescape false %}` are `unescaped_output`, and
+  `template_from_string` or a non-literal template name is `twig_dynamic_evaluation`.
+- PHP sinks for the legacy `mysql_`, `pg_`, `odbc_`, `sqlsrv_`, `mssql_`, `sqlite_`, `oci_`,
+  `db2_` and ADOdb query calls, `<?=`, `print_r`, `vprintf` and `die`/`exit` with a message, every
+  `mail()`, `parse_str` with one argument, `import_request_variables` and variable-variable
+  assignment. `$HTTP_*_VARS` and `$HTTP_RAW_POST_DATA` are request input and `$_ENV` is process
+  input. Callback builtins hint their callable, and a literal sink name hints that sink.
+- `.php3`, `.php4`, `.pht`, `.phtm` and `.ctp` index as PHP, as do `.tpl` files that open a PHP
+  tag and `.engine`/`.profile` files that open one within the first 64 KiB.
+- Laravel controller entry points for every named class under an `Http\Controllers` namespace or
+  path, including invokable controllers.
+- Outbound HTTP hints for Java `openStream` and chained `HttpClient` calls, C# JSON and string
+  fetches, and Go `Do` on any client-named or `http.Client`-bound receiver.
+
+### Changed
+
+- PHP `->exec(`, `->query(` and `->real_query(` hint on every receiver, every `assert(` and
+  `hash(` call hints, and PHP function names match in any letter case.
+- Per-file structural artifacts are compact JSON with one top-level key or array record per line
+  and `call_sites` last. A call site carries `receiver` and `passes_caller_params` only when set.
+- Source that is not valid UTF-8 is parsed with replacement; only a UTF-16 or UTF-32 byte order
+  mark falls back ([ADR 0042](docs/adr/0042-non-utf8-source-is-parsed-with-replacement.md)).
+- `vendor/` and `env/` are skipped only when they hold package-manager or virtualenv output, and a
+  PHP include into an excluded directory is reported once per directory.
+- A file with no callable or segment owes a whole-file reviewed span unless it is signal-free CSS
+  or HTML, and an HTML page or template with an inline script or Blade PHP owes one too.
+- A `skipped` close is refused for critical, high and medium files and needs a standard reason.
+- URL-COMPONENT files require web-app-injection and path-traversal, NETWORK-INPUT files
+  deserialization, and managed NETWORK-INPUT files file-upload. The effort gate names every family
+  under its threshold.
+- Workflow-family path hints apply to every path the index reads as code.
+- When a list passes the signal limit, each kind keeps its earliest records in turn.
+
+### Fixed
+
+- `code-ingest` confirms a refresh commit whose response was lost and finishes the post-commit
+  steps, and a pooled connection applies each request's read timeout.
+- `code-index build` and `sync` publish a file whose artifact fails validation as a degraded
+  streaming fallback instead of refusing the repository, and refuse unpublishable names before
+  sending them.
+- JavaScript callables are never named after an expression's source text, and every callable name
+  fits the backend caps, including after disambiguation.
+- Index line numbers break only at CR, LF and CRLF, matching the sealed snapshot.
+- A line is commentary only when the grammar puts all of its text in comments, so a C dereference,
+  a continued operator or PHP after a `?>`-closed comment is read.
+- A bare-CR script or stylesheet is no longer taken for a minified bundle.
+- The streaming fallback matches JavaScript `Function(` by its case, so `function(` is not eval.
+- PHP sinks on non-ASCII identifiers match on both readers.
+
 ## [2.4.0] - 2026-11-05
 
 After upgrading, run `vigil assess code-index build` and then `code-index sync` for each code
