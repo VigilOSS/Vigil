@@ -48,6 +48,9 @@ _SIGNAL_DIMENSIONS = (
     "security_sinks",
     "security_sources",
 )
+# The capped lists whose records carry a kind and a line; past the limit each
+# keeps its records in turn across kinds, so no kind is lost behind another.
+_KINDED_SIGNAL_LISTS = ("entry_points", "security_sinks", "security_sources")
 _CAPPED_INDEX_LISTS = (
     "call_sites",
     "classes",
@@ -321,6 +324,17 @@ _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
 }
 
 
+def _kind_balanced(records: list[dict[str, Any]], limit: int) -> list[dict[str, Any]]:
+    """The *limit* records ordered by (rank within kind, line), in their original order."""
+    ranks: dict[str, int] = {}
+    keys: list[tuple[int, int, int]] = []
+    for index in sorted(range(len(records)), key=lambda item: records[item]["line"]):
+        kind = records[index]["kind"]
+        ranks[kind] = ranks.get(kind, 0) + 1
+        keys.append((ranks[kind], records[index]["line"], index))
+    return [records[index] for index in sorted(key[2] for key in sorted(keys)[:limit])]
+
+
 def _byte_pattern(pattern: str, case_blind: bool = True) -> re.Pattern[bytes]:
     return re.compile(pattern.encode("ascii"), re.IGNORECASE if case_blind else 0)
 
@@ -439,6 +453,9 @@ class StreamingSecurityScanner:
         self.security_sinks: list[dict[str, Any]] = []
         self.security_sources: list[dict[str, Any]] = []
         self.signal_counts = {dimension: 0 for dimension in _SIGNAL_DIMENSIONS}
+        self._kind_counts: dict[str, dict[str, int]] = {
+            dimension: {} for dimension in _KINDED_SIGNAL_LISTS
+        }
         self._truncated: set[str] = set()
         self._source_patterns = [
             (kind, _byte_pattern(pattern))
@@ -681,13 +698,12 @@ class StreamingSecurityScanner:
                 record["raw"], {**record, "detection": "heuristic_streaming"}
             )
 
-    def _retain(self, dimension: str, record: dict[str, Any] | str) -> None:
+    def _retain(self, dimension: str, record: dict[str, Any]) -> None:
         self.signal_counts[dimension] += 1
-        target = getattr(self, dimension)
-        if len(target) < self.signal_limit:
-            target.append(record)
-        else:
-            self._truncated.add(dimension)
+        kinds = self._kind_counts[dimension]
+        if kinds.get(record["kind"], 0) < self.signal_limit:
+            kinds[record["kind"]] = kinds.get(record["kind"], 0) + 1
+            getattr(self, dimension).append(record)
 
     def _scan_window(self, window: bytes, *, accept_before: int) -> None:
         if self._line_comment is True:
@@ -773,6 +789,12 @@ class StreamingSecurityScanner:
             self._finish_line()
         if self._php_use_pending is not None:
             self._publish_php_use()
+        for dimension in _KINDED_SIGNAL_LISTS:
+            records = getattr(self, dimension)
+            if len(records) > self.signal_limit:
+                setattr(self, dimension, _kind_balanced(records, self.signal_limit))
+            if self.signal_counts[dimension] > len(getattr(self, dimension)):
+                self._truncated.add(dimension)
         truncated = sorted(self._truncated)
         unavailable = set(STREAMING_FALLBACK_BASELINE_UNAVAILABLE)
         for dimension, patterns in (
@@ -927,7 +949,11 @@ def _complete_index_metadata(
     for dimension in _CAPPED_INDEX_LISTS:
         values = indexed.setdefault(dimension, [])
         if len(values) > STRUCTURAL_SIGNAL_LIMIT:
-            indexed[dimension] = values[:STRUCTURAL_SIGNAL_LIMIT]
+            indexed[dimension] = (
+                _kind_balanced(values, STRUCTURAL_SIGNAL_LIMIT)
+                if dimension in _KINDED_SIGNAL_LISTS
+                else values[:STRUCTURAL_SIGNAL_LIMIT]
+            )
             truncated.add("imports" if dimension == "import_targets" else dimension)
     # Truncation and an unscanned scope are different debts on one field. The
     # signal limit is the louder of the two -- it means retained records were
