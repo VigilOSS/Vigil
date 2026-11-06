@@ -55,14 +55,18 @@ The `code-ingest` command:
   Git reads the repository's history and index as data and never runs a program its config,
   attributes or hooks name
 - Marks generated/vendored/test/doc files as `skip` candidates. The default policy excludes
-  `vendor/` (another casing only when it holds `autoload.php`, `modules.txt`, `composer/` or
-  `bundle/`), a forge-archive copy (`<project>-master/` or `<project>-main/` whose root holds
+  `vendor/` in any casing only when it holds `autoload.php`, `modules.txt`, `vendor.json`,
+  `composer/`, `bundle/` or a `github.com/`, `golang.org/` or `gopkg.in/` import-path tree, `env/`
+  only when it holds `pyvenv.cfg`, `bin/activate` or `Scripts/activate`, a forge-archive copy
+  (`<project>-master/` or `<project>-main/` whose root holds
   `composer.json`, `package.json`, `VERSION` or a licence file, unless its manifest names the
   directory itself), `.phps` source-display copies, and minified JavaScript/CSS (`.min.*`,
   `.bundle.*`, content-hashed `*.chunk.*`, or a file whose line shape is minified). A vendored-copy
   exclusion records the package name and version its root files give, which `code-dependencies`
   reports when run against the sealed source. Re-admit a copy with `--include-path '<dir>/**'`,
-  minified files with `--include-minified`, and other skips with `--include-skipped`
+  minified files with `--include-minified`, and other skips with `--include-skipped`.
+  `code-index build` warns once for each excluded directory a PHP include reaches, except
+  package-manager `vendor/`
 - Atomically refreshes the backend manifest — the backend assigns each file an integer
   `file_id` (primary key). Retrieve the mapping via
   `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;

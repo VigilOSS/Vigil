@@ -1024,15 +1024,15 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
 ) -> None:
     module = _load_command("code_ingest.py", "test_sealed_ingest_exclusions")
     repo = tmp_path / "repo"
-    vendor = repo / "vendor" / "nested"
-    vendor.mkdir(parents=True)
+    node_modules = repo / "node_modules" / "nested"
+    node_modules.mkdir(parents=True)
     (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
-    (repo / "vendor" / "library.php").write_text("<?php echo 1;\n", encoding="utf-8")
-    (vendor / "bundle.js").write_text("export const safe = true;\n", encoding="utf-8")
+    (repo / "node_modules" / "library.php").write_text("<?php echo 1;\n", encoding="utf-8")
+    (node_modules / "bundle.js").write_text("export const safe = true;\n", encoding="utf-8")
     outside = tmp_path / "outside.txt"
     outside.write_text("outside\n", encoding="utf-8")
     (repo / "outside-link").symlink_to(outside)
-    (vendor / "nested-link").symlink_to(outside)
+    (node_modules / "nested-link").symlink_to(outside)
     engagement = tmp_path / "engagement"
     engagement.mkdir()
     monkeypatch.setattr(
@@ -1095,12 +1095,12 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
         (record["path"], record["kind"]): record
         for record in sealed["excluded_entries"]
     }
-    assert ("vendor", "directory") in exclusions
-    assert ("vendor/library.php", "file") in exclusions
-    assert ("vendor/nested/bundle.js", "file") in exclusions
+    assert ("node_modules", "directory") in exclusions
+    assert ("node_modules/library.php", "file") in exclusions
+    assert ("node_modules/nested/bundle.js", "file") in exclusions
     assert ("outside-link", "symlink") in exclusions
-    assert ("vendor/nested/nested-link", "symlink") in exclusions
-    assert exclusions[("vendor/library.php", "file")]["sha256"] == hashlib.sha256(
+    assert ("node_modules/nested/nested-link", "symlink") in exclusions
+    assert exclusions[("node_modules/library.php", "file")]["sha256"] == hashlib.sha256(
         b"<?php echo 1;\n"
     ).hexdigest()
 
@@ -1124,13 +1124,13 @@ def test_targeted_include_does_not_admit_siblings_from_a_skipped_directory(
 ) -> None:
     module = _load_command("code_ingest.py", "test_sealed_ingest_targeted_include")
     repo = tmp_path / "repo"
-    vendor = repo / "vendor"
-    vendor.mkdir(parents=True)
+    node_modules = repo / "node_modules"
+    node_modules.mkdir(parents=True)
     (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
-    (vendor / "review-me.php").write_text("<?php echo 1;\n", encoding="utf-8")
-    (vendor / "unrelated.php").write_text("<?php echo 2;\n", encoding="utf-8")
+    (node_modules / "review-me.php").write_text("<?php echo 1;\n", encoding="utf-8")
+    (node_modules / "unrelated.php").write_text("<?php echo 2;\n", encoding="utf-8")
     args = _ingest_args(repo, tmp_path / "engagement")
-    args.include_path = ["**/vendor/review-me.php"]
+    args.include_path = ["**/node_modules/review-me.php"]
 
     with module.RootedSourceTree(repo) as source_tree:
         admitted = list(
@@ -1140,12 +1140,12 @@ def test_targeted_include_does_not_admit_siblings_from_a_skipped_directory(
             source_tree, args, tmp_path / "snapshots"
         )
 
-    assert admitted == ["main.py", "vendor/review-me.php"]
+    assert admitted == ["main.py", "node_modules/review-me.php"]
     assert {
         (record["path"], record["reason"])
         for record in excluded
         if record["kind"] == "file"
-    } == {("vendor/unrelated.php", "skipped_dir:vendor")}
+    } == {("node_modules/unrelated.php", "skipped_dir:node_modules")}
 
 
 def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_snapshot(
@@ -4846,9 +4846,9 @@ def test_exclusion_hash_accounting_streams_sparse_files_without_materializing_th
 ) -> None:
     module = _load_command("code_ingest.py", "test_streamed_exclusion_accounting")
     source = tmp_path / "source"
-    vendor = source / "vendor"
-    vendor.mkdir(parents=True)
-    huge = vendor / "generated.bin"
+    node_modules = source / "node_modules"
+    node_modules.mkdir(parents=True)
+    huge = node_modules / "generated.bin"
     with huge.open("wb") as handle:
         handle.seek(32 * 1024 * 1024 - 1)
         handle.write(b"x")
@@ -4865,7 +4865,7 @@ def test_exclusion_hash_accounting_streams_sparse_files_without_materializing_th
     _current, peak = tracemalloc.get_traced_memory()
     tracemalloc.stop()
 
-    generated = next(item for item in records if item["path"] == "vendor/generated.bin")
+    generated = next(item for item in records if item["path"] == "node_modules/generated.bin")
     assert generated["size"] == 32 * 1024 * 1024
     assert len(str(generated["sha256"])) == 64
     assert peak < 8 * 1024 * 1024

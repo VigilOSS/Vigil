@@ -48,8 +48,8 @@ _capture_regular_file = capture_regular_file
 
 SKIP_DIRS = frozenset({
     '.git', '.svn', '.hg', '__pycache__', 'node_modules', '.tox',
-    'venv', '.venv', 'env', '.env', 'dist', 'build', 'target',
-    'vendor', '.next', '.nuxt', '.expo', '.gradle', '.idea',
+    'venv', '.venv', '.env', 'dist', 'build', 'target',
+    '.next', '.nuxt', '.expo', '.gradle', '.idea',
     '.vscode', '.vs', 'coverage', '.nyc_output',
 })
 
@@ -68,14 +68,22 @@ SKIP_EXTENSIONS = frozenset({
     '.phps',
 })
 
-# Composer, Bundler and Go all write `vendor/`, and a Windows-authored tree may
-# spell it `Vendor/`. `Vendor` is also a business entity, so a PSR-4 or .NET
-# `src/Vendor/` is first-party: another casing is skipped only when the
-# directory holds what a package manager writes there. PascalCase `Build/`,
-# `Coverage/` and `Target/` are ordinary .NET source directories, so the rest
-# of SKIP_DIRS stays exact.
-_CASE_INSENSITIVE_SKIP_DIRS = frozenset({'vendor'})
-_PACKAGE_MANAGER_VENDOR_MARKERS = ('autoload.php', 'modules.txt', 'composer', 'bundle')
+# Composer, Bundler and Go write `vendor/`, and virtualenv writes `env/`, but
+# both names also hold first-party code: a hand-copied library, a marketplace's
+# `src/Vendor/`, an `env/production.php` of settings. Such a directory is
+# skipped, in any casing, only when it holds what its tool writes there, named
+# exactly: a case-folding filesystem would otherwise read a first-party
+# `src/Vendor/Bundle/` as Bundler's `bundle/`. Go tools older than modules
+# (dep, glide, godep, govendor) lay `vendor/` out by import path.
+# PascalCase `Build/`, `Coverage/` and `Target/` are ordinary .NET source
+# directories, so SKIP_DIRS stays exact.
+_TOOL_OUTPUT_DIR_MARKERS = {
+    'vendor': (
+        'autoload.php', 'modules.txt', 'composer', 'bundle',
+        'vendor.json', 'github.com', 'golang.org', 'gopkg.in',
+    ),
+    'env': ('pyvenv.cfg', 'bin/activate', 'Scripts/activate'),
+}
 
 # A source archive downloaded from a forge unpacks as `<project>-<branch>/`.
 # The name alone also describes first-party directories (`db-master/`), so a
@@ -603,12 +611,7 @@ def _max_included_skipped_bytes(args) -> int:
 
 
 def _effective_skip_dirs(args) -> frozenset[str]:
-    """Return the directory denylist this invocation ingests against.
-
-    Presets are threaded through the callers rather than mutating the
-    module-level frozensets: `code_index` imports `SKIP_DIRS`/`_should_skip_file`
-    and re-walks with them, and its view of the policy must not shift under it.
-    """
+    """Return the directory denylist this invocation ingests against."""
     if getattr(args, "policy_preset", "application") == "package":
         return SKIP_DIRS - _PACKAGE_PRESET_ADMITTED_DIRS
     return SKIP_DIRS
@@ -719,32 +722,42 @@ class _SkipPolicy:
         self.args = args
         self.skip_dirs = _effective_skip_dirs(args)
         self._vendored: dict[str, dict[str, object] | None] = {}
-        self._cased_vendor: dict[str, bool] = {}
+        self._tool_output: dict[str, bool] = {}
         self._minified_by_content: set[str] = set()
 
     def directory_reason(self, rel_dir: str, dirname: str) -> str | None:
         named = _named_skip_dir_reason(dirname, self.skip_dirs)
         if named:
             return named
-        cased = self.cased_vendor_reason(rel_dir)
-        if cased:
-            return cased
+        tool_output = self.tool_output_reason(rel_dir)
+        if tool_output:
+            return tool_output
         if self.vendored_copy(rel_dir) is not None:
             return VENDORED_COPY_REASON
         return None
 
-    def cased_vendor_reason(self, rel_dir: str) -> str | None:
-        """The `vendor` reason for another casing that holds package-manager output."""
+    def tool_output_reason(self, rel_dir: str) -> str | None:
+        """The reason a `vendor` or `env` directory earns by holding its tool's output."""
         lowered = PurePosixPath(rel_dir).name.lower()
-        if lowered not in _CASE_INSENSITIVE_SKIP_DIRS or lowered not in self.skip_dirs:
+        markers = _TOOL_OUTPUT_DIR_MARKERS.get(lowered)
+        if markers is None:
             return None
-        if rel_dir not in self._cased_vendor:
-            listing = next(self.tree.walk(rel_dir))
-            names = set(listing.regular_files) | set(listing.directories)
-            self._cased_vendor[rel_dir] = any(
-                marker in names for marker in _PACKAGE_MANAGER_VENDOR_MARKERS
+        if rel_dir not in self._tool_output:
+            self._tool_output[rel_dir] = any(
+                self._holds(rel_dir, marker) for marker in markers
             )
-        return f"skipped_dir:{lowered}" if self._cased_vendor[rel_dir] else None
+        return f"skipped_dir:{lowered}" if self._tool_output[rel_dir] else None
+
+    def _holds(self, rel_dir: str, marker: str) -> bool:
+        for name in marker.split("/"):
+            try:
+                listing = next(self.tree.walk(rel_dir))
+            except (OSError, ValueError):
+                return False
+            if name not in listing.regular_files and name not in listing.directories:
+                return False
+            rel_dir = f"{rel_dir}/{name}"
+        return True
 
     def vendored_copy(self, rel_dir: str) -> dict[str, object] | None:
         """Package identity of a vendored copy rooted at *rel_dir*, or None."""
@@ -840,9 +853,9 @@ class _SkipPolicy:
             return reason
         parts = PurePosixPath(rel_path).parts[:-1]
         for depth in range(1, len(parts) + 1):
-            cased = self.cased_vendor_reason("/".join(parts[:depth]))
-            if cased:
-                return cased
+            tool_output = self.tool_output_reason("/".join(parts[:depth]))
+            if tool_output:
+                return tool_output
             if self.vendored_copy("/".join(parts[:depth])) is not None:
                 return VENDORED_COPY_REASON
         return self._content_reason(rel_path, filename)
@@ -870,15 +883,6 @@ class _SkipPolicy:
         if rel_path in self._minified_by_content:
             return None
         return _max_included_skipped_bytes(self.args)
-
-
-def _should_skip_file(rel_path: str, filename: str) -> bool:
-    """Return True if the file is normally skipped.
-
-    Kept as the boolean compatibility helper for code_index; code_ingest uses
-    _skip_file_reason when it needs auditable skip details.
-    """
-    return _skip_file_reason(rel_path, filename) is not None
 
 
 def _pattern_matches(normalized: str, pattern: str) -> bool:
@@ -1050,7 +1054,7 @@ def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -
         directory = dominant.split(":", 1)[1]
         if directory in BUILD_ARTIFACT_DIRS:
             remedy = "--policy-preset package --include-minified"
-        elif directory in _CASE_INSENSITIVE_SKIP_DIRS:
+        elif directory in _TOOL_OUTPUT_DIR_MARKERS:
             # The reason folds the letter case; the glob must match the tree.
             remedy = f"--include-path '**/<{directory} dir, as cased in the tree>/**'"
         else:
@@ -1224,24 +1228,6 @@ def _source_hints(rel_path: str) -> dict[str, str]:
     return hints
 
 
-def _skipped_record(repo_path: str, rel_path: str, reason: str, *, kind: str = 'file') -> dict[str, object]:
-    filepath = os.path.join(repo_path, rel_path)
-    record: dict[str, object] = {
-        'path': rel_path,
-        'kind': kind,
-        'reason': reason,
-    }
-    if kind == 'file' and os.path.isfile(filepath):
-        try:
-            record['size'] = os.path.getsize(filepath)
-        except OSError:
-            record['size'] = 0
-        record['sha256'] = _sha256_file(filepath)
-        record['language'] = _detect_language(os.path.basename(filepath)) or ''
-        record.update(_source_hints(rel_path))
-    return record
-
-
 def _captured_skipped_record(
     rel_path: str,
     reason: str,
@@ -1287,37 +1273,6 @@ def _enumerate_rooted_skipped_dir(
                     "reason": reason,
                 }
             )
-    return records
-
-
-def _enumerate_skipped_dir(repo_path: str, rel_dir: str, dirname: str) -> list[dict[str, object]]:
-    """Walk inside a skipped directory and emit per-file skipped records.
-
-    The dir-level record alone hides large file counts (e.g. vendor/ with 378 PHP files
-    reads as a single skipped row). Returning per-file records makes the skipped surface
-    auditable from skipped-artifact manifests and code-coverage reports.
-    """
-    records: list[dict[str, object]] = []
-    dir_abs = os.path.join(repo_path, rel_dir)
-    if not os.path.isdir(dir_abs):
-        return records
-    reason = f'skipped_dir:{dirname}'
-    try:
-        for inner_dirpath, inner_dirnames, inner_filenames in os.walk(dir_abs):
-            # Don't follow symlinked dirs while accounting.
-            inner_dirnames[:] = [
-                d for d in inner_dirnames
-                if not os.path.islink(os.path.join(inner_dirpath, d))
-            ]
-            for fname in inner_filenames:
-                fpath = os.path.join(inner_dirpath, fname)
-                if not _is_regular_file(fpath):
-                    continue
-                inner_rel = os.path.relpath(fpath, repo_path)
-                records.append(_skipped_record(repo_path, inner_rel, reason))
-    except OSError:
-        # Best-effort accounting; partial enumeration is better than none.
-        pass
     return records
 
 
@@ -1521,27 +1476,10 @@ def _write_skipped_manifest(
     return str(path)
 
 
-def _is_regular_file(filepath: str) -> bool:
-    """Return True for regular repo files, excluding symlinks and special files."""
-    return os.path.isfile(filepath) and not os.path.islink(filepath)
-
-
 def _detect_language(filename: str, header: str | None = None) -> str | None:
     """Compatibility wrapper around the shared code-language classifier."""
 
     return detect_language(filename, header)
-
-
-def _sha256_file(filepath: str) -> str:
-    """Compute SHA-256 hash of a file."""
-    h = hashlib.sha256()
-    try:
-        with open(filepath, 'rb') as f:
-            for chunk in iter(lambda: f.read(8192), b''):
-                h.update(chunk)
-    except OSError:
-        return ''
-    return h.hexdigest()
 
 
 def _repo_key_for_path(repo_name: str, repo_path: str) -> str:

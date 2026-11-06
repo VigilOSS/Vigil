@@ -638,7 +638,6 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
         ),
     )
     monkeypatch.setattr(module, "_count_lines", lambda filepath: 1)
-    monkeypatch.setattr(module, "_sha256_file", lambda filepath: f"sha:{Path(filepath).name}")
     monkeypatch.setattr(module, "_read_header", lambda filepath: f"header:{Path(filepath).name}")
     monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
 
@@ -787,33 +786,6 @@ def test_code_ingest_commits_complete_empty_manifest(monkeypatch, tmp_path):
     ]
 
 
-def test_code_index_walk_repo_skips_named_pipes(tmp_path):
-    module = _load_code_index_module()
-
-    repo_path = tmp_path / "repo"
-    repo_path.mkdir()
-    (repo_path / "main.py").write_text("print('ok')\n", encoding="utf-8")
-    os.mkfifo(repo_path / "blocked.py")
-
-    files = module._walk_repo(str(repo_path))
-
-    assert files == [{"file_path": "main.py", "language": "python"}]
-
-
-def test_code_index_walk_repo_applies_the_ingest_directory_skip_rule(tmp_path):
-    module = _load_code_index_module()
-
-    repo_path = tmp_path / "repo"
-    (repo_path / "vendor" / "acme").mkdir(parents=True)
-    (repo_path / "vendor" / "acme" / "lib.php").write_text("<?php\n", encoding="utf-8")
-    (repo_path / "Build").mkdir()
-    (repo_path / "Build" / "Report.cs").write_text("class Report {}\n", encoding="utf-8")
-
-    files = module._walk_repo(str(repo_path))
-
-    assert files == [{"file_path": "Build/Report.cs", "language": "csharp"}]
-
-
 def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, tmp_path):
     module = _load_code_index_module()
     from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
@@ -947,8 +919,6 @@ def test_should_descend_skipped_dir_honors_nested_glob_includes():
     into nested 'src/vendor', not just a top-level 'vendor'. Regression for
     PR 14 Codex P2."""
     module = _load_code_ingest_module()
-
-    assert "vendor" in module.SKIP_DIRS, "vendor must remain a skipped dir for this test"
 
     args = SimpleNamespace(
         include_path=["**/vendor/foo.min.js"],

@@ -342,3 +342,31 @@ def test_the_build_reads_each_file_at_its_repository_path(tmp_path, monkeypatch,
         ("target_absent", "../publicx.php"),
     ]
     assert built == _includes(exact)
+
+
+def test_includes_into_an_excluded_directory_are_reported_once_per_directory(
+    tmp_path, monkeypatch, request, capsys
+) -> None:
+    """An include reaching a directory ingest left out is where first-party code
+    went missing; Composer's autoloader under `vendor/` is expected and stays quiet."""
+    _build(
+        tmp_path,
+        monkeypatch,
+        request,
+        {
+            "public/index.php": b"<?php\nrequire 'vendor/autoload.php';\nrequire 'env/production.php';\n"
+                                b"require __DIR__ . '/../dist/upload.php';\n",
+            "public/admin.php": b"<?php\nrequire 'vendor/autoload.php';\ninclude 'env/production.php';\n",
+        },
+        excluded_entries=[
+            {"path": "dist", "kind": "directory", "reason": "skipped_dir:dist"},
+            {"path": "env", "kind": "directory", "reason": "skipped_dir:env"},
+            {"path": "vendor", "kind": "directory", "reason": "skipped_dir:vendor"},
+        ],
+    )
+
+    reported = [line for line in capsys.readouterr().err.splitlines() if "--include-path" in line]
+    assert len(reported) == 2
+    assert [line for line in reported if "'env/**'" in line and " 2 " in line]
+    assert [line for line in reported if "'dist/**'" in line and " 1 " in line]
+    assert not [line for line in reported if "vendor" in line]

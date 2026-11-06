@@ -152,15 +152,6 @@ def test_package_preset_admits_dist_and_still_excludes_node_modules(tmp_path):
     assert excluded["node_modules/left-pad/index.js"] == "skipped_dir:node_modules"
 
 
-def test_preset_does_not_shift_the_module_level_policy_code_index_imports(tmp_path):
-    """`code_index` re-walks with SKIP_DIRS/_should_skip_file; its view is fixed."""
-    repo = _package_repo(tmp_path)
-    _admitted(repo, _args(repo, policy_preset="package"))
-
-    assert "dist" in code_ingest.SKIP_DIRS
-    assert code_ingest._should_skip_file("dist/bundle.js", "bundle.js") is True
-
-
 def test_summary_census_carries_the_denominator_and_per_reason_counts(capsys):
     records = [
         {"path": "dist", "kind": "directory", "reason": "skipped_dir:dist"},

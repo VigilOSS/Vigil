@@ -189,11 +189,17 @@ def test_archive_named_directories_need_a_package_marker(tmp_path, dirname):
 # --- vendor/ casing ----------------------------------------------------------
 
 
-@pytest.mark.parametrize("marker", ["autoload.php", "modules.txt", "composer/installed.json"])
-def test_a_differently_cased_vendor_dir_with_package_manager_contents_is_skipped(tmp_path, marker):
+@pytest.mark.parametrize("dirname", ["vendor", "Vendor"])
+@pytest.mark.parametrize("marker", [
+    "autoload.php", "modules.txt", "composer/installed.json", "bundle/ruby/3.3.0/gems.rb",
+    "vendor.json", "github.com/acme/log/log.go", "golang.org/x/net/html.go", "gopkg.in/yaml.v3/yaml.go",
+])
+def test_a_vendor_dir_with_package_manager_contents_is_skipped_in_any_case(
+    tmp_path, dirname, marker
+):
     repo = tmp_path / "repo"
-    _write(repo, f"Vendor/{marker}", "<?php return 1;\n")
-    _write(repo, "Vendor/acme/jwt/src/JWT.php", "<?php class JWT {}\n")
+    _write(repo, f"{dirname}/{marker}", "<?php return 1;\n")
+    _write(repo, f"{dirname}/acme/jwt/src/JWT.php", "<?php class JWT {}\n")
     _write(repo, "src/Coverage/Report.cs", "class Report {}\n")
     _write(repo, "src/Build/Step.cs", "class Step {}\n")
 
@@ -201,10 +207,73 @@ def test_a_differently_cased_vendor_dir_with_package_manager_contents_is_skipped
 
     assert _admitted(repo, args) == ["src/Build/Step.cs", "src/Coverage/Report.cs"]
     assert _excluded(repo, args) == {
-        f"Vendor/{marker}": "skipped_dir:vendor",
-        "Vendor/acme/jwt/src/JWT.php": "skipped_dir:vendor",
+        f"{dirname}/{marker}": "skipped_dir:vendor",
+        f"{dirname}/acme/jwt/src/JWT.php": "skipped_dir:vendor",
     }
     _assert_partition_verifies(repo, args)
+
+
+def test_a_vendor_or_env_dir_without_tool_output_is_first_party(tmp_path):
+    """Hand-copied libraries under `vendor/` and per-environment settings under
+    `env/` are code the application runs; only what Composer, Go, Bundler or a
+    Python virtualenv writes there is someone else's."""
+    repo = tmp_path / "repo"
+    _write(repo, "vendor/acme/billing/src/Charge.php", "<?php class Charge {}\n")
+    _write(repo, "env/production.php", "<?php return ['debug' => false];\n")
+    _write(repo, "config/Env/staging.php", "<?php return [];\n")
+    _write(repo, "env/bin/deploy.sh", "#!/bin/sh\n")
+    _write(repo, "tools/env/pyvenv.cfg", "home = /usr/bin\n")
+    _write(repo, "tools/env/lib/site.py", "import os\n")
+    _write(repo, "legacy/env/bin/activate", "# virtualenv\n")
+    _write(repo, "legacy/env/lib/site.py", "import os\n")
+    _write(repo, "win/env/Scripts/activate", "# virtualenv\n")
+    _write(repo, "win/env/Lib/site.py", "import os\n")
+    _write(repo, "src/Vendor/Bundle/Controller/AdminController.php", "<?php class AdminController {}\n")
+    _write(repo, "src/Vendor/Composer/Installer.php", "<?php class Installer {}\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == [
+        "config/Env/staging.php",
+        "env/bin/deploy.sh",
+        "env/production.php",
+        "src/Vendor/Bundle/Controller/AdminController.php",
+        "src/Vendor/Composer/Installer.php",
+        "vendor/acme/billing/src/Charge.php",
+    ]
+    assert _excluded(repo, args) == {
+        "legacy/env/bin/activate": "skipped_dir:env",
+        "legacy/env/lib/site.py": "skipped_dir:env",
+        "tools/env/lib/site.py": "skipped_dir:env",
+        "tools/env/pyvenv.cfg": "skipped_dir:env",
+        "win/env/Lib/site.py": "skipped_dir:env",
+        "win/env/Scripts/activate": "skipped_dir:env",
+    }
+    _assert_partition_verifies(repo, args)
+
+
+class _CaseFoldingTree:
+    """A tree whose lookups ignore case, as APFS and NTFS do, listing exact names."""
+
+    def __init__(self, listings: dict[str, list[str]]) -> None:
+        self.listings = listings
+
+    def walk(self, start: str = ""):
+        yield SimpleNamespace(
+            relative_dir=start, directories=self.listings.get(start, []),
+            regular_files=[], other_entries=[],
+        )
+
+    def stat_entry(self, raw: str):
+        return Path("/").stat()
+
+
+def test_a_tool_marker_matches_only_its_exact_name_on_a_case_folding_filesystem():
+    tree = _CaseFoldingTree({"src/Vendor": ["Bundle", "Composer"], "vendor": ["composer"]})
+    policy = code_ingest._SkipPolicy(tree, _args(Path("/")))
+
+    assert policy.tool_output_reason("src/Vendor") is None
+    assert policy.tool_output_reason("vendor") == "skipped_dir:vendor"
 
 
 def test_a_first_party_vendor_domain_directory_is_admitted(tmp_path):

@@ -20,11 +20,6 @@ from pathlib import Path, PurePosixPath
 from time import monotonic
 from typing import Any
 
-from assess.commands.code_ingest import (
-    _is_regular_file,
-    _named_skip_dir_reason,
-    _should_skip_file,
-)
 from assess.lib.client import AssessmentClient
 from assess.lib.code_snapshot import (
     MAX_JSON_ARTIFACT_BYTES,
@@ -65,7 +60,6 @@ from assess.lib.treesitter_index import (
     PhpIncludeResolver,
     StreamingSecurityScanner,
     _fallback_from_bytes,
-    language_for_file,
 )
 
 DEFAULT_MAX_TREE_SITTER_BYTES = 8 * 1024 * 1024
@@ -183,29 +177,6 @@ def _parser_jobs(value: str) -> int:
     if jobs < 1:
         raise argparse.ArgumentTypeError("must be a positive integer")
     return jobs
-
-
-def _walk_repo(repo_path: str) -> list[dict[str, str]]:
-    """Compatibility inventory helper; authored builds use the sealed manifest."""
-    files: list[dict[str, str]] = []
-    for dirpath, dirnames, filenames in os.walk(repo_path, followlinks=False):
-        dirnames[:] = [
-            name
-            for name in dirnames
-            if _named_skip_dir_reason(name) is None
-            and not os.path.islink(os.path.join(dirpath, name))
-        ]
-        for filename in filenames:
-            absolute = os.path.join(dirpath, filename)
-            if not _is_regular_file(absolute):
-                continue
-            relative = os.path.relpath(absolute, repo_path).replace(os.sep, "/")
-            if _should_skip_file(relative, filename):
-                continue
-            language = language_for_file(filename)
-            if language and language in SUPPORTED_LANGUAGES:
-                files.append({"file_path": relative, "language": language})
-    return files
 
 
 def _file_id(repo_id: int, repo_generation: int, rel_path: str) -> str:
@@ -1203,6 +1174,16 @@ def run(args) -> None:
             if isinstance(record, dict)
         ),
     )
+    # Composer's autoloader under vendor/ is required everywhere and expected.
+    reported_exclusions = {
+        str(record["path"]): str(record["reason"])
+        for record in source_manifest.get("excluded_entries", [])
+        if isinstance(record, dict)
+        and record.get("kind") == "directory"
+        and str(record.get("reason") or "").startswith("skipped_dir:")
+        and record.get("reason") != "skipped_dir:vendor"
+    }
+    excluded_includes: dict[str, int] = {}
     cancelled = threading.Event()
     processed = 0
     # The first failure by snapshot order, as a serial build would raise it.
@@ -1287,6 +1268,10 @@ def run(args) -> None:
                 _validate_analysis_artifact(
                     indexed, rel_path=rel_path, source_size=captured.size, loc=captured.loc,
                 )
+            for target in indexed.get("import_targets", []):
+                entry = target.get("excluded_entry")
+                if entry in reported_exclusions:
+                    excluded_includes[entry] = excluded_includes.get(entry, 0) + 1
             signal_counts = indexed["signal_counts"]
             indexed["total_entry_points"] = int(signal_counts["entry_points"])
             indexed["total_security_sinks"] = int(signal_counts["security_sinks"])
@@ -1402,6 +1387,13 @@ def run(args) -> None:
                 invalid_artifact_notice(
                     "code-index", [message for _position, message in sorted(degraded)]
                 ),
+                file=sys.stderr,
+            )
+        for entry, count in sorted(excluded_includes.items()):
+            print(
+                f"code-index: {count} PHP include(s) reach {entry}/, which code-ingest excluded "
+                f"as {reported_exclusions[entry]}; re-ingest with --include-path '{entry}/**' "
+                "to index it.",
                 file=sys.stderr,
             )
 
