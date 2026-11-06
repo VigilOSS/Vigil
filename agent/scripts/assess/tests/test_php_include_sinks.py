@@ -1,13 +1,11 @@
-"""PHP `file_inclusion` sinks come from the parse tree, tagged by argument shape.
+"""PHP `file_inclusion` sinks come from the parse tree and name their argument.
 
 An inclusion construct loads and runs the file it names, so every one is a
 sink -- a literal one included, because a hunter decides whether it matters,
 not the indexer. What a line merely spells like an inclusion (a comment, a
 string, an array key, a `$include` variable, `$this->include()` view
-rendering) is not one. The shape says what the argument is built from:
-`literal` (strings and `__DIR__`/`__FILE__` arithmetic), `constant`,
-`property` (rooted in an object or static property) or `dynamic`. The
-streaming fallback has no tree, so it reports `unclassified`.
+rendering) is not one. Whether the argument is static is the import target's
+status to say.
 """
 from __future__ import annotations
 
@@ -21,7 +19,7 @@ def _inclusions(indexed: dict) -> list[dict]:
     return [sink for sink in indexed["security_sinks"] if sink["kind"] == "file_inclusion"]
 
 
-def test_include_sinks_carry_their_argument_shape() -> None:
+def test_every_inclusion_construct_is_a_sink_naming_its_argument() -> None:
     source = b"""<?php
 require_once __DIR__ . '/bootstrap.php';
 include 'acme/header.php';
@@ -33,26 +31,24 @@ require self::TEMPLATES . 'page.php';
 """
     indexed = index_file("public/index.php", "php", source)
 
-    assert {sink["line"]: sink["argument_shape"] for sink in _inclusions(indexed)} == {
-        2: "literal",
-        3: "literal",
-        4: "constant",
-        5: "dynamic",
-        6: "property",
-        7: "literal",
-        8: "constant",
+    assert {sink["line"]: sink["argument"] for sink in _inclusions(indexed)} == {
+        2: "__DIR__ . '/bootstrap.php'",
+        3: "'acme/header.php'",
+        4: "ACME_ROOT . '/config.php'",
+        5: "$_GET['page'] . '.php'",
+        6: "$CFG->dirroot . '/lib/setup.php'",
+        7: "dirname(__FILE__) . '/footer.php'",
+        8: "self::TEMPLATES . 'page.php'",
     }
 
 
-def test_an_include_sink_names_its_argument_and_operands() -> None:
+def test_an_include_sink_names_its_argument() -> None:
     source = b"""<?php
 include $CFG->dirroot . '/theme/' . $theme . '/layout.php';
 """
     (sink,) = _inclusions(index_file("public/index.php", "php", source))
 
     assert sink["argument"] == "$CFG->dirroot . '/theme/' . $theme . '/layout.php'"
-    assert sink["dynamic_operands"] == ["$CFG->dirroot", "$theme"]
-    assert sink["argument_shape"] == "dynamic"
     assert sink["vuln_classes"] == ["lfi", "rfi"]
     assert sink["function"] == "<top-level>"
 
@@ -97,7 +93,7 @@ def test_php_non_inclusion_constructs_are_not_file_inclusion(statement: str) -> 
     assert _inclusions(indexed) == []
 
 
-def test_streaming_reports_include_sinks_unclassified() -> None:
+def test_streaming_reports_include_sinks_by_line() -> None:
     source = b"""<?php
 require_once __DIR__ . '/bootstrap.php';
 include $_GET['page'];
@@ -107,7 +103,4 @@ $this->include('acme/view');
         "public/index.php", "php", source, degradation_reason="test"
     )
 
-    assert [(sink["line"], sink["argument_shape"]) for sink in _inclusions(streamed)] == [
-        (2, "unclassified"),
-        (3, "unclassified"),
-    ]
+    assert [sink["line"] for sink in _inclusions(streamed)] == [2, 3]

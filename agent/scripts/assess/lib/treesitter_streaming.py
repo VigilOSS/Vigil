@@ -247,8 +247,6 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
         ("template_interpolation", r"\{\{(?!--)[^}\r\n]+\}\}", ["xss"]),
         ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
     ],
-    # A line cannot tell an inclusion's argument shape; these sinks carry
-    # `argument_shape: "unclassified"`.
     "php": [
         ("file_inclusion", _PHP_STREAM_INCLUDE, list(_PHP_FILE_INCLUSION_VULN_CLASSES)),
         ("mass_assignment", _PHP_STREAM_EXTRACT, ["mass-assignment"]),
@@ -720,17 +718,17 @@ class StreamingSecurityScanner:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
                     continue
-                sink = {
-                    "kind": kind,
-                    "line": self._line_number,
-                    "function": "<streaming>",
-                    "snippet": self._snippet(window, match.start(), match.end()),
-                    "vuln_classes": vuln_classes,
-                    "detection": "heuristic_streaming",
-                }
-                if kind == "file_inclusion":
-                    sink["argument_shape"] = "unclassified"
-                self._retain("security_sinks", sink)
+                self._retain(
+                    "security_sinks",
+                    {
+                        "kind": kind,
+                        "line": self._line_number,
+                        "function": "<streaming>",
+                        "snippet": self._snippet(window, match.start(), match.end()),
+                        "vuln_classes": vuln_classes,
+                        "detection": "heuristic_streaming",
+                    },
+                )
         for kind, pattern in source_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:

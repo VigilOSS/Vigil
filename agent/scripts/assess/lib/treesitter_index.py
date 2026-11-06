@@ -1943,26 +1943,8 @@ class _PhpPath(NamedTuple):
     text: str
 
 
-# The argument operands that are not literal text, by what they are rooted in.
-# The order is precedence: one dynamic operand makes the whole argument dynamic.
-_PHP_ARGUMENT_SHAPES = ("dynamic", "property", "constant")
-_PHP_PROPERTY_TYPES = frozenset({
-    "member_access_expression",
-    "nullsafe_member_access_expression",
-    "scoped_property_access_expression",
-})
-_PHP_ARGUMENT_OPERAND_LIMIT = 8
-
-
 class _PhpPathEvaluator:
-    """Evaluate one include argument, recording why a value is not static.
-
-    Besides the value, it records each operand the argument is written with
-    that is not literal text -- a constant, a property, anything else -- which
-    is the argument's shape. Operands reached by expanding a constant's own
-    definition are not part of how the argument is written, so only the value
-    and its staticness follow them.
-    """
+    """Evaluate one include argument, recording why a value is not static."""
 
     def __init__(
         self,
@@ -1975,18 +1957,6 @@ class _PhpPathEvaluator:
         self.file_name = file_name
         self.dynamic = False
         self.unresolved: list[str] = []
-        self.operands: list[tuple[str, str]] = []
-
-    def _not_static(self, node: Any, active: frozenset[str]) -> None:
-        self.dynamic = True
-        if not active:
-            kind = "property" if node.type in _PHP_PROPERTY_TYPES else "dynamic"
-            self.operands.append((kind, _php_call_text(node, self.source)))
-
-    @property
-    def shape(self) -> str:
-        kinds = {kind for kind, _text in self.operands}
-        return next((kind for kind in _PHP_ARGUMENT_SHAPES if kind in kinds), "literal")
 
     def value(self, node: Any, active: frozenset[str] = frozenset()) -> _PhpPath | None:
         node_type = node.type
@@ -1994,39 +1964,33 @@ class _PhpPathEvaluator:
             inner = node.named_children[0] if node.named_children else None
             return self.value(inner, active) if inner is not None else None
         if node_type in _PHP_STRING_TYPES:
-            return self._string(node, active)
+            return self._string(node)
         if node_type in {"name", "qualified_name"}:
             return self._constant(_node_text(node, self.source).lstrip("\\"), active)
         if node_type == "class_constant_access_expression":
-            text = _node_text(node, self.source)
-            self.unresolved.append(text)
-            if not active:
-                self.operands.append(("constant", text))
+            self.unresolved.append(_node_text(node, self.source))
             return None
         if node_type == "binary_expression":
             operator = node.child_by_field_name("operator")
             left = node.child_by_field_name("left")
             right = node.child_by_field_name("right")
             if operator is None or operator.type != "." or left is None or right is None:
-                self._not_static(node, active)
+                self.dynamic = True
                 return None
             return self._concat(self.value(left, active), self.value(right, active))
         if node_type == "function_call_expression":
             return self._call(node, active)
-        self._not_static(node, active)
+        self.dynamic = True
         return None
 
-    def _string(self, node: Any, active: frozenset[str]) -> _PhpPath | None:
+    def _string(self, node: Any) -> _PhpPath | None:
         parts: list[str] = []
-        static = True
         stack = list(reversed(node.named_children))
         while stack:
             child = stack.pop()
             if child.type not in _PHP_STRING_PART_TYPES:
-                # Every interpolated operand is recorded, so keep reading.
-                self._not_static(child, active)
-                static = False
-                continue
+                self.dynamic = True
+                return None
             if child.type == "escape_sequence":
                 text = _node_text(child, self.source)
                 parts.append(_PHP_STRING_ESCAPES.get(text, text))
@@ -2034,7 +1998,7 @@ class _PhpPathEvaluator:
                 stack.extend(reversed(child.named_children))
             elif child.type in {"string_content", "string_value", "nowdoc_string"}:
                 parts.append(_node_text(child, self.source))
-        return _PhpPath(False, 0, "".join(parts)) if static else None
+        return _PhpPath(False, 0, "".join(parts))
 
     def _constant(self, name: str, active: frozenset[str]) -> _PhpPath | None:
         magic = name.upper()
@@ -2044,8 +2008,6 @@ class _PhpPathEvaluator:
             return _PhpPath(True, 0, "/" + self.file_name)
         if name in _PHP_PATH_CONSTANTS:
             return _PhpPath(False, 0, _PHP_PATH_CONSTANTS[name])
-        if not active:
-            self.operands.append(("constant", name))
         definitions = self.constants.get(name, [])
         if name not in active and definitions:
             values = {self.value(definition, active | {name}) for definition in definitions}
@@ -2086,7 +2048,7 @@ class _PhpPathEvaluator:
             if len(values) == 2:
                 text = _node_text(values[1], self.source).replace("_", "")
                 if values[1].type != "integer" or not text.isdigit():
-                    self._not_static(node, active)
+                    self.dynamic = True
                     return None
                 # A path never has more levels than this; the bound only keeps a
                 # nonsense literal from costing a loop of its own size.
@@ -2095,7 +2057,7 @@ class _PhpPathEvaluator:
             for _level in range(levels):
                 path = _php_dirname(path) if path is not None else None
             return path
-        self._not_static(node, active)
+        self.dynamic = True
         return None
 
 
@@ -2175,8 +2137,6 @@ class _PhpInclude(NamedTuple):
 
     site: _PhpIncludeSite
     target: dict[str, Any]
-    shape: str
-    operands: list[str]
 
 
 def _php_include(
@@ -2186,7 +2146,7 @@ def _php_include(
     file_path: str,
 ) -> _PhpInclude:
     """Evaluate one inclusion: the `import_targets` record, before snapshot
-    resolution, and the argument shape its sink carries."""
+    resolution, whose raw argument its sink carries."""
     record: dict[str, Any] = {
         "raw": _php_call_text(site.argument, source) if site.argument is not None else "",
         "resolved": "",
@@ -2204,16 +2164,7 @@ def _php_include(
         record.update(_php_static_include_target(path, file_path))
     else:
         record["status"] = "dynamic"
-    operands: list[str] = []
-    for _kind, text in evaluator.operands:
-        if text not in operands:
-            operands.append(text)
-    return _PhpInclude(
-        site,
-        record,
-        evaluator.shape if site.argument is not None else "dynamic",
-        operands[:_PHP_ARGUMENT_OPERAND_LIMIT],
-    )
+    return _PhpInclude(site, record)
 
 
 def _php_static_include_target(path: _PhpPath, file_path: str) -> dict[str, str]:
@@ -2256,8 +2207,8 @@ def _php_include_sinks(
 ) -> list[dict[str, Any]]:
     """A `file_inclusion` sink per inclusion construct, read off the parse tree.
 
-    Each is attributed to its innermost callable or `<top-level>` and tagged
-    with its argument shape. A literal inclusion stays a sink: whether a fixed
+    Each is attributed to its innermost callable or `<top-level>` and names
+    its argument. A literal inclusion stays a sink: whether a fixed
     path matters is the reviewer's call. What a line only spells like an
     inclusion -- a comment, a string, an array key, a `$include` variable,
     `$this->include()` -- has no inclusion node, so it is not one.
@@ -2273,9 +2224,7 @@ def _php_include_sinks(
             "function": caller["name"] if caller is not None else "<top-level>",
             "snippet": _snippet(source_lines[line_index]) if line_index < len(source_lines) else "",
             "vuln_classes": list(_PHP_FILE_INCLUSION_VULN_CLASSES),
-            "argument_shape": include.shape,
             "argument": include.target["raw"],
-            "dynamic_operands": include.operands,
         })
     return sinks
 
