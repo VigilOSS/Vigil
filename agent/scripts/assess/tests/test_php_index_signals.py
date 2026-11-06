@@ -25,7 +25,7 @@ class FilesController extends Controller {
     assert indexed["analysis_status"] == "complete"
     assert any(item["name"] == "show" and item["kind"] == "laravel_action"
                for item in indexed["entry_points"])
-    assert not any(item["kind"] == "sql_exec" for item in indexed["security_sinks"])
+    assert any(item["kind"] == "file_path" for item in indexed["security_sinks"])
 
 
 def test_php_private_controller_helper_is_not_http_entry() -> None:
@@ -228,6 +228,7 @@ class AcmeImport {
 
     assert {(item["line"], item["kind"]) for item in indexed["security_sinks"]} == {
         (4, "sql_exec"),
+        (4, "process_exec"),
         (5, "process_exec"),
         (7, "deserialization"),
     }

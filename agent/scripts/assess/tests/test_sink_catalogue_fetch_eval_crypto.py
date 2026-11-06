@@ -811,7 +811,7 @@ CASES: list[tuple[str, str, str, str]] = [
     ("eval_exec", "ruby", r"\bpublic_send\s*\(", "public_send(attr)"),
     # -- eval_exec: php (2) --
     ("eval_exec", "php", r"\beval\s*\(", "eval($code);"),
-    ("eval_exec", "php", r"\bassert\s*\(\s*(?:['\"]|<<<|\$\w+\s*[,)])", "assert($code);"),
+    ("eval_exec", "php", r"\bassert\s*\(", "assert($code);"),
     # -- eval_exec: csharp (4) --
     ("eval_exec", "csharp", r"\bAssembly\.Load\w*\s*\(", "var assembly = Assembly.Load(raw);"),
     ("eval_exec", "csharp", r"\bActivator\.CreateInstance\s*\(", "var instance = Activator.CreateInstance(type);"),
@@ -843,7 +843,7 @@ CASES: list[tuple[str, str, str, str]] = [
     ("crypto", "php", r"\bopenssl_encrypt\s*\(", "openssl_encrypt($data,"),
     ("crypto", "php", r"\bmd5\s*\(", "return md5($data);"),
     ("crypto", "php", r"\bsha1\s*\(", "return sha1($data);"),
-    ("crypto", "php", r"\bhash\s*\(\s*(?:['\"](?:md2|md4|md5|sha1|crc32b?|adler32|fnv1a?(?:32|64)|joaat)['\"]|\$)", "return hash('md5', $data);"),
+    ("crypto", "php", r"\bhash\s*\(", "return hash('md5', $data);"),
     ("crypto", "php", r"\bmcrypt_encrypt\s*\(", "mcrypt_encrypt(MCRYPT_DES, $key, $data, MCRYPT_MODE_ECB)"),
     # -- crypto: csharp (6) --
     ("crypto", "csharp", r"\bMD5\b", "var hasher = MD5.Create();"),
@@ -1037,3 +1037,20 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
     assert len(catalogue) == 107
     assert len(tested) == 94
     assert len(excluded) == 13
+
+
+def test_the_streaming_fallback_reads_javascript_function_by_its_case() -> None:
+    def eval_lines(source: bytes) -> list[int]:
+        streamed = treesitter_index._fallback_from_bytes(
+            "dist/acme.min.js", "javascript", source, degradation_reason="test"
+        )
+        return [sink["line"] for sink in streamed["security_sinks"] if sink["kind"] == "eval_exec"]
+
+    minified = (
+        b"!function(e){var t=function(n){return n};e.a=function(){return t(1)}}(window);\n"
+        b"var g=function(a){return function(b){return a+b}};\n"
+        b"(function(){})();\n"
+    )
+
+    assert eval_lines(minified) == []
+    assert eval_lines(b'var render = new Function("acme", "return acme");\n') == [1]

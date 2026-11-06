@@ -113,16 +113,6 @@ SinkPattern = dict[str, Any]  # {"kind", "patterns": {lang: [regex_str,...]}, "v
 # keyword off a line under the same kind and classes.
 _PHP_FILE_INCLUSION_VULN_CLASSES = ("lfi", "rfi")
 
-# Receivers whose `->exec(` or `->query(` runs no SQL, matched case-blind
-# against the receiver's last name: a scheduler's shell command, a Redis
-# transaction or pipeline, a job queue, PrestaShop's hook dispatcher, an
-# XPath or API-client query, and the query string of a request or URL.
-_PHP_NON_SQL_RECEIVERS = (
-    r"schedule|pipeline|pipe|multi|queue|hookmanager|\w*redis\w*|\w*xpath|xp"
-    r"|\w*client|(?:base)?request|req|ur[il]|urlgenerator|\w*builder"
-)
-# A CakePHP console test case runs a console command through `$this->exec()`.
-_PHP_CAKE_CONSOLE_TEST_TRAIT = "Cake\\Console\\TestSuite\\ConsoleIntegrationTestTrait"
 # The `extract()` builtin as a line can show it: not a method, a static call,
 # a variable holding a callable, or a declaration of a function so named.
 _PHP_STREAM_EXTRACT = r"(?<![\w$>:])(?<!function )extract\s*\("
@@ -178,15 +168,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "ruby": [r"\b\w+\.execute\s*\(", r"\bActiveRecord.*\.find_by_sql\s*\(",
                      r"\b\w+\.where\s*\(.*\braw\b"],
             # The raw-expression escape hatches of Laravel's query builder and
-            # `DB` facade, a handle held in a property (`$this->db->query(`),
-            # and WordPress's `$wpdb` readers. A `->exec(`/`->query(` whose
-            # receiver is in `_PHP_NON_SQL_RECEIVERS` is not a database call;
-            # both readers drop it.
-            "php": [r"\bmysqli_query\s*\(", r"\$\w+->query\s*\(", r"\bPDO::query\s*\(",
-                    r"\$\w+->prepare\s*\(", r"->exec\s*\(",
+            # `DB` facade, and WordPress's `$wpdb` readers.
+            "php": [r"\bmysqli_query\s*\(", r"->\s*(?:exec|query)\s*\(", r"\bPDO::query\s*\(",
+                    r"\$\w+->prepare\s*\(",
                     r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(",
                     r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(",
-                    r"\$\w+(?:->\w+)+->query\s*\(",
                     r"\$wpdb->(?:get_results|get_var|get_row|get_col)\s*\("],
             "csharp": [r"\bnew\s+SqlCommand\s*\(", r"\bnew\s+OleDbCommand\s*\(",
                        r"\.ExecuteReader\s*\(", r"\.ExecuteNonQuery\s*\(",
@@ -216,7 +202,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             # so the anchored form could only ever match `a\`cmd\``.
             "ruby": [r"\bsystem\s*\(", r"\bexec\s*\(", r"`[^`]*`",
                      r"\bOpen3\.\w+\s*\(", r"\bIO\.popen\s*\("],
-            "php": [r"(?<!->|::)\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
+            "php": [r"\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
                     r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\(",
                     r"\bpcntl_exec\s*\("],
             "csharp": [r"\bProcess\.Start\s*\(", r"\bnew\s+ProcessStartInfo\s*\("],
@@ -304,9 +290,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             ],
             "ruby": [r"\beval\s*\(", r"\bclass_eval\s*\(", r"\binstance_eval\s*\(",
                      r"\bsend\s*\(", r"\bpublic_send\s*\("],
-            # `assert()` evaluates its argument only when that is a string,
-            # which a variable can hold; a boolean condition is a check.
-            "php": [r"\beval\s*\(", r"\bassert\s*\(\s*(?:['\"]|<<<|\$\w+\s*[,)])", r"\bpreg_replace\s*\(.*/e",
+            "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
                     r"\bcreate_function\s*\("],
             "csharp": [r"\bAssembly\.Load\w*\s*\(", r"\bActivator\.CreateInstance\s*\(",
                        r"\bType\.GetType\s*\(", r"\bCSharpCodeProvider\b"],
@@ -325,12 +309,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "go": [r"\bcrypto/\w+\b", r"\baes\.NewCipher\s*\(", r"\bsha256\.New\s*\(",
                    r"\bhmac\.New\s*\("],
             "ruby": [r"\bOpenSSL::Cipher\b", r"\bDigest::\w+\b", r"\bOpenSSL::HMAC\b"],
-            # The family is misuse, so `hash()` is a sink when its algorithm is
-            # a weak one or chosen at run time; `hash('sha256', ...)` is not.
             # `mcrypt_encrypt` is the unmaintained cipher API itself.
             "php": [r"\bopenssl_encrypt\s*\(", r"\bmd5\s*\(", r"\bsha1\s*\(",
-                    r"\bhash\s*\(\s*(?:['\"](?:md2|md4|md5|sha1|crc32b?|adler32|fnv1a?(?:32|64)|joaat)['\"]|\$)",
-                    r"\bmcrypt_encrypt\s*\("],
+                    r"\bhash\s*\(", r"\bmcrypt_encrypt\s*\("],
             "csharp": [r"\bMD5\b", r"\bSHA1\b", r"\bDESCryptoServiceProvider\b",
                        r"\bTripleDES\b", r"\bRijndaelManaged\b", r"\bnew\s+Random\s*\("],
         },
@@ -345,7 +326,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "javascript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
             "typescript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
             "go": [r"\bjwt\.\w+\s*\(", r"\bsession\.Get\s*\(", r"\bbcrypt\.\w+\s*\("],
-            "ruby": [r"\bauthenticate_user\b", r"\bdevise\b", r"\bcurrent_user\b",
+            "ruby": [r"\bauthenticate_user\b", r"\b[Dd]evise\b", r"\bcurrent_user\b",
                      r"\bsession\s*\["],
             # No leading `\b`: it demands a word character to the LEFT of the
             # `$`, which valid PHP never writes before a variable sigil, so the
@@ -373,7 +354,7 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "kind": "redirect",
         "vuln_classes": ["open-redirect"],
         "patterns": {
-            "java": [r"\bsendRedirect\s*\(", r'\bsetHeader\s*\(\s*"Location"'],
+            "java": [r"\bsendRedirect\s*\(", r'\bsetHeader\s*\(\s*"(?i:Location)"'],
             "python": [r"\bredirect\s*\(", r"\bHttpResponseRedirect\s*\("],
             "javascript": [r"\bres\.redirect\s*\("],
             "typescript": [r"\bres\.redirect\s*\("],

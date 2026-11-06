@@ -32,9 +32,7 @@ from assess.lib.treesitter_catalogues import (
     _GLOBAL_ENTRY_LINE_PATTERNS,
     _IMPORT_QUERIES,
     _PHP_CLI_ENTRY_EVIDENCE,
-    _PHP_CAKE_CONSOLE_TEST_TRAIT,
     _PHP_FILE_INCLUSION_VULN_CLASSES,
-    _PHP_NON_SQL_RECEIVERS,
     _PHP_SERVER_ARGV,
     _SINK_DEFINITIONS,
 )
@@ -477,7 +475,7 @@ def _whole_tree_queries(language: str, lang_obj: Any) -> tuple[str, ...]:
         queries.append(_CPP_DECLARATION_QUERY)
     elif family == "php":
         queries.extend((
-            _PHP_INCLUDE_QUERY, _PHP_AST_SINK_QUERY, _PHP_CALL_QUERY, _PHP_SQL_CALL_QUERY,
+            _PHP_INCLUDE_QUERY, _PHP_AST_SINK_QUERY, _PHP_CALL_QUERY,
         ))
     queries.extend(
         _node_type_query(lang_obj, types)
@@ -4454,83 +4452,14 @@ def _go_fetch_bindings(lines: list[str], http_aliases: set[str]) -> set[str]:
     return bindings
 
 
-_PHP_SQL_CALL_QUERY = "\n".join((
-    "(member_call_expression) @call",
-    "(nullsafe_member_call_expression) @call",
-))
-_PHP_SQL_METHODS = frozenset({"exec", "query"})
-_PHP_NON_SQL_RECEIVER = re.compile(_PHP_NON_SQL_RECEIVERS, re.IGNORECASE)
-_PHP_NAMED_MEMBER_TYPES = frozenset({
-    "member_access_expression", "nullsafe_member_access_expression",
-    "member_call_expression", "nullsafe_member_call_expression",
-    "scoped_call_expression", "scoped_property_access_expression",
-})
-
-
-def _php_receiver_name(node: Any, source: bytes) -> str:
-    """The last name of a call's receiver: `$db`, `$this->db`, `$redis->multi()`."""
-    while node.type == "parenthesized_expression" and node.named_children:
-        node = node.named_children[0]
-    if node.type == "variable_name":
-        return _node_text(node, source).lstrip("$")
-    if node.type in _PHP_NAMED_MEMBER_TYPES:
-        name = node.child_by_field_name("name")
-        return _node_text(name, source).lstrip("$") if name is not None else ""
-    if node.type == "function_call_expression":
-        function = node.child_by_field_name("function")
-        return _node_text(function, source).rsplit("\\", 1)[-1] if function is not None else ""
-    return ""
-
-
-def _php_sql_calls(
-    tree: Any, source: bytes, import_targets: list[dict[str, Any]]
-) -> dict[tuple[int, str], bool]:
-    """Whether each line's `->exec(`/`->query(` calls include a database call.
-
-    Keyed by the 0-based line of the method name and the lowercased method.
-    A receiver in `_PHP_NON_SQL_RECEIVERS` -- a scheduler, a Redis pipeline,
-    an XPath query -- is not one, and neither is `$this->exec()` in a file
-    that imports CakePHP's console test trait, which runs a console command.
-    A line the sink table matches with no such call holds the text only.
-    """
-    parser = _get_parser("php")
-    if parser is None:
-        return {}
-    console_test = any(
-        target.get("qualified_name") == _PHP_CAKE_CONSOLE_TEST_TRAIT for target in import_targets
-    )
-    calls: dict[tuple[int, str], bool] = {}
-    for call in _ts_query_captures(parser.language, _PHP_SQL_CALL_QUERY, tree.root_node).get("call", []):
-        method = call.child_by_field_name("name")
-        receiver = call.child_by_field_name("object")
-        if method is None or receiver is None or method.type != "name":
-            continue
-        method_name = _node_text(method, source).lower()
-        if method_name not in _PHP_SQL_METHODS:
-            continue
-        receiver_name = _php_receiver_name(receiver, source)
-        database = _PHP_NON_SQL_RECEIVER.fullmatch(receiver_name) is None and not (
-            console_test and method_name == "exec" and receiver_name == "this"
-        )
-        key = (method.start_point[0], method_name)
-        calls[key] = calls.get(key, False) or database
-    return calls
-
-
 def _detect_sinks(
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
     file_scope_lines: list[tuple[int, str]],
-    php_sql_calls: dict[tuple[int, str], bool] | None = None,
 ) -> list[dict[str, Any]]:
-    """Detect security-sensitive API calls in callable bodies and file scope.
-
-    *php_sql_calls* is `_php_sql_calls` for a PHP file: a `->exec(` or
-    `->query(` row of the sink table counts only on a line that holds a
-    database call of that method.
-    """
+    """Detect security-sensitive API calls in callable bodies and file scope."""
     sinks: list[dict[str, Any]] = []
     java_class_receivers: dict[int, dict[str, str]] = {}
     java_class_for_line: dict[int, dict[str, Any]] = {}
@@ -4637,17 +4566,6 @@ def _detect_sinks(
                             match for match in matches
                             if match.group().split(".", 1)[0] == "DefaultClient"
                             or match.group().split(".", 1)[0] in go_fetch_receivers
-                        )
-                    elif (
-                        php_sql_calls is not None
-                        and sink_def["kind"] == "sql_exec"
-                        and (method := next(
-                            (name for name in _PHP_SQL_METHODS if f"->{name}" in pat), None
-                        )) is not None
-                    ):
-                        matches = (
-                            match for match in matches
-                            if php_sql_calls.get((line_idx, method), False)
                         )
                     if next(matches, None) is not None:
                         identity = (sink_def["kind"], func["name"], line_idx)
@@ -5744,8 +5662,7 @@ def index_file(
                 _executable_file_scope_lines(tree, functions, effective_lang, source, set()),
             ))
         sinks = _detect_sinks(
-            functions, classes, effective_lang, source_lines, file_scope.scanned,
-            _php_sql_calls(tree, source, import_targets) if effective_lang == "php" else None,
+            functions, classes, effective_lang, source_lines, file_scope.scanned
         )
         if effective_lang == "php":
             locator = _PhpCallableLocator(functions)

@@ -81,15 +81,31 @@ def _kinds(statement: str, *, prelude: str = "") -> set[str]:
         pytest.param(
             "forward_static_call_array([$cls, $fn], [$id]);", "dynamic_invocation", id="forward-static-call-array"
         ),
-        pytest.param("assert($data);", "eval_exec", id="assert-variable"),
-        pytest.param("assert('$id > 0');", "eval_exec", id="assert-string"),
-        pytest.param("hash('md5', $data);", "crypto", id="hash-weak"),
-        pytest.param("hash($fn, $data);", "crypto", id="hash-chosen-algorithm"),
         pytest.param("mcrypt_encrypt(MCRYPT_DES, $id, $data, 'ecb');", "crypto", id="mcrypt"),
     ],
 )
 def test_php_sink_catalogue_gap_is_detected(statement: str, kind: str) -> None:
     assert kind in _kinds(statement)
+
+
+@pytest.mark.parametrize(
+    ("statement", "kind"),
+    [
+        pytest.param("assert($data);", "eval_exec", id="assert-variable"),
+        pytest.param("assert('$id > 0');", "eval_exec", id="assert-string"),
+        pytest.param("assert($_POST['c']);", "eval_exec", id="assert-request"),
+        pytest.param("@assert(base64_decode($_POST['c']));", "eval_exec", id="assert-decoded"),
+        pytest.param("assert($o->code);", "eval_exec", id="assert-property"),
+        pytest.param("assert($id > 0, 'positive');", "eval_exec", id="assert-condition"),
+        pytest.param("hash('md5', $data);", "crypto", id="hash-weak"),
+        pytest.param("hash($fn, $data);", "crypto", id="hash-chosen-algorithm"),
+        pytest.param("hash('sha256', $pw);", "crypto", id="hash-strong"),
+        pytest.param("hash(self::ALGO, $pw);", "crypto", id="hash-constant"),
+    ],
+)
+def test_every_assert_and_hash_call_is_a_sink_on_both_readers(statement: str, kind: str) -> None:
+    assert kind in _kinds(statement)
+    assert kind in _streamed_kinds(statement)
 
 
 def test_a_guzzle_client_built_by_its_imported_name_is_a_fetch() -> None:
@@ -119,10 +135,7 @@ def test_a_guzzle_client_built_by_its_imported_name_is_a_fetch() -> None:
         pytest.param("$fn($id);", "eval_exec", "", id="variable-function-evaluates-nothing"),
         pytest.param("$o = new $cls($id);", "eval_exec", "", id="variable-class-evaluates-nothing"),
         pytest.param("call_user_func($fn, $id);", "eval_exec", "", id="callback-evaluates-nothing"),
-        pytest.param("assert($id > 0, 'positive');", "eval_exec", "", id="assert-condition"),
-        pytest.param("hash('sha256', $data);", "crypto", "", id="hash-strong"),
         pytest.param("$this->query->get('id');", "sql_exec", "", id="query-bag"),
-        pytest.param("$this->request->query('id');", "sql_exec", "", id="request-query"),
         pytest.param("$file->copy($path);", "file_path", "", id="copy-method"),
         pytest.param("$q->where('id', $id);", "sql_exec", "", id="bound-where"),
     ],
@@ -178,52 +191,60 @@ def _streamed_kinds(statement: str, *, prelude: str = "") -> set[str]:
 @pytest.mark.parametrize(
     "statement",
     [
-        pytest.param("$schedule->exec('rsync -a /srv/acme /backup');", id="scheduler"),
-        pytest.param("$this->schedule->exec('echo acme')->everyMinute();", id="scheduler-property"),
-        pytest.param("$redis->multi()->exec();", id="redis-transaction"),
-        pytest.param("$pipeline->exec();", id="redis-pipeline"),
-        pytest.param("$multi->exec();", id="redis-multi"),
-        pytest.param("$this->redisClient->exec();", id="redis-client"),
-        pytest.param("$queue->exec();", id="queue"),
-        pytest.param("$this->hookManager->exec('actionAcmeShipping', [$id]);", id="hook-manager"),
-        pytest.param("$xpath->query('//item');", id="xpath"),
-        pytest.param("$this->xpath->query('//item');", id="xpath-property"),
-        pytest.param("$this->domXPath->query($id);", id="domxpath-property"),
-        pytest.param("$this->client->query('{ invoices { id } }');", id="graphql-client"),
-        pytest.param("$response->baseRequest->query('id');", id="request-property"),
-        pytest.param("$this->urlGenerator->query('acme/invoices');", id="url-generator"),
-    ],
-)
-def test_a_non_database_receiver_is_not_a_sql_sink(statement: str) -> None:
-    assert "sql_exec" not in _kinds(statement)
-    assert "sql_exec" not in _streamed_kinds(statement)
-
-
-@pytest.mark.parametrize(
-    "statement",
-    [
         pytest.param("$pdo->exec($id);", id="pdo"),
         pytest.param("$this->connection->exec($id);", id="connection-property"),
         pytest.param("$db->getPdo()->exec($id);", id="pdo-getter"),
         pytest.param("static::$drv->exec($id);", id="static-driver"),
         pytest.param("$this->exec($id);", id="pdo-subclass"),
-        pytest.param("$mysqli->query($id);", id="mysqli"),
-        pytest.param("$this->db->query($id);", id="db-property"),
+        pytest.param("$schedule->exec($cmd);", id="scheduler"),
+        pytest.param("$this->schedule->exec('echo acme')->everyMinute();", id="scheduler-property"),
+        pytest.param("$sshClient->exec($cmd);", id="ssh-client"),
+        pytest.param("$redis->multi()->exec();", id="redis-transaction"),
+        pytest.param("$this->redis->exec();", id="redis-property"),
+        pytest.param("$pipeline->exec();", id="redis-pipeline"),
+        pytest.param("$multi->exec();", id="redis-multi"),
+        pytest.param("$this->redisClient->exec();", id="redis-client"),
+        pytest.param("$queue->exec();", id="queue"),
+        pytest.param("$this->hookManager->exec('actionAcmeShipping', [$id]);", id="hook-manager"),
+        pytest.param("$pdo -> exec($sql);", id="spaced-arrow"),
     ],
 )
-def test_a_database_receiver_is_still_a_sql_sink(statement: str) -> None:
+def test_every_exec_method_is_a_sql_and_process_sink(statement: str) -> None:
+    assert {"sql_exec", "process_exec"} <= _kinds(statement)
+    assert {"sql_exec", "process_exec"} <= _streamed_kinds(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("$mysqli->query($id);", id="mysqli"),
+        pytest.param("$this->db->query($id);", id="db-property"),
+        pytest.param('$dbClient->query("SELECT * FROM acme WHERE id = $id");', id="db-client"),
+        pytest.param("$queryBuilder->query($sql);", id="query-builder"),
+        pytest.param("$xpath->query('//item');", id="xpath"),
+        pytest.param("$this->xpath->query('//item');", id="xpath-property"),
+        pytest.param("$this->domXPath->query($id);", id="domxpath-property"),
+        pytest.param("$this->client->query('{ invoices { id } }');", id="graphql-client"),
+        pytest.param("$this->request->query('id');", id="request"),
+        pytest.param("$response->baseRequest->query('id');", id="request-property"),
+        pytest.param("$this->urlGenerator->query('acme/invoices');", id="url-generator"),
+        pytest.param("$this->getConnection()->query($sql);", id="connection-getter"),
+        pytest.param("DB::connection()->getPdo()->query($sql);", id="facade-pdo"),
+        pytest.param("(new PDO($dsn))->query($sql);", id="new-pdo"),
+        pytest.param("$pdo?->query($sql);", id="nullsafe"),
+        pytest.param("$this?->db?->query($sql);", id="nullsafe-property"),
+        pytest.param("$pdo -> query($sql);", id="spaced-arrow"),
+    ],
+)
+def test_every_query_method_is_a_sql_sink(statement: str) -> None:
     assert "sql_exec" in _kinds(statement)
     assert "sql_exec" in _streamed_kinds(statement)
 
 
-def test_a_cakephp_console_test_runs_commands_not_sql() -> None:
+def test_a_cakephp_console_test_exec_is_a_sql_and_process_sink() -> None:
     prelude = "use Cake\\Console\\TestSuite\\ConsoleIntegrationTestTrait;\n"
 
-    assert "sql_exec" not in _kinds("$this->exec('cache clear_all');", prelude=prelude)
-
-
-def test_a_sql_receiver_named_in_a_string_is_not_a_call() -> None:
-    assert "sql_exec" not in _kinds("$help = 'call $pdo->exec($sql) to run it';")
+    assert {"sql_exec", "process_exec"} <= _kinds("$this->exec('cache clear_all');", prelude=prelude)
 
 
 @pytest.mark.parametrize(

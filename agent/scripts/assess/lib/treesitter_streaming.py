@@ -9,7 +9,6 @@ from assess.lib.treesitter_catalogues import (
     _ENTRY_LINE_PATTERNS,
     _PHP_CLI_INPUT_PATTERNS,
     _PHP_FILE_INCLUSION_VULN_CLASSES,
-    _PHP_NON_SQL_RECEIVERS,
     _PHP_SERVER_ARGV,
     _PHP_STREAM_EXTRACT,
     _SINK_DEFINITIONS,
@@ -322,24 +321,8 @@ _STREAM_EXTRA_ENTRY_PATTERNS: dict[str, list[tuple[str, str]]] = {
 }
 
 
-def _byte_pattern(pattern: str) -> re.Pattern[bytes]:
-    return re.compile(pattern.encode("ascii"), re.IGNORECASE)
-
-
-# The receiver a line's `->exec(`/`->query(` sink match was called on: its
-# last name, a variable or a property or the method a call chain ends with.
-_PHP_STREAM_SQL_RECEIVER = re.compile(
-    rb"\$?(\w+)\s*(?:\([^()]*\))?\s*\??->\s*(?:exec|query)\s*\($", re.IGNORECASE
-)
-_PHP_STREAM_NON_SQL_RECEIVER = re.compile(_PHP_NON_SQL_RECEIVERS.encode("ascii"), re.IGNORECASE)
-_PHP_STREAM_RECEIVER_BYTES = 256
-
-
-def _php_stream_non_sql_receiver(window: bytes, match_end: int) -> bool:
-    receiver = _PHP_STREAM_SQL_RECEIVER.search(
-        window, max(0, match_end - _PHP_STREAM_RECEIVER_BYTES), match_end
-    )
-    return receiver is not None and _PHP_STREAM_NON_SQL_RECEIVER.fullmatch(receiver.group(1)) is not None
+def _byte_pattern(pattern: str, case_blind: bool = True) -> re.Pattern[bytes]:
+    return re.compile(pattern.encode("ascii"), re.IGNORECASE if case_blind else 0)
 
 
 # PHP's namespace `use` statement, read statement by statement where no parse
@@ -513,12 +496,14 @@ class StreamingSecurityScanner:
         self,
     ) -> list[tuple[str, re.Pattern[bytes], list[str]]]:
         patterns: list[tuple[str, re.Pattern[bytes], list[str]]] = []
+        # Only PHP names its functions case-blind; JavaScript's `Function(`
+        # is not every `function(`.
         for definition in _SINK_DEFINITIONS:
             for pattern in definition["patterns"].get(self.language, []):
                 patterns.append(
                     (
                         str(definition["kind"]),
-                        _byte_pattern(pattern),
+                        _byte_pattern(pattern, self.language == "php"),
                         list(definition["vuln_classes"]),
                     )
                 )
@@ -718,12 +703,6 @@ class StreamingSecurityScanner:
         for kind, pattern, vuln_classes in sink_patterns:
             for match in pattern.finditer(window):
                 if match.start() >= accept_before:
-                    continue
-                if (
-                    kind == "sql_exec"
-                    and self.language == "php"
-                    and _php_stream_non_sql_receiver(window, match.end())
-                ):
                     continue
                 sink = {
                     "kind": kind,

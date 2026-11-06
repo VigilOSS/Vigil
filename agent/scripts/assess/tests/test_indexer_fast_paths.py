@@ -312,10 +312,10 @@ def test_one_shared_pass_answers_each_query_as_its_own_cursor_would() -> None:
             for name, nodes in captures.items()
         }
 
-    assert len(queries) == 9
+    assert len(queries) == 8
     for query in queries:
         assert spans(shared.captures(parser.language, query, tree.root_node)) == spans(alone[query])
-    assert sum(len(nodes) for captures in alone.values() for nodes in captures.values()) == 26
+    assert sum(len(nodes) for captures in alone.values() for nodes in captures.values()) == 25
     # Another tree, or a query outside the family, is not this pass's to answer.
     other = parser.parse(ACME_PHP_CONTROLLER)
     assert shared.captures(parser.language, queries[0], other.root_node) is None

@@ -563,7 +563,7 @@ CASES: tuple[Case, ...] = (
     Case("auth-ruby-session-subscript", "auth", "ruby", r"\bsession\s*\[",
          "auth.rb", AUTH_RUBY,
          "session[:user_id] = user.id", _AUTH_VULN_CLASSES),
-    Case("auth-ruby-devise", "auth", "ruby", r"\bdevise\b",
+    Case("auth-ruby-devise", "auth", "ruby", r"\b[Dd]evise\b",
          "auth.rb", AUTH_RUBY,
          "devise :database_authenticatable", _AUTH_VULN_CLASSES),
     Case("auth-php-auth-facade", "auth", "php", r"\bAuth::\w+\s*\(",
@@ -646,7 +646,7 @@ CASES: tuple[Case, ...] = (
          "RedirectServlet.java", REDIRECT_JAVA,
          "resp.sendRedirect(target);", _REDIRECT_VULN_CLASSES),
     Case("redirect-java-setHeader-location", "redirect", "java",
-         r'\bsetHeader\s*\(\s*"Location"', "RedirectServlet.java", REDIRECT_JAVA,
+         r'\bsetHeader\s*\(\s*"(?i:Location)"', "RedirectServlet.java", REDIRECT_JAVA,
          'resp.setHeader("Location", target);', _REDIRECT_VULN_CLASSES),
     Case("redirect-python-redirect", "redirect", "python", r"\bredirect\s*\(",
          "views.py", REDIRECT_PYTHON,
@@ -1216,3 +1216,33 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_families() -> None
     assert len(catalogue) == 92
     assert len(covered) == 80
     assert len(excluded) == 12
+
+
+@pytest.mark.parametrize(
+    ("path", "language", "source", "kind"),
+    [
+        pytest.param(
+            "src/Redirect.java", "java",
+            "class Redirect {\n  void go(HttpServletResponse resp, String url) {\n"
+            '    resp.setHeader("location", url);\n  }\n}\n',
+            "redirect", id="java-lowercase-location",
+        ),
+        pytest.param(
+            "config/initializers/devise.rb", "ruby", "Devise.setup do |config|\nend\n",
+            "auth", id="ruby-devise-setup",
+        ),
+        pytest.param(
+            "app/models/user.rb", "ruby", "class User\n  extend Devise::Models\nend\n",
+            "auth", id="ruby-devise-module",
+        ),
+    ],
+)
+def test_a_case_variant_spelling_is_a_sink_on_both_readers(
+    path: str, language: str, source: str, kind: str
+) -> None:
+    streamed = treesitter_index._fallback_from_bytes(
+        path, language, source.encode(), degradation_reason="test"
+    )
+
+    assert _sinks_of_kind(_index(path, language, source), kind)
+    assert _sinks_of_kind(streamed, kind)

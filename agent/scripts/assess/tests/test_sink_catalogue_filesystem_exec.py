@@ -811,12 +811,10 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "ruby", r"\b\w+\.execute\s*\(", "conn.execute(sql)", ["sqli"]),
     # ---- sql_exec : php (treesitter_index.py:278-279) ----
     ("sql_exec", "php", r"\bmysqli_query\s*\(", "mysqli_query($mysqli, $sql)", ["sqli"]),
-    ("sql_exec", "php", r"\$\w+->query\s*\(", "$pdo->query($sql)", ["sqli"]),
+    ("sql_exec", "php", r"->\s*(?:exec|query)\s*\(", "$pdo->query($sql)", ["sqli"]),
     ("sql_exec", "php", r"\$\w+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
-    ("sql_exec", "php", r"->exec\s*\(", "$pdo->exec($sql)", ["sqli"]),
     ("sql_exec", "php", r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(", "$query->whereRaw(", ["sqli"]),
     ("sql_exec", "php", r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(", "DB::select(", ["sqli"]),
-    ("sql_exec", "php", r"\$\w+(?:->\w+)+->query\s*\(", "$this->db->query(", ["sqli"]),
     ("sql_exec", "php", r"\$wpdb->(?:get_results|get_var|get_row|get_col)\s*\(", "$wpdb->get_results(", ["sqli"]),
     # ---- sql_exec : csharp (treesitter_index.py:310-313) ----
     ("sql_exec", "csharp", r"\bnew\s+SqlCommand\s*\(", "new SqlCommand(sql, conn)", ["sqli"]),
@@ -862,7 +860,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "ruby", r"\bIO\.popen\s*\(", "IO.popen(cmd)", ["injection"]),
     ("process_exec", "ruby", r"`[^`]*`", "`ssh #{host} uptime`", ["injection"]),
     # ---- process_exec : php (treesitter_index.py:296-297) ----
-    ("process_exec", "php", r"(?<!->|::)\bexec\s*\(", "        exec($cmd);", ["injection"]),
+    ("process_exec", "php", r"\bexec\s*\(", "        exec($cmd);", ["injection"]),
     ("process_exec", "php", r"\bsystem\s*\(", "system($cmd)", ["injection"]),
     ("process_exec", "php", r"\bshell_exec\s*\(", "shell_exec($cmd)", ["injection"]),
     ("process_exec", "php", r"\bpassthru\s*\(", "passthru($cmd)", ["injection"]),
@@ -1039,9 +1037,9 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
 
     # Hard counts. PHP inclusion is a parse-tree sink with no pattern here. Go's
     # `.Query(` excludes a `URL` receiver, so it is LIVE in the case table.
-    # file_path=44, sql_exec=34, process_exec=36 -> 114.
-    assert len(all_patterns) == 114
-    assert len(tested) == 109
+    # file_path=44, sql_exec=32, process_exec=36 -> 112.
+    assert len(all_patterns) == 112
+    assert len(tested) == 107
     assert len(excluded) == 5
 
 
