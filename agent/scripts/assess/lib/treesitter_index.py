@@ -479,7 +479,11 @@ def _whole_tree_queries(language: str, lang_obj: Any) -> tuple[str, ...]:
         ))
     queries.extend(
         _node_type_query(lang_obj, types)
-        for types in (*_WHOLE_TREE_NODE_TYPES.get(family, ()), _file_scope_candidate_types(family))
+        for types in (
+            *_WHOLE_TREE_NODE_TYPES.get(family, ()),
+            _file_scope_candidate_types(family),
+            _COMMENT_NODE_TYPES,
+        )
     )
     return tuple(dict.fromkeys(query for query in queries if query))
 
@@ -3351,23 +3355,6 @@ def _function_scan_lines(
     return lines
 
 
-# Comment openers the per-line pattern readers skip. This is a cheap prefix
-# test, not a lexer, and it stays one: `*` is a `/* ... */` continuation and
-# `#` is a comment in Python, Ruby, PHP and shell. It is nowhere near enough to
-# decide whether a whole file holds any source at all; that question is
-# `_file_is_commentary_only`'s, and it asks the grammar. `/*` is deliberately
-# absent: a block comment can close mid-line and `/* legacy */ system(cmd);` is
-# a sink, so skipping the line would be a miss.
-_LINE_COMMENT_PREFIXES = ("//", "#", "*")
-# Where `#` is code, it is not skipped. A C/C++ directive carries a macro body,
-# and `#define RUN(cmd) system(cmd)` is the wrapper every caller reaches the
-# sink through; a C# directive and a JavaScript `#private` field are
-# statements too.
-_HASH_IS_CODE_LANGUAGES = frozenset(
-    {"c", "cpp", "csharp", "go", "java", "javascript", "typescript"}
-)
-_HASH_IS_CODE_COMMENT_PREFIXES = ("//", "*")
-
 # Dimensions whose only readers are the callable spans `_function_scan_lines`
 # returns and the file-scope complement `_file_scope_lines` returns:
 # `_detect_sinks` and `_detect_call_sites` see nothing else, PHP's parse-tree
@@ -3384,17 +3371,6 @@ _COMMENT_NODE_TYPES = frozenset({"comment", "line_comment", "block_comment"})
 _DOCSTRING_NODE_TYPES = frozenset({"string", "concatenated_string", "string_literal"})
 
 UNSCANNED_SCOPE_DEGRADATION_REASON = "unscanned_function_scope"
-
-
-def _is_scannable_source_line(text: str, language: str | None = None) -> bool:
-    """Whether a line is source the pattern readers accept."""
-    stripped = text.strip()
-    prefixes = (
-        _HASH_IS_CODE_COMMENT_PREFIXES
-        if language in _HASH_IS_CODE_LANGUAGES
-        else _LINE_COMMENT_PREFIXES
-    )
-    return bool(stripped) and not stripped.startswith(prefixes)
 
 
 def _is_comment_node(node: Any) -> bool:
@@ -3709,7 +3685,7 @@ def _file_scope_lines(
             stop = len(line) if end is None else min(end, len(line))
             if start < stop:
                 line = line[:start] + " " * (stop - start) + line[stop:]
-        if not _is_scannable_source_line(line, language):
+        if not line.strip():
             continue
         if line.strip().startswith(_TOP_LEVEL_DECLARATION_PREFIXES):
             withheld.append((index, line))
@@ -4088,13 +4064,13 @@ def _php_existence_guarded_statements(node: Any, source: bytes) -> list[Any] | N
     ]
 
 
-# A line whose code is only closing punctuation, with at most a trailing line
-# comment: the `};` that ends an anonymous class, the `);` after a closure.
-_CLOSING_PUNCTUATION_LINE = re.compile(r"[\]\)\};,\s]*(?:(?://|#).*)?")
+# A line whose code is only closing punctuation: the `};` that ends an
+# anonymous class, the `);` after a closure.
+_CLOSING_PUNCTUATION_LINE = re.compile(r"[\]\)\};,\s]*")
 
 
-def _holds_code(text: str, language: str) -> bool:
-    """Whether a line of an executing statement holds code a segment owes.
+def _holds_code(text: str) -> bool:
+    """Whether a line of an executing statement, comments blanked, holds code a segment owes.
 
     Blank lines, commentary and closing punctuation inside a statement run
     nothing of their own. They are only ever read at a segment's edge, where
@@ -4102,14 +4078,7 @@ def _holds_code(text: str, language: str) -> bool:
     is lost.
     """
     stripped = text.strip()
-    if not _is_scannable_source_line(stripped, language):
-        return False
-    if stripped.startswith("/*"):
-        close = stripped.find("*/")
-        if close < 0:
-            return False
-        stripped = stripped[close + 2:]
-    return not _CLOSING_PUNCTUATION_LINE.fullmatch(stripped)
+    return bool(stripped) and not _CLOSING_PUNCTUATION_LINE.fullmatch(stripped)
 
 
 def _is_executable_file_scope_node(node: Any, language: str, source: bytes) -> bool:
@@ -4198,6 +4167,7 @@ def _executable_file_scope_lines(
     functions: list[dict[str, Any]],
     language: str,
     source: bytes,
+    code_lines: list[str],
     signal_lines: set[int],
 ) -> set[int]:
     """0-based lines of file-scope code that executes, outside every callable.
@@ -4222,14 +4192,8 @@ def _executable_file_scope_lines(
             bisect_left(signals, node.start_point[0]):bisect_right(signals, node.end_point[0])
         ]
 
-    source_rows = source.split(b"\n")
-
-    def code_lines(rows: Iterable[int]) -> list[int]:
-        return [
-            row for row in rows
-            if row < len(source_rows)
-            and _holds_code(source_rows[row].decode("utf-8", errors="replace"), language)
-        ]
+    def holding_code(rows: Iterable[int]) -> list[int]:
+        return [row for row in rows if row < len(code_lines) and _holds_code(code_lines[row])]
 
     root = getattr(tree, "root_node", None)
     stack = list(reversed(list(getattr(root, "named_children", ()) or ())))
@@ -4270,7 +4234,7 @@ def _executable_file_scope_lines(
                     if block.type in initializers
                 ]
                 for block in blocks:
-                    lines.update(code_lines(range(block.start_point[0], block.end_point[0] + 1)))
+                    lines.update(holding_code(range(block.start_point[0], block.end_point[0] + 1)))
                 if (
                     not blocks
                     and (within := signals_within(member))
@@ -4281,7 +4245,7 @@ def _executable_file_scope_lines(
         if language == "php" and node.type in {"text", "text_interpolation"}:
             lines.update(_php_output_lines(node, source))
         elif _is_executable_file_scope_node(node, language, source):
-            lines.update(code_lines(_content_lines(node, source)))
+            lines.update(holding_code(_content_lines(node, source)))
         elif (within := signals_within(node)) and _carries_file_scope_signal(node, language):
             lines.update(within)
     return {
@@ -4334,8 +4298,6 @@ def _java_fetch_call_matches_type(
 def _java_fetch_bindings(lines: list[str]) -> dict[str, str]:
     bindings: dict[str, str] = {}
     for line in lines:
-        if not _is_scannable_source_line(line):
-            continue
         for declared_type, name in re.findall(
             r"\b([A-Z][\w.]*|var|int|long|short|byte|boolean)\s+([A-Za-z_]\w*)\s*(?=[=;,)]|$)",
             line,
@@ -4355,8 +4317,6 @@ def _csharp_fetch_bindings(
 ) -> dict[str, str]:
     bindings: dict[str, str] = dict(known or {})
     for line in lines:
-        if not _is_scannable_source_line(line):
-            continue
         for declared_type, name in re.findall(
             r"\b(HttpClient|WebClient|HttpWebRequest|WebRequest|IHttpClientFactory)\??\s+([A-Za-z_]\w*)\b",
             line,
@@ -4410,8 +4370,6 @@ def _go_http_aliases(source_lines: list[str]) -> set[str]:
     """Names this file binds the `net/http` package to."""
     aliases: set[str] = set()
     for line in source_lines:
-        if not _is_scannable_source_line(line, "go"):
-            continue
         # The word boundary belongs to the alias: an import-block row is a bare
         # `"net/http"` after indentation, where no boundary precedes the quote.
         imported = re.search(r"(?:\b(\w+)\s+)?[\"`]net/http[\"`]", line)
@@ -4427,8 +4385,6 @@ def _go_fetch_bindings(lines: list[str], http_aliases: set[str]) -> set[str]:
     if not package_names:
         return bindings
     for line in lines:
-        if not _is_scannable_source_line(line):
-            continue
         bindings.update(re.findall(
             rf"\b([A-Za-z_]\w*)\s+\*?(?:{package_names})\.Client\b", line
         ))
@@ -4499,12 +4455,17 @@ def _detect_sinks(
         java_fetch_receivers: dict[str, str] = {}
         csharp_fetch_receivers: dict[str, str] = {}
         go_fetch_receivers: set[str] = set()
+        # Each line is filtered once, and a line holding no literal a gated
+        # pattern requires is offered only to the patterns that require none.
+        readable = [
+            (line_idx, line_text) for line_idx, line_text in scan_lines if source_lines[line_idx]
+        ]
         if language == "java":
             cls = java_class_for_line.get(func.get("line_start", 0))
             if cls is not None:
                 java_fetch_receivers.update(java_class_receivers[id(cls)])
             java_fetch_receivers.update(_java_fetch_bindings(func.get("params", [])))
-            java_fetch_receivers.update(_java_fetch_bindings([line for _, line in scan_lines]))
+            java_fetch_receivers.update(_java_fetch_bindings([line for _, line in readable]))
         elif language == "csharp":
             cls = csharp_class_for_line.get(func.get("line_start", 0))
             if cls is not None:
@@ -4513,18 +4474,11 @@ def _detect_sinks(
                 func.get("params", []), csharp_fetch_receivers
             )
             csharp_fetch_receivers = _csharp_fetch_bindings(
-                [line for _, line in scan_lines], csharp_fetch_receivers
+                [line for _, line in readable], csharp_fetch_receivers
             )
         elif language == "go":
             go_fetch_receivers.update(_go_fetch_bindings(func.get("params", []), go_http_aliases))
-            go_fetch_receivers.update(_go_fetch_bindings([line for _, line in scan_lines], go_http_aliases))
-        # Each line is filtered once, and a line holding no literal a gated
-        # pattern requires is offered only to the patterns that require none.
-        readable = [
-            (line_idx, line_text)
-            for line_idx, line_text in scan_lines
-            if _is_scannable_source_line(line_text, language)
-        ]
+            go_fetch_receivers.update(_go_fetch_bindings([line for _, line in readable], go_http_aliases))
         admitted = readable if gate is None else [
             (line_idx, line_text) for line_idx, line_text in readable if gate.search(line_text)
         ]
@@ -4643,7 +4597,7 @@ def _detect_call_sites(
                     param_names.add(tok)
 
         for line_idx, line_text in scan_lines:
-            if not _is_scannable_source_line(line_text, language):
+            if not source_lines[line_idx]:
                 continue
             for m in _CALL_RE.finditer(line_text):
                 callee = m.group(1)
@@ -5063,8 +5017,6 @@ def _detect_exports(
         named_export_re = re.compile(r"\bexport\s*\{([^}]+)\}")
         module_exports_re = re.compile(r"\bmodule\.exports\s*=")
         for idx, line in enumerate(source_lines):
-            if not _is_scannable_source_line(line):
-                continue
             m = export_re.search(line)
             if m:
                 exports.append({"name": m.group(1), "kind": "named_export", "line": idx + 1})
@@ -5082,8 +5034,6 @@ def _detect_exports(
         all_re = re.compile(r"__all__\s*=\s*\[([^\]]*)\]")
         has_all = False
         for idx, line in enumerate(source_lines):
-            if not _is_scannable_source_line(line):
-                continue
             m = all_re.search(line)
             if m:
                 has_all = True
@@ -5124,15 +5074,14 @@ def _detect_exports(
     return exports
 
 
-def _export_source_lines(tree: Any, source: bytes) -> list[str]:
-    # Keep source coordinates while excluding parser-labelled comments from
-    # the line-based export reader, including comments closing before code.
+def _uncommented_source(tree: Any, source: bytes) -> bytes:
+    """*source* with every grammar comment blanked and its line breaks kept."""
     visible = bytearray(source)
     for node in _named_nodes_of_types(tree, _COMMENT_NODE_TYPES):
         visible[node.start_byte:node.end_byte] = re.sub(
             rb"[^\r\n]", b" ", source[node.start_byte:node.end_byte]
         )
-    return _source_lines(bytes(visible))
+    return bytes(visible)
 
 
 def _resolve_import_targets(
@@ -5631,6 +5580,12 @@ def index_file(
         )
 
         effective_lang = "typescript" if parse_lang == "tsx" else language
+        uncommented = _uncommented_source(tree, source)
+        code_lines = _source_lines(uncommented)
+        # A line is commentary only when the grammar puts all of its text in comments.
+        reader_lines = [
+            line if code.strip() else "" for line, code in zip(source_lines, code_lines)
+        ]
         _enrich_qualified_names(functions, classes, effective_lang, source)
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
@@ -5650,10 +5605,12 @@ def index_file(
                 file_scope,
                 source,
                 tree,
-                _executable_file_scope_lines(tree, functions, effective_lang, source, set()),
+                _executable_file_scope_lines(
+                    tree, functions, effective_lang, source, code_lines, set()
+                ),
             ))
         sinks = _detect_sinks(
-            functions, classes, effective_lang, source_lines, file_scope.scanned
+            functions, classes, effective_lang, reader_lines, file_scope.scanned
         )
         if effective_lang == "php":
             locator = _PhpCallableLocator(functions)
@@ -5668,7 +5625,7 @@ def index_file(
             )
         else:
             call_sites = _detect_call_sites(
-                functions, effective_lang, source_lines, file_scope.scanned
+                functions, effective_lang, reader_lines, file_scope.scanned
             )
         unscanned = _unscanned_scope_dimensions(
             functions,
@@ -5680,22 +5637,17 @@ def index_file(
             file_scope=file_scope,
             withheld_call=withheld_call,
             executable_file_scope=lambda: bool(_executable_file_scope_lines(
-                tree, functions, effective_lang, source,
+                tree, functions, effective_lang, source, code_lines,
                 {sink["line"] - 1 for sink in sinks if sink["function"] == "<top-level>"},
             )),
         )
-        export_lines = (
-            _export_source_lines(tree, source)
-            if effective_lang in {"javascript", "typescript"}
-            else source_lines
-        )
-        exports = _detect_exports(functions, classes, effective_lang, export_lines)
+        exports = _detect_exports(functions, classes, effective_lang, code_lines)
         security_observations: dict[str, Any] = {}
         _attach_bounded_security_sources(
             security_observations,
             file_path=file_path,
             language=effective_lang,
-            source=source,
+            source=uncommented,
         )
         if effective_lang == "java":
             for func in functions:
@@ -5790,7 +5742,7 @@ def index_file(
             top_level_segments = _top_level_segments(
                 functions,
                 _executable_file_scope_lines(
-                    tree, functions, effective_lang, source, signal_lines
+                    tree, functions, effective_lang, source, code_lines, signal_lines
                 ),
             )
         _remove_internal_structural_fields(functions, classes)
