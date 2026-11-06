@@ -4717,9 +4717,19 @@ _PHP_AST_SINK_QUERY = "\n".join((
     "(scoped_call_expression) @method",
     "(object_creation_expression) @new",
 ))
-_PHP_DYNAMIC_CALLERS = frozenset({
-    "call_user_func", "call_user_func_array", "forward_static_call", "forward_static_call_array",
-})
+# The builtins that call a callable they are handed, by the position of the
+# argument that names it; a named argument is always `callback`.
+# `preg_replace_callback_array` takes an array of them, one per pattern.
+_PHP_DYNAMIC_CALLERS = {
+    "call_user_func": 0, "call_user_func_array": 0, "forward_static_call": 0,
+    "forward_static_call_array": 0, "array_map": 0, "register_shutdown_function": 0,
+    "spl_autoload_register": 0, "set_error_handler": 0, "set_exception_handler": 0,
+    "ob_start": 0, "preg_replace_callback_array": 0,
+    "array_filter": 1, "array_walk": 1, "array_walk_recursive": 1, "array_reduce": 1,
+    "usort": 1, "uasort": 1, "uksort": 1, "preg_replace_callback": 1, "iterator_apply": 1,
+}
+# The magic constants a `[$this, __FUNCTION__]` callable names its method by.
+_PHP_MAGIC_METHOD_NAMES = frozenset({"__FUNCTION__", "__METHOD__"})
 # Callees that name their function in the source text: `acme_render(...)`,
 # `\Acme\render(...)`. Every other callee is a value chosen at run time.
 _PHP_NAMED_CALLEE_TYPES = frozenset({"name", "qualified_name", "relative_name"})
@@ -4734,15 +4744,59 @@ def _php_literal_string(node: Any) -> bool:
     )
 
 
-def _php_literal_callable(node: Any) -> bool:
+def _php_literal_callable(node: Any, source: bytes) -> bool:
     """Whether a callable argument names its function in the source text."""
     if _php_literal_string(node) or node.type in _PHP_LITERAL_CALLABLE_TYPES:
         return True
+    arguments = node.child_by_field_name("arguments")
+    if arguments is not None and [child.type for child in arguments.named_children] == ["variadic_placeholder"]:
+        # A first-class callable, `trim(...)` or `$this->format(...)`.
+        callee = node.child_by_field_name("function") or node.child_by_field_name("name")
+        return callee is not None and callee.type in _PHP_NAMED_CALLEE_TYPES
     if node.type != "array_creation_expression":
         return False
     elements = [child for child in node.named_children if child.type == "array_element_initializer"]
     method = elements[-1].named_children[-1] if elements and elements[-1].named_children else None
-    return method is not None and _php_literal_string(method)
+    return method is not None and (
+        _php_literal_string(method)
+        or (method.type == "name" and _node_text(method, source).upper() in _PHP_MAGIC_METHOD_NAMES)
+    )
+
+
+def _php_callback_values(name: str, values: list[Any], source: bytes) -> list[Any]:
+    """The callable values a callback builtin is handed; empty when there is none.
+
+    A spread argument is returned as itself: what it unpacks is chosen at run time."""
+    argument = next(
+        (
+            value for value in values
+            if (label := value.child_by_field_name("name")) is not None
+            and _node_text(label, source) == "callback"
+        ),
+        values[_PHP_DYNAMIC_CALLERS[name]] if _PHP_DYNAMIC_CALLERS[name] < len(values) else None,
+    )
+    if argument is None:
+        return []
+    if argument.type != "argument" or not argument.named_children:
+        return [argument]
+    value = argument.named_children[-1]
+    if name == "preg_replace_callback_array" and value.type == "array_creation_expression":
+        return [
+            element.named_children[-1]
+            for element in value.named_children
+            if element.type == "array_element_initializer" and element.named_children
+        ]
+    return [] if value.type == "null" else [value]
+
+
+def _php_callback_sink_kinds(name: str) -> list[str]:
+    """The sink kinds a call to the function a literal callback names would be."""
+    call = name + "("
+    return [
+        definition["kind"]
+        for definition, patterns in _sink_line_readers("php")
+        if any(compiled.search(call) for _pattern, compiled, _literals in patterns)
+    ]
 
 
 def _php_ast_sinks(
@@ -4779,14 +4833,19 @@ def _php_ast_sinks(
         while callee.type == "parenthesized_expression" and callee.named_children:
             callee = callee.named_children[0]
         if callee.type not in _PHP_NAMED_CALLEE_TYPES:
-            if not _php_literal_callable(callee):
+            if not _php_literal_callable(callee, source):
                 found.append(("dynamic_invocation", call))
             continue
         name = _node_text(function, source).lstrip("\\").lower()
-        if name in _PHP_DYNAMIC_CALLERS and values:
-            callable_value = values[0].named_children[0] if values[0].named_children else None
-            if values[0].type != "argument" or callable_value is None or not _php_literal_callable(callable_value):
-                found.append(("dynamic_invocation", call))
+        if name in _PHP_DYNAMIC_CALLERS:
+            for callable_value in _php_callback_values(name, values, source):
+                if not _php_literal_callable(callable_value, source):
+                    found.append(("dynamic_invocation", call))
+                elif _php_literal_string(callable_value):
+                    found.extend(
+                        (kind, call)
+                        for kind in _php_callback_sink_kinds(_node_text(callable_value, source)[1:-1])
+                    )
         elif name in {"extract", "import_request_variables"} or (name == "parse_str" and len(values) == 1):
             found.append(("mass_assignment", call))
     for method_call in captures.get("method", []):

@@ -410,3 +410,66 @@ def test_legacy_php_input_globals_are_sources_on_both_readers(line: bytes, kind:
         treesitter_index._fallback_from_bytes("legacy/acme.php", "php", source, degradation_reason="test"),
     ):
         assert [(record["kind"], record["line"]) for record in observed["security_sources"]] == [(kind, 2)]
+
+
+@pytest.mark.parametrize(
+    ("statement", "kind"),
+    [
+        pytest.param("call_user_func('system', $_GET['c']);", "process_exec", id="call-user-func-system"),
+        pytest.param("call_user_func_array('passthru', [$id]);", "process_exec", id="call-user-func-array-passthru"),
+        pytest.param("array_walk($data, 'unserialize');", "deserialization", id="array-walk-unserialize"),
+        pytest.param("array_map('assert', $data);", "eval_exec", id="array-map-assert"),
+        pytest.param("array_map($_GET['f'], $data);", "dynamic_invocation", id="array-map"),
+        pytest.param("array_filter($data, $fn);", "dynamic_invocation", id="array-filter"),
+        pytest.param("array_walk($data, $fn);", "dynamic_invocation", id="array-walk"),
+        pytest.param("usort($data, $fn);", "dynamic_invocation", id="usort"),
+        pytest.param("uasort($data, $fn);", "dynamic_invocation", id="uasort"),
+        pytest.param("uksort($data, $fn);", "dynamic_invocation", id="uksort"),
+        pytest.param("preg_replace_callback('/acme/', $fn, $q);", "dynamic_invocation", id="preg-replace-callback"),
+        pytest.param("register_shutdown_function($fn);", "dynamic_invocation", id="register-shutdown-function"),
+        pytest.param("iterator_apply($data, $fn);", "dynamic_invocation", id="iterator-apply"),
+        pytest.param("array_reduce($data, $fn, 0);", "dynamic_invocation", id="array-reduce"),
+        pytest.param("array_walk_recursive($data, $fn);", "dynamic_invocation", id="array-walk-recursive"),
+        pytest.param("spl_autoload_register($fn);", "dynamic_invocation", id="spl-autoload-register"),
+        pytest.param("set_error_handler($fn);", "dynamic_invocation", id="set-error-handler"),
+        pytest.param("set_exception_handler($fn);", "dynamic_invocation", id="set-exception-handler"),
+        pytest.param("ob_start($fn);", "dynamic_invocation", id="ob-start"),
+        pytest.param("preg_replace_callback_array($data, $q);", "dynamic_invocation", id="preg-replace-callback-array"),
+        pytest.param(
+            "preg_replace_callback_array(['/a/' => $fn], $q);",
+            "dynamic_invocation",
+            id="preg-replace-callback-array-value",
+        ),
+        pytest.param("ob_start('system');", "process_exec", id="ob-start-system"),
+        pytest.param("array_map(array: $data, callback: 'system');", "process_exec", id="named-callback"),
+        pytest.param("usort(callback: $fn, array: $data);", "dynamic_invocation", id="named-callback-first"),
+    ],
+)
+def test_a_callback_builtin_hints_what_its_callback_runs(statement: str, kind: str) -> None:
+    assert kind in _kinds(statement)
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
+        pytest.param("array_map('trim', $data);", id="literal-builtin"),
+        pytest.param("array_filter($data);", id="no-callback"),
+        pytest.param("usort($data, [$this, 'compare']);", id="literal-method"),
+        pytest.param("array_map(fn ($v) => $v, $data);", id="arrow-function"),
+        pytest.param("preg_replace_callback('/acme/', 'strtoupper', $q);", id="literal-function"),
+        pytest.param("array_map(trim(...), $data);", id="first-class-function"),
+        pytest.param("array_walk($data, $this->format(...));", id="first-class-method"),
+        pytest.param("usort($data, Acme::compare(...));", id="first-class-static-method"),
+        pytest.param("array_map(null, $data, $q);", id="null-callback"),
+        pytest.param("set_error_handler(null);", id="null-handler"),
+        pytest.param("array_map([$this, __FUNCTION__], $data);", id="magic-function-method"),
+        pytest.param("array_map([$this, __METHOD__], $data);", id="magic-method-method"),
+        pytest.param("ob_start();", id="no-output-callback"),
+        pytest.param(
+            "preg_replace_callback_array(['/a/' => fn ($m) => $m[0], '/b/' => 'strtoupper'], $q);",
+            id="preg-replace-callback-array-literals",
+        ),
+    ],
+)
+def test_a_literal_callback_naming_no_sink_hints_nothing(statement: str) -> None:
+    assert _kinds(statement) == set()
