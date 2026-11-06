@@ -53,6 +53,8 @@ from assess.lib.treesitter_lightweight import (
     _extract_powershell,
     _extract_shell,
     _extract_twig,
+    _holds_inline_script,
+    _holds_unread_code,
 )
 from assess.lib.treesitter_streaming import (
     _SIGNAL_DIMENSIONS,
@@ -3475,6 +3477,16 @@ def _unscanned_scope_dimensions(
     return unscanned
 
 
+def _unread_body_dimensions(records: dict[str, Any]) -> set[str]:
+    """What a code body no reader looked at leaves unmeasured.
+
+    Every function-scoped dimension that retained no record: `unavailable`
+    means zero records, so one a reader did fill elsewhere in the file stays.
+    `dataflow` keeps none, so the file always owes a whole-file read.
+    """
+    return {dimension for dimension in FUNCTION_SCOPED_DIMENSIONS if not records.get(dimension)}
+
+
 _TOP_LEVEL_DECLARATION_PREFIXES = (
     "class ",
     "interface ",
@@ -5403,18 +5415,21 @@ def index_file(
             indexed = _index_lightweight(file_path, language, source_lines, total_lines)
             _bound_callable_names(indexed["functions"], source)
             _disambiguate_qualified_names(indexed["functions"])
+            _attach_bounded_security_sources(
+                indexed, file_path=file_path, language=language, source=source
+            )
             return _complete_index_metadata(
-                _attach_bounded_security_sources(
-                    indexed,
-                    file_path=file_path,
-                    language=language,
-                    source=source,
-                ),
+                indexed,
                 source_size=len(source),
                 analysis_mode="lightweight_regex",
-                # The lightweight extractors are whole-file line readers; no
-                # dimension of theirs depends on a callable being found.
-                unscanned_dimensions=set(),
+                # The lightweight extractors are whole-file line readers, so no
+                # dimension of theirs depends on a callable being found; only a
+                # code body they hold but do not read leaves one unmeasured.
+                unscanned_dimensions=(
+                    _unread_body_dimensions(indexed)
+                    if _holds_unread_code(language, source_lines)
+                    else set()
+                ),
             )
         except MemoryError:
             raise
@@ -5592,6 +5607,13 @@ def index_file(
                 {sink["line"] - 1 for sink in sinks if sink["function"] == "<top-level>"},
             )),
         )
+        if effective_lang == "php" and any(
+            node.type == "text" and _holds_inline_script(_node_text(node, source))
+            for node in _named_nodes_of_types(tree, _file_scope_candidate_types("php"))
+        ):
+            unscanned |= _unread_body_dimensions(
+                {"security_sinks": sinks, "call_sites": call_sites}
+            )
         exports = _detect_exports(functions, classes, effective_lang, code_lines)
         security_observations: dict[str, Any] = {}
         _attach_bounded_security_sources(

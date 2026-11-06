@@ -110,14 +110,15 @@ def test_freemarker_templates_resolve_to_a_structural_language(filename: str) ->
     assert "freemarker" in treesitter_index.LIGHTWEIGHT_LANGUAGES
 
 
-def test_freemarker_template_indexes_as_a_complete_lightweight_artifact() -> None:
+def test_freemarker_template_indexes_as_a_lightweight_artifact_owing_its_inline_script() -> None:
     result = _index()
 
     assert result["language"] == "freemarker"
     assert result["analysis_mode"] == "lightweight_regex"
-    assert result["analysis_status"] == "complete"
+    assert result["analysis_status"] == "degraded"
+    assert result["degradation_reason"] == "unscanned_function_scope"
     assert result["structural_index_available"] is True
-    assert result["unavailable_dimensions"] == []
+    assert result["unavailable_dimensions"] == ["call_sites", "dataflow"]
     assert result["security_sources"], "bounded security-source scan must cover .ftl"
 
 
@@ -505,14 +506,19 @@ def test_freemarker_artifacts_satisfy_the_index_and_sync_contracts() -> None:
 
     limit = treesitter_index.STRUCTURAL_SIGNAL_LIMIT
     truncating = "".join(f"<p>${{value{number}}}</p>\n" for number in range(limit + 1))
-    for label, source in (("complete", TEMPLATE), ("degraded", truncating)):
+    without_script = TEMPLATE.replace("  <script>\n", "").replace("  </script>\n", "")
+    for name, label, source in (
+        ("complete", "complete", without_script),
+        ("unscanned", "degraded", TEMPLATE),
+        ("truncated", "degraded", truncating),
+    ):
         raw = source.encode("utf-8")
-        result = _index(source, f"{label}.ftl")
+        result = _index(source, f"{name}.ftl")
 
         assert result["analysis_status"] == label
-        _validate_analysis_artifact(result, rel_path=f"{label}.ftl", source_size=len(raw))
+        _validate_analysis_artifact(result, rel_path=f"{name}.ftl", source_size=len(raw))
         metadata = validated_structural_metadata(
-            result, rel_path=f"{label}.ftl", source_size=len(raw)
+            result, rel_path=f"{name}.ftl", source_size=len(raw)
         )
         assert metadata["structural_analysis_status"] == label
         assert metadata["structural_analysis_mode"] == "lightweight_regex"

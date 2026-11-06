@@ -342,13 +342,13 @@ def test_an_upgrade_that_adds_file_scope_keeps_receipts_and_surfaces_the_new_obl
     assert _uncovered_paths(_gate(client, key, repo_id)) == set()
 
 
-def _indexed_obligation(file_path: str, language: str, source: bytes):
+def _indexed_obligation(file_path: str, language: str, source: bytes, status: str = "complete"):
     import json
 
     from app.services.code_analysis_support import structural_review_obligation
 
     indexed = index_file(file_path, language, source)
-    assert indexed["analysis_status"] == "complete"
+    assert indexed["analysis_status"] == status
     return structural_review_obligation(
         {
             "loc": len(source.splitlines()),
@@ -424,6 +424,23 @@ def test_a_complete_stylesheet_or_markup_page_owes_nothing(
     """A stylesheet or a page of markup has no callable and no file-scope code
     the index reads, so it owes no review a span could prove."""
     assert not _indexed_obligation(file_path, language, source).owed
+
+
+def test_a_markup_page_with_an_inline_script_owes_a_whole_file_span() -> None:
+    """The HTML readers take tags, not the script a `<script>` element runs, so
+    a page carrying one owes a read of all of it, form or no form."""
+    source = (
+        b"<!doctype html>\n<html>\n<body>\n<form action=\"/search\"></form>\n"
+        b"<script>\n  document.write(location.hash);\n</script>\n</body>\n</html>\n"
+    )
+    loc = len(source.splitlines())
+
+    requirement = _indexed_obligation(
+        "web/search.html", "html", source, status="degraded"
+    ).span_requirement(loc)
+
+    assert requirement is not None
+    assert requirement[0] == (1, loc)
 
 
 def test_the_span_requirement_reads_segments_in_line_order() -> None:

@@ -616,10 +616,8 @@ def _extract_lua(
 
 # --- HTML / templates -------------------------------------------------------
 
-_HTML_TAG_RE = re.compile(
-    r"<(?P<tag>form|script|link|iframe)\b(?P<attrs>(?:\"[^\"]*\"|'[^']*'|[^'\">])*)>",
-    re.IGNORECASE,
-)
+_HTML_ATTRS = r"(?P<attrs>(?:\"[^\"]*\"|'[^']*'|[^'\">])*)"
+_HTML_TAG_RE = re.compile(rf"<(?P<tag>form|script|link|iframe)\b{_HTML_ATTRS}>", re.IGNORECASE)
 _HTML_ATTR_RE = re.compile(
     r"(?P<name>[^\s=/>]+)(?:\s*=\s*(?:\"(?P<double>[^\"]*)\"|'(?P<single>[^']*)'|(?P<bare>[^\s>]+)))?"
 )
@@ -627,6 +625,50 @@ _HTML_INLINE_HANDLER_RE = re.compile(r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", re.I
 _HTML_JS_URL_RE = re.compile(r"""=\s*['"]\s*javascript:""", re.IGNORECASE)
 _HTML_MUSTACHE_RE = re.compile(r"\{\{[^}]+\}\}")
 _HTML_ASP_RE = re.compile(r"<%[^%]+%>")
+# Code a lightweight reader holds but does not read: the script an inline
+# `<script>` element runs, unless its type names a data block, and the PHP a
+# Blade template runs. Each markup language masks its own comments as its HTML
+# pass does.
+_INLINE_SCRIPT_BODY_RE = re.compile(
+    rf"<script(?=[\s/>]){_HTML_ATTRS}>(?!\s*</script)\s*\S", re.IGNORECASE
+)
+_DATA_BLOCK_SCRIPT_TYPE_RE = re.compile(r"[^\"'\s>]*json|importmap|speculationrules", re.IGNORECASE)
+_BLADE_PHP_RE = re.compile(r"(?<!@)@php\b|<\?(?:php\b|=)", re.IGNORECASE)
+_MARKUP_TEMPLATE_COMMENTS: dict[str, tuple[str, str] | None] = {
+    "html": None,
+    "blade": ("{{--", "--}}"),
+    "twig": ("{#", "#}"),
+    "freemarker": ("<#--", "-->"),
+}
+
+
+def _holds_inline_script(text: str) -> bool:
+    for match in _INLINE_SCRIPT_BODY_RE.finditer(text):
+        script_type = next(
+            (
+                next((part for part in attr.group("double", "single", "bare") if part is not None), "")
+                for attr in _HTML_ATTR_RE.finditer(match.group("attrs"))
+                if attr.group("name").lower() == "type"
+            ),
+            "",
+        )
+        if not _DATA_BLOCK_SCRIPT_TYPE_RE.fullmatch(script_type.strip()):
+            return True
+    return False
+
+
+def _holds_unread_code(language: str, source_lines: list[str]) -> bool:
+    if language not in _MARKUP_TEMPLATE_COMMENTS:
+        return False
+    lines = _mask_delimited_comments(source_lines, "<!--", "-->")
+    if (template_comments := _MARKUP_TEMPLATE_COMMENTS[language]) is not None:
+        lines = _mask_delimited_comments(lines, *template_comments)
+    text = "\n".join(lines)
+    return _holds_inline_script(text) or (
+        language == "blade" and _BLADE_PHP_RE.search(text) is not None
+    )
+
+
 def _mask_delimited_comments(
     source_lines: list[str], opening: str, closing: str
 ) -> list[str]:
