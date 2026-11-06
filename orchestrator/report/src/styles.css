@@ -321,6 +321,17 @@ a {
   font-size: 11px;
 }
 
+/* A verdict recorded on the operator's attestation rather than a proof receipt
+ * (ADR 0043). Marked by its own border and weight as well as by hue, because
+ * this document is read on paper and in grayscale as often as on a screen, and
+ * the distinction it draws is the one that must not be lost. */
+.rpt-chip-attested {
+  border-color: var(--warn);
+  color: var(--warn);
+  background: color-mix(in srgb, var(--warn) 10%, transparent);
+  font-weight: 600;
+}
+
 .rpt-mode-badge {
   display: inline-flex;
   align-items: center;
@@ -750,6 +761,52 @@ a {
   color: var(--warn);
 }
 
+/* How this verdict was reached, ahead of the claims it qualifies. The reason is
+ * the operator's verbatim attestation about target-influenced evidence: it keeps
+ * its own line breaks and wraps rather than overflowing, so presentation is
+ * clamped and the record is not (ADR 0018, ADR 0019). */
+.rpt-attestation {
+  margin: 12px 0 0;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-left: 3px solid var(--warn);
+  border-radius: 7px;
+  background: color-mix(in srgb, var(--warn) 6%, transparent);
+  break-inside: avoid;
+}
+
+.rpt-attestation-title {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 650;
+  color: var(--warn);
+}
+
+.rpt-attestation-lede {
+  margin: 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink-2);
+}
+
+.rpt-attestation-reason {
+  margin: 6px 0 0;
+  font-size: 13px;
+  line-height: 1.5;
+  color: var(--ink);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* Says how many verdicts in the bar above were operator-attested, so the
+   distribution is not read as a count of proofs. */
+.rpt-breakdown-note {
+  margin: 10px 0 0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--warn);
+}
+
 .rpt-ref-list {
   margin: 0;
   padding-left: 20px;
@@ -832,6 +889,20 @@ a {
 .rpt-readiness-list li {
   margin: 0 0 4px;
   word-break: break-word;
+}
+
+/* The gating class, beside the kind it belongs to. Text, not colour alone —
+ * this document is read on paper and in grayscale as often as on a screen. */
+.rpt-gating {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--ink-2);
+  white-space: nowrap;
 }
 
 /* ── Full report (print document) ─────────────────────────── */

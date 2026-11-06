@@ -190,6 +190,9 @@ def test_lease_adoption_preserves_receipts_and_closes_under_the_new_lease(
     assert payload["item"]["lease_token"] != claim["lease_token"]
     assert payload["item"]["status"] == "processing"
     assert payload["item"]["file"]["file_path"] == "src/parser.py"
+    # Adoption hands back the same claim shape `fetch` does, so the replacement
+    # reads the key every write names instead of learning a second vocabulary.
+    assert payload["item"]["queue_item_id"] == int(claim["id"])
     assert payload["adopted_leases"] == [
         {"agent_name": "hunter-a", "lease_token": claim["lease_token"]}
     ]
@@ -582,3 +585,126 @@ def test_adopter_may_correct_a_receipt_it_inherited(client, isolate_settings) ->
     )
     assert completed.status_code == 200, completed.text
     assert completed.json()["coverage_integrity"]["current_receipt_rows"] == 1
+
+
+def test_release_returns_a_held_row_to_the_pending_rotation(client, isolate_settings) -> None:
+    """A lane that holds files another lane is reviewing needs a non-verdict exit.
+
+    The terminal verbs are `done`, `error` and `needs-context` only, so a lane
+    standing down from files it never analysed had to mislabel them: `clean` and
+    `skipped` are false, and `needs-context` claims context is owed. `release`
+    is the honest exit — the row goes back to unleased `pending` under the same
+    per-row compare-and-swap `reset-stale` uses, its receipts are superseded the
+    same way, and the reason lands in `analysis_notes`. No new disposition: a
+    disposition is a verdict and is consumed as one everywhere.
+    """
+    engagement_key = "2026-11-06-code-lease-release"
+    _, parser, claim = _seed_claimed_parser(
+        client, isolate_settings, engagement_key, "lease-release-repo"
+    )
+    _record_clean_receipt(client, engagement_key, claim)
+    base = f"/engagements/{engagement_key}/assessment/code"
+
+    wrong_lease = client.post(
+        f"{base}/analysis-queue/release",
+        json={
+            "item_id": claim["id"],
+            "agent_name": "hunter-a",
+            "lease_token": "not-the-lease",
+            "reason": "src/parser.py belongs to the auth lane",
+        },
+    )
+    assert wrong_lease.status_code == 409, wrong_lease.text
+
+    released = client.post(
+        f"{base}/analysis-queue/release",
+        json={
+            "item_id": claim["id"],
+            "agent_name": "hunter-a",
+            "lease_token": claim["lease_token"],
+            "reason": "src/parser.py belongs to the auth lane",
+        },
+    )
+    assert released.status_code == 200, released.text
+    payload = released.json()
+    assert payload["item_id"] == int(claim["id"])
+    assert payload["file_path"] == "src/parser.py"
+    assert payload["previous_agent_name"] == "hunter-a"
+    assert payload["previous_lease_token"] == claim["lease_token"]
+    assert payload["discarded_result_count"] == 1
+
+    pending = client.get(f"{base}/analysis-queue?status=pending").json()
+    row = next(item for item in pending["items"] if item["id"] == claim["id"])
+    assert row["agent_name"] == ""
+    assert row["lease_token"] == ""
+    assert row["disposition"] == ""
+    assert row["adopted_leases"] == []
+    assert row["current_result_count"] == 0
+    with db_module.get_connection() as connection:
+        notes = connection.execute(
+            "SELECT analysis_notes FROM code_analysis_queue WHERE id = ?",
+            (claim["id"],),
+        ).fetchone()[0]
+    assert "[released: src/parser.py belongs to the auth lane]" in notes
+    assert client.get(
+        f"{base}/analysis-results?queue_item_id={claim['id']}"
+    ).json() == []
+
+    file_row = client.get(f"{base}/files/{parser['id']}").json()
+    assert file_row["analysis_status"] == "queued"
+
+    # The row is claimable again, by anybody.
+    reclaimed = client.post(
+        f"{base}/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "hunter-auth"},
+    )
+    assert reclaimed.status_code == 200, reclaimed.text
+    assert [item["queue_item_id"] for item in reclaimed.json()] == [int(claim["id"])]
+
+    audited = next(
+        entry
+        for entry in client.get(f"/engagements/{engagement_key}/activity-entries").json()["items"]
+        if entry["title"] == "code-dispatch release"
+    )
+    assert audited["actor_name"] == "hunter-a"
+
+    # Releasing a row nobody holds is a conflict, not a silent no-op.
+    again = client.post(
+        f"{base}/analysis-queue/release",
+        json={
+            "item_id": claim["id"],
+            "agent_name": "hunter-a",
+            "lease_token": claim["lease_token"],
+            "reason": "already released",
+        },
+    )
+    assert again.status_code == 409, again.text
+
+
+def test_release_does_not_add_a_sixth_disposition(client, isolate_settings) -> None:
+    """A released row is `pending` with no verdict, so nothing downstream has to
+    learn a sixth disposition value."""
+    from app.services import code_analysis
+
+    assert code_analysis._VALID_DISPOSITIONS == frozenset(
+        {"finding", "suspicious", "clean", "skipped"}
+    )
+
+
+def test_the_cli_and_api_agree_on_one_closeout_vocabulary() -> None:
+    """One definition of a verdict and of a standard skip, two declarations.
+
+    `code-dispatch done` refuses an unknown disposition and a non-standard
+    `--skip-reason` on the invocation, before a coverage-file parse and a round
+    trip. A mirror without this guard is how the CLI would start refusing a
+    disposition the backend accepts, or accepting a skip reason it rejects.
+    """
+    from app.services.code_analysis import SKIP_REASONS, _VALID_DISPOSITIONS
+    from assess.commands import code_dispatch
+    from assess.lib.contracts import CODE_SKIP_REASONS
+
+    assert set(code_dispatch._DONE_DISPOSITIONS) == set(_VALID_DISPOSITIONS)
+    # `done --skip-reason` validates against the agent tree's one declaration
+    # of the standard set, which the contract and `code-record classify` read
+    # too; this is the guard that keeps that declaration equal to the backend's.
+    assert set(CODE_SKIP_REASONS) == set(SKIP_REASONS)

@@ -107,11 +107,11 @@ These touch no external services and do not need the audit envelope:
 
 ### Step 1 — Collect IOCs from the finding
 
-Pull the IOC list from the finding's `details.indicators[]` —
+Pull the IOC list from the finding's `details.iocs[]` —
 each entry is `{"kind": "ip|domain|url|hash|email|asn", "value": "..."}`
 with an optional `algorithm` field on hashes.
 
-If the finding lacks an explicit `indicators[]` array, parse the
+If the finding lacks an explicit `iocs[]` array, parse the
 registered artifacts: the L2 investigator's `timeline.md` typically
 embeds IOCs inline. Extract with `jq` over the artifact JSON or `rg`
 over the markdown — both run host-side without host-exec because they

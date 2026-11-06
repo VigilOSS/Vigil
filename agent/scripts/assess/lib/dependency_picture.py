@@ -37,6 +37,7 @@ from pathlib import PurePosixPath
 from typing import Iterable, Mapping, Sequence
 
 from .dependency_manifests import (
+    ARTIFACT_URL_NOTE_PREFIX,
     CATALOG_ACCESSOR_NOTE,
     CATALOG_ALIAS_NOTE,
     PARSED_MANIFEST_KINDS,
@@ -99,6 +100,16 @@ DEPENDENCY_QUALIFIERS: tuple[str, ...] = (
     "unverified_aggregator_module",
     "unverified_version_unresolved",
     "unverified_scanner_row_correlated",
+    # Whether the read files name the artifact this pin was fetched from.
+    # `_declared` means a lockfile stated a URL and it travels on the record
+    # verbatim; `_unlocated` means the component IS pinned but no file read
+    # stated where its bytes came from, so the operator resolves the coordinate
+    # through the ecosystem's registry themselves. Neither says the artifact was
+    # obtained or inspected: nothing here fetches anything, by design — the
+    # sealed-source lane has no network, and a library-behaviour question
+    # answered from memory is how a retracted critical finding happened.
+    "unverified_upstream_artifact_url_declared",
+    "unverified_upstream_artifact_unlocated",
 )
 
 # The reader each observation came through. `gradle_script_regex` names the
@@ -173,6 +184,15 @@ class DependencyObservation:
     module_prefixes: tuple[str, ...] = ()
     reference_sites: tuple[ReferenceSite, ...] = ()
     evidence: tuple[Evidence, ...] = ()
+    # The pin in its own ecosystem's syntax (`lodash@4.17.21`,
+    # `group:artifact:1.2.3`, `requests==2.31.0`), and the artifact URL the
+    # lockfile stated, where it stated one. Empty when the version is a range
+    # rather than a pin. These exist so an operator can obtain the library's own
+    # source out of band and re-ingest it with `--role reference`, which is the
+    # only sound way to answer a question about a dependency's behaviour: the
+    # snapshot excludes package-manager output, and this lane never fetches.
+    resolved_coordinate: str = ""
+    upstream_artifact_url: str = ""
     qualifiers: tuple[str, ...] = ()
     # Reader-level facts in the build file's own words (`optional`,
     # `marker:...`, `lock_scope:dev`). Kept apart from `qualifiers` so a build
@@ -280,6 +300,53 @@ _OPTIONAL_SCOPES: frozenset[str] = frozenset({"optionalDependencies", "optional"
 # build profile. `dependency_manifests` stamps it; the picture reads it back
 # rather than re-parsing, so the two cannot disagree about what is conditional.
 _PROFILE_NOTE_PREFIX = "profile:"
+
+# How each ecosystem writes one exact version of one component — the string an
+# operator pastes into that ecosystem's own download command. Anything not
+# listed falls back to the `name@version` form npm and Go share.
+_PIN_SYNTAX: dict[str, str] = {
+    "maven": "{coordinate}:{version}",
+    "gradle": "{coordinate}:{version}",
+    "npm": "{coordinate}@{version}",
+    "go": "{coordinate}@{version}",
+    "python": "{coordinate}=={version}",
+}
+# Characters that make a version string a constraint rather than a pin. A
+# constraint names a set of releases, so there is no single artifact to obtain
+# and naming one would be a guess.
+_VERSION_CONSTRAINT_CHARACTERS = frozenset("^~<>*|,[]() !${}")
+
+
+def _exact_version(version: str) -> str:
+    """The single release a version string pins, or "" if it pins none.
+
+    `==1.2.3` and `1.2.3` are the same pin written two ways; `>=1.2.3`,
+    `^1.2.3` and `${commons.version}` are not pins at all.
+    """
+    candidate = version.strip()
+    if candidate.startswith("=="):
+        candidate = candidate[2:].strip()
+    if not candidate or candidate.startswith("="):
+        return ""
+    if any(character in _VERSION_CONSTRAINT_CHARACTERS for character in candidate):
+        return ""
+    return candidate
+
+
+def _resolved_coordinate(ecosystem: str, coordinate: str, version: str) -> str:
+    exact = _exact_version(version)
+    if not exact or not coordinate:
+        return ""
+    template = _PIN_SYNTAX.get(ecosystem, "{coordinate}@{version}")
+    return template.format(coordinate=coordinate, version=exact)
+
+
+def _upstream_artifact_url(notes: Iterable[str]) -> str:
+    """The artifact URL a read file stated, quoted exactly as it stated it."""
+    for note in notes:
+        if note.startswith(ARTIFACT_URL_NOTE_PREFIX):
+            return note[len(ARTIFACT_URL_NOTE_PREFIX):]
+    return ""
 
 
 def _profile_notes(notes: Iterable[str]) -> list[str]:
@@ -1162,6 +1229,15 @@ def build_dependency_picture(
         if record.declared_range and _satisfies(record.declared_range, record.version) is False:
             qualifiers.add("unverified_manifest_lock_divergence")
 
+        resolved_coordinate = _resolved_coordinate(
+            record.ecosystem, record.coordinate, record.version
+        )
+        artifact_url = _upstream_artifact_url(record.declaration_notes)
+        if artifact_url:
+            qualifiers.add("unverified_upstream_artifact_url_declared")
+        elif resolved_coordinate:
+            qualifiers.add("unverified_upstream_artifact_unlocated")
+
         sites = tuple(
             sorted(
                 (
@@ -1196,6 +1272,8 @@ def build_dependency_picture(
                 module_prefixes=tuple(sorted(set(prefixes))),
                 reference_sites=sites,
                 evidence=tuple(record.evidence),
+                resolved_coordinate=resolved_coordinate,
+                upstream_artifact_url=artifact_url,
                 qualifiers=tuple(sorted(qualifiers)),
                 declaration_notes=tuple(sorted(set(record.declaration_notes))),
             )

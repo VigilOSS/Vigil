@@ -32,6 +32,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from assess.lib.render_containment import contain_separators
+
 # Longest run of backticks anywhere in a string — used to pick a code fence
 # that the content cannot prematurely close.
 _BACKTICK_RUN = re.compile(r"`+")
@@ -142,6 +144,94 @@ def detail_value(finding: dict, key: str, default: Any = "") -> Any:
     return details_object(finding).get(key, default)
 
 
+# ── The authority behind a verdict that cites no proof receipt ───────────────
+#
+# A terminal verdict normally requires a decision receipt from a completed,
+# evidence-healthy, author-independent dispatch run. ADR 0043 adds one route
+# that does not: `finding verify --operator-authority --intel-id <id>` settles a
+# finding on evidence that lies outside the sealed snapshot by design, so no
+# receipt in the engagement can carry it. ADR 0019 makes the operator the
+# authority over their own engagement; what it does not permit is weakening a
+# gate silently, so the status word alone is not a rendering these surfaces may
+# use — `findings.md` is the report the operator hands over, and a waived verdict
+# printed beside dispatch-verified ones with nothing to tell them apart turns an
+# honest operator record into a laundered proof.
+_OPERATOR_AUTHORITY_KEY = "operator_authority"
+
+
+def operator_authority_stamp(finding: dict) -> dict:
+    """The waiver behind this finding's CURRENT verdict, or ``{}``.
+
+    Three envelopes carry it and a renderer sees whichever one its caller
+    fetched: the exploit-candidate and report projections put the stamp at the
+    top level, the finding point read puts it in ``verification_audit`` beside
+    the receipt list it stands in for, and every serialized finding row carries
+    ``provenance.operator_authority``. The field is delivered on each of them, so
+    an absent stamp means "receipt-backed", never "this projection does not say".
+
+    ``provenance.superseded_operator_authority`` is deliberately NOT consulted: a
+    waiver a later dispatch-verified verdict replaced is history, and reading it
+    here would label the verdict standing now as operator-granted.
+    """
+
+    for envelope in (
+        finding,
+        finding.get("verification_audit"),
+        finding.get("provenance"),
+    ):
+        if not isinstance(envelope, dict):
+            continue
+        stamp = envelope.get(_OPERATOR_AUTHORITY_KEY)
+        if isinstance(stamp, dict) and stamp:
+            return stamp
+    return {}
+
+
+def operator_authority_citation(stamp: dict) -> str:
+    """``intel note 7`` — the intel row a distrustful reader can go and open.
+
+    The table is half the citation: `intel get` takes the type as a required
+    positional and the ten intel tables allocate ids independently, so the id
+    alone names a different row in each of them. A stamp that records no type
+    states the id by itself rather than asserting a table nobody resolved.
+
+    Contained rather than escaped. Every value here reaches a markdown document,
+    and a bare separator in one would break the fragment out of its own list item
+    and let it open a section beside the operator's own words (ADR 0018). Nothing
+    is trimmed, collapsed or dropped — only the rendering indent is inserted.
+    """
+
+    intel_id = nonempty(stamp.get("intel_id"))
+    if not intel_id:
+        return "no intel row recorded"
+    intel_type = nonempty(stamp.get("intel_type"))
+    citation = f"intel {intel_type} {intel_id}" if intel_type else f"intel {intel_id}"
+    return contain_separators(citation)
+
+
+def operator_authority_marker(stamp: dict) -> str:
+    """``operator attested (intel note 7, no proof receipt)``.
+
+    Terse on purpose: it rides on the line that states the verdict, so it has to
+    fit beside it. The empty receipt list is named explicitly, because that is
+    the thing a reader would otherwise read as "nobody recorded the evidence".
+    """
+
+    return f"operator attested ({operator_authority_citation(stamp)}, no proof receipt)"
+
+
+def operator_authority_reason(stamp: dict) -> str:
+    """The operator's own statement of what the out-of-snapshot evidence settles.
+
+    Verbatim, because it is the only statement of why the verdict stands and a
+    paraphrase would assert grounds nobody wrote; contained, for the reason
+    :func:`operator_authority_citation` gives.
+    """
+
+    reason = nonempty(stamp.get("reason"))
+    return contain_separators(reason) if reason else ""
+
+
 def blocked_reason_summary(finding: dict) -> str:
     """One-line ``BLOCKED: <reason>`` marker for a blocked finding, or "".
 
@@ -217,7 +307,7 @@ def _root_cause_lines(finding: dict) -> list[str]:
         lines.append(f"- **Root Cause Group**: root ({finding.get('sibling_count', 0)} siblings)")
     elif root_role == "sibling":
         root_slug = finding.get("root_cause_slug", "")
-        effect = finding.get("root_cause_effect", "eliminates_finding")
+        effect = finding.get("root_cause_effect", "eliminates_attack_path")
         effect_label = "fixing root eliminates this finding"
         if effect == "eliminates_attack_path":
             effect_label = "fixing root eliminates this attack path; residual finding remains"
@@ -280,8 +370,21 @@ def render_finding(finding: dict, *, include_root_cause_group: bool = False) -> 
         f"- **Discovered by**: {source_name}",
         f"- **Severity**: {severity}",
         f"- **Workflow**: {workflow_status}",
-        f"- **Verification**: {verification_status}",
     ]
+    # The marker rides on the verdict line it qualifies, and the attestation
+    # follows it: a finding section cut out of this document and pasted into a
+    # ticket keeps the status word, so the two must travel together.
+    authority = operator_authority_stamp(finding)
+    if authority:
+        lines.append(
+            f"- **Verification**: {verification_status} — "
+            f"{operator_authority_marker(authority)}"
+        )
+        reason = operator_authority_reason(authority)
+        if reason:
+            lines.append(f"- **Operator Attestation**: {reason}")
+    else:
+        lines.append(f"- **Verification**: {verification_status}")
     if defect_family:
         lines.append(f"- **Type**: {defect_family}")
     if owasp_category:

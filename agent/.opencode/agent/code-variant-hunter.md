@@ -38,7 +38,11 @@ anticipate is still a variant if the pattern holds.
 ## Operational Mode Gate
 
 Derive the mode from the existing Runtime Identity `authorized_phase`; there is no separate mode
-field:
+field. An `authorized_phase` that is absent, reads `MISSING (malformed dispatch)`, or names no
+phase is NOT a Phase 2 dispatch and is not establishable from backend state — see
+`shared-constraints-code.md` "Runtime Identity authority fields". Running the Phase 2 branch
+because the Phase 3 authority fields happen to be absent is the specific error that gate exists to
+stop: it silently converts a receipt-bearing dispatch into one that emits none.
 
 - **Phase 2 discovery mode:** `variant_dispatch_id` and `parent_finding_slugs` are both absent. Use
   the supplied historical CVE/patch bug-shape evidence (including vulnerable/fixed code when
@@ -52,10 +56,12 @@ field:
   Record each confirmed child instance using the `links` array from skill Step 4, pointing to its assigned parent and emit one
   dispatch-bound `code-record variant-check` receipt for every current admitted file.
 
-A phase outside 2/3, either authority field in Phase 2, either missing authority field in Phase 3,
-an empty parent set, or an authority mismatch is a malformed dispatch. Stop and request a corrected
-dispatch before reading source so discovery evidence cannot accidentally claim receipt-bearing
-coverage and Phase 3 coverage cannot detach from its frozen parents.
+An unresolved `authorized_phase`, a phase outside 2/3, either authority field in Phase 2, either
+missing authority field in Phase 3, an empty parent set, or an authority mismatch is a malformed
+dispatch. Stop and request a corrected dispatch before reading source so discovery evidence cannot
+accidentally claim receipt-bearing coverage and Phase 3 coverage cannot detach from its frozen
+parents. Say in your return which field was missing and that you stopped rather than choosing a
+mode; a dispatch that picks a mode anyway produces coverage nobody can attribute to a phase.
 
 > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 

@@ -50,7 +50,7 @@ dispatch. Discovery walks the skill directories; there is no roster file.
    ```
 
    The directory name is the canonical dispatch identifier. `description` is the discovery summary;
-   `name` is optional metadata. Do not add the skill to the deprecated `agent/SKILL.md` pointer.
+   `name` is optional metadata. Skills are self-registering, so no index needs a hand-written entry.
 
 4. Reference the directory name from the prompt layer that should dispatch it
    (`agent/operator-core*.md` or a role prompt under `agent/agents/`). The operator passes the skill
@@ -399,7 +399,8 @@ one line, which is mutating the operator's capture.
 - **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
 
 - **CI covers all four pytest scopes.** `backend-tests`, `quality-checks` (eval), `root-tests`, and `assess-tests`
-  are blocking. Path-scoped jobs use absolute paths because `uv --directory` changes the working
+  are blocking and run separately. Backend, root and assess jobs each use two workers on hosted
+  runners. Path-scoped jobs use absolute paths because `uv --directory` changes the working
   directory. Check pytest's exit status and collected count; an empty selection proves nothing.
 - **The `**/data/` ignore trap.** Required resolver lists, fixtures, or golden files under `data/`
   need targeted `.gitignore` negations for every ignored path level. Track them with

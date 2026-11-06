@@ -69,10 +69,10 @@ the platform is in scope for this customer.
 
 | Field | Value |
 |-------|-------|
-| Finding skeleton | `status=draft`, `verification_status=unreviewed`, tentative severity per `agent/rules/triage.md` §2 (MITRE-impact-based, not the alert source's `severity_hint`), `details.mitre_techniques=<guess>`, `details.confidence` = `low` (L1 is single-signal by definition) |
+| Finding skeleton | `workflow_status=draft`, `verification_status=unreviewed`, tentative severity per `agent/rules/triage.md` §2 (MITRE-impact-based, not the alert source's `severity_hint`), `details.mitre_techniques=<guess>`, `details.confidence` = `low` (L1 is single-signal by definition) |
 | Downstream skill name | One of `google-workspaces`, `m365-signin-investigation`, `aws-cloudtrail-investigation`, `okta-investigation`, `edr-alert-triage`, `network-threat-hunt`, `phishing-triage` — see "Platform Skill Routing" below |
 | Evidence-bar hint | One-line hint for L2 naming the minimum corroboration L2 must gather (e.g., "need cross-source signal from EDR or proxy in the same 15-min window", "need the user's 30-day baseline ASN/region histogram") |
-| Handoff JSON | `disposition` ∈ `{null, "false_positive_proposed"}` (L1 never writes a terminal verification status), `evidence_refs[]` (artifact IDs only — never local paths), `coverage_gaps[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]` |
+| Handoff JSON | Top-level: `agent_id`, `agent_role: alert-triage-specialist`, `phase`, `summary`, `confidence`, `finding_slugs[]`, `handoff_status`, `recommended_next_agent`, and `coverage_gaps[]` / `next_steps[]` in their object shapes. Under `extras`: `disposition` ∈ `{null, "false_positive_proposed"}` (L1 never writes a terminal verification status), `evidence_refs[]` (artifact IDs only — never local paths), `mitre_techniques[]`, `tenant_ref_paths_consulted[]`. `agent handoff` refuses any other top-level key — see `agent/shared-constraints-blue.md` "Dispatch Handoff Conventions" |
 
 ## Platform Skill Routing
 
@@ -194,7 +194,7 @@ Before your dispatch returns, run in this order:
      <finding-json> --agent-id <your-agent_id>` with `verification_status=unreviewed`, then hand it to L3 with
      the verbatim tenant-ref citation and matching fields for a structured counter-check.
    - Dispatch-to-L2 path: `vigil assess finding record alert-triage-specialist
-     <finding-json> --agent-id <your-agent_id>` with `status=draft`, `verification_status=unreviewed`.
+     <finding-json> --agent-id <your-agent_id>` with `workflow_status=draft`, `verification_status=unreviewed`.
 
 5. **Record the activity entry.** `vigil assess log` with `--actor-kind agent`,
    `action=alert_triaged`, and `--metadata-inline` carrying `{tier:"L1",

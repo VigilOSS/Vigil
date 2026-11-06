@@ -64,6 +64,20 @@
       "title": "Analysis Priority",
       "type": "integer",
       "description": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0."
+    },
+    "skip_reason": {
+      "default": "",
+      "maxLength": 512,
+      "title": "Skip Reason",
+      "type": "string",
+      "enum": [
+        "test-fixture",
+        "generated-code",
+        "minified",
+        "out-of-scope-language",
+        "vendored-dependency"
+      ],
+      "description": "Why this file is excluded from review. Required on `classification: \"skip\"`, refused on every other classification — omit it there, and the stored value is the empty default."
     }
   },
   "required": [

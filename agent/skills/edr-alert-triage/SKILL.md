@@ -443,32 +443,38 @@ schema. Required fields, EDR-specific:
 ```json
 {
   "agent_id": "<runtime-agent-id>",
-  "agent_role": "edr-triage-specialist",
-  "phase": "investigation",
-  "handoff_status": "ready",
-  "finding_slug": "<updated by finding record/finding update>",
-  "skill_to_load": "alert-fp-verification",
-  "platform": "edr-mde | edr-cs | edr-s1",
-  "alert_external_id": "<from L1>",
-  "actor": "<account or device identity from process tree>",
-  "target": "<device ID + any cross-host targets>",
-  "time_window_utc": ["<start>", "<end>"],
-  "mitre_techniques": ["<refined list from Step 6>"],
-  "severity": "<L2-recomputed>",
+  "agent_role": "investigator",
+  "phase": "investigate",
+  "summary": "<which EDR alert expanded into what process-tree / network / persistence picture, and what the proposed disposition rests on>",
   "confidence": "low | medium | high",
-  "confidence_rationale": "<one sentence: which corroborating sources>",
-  "disposition_proposed": "verified | false_positive | downgraded | escalated",
-  "tenant_ref_paths_consulted": ["agent/references/tenants/<customer>-edr.md"],
-  "evidence_refs": [<artifact-ids: process-tree dump, network correlation dump, persistence inventory, IOC dumps, OverWatch annotation export>],
-  "vendor_fp_gates_outcome": {"<gate>": "<hit | miss | n/a>"},
-  "next_specialist": "verifier",
-  "next_steps": [
-    "Verifier Check 1: confirm process tree completeness across 5 generations",
-    "Verifier Check 2: confirm IOC reputation citations include last_verified_utc",
-    "Verifier Check 3: re-run vendor-specific FP gates against current tenant ref"
+  "handoff_status": "ready",
+  "finding_slugs": ["<updated by finding record/finding update>"],
+  "recommended_next_agent": "incident-verifier",
+  "coverage_gaps": [
+    {"area": "<vendor hunting API>", "reason": "<missing vendor API token>", "recommended_followup": "<which pull to re-run once the token lands>"},
+    {"area": "<tenant-ref register>", "reason": "<gap in tenant ref>", "recommended_followup": "<proposed register entry>"}
   ],
-  "coverage_gaps": ["<missing-vendor-api-token>", "<gap-in-tenant-ref>"],
-  "rationale": "<one paragraph: what the audit pull surfaced, why this disposition>"
+  "next_steps": [
+    {"action": "Check 1: confirm process-tree completeness across 5 generations", "target": "<device-id>", "recommended_agent": "incident-verifier", "rationale": "a truncated tree is the most common EDR over-claim"},
+    {"action": "Check 2: confirm IOC reputation citations carry last_verified_utc", "target": "<finding-slug>", "recommended_agent": "incident-verifier", "rationale": "stale reputation is not evidence"},
+    {"action": "Check 3: re-run the vendor FP gates against the current tenant ref", "target": "<finding-slug>", "recommended_agent": "incident-verifier", "rationale": "the known-benign register may have changed since L1"}
+  ],
+  "extras": {
+    "skill_to_load": "alert-fp-verification",
+    "platform": "edr-mde | edr-cs | edr-s1",
+    "alert_external_id": "<from L1>",
+    "actor": "<account or device identity from process tree>",
+    "target": "<device ID + any cross-host targets>",
+    "time_window_utc": ["<start>", "<end>"],
+    "mitre_techniques": ["<refined list from Step 6>"],
+    "severity": "<L2-recomputed>",
+    "confidence_rationale": "<one sentence: which corroborating sources>",
+    "disposition_proposed": "verified | false_positive | downgraded | escalated",
+    "tenant_ref_paths_consulted": ["agent/references/tenants/<customer>-edr.md"],
+    "evidence_refs": [<artifact-ids: process-tree dump, network correlation dump, persistence inventory, IOC dumps, OverWatch annotation export>],
+    "vendor_fp_gates_outcome": {"<gate>": "<hit | miss | n/a>"},
+    "rationale": "<one paragraph: what the audit pull surfaced, why this disposition>"
+  }
 }
 ```
 
@@ -516,7 +522,7 @@ schema. Required fields, EDR-specific:
 5. **Emit the handoff JSON**:
 
    ```bash
-   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-<agent-id>.json
    ```
 
 ## Common Failure Modes

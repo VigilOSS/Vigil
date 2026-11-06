@@ -1872,3 +1872,180 @@ def test_a_coordinate_this_pom_cannot_resolve_is_reported_not_dropped() -> None:
     assert parse.dependencies == ()
     gap = next(gap for gap in parse.gaps if gap.gap == "unresolved_coordinate")
     assert "widget" in gap.detail
+
+
+# --------------------------------------------------------------------------- #
+# D7 — the route from a pin to the library source
+#
+# The snapshot excludes package-manager output, so a question about a library's
+# own behaviour has no in-snapshot answer and reasoning from memory produced a
+# retracted critical finding. There is deliberately no network fetcher in the
+# sealed-source lane; instead the picture names the exact coordinate, and the
+# upstream artifact URL where the lockfile itself states one, so the operator
+# can obtain it out of band and re-ingest it with `--role reference`.
+# --------------------------------------------------------------------------- #
+
+
+def test_npm_lock_carries_the_upstream_artifact_url_it_states() -> None:
+    lodash = next(
+        dep
+        for dep in _parse("package-lock.json", PACKAGE_LOCK_V3).dependencies
+        if dep.coordinate == "lodash" and dep.version == "4.17.21"
+    )
+
+    assert f"{dm.ARTIFACT_URL_NOTE_PREFIX}https://r/lodash" in lodash.qualifiers
+
+
+def test_an_npm_entry_with_no_resolved_url_claims_none() -> None:
+    express = next(
+        dep
+        for dep in _parse("package-lock.json", PACKAGE_LOCK_V3).dependencies
+        if dep.coordinate == "express"
+    )
+
+    assert not [
+        note
+        for note in express.qualifiers
+        if note.startswith(dm.ARTIFACT_URL_NOTE_PREFIX)
+    ]
+
+
+_PACKAGE_LOCK_V1 = """\
+{
+  "name": "storefront",
+  "lockfileVersion": 1,
+  "dependencies": {
+    "lodash": {
+      "version": "4.17.21",
+      "resolved": "https://registry.npmjs.example/lodash/-/lodash-4.17.21.tgz"
+    }
+  }
+}
+"""
+
+
+def test_npm_lockfile_version_one_carries_the_url_too() -> None:
+    lodash = _by_coordinate(_parse("package-lock.json", _PACKAGE_LOCK_V1))["lodash"]
+
+    assert (
+        f"{dm.ARTIFACT_URL_NOTE_PREFIX}"
+        "https://registry.npmjs.example/lodash/-/lodash-4.17.21.tgz"
+    ) in lodash.qualifiers
+
+
+_YARN_LOCK_RESOLVED = """\
+lodash@^4.17.0:
+  version "4.17.21"
+  resolved "https://registry.yarnpkg.example/lodash/-/lodash-4.17.21.tgz#abc"
+"""
+
+
+def test_yarn_classic_carries_the_resolved_artifact_url() -> None:
+    lodash = _by_coordinate(_parse("yarn.lock", _YARN_LOCK_RESOLVED))["lodash"]
+
+    assert (
+        f"{dm.ARTIFACT_URL_NOTE_PREFIX}"
+        "https://registry.yarnpkg.example/lodash/-/lodash-4.17.21.tgz#abc"
+    ) in lodash.qualifiers
+
+
+_PIPFILE_LOCK_FILE_URL = """\
+{
+  "default": {
+    "acme-widgets": {
+      "version": "==1.2.3",
+      "file": "https://files.pythonhosted.example/acme-widgets-1.2.3.tar.gz"
+    }
+  }
+}
+"""
+
+
+def test_pipfile_lock_carries_a_direct_artifact_url() -> None:
+    widgets = _by_coordinate(_parse("Pipfile.lock", _PIPFILE_LOCK_FILE_URL))[
+        "acme-widgets"
+    ]
+
+    assert (
+        f"{dm.ARTIFACT_URL_NOTE_PREFIX}"
+        "https://files.pythonhosted.example/acme-widgets-1.2.3.tar.gz"
+    ) in widgets.qualifiers
+
+
+def test_a_url_note_never_reads_as_a_vigil_observation() -> None:
+    """Reader notes are the build file's words; Vigil's vocabulary is separate."""
+    assert not dm.ARTIFACT_URL_NOTE_PREFIX.startswith("unverified_")
+
+
+def test_the_picture_names_the_exact_coordinate_and_url_per_pinned_component() -> None:
+    from assess.lib.dependency_picture import (
+        DEPENDENCY_QUALIFIERS,
+        build_dependency_picture,
+    )
+
+    picture = build_dependency_picture(
+        parses=[_parse("package-lock.json", PACKAGE_LOCK_V3)],
+        present_paths=[],
+        indexed_files=[],
+    )
+    observations = {
+        (obs.coordinate, obs.version): obs for obs in picture.observations
+    }
+    lodash = observations[("lodash", "4.17.21")]
+    express = observations[("express", "4.18.2")]
+
+    assert lodash.resolved_coordinate == "lodash@4.17.21"
+    assert lodash.upstream_artifact_url == "https://r/lodash"
+    assert "unverified_upstream_artifact_url_declared" in lodash.qualifiers
+    # "the file stated no URL" is spelled differently from "the file stated one".
+    assert express.resolved_coordinate == "express@4.18.2"
+    assert express.upstream_artifact_url == ""
+    assert "unverified_upstream_artifact_unlocated" in express.qualifiers
+    assert {
+        "unverified_upstream_artifact_url_declared",
+        "unverified_upstream_artifact_unlocated",
+    } <= set(DEPENDENCY_QUALIFIERS)
+
+
+@pytest.mark.parametrize(
+    ("path", "text", "coordinate", "expected"),
+    [
+        (
+            "pom.xml", SERVICE_POM,
+            "jakarta.servlet:jakarta.servlet-api",
+            "jakarta.servlet:jakarta.servlet-api:6.0.0",
+        ),
+        ("requirements.txt", REQUIREMENTS, "django", "django==4.2.11"),
+        ("go.mod", GO_MOD, "github.com/lib/pq", "github.com/lib/pq@v1.10.9"),
+        # A range is not a pin, so it names no coordinate to obtain.
+        ("requirements.txt", REQUIREMENTS, "requests", ""),
+    ],
+)
+def test_the_resolved_coordinate_uses_each_ecosystem_pin_syntax(
+    path: str, text: str, coordinate: str, expected: str
+) -> None:
+    from assess.lib.dependency_picture import build_dependency_picture
+
+    picture = build_dependency_picture(
+        parses=[_parse(path, text)], present_paths=[], indexed_files=[]
+    )
+    observation = next(
+        obs for obs in picture.observations if obs.coordinate == coordinate
+    )
+
+    assert observation.resolved_coordinate == expected
+
+
+def test_an_unresolved_version_claims_no_pin() -> None:
+    from assess.lib.dependency_picture import build_dependency_picture
+
+    picture = build_dependency_picture(
+        parses=[_parse("package.json", json.dumps({"name": "app", "dependencies": {"widget": "^1.0.0"}}))],
+        present_paths=[],
+        indexed_files=[],
+    )
+    widget = next(obs for obs in picture.observations if obs.coordinate == "widget")
+
+    assert widget.resolved_coordinate == ""
+    assert widget.upstream_artifact_url == ""
+    assert "unverified_upstream_artifact_unlocated" not in widget.qualifiers

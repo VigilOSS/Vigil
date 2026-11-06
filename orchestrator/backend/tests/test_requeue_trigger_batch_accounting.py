@@ -370,3 +370,43 @@ def test_requeue_names_a_trigger_target_missing_from_the_snapshot_and_the_closes
         f"of repository {repo['id']}"
     ) in label
     assert "closest admitted path: 'src/helpers.py'" in label
+
+
+def test_requeue_names_a_missing_file_path_target_and_the_closest_path(
+    client, isolate_settings
+):
+    """A direct `file_path` selector earns the same diagnosis a `trigger_id` does.
+
+    With `repo_id` supplied the generation to search is known, so an unmatched
+    path can say why it did not match and what the snapshot does hold. Without
+    it the operator got a bare `not_found` label and had to re-derive the
+    admitted spelling by hand.
+    """
+    engagement_key = "2026-11-06-code-requeue-missing-path"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo, _parser, _helper = _seed(client, engagement_key, "requeue-missing-path-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    generation = client.get(f"{base}/repos/{repo['id']}").json()["active_generation"]
+
+    requeued = client.post(
+        f"{base}/analysis-queue/requeue",
+        json={"items": [{"file_path": "lib/helpers.py", "repo_id": repo["id"]}]},
+    )
+
+    assert requeued.status_code == 201, requeued.text
+    [label] = requeued.json()["not_found"]
+    assert label.startswith("lib/helpers.py: ")
+    assert (
+        f"'lib/helpers.py' is not a file in generation {generation} "
+        f"of repository {repo['id']}"
+    ) in label
+    assert "closest admitted path: 'src/helpers.py'" in label
+
+    # Without `repo_id` there is no single generation to search, so the label
+    # stays the bare path rather than guessing a repository.
+    unscoped = client.post(
+        f"{base}/analysis-queue/requeue",
+        json={"items": [{"file_path": "lib/helpers.py"}]},
+    )
+    assert unscoped.status_code == 201, unscoped.text
+    assert unscoped.json()["not_found"] == ["lib/helpers.py"]

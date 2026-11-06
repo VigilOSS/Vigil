@@ -12,6 +12,7 @@ projection of the server rule instead of a second copy of it.
 
 from __future__ import annotations
 
+import difflib
 from typing import Any
 
 from fastapi import HTTPException, status
@@ -127,6 +128,15 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
         "items": {"type": ["string", "integer"]},
         "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. Newly authored ids must resolve in this engagement; legacy missing ids are reported as advisories. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. Leave it empty for a source-derived file finding (`reproduction_basis` `source`: every current verification receipt is a source_observation); its proof receipts back the steps and no run is owed.",
     },
+    # The command-run ids behind the REPLAY an operator is told to run, as
+    # distinct from ``repro_runs`` (the ids behind the authored reproduction
+    # steps). Both are command-run ids; a replay cites the subset a reader is
+    # expected to re-execute.
+    "replay_commands": {
+        "type": "array",
+        "items": {"type": "integer", "minimum": 1},
+        "description": "Command-run ids (from `vigil assess command-run list`) of the executed commands that back this finding's cited replay steps, in replay order. Each id must resolve in this engagement. Use `repro_runs` for the ids behind the authored steps_to_reproduce; this key names the ones a reader is told to re-execute.",
+    },
     "attack_scenario": {
         "type": "string",
         "description": "Realistic adversary, starting access, and action, ending at first compromise. Renders as the submission's Attack Scenario section; omit when the reproduction already carries the narrative.",
@@ -134,6 +144,15 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     "poc_code": {
         "type": "string",
         "description": "Minimal exploit code or script that reproduces the finding. Omit if poc_request/poc_response is sufficient.",
+    },
+    # The fence language for ``poc_code``. The operator views and the report
+    # renderer read it as the opening fence's info string, so it is deliberately
+    # free text: a specialist writes whatever the target's own toolchain calls
+    # the language. Hostile values are neutralised at render time (a hint that
+    # cannot be a CommonMark info string is dropped, never the capture).
+    "poc_language": {
+        "type": "string",
+        "description": "Language hint for the poc_code fence (e.g. 'python', 'bash', 'http'). Free text, written by whoever authored poc_code; the operator views and the report renderer use it as the fenced block's info string and drop a hint they cannot render without altering the capture.",
     },
     "references": {
         "type": "array",
@@ -517,7 +536,119 @@ FINDING_DETAIL_EXTENSION_PROPERTIES: dict[str, dict[str, dict[str, Any]]] = {
             "items": {"type": ["string", "object"]},
             "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
         },
+        # The annotations `vigil blue` itself writes. Each of these is sent by a
+        # blue wrapper verb or instructed verbatim by a blue role prompt or
+        # skill, and `details` is a closed allow-list — so an unregistered key
+        # is not a missing nicety, it is a verb that cannot complete.
+        "tier": {
+            "type": "string",
+            "description": "Current IR triage tier for this finding (L1 alert triage, L2 skill-led triage, L3 independent verification, L4 incident lead). Written by `vigil blue tier`.",
+        },
+        "tier_notes": {
+            "type": "string",
+            "description": "Why the finding sits at its recorded tier — what the tier pass established and what it left for the next one. Written by `vigil blue tier --notes`.",
+        },
+        "evidence_refs": {
+            "type": "array",
+            "items": {"type": ["string", "integer"]},
+            "description": "Supporting evidence ids or engagement-local paths cited by a blue verification, beyond the single `evidence_ref` column. Written by `vigil blue verify --evidence-refs`; the column remains the one indexed artifact.",
+        },
+        "containment_status": {
+            "type": "string",
+            "description": "Containment state recorded alongside the finding's workflow_status (e.g. 'contained'). Written by `vigil blue contain` after an approved proposal was executed; the authoritative lifecycle value stays on workflow_status.",
+        },
+        "containment_action": {
+            "type": "string",
+            "description": "Containment verb actually executed for this finding (revoke_session, reset_cred, disable_account, isolate_host, block_ioc, ...), copied from the approved proposal. Written by `vigil blue contain`.",
+        },
+        "containment_command_run_id": {
+            "type": ["integer", "null"],
+            "description": "assessment_command_runs id of the audited execution that performed the containment, or null when the proof is a registered artifact instead. Written by `vigil blue contain --command-run-id`.",
+        },
+        "checks": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Per-check results from the structured false-positive verification, one entry per numbered check with its result, cited evidence and rationale. Recorded by incident-verifier on `finding verify`; the decisive counter-check/confirm-check remains its own structured payload.",
+        },
+        "devils_advocate": {
+            "type": "array",
+            "items": {"type": "object"},
+            "description": "Benign hypotheses raised against the finding during verification, each with the counter-evidence that discharged it (or the fact that it was not discharged). Recorded by incident-verifier on `finding verify`.",
+        },
+        "network_window_utc": {
+            "type": ["string", "array", "object"],
+            "description": "UTC window the network hunt actually searched, as [start, end] — the trigger window extended backwards per agent/rules/triage.md. Recorded by network-threat-hunt so a beacon conclusion is read against the window that produced it.",
+        },
+        "coverage": {
+            "type": ["string", "object", "array"],
+            "description": "What the searched telemetry actually covered: byte and flow counts, retention window, and the slices that were unavailable. Recorded by network-threat-hunt so a negative result is not read as absence of activity.",
+        },
+        "cross_skill_correlation_ids": {
+            "type": "array",
+            "items": {"type": ["string", "integer"]},
+            "description": "Finding slugs or ids in other blue lanes that corroborate or extend this one (e.g. the EDR finding for a network-side src_ip). Recorded when a skill chains to another instead of closing the finding.",
+        },
+        "disposition_recommendation": {
+            "type": "string",
+            "description": "The triage pass's RECOMMENDED disposition, in the blue vocabulary. Advisory only: the verifier reads it and is not bound by it, and the stored verdict remains verification_status.",
+        },
+        "respond_review": {
+            "type": ["string", "object", "array"],
+            "description": "The incident lead's respond-phase review of this finding — including an explicit 'no containment warranted' annotation with its cited rationale, which is the only thing that stands in for a recorded containment proposal at the report transition.",
+        },
+        # The L1 alert-triage skeleton (agent/skills/alert-triage/SKILL.md hands
+        # out a complete `finding record` payload), reduced to the keys with no
+        # existing home: the actor, the target, the alert's own window and the
+        # confidence rationale all have canonical homes already (`iocs`,
+        # `network_window_utc`, `severity_rationale`), and registering synonyms
+        # for them would turn one vocabulary into two spellings of it.
+        "alert_normalized": {
+            "type": "object",
+            "description": "The L1 parse of the raw alert — actor, target, action, time window and source signal — written ONCE so the verifier and the report-writer read the same parse instead of each re-deriving one from the raw body. Downstream skills anchor their look-back window to `alert_normalized.time_window_utc[0]`.",
+        },
+        "platform": {
+            "type": "string",
+            "description": "Platform the alert fired on (gws, m365, aws, okta, edr, network, or another the tenant runs). Selects which tenant reference and containment vocabulary apply. Free text, because a tenant may run a platform outside the containment-proposal enum.",
+        },
+        "source_signal": {
+            "type": ["string", "object"],
+            "description": "The detection's own identity as the source emitted it: rule name, rule id, detection control and severity hint. Records WHAT fired, independently of the verdict reached about it, which is what the verifier's source check reads.",
+        },
+        "alert_external_id": {
+            "type": "string",
+            "description": "The alert's identifier outside Vigil (SIEM alert UUID, rule id, or a slug the operator assigned), so a recorded finding can be joined back to the source console.",
+        },
+        "tenant_ref_paths_consulted": {
+            "type": "array",
+            "items": {"type": "string"},
+            "description": "Tenant reference files actually read while triaging this alert. A known-benign claim rests on them, so the paths are recorded rather than implied.",
+        },
     },
+}
+
+
+# Names that are refused but NOT homeless: the key has a canonical home under a
+# different spelling, or nested inside another key. difflib finds nothing for
+# ``risk`` at any sane cutoff, and ranks the wrong siblings first for
+# ``new_evidence``, so the route is stated rather than guessed. Owned here beside
+# the vocabulary and projected into the generated agent schema (see
+# ``scripts/generate_agent_schemas.py``) so the CLI door says the same sentence.
+FINDING_DETAIL_KEY_ALIASES: dict[str, str] = {
+    "risk": "details.impact (the attacker outcome) + details.severity_rationale (why that rating)",
+    "indicators": "details.iocs",
+    "new_evidence": "details.replies[].new_evidence (vigil assess record-reply --new-evidence)",
+    # The four alert-triage names that are spellings of a key that exists.
+    "actor": "details.iocs (the observed principal), or `vigil assess intel record` for an identity row",
+    "target": "details.iocs (the acted-upon entity), or `vigil assess intel record` for an identity row",
+    "time_window_utc": "details.network_window_utc, or details.alert_normalized.time_window_utc for the alert's own window",
+    "confidence_rationale": "details.severity_rationale",
+    # Named as effect-table axes and rendered into every finding write verb's
+    # contract, but never part of this vocabulary: the claim's proof prose is
+    # `evidence` (plus the verification's receipts), and exploitability is
+    # carried by the two keys that actually say what it rests on.
+    "proof": "details.evidence (authored proof prose) + a proof receipt on the verification",
+    "exploitability": "details.precondition_analysis + details.self_obtainability_verdict",
+    "poc_description": "details.poc_code with details.poc_language, or details.evidence for the prose",
 }
 
 
@@ -540,6 +671,83 @@ def _detail_properties() -> dict[str, dict[str, Any]]:
 
 
 FINDING_DETAIL_PROPERTIES = _detail_properties()
+
+
+def _nested_field_paths(
+    properties: dict[str, dict[str, Any]],
+) -> dict[str, str]:
+    """Leaf name -> its dotted path, for keys that live INSIDE another key.
+
+    One level deep, which is as deep as the vocabulary goes: an object key
+    contributes ``parent.child`` and an array-of-objects key ``parent[].child``.
+    Derived from the properties table rather than listed, so a new sub-field is
+    routable the moment it is registered. A leaf name that collides with a
+    top-level key, or with another leaf, is dropped — an ambiguous route is
+    worse than none.
+    """
+
+    paths: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for parent, schema in properties.items():
+        if not isinstance(schema, dict):
+            continue
+        items = schema.get("items")
+        child_schema, suffix = (
+            (items, "[]") if isinstance(items, dict) else (schema, "")
+        )
+        children = child_schema.get("properties")
+        if not isinstance(children, dict):
+            continue
+        for child in children:
+            if child in properties or child in paths:
+                ambiguous.add(child)
+                continue
+            paths[child] = f"details.{parent}{suffix}.{child}"
+    for name in ambiguous:
+        paths.pop(name, None)
+    return paths
+
+
+FINDING_DETAIL_NESTED_FIELD_PATHS = _nested_field_paths(FINDING_DETAIL_PROPERTIES)
+
+
+def suggest_detail_key_home(key: str) -> str | None:
+    """Where a refused ``details`` key actually belongs, or ``None``.
+
+    Three sources, mirrored exactly by the CLI door
+    (``assess.lib.schema_validation``) so the two cannot say different things
+    about the same key:
+
+    1. the alias table — a maintainer-curated route, which is knowledge a fuzzy
+       matcher does not have, so it answers alone when it has an entry;
+    2. an EXACT nested sub-field name, offered FIRST among the guesses: a key
+       that is really a misplaced sub-field (``new_evidence``) is otherwise
+       ranked below top-level siblings that merely share a substring
+       (``evidence``), and difflib finds the dotted path itself too weakly;
+    3. ``difflib`` near-misses on any real key, nested paths included, for
+       ordinary typos.
+
+    Everything but (1) is a suggestion, not a verdict — a generic leaf name can
+    have a plausible nested home and a plausible top-level one, and the caller
+    is better served seeing both than being steered to one.
+    """
+
+    alias = FINDING_DETAIL_KEY_ALIASES.get(key)
+    if alias is not None:
+        return alias
+    candidates = sorted(FINDING_DETAIL_PROPERTIES) + sorted(
+        FINDING_DETAIL_NESTED_FIELD_PATHS.values()
+    )
+    suggestions: list[str] = []
+    nested = FINDING_DETAIL_NESTED_FIELD_PATHS.get(key)
+    if nested is not None:
+        suggestions.append(nested)
+    suggestions.extend(
+        match
+        for match in difflib.get_close_matches(key, candidates, n=3, cutoff=0.55)
+        if match not in suggestions
+    )
+    return ", ".join(suggestions[:3]) or None
 
 
 def _type_matches(value: Any, declared: str) -> bool:
@@ -778,11 +986,13 @@ def validate_finding_details(
         if schema is None:
             if key in already_stored_keys:
                 continue
+            suggestion = suggest_detail_key_home(key)
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
-                    f"details.{key} is not an allowed finding detail key; run "
-                    "`vigil assess contract finding record` for the allowed keys"
+                    f"details.{key} is not an allowed finding detail key; "
+                    + (f"did you mean: {suggestion}? " if suggestion else "")
+                    + "run `vigil assess contract finding record` for the allowed keys"
                 ),
             )
         if value is None:

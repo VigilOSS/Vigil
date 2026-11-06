@@ -240,6 +240,96 @@ def test_a_first_party_vendor_domain_directory_is_admitted(tmp_path):
     _assert_partition_verifies(repo, args)
 
 
+@pytest.mark.parametrize("marker", [
+    # Composer installs each package at `vendor/<vendor>/<package>/`, so every
+    # installed package carries its own manifest even in a tree that gitignored
+    # the generated `autoload.php` and `composer/`.
+    "acme/jwt/composer.json",
+    # The same installed root, one level below the directory that holds it.
+    "acme/jwt/vendor/autoload.php",
+    # Bundler's gem cache and its older `vendor/gems/` install layout.
+    "cache/acme-1.0.0.gem",
+    "gems/acme-1.0.0/acme.gemspec",
+])
+def test_a_vendor_dir_is_skipped_by_tool_output_below_its_root(tmp_path, marker):
+    """What a package manager writes under `vendor/` is not always at its root.
+
+    Reading only the immediate children admits a fully installed Composer or
+    Bundler tree as first-party source, which then carries most of the
+    repository's sink volume into the review.
+    """
+    repo = tmp_path / "repo"
+    _write(repo, f"vendor/{marker}", "x\n")
+    _write(repo, "vendor/acme/jwt/src/JWT.php", "<?php class JWT {}\n")
+    _write(repo, "src/App.php", "<?php class App {}\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == ["src/App.php"]
+    assert _excluded(repo, args) == {
+        f"vendor/{marker}": "skipped_dir:vendor",
+        "vendor/acme/jwt/src/JWT.php": "skipped_dir:vendor",
+    }
+    _assert_partition_verifies(repo, args)
+
+
+@pytest.mark.parametrize("host", [
+    "google.golang.org", "cloud.google.com", "go.opentelemetry.io",
+    "k8s.io", "sigs.k8s.io", "go.uber.org", "gitlab.com", "bitbucket.org",
+])
+def test_a_go_vendor_tree_is_skipped_whatever_host_serves_the_module(tmp_path, host):
+    """A Go module path can start at any domain, so the host is matched by its
+    shape; `google.golang.org` is not a sub-name of `golang.org`."""
+    repo = tmp_path / "repo"
+    _write(repo, f"vendor/{host}/acme/log/log.go", "package log\n")
+    _write(repo, "main.go", "package main\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == ["main.go"]
+    assert _excluded(repo, args) == {f"vendor/{host}/acme/log/log.go": "skipped_dir:vendor"}
+    _assert_partition_verifies(repo, args)
+
+
+@pytest.mark.parametrize("marker", [
+    "conda-meta/history",
+    "lib/python3.12/site-packages/acme/__init__.py",
+    "Lib/site-packages/acme/__init__.py",
+])
+def test_an_env_dir_is_skipped_by_the_library_root_it_keeps(tmp_path, marker):
+    """A committed virtualenv or conda environment whose `bin/` and `pyvenv.cfg`
+    were left out still carries the installed libraries."""
+    repo = tmp_path / "repo"
+    _write(repo, f"env/{marker}", "x = 1\n")
+    _write(repo, "app.py", "import os\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == ["app.py"]
+    assert _excluded(repo, args) == {f"env/{marker}": "skipped_dir:env"}
+    _assert_partition_verifies(repo, args)
+
+
+def test_a_dotted_directory_name_alone_does_not_skip_a_vendor_dir(tmp_path):
+    """A module host is an import path with Go source beneath it. A hand-copied
+    front-end library has a dot in its name and nothing else in common, and one
+    such directory must not condemn everything beside it."""
+    repo = tmp_path / "repo"
+    _write(repo, "vendor/jquery.ui/jquery-ui.js", "(function () { return 1; }());\n")
+    _write(repo, "vendor/acme/billing/src/Charge.php", "<?php class Charge {}\n")
+    _write(repo, "src/App.php", "<?php class App {}\n")
+
+    args = _args(repo)
+
+    assert _admitted(repo, args) == [
+        "src/App.php",
+        "vendor/acme/billing/src/Charge.php",
+        "vendor/jquery.ui/jquery-ui.js",
+    ]
+    assert _excluded(repo, args) == {}
+    _assert_partition_verifies(repo, args)
+
+
 # --- hashed chunks and .phps -------------------------------------------------
 
 
@@ -485,3 +575,61 @@ def test_a_dry_run_previews_without_follow_up_commands(monkeypatch, tmp_path, ca
     # stdout is exactly the backend preview document.
     preview = json.loads(capsys.readouterr().out)
     assert preview["files"] == 1
+
+
+# --- vendor-named admission warning ------------------------------------------
+
+
+def test_a_vendor_dir_that_holds_most_of_the_admitted_set_is_named(
+    monkeypatch, tmp_path, capsys
+):
+    """A hand-copied `vendor/` carries nothing a package manager wrote, so it is
+    ingested as first-party source and every file in it is hashed, sealed,
+    parsed and given a backend row. The collapsed-admission warning covers only
+    the opposite failure — a policy that discarded the repository — so a
+    third-party tree reviewed as the operator's own code needs its own line."""
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+    for number in range(40):
+        _write(repo, f"vendor/phpmailer/class.part{number}.php", f"<?php class P{number} {{}}\n")
+    _write(repo, "src/App.php", "<?php class App {}\n")
+
+    code_ingest.run(_args(repo, name="acme-reports", dry_run=True, engagement_dir=str(engagement)))
+
+    err = capsys.readouterr().err
+    assert "vendor/ holds 40 of 42 admitted files (95.2%)" in err
+    assert "--exclude-path 'vendor'" in err
+
+
+def test_an_explicitly_included_vendor_dir_is_not_warned_about(
+    monkeypatch, tmp_path, capsys
+):
+    """`--include-path` is the operator saying they want those bytes reviewed."""
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+    _write(repo, "vendor/autoload.php", "<?php\n")
+    for number in range(40):
+        _write(repo, f"vendor/acme/jwt/src/Part{number}.php", f"<?php class P{number} {{}}\n")
+
+    code_ingest.run(
+        _args(
+            repo, name="acme-reports", dry_run=True,
+            engagement_dir=str(engagement), include_path=["vendor/**"],
+        )
+    )
+
+    assert "admitted files" not in capsys.readouterr().err
+
+
+def test_a_first_party_vendor_module_a_fraction_of_the_tree_is_not_warned_about(
+    monkeypatch, tmp_path, capsys
+):
+    """A marketplace's `src/Vendor/` is ordinary application code, and a warning
+    on every repository that has one trains the operator to stop reading."""
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+    for number in range(10):
+        _write(repo, f"src/Vendor/Part{number}.php", f"<?php class P{number} {{}}\n")
+    for number in range(60):
+        _write(repo, f"src/Order/Part{number}.php", f"<?php class O{number} {{}}\n")
+
+    code_ingest.run(_args(repo, name="acme-reports", dry_run=True, engagement_dir=str(engagement)))
+
+    assert "admitted files" not in capsys.readouterr().err

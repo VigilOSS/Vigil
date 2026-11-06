@@ -732,7 +732,7 @@ def test_update_payload_file_preserves_iterative_patch_and_does_not_rewrite_file
             "notes_mode": "replace",
             "details": {"cvss_score": 7.5},
             "details_mode": "replace",
-            "provenance": {"agent": "VA"},
+            "provenance": {"agent_name": "VA"},
             "expected_row_version": 4,
         },
         indent=2,
@@ -1211,12 +1211,22 @@ def test_update_validates_details_against_the_record_contract(
         assert len(fake.patches) == 1
 
 
-def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
+def test_verify_forwards_new_severity_on_any_terminal_status(
     tmp_path, monkeypatch, capsys
 ):
-    """``--new-severity`` is consumed ONLY by the downgraded status; under
-    any other one the backend silently dropped it and answered 200. Fail here,
-    naming the verb that actually re-bands a finding, so nothing is sent."""
+    """A terminal verdict re-bands in the SAME attested write.
+
+    `severity` is an INVALIDATE axis, so correcting a band through
+    `finding update` resets the verdict that was just established. Accepting
+    `new_severity` on any terminal status is what makes one fresh verification
+    re-band and re-attest together.
+
+    The band here moves UP, which is the direction a `confirmed` verdict carries:
+    the backend refuses a strictly lower band on `confirmed` so the drop goes
+    through `--status downgraded` and leaves a `verified_downgraded` row in the
+    ledger. This test only pins the forwarding, but a fake client will happily
+    forward a payload the server rejects, so the example stays a real one.
+    """
     fake = _FakeClient()
     _install(monkeypatch, verify_finding, tmp_path, fake)
     args = _parse(
@@ -1226,6 +1236,29 @@ def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
             "--status", "confirmed",
             "--reason", "reproduced",
             "--proof-receipt-id", "17",
+            "--new-severity", "critical",
+        ],
+        tmp_path,
+    )
+
+    verify_finding.run(args)
+    capsys.readouterr()
+
+    assert fake.posts[0][1]["new_severity"] == "critical"
+
+
+def test_verify_rejects_new_severity_on_a_non_terminal_status(
+    tmp_path, monkeypatch, capsys
+):
+    """A non-terminal status records no fresh attestation, so it cannot re-band."""
+    fake = _FakeClient()
+    _install(monkeypatch, verify_finding, tmp_path, fake)
+    args = _parse(
+        verify_finding,
+        [
+            "verify", "VA-1",
+            "--status", "disputed",
+            "--reason", "needs a second look",
             "--new-severity", "low",
         ],
         tmp_path,
@@ -1237,7 +1270,7 @@ def test_verify_rejects_new_severity_outside_downgraded_before_the_post(
     assert exc.value.code == 1
     assert fake.posts == []
     err = capsys.readouterr().err
-    assert "new_severity applies only to --status downgraded" in err
+    assert "new_severity applies only to a terminal --status" in err
     assert "finding update VA-1 --severity low" in err
 
 
@@ -1256,9 +1289,8 @@ def test_verify_new_severity_rejection_names_every_slug_in_the_batch(
         verify_finding,
         [
             "verify", "VA-1", "VA-2", "VA-3",
-            "--status", "confirmed",
-            "--reason", "reproduced",
-            "--proof-receipt-id", "17",
+            "--status", "disputed",
+            "--reason", "needs a second look",
             "--new-severity", "low",
         ],
         tmp_path,
@@ -1292,3 +1324,167 @@ def test_verify_downgraded_still_forwards_new_severity(tmp_path, monkeypatch, ca
     capsys.readouterr()
 
     assert fake.posts[0][1]["new_severity"] == "medium"
+
+
+# -- Defect: a refused details key with a real home got no route --------------
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        # difflib finds NOTHING for `risk` at any sane cutoff, so the rejection
+        # named no alternative at all — while the field has two real homes.
+        ("risk", "Any member reads another member's order.", "details.impact"),
+        # Here difflib finds the WRONG things (`evidence`, `confidence`): the key
+        # is a required SUB-field of details.replies[], written by record-reply.
+        ("new_evidence", "Replayed after the fix.", "details.replies[].new_evidence"),
+        # A key the blue prompts used for what the schema calls `iocs`.
+        ("indicators", ["10.42.0.18"], "details.iocs"),
+    ],
+)
+def test_a_refused_details_key_is_routed_to_its_real_home(
+    tmp_path, monkeypatch, capsys, key, value, expected
+):
+    """Route the name, do not guess at it.
+
+    The suggester only ever offered top-level siblings as ``difflib``
+    candidates, so a key whose canonical home is spelled differently or lives
+    nested inside another key was either unroutable or routed wrongly. The alias
+    table is owned beside the backend vocabulary and projected into the
+    generated schema, so this door quotes the same sentence the server does.
+    """
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--details-inline", json.dumps({key: value})],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert f"details.{key} is not allowed" in err
+    assert expected in err
+    assert fake.patches == []
+
+
+def test_a_nested_sub_field_name_outranks_a_substring_sibling(tmp_path, monkeypatch, capsys):
+    """An exact nested leaf is a misplaced field, not a typo, so it goes first."""
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--details-inline", json.dumps({"sent_status": "draft"})],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit):
+        update_finding.run(args)
+
+    err = capsys.readouterr().err
+    suggestion = next(line for line in err.splitlines() if "sent_status is not allowed" in line)
+    assert "Did you mean: details.replies[].sent_status" in suggestion, suggestion
+    assert fake.patches == []
+
+
+def test_an_unrelated_token_still_earns_no_route(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--details-inline", json.dumps({"fizzbuzz": "x"})],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit):
+        update_finding.run(args)
+
+    err = capsys.readouterr().err
+    assert "details.fizzbuzz is not allowed" in err
+    assert "Did you mean" not in err
+
+
+# -- Defect: provenance was creatable-or-maintainable, pick one ---------------
+
+
+@pytest.mark.parametrize(
+    "provenance",
+    [
+        {"reported_by": "Acme Security Research"},
+        {"captured_at": "2026-10-08T11:04:00Z"},
+        {"artifact_ref": "scans/idor-capture.txt"},
+        {"evidence_quote": "HTTP/1.1 200 OK\n\n{\"order_id\": 1001}"},
+    ],
+)
+def test_the_update_door_accepts_the_provenance_keys_the_skills_prescribe(
+    tmp_path, monkeypatch, capsys, provenance
+):
+    """These four were refused by the record door and accepted by this one.
+
+    The report-generation skill instructs ``reported_by`` and the operator views
+    render ``captured_at`` / ``artifact_ref`` / ``evidence_quote``, so the one
+    closed vocabulary has to admit all four on BOTH doors.
+    """
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--provenance-inline", json.dumps(provenance)],
+        tmp_path,
+    )
+
+    update_finding.run(args)
+    capsys.readouterr()
+
+    assert len(fake.patches) == 1
+    assert fake.patches[0][1]["provenance"] == provenance
+
+
+def test_the_update_door_now_validates_provenance_too(tmp_path, monkeypatch, capsys):
+    """It deliberately skipped provenance while the two doors disagreed."""
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--provenance-inline", json.dumps({"reportedby": "Acme"})],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "provenance.reportedby is not allowed" in err
+    assert "reported_by" in err
+    assert fake.patches == []
+
+
+def test_the_update_door_names_the_rebind_route_for_a_reserved_binding(
+    tmp_path, monkeypatch, capsys
+):
+    """``code_snapshot`` is allowed on create and reserved on patch.
+
+    The schema cannot express that, so without this the client would call the
+    payload valid and the server would answer 422 naming no route.
+    """
+    fake = _FakeClient()
+    _install(monkeypatch, update_finding, tmp_path, fake)
+    binding = {"repo_id": 1, "repo_generation": 4, "source_manifest_digest": "ab" * 32}
+    args = _parse(
+        update_finding,
+        ["update", "VA-1", "--provenance-inline", json.dumps({"code_snapshot": binding})],
+        tmp_path,
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        update_finding.run(args)
+
+    assert exc.value.code == 1
+    err = capsys.readouterr().err
+    assert "provenance.code_snapshot is reserved" in err
+    assert "finding verify" in err
+    assert fake.patches == []

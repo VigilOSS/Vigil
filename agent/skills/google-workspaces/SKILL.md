@@ -31,8 +31,9 @@ Always-active references — load before the first command runs:
   filter deletion, role change, MFA enrollment change — goes through
   propose → approve → execute → record, never silent action mid-investigation),
   artifact-index chain of custody (§3: register every durable pull via
-  `vigil assess artifact register`; manual `shasum ... > SHA256SUMS.txt` is
-  deprecated — the backend computes the hash on register), UTC (§4),
+  `vigil assess artifact register`, which computes the hash itself — a
+  hand-written `SHA256SUMS.txt` is an unregistered claim the index cannot
+  attest), UTC (§4),
   30-day look-back (§5), host-exec audit pipeline (§6), stay in scope (§7).
 
 This section adds Google-Workspace-specific detail on top of those rules; it

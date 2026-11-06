@@ -1588,6 +1588,18 @@ textarea {
   background: var(--count-bg-active);
   color: var(--count-ink-active);
 }
+/* `details.poc_language` is free text an author writes while reading target
+ * output, so the chip holds a value of unbounded length. Clamp the chip, not
+ * the value: the text stays whole in the DOM and on the element's own hover
+ * title, exactly as the grid's long locations do. */
+.findings-redesign .count.poc-language-chip {
+  display: inline-block;
+  max-width: 12rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  vertical-align: bottom;
+}
 
 .findings-redesign .section-title {
   font-size: 0.74rem;
@@ -2140,6 +2152,23 @@ textarea {
 .findings-redesign .tl-audit-record dd {
   color: var(--ink-2);
   margin: 0;
+  overflow-wrap: anywhere;
+}
+/* A verdict taken on the operator's own authority rather than a decision
+ * receipt. Warn-toned so it does not read as one more receipt in the list, and
+ * the reason keeps the operator's own line breaks: it is the whole record of
+ * why a gate was weakened. */
+.findings-redesign .tl-audit-record.operator-authority-record {
+  border-left-color: var(--warn);
+}
+.findings-redesign .tl-audit-record.operator-authority-record > p {
+  margin: 0 0 6px;
+  color: var(--warn);
+  font-size: 0.76rem;
+  line-height: 1.45;
+}
+.operator-authority-reason {
+  white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
 
@@ -3625,3 +3654,9 @@ body.detail-modal-open {
 .submission-blockers { margin: 12px 0; padding: 8px 10px; border-left: 3px solid var(--warn); background: color-mix(in srgb, var(--warn) 7%, transparent); }
 .submission-blockers p { margin: 0; color: var(--warn); font-size: 0.75rem; line-height: 1.45; }
 .submission-blockers p + p { margin-top: 5px; }
+/* The operator-authority notice carries a heading line, a sentence and the
+ * operator's verbatim reason, so it stacks wherever it is mounted rather than
+ * relying on the record header's own grid. */
+.operator-authority-notice { display: grid; gap: 4px; font-size: 0.78rem; line-height: 1.45; }
+.operator-authority-notice > strong { color: var(--warn); font-weight: 650; }
+.operator-authority-notice > span { color: var(--ink-2); }

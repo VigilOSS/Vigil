@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import sqlite3
 
+from app.services import code_analysis
+
 from test_code_analysis_api import (
     _classify_file,
     _create_repo,
@@ -283,3 +285,37 @@ def test_path_prefix_and_paging_scope_the_directory_rows(client, isolate_setting
     second = client.get(f"{base}/coverage/by-path?limit=1&offset=1").json()
     assert [row["path"] for row in second["directories"]] == ["src/auth"]
     assert client.get(f"{base}/coverage/by-path?depth=0").status_code == 422
+
+
+def test_directory_rows_break_terminal_work_down_by_disposition(client, isolate_settings):
+    """"Done, by whom, with what verdict" is half of what a wave plan needs.
+
+    The row already says how much is analyzed; without a disposition split it
+    cannot say whether that review found anything, so a directory full of
+    findings reads the same as a directory of clean closes. The split reads the
+    same latest current queue attempt `by_status` and `accounted_skips` read, so
+    it cannot disagree with them.
+    """
+    base, _repo_id, _reference_id, _files = _seed(
+        client, isolate_settings, "2026-11-06-coverage-by-path-disposition"
+    )
+
+    rows = client.get(f"{base}/coverage/by-path").json()["directories"]
+    by_path = {row["path"]: row for row in rows}
+
+    assert by_path["src/auth"]["by_disposition"] == {"clean": 1}
+    assert by_path["tools"]["by_disposition"] == {"skipped": 1}
+    # An in-progress claim has no verdict yet, and neither has a pending file.
+    assert by_path["src/billing"]["by_disposition"] == {}
+    assert by_path["."]["by_disposition"] == {}
+
+    # Every counted disposition is one the vocabulary admits — a reopened row
+    # carries `superseded`, which is not a verdict and must not be counted —
+    # and across these rows the verdicts account for exactly the analyzed and
+    # accounted-skip files the same row reports.
+    for row in rows:
+        assert set(row["by_disposition"]) <= code_analysis._VALID_DISPOSITIONS
+        analyzed = sum(
+            tier["analyzed"] for tier in row["by_classification"].values()
+        )
+        assert sum(row["by_disposition"].values()) == analyzed + row["accounted_skips"]

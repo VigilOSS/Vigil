@@ -63,8 +63,11 @@ Provide:
   configure scripts, feature flags)
 - Complete current threat-model envelope from `vigil assess fetch
   "code/threat-model/<repo-id>"` (module product-surface profile, reachability basis, caller
-  control, and trust boundaries for severity); require `current: true` and matching source
-  identity. A clipped summary is supplemental only
+  control, trust boundaries for severity, and the trusted-inputs set); require `current: true` and
+  matching source identity. A clipped summary is supplemental only. The trusted-inputs entries are
+  advisory on both sides of the verdict: an entry cannot carry a KILL on its own, because the
+  architect recorded it from documentation and naming, so the verifier re-reads the writer in
+  source before trusting it -- exactly as the hunter does in Phase 2A
 - Instruction: run the FP & severity-downgrade gate (`agent/references/finding-fp-and-severity-gate.md`,
   C1–C7) on each finding, then author the report-ready story into `details`, before recording
   confirmed/downgraded
@@ -207,8 +210,13 @@ vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed curr
   --confirm-check-file <confirm-check.json> \
   --source-name code-vuln-verifier \
   --provenance-inline '{"code_snapshot":{"repo_id":7,"repo_generation":3,"source_manifest_digest":"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}}'
-# Or pass the dedicated false-positive status with a completed counter-check
-vigil assess finding verify <slug> --status false_positive --reason "<kill rationale>" --counter-check-file <counter-check.json>
+# Or pass the dedicated false-positive status with a completed counter-check. kill_reason and
+# kill_check (the 1-5 check number that falsified the claim) are both required; without them the
+# write is refused and the finding stays unreviewed in the report-candidate set. When the
+# counter-check bar cannot be met, `--status disputed --reason "<why the claim is withdrawn>"`
+# is the cheap withdrawal and still survives a later sweep.
+vigil assess finding verify <slug> --status false_positive --reason "<kill rationale>" --counter-check-file <counter-check.json> \
+  --details-inline '{"kill_reason": "<which check falsified the claim and why>", "kill_check": <1-5>}'
 # Reopen a previously verified or false-positive finding when new evidence requires re-triage
 vigil assess finding update <slug> --reason "<why the prior verdict no longer holds>" --status draft
 # Verification deliberately preserves draft workflow state. After review, every retained draft

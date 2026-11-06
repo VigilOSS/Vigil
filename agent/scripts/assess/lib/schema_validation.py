@@ -20,8 +20,69 @@ def load_schema(schema_name: str) -> dict[str, Any]:
     return json.loads(schema_path.read_text(encoding="utf-8"))
 
 
-def _suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str | None:
+# Schema keyword carrying the maintainer-curated alias table: rejected name ->
+# the canonical home, in prose. Written into the generated bundle by
+# ``orchestrator/backend/scripts/generate_agent_schemas.py`` from the backend's
+# own ``FINDING_DETAIL_KEY_ALIASES``, so this door and the server door quote the
+# same sentence for the same key instead of keeping two lists.
+FIELD_ALIAS_KEYWORD = "x-vigil-field-aliases"
+
+
+def _nested_field_paths(properties: Any, *, path: str) -> dict[str, str]:
+    """Leaf name -> its dotted path, for fields nested INSIDE another field.
+
+    One level deep: an object property contributes ``parent.child`` and an
+    array-of-objects property ``parent[].child``. A leaf whose name collides
+    with a sibling top-level field, or with another leaf, is dropped — an
+    ambiguous route is worse than none. Mirrors
+    ``state_manager.finding_details._nested_field_paths``.
+    """
+    if not isinstance(properties, dict):
+        return {}
+    paths: dict[str, str] = {}
+    ambiguous: set[str] = set()
+    for parent, schema in properties.items():
+        if not isinstance(schema, dict):
+            continue
+        items = schema.get("items")
+        child_schema, suffix = (
+            (items, "[]") if isinstance(items, dict) else (schema, "")
+        )
+        children = child_schema.get("properties") if isinstance(child_schema, dict) else None
+        if not isinstance(children, dict):
+            continue
+        for child in children:
+            if child in properties or child in paths:
+                ambiguous.add(child)
+                continue
+            paths[child] = f"{path}.{parent}{suffix}.{child}"
+    for name in ambiguous:
+        paths.pop(name, None)
+    return paths
+
+
+def _suggest_close_match(
+    unknown_field: str,
+    allowed_fields: list[str],
+    *,
+    nested_fields: dict[str, str] | None = None,
+    aliases: Any = None,
+) -> str | None:
     """Return a "Did you mean: <c1>, <c2>, <c3>?" hint for an unknown field name.
+
+    Three sources, mirroring ``finding_details.suggest_detail_key_home`` so the
+    CLI door and the server door cannot say different things about one key:
+
+    1. the curated ``aliases`` table — a name whose canonical home is spelled
+       differently (``risk`` -> impact + severity_rationale) or lives under
+       another verb. difflib finds nothing for it at any sane cutoff, so when
+       the table has an entry it answers alone;
+    2. an EXACT ``nested_fields`` leaf, offered FIRST among the guesses: a key
+       that is really a misplaced sub-field (``new_evidence``, written by
+       ``record-reply`` into ``details.replies[]``) otherwise ranks below
+       top-level siblings that merely share a substring (``evidence``);
+    3. ``difflib`` near-misses over the allowed fields plus the nested dotted
+       paths, for ordinary typos.
 
     Surfaces up to three suggestions joined by ``, `` so a single high-score
     outlier like ``evidence`` -> ``evidence_ref`` doesn't drown out equally
@@ -30,12 +91,40 @@ def _suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str |
     past the 0.6 wall while staying tight enough that genuinely unrelated
     tokens (``fizzbuzz``) still produce no hint.
     """
-    if not allowed_fields:
+    if isinstance(aliases, dict):
+        alias = aliases.get(unknown_field)
+        if isinstance(alias, str) and alias.strip():
+            return alias
+    nested_fields = nested_fields or {}
+    candidates = [*allowed_fields, *sorted(nested_fields.values())]
+    if not candidates:
         return None
-    matches = difflib.get_close_matches(unknown_field, allowed_fields, n=3, cutoff=0.55)
-    if not matches:
-        return None
-    return ", ".join(matches)
+    suggestions: list[str] = []
+    nested = nested_fields.get(unknown_field)
+    if nested is not None:
+        suggestions.append(nested)
+    suggestions.extend(
+        match
+        for match in difflib.get_close_matches(unknown_field, candidates, n=3, cutoff=0.55)
+        if match not in suggestions
+    )
+    return ", ".join(suggestions[:3]) or None
+
+
+def _unknown_field_error(
+    path: str, key: str, schema: dict[str, Any], properties: Any
+) -> str:
+    """The one "is not allowed" line both closed-object doors emit."""
+    allowed_keys = sorted(properties.keys()) if isinstance(properties, dict) else []
+    suggestion = _suggest_close_match(
+        key,
+        allowed_keys,
+        nested_fields=_nested_field_paths(properties, path=path),
+        aliases=schema.get(FIELD_ALIAS_KEYWORD) if isinstance(schema, dict) else None,
+    )
+    if suggestion:
+        return f"{path}.{key} is not allowed. Did you mean: {suggestion}?"
+    return f"{path}.{key} is not allowed"
 
 
 def suggest_close_match(unknown_field: str, allowed_fields: list[str]) -> str | None:
@@ -71,15 +160,10 @@ def collect_patch_validation_errors(
         return errors
     properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
     additional_properties = schema.get("additionalProperties", True) if isinstance(schema, dict) else True
-    allowed_keys = sorted(properties.keys()) if isinstance(properties, dict) else []
     if additional_properties is False:
         for key in payload:
             if key not in properties:
-                suggestion = _suggest_close_match(key, allowed_keys)
-                if suggestion:
-                    errors.append(f"{path}.{key} is not allowed. Did you mean: {suggestion}?")
-                else:
-                    errors.append(f"{path}.{key} is not allowed")
+                errors.append(_unknown_field_error(path, key, schema, properties))
     for key, child_value in payload.items():
         child_schema = properties.get(key) if isinstance(properties, dict) else None
         if isinstance(child_schema, dict):
@@ -124,16 +208,9 @@ def _validate_object_keywords(
     properties = schema.get("properties", {})
     additional_properties = schema.get("additionalProperties", True)
     if additional_properties is False:
-        allowed_keys = sorted(properties.keys()) if isinstance(properties, dict) else []
         for key in value:
             if key not in properties:
-                suggestion = _suggest_close_match(key, allowed_keys)
-                if suggestion:
-                    errors.append(
-                        f"{path}.{key} is not allowed. Did you mean: {suggestion}?"
-                    )
-                else:
-                    errors.append(f"{path}.{key} is not allowed")
+                errors.append(_unknown_field_error(path, key, schema, properties))
     for key, child_value in value.items():
         child_schema = properties.get(key) if isinstance(properties, dict) else None
         if isinstance(child_schema, dict):

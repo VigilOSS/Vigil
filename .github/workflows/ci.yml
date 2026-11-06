@@ -99,7 +99,7 @@ jobs:
       # these two suites are separate jobs rather than one invocation.
       - name: Run root test suite
         run: >-
-          uv run --directory orchestrator/backend --extra dev pytest
+          uv run --directory orchestrator/backend --extra dev pytest -n 2
           "${GITHUB_WORKSPACE}/tests" -q
           --ignore="${GITHUB_WORKSPACE}/tests/eval"
 
@@ -113,7 +113,7 @@ jobs:
       # Resolve the suite from the checkout, not uv's backend cwd.
       - name: Run assess CLI test suite
         run: >-
-          uv run --directory orchestrator/backend --extra dev pytest
+          uv run --directory orchestrator/backend --extra dev pytest -n 2
           "${GITHUB_WORKSPACE}/agent/scripts/assess/tests" -q
 
   frontend-build:

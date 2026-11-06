@@ -248,6 +248,84 @@ def test_a_cakephp_console_test_exec_is_a_sql_and_process_sink() -> None:
 @pytest.mark.parametrize(
     "statement",
     [
+        pytest.param("$help = 'call $pdo->exec($sql) to run it';", id="single-quoted"),
+        # PHP interpolates `$pdo->exec` here and renders `($sql) to run it`
+        # verbatim: simple interpolation reaches a property, never a call.
+        pytest.param('$help = "call $pdo->exec($sql) to run it";', id="double-quoted"),
+        # `{$` is the interpolation; `{ $` is a brace in the text.
+        pytest.param('$help = "see { $pdo->exec($sql) } for this";', id="brace-then-space"),
+        pytest.param("$help = <<<'ACME'\ncall {$pdo->exec($sql)} to run it\nACME;", id="nowdoc"),
+    ],
+)
+def test_a_sql_receiver_named_in_a_string_is_not_a_call(statement: str) -> None:
+    assert "sql_exec" not in _kinds(statement)
+
+
+@pytest.mark.parametrize(
+    ("statement", "kinds"),
+    [
+        pytest.param('$out = "rows: {$pdo->exec($sql)}";',
+                     {"sql_exec", "process_exec"}, id="braced-double-quoted"),
+        pytest.param('echo "out: {$client->shell_exec($id)}";',
+                     {"xss_output", "process_exec"}, id="braced-echo"),
+        pytest.param('$out = "rows: {$pdo?->exec($sql)}";',
+                     {"sql_exec", "process_exec"}, id="braced-nullsafe"),
+        pytest.param('$out = "name: ${exec($id)}";',
+                     {"process_exec"}, id="dollar-brace-variable-name"),
+        # The inner literal is text inside code inside text: only the call
+        # starting outside it is a call.
+        pytest.param('$out = "nest {$pdo->exec("SELECT $id")} end";',
+                     {"sql_exec", "process_exec"}, id="braced-nested-literal"),
+    ],
+)
+def test_a_call_php_runs_inside_a_string_is_a_sink(statement: str, kinds: set[str]) -> None:
+    """`{$...}` is a child expression the grammar resolves, not literal text.
+
+    The quoted-span filter rejects a sink whose match starts inside a string
+    literal because a line cannot tell a call from the text of one. PHP
+    evaluates a braced interpolation, so the span it covers is code the file
+    runs, and suppressing it loses the sink instead of a false positive.
+    """
+    assert kinds <= _kinds(statement)
+    assert kinds <= _streamed_kinds(statement)
+
+
+def test_a_call_php_runs_inside_a_heredoc_is_a_sink() -> None:
+    source = b"""<?php
+function acme_report($pdo, $sql) {
+    return <<<ACME
+rows: {$pdo->exec($sql)}
+ACME;
+}
+"""
+
+    indexed = index_file("src/acme.php", "php", source)
+
+    assert {"sql_exec", "process_exec"} <= {
+        sink["kind"] for sink in indexed["security_sinks"] if sink["line"] == 4
+    }
+
+
+def test_an_interpolated_call_spanning_lines_is_a_sink_at_its_own_line() -> None:
+    """The literal covers each of its lines, and the call takes its own back."""
+    source = b"""<?php
+function acme_report($pdo, $sql) {
+    return "rows: {$pdo->exec(
+        $sql
+    )} for $sql";
+}
+"""
+
+    indexed = index_file("src/acme.php", "php", source)
+
+    assert {(sink["kind"], sink["line"]) for sink in indexed["security_sinks"]} == {
+        ("sql_exec", 3), ("process_exec", 3)
+    }
+
+
+@pytest.mark.parametrize(
+    "statement",
+    [
         pytest.param("$ids = array_map(fn ($r) => $extract($r), $data);", id="closure-variable"),
         pytest.param('$sql = "SELECT EXTRACT(month FROM created_at) FROM invoices";', id="sql-string"),
         pytest.param("$this->extract($data);", id="method"),

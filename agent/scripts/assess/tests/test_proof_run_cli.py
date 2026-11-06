@@ -1,11 +1,13 @@
 """Operator-facing lifecycle for assessment proof runs."""
 from __future__ import annotations
 
+import argparse
 import json
 
 import pytest
 
 from assess import cli
+from assess.commands import proof_run
 from assess.lib import config, contracts
 from assess.lib.client import AssessError, AssessmentClient
 
@@ -750,3 +752,110 @@ def test_proof_run_start_refuses_a_finding_with_no_resolvable_author(
     stderr = capsys.readouterr().err
     assert "VA-049" in stderr
     assert "bind-author" in stderr
+
+
+# ── The way out of a terminal run ────────────────────────────────────────────
+#
+# Importing more sources than were read seals a run `partial`, and partial is
+# terminal: further source reads, new receipts, and terminal finding decisions
+# are all refused. `--resume-from` is the architecture's answer — the child
+# inherits the parent's sources, its source reads, and every receipt binding
+# that is still healthy, and a new receipt may bind a source read from anywhere
+# in the lineage, so the child re-binds and completes. It carried no help text
+# at all, so the wall was discoverable and the door was not.
+
+
+def _proof_run_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    sub = parser.add_subparsers()
+    proof_run.register(sub)
+    return parser
+
+
+def _start_option_help(option: str) -> str:
+    sub_action = next(
+        action
+        for action in _proof_run_parser()._actions
+        if isinstance(action, argparse._SubParsersAction)
+    )
+    start = next(
+        action
+        for action in sub_action.choices["proof-run"]._actions
+        if isinstance(action, argparse._SubParsersAction)
+    ).choices["start"]
+    return next(
+        (action.help or "")
+        for action in start._actions
+        if option in action.option_strings
+    )
+
+
+def test_resume_from_help_names_the_recovery_it_performs() -> None:
+    """A terminal run's only continuation must say what it inherits."""
+    help_text = _start_option_help("--resume-from").lower()
+
+    assert help_text.strip(), "--resume-from carries no help at all"
+    assert "terminal" in help_text
+    assert "partial" in help_text
+    assert "source read" in help_text
+    assert "receipt" in help_text
+    # Naming --for-finding matters: the inherited bindings do NOT carry the
+    # parent's finding associations, so a resumed run needs its own.
+    assert "--for-finding" in help_text
+
+
+def test_proof_run_start_reports_the_created_run_when_the_association_fails(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    """A created-but-unassociated run is recoverable, and the refusal says how.
+
+    The run exists and has cost target traffic by the time the association is
+    attempted, so swallowing the id would strand it: nothing names the run to
+    link, and a fresh start would duplicate it.
+    """
+    engagement = _engagement(tmp_path)
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+    monkeypatch.setattr(
+        AssessmentClient,
+        "get",
+        _findings_get({"VA-052": {"slug": "VA-052", "provenance": {"agent_id": "HUNT-1"}}}),
+    )
+
+    def post(_client, endpoint: str, payload: dict):
+        if endpoint.endswith("/links"):
+            raise AssessError("HTTP 409:\n{\"detail\": \"finding link conflict\"}")
+        return {
+            "id": 77,
+            "run_uuid": payload["run_uuid"],
+            "run_kind": payload["run_kind"],
+            "run_purpose": payload["run_purpose"],
+            "producer_dispatch_id": 11,
+            "producer_dispatch_agent_id": payload["producer_dispatch_agent_id"],
+            "status": "running",
+        }
+
+    monkeypatch.setattr(AssessmentClient, "post", post)
+
+    with pytest.raises(SystemExit) as exc:
+        cli.main(
+            [
+                "--engagement-dir",
+                str(engagement),
+                "proof-run",
+                "start",
+                "verify-va-052",
+                "--kind",
+                "web",
+                "--agent-id",
+                "VERIFY-1",
+                "--for-finding",
+                "VA-052",
+            ]
+        )
+
+    assert exc.value.code == 1
+    stderr = capsys.readouterr().err
+    assert "77" in stderr
+    assert "VA-052" in stderr
+    assert "finding link VA-052 --link-kind proof_run" in stderr
+    assert "--target-kind assessment_run --target-id 77" in stderr

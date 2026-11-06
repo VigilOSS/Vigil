@@ -62,7 +62,12 @@ import json
 
 import pytest
 
-from assess.lib import treesitter_catalogues, treesitter_index, treesitter_streaming
+from assess.lib import (
+    treesitter_catalogues,
+    treesitter_index,
+    treesitter_lightweight,
+    treesitter_streaming,
+)
 from assess.lib.parser_boundary import DEFAULT_MAX_LINE_BYTES
 from assess.lib.parser_boundary import index_file as boundary_index_file
 from assess.lib.treesitter_index import (
@@ -180,6 +185,10 @@ function handleFramework(Request $request) {
 }
 """
 
+# The interpolation patterns compose their body from the module that owns it,
+# so a key here cannot drift from the catalogue entry it names.
+_BRACE_STEP = treesitter_lightweight._TEMPLATE_BRACE_STEP_LINE
+
 BLADE_SOURCES_SRC = """\
 <p>{{ $user->name }}</p>
 <p>{!! $user->bio !!}</p>
@@ -222,7 +231,7 @@ LUA_SOURCES_SRC = "local id = ARGV[1]\nlocal k = KEYS[1]\n"
 
 HTML_SOURCES_SRC = "<p>{{ user.name }}</p>\n<p><% value %></p>\n"
 
-CSS_SOURCES_SRC = "/* {{theme}} */\nbody { color: <% c %>; }\n"
+CSS_SOURCES_SRC = "body { color: {{theme}}; }\n.hero { background: <% c %>; }\n"
 
 FREEMARKER_SOURCES_SRC = "<p>${user.name}</p>\n<p>#{count}</p>\n"
 
@@ -397,7 +406,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
      "<?php\n$opts = $_SERVER['argv'];\n", "bin/sync.php", "$opts = $_SERVER['argv'];", "http_request_input"),
     ("source", "php", r"\bgetenv\s*\(|(?-i:\$_ENV\b)", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
     ("source", "php", "|".join(pattern for _evidence, pattern in treesitter_catalogues._PHP_CLI_INPUT_PATTERNS), "source", PHP_SOURCES_SRC, "index.php", "$job = $argv[1];", "process_input"),
-    ("source", "blade", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
+    ("source", "blade", r"\{\{(?!--)" + _BRACE_STEP + r"+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
     ("source", "c", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", C_SOURCES_SRC, "main.c", 'char *a = argv[1];', "process_input"),
     ("source", "cpp", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", CPP_SOURCES_SRC, "main.cpp", 'char *a = argv[1];', "process_input"),
     ("source", "cpp", r"\b(?:req|request)\.(?:path|body|get_param_value\s*\(|get_header_value\s*\()", "source", CPP_HTTP_SOURCE_SRC, "server.cpp", "req.path", "http_request_input"),
@@ -405,10 +414,10 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "shell", r"\$\{?[A-Z_][A-Z0-9_]*\}?", "source", SHELL_SOURCES_SRC, "install.sh", "echo $HOME", "environment_input"),
     ("source", "dockerfile", r"^\s*(?:ARG|ENV)\s+[A-Za-z_][A-Za-z0-9_]*", "source", DOCKERFILE_SOURCES_SRC, "Dockerfile", "ARG BUILD_ID", "build_argument"),
     ("source", "lua", r"\b(?:ARGV|KEYS)\s*\[", "source", LUA_SOURCES_SRC, "script.lua", "local id = ARGV[1]", "script_argument"),
-    ("source", "html", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", "source", HTML_SOURCES_SRC, "index.html", "{{ user.name }}", "template_input"),
-    ("source", "css", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>", "source", CSS_SOURCES_SRC, "style.css", "{{theme}}", "template_input"),
+    ("source", "html", r"\{\{" + _BRACE_STEP + r"+\}\}|<%[^%\r\n]+%>", "source", HTML_SOURCES_SRC, "index.html", "{{ user.name }}", "template_input"),
+    ("source", "css", r"\{\{" + _BRACE_STEP + r"+\}\}|<%[^%\r\n]+%>", "source", CSS_SOURCES_SRC, "style.css", "body { color: {{theme}}; }", "template_input"),
     ("source", "freemarker", r"[$#]\{[^}\r\n]+\}", "source", FREEMARKER_SOURCES_SRC, "page.ftl", "${user.name}", "template_input"),
-    ("source", "twig", r"\{\{[^}\r\n]+\}\}", "source", TWIG_SOURCES_SRC, "page.html.twig", "{{ user.name }}", "template_input"),
+    ("source", "twig", r"\{\{" + _BRACE_STEP + r"+\}\}", "source", TWIG_SOURCES_SRC, "page.html.twig", "{{ user.name }}", "template_input"),
     ("source", "powershell", r"\$(?:args|PSBoundParameters|MyInvocation)\b", "source", PS_SOURCES_SRC, "script.ps1", "$name = $args[0]", "script_parameter"),
     ("source", "powershell", r"\$env:[A-Za-z_]\w*", "source", PS_SOURCES_SRC, "script.ps1", "$key = $env:API_KEY", "environment_input"),
     ("source", "powershell", r"\bRead-Host\b", "source", PS_SOURCES_SRC, "script.ps1", "$answer = Read-Host", "interactive_input"),
@@ -455,16 +464,16 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("extra_sink", "lua", r"\b(?:loadstring|load)\s*\(", "extra_sink", LUA_SINK_SRC, "x.lua", "loadstring(usercode)()", "dynamic_code_load"),
     ("extra_sink", "lua", r"\bos\.execute\s*\(", "extra_sink", LUA_SINK_SRC, "x.lua", "os.execute(cmd)", "os_execute"),
     ("extra_sink", "html", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", HTML_SINK_SRC, "x.html", 'onclick="doThing()"', "inline_event_handler"),
-    ("extra_sink", "html", r"\{\{[^}\r\n]+\}\}", "extra_sink", HTML_SINK_SRC, "x.html", "{{ raw_html }}", "template_interpolation"),
+    ("extra_sink", "html", r"\{\{" + _BRACE_STEP + r"+\}\}", "extra_sink", HTML_SINK_SRC, "x.html", "{{ raw_html }}", "template_interpolation"),
     # css_expression / css_behavior: OBSOLETE, excluded -- see meta-test
     ("extra_sink", "freemarker", r"[$#]\{[^}\r\n]+\}", "extra_sink", FREEMARKER_SINK_SRC, "x.ftl", "<p>${value}</p>", "template_interpolation"),
     ("extra_sink", "freemarker", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", FREEMARKER_SINK_SRC, "x.ftl", "onclick=", "inline_event_handler"),
     ("extra_sink", "freemarker", r"\?(?:eval|eval_json|evalJson|interpret|new)\b", "extra_sink", FREEMARKER_SINK_SRC, "x.ftl", "${data?eval}", "freemarker_dynamic_evaluation"),
     ("extra_sink", "blade", r"\{!![^!\r\n]+!!\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{!! $bio !!}", "unescaped_output"),
-    ("extra_sink", "blade", r"\{\{(?!--)[^}\r\n]+\}\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{{ $name }}", "template_interpolation"),
+    ("extra_sink", "blade", r"\{\{(?!--)" + _BRACE_STEP + r"+\}\}", "extra_sink", BLADE_SINK_SRC, "x.blade.php", "{{ $name }}", "template_interpolation"),
     ("extra_sink", "blade", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", BLADE_SINK_SRC, "x.blade.php", 'onclick="go()"', "inline_event_handler"),
-    ("extra_sink", "twig", r"\{\{[^}\r\n]*\|\s*raw\b[^}\r\n]*\}\}|\{%[-~]?\s*autoescape\s+false\b", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "{{ bio|raw }}", "unescaped_output"),
-    ("extra_sink", "twig", r"\{\{(?![^}\r\n]*\|\s*raw\b)[^}\r\n]+\}\}", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "{{ name }}", "template_interpolation"),
+    ("extra_sink", "twig", r"\{\{" + _BRACE_STEP + r"*\|\s*raw\b" + _BRACE_STEP + r"*\}\}|\{%[-~]?\s*autoescape\s+false\b", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "{{ bio|raw }}", "unescaped_output"),
+    ("extra_sink", "twig", r"\{\{(?!" + _BRACE_STEP + r"*\|\s*raw\b)" + _BRACE_STEP + r"+\}\}", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "{{ name }}", "template_interpolation"),
     ("extra_sink", "twig", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", "extra_sink", TWIG_SINK_SRC, "x.html.twig", 'onclick="go()"', "inline_event_handler"),
     ("extra_sink", "twig", r"\btemplate_from_string\s*\(", "extra_sink", TWIG_SINK_SRC, "x.html.twig", "template_from_string(", "twig_dynamic_evaluation"),
     # powershell's 8 -- dual-path, tested via plain index_file (route="ps_sink")

@@ -168,6 +168,52 @@ describe("SubmissionPane structure", () => {
 
     expect(screen.getByText("Supporting captures")).toBeTruthy();
   });
+
+  it("labels the payload with the recorded language hint whatever is in it", () => {
+    // `details.poc_language` is registered as free text: the record door admits
+    // the key and checks nothing about the value, so a specialist writes
+    // whatever the target's toolchain calls the language — while reading target
+    // output (ADR 0018). This page renders it into a DOM text node, where
+    // nothing the value can contain is a construct: there is no fence here to
+    // break, so there is nothing to contain and ADR 0019 leaves the operator's
+    // own record whole. The clipboard twin is the surface that does hold a
+    // fence, and it guards itself (lib/findingMarkdown.test.ts); a hint this
+    // chip hid would be a value the operator recorded and no surface shows.
+    const payload = "curl https://target.example";
+    const chip = (container: HTMLElement) =>
+      container.querySelector(".section-title .poc-language-chip");
+
+    for (const hint of [
+      "bash",
+      // Ordinary multi-word hints a specialist really writes. A space is legal
+      // in a fence info string too, so neither surface has cause to drop these.
+      "python 3",
+      "shell script",
+      "PowerShell Core",
+      // Punctuation that would break a BACKTICK fence breaks nothing in a text
+      // node, so the chip keeps it while the clipboard twin still drops it.
+      "sh\n## Not a heading here",
+      "js`x`",
+    ]) {
+      const { container } = renderPane({ poc_code: payload, poc_language: hint });
+      const node = chip(container)!;
+      expect(node.textContent).toBe(hint);
+      expect(node.getAttribute("title")).toBe(hint);
+      expect(screen.getByText("Payload")).toBeTruthy();
+      // The capture is evidence and survives intact either way.
+      expect(container.textContent).toContain(payload);
+      cleanup();
+    }
+
+    // Length is a LAYOUT problem, not a containment one, and the fix is a
+    // clamped chip rather than a shortened record: a hint of any length stays
+    // whole in the DOM text and on the chip's own hover title.
+    const long = "x".repeat(400);
+    const wide = renderPane({ poc_code: payload, poc_language: long });
+    const node = wide.container.querySelector(".section-title .poc-language-chip")!;
+    expect(node.textContent).toBe(long);
+    expect(node.getAttribute("title")).toBe(long);
+  });
 });
 
 describe("HistoryPane", () => {
@@ -353,6 +399,78 @@ describe("HistoryPane", () => {
     expect(screen.getByText("The endpoint still returned the protected record")).toBeTruthy();
     expect(screen.getByText("41, 42")).toBeTruthy();
     expect(container.textContent).not.toContain("[object Object]");
+  });
+
+  // The audit record for a verdict reached on operator authority, which stands
+  // in the ledger where the decision receipts would have been. It is the only
+  // place in this pane that names the cited row in a field of its own, so it is
+  // where a citation that omits its table does the most damage: `intel get`
+  // takes the type as a required positional over ten entity types whose ids are
+  // allocated independently, and an id by itself sends a reader who distrusts
+  // the verdict to whichever row occupies it in the table they guessed.
+  const historyWaiver = {
+    kind: "out_of_snapshot",
+    intel_id: 1,
+    intel_type: "tech-component",
+    at: "2026-10-02T09:30:00Z",
+    reason: "The Acme edge configuration disables the affected handler out of snapshot.",
+  };
+
+  it("qualifies an authority verdict before its history detail is opened", () => {
+    render(<HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
+      transitions={[{
+        id: 21, actor: "operator", action: "verified_downgraded",
+        from_workflow_status: "active", to_workflow_status: "active",
+        from_verification_status: "unreviewed", to_verification_status: "downgraded",
+        verification_event_version: 2, from_severity: "high", to_severity: "low",
+        reason_code: "verified", created_at: new Date().toISOString(),
+        reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
+        operator_authority: historyWaiver,
+      }]} />);
+    expect(screen.getByText("Operator authority · intel tech-component 1")).toBeTruthy();
+    expect(getAssessmentFindingTransition).not.toHaveBeenCalled();
+  });
+
+  it("names the intel table beside the cited id in the operator-authority record", async () => {
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+      id: 21, actor: "operator", action: "verified_downgraded",
+      from_workflow_status: "active", to_workflow_status: "active",
+      from_verification_status: "unreviewed", to_verification_status: "downgraded",
+      verification_event_version: 2, from_severity: "high", to_severity: "low",
+      reason_code: "verified", reason_text: "", artifact_ref: "",
+      metadata_json: JSON.stringify({ operator_authority: historyWaiver }),
+      created_at: new Date().toISOString(),
+      verification_audit: {
+        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
+        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
+        record_limit: 20, truncated: false,
+      },
+    } as never);
+    const { container } = render(
+      <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
+        transitions={[{
+          id: 21, actor: "operator", action: "verified_downgraded",
+          from_workflow_status: "active", to_workflow_status: "active",
+          from_verification_status: "unreviewed", to_verification_status: "downgraded",
+          verification_event_version: 2, from_severity: "high", to_severity: "low",
+          reason_code: "verified", artifact_ref: "", created_at: new Date().toISOString(),
+          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
+        }]}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("View details"));
+    // The row's pill, the record title, the record's prose and its structured
+    // row all name the table, so none of them can be followed to another record.
+    const titled = await screen.findAllByText("Operator authority · intel tech-component 1");
+    expect(titled.length).toBeGreaterThan(1);
+    expect(container.textContent).toContain("Cited intel tech-component 1.");
+    const cited = screen.getByText("Cited intel");
+    expect(cited.nextElementSibling?.textContent).toBe("tech-component 1");
+    // The operator's own words reach the record as a plain text node (ADR 0018).
+    const reason = container.querySelector(".operator-authority-reason");
+    expect(reason?.textContent).toBe(historyWaiver.reason);
+    expect(reason?.querySelector("*")).toBeNull();
   });
 });
 
@@ -892,6 +1010,92 @@ describe("finding investigation workspace", () => {
     expect(await screen.findByText("Runtime proof outstanding")).toBeTruthy();
     expect(screen.getByText("No runtime observation recorded.")).toBeTruthy();
     expect(screen.getByText("No proof receipts support the current verification state.")).toBeTruthy();
+  });
+
+  // ── Operator-authority verdicts ─────────────────────────────────────
+  //
+  // `finding verify --operator-authority --intel-id <id>` reaches a terminal
+  // verdict with NO decision receipt: the operator stands behind it with
+  // evidence outside the engagement snapshot, and the backend stamps
+  // `provenance.operator_authority` (mirrored onto
+  // `verification_audit.operator_authority`) in place of receipt ids. ADR 0019
+  // permits the operator weakening their own gate. It does not permit the
+  // result reading as a dispatch-verified verdict — and the drawer's own
+  // "No proof receipts support the current verification state." would have
+  // reported it as missing evidence.
+  const waiver = {
+    kind: "out_of_snapshot",
+    intel_id: 17,
+    // The table the id belongs to. `intel get` takes it as a required
+    // positional and the ten intel tables number independently, so every
+    // surface that names the cited row has to name its table too.
+    intel_type: "note",
+    at: "2026-10-02T09:30:00Z",
+    reason: "Acme vendor advisory ACME-2026-9 confirms the fix shipped out of snapshot.",
+  };
+
+  it("marks a verdict reached on operator authority and names the intel and reason", async () => {
+    workspace({
+      proof_receipts: [],
+      verification_audit: { ...finding.verification_audit, proof_receipt_ids: [], proof_receipt_total: 0, operator_authority: waiver },
+      provenance: { ...finding.provenance, operator_authority: waiver },
+    });
+
+    // On the verdict axis in the record header, where the verification status is.
+    const axis = await screen.findByRole("group", { name: "Verification status" });
+    expect(axis.textContent).toContain("Operator authority · intel note 17");
+
+    // And stated in full, once, where the receipts would have been.
+    const notices = screen.getAllByRole("status", { name: /Operator-authority/ });
+    expect(notices.length).toBeGreaterThan(0);
+    expect(notices.some((node) => node.textContent?.includes(waiver.reason))).toBe(true);
+    expect(notices.some((node) => node.textContent?.includes("not a proof receipt"))).toBe(true);
+
+    // The empty receipt list no longer reads as absent evidence.
+    expect(screen.queryByText("No proof receipts support the current verification state.")).toBeNull();
+    expect(screen.getByText("No proof receipts: the verdict above rests on the operator's authority.")).toBeTruthy();
+  });
+
+  it("describes retained authority as prior after the finding becomes unreviewed", async () => {
+    workspace({
+      verification_status: "unreviewed", proof_receipts: [],
+      verification_audit: { ...finding.verification_audit, operator_authority: waiver },
+      provenance: { ...finding.provenance, operator_authority: waiver },
+    });
+    const axis = await screen.findByRole("group", { name: "Verification status" });
+    expect(axis.textContent).toContain("Prior operator authority · intel note 17");
+    expect(screen.getAllByText(/A prior verdict rested on the operator's own authority/).length).toBeGreaterThan(0);
+    expect(screen.getByText("No proof receipts support the current verification state.")).toBeTruthy();
+  });
+
+  it("does not present a superseded waiver as the standing authority", async () => {
+    // A later dispatch-verified verdict MOVES the stamp to
+    // `superseded_operator_authority` rather than deleting it, following the
+    // superseded-code-snapshot precedent. Reading that key as current would
+    // invert the distinction the stamp exists to draw.
+    workspace({
+      verification_audit: { ...finding.verification_audit, operator_authority: null },
+      provenance: { ...finding.provenance, operator_authority: null, superseded_operator_authority: waiver },
+    });
+
+    await screen.findByRole("heading", { name: "Shared claim" });
+    const axis = screen.getByRole("group", { name: "Verification status" });
+    expect(axis.textContent).not.toContain("Operator authority");
+    expect(screen.queryByRole("status", { name: /Operator-authority/ })).toBeNull();
+    expect(screen.queryByText(waiver.reason)).toBeNull();
+  });
+
+  it("copies the waiver into the Markdown write-up, not just the page", async () => {
+    workspace({
+      proof_receipts: [],
+      verification_audit: { ...finding.verification_audit, operator_authority: waiver },
+      provenance: { ...finding.provenance, operator_authority: waiver },
+    });
+    fireEvent.click(await screen.findByRole("button", { name: "Copy write-up as Markdown" }));
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    const copied = String(writeText.mock.calls[0][0]);
+    expect(copied).toContain("**Operator authority · intel note 17** (no proof receipt)");
+    expect(copied).toContain(`**Operator authority reason:** ${waiver.reason}`);
   });
 
   it("does not claim runtime proof is outstanding for a merged finding", async () => {

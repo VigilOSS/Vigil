@@ -48,7 +48,9 @@ def register(subparsers) -> None:
     p.add_argument("-w", "--worker", dest="worker", default="", help="Concurrent workers (dalfox -w).")
     p.add_argument("--delay", dest="delay", default="", help="Delay in milliseconds between requests (politeness).")
     p.add_argument("--dalfox-timeout", dest="dalfox_timeout", default="",
-                   help="dalfox per-request timeout in seconds (emitted as dalfox's --timeout; renamed to avoid the audit --timeout collision).")
+                   help="dalfox's PER-REQUEST timeout in seconds, passed through as dalfox's own "
+                        "--timeout inside the container. The required --timeout is the run's "
+                        "wall-clock audit budget; setting one does not bound the other.")
     p.add_argument("--waf-evasion", dest="waf_evasion", action="store_true", help="Enable dalfox WAF-evasion mode.")
     p.add_argument("--skip-bav", dest="skip_bav", action="store_true",
                    help="Skip the basic-another-vuln scan so the run stays focused on XSS.")

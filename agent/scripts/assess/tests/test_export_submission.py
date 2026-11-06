@@ -88,14 +88,37 @@ class _FakeClient:
         self.gets: list[str] = []
         self.posts: list[tuple[str, dict]] = []
 
+    def _decision_page(self, endpoint: str) -> list[dict]:
+        """One bounded page, the way the backend serves it.
+
+        The route caps at `limit` and offsets from `offset`; a reader that sends
+        one request at the ceiling silently drops everything past it.
+        """
+        if self._decisions_error:
+            raise AssessError(self._decisions_error)
+        params = parse_qs(urlsplit(endpoint).query)
+        kind = params.get("kind", [""])[0]
+        matched = [row for row in self._decisions if row.get("kind") == kind]
+        offset = int(params.get("offset", ["0"])[0])
+        limit = int(params.get("limit", [str(len(matched))])[0])
+        return matched[offset : offset + limit]
+
+    def get_all_pages(self, endpoint: str, *, page_size: int = 5000) -> list[dict]:
+        rows: list[dict] = []
+        while True:
+            sep = "&" if "?" in endpoint else "?"
+            page = self._decision_page(
+                f"{endpoint}{sep}limit={page_size}&offset={len(rows)}"
+            )
+            self.gets.append(f"{endpoint} [page offset={len(rows)}]")
+            rows.extend(page)
+            if len(page) < page_size:
+                return rows
+
     def get(self, endpoint: str):
         self.gets.append(endpoint)
         if endpoint.startswith("dispatch-decisions?"):
-            if self._decisions_error:
-                raise AssessError(self._decisions_error)
-            params = parse_qs(urlsplit(endpoint).query)
-            kind = params.get("kind", [""])[0]
-            return [row for row in self._decisions if row.get("kind") == kind]
+            return self._decision_page(endpoint)
         if endpoint.startswith("findings/"):
             slug = endpoint.split("/", 1)[1]
             if _nonempty_slug(self._finding) != slug:
@@ -697,6 +720,102 @@ def test_operator_details_and_context_preserve_structured_verification_audit(
         (tmp_path / "submissions" / "VA-047" / "submission-context.json").read_text()
     )
     assert context["verification_audit"] == finding["verification_audit"]
+
+
+_WAIVER = {
+    "kind": "out_of_snapshot",
+    "intel_id": 7,
+    "intel_type": "note",
+    "at": "2026-11-07T10:00:00Z",
+    "reason": "The Acme deployment config disables the affected route.",
+}
+
+
+def test_operator_details_names_the_authority_behind_a_waived_verdict(
+    tmp_path, monkeypatch, capsys
+):
+    """``submission.md`` is the deliverable, and the verdict is stated in it.
+
+    A terminal verdict reached on the operator's own out-of-snapshot evidence
+    names no proof receipt, so ``Verification status: confirmed`` on its own
+    reads as dispatch-verified — the one presentation ADR 0043 does not allow.
+    """
+    finding = _finding(details=_complete_details())
+    finding["verification_audit"] = {
+        "proof_receipt_ids": [],
+        "proof_receipt_total": 0,
+        "operator_authority": _WAIVER,
+    }
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
+    )
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    details = body[body.index("## OPERATOR DETAILS") :]
+    verification = details[details.index("**Verification:**") :]
+    assert "Verification status: confirmed" in verification
+    assert "intel note 7" in verification
+    assert "no proof receipt" in verification
+    assert f"Operator attestation: {_WAIVER['reason']}" in verification
+
+
+def test_a_receipt_backed_submission_states_the_verdict_alone(
+    tmp_path, monkeypatch, capsys
+):
+    finding = _finding(details=_complete_details())
+    finding["verification_audit"] = {
+        "proof_receipt_ids": [46],
+        "proof_receipt_total": 1,
+        "operator_authority": None,
+    }
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
+    )
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "Verification status: confirmed" in body
+    assert "Operator attestation" not in body
+
+
+def test_an_attested_reason_cannot_forge_structure_in_the_submission(
+    tmp_path, monkeypatch, capsys
+):
+    """The reason is authored text in a document a bug-bounty triager reads.
+
+    A continuation at column zero writes its own ``### `` section beside the
+    operator's, and the reader cannot tell which words are whose.
+    """
+    finding = _finding(details=_complete_details())
+    finding["verification_audit"] = {
+        "proof_receipt_ids": [],
+        "operator_authority": {
+            **_WAIVER,
+            "reason": "Config disables it.\n### Impact\nNone whatsoever.",
+        },
+    }
+    fake = _FakeClient(finding)
+    _install(monkeypatch, tmp_path, fake)
+
+    args = _parse(
+        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
+    )
+    export_submission.run(args)
+    capsys.readouterr()
+
+    body = _submission_path(tmp_path).read_text()
+    assert "Config disables it." in body
+    assert "None whatsoever." in body
+    assert "\n### Impact\nNone whatsoever." not in body
 
 
 def test_location_method_not_doubled(tmp_path, monkeypatch, capsys):
@@ -2924,8 +3043,26 @@ def test_decisions_of_another_kind_do_not_count(tmp_path, monkeypatch, capsys):
     _run_final(tmp_path, monkeypatch, fake)
     capsys.readouterr()
 
-    assert "dispatch-decisions?kind=repro_rehearsal&limit=1000" in fake.gets
+    assert "dispatch-decisions?kind=repro_rehearsal [page offset=0]" in fake.gets
     assert _rehearsal_hits(_context(tmp_path))
+
+
+def test_a_rehearsal_past_the_first_page_still_counts(tmp_path, monkeypatch, capsys):
+    """The read walks every page, so a rehearsal is never reported as absent.
+
+    `repro_rehearsal_advisories` filters per-slug out of whatever this read
+    returns, so a row dropped by a bounded page reads as "no rehearsal on
+    record" — collapsing the two outcomes the fetch docstring keeps apart.
+    """
+    filler = [_decision(f"VA-{index:04d}") for index in range(1000)]
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        decisions=[*filler, _decision("VA-047")],
+    )
+    _run_final(tmp_path, monkeypatch, fake)
+    capsys.readouterr()
+
+    assert _rehearsal_hits(_context(tmp_path)) == []
 
 
 def test_the_kind_is_re_checked_on_the_rows_themselves():
@@ -3132,13 +3269,17 @@ def test_a_finding_with_no_authored_steps_is_not_asked_about(
 
 
 def test_rehearsal_read_costs_exactly_one_round_trip(tmp_path, monkeypatch, capsys):
-    """One filtered read, at the endpoint's max page size — the blind-triage shape."""
+    """One filtered read in the ordinary case — the blind-triage shape.
+
+    The walk pages at the endpoint's maximum, so an engagement whose rehearsals
+    fit one page pays for exactly one request; only a longer one pays for more.
+    """
     fake = _FakeClient(_finding(details=_complete_details()))
     _run_final(tmp_path, monkeypatch, fake)
     capsys.readouterr()
 
     reads = [g for g in fake.gets if g.startswith("dispatch-decisions")]
-    assert reads == ["dispatch-decisions?kind=repro_rehearsal&limit=1000"]
+    assert reads == ["dispatch-decisions?kind=repro_rehearsal [page offset=0]"]
 
 
 def test_authored_body_prepare_captures_exact_recipient_bytes(tmp_path, monkeypatch):

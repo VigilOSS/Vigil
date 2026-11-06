@@ -99,8 +99,10 @@ def _require_modules_receipt(
         raise AssessError(
             "record code modules: backend response did not identify the canonical "
             "module id/repo/key rows for every requested module; the write may have "
-            "committed, so inspect `vigil assess code list-modules` and do not retry "
-            "automatically"
+            "committed, so do not retry automatically: read "
+            f"`vigil assess fetch 'code/modules?repo_id={repo_id}'`, compare its "
+            "module_key values against the ones just submitted, and re-send only the "
+            "modules missing from that read"
         )
     return rows
 

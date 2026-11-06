@@ -141,6 +141,11 @@ Data-exposure-specific:
 - **Single-target dressed as "any/all"** — the mass framing needs enumeration that's actually gated. **[DOWN]**
 - **Compensating control already blocks it** — "no CSRF token" but SameSite/custom-header blocks
   CSRF; "no rate limit" but the action is harmless. **[KILL]**
+- **Not a trigger: a threat-model trusted-input entry.** On the code track the architect's
+  `trusted_inputs` set is advisory — it was recorded from documentation and naming, not from
+  reading the writer — so it cannot carry a KILL on its own. Re-read the writer in source: a
+  source stays attacker-influenced when the code shows a less-trusted writer, or when the entry
+  cites no reason. A wrong entry kills a real finding with no visible counter-evidence.
 
 Overclaim / mis-framing (the recurring patterns an independent triager downgrades):
 - **Self-induced precondition** — the attacker **manufactured the trigger** (disabled a protection

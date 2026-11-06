@@ -6,11 +6,13 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands.dispatch import handoff_renderer
+from assess.lib.client import AssessError
 
 
 class _FakeClient:
     handoff: dict[str, object]
     dispatch: dict[str, object] | None
+    packet: dict[str, object] | None = None
     fetched: list[str]
 
     def __init__(self, _base_url: str, _engagement_key: str) -> None:
@@ -30,6 +32,10 @@ class _FakeClient:
 
     def get(self, endpoint: str) -> object:
         self.fetched.append(endpoint)
+        if endpoint.endswith("/prompt-packet"):
+            if self.packet is None:
+                raise AssessError(f"GET {endpoint} failed: HTTP 404")
+            return self.packet
         slug = endpoint.removeprefix("findings/")
         return {"slug": slug, "title": f"Finding {slug}", "severity": "medium"}
 
@@ -46,9 +52,16 @@ def _run_renderer(
     handoff_slugs: object,
     handoff_extra: dict[str, object] | None = None,
     max_lines: int = 40,
+    present_paths: tuple[str, ...] = (),
+    dispatch_extra: dict[str, object] | None = None,
+    packet_context: dict[str, object] | None = None,
 ) -> _FakeClient:
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
+    for relative in present_paths:
+        written = engagement_dir / relative
+        written.parent.mkdir(parents=True, exist_ok=True)
+        written.write_text("evidence", encoding="utf-8")
     _FakeClient.handoff = {
         "agent_id": "agent-1",
         "agent_role": "recon-specialist",
@@ -67,7 +80,11 @@ def _run_renderer(
         "task": "Map the target surface",
         "status": "completed",
         "finding_slugs": dispatch_slugs,
+        **(dispatch_extra or {}),
     }
+    _FakeClient.packet = (
+        None if packet_context is None else {"schema": "dispatch-prompt/v1", "context": packet_context}
+    )
     client = _FakeClient("", "")
     monkeypatch.setattr(handoff_renderer, "AssessmentClient", lambda *_args: client)
     monkeypatch.setattr(
@@ -128,7 +145,7 @@ def test_render_handoff_separates_slug_sources_and_enriches_stable_union(
     assert "**Findings recorded:**" not in output
     assert "**Dispatch-declared findings:** `D-001`, `SHARED`" in output
     assert "**Handoff-declared findings:** `SHARED`, `H-001`" in output
-    assert client.fetched == [
+    assert [e for e in client.fetched if e.startswith("findings/")] == [
         "findings/D-001",
         "findings/SHARED",
         "findings/H-001",
@@ -173,7 +190,7 @@ def test_render_handoff_does_not_claim_no_findings_when_neither_source_declares_
     assert "**Handoff-declared findings:** (none declared)" in output
     assert "(none declared in handoff or dispatch)" in output
     assert "no findings" not in output.lower()
-    assert client.fetched == []
+    assert [e for e in client.fetched if e.startswith("findings/")] == []
 
 
 def test_render_handoff_surfaces_the_handoff_rows_own_version_status_and_write_time(
@@ -256,7 +273,10 @@ def test_render_handoff_attributes_all_omitted_records_to_separate_sections(
     _run_renderer(
         monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
         handoff_extra={
-            "working_artifacts": [f"scans/acme/artifact-{index}.json" for index in range(11)],
+            "working_artifacts": [
+                {"path": f"scans/acme/artifact-{index}.json", "kind": "data"}
+                for index in range(11)
+            ],
             "runtime_issues": [
                 {"kind": "acme-runtime-control", "detail": f"control {index}"}
                 for index in range(3)
@@ -288,8 +308,12 @@ def test_render_handoff_keeps_cap_and_recorded_values_when_space_allows(
     issues = [{"kind": "acme-runtime-control", "detail": f"control {index}"} for index in range(3)]
     _run_renderer(
         monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
-        handoff_extra={"working_artifacts": paths, "runtime_issues": issues},
+        handoff_extra={
+            "working_artifacts": [{"path": path} for path in paths],
+            "runtime_issues": issues,
+        },
         max_lines=max_lines,
+        present_paths=tuple(paths),
     )
 
     output = capsys.readouterr().out
@@ -346,3 +370,190 @@ def test_handoff_context_respects_both_display_bounds(tmp_path, monkeypatch, cap
     output = capsys.readouterr().out.rstrip('\n')
     assert len(output) <= 8000
     assert len(output.splitlines()) <= max_lines
+
+
+def test_render_handoff_reports_each_artifacts_state_against_the_engagement(
+    tmp_path, monkeypatch, capsys
+):
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
+        handoff_extra={"working_artifacts": [
+            {"path": "scans/acme-written.txt", "kind": "data"},
+            {"path": "scans/acme-claimed.txt", "kind": "data"},
+        ]},
+        present_paths=("scans/acme-written.txt",),
+        max_lines=0,
+    )
+
+    output = capsys.readouterr().out
+    assert "`scans/acme-written.txt` (state: present)" in output
+    assert "`scans/acme-claimed.txt` (state: missing)" in output
+
+
+def test_render_handoff_never_calls_an_out_of_engagement_path_present(
+    tmp_path, monkeypatch, capsys
+):
+    """The backend refuses to register it, so no artifact row can exist for it.
+
+    Reporting it as `present` because it happens to exist on the operator's disk
+    is the one answer that is never true of the engagement.
+    """
+    outside = tmp_path / "acme-outside.txt"
+    outside.write_text("evidence", encoding="utf-8")
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
+        handoff_extra={"working_artifacts": [
+            {"path": str(outside)},
+            {"path": "../acme-outside.txt"},
+        ]},
+        max_lines=0,
+    )
+
+    output = capsys.readouterr().out
+    assert output.count("(state: out-of-engagement)") == 2
+    assert "(state: present)" not in output
+
+
+def test_a_missing_artifact_survives_the_default_line_budget(tmp_path, monkeypatch, capsys):
+    """The trim drops the artifact tail, which is where a missing file hid.
+
+    A `missing` artifact is the one the next dispatch must not chase, and the
+    capped blob is exactly what the operator pastes forward.
+    """
+    present = [f"scans/acme/present-{index}.txt" for index in range(30)]
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[],
+        handoff_extra={"working_artifacts": [
+            *({"path": path} for path in present),
+            {"path": "scans/acme/never-written.txt"},
+        ]},
+        present_paths=tuple(present),
+        max_lines=40,
+    )
+
+    output = capsys.readouterr().out
+    assert len(output.splitlines()) <= 40
+    assert "`scans/acme/never-written.txt` (state: missing)" in output
+    assert "more artifact(s) omitted" in output
+
+
+def test_render_handoff_names_the_phase_the_lane_ran_at_and_the_phase_it_was_authorized_for(
+    tmp_path, monkeypatch, capsys
+):
+    """A lane that quietly ran a different phase than it was given must be visible.
+
+    `authorized_phase` is the operator's grant; the handoff's own `phase` is what
+    the lane says it actually did. The renderer showed neither, so a dispatch
+    that downgraded itself to a less privileged branch looked exactly like one
+    that ran as dispatched.
+    """
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        handoff_extra={"phase": "classify-map"},
+        packet_context={"authorized_phase": "hunt"},
+    )
+
+    output = capsys.readouterr().out
+    assert "**Phase:**" in output
+    assert "classify-map" in output
+    assert "hunt" in output
+    assert "differs" in output.lower()
+
+
+def test_render_handoff_phase_line_agrees_without_flagging_a_divergence(
+    tmp_path, monkeypatch, capsys
+):
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        handoff_extra={"phase": "hunt"},
+        packet_context={"authorized_phase": "hunt"},
+    )
+
+    output = capsys.readouterr().out
+    assert "**Phase:**" in output
+    assert "hunt" in output
+    assert "differs" not in output.lower()
+
+
+def test_render_handoff_phase_line_survives_a_missing_prompt_packet(
+    tmp_path, monkeypatch, capsys
+):
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        handoff_extra={"phase": "hunt"},
+    )
+
+    output = capsys.readouterr().out
+    assert "**Phase:**" in output
+    assert "hunt" in output
+
+
+def test_render_handoff_reads_the_skills_the_lane_recorded_in_its_handoff(
+    tmp_path, monkeypatch, capsys
+):
+    """`skills` on the dispatch row is the REQUEST; the handoff holds what ran.
+
+    An omitted `--skills` tells the specialist to self-select and "record the
+    loaded skill names in the handoff", and `extras` is the only place the
+    handoff payload accepts them. Reading only the dispatch row made the field
+    permanently "(not recorded)" for exactly the dispatches that self-selected.
+    """
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        dispatch_extra={"skills": "", "agent_role": "code-vuln-hunter"},
+        handoff_extra={"extras": {"skills_loaded": ["code-vulnerability-analysis"]}},
+    )
+
+    output = capsys.readouterr().out
+    assert "code-vulnerability-analysis" in output
+    assert "**Skills loaded:** (not recorded)" not in output
+
+
+def test_render_handoff_prefers_the_dispatch_skill_request_and_names_both(
+    tmp_path, monkeypatch, capsys
+):
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        dispatch_extra={"skills": "code-architecture-mapping", "agent_role": "code-architect"},
+        handoff_extra={"extras": {"skills_loaded": "code-vulnerability-analysis"}},
+    )
+
+    output = capsys.readouterr().out
+    assert "code-architecture-mapping" in output
+    assert "code-vulnerability-analysis" in output
+
+
+def test_render_handoff_states_that_a_leaseless_hunter_lane_covered_nothing(
+    tmp_path, monkeypatch, capsys
+):
+    """A hunter with no queue lease cannot write one analysis receipt.
+
+    The lane reads real source and produces real findings, so its handoff looks
+    normal; `code-coverage` still reports every file it read as unreviewed. The
+    next dispatch has to be able to see that from the handoff alone.
+    """
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        dispatch_extra={"agent_role": "code-vuln-hunter"},
+        packet_context={"authorized_phase": "hunt"},
+    )
+
+    output = capsys.readouterr().out
+    assert "**Lane basis:**" in output
+    assert "no queue lease" in output
+    assert "non-covering" in output
+
+
+def test_render_handoff_reports_the_queue_lease_a_covering_lane_held(
+    tmp_path, monkeypatch, capsys
+):
+    _run_renderer(
+        monkeypatch, tmp_path, dispatch_slugs=[], handoff_slugs=[], max_lines=0,
+        dispatch_extra={"agent_role": "code-vuln-hunter"},
+        packet_context={"authorized_phase": "hunt", "queue_item_ids": [44, 45]},
+    )
+
+    output = capsys.readouterr().out
+    assert "**Lane basis:**" in output
+    assert "44, 45" in output
+    assert "non-covering" not in output

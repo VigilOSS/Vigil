@@ -238,16 +238,28 @@ def apply_resolve_pin(
     resolved = ips if ips is not None else resolve_host_ips(host)
     if not resolved:
         return None
-    ipv4 = [address for address in resolved if ipaddress.ip_address(address).version == 4]
-    pin_ip = secrets.choice(ipv4 or resolved)
     # A local replica host (e.g. a *.com.local name at 127.0.0.1 in the host
     # /etc/hosts) is reached in-container through the docker extra_hosts mapping
     # runtime.local_replica_hosts injects at container start, which points the
     # name at the host gateway for ALL tools. A --resolve to loopback here would
     # point the container at ITSELF and override that mapping, so leave the argv
     # to in-container DNS.
-    if ipaddress.ip_address(pin_ip).is_loopback:
+    #
+    # The filter runs BEFORE the selection, not on its result: testing only the
+    # chosen address made a host answering with both a loopback and a routable
+    # record pin or skip at random, so the same argv reached two different
+    # destinations run to run. A loopback address is never pinnable, so it is
+    # not a candidate; when nothing else is left there is no pin at all, which
+    # is exactly the replica case above.
+    candidates = [
+        address
+        for address in resolved
+        if not ipaddress.ip_address(address).is_loopback
+    ]
+    if not candidates:
         return None
+    ipv4 = [address for address in candidates if ipaddress.ip_address(address).version == 4]
+    pin_ip = secrets.choice(ipv4 or candidates)
     cmd.extend(["--resolve", f"{host}:{port}:{pin_ip}"])
     return pin_ip
 

@@ -567,10 +567,67 @@ _RIPGREP_DEGRADATION = (
 )
 
 
+# The same shape as ripgrep's, one rank higher. `agent/shared-constraints-code.md`
+# ranks the generation-bound ctags symbol index FIRST in the cross-reference
+# priority order, ahead of `rg`, and `code-ingest` builds that index only from
+# Universal Ctags probed as `ctags --options=NONE` (see `_setup_ctags`). Without
+# it every cross-reference in the engagement degrades to grep, and the only
+# signal was one `ctags: unavailable` stderr line during ingest — ctags is in no
+# dependency manifest and no runtime image, and code analysis runs on the host.
+_CTAGS_DEGRADATION = (
+    "code-track cross-reference index, ranked ahead of ripgrep; without it every "
+    "cross-reference in the engagement degrades to grep and `code-ingest` reports "
+    "ctags_path: unavailable on one line. Only Universal Ctags is trusted "
+    "(probed as `ctags --options=NONE --version`) — macOS ships BSD ctags, which "
+    "is not; install it with `brew install universal-ctags` (see docs/code-analysis.md)"
+)
+
+
+def _ctags_is_universal() -> bool:
+    """Mirror of ``code_ingest._setup_ctags``'s trust test, as a doctor probe.
+
+    Ingest accepts ONLY Universal Ctags and only under ``--options=NONE`` (so a
+    repository-supplied ``.ctags`` cannot steer the index). Probing the same way
+    keeps the doctor row from reporting a ctags the index generator will refuse.
+    """
+    try:
+        result = subprocess.run(
+            ["ctags", "--options=NONE", "--version"],
+            text=True,
+            capture_output=True,
+            check=False,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    return "Universal" in (result.stdout or "") or "Universal" in (result.stderr or "")
+
+
+def _ctags_degradation_check(presence: Check) -> Check:
+    """Advisory ctags row: never FAIL, never required.
+
+    A BSD or Exuberant ctags is ON PATH and still unusable, so presence alone is
+    not the answer — but the index is an advisory accelerator and a web
+    engagement never reaches a cross-reference, so an unusable ctags is a WARN
+    that names what was lost, exactly as the ripgrep row is.
+    """
+    if presence.status == "MISSING":
+        return replace(presence, status="MISSING", detail=_CTAGS_DEGRADATION)
+    if _ctags_is_universal():
+        return replace(presence, status="OK", detail="")
+    return replace(
+        presence,
+        status="WARN",
+        detail=f"on PATH but not Universal Ctags; {_CTAGS_DEGRADATION}",
+    )
+
+
 def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.run_command) -> list[Check]:
     checks: list[Check] = []
     binary_status: dict[str, str] = {}
-    for command in ("uv", "docker", "go", "codex", "claude", "fzf", "rg"):
+    for command in ("uv", "docker", "go", "codex", "claude", "fzf", "rg", "ctags"):
         check = _binary_check(command)
         # uv runs the managed backend. Docker is a capability prerequisite for
         # target execution, not for starting source investigation on the host.
@@ -582,6 +639,8 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
             check = replace(check, status="WARN" if check.status == "FAIL" else check.status, detail="needed only for host recon tool installation; install Go before `vigil doctor --install-host-tools`")
         elif command == "rg" and check.status != "OK":
             check = replace(check, detail=_RIPGREP_DEGRADATION)
+        elif command == "ctags":
+            check = _ctags_degradation_check(check)
         checks.append(check)
         binary_status[command] = check.status
     install_root = install_root.expanduser().resolve()

@@ -57,6 +57,20 @@ _SCHEMA_SCALARS = (
     "source_name",
 )
 
+# Provenance keys the service stamps and the record door refuses from a caller.
+# Mirrors `_SERVICE_STAMPED_PROVENANCE_REMEDIES` in the backend's
+# state_manager/findings.py, which owns the rule; this copy exists for the same
+# packaging reason as the other backend mirrors in this tree. A captured fixture
+# that kept one of these would replay as a refusal instead of as the finding it
+# was captured from, so the capture drops them rather than the replay failing.
+_SERVICE_STAMPED_PROVENANCE_KEYS = frozenset({
+    "code_snapshot_attestation",
+    "superseded_code_snapshot",
+    "original_canonical_location",
+    "operator_authority",
+    "superseded_operator_authority",
+})
+
 # Headroom added to max_findings in a scaffolded definition so a re-run that
 # legitimately surfaces a couple more findings does not flip the gate red.
 _MAX_FINDINGS_HEADROOM = 3
@@ -142,11 +156,13 @@ def _to_fixture_record(row: dict) -> dict:
     out["details"] = row.get("details", {})
     out["provenance"] = row.get("provenance", {})
     if isinstance(out["provenance"], dict):
-        # Server-issued receipts are not authorable or portable fixture input.
+        # Server-issued receipts are not authorable or portable fixture input, and
+        # the record door now refuses every one of them, so a captured fixture that
+        # kept one would replay as a 400 rather than as the finding it came from.
         out["provenance"] = {
             key: value
             for key, value in out["provenance"].items()
-            if key != "code_snapshot_attestation"
+            if key not in _SERVICE_STAMPED_PROVENANCE_KEYS
         }
     out["links"] = []
     if row.get("evidence_type"):

@@ -29,6 +29,29 @@ TERMINAL_VERIFICATION_STATUSES = frozenset(
 )
 VERIFICATION_AUDIT_RECORD_LIMIT = 100
 
+# The operator-authority terminal verdict. Every receipt route runs through a
+# dispatch (``_require_verifier_owned_evidence``), so an operator holding no
+# dispatch could not record a correction at all — and a fact that settles a
+# finding while sitting OUTSIDE the sealed snapshot (a deployment config, a
+# vendor statement) has no receipt in this engagement that could carry it. ADR
+# 0019 lets the operator weaken a gate over their own engagement; what it does
+# not permit is doing so SILENTLY, so the waiver is a durable stamp naming the
+# intel row it rests on, and every verdict projection carries it. The superseded
+# key keeps the record when a later dispatch-verified verdict replaces it,
+# following the superseded-code-snapshot precedent: the stamp is the record of
+# how a verdict was reached, so it is moved aside rather than deleted.
+OPERATOR_AUTHORITY_PROVENANCE_KEY = "operator_authority"
+SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY = "superseded_operator_authority"
+OPERATOR_AUTHORITY_KIND = "out_of_snapshot"
+
+
+def operator_authority_stamp(provenance: Any) -> dict[str, Any] | None:
+    """Stored authority waiver; callers qualify it against the verdict status."""
+
+    stamp = _common._json_object(provenance).get(OPERATOR_AUTHORITY_PROVENANCE_KEY)
+    return stamp if isinstance(stamp, dict) else None
+
+
 _COMMAND_OUTPUT_DEGRADED_RETENTION_STATUSES = frozenset(
     {
         "integrity_failure",
@@ -538,13 +561,32 @@ def create_proof_receipt(
         ).fetchone()
         if run is None:
             raise HTTPException(status_code=404, detail="assessment run not found")
-        if str(run["status"]) != "running":
+        run_status = str(run["status"])
+        if run_status != "running":
+            # ``queued`` and ``running`` are the two ACTIVE statuses, so every
+            # other value is a genuinely sealed terminal run. Calling a queued
+            # run sealed sent the caller at the sealed run's escape — start a
+            # replacement — and a scan-purpose run starts queued too, so the same
+            # call failed the same way forever.
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    f"assessment run id={run_id} is sealed with status="
-                    f"{str(run['status'])!r}; proof receipts must be recorded "
-                    "while the run is running"
+                    (
+                        f"assessment run id={run_id} has not started: a scan-purpose "
+                        "run is created queued and records no evidence until it is "
+                        f"begun. Run `vigil assess proof-run begin {run_id}`, then "
+                        "record the receipt — a replacement run would only be queued "
+                        "as well."
+                    )
+                    if run_status == "queued"
+                    else (
+                        f"assessment run id={run_id} is sealed with status="
+                        f"{run_status!r}; proof receipts must be recorded while the "
+                        "run is running. To bind new receipts to evidence this run "
+                        "already delivered, open a child with `vigil assess proof-run "
+                        f"start <new-run-uuid> --resume-from {run_id}` and record them "
+                        "there."
+                    )
                 ),
             )
 
@@ -911,6 +953,11 @@ def proof_receipts_for_finding(
     engagement_id: int,
     finding_id: int,
 ) -> list[dict[str, Any]]:
+    """Receipts of the latest decision, including receipt-free authority events.
+
+    Presentation edits do not create decisions and keep the preceding proof.
+    Historical links remain in the verification audit, not in this projection.
+    """
     rows = connection.execute(
         """
         SELECT receipts.*, artifacts.present AS artifact_present,
@@ -923,14 +970,21 @@ def proof_receipts_for_finding(
         WHERE links.engagement_id = ? AND links.finding_id = ?
           AND (
             links.transition_id = (
-              SELECT MAX(current_links.transition_id)
-              FROM assessment_finding_proof_receipts AS current_links
-              JOIN assessment_finding_transitions AS current_transition
-                ON current_transition.id = current_links.transition_id
-              WHERE current_links.engagement_id = links.engagement_id
-                AND current_links.finding_id = links.finding_id
+              SELECT MAX(current_transition.id)
+              FROM assessment_finding_transitions AS current_transition
+              WHERE current_transition.engagement_id = links.engagement_id
+                AND current_transition.finding_id = links.finding_id
                 AND current_transition.to_verification_status =
                     findings.verification_status
+                AND (
+                  json_type(current_transition.metadata_json, '$.operator_authority') = 'object'
+                  OR EXISTS (
+                    SELECT 1 FROM assessment_finding_proof_receipts AS current_links
+                    WHERE current_links.engagement_id = links.engagement_id
+                      AND current_links.finding_id = links.finding_id
+                      AND current_links.transition_id = current_transition.id
+                  )
+                )
             )
             OR (
               links.transition_id IS NULL
@@ -940,6 +994,13 @@ def proof_receipts_for_finding(
                 WHERE mapped_links.engagement_id = links.engagement_id
                   AND mapped_links.finding_id = links.finding_id
                   AND mapped_links.transition_id IS NOT NULL
+              )
+              AND NOT EXISTS (
+                SELECT 1 FROM assessment_finding_transitions AS authority_decision
+                WHERE authority_decision.engagement_id = links.engagement_id
+                  AND authority_decision.finding_id = links.finding_id
+                  AND authority_decision.to_verification_status = findings.verification_status
+                  AND json_type(authority_decision.metadata_json, '$.operator_authority') = 'object'
               )
             )
           )
@@ -1090,7 +1151,11 @@ def verification_audit_for_finding(
         """,
         (engagement_id, finding_id, VERIFICATION_AUDIT_RECORD_LIMIT),
     ).fetchall()
-    return _verification_audit_payload(
+    provenance = connection.execute(
+        "SELECT provenance_json FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+        (engagement_id, finding_id),
+    ).fetchone()
+    payload = _verification_audit_payload(
         [int(row["proof_receipt_id"]) for row in proof_link_rows],
         _serialize_counterchecks(connection, list(counter_rows)),
         _serialize_severity_variances(list(variance_rows)),
@@ -1098,6 +1163,14 @@ def verification_audit_for_finding(
         counter_check_total=int(totals["counter_check_total"]),
         severity_variance_total=int(totals["severity_variance_total"]),
     )
+    # The authority behind the CURRENT verdict, beside the receipts that would
+    # otherwise be the only thing a reader checks: a verdict carried by the
+    # operator's out-of-snapshot evidence has no receipts at all, and an empty
+    # receipt list must never read as "nobody recorded the evidence".
+    payload[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_authority_stamp(
+        provenance["provenance_json"] if provenance is not None else None
+    )
+    return payload
 
 
 def verification_audit_by_transition(
@@ -1444,17 +1517,81 @@ def record_finding_verification_evidence(
     confirm_check: dict[str, Any] | None,
     severity_variance: dict[str, Any] | None,
     normal_severity_band: str | None,
+    operator_authority: bool = False,
 ) -> dict[str, Any]:
     """Validate and durably link the evidence behind one verification event."""
 
     terminal = verification_status in TERMINAL_VERIFICATION_STATUSES
     if not terminal:
-        if proof_receipt_ids or counter_check is not None or confirm_check is not None or severity_variance is not None:
+        if (
+            proof_receipt_ids
+            or counter_check is not None
+            or confirm_check is not None
+            or severity_variance is not None
+            or operator_authority
+        ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail="proof decision records apply only to terminal verification statuses",
+                detail=(
+                    "proof decision records and operator authority apply only to "
+                    "terminal verification statuses"
+                ),
             )
-        return {"proof_receipts": [], "counter_check": None, "severity_variance": None}
+        return {
+            "proof_receipts": [],
+            "counter_check": None,
+            "severity_variance": None,
+            "operator_authority": None,
+        }
+
+    if operator_authority:
+        # The fourth decision branch: the operator's own out-of-snapshot evidence
+        # stands in for the decision receipt. The stamp is read back from the
+        # STORED provenance rather than trusted from the caller, so the gate is
+        # only ever waived for a verdict whose waiver is already durable.
+        #
+        # A receipt and a structured check are both receipt-bound records, so
+        # neither can ride along: ``confirm_check``/``counter_check`` must name
+        # the decision receipts, and ``severity_variance`` is keyed to one. A
+        # band that departs from the CVSS score therefore records no variance row
+        # here; the stamp's reason is its attribution, and report readiness has
+        # to show the verdict as operator-authority rather than proven.
+        stamp = operator_authority_stamp(finding["provenance_json"])
+        if stamp is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "an operator-authority verdict must record its "
+                    "provenance.operator_authority stamp; verify with "
+                    "`finding verify --operator-authority --intel-id <id>`"
+                ),
+            )
+        carried = [
+            name
+            for name, value in (
+                ("proof_receipt_ids", proof_receipt_ids),
+                ("counter_check", counter_check),
+                ("confirm_check", confirm_check),
+                ("severity_variance", severity_variance),
+            )
+            if value
+        ]
+        if carried:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "an operator-authority verdict rests on out-of-snapshot evidence "
+                    f"and records no proof receipts, so it cannot carry {', '.join(carried)}; "
+                    "verify on the receipt instead, or record the verdict on the "
+                    "operator's evidence alone"
+                ),
+            )
+        return {
+            "proof_receipts": [],
+            "counter_check": None,
+            "severity_variance": None,
+            "operator_authority": stamp,
+        }
 
     counter_receipt_ids = (
         [int(value) for value in counter_check.get("proof_receipt_ids", [])]
@@ -1708,4 +1845,8 @@ def record_finding_verification_evidence(
         "proof_receipts": receipts,
         "counter_check": counter_record,
         "severity_variance": variance_record,
+        # A dispatch-verified verdict supersedes any earlier operator-authority
+        # stamp (``findings`` moves it aside on the same write), so the envelope
+        # states the authority behind the verdict it just recorded.
+        "operator_authority": operator_authority_stamp(finding["provenance_json"]),
     }

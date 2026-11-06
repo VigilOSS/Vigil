@@ -1,7 +1,7 @@
 """Scope-filter tests for `vigil assess ingest candidates` + the shared resolver.
 
 ingest-candidates ingests curated, metadata-rich candidate JSONL. Each record
-carries an arbitrary per-record URL, so — exactly like ingest-endpoints — a
+carries an arbitrary per-record URL, so — exactly like ingest endpoints — a
 curated row can carry a reachable-but-out-of-scope host (e.g. carried through
 from a gau/wayback corpus the curating specialist read). The scope gate must
 admit only scope.json-allowlisted hosts and record the rest skipped

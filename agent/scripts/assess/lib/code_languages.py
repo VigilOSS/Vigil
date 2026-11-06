@@ -160,10 +160,17 @@ PHP_TAG_REQUIRED_EXTENSIONS = frozenset(
 # Suffixes whose language the file's opening text decides.
 HEADER_DECIDED_EXTENSIONS = PHP_TAG_REQUIRED_EXTENSIONS | {".tpl"}
 _PHP_OPEN_TAG = re.compile(r"<\?(?:php(?![A-Za-z0-9_])|=|(?=\s))", re.IGNORECASE)
-# OpenCart, Smarty, Twig and plain HTML all name templates `.tpl`. One is PHP
-# when its header opens a PHP tag, and otherwise Twig when it opens a `{{` or
-# `{%` delimiter, which Smarty's `{$var}`/`{if}` never do.
+# OpenCart, Smarty, Twig, Handlebars and plain HTML all name templates `.tpl`.
+# One is PHP when its header opens a PHP tag, and otherwise Twig when it opens a
+# `{{` or `{%` delimiter, which Smarty's `{$var}`/`{if}` never do.
 _TWIG_DELIMITER = re.compile(r"\{[{%]")
+# Handlebars and Mustache open with `{{` too, and their sigils are the tell: a
+# block (`{{#`, `{{/`), a partial (`{{>`), an inverted section (`{{^`), an
+# unescaped value (`{{{`, `{{&`) and a comment (`{{!`) are none of them an
+# expression Twig can evaluate. Such a file is HTML with mustache
+# interpolation, which the HTML reader reads as one -- and reading it as Twig
+# makes the `{#` of `{{#each}}` open a comment the file never closes.
+_MUSTACHE_SIGIL = re.compile(r"\{\{[#/{>^&!]")
 
 # Longest first, so a future `.foo.blade.php` cannot be decided by a shorter
 # sibling key that happens to be scanned earlier.
@@ -199,7 +206,7 @@ def detect_language(file_path: str, header: str | None = None) -> str | None:
     if suffix == ".tpl" and header is not None:
         if _PHP_OPEN_TAG.search(header):
             return "php"
-        if _TWIG_DELIMITER.search(header):
+        if _TWIG_DELIMITER.search(header) and not _MUSTACHE_SIGIL.search(header):
             return "twig"
     return LANGUAGE_BY_EXTENSION.get(suffix)
 

@@ -270,3 +270,67 @@ def test_apply_resolve_pin_skips_loopback_targets_for_extra_hosts(monkeypatch):
     assert pinned is None
     assert "--resolve" not in cmd
     assert "--connect-to" not in cmd
+
+
+def test_apply_resolve_pin_drops_loopback_candidates_before_choosing(monkeypatch):
+    """A mixed answer must not flip a coin over whether the run is pinned.
+
+    ``secrets.choice`` used to pick from the full candidate set and the
+    ``is_loopback`` test ran on that ONE choice, so a host answering with both
+    127.0.0.1 and a routable A record pinned the routable address or skipped the
+    pin entirely at random — the same argv producing two different in-container
+    destinations run to run. A loopback candidate can never be pinned, so it
+    leaves the candidate set before the selection, not after it.
+    """
+    monkeypatch.setattr(kali_resolve.secrets, "choice", lambda values: values[0])
+    cmd = ["curl", "-sS", "https://mixed.example.com/"]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd,
+        "curl",
+        runtime=_docker_desktop(),
+        ips=["127.0.0.1", "203.0.113.5"],
+    )
+
+    assert pinned == "203.0.113.5"
+    assert cmd[cmd.index("--resolve") + 1] == "mixed.example.com:443:203.0.113.5"
+
+
+def test_apply_resolve_pin_never_offers_a_loopback_candidate_to_the_selector(monkeypatch):
+    """The selector only ever sees pinnable addresses."""
+    seen: list[list[str]] = []
+
+    def record(values):
+        seen.append(list(values))
+        return values[-1]
+
+    monkeypatch.setattr(kali_resolve.secrets, "choice", record)
+    cmd = ["curl", "-sS", "https://mixed.example.com/"]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd,
+        "curl",
+        runtime=_docker_desktop(),
+        ips=["203.0.113.5", "127.0.0.2", "203.0.113.6"],
+    )
+
+    assert pinned == "203.0.113.6"
+    assert seen == [["203.0.113.5", "203.0.113.6"]]
+
+
+@pytest.mark.parametrize(
+    "addresses",
+    [["127.0.0.1"], ["::1"], ["127.0.0.1", "127.0.0.53", "::1"]],
+)
+def test_apply_resolve_pin_still_skips_an_all_loopback_host(addresses, monkeypatch):
+    """Unchanged: nothing pinnable is left, so in-container DNS (the injected
+    ``extra_hosts`` entry) resolves the replica for every tool."""
+    monkeypatch.setattr(kali_resolve.secrets, "choice", lambda values: values[0])
+    cmd = ["curl", "-sk", "https://replica.acme.example/"]
+
+    pinned = kali_resolve.apply_resolve_pin(
+        cmd, "curl", runtime=_docker_desktop(), ips=list(addresses)
+    )
+
+    assert pinned is None
+    assert "--resolve" not in cmd

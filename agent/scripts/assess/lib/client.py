@@ -371,6 +371,16 @@ def _is_handoff_duplicate_conflict(exc: AssessError) -> bool:
     )
 
 
+#: Hard ceiling on pages a single paginated read will walk.
+#:
+#: The walk ends on a short page. A backend that serves a full page at every
+#: offset -- a route that drops `offset`, or one whose window is wider than the
+#: page it returns -- never ends it, and an unbounded walk turns that into a
+#: command that never returns and reports nothing. The bound converts it into a
+#: resumable refusal. `fetch` applies the same ceiling to its own three walks.
+MAX_PAGE_WALK = 500
+
+
 class AssessmentClient:
     """HTTP client for the orchestrator assessment API.
 
@@ -845,8 +855,13 @@ class AssessmentClient:
         return _require_read_shape(rows, endpoint=endpoint, expected=list)
 
     # HandoffUpdate (the PATCH body) forbids `agent_id` (it's in the URL) and
-    # `agent_role` (immutable once the row exists). Everything else round-trips.
+    # `agent_role` (immutable once the row exists). Everything else round-trips,
+    # `expected_handoff_version` included: the backend compares it against the
+    # stored version and answers 409 on a mismatch, so a caller that authors it
+    # and has it filtered out here does not get a weaker write — it gets an
+    # UNGUARDED one, which is the single outcome the field exists to prevent.
     _HANDOFF_PATCHABLE_FIELDS = (
+        "expected_handoff_version",
         "summary",
         "phase",
         "confidence",
@@ -1000,7 +1015,7 @@ class AssessmentClient:
 
         rows: list[Any] = []
         offset = 0
-        while True:
+        for _page_index in range(MAX_PAGE_WALK):
             paged_query_items = [
                 item for item in query_items if item[0] not in {"limit", "offset"}
             ]
@@ -1014,6 +1029,12 @@ class AssessmentClient:
             if len(page) < page_size:
                 return rows
             offset += page_size
+        raise AssessError(
+            f"{normalized_path}: stopped after {MAX_PAGE_WALK} pages "
+            f"({len(rows)} rows) without reaching a short page, so the backend "
+            f"is not advancing. Continue with ?limit={page_size}&offset={offset} "
+            "once it is, rather than reading this as the whole list."
+        )
 
     def post_event(self, payload: dict) -> dict | None:
         """POST /events. Fire-and-forget: warn on failure, never raise."""

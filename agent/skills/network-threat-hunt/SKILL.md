@@ -479,40 +479,45 @@ silent gap.
 ```json
 {
   "agent_id": "<runtime-agent-id from dispatch banner>",
-  "agent_role": "network-threat-hunt-specialist",
-  "phase": "investigation",
-  "handoff_status": "ready",
-  "finding_slug": "<from finding record>",
-  "skill_completed": "network-threat-hunt",
-  "platform": "network",
-  "sub_platform": "siem|fw|proxy|dns|tls|mixed",
-  "src_ip": "10.42.0.18",
-  "dst_ip_list": ["203.0.113.42"],
-  "dst_fqdn_list": ["api.evil.example"],
-  "ja3_hash_list": ["..."],
-  "time_window_utc": ["2026-04-19T00:00:00Z", "2026-05-19T00:00:00Z"],
-  "mitre_techniques": ["T1071.001", "T1573", "T1071.004"],
-  "severity": "high",
+  "agent_role": "investigator",
+  "phase": "investigate",
+  "summary": "<which network signals fired for <src_ip>, which tenant-ref registers were eliminated, and what the disposition rests on>",
   "confidence": "medium",
-  "confidence_rationale": "Three independent network signals; no endpoint corroboration yet.",
-  "tenant_ref_paths_consulted": [
-    "agent/references/tenants/<customer>-network.md"
+  "handoff_status": "ready",
+  "finding_slugs": ["<from finding record>"],
+  "recommended_next_agent": "incident-verifier",
+  "coverage_gaps": [
+    {"area": "firewall log retention", "reason": "only 14d retained", "recommended_followup": "the true T-30 window is unavailable; request an archive restore or state the bound"}
   ],
-  "tenant_ref_eliminations": [
-    {"register": "documented_outbound_jobs", "outcome": "miss"},
-    {"register": "internal_jaX_baseline", "outcome": "miss"},
-    {"register": "dns_high_entropy_allowlist", "outcome": "miss"}
-  ],
-  "evidence_refs": ["<artifact-id-fw-csv>", "<artifact-id-beacons-tsv>", "<artifact-id-ja3-matrix>", "<artifact-id-dns-entropy>"],
-  "next_specialist": "edr-alert-triage | ioc-enrichment | incident-containment | verifier",
   "next_steps": [
-    "Pivot to EDR for process tree on src_host(s) mapped from src_ip",
-    "Enrich dst_ip / dst_fqdn / ja3_hash via ioc-enrichment",
-    "If verified, draft firewall-block proposal via incident-containment"
+    {"action": "pivot to EDR for the process tree on the src_host mapped from src_ip", "target": "<src_host>", "recommended_agent": "investigator", "rationale": "network-only evidence cannot name the process"},
+    {"action": "enrich dst_ip / dst_fqdn / ja3_hash", "target": "<dst_fqdn>", "recommended_agent": "osint-analyst", "rationale": "reputation decides whether the beacon is adversarial"},
+    {"action": "draft a firewall-block proposal once the finding verifies", "target": "<dst_ip>", "recommended_agent": "ir-lead", "rationale": "L4 owns containment proposals"}
   ],
-  "coverage_gaps": ["Firewall retention only 14d — true T-30 window unavailable"],
-  "cross_platform_correlation_notes": "EDR sibling finding slug: <slug>",
-  "rationale": "<paragraph: why this disposition, what verifier checks first, what operator authorizes>"
+  "extras": {
+    "skill_completed": "network-threat-hunt",
+    "platform": "network",
+    "sub_platform": "siem|fw|proxy|dns|tls|mixed",
+    "src_ip": "10.42.0.18",
+    "dst_ip_list": ["203.0.113.42"],
+    "dst_fqdn_list": ["api.evil.example"],
+    "ja3_hash_list": ["..."],
+    "time_window_utc": ["2026-04-19T00:00:00Z", "2026-05-19T00:00:00Z"],
+    "mitre_techniques": ["T1071.001", "T1573", "T1071.004"],
+    "severity": "high",
+    "confidence_rationale": "Three independent network signals; no endpoint corroboration yet.",
+    "tenant_ref_paths_consulted": [
+      "agent/references/tenants/<customer>-network.md"
+    ],
+    "tenant_ref_eliminations": [
+      {"register": "documented_outbound_jobs", "outcome": "miss"},
+      {"register": "internal_jaX_baseline", "outcome": "miss"},
+      {"register": "dns_high_entropy_allowlist", "outcome": "miss"}
+    ],
+    "evidence_refs": ["<artifact-id-fw-csv>", "<artifact-id-beacons-tsv>", "<artifact-id-ja3-matrix>", "<artifact-id-dns-entropy>"],
+    "cross_platform_correlation_notes": "EDR sibling finding slug: <slug>",
+    "rationale": "<paragraph: why this disposition, what verifier checks first, what operator authorizes>"
+  }
 }
 ```
 
@@ -541,7 +546,7 @@ silent gap.
    vigil assess log <runtime-agent-id> \
      "network-handoff" \
      "Ran 6-step network hunt: window, beacon, DNS, JA3, lateral, proxy" \
-     "Handoff to <next_specialist>" \
+     "Handoff to <recommended_next_agent>" \
      --actor-kind agent \
      --metadata-file /tmp/network_metadata.json
    ```

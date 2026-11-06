@@ -209,6 +209,11 @@ def test_fetch_passes_queue_mode_filter_to_the_backend(monkeypatch, tmp_path, ca
         def __exit__(self, *_exc):
             return False
 
+        def get(self, endpoint: str):
+            posted.setdefault("scope_reads", []).append(endpoint)  # type: ignore[union-attr]
+            return {"total": 0, "offset": 0, "count": 0, "has_more": False,
+                    "item_ids": [], "items": []}
+
         def post(self, endpoint: str, payload: dict[str, object]):
             posted["endpoint"] = endpoint
             posted["payload"] = payload
@@ -322,3 +327,308 @@ def test_ids_file_accepts_single_and_multiple_plain_ids(tmp_path, content, expec
     path = tmp_path / "ids.txt"
     path.write_text(content)
     assert code_dispatch._ids_from_file(str(path)) == expected
+
+
+# --- B10: an empty claim must say WHICH kind of empty it is -----------------
+
+
+class _EmptyFetchClient:
+    """A claim that returns nothing, plus the scope read that explains why."""
+
+    scope_page: dict = {
+        "total": 0, "offset": 0, "count": 0, "has_more": False,
+        "item_ids": [], "items": [],
+    }
+    reads: list[str] = []
+    claimed: list[dict] = []
+
+    def __init__(self, *_args) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def get(self, endpoint: str):
+        type(self).reads.append(endpoint)
+        return type(self).scope_page
+
+    def post(self, _endpoint: str, _payload: dict[str, object]):
+        return type(self).claimed
+
+
+@pytest.fixture
+def empty_fetch_client(monkeypatch, tmp_path):
+    _EmptyFetchClient.reads = []
+    _EmptyFetchClient.claimed = []
+    _EmptyFetchClient.scope_page = {
+        "total": 0, "offset": 0, "count": 0, "has_more": False,
+        "item_ids": [], "items": [],
+    }
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _EmptyFetchClient)
+    monkeypatch.setattr(code_dispatch, "write_json_snapshot", lambda *_a, **_k: snapshot)
+    return _EmptyFetchClient
+
+
+def test_an_empty_claim_reads_the_same_scope_with_no_status_filter(
+    empty_fetch_client, tmp_path, capsys
+):
+    """The diagnostic must reuse the claim's own scope, minus `status`.
+
+    Anything else can disagree with the claim query, which is the one thing a
+    "why did I get nothing" message must never do.
+    """
+    code_dispatch._fetch(
+        _config(tmp_path),
+        5,
+        "idle-hunter",
+        code_dispatch._parse_fetch_filters(
+            [
+                "--repo-id", "3",
+                "--classification", "critical",
+                "--batch-theme", "parser core",
+                "--queue-mode", "initial",
+                "--path-prefix", "src/auth",
+                "--path-glob", "*.py",
+            ]
+        ),
+    )
+
+    assert empty_fetch_client.reads == [
+        "code/analysis-queue?repo_id=3&classification=critical"
+        "&batch_theme=parser+core&queue_mode=initial"
+        "&path_prefix=src%2Fauth&path_glob=%2A.py&limit=200"
+    ]
+    err = capsys.readouterr().err
+    assert "No current-generation queue row lies under this scope" in err
+    assert "code-coverage --by-path" in err
+
+
+def test_an_empty_claim_over_busy_rows_names_their_status_and_holders(
+    empty_fetch_client, tmp_path, capsys
+):
+    empty_fetch_client.scope_page = {
+        "total": 3,
+        "offset": 0,
+        "count": 3,
+        "has_more": False,
+        "item_ids": [41, 42, 43],
+        "items": [
+            {
+                "id": 41, "status": "processing", "agent_name": "hunter-a",
+                "heartbeat_age_seconds": 900, "file_path": "src/auth/login.py",
+            },
+            {
+                "id": 42, "status": "processing", "agent_name": "hunter-b",
+                "heartbeat_age_seconds": 5, "file_path": "src/auth/session.py",
+            },
+            {
+                "id": 43, "status": "done", "agent_name": "",
+                "heartbeat_age_seconds": None, "file_path": "src/auth/token.py",
+            },
+        ],
+    }
+
+    code_dispatch._fetch(
+        _config(tmp_path), 5, "idle-hunter", {"path_prefix": ["src/auth"]}
+    )
+
+    err = capsys.readouterr().err
+    assert "3 row(s) match this scope" in err
+    assert "none is claimable now" in err
+    assert "processing=2" in err
+    assert "done=1" in err
+    assert "hunter-a" in err
+    assert "15m" in err
+    assert "code-coverage --by-path" not in err
+
+
+def test_a_non_empty_claim_issues_no_diagnostic_read(empty_fetch_client, tmp_path, capsys):
+    empty_fetch_client.claimed = [
+        {"id": 41, "assigned_agent": "idle-hunter", "lease_token": "lease-41"}
+    ]
+
+    code_dispatch._fetch(_config(tmp_path), 5, "idle-hunter", {})
+
+    assert empty_fetch_client.reads == []
+    assert "claimable" not in capsys.readouterr().err
+
+
+def test_the_empty_claim_diagnostic_survives_an_unreadable_scope_page(
+    empty_fetch_client, tmp_path, capsys
+):
+    """A failed diagnostic read must not turn an empty claim into a crash."""
+    empty_fetch_client.scope_page = []  # type: ignore[assignment]
+
+    code_dispatch._fetch(_config(tmp_path), 5, "idle-hunter", {"repo_id": 3})
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out) == []
+    assert "repo_id=3" in captured.err
+
+
+# --- G11: a partial --ids-file claim must name every id it did not get ------
+
+
+def test_a_partial_ids_file_claim_names_the_unclaimed_ids_and_their_status(
+    monkeypatch, tmp_path, capsys
+):
+    """1,560 of 1,574 claimed printed nothing; 14 files were never reviewed."""
+
+    class _PartialClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, endpoint: str):
+            assert endpoint.startswith("code/analysis-queue?")
+            return {
+                "total": 3, "offset": 0, "count": 3, "has_more": False,
+                "item_ids": [41, 42, 43],
+                "items": [
+                    {"id": 42, "status": "processing", "agent_name": "hunter-b",
+                     "file_path": "src/b.py", "heartbeat_age_seconds": 12},
+                    {"id": 43, "status": "done", "agent_name": "",
+                     "file_path": "src/c.py", "heartbeat_age_seconds": None},
+                    {"id": 41, "status": "processing", "agent_name": "mine",
+                     "file_path": "src/a.py", "heartbeat_age_seconds": 0},
+                ],
+            }
+
+        def post(self, _endpoint: str, _payload: dict[str, object]):
+            return [{"id": 41, "assigned_agent": "mine", "lease_token": "lease-41"}]
+
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _PartialClient)
+    monkeypatch.setattr(code_dispatch, "write_json_snapshot", lambda *_a, **_k: snapshot)
+
+    code_dispatch._fetch(
+        _config(tmp_path), 3, "mine", {"item_ids": [41, 42, 43]}
+    )
+
+    captured = capsys.readouterr()
+    assert [item["id"] for item in json.loads(captured.out)] == [41]
+    err = captured.err
+    assert "claimed 1 of the 3 requested id(s)" in err
+    assert "42 (processing" in err
+    assert "hunter-b" in err
+    assert "43 (done" in err
+    # The id this lane DID claim is not reported as unclaimed.
+    assert "41 (" not in err
+
+
+def test_a_complete_ids_file_claim_warns_about_nothing(monkeypatch, tmp_path, capsys):
+    class _CompleteClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, endpoint: str):
+            pytest.fail(f"a complete claim must not issue a diagnostic read: {endpoint}")
+
+        def post(self, _endpoint: str, _payload: dict[str, object]):
+            return [
+                {"id": 41, "assigned_agent": "mine", "lease_token": "lease-41"},
+                {"id": 42, "assigned_agent": "mine", "lease_token": "lease-42"},
+            ]
+
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _CompleteClient)
+    monkeypatch.setattr(code_dispatch, "write_json_snapshot", lambda *_a, **_k: snapshot)
+
+    code_dispatch._fetch(_config(tmp_path), 2, "mine", {"item_ids": [41, 42]})
+
+    assert "requested id(s)" not in capsys.readouterr().err
+
+
+def test_an_ids_file_claim_that_got_nothing_still_names_every_id(
+    monkeypatch, tmp_path, capsys
+):
+    """A total ids-file failure is the same question, with every id unclaimed."""
+
+    class _NoneClaimedClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, _endpoint: str):
+            return {
+                "total": 1, "offset": 0, "count": 1, "has_more": False,
+                "item_ids": [41],
+                "items": [
+                    {"id": 41, "status": "processing", "agent_name": "other-lane",
+                     "file_path": "src/a.py", "heartbeat_age_seconds": 30},
+                ],
+            }
+
+        def post(self, _endpoint: str, _payload: dict[str, object]):
+            return []
+
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _NoneClaimedClient)
+    monkeypatch.setattr(code_dispatch, "write_json_snapshot", lambda *_a, **_k: snapshot)
+
+    code_dispatch._fetch(_config(tmp_path), 2, "mine", {"item_ids": [41, 99]})
+
+    err = capsys.readouterr().err
+    assert "claimed 0 of the 2 requested id(s)" in err
+    assert "41 (processing held by other-lane)" in err
+    assert "99: no current-generation queue row found" in err
+
+
+def test_a_failed_status_lookup_is_not_reported_as_a_missing_row(
+    monkeypatch, tmp_path, capsys
+):
+    """"We could not look" must never render as "the row is gone"."""
+    from assess.lib.client import AssessError
+
+    class _BrokenLookupClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, _endpoint: str):
+            raise AssessError("HTTP 503 analysis-queue listing unavailable")
+
+        def post(self, _endpoint: str, _payload: dict[str, object]):
+            return [{"id": 41, "assigned_agent": "mine", "lease_token": "lease-41"}]
+
+    snapshot = tmp_path / "snapshot.json"
+    snapshot.write_text("{}", encoding="utf-8")
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _BrokenLookupClient)
+    monkeypatch.setattr(code_dispatch, "write_json_snapshot", lambda *_a, **_k: snapshot)
+
+    code_dispatch._fetch(_config(tmp_path), 2, "mine", {"item_ids": [41, 42]})
+
+    err = capsys.readouterr().err
+    assert "claimed 1 of the 2 requested id(s)" in err
+    assert "could not be read back" in err
+    assert "42: status unread" in err
+    assert "no current-generation queue row found" not in err

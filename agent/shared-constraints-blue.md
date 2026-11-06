@@ -304,30 +304,39 @@ Every blue specialist dispatch closes with a handoff JSON conforming to
 vigil assess agent handoff --agent-id <agent-id> --from-json <path>
 ```
 
-Blue handoffs include the following fields beyond the cross-mode baseline:
+The top-level keys are exactly the ones `handoff-schema.md` defines; `agent handoff` names any
+other top-level key on stderr and exits 1, so blue role-specific fields go inside `extras`:
 
-- **`disposition`** — set by L3 `incident-verifier` only; one of `verified |
+- **`extras.disposition`** — set by L3 `incident-verifier` only; one of `verified |
   false_positive | downgraded | escalated`. Other tiers leave this null.
-- **`evidence_refs`** — array of artifact IDs (from `assessment_artifacts.id`),
+- **`extras.evidence_refs`** — array of artifact IDs (from `assessment_artifacts.id`),
   NOT local filesystem paths. The downstream specialist (verifier consuming
   the L2 handoff, report-writer consuming the L3 handoff) resolves artifacts
   by ID through `vigil assess artifact get <id>` rather than re-reading files
   on disk.
-- **`coverage_gaps`** — array of one-line strings naming the open questions
-  the dispatch did not close. The verifier flags missing
-  cross-platform correlation here as a `coverage_gaps` entry.
-- **`mitre_techniques`** — array of MITRE ATT&CK technique IDs the dispatch
+- **`extras.mitre_techniques`** — array of MITRE ATT&CK technique IDs the dispatch
   produced evidence for. Matches the finding's
   `details.mitre_techniques`; redundant on purpose so the handoff
   is self-contained.
-- **`tenant_ref_paths_consulted`** — array of tenant ref paths the dispatch
+- **`extras.tenant_ref_paths_consulted`** — array of tenant ref paths the dispatch
   actually loaded. Distinct from the dispatch's available `tenant_reference_paths[]`;
   this field records which ones the specialist read.
-- **`cross_platform_correlation_notes`** — present and non-empty when
+- **`extras.cross_platform_correlation_notes`** — present and non-empty when
   the dispatch names more than one platform; one-paragraph summary of
   how identity, time window, and IOCs correlate across platforms.
 
-A handoff missing `evidence_refs` for a finding with claimed evidence is a
+`coverage_gaps` and `next_steps` stay top-level and keep the schema's own object shapes —
+`{area, reason, recommended_followup}` and `{action, target, recommended_agent, rationale}` per
+entry. A list of plain strings is refused, so the open question a blue dispatch could not close
+goes in as an object; the verifier records missing cross-platform correlation the same way.
+`finding_slugs` is the plural array of slug strings.
+
+`agent_role` must equal the role the dispatch row was registered under —
+`alert-triage-specialist`, `investigator`, `incident-verifier`, `ir-lead`, or `osint-analyst`.
+The write 409s on anything else, including a name derived from the platform skill the dispatch
+ran, so an L2 platform dispatch hands off as `investigator`.
+
+A handoff missing `extras.evidence_refs` for a finding with claimed evidence is a
 coverage gap. A handoff citing local paths instead of artifact IDs cannot
 survive resume — the next agent's resume-brief will not surface the file
 because it was never registered.

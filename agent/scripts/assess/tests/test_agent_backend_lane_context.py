@@ -9,8 +9,22 @@ import pytest
 from assess.commands import agent
 
 
+def _files_page(rows, *, offset=0, total=None):
+    """The bounded `code/files` envelope the shared validator requires."""
+    total = len(rows) if total is None else total
+    return {"total": total, "offset": offset, "count": len(rows),
+            "has_more": offset + len(rows) < total, "items": rows}
+
+
 class _Client:
+    progress = {44: {"applicable_vuln_classes": ["web-app-injection", "error-handling"],
+                     "path_suggested_vuln_classes": ["path-traversal"],
+                     "missing_cwe_families": ["web-app-injection"]}}
+
     def get(self, endpoint):
+        if endpoint.startswith("code/analysis-queue/") and endpoint.endswith("/progress"):
+            item_id = int(endpoint.split("/")[2])
+            return dict(self.progress[item_id], item_id=item_id)
         assert endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0"
         return {"items": [{"id": 44, "file_path": "app/auth.py", "status": "pending",
                             "repo_generation": 3, "repo_id": 7}], "has_more": False}
@@ -75,7 +89,9 @@ def test_dispatch_prompt_quotes_backend_queue_and_attributed_handoff(
                 return {"items": [{"id": 44, "file_path": "src/auth/A.java", "status": "pending",
                                     "repo_generation": 3, "repo_id": 7}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
-                return {"items": [{"file_path": "src/auth/A.java", "loc": 12}], "has_more": False}
+                return _files_page([{"file_path": "src/auth/A.java", "loc": 12}])
+            if endpoint == "code/analysis-queue/44/progress":
+                return super().get(endpoint)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
     monkeypatch.setattr(agent, "_render_handoff", lambda _args, _ids: print("#### Handoff from prior-1\n- finding VA-001"))
     prompt = agent._dispatch_prompt(
@@ -85,6 +101,7 @@ def test_dispatch_prompt_quotes_backend_queue_and_attributed_handoff(
         args=args, client=LaneClient(),
     )
     assert "queue_item_id=44" in prompt
+    assert "applicable_vuln_classes=web-app-injection,error-handling" in prompt
     assert "src/auth/A.java" in prompt
     assert "Backend handoff attributed to dispatch prior-1" in prompt
     assert '"src/auth/A.java" (12 LOC; queue item 44)' in prompt
@@ -107,10 +124,10 @@ def test_lane_file_manifest_summarizes_fetch_json(tmp_path: Path):
                     {"id": 45, "file_path": "src/web/B.java", "repo_generation": 3, "repo_id": 7},
                 ], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
-                return {"items": [
+                return _files_page([
                     {"file_path": "src/auth/A.java", "loc": 12},
                     {"file_path": "src/web/B.java", "loc": 8},
-                ], "has_more": False}
+                ])
             raise AssertionError(f"unexpected endpoint: {endpoint}")
     lines = agent._lane_file_manifest(
         lane_file, client=BackendClient(), source_identity=["repo_id: 7", "repo_generation: 3"]
@@ -138,7 +155,7 @@ def test_lane_file_manifest_uses_backend_facts_for_fetch_json(tmp_path: Path):
                     "repo_id": 7, "repo_generation": 3, "status": "processing",
                 }], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
-                return {"items": [{"file_path": "src/auth/A.java", "loc": 12}], "has_more": False}
+                return _files_page([{"file_path": "src/auth/A.java", "loc": 12}])
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
     rendered = "\n".join(agent._lane_file_manifest(
@@ -163,7 +180,7 @@ def test_lane_file_manifest_rejects_stale_fetch_json(tmp_path: Path, capsys):
                 return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3,
                                    "repo_id": 7}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
-                return {"items": [{"file_path": "src/a.py", "loc": 12}], "has_more": False}
+                return _files_page([{"file_path": "src/a.py", "loc": 12}])
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
     with pytest.raises(SystemExit):
@@ -180,10 +197,10 @@ def test_lane_file_manifest_resolves_newline_paths_against_selected_repo(tmp_pat
     class FileClient:
         def get(self, endpoint):
             assert endpoint == "code/files?repo_id=7&limit=10000&offset=0"
-            return {"items": [
+            return _files_page([
                 {"file_path": "src/auth/A.java", "loc": 12},
                 {"file_path": "src/web/B.java", "loc": 8},
-            ], "has_more": False}
+            ])
 
     lines = agent._lane_file_manifest(
         lane_file, client=FileClient(), source_identity=["repo_id: 7", "repo_generation: 3"]
@@ -272,10 +289,120 @@ def test_lane_file_manifest_renders_leased_item_scratch_dir(tmp_path: Path):
                 return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3, "repo_id": 7,
                                    "status": "processing", "lease_token": "tok-1"}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
-                return {"items": [{"file_path": "src/a.py", "loc": 12}], "has_more": False}
+                return _files_page([{"file_path": "src/a.py", "loc": 12}])
             raise AssertionError(f"unexpected endpoint: {endpoint}")
 
     rendered = "\n".join(agent._lane_file_manifest(
         lane_file, client=BackendClient(), source_identity=["repo_id: 7", "repo_generation: 3"],
     ))
     assert _dispatch_scratch_relative(queue_item_id=44, lease_token="tok-1").as_posix() in rendered
+
+
+def test_backend_queue_manifest_states_the_required_vuln_class_families():
+    """`done` enforces applicable_vuln_classes, and the hunter never runs fetch.
+
+    The queue-ID manifest is the one backend-bound channel into the packet, so a
+    dispatch whose families reach it only through operator prose is a closeout
+    rejected for families it was never told.
+    """
+    rendered = "\n".join(
+        agent._backend_queue_manifest(_Client(), [44], repo_id=7, repo_generation=3)
+    )
+
+    assert "applicable_vuln_classes=web-app-injection,error-handling" in rendered
+    assert "path_suggested_vuln_classes=path-traversal" in rendered
+    assert "missing_cwe_families=web-app-injection" in rendered
+
+
+def test_backend_queue_manifest_refuses_an_unreadable_progress_payload(capsys):
+    class NoFamilies(_Client):
+        progress = {44: {"item_id": 44}}
+
+    with pytest.raises(SystemExit):
+        agent._backend_queue_manifest(NoFamilies(), [44], repo_id=7, repo_generation=3)
+    assert "applicable_vuln_classes" in capsys.readouterr().err
+
+
+def test_lane_file_manifest_renders_each_items_required_families(tmp_path: Path):
+    lane_file = tmp_path / "lane.json"
+    lane_file.write_text(json.dumps([
+        {"id": 44, "repo_generation": 3, "repo": {"id": 7},
+         "file": {"file_path": "src/a.py", "loc": 12},
+         "applicable_vuln_classes": ["deserialization", "error-handling"],
+         "path_suggested_vuln_classes": ["file-upload"]},
+    ]), encoding="utf-8")
+
+    class BackendClient:
+        def get(self, endpoint):
+            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+                return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3,
+                                   "repo_id": 7, "status": "processing"}], "has_more": False}
+            if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
+                return _files_page([{"file_path": "src/a.py", "loc": 12}])
+            raise AssertionError(f"unexpected endpoint: {endpoint}")
+
+    rendered = "\n".join(agent._lane_file_manifest(
+        lane_file, client=BackendClient(), source_identity=["repo_id: 7", "repo_generation: 3"],
+    ))
+
+    assert "applicable_vuln_classes: deserialization,error-handling" in rendered
+    assert "path_suggested_vuln_classes: file-upload" in rendered
+
+
+def test_lane_file_manifest_refuses_a_code_files_total_that_shifts_while_paging(
+    tmp_path: Path, capsys
+):
+    """Both paging loops hand-rolled their envelope checks and missed this."""
+    lane_file = tmp_path / "lane.txt"
+    lane_file.write_text("src/a.py\nsrc/b.py\n", encoding="utf-8")
+
+    class ShiftingClient:
+        def __init__(self):
+            self.calls = 0
+
+        def get(self, endpoint):
+            self.calls += 1
+            if self.calls == 1:
+                return _files_page([{"file_path": "src/a.py", "loc": 12}], total=2)
+            # A caller that trusts `has_more` over the shifted `total` pages for
+            # ever; fail loudly instead of hanging the suite.
+            assert self.calls < 4, "paging did not stop at the inconsistent total"
+            return _files_page([{"file_path": "src/b.py", "loc": 8}], offset=1, total=99)
+
+    with pytest.raises(SystemExit):
+        agent._lane_file_manifest(
+            lane_file, client=ShiftingClient(), source_identity=["repo_id: 7", "repo_generation: 3"]
+        )
+    assert "total" in capsys.readouterr().err
+
+
+def test_shared_from_json_context_merges_with_per_lane_overrides(tmp_path: Path):
+    """Wave boilerplate is authored once; each lane overrides only its own keys.
+
+    The two channels used to be mutually exclusive, which forced operators to
+    generate a complete context file per lane.
+    """
+    shared = {field: "wave default" for field in agent._PROMPT_CONTEXT_FIELDS}
+    start_payload = tmp_path / "start.json"
+    start_payload.write_text(json.dumps({
+        "agent_role": "code-vuln-hunter", "agent_id": "lane-1", "task": "review auth",
+        "prompt_context": shared,
+    }), encoding="utf-8")
+    lane_context = tmp_path / "lane-context.json"
+    lane_context.write_text(json.dumps({
+        "target": "src/auth/A.java", "role_specific_additions": "Read-only analysis.",
+    }), encoding="utf-8")
+    parser = argparse.ArgumentParser()
+    agent.register(parser.add_subparsers())
+    args = parser.parse_args([
+        "agent", "start", "--from-json", str(start_payload),
+        "--prompt-context-json", str(lane_context), "--no-target-traffic",
+        "--dispatch-mode", "item-iterating",
+    ])
+
+    agent.dispatch._build_register_payload(args)
+
+    assert args.prompt_context["target"] == "src/auth/A.java"
+    assert args.prompt_context["role_specific_additions"] == "Read-only analysis."
+    assert args.prompt_context["coverage"] == "wave default"
+    assert args.prompt_context["cleanup"] == "wave default"

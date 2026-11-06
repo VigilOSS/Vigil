@@ -413,3 +413,94 @@ def test_admitted_theme_manifest_warns_on_missing_relative_shipped_asset():
         "themes/login/theme.properties references missing relative asset "
         "themes/login/css/app.min.css (absent from sealed snapshot)",
     ]
+
+
+# --- AJ1: one ingest flag could refuse a whole repository at index time ----
+
+
+def test_default_language_for_unknown_is_canonicalized_before_it_is_stamped():
+    from assess.lib.code_languages import canonical_backend_language
+
+    assert code_ingest._validated_default_language("C++") == "cpp"
+    assert canonical_backend_language("cpp") == "cpp"
+    assert code_ingest._validated_default_language("  python ") == "python"
+    assert code_ingest._validated_default_language(None) is None
+    assert code_ingest._validated_default_language("") is None
+
+
+@pytest.mark.parametrize("value", ["not-a-language", "prisma-schema", "C#++"])
+def test_an_unknown_default_language_refuses_the_ingest_up_front(value, capsys):
+    """Stamping it would make the very next code-index build refuse the repo."""
+    with pytest.raises(SystemExit) as excinfo:
+        code_ingest._validated_default_language(value)
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "--default-language-for-unknown" in err
+    assert value in err
+    # The refusal must be actionable: name what IS accepted.
+    assert "python" in err
+
+
+def test_the_ingest_run_refuses_the_bad_flag_before_touching_the_repository(
+    tmp_path, capsys
+):
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    (repo / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        code_ingest.run(_args(repo, default_language_for_unknown="not-a-language"))
+
+    assert excinfo.value.code == 1
+    assert "--default-language-for-unknown" in capsys.readouterr().err
+
+
+# --- D4: `code-ingest list` is parsed as a repository path -----------------
+
+
+def test_code_ingest_help_names_the_repository_listing_route(capsys):
+    parser = argparse.ArgumentParser()
+    subparsers = parser.add_subparsers(dest="command")
+    code_ingest.register(subparsers)
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(["code-ingest", "--help"])
+
+    help_text = capsys.readouterr().out
+    assert "vigil assess fetch code/repos" in help_text
+    assert "no subcommands" in help_text
+
+
+def test_a_subcommand_shaped_argument_is_told_where_the_listing_lives(
+    tmp_path, capsys, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+
+    with pytest.raises(SystemExit) as excinfo:
+        code_ingest.run(_args(Path("list")))
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "Repository path not found" in err
+    assert "takes a repository path, not a subcommand" in err
+    assert "vigil assess fetch code/repos" in err
+
+
+def test_a_real_directory_named_list_is_still_ingested_as_a_path(tmp_path, monkeypatch):
+    """The hint must never shadow a repository that is actually called `list`."""
+    (tmp_path / "list" / "src").mkdir(parents=True)
+    (tmp_path / "list" / "src" / "a.py").write_text("x = 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert "src/a.py" in _admitted(tmp_path / "list", _args(Path("list")))
+
+
+def test_a_missing_path_with_separators_gets_no_subcommand_hint(tmp_path, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        code_ingest.run(_args(tmp_path / "missing" / "repo"))
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "Repository path not found" in err
+    assert "not a subcommand" not in err

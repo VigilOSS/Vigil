@@ -1,12 +1,26 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Final, Literal
 from fastapi import HTTPException, status
 
 from ..events import _engagement_or_404
 
 from . import _common
 from ._common import DUPLICATE_LINK_KIND, ROOT_CAUSE_EFFECTS, ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _is_suppressed_workflow_status, _json_object, _json_text, _merge_object_text, _resolve_existing_finding_slug, _row_workflow_status, _serialize_finding_record
+
+# What a root-cause link means when the caller states no effect. This module owns
+# root-cause link semantics, so it owns the default too: the API request model,
+# both reads below and the `finding link --effect` flag resolve to this one value.
+# A default spelled out separately in each of those places is exactly how the wire
+# and the CLI drifted apart, handing a UI link one meaning and a CLI link another.
+# `eliminates_attack_path` says the sibling survives the root fix as a standalone
+# remediation item, so a pure grouping pass keeps every verdict and costs nothing.
+# `eliminates_finding` claims the root fix retires the sibling, which raises a
+# claim review on every confirmed or downgraded sibling plus a
+# `finding_claim_review_pending` report blocker — a price the operator asks for.
+DEFAULT_ROOT_CAUSE_EFFECT: Final[Literal["eliminates_finding", "eliminates_attack_path"]] = (
+    "eliminates_attack_path"
+)
 
 
 def _finding_link_audit_snapshot(
@@ -205,9 +219,9 @@ def _record_relationship_change(
 
 def _root_cause_link_metadata(link: dict[str, Any]) -> dict[str, Any]:
     provenance = _json_object(link.get("provenance_json", "{}"))
-    effect = str(provenance.get("root_cause_effect") or "eliminates_finding").strip()
+    effect = str(provenance.get("root_cause_effect") or DEFAULT_ROOT_CAUSE_EFFECT).strip()
     if effect not in ROOT_CAUSE_EFFECTS:
-        effect = "eliminates_finding"
+        effect = DEFAULT_ROOT_CAUSE_EFFECT
     order_value = provenance.get("sibling_order")
     try:
         sibling_order = int(order_value) if order_value not in (None, "") else None
@@ -276,6 +290,24 @@ def _upsert_finding_link(
             target_ref,
             field="target_ref",
         )
+    if str(target_kind) == "finding":
+        # The guard belongs to the upsert, not only to the two public link verbs:
+        # the merge link-copy path reaches this function directly, and a copied
+        # edge whose target IS the merge target produced a live `related -> self`
+        # row that `finding get` then returned as an outbound link.
+        self_referential = (
+            target_ref
+            and connection.execute(
+                "SELECT 1 FROM assessment_findings "
+                "WHERE engagement_id = ? AND id = ? AND slug = ?",
+                (engagement_id, finding_id, target_ref),
+            ).fetchone() is not None
+        ) or (target_id is not None and int(target_id) == int(finding_id))
+        if self_referential:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="finding cannot link to itself",
+            )
     row = _active_finding_link(
         connection,
         engagement_id,
@@ -405,7 +437,7 @@ def set_root_cause_link(
     provenance: dict[str, Any] | None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    effect = (root_cause_effect or "eliminates_finding").strip()
+    effect = (root_cause_effect or DEFAULT_ROOT_CAUSE_EFFECT).strip()
     if effect not in ROOT_CAUSE_EFFECTS:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"invalid root_cause_effect: {root_cause_effect}")
     with _common.get_connection() as connection:

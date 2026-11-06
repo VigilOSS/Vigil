@@ -6,10 +6,14 @@ import os
 from typing import Annotated, Any, Literal, TypeAlias
 
 import anyio
-from fastapi import APIRouter, Depends, Query, Response, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
 
 from ..services import activity as activity_service
+# The API layer's one bulk-write ceiling, owned beside the five assessment
+# models that already apply it. Imported rather than restated so the cap cannot
+# drift between the two routers.
+from .assessment import MAX_BULK_ASSESSMENT_WRITE_ITEMS
 from ..db import get_connection
 from ..services import code_analysis
 from ..services import code_analysis_support
@@ -207,10 +211,24 @@ class CodeFileClassification(BaseModel):
     slot_types: list[CodeSlotType] = Field(default_factory=list)
     language: str | None = Field(default=None, max_length=64)
     analysis_priority: int = Field(strict=True, ge=0, le=100)
+    # Required by the service when classification='skip' and refused otherwise:
+    # classifying a file `skip` is the same exclusion `code-dispatch done
+    # skipped` makes later, and coverage only accounts a skip that says why.
+    skip_reason: str = Field(default="", max_length=512)
 
 
 class CodeFilesBulkClassifyRequest(BaseModel):
-    classifications: list[CodeFileClassification]
+    # The only bulk assessment write model that carried no cap, and the one whose
+    # payload scales with the repository: an operator's whole classification pass
+    # arrived as one request, one ``BEGIN IMMEDIATE`` and one response budget, so
+    # a large repo timed out with the operator unable to tell whether it had
+    # committed. Bounded at the SAME cap its five siblings use, which is also the
+    # chunk size `code-classify` now sends, so the shipped path is unaffected and
+    # an unchunked caller is refused instead of being allowed to build a
+    # transaction nobody can wait out.
+    classifications: list[CodeFileClassification] = Field(
+        min_length=1, max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS
+    )
 
 
 class CodeModuleRecord(BaseModel):
@@ -287,6 +305,8 @@ class QueueCompleteRequest(BaseModel):
 
 
 class QueueErrorRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     item_ids: list[StrictPositiveId] = Field(min_length=1, max_length=1)
     agent_name: str = Field(min_length=1, max_length=128)
     lease_token: str = Field(min_length=1, max_length=128)
@@ -294,6 +314,8 @@ class QueueErrorRequest(BaseModel):
 
 
 class QueueNeedsContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     item_ids: list[StrictPositiveId] = Field(min_length=1, max_length=1)
     agent_name: str = Field(min_length=1, max_length=128)
     lease_token: str = Field(min_length=1, max_length=128)
@@ -301,22 +323,48 @@ class QueueNeedsContextRequest(BaseModel):
 
 
 class QueueResetStaleRequest(BaseModel):
+    """The destructive sweep, scoped to one lane.
+
+    Every predicate here is one `GET /analysis-queue?stale_minutes=N` already
+    takes, so `code-dispatch list --stale-minutes N` previews exactly the rows
+    this call discards. `minutes` is bounded identically to
+    `QueueAdoptLeaseRequest.stale_minutes`: both describe the same abandonment
+    window.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
     minutes: int = Field(default=10, ge=1, le=1440)
+    repo_id: StrictPositiveId | None = None
+    batch_theme: str | None = Field(default=None, max_length=256)
+    queue_mode: CodeQueueMode | None = None
+    path_prefix: list[CodePathScope] | None = Field(
+        default=None, min_length=1, max_length=MAX_PATH_SCOPE_VALUES
+    )
+    path_glob: list[CodePathScope] | None = Field(
+        default=None, min_length=1, max_length=MAX_PATH_SCOPE_VALUES
+    )
 
 
 class QueueRetryErrorRequest(BaseModel):
     """C5.1: recover status='error' queue items back to 'pending' by id."""
+
+    model_config = ConfigDict(extra="forbid")
 
     item_ids: list[StrictPositiveId] = Field(min_length=1)
     reason: str = Field(default="", max_length=2000)
 
 
 class QueueRetryNeedsContextRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     item_ids: list[StrictPositiveId] = Field(min_length=1)
     reason: str = Field(min_length=1, max_length=2000)
 
 
 class QueueHeartbeatRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     item_id: StrictPositiveId
     agent_name: str = Field(min_length=1, max_length=128)
     lease_token: str = Field(min_length=1, max_length=128)
@@ -340,6 +388,23 @@ class QueueAdoptLeaseRequest(BaseModel):
     expected_lease_token: str = Field(min_length=1, max_length=128)
     agent_name: str = Field(min_length=1, max_length=128)
     stale_minutes: int = Field(default=10, ge=1, le=1440)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class QueueReleaseRequest(BaseModel):
+    """Hand one claimed row back to the pending rotation with no verdict.
+
+    Authorized by the lease rather than by a staleness window: the holder
+    presents the identity it was given, so `release` is the owner standing down
+    and never a way to take somebody else's work. There is deliberately no
+    disposition field — a released row carries no verdict at all.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_id: StrictPositiveId
+    agent_name: str = Field(min_length=1, max_length=128)
+    lease_token: str = Field(min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=2000)
 
 
@@ -1070,19 +1135,66 @@ async def publish_repo_lsp_config(
 # File endpoints
 # ---------------------------------------------------------------------------
 
+CodeFileSort: TypeAlias = Literal[
+    "analysis_priority", "file_path", "loc", "git_churn_score", "id"
+]
+CodeSortOrder: TypeAlias = Literal["asc", "desc"]
+_LIST_FILES_QUERY_PARAMS = frozenset({
+    "repo_id", "module_id", "classification", "analysis_status", "search",
+    "path_prefix", "path_glob", "sort", "order", "limit", "offset",
+    "include_header_snippet",
+})
+
+
 @router.get("/files")
 def list_files(
+    request: Request,
     engagement_key: str,
     repo_id: int | None = Query(default=None),
     module_id: int | None = Query(default=None),
     classification: str | None = Query(default=None),
     analysis_status: str | None = Query(default=None),
-    search: str | None = Query(default=None),
+    search: str | None = Query(
+        default=None,
+        description="Substring match anywhere in the repository-relative path.",
+    ),
+    path_prefix: list[CodePathScope] | None = Query(
+        default=None,
+        max_length=MAX_PATH_SCOPE_VALUES,
+        description=(
+            "Repeatable; a repository-relative directory or file path matched by"
+            " whole segments, the predicate `analysis-queue/fetch` claims with."
+        ),
+    ),
+    path_glob: list[CodePathScope] | None = Query(
+        default=None,
+        max_length=MAX_PATH_SCOPE_VALUES,
+        description="Repeatable; a case-sensitive fnmatch pattern over the whole path.",
+    ),
+    sort: CodeFileSort | None = Query(
+        default=None,
+        description="Column to order by; defaults to analysis_priority.",
+    ),
+    order: CodeSortOrder | None = Query(
+        default=None, description="Sort direction; defaults to desc."
+    ),
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     include_header_snippet: bool = Query(default=False),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
+    # Per route, not globally: a mistyped filter name silently returns an
+    # unfiltered page, which is a wrong answer rather than an empty one. Scoped
+    # to this listing because every other route's accepted set is its own.
+    unknown = sorted(set(request.query_params) - _LIST_FILES_QUERY_PARAMS)
+    if unknown:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"code/files does not accept query params: {', '.join(unknown)}. "
+                "Accepted: " + ", ".join(sorted(_LIST_FILES_QUERY_PARAMS))
+            ),
+        )
     return code_analysis.list_code_files(
         engagement.id,
         repo_id=repo_id,
@@ -1090,6 +1202,10 @@ def list_files(
         classification=classification,
         analysis_status=analysis_status,
         search=search,
+        path_prefix=path_prefix,
+        path_glob=path_glob,
+        sort=sort,
+        order=order,
         limit=limit,
         offset=offset,
         include_header_snippet=include_header_snippet,
@@ -1350,6 +1466,11 @@ async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleR
             code_analysis.reset_stale_queue_items,
             engagement.id,
             minutes=request.minutes,
+            repo_id=request.repo_id,
+            batch_theme=request.batch_theme,
+            queue_mode=request.queue_mode,
+            path_prefix=request.path_prefix,
+            path_glob=request.path_glob,
         )
     )
     await _broadcast(engagement.key, "queue_reset_stale", record)
@@ -1411,6 +1532,42 @@ async def adopt_queue_lease(
         )
     )
     await _broadcast(engagement.key, "queue_adopt_lease", record)
+    return record
+
+
+@router.post("/analysis-queue/release")
+async def release_queue_lease(
+    engagement_key: str, request: QueueReleaseRequest
+) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    record = await anyio.to_thread.run_sync(
+        functools.partial(
+            code_analysis.release_queue_lease,
+            engagement.id,
+            item_id=request.item_id,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
+            reason=request.reason,
+        )
+    )
+    await anyio.to_thread.run_sync(
+        functools.partial(
+            _audit_code_mutation,
+            engagement.id,
+            title="code-dispatch release",
+            action=f"item_id={request.item_id} agent={request.agent_name}",
+            actor_name=request.agent_name,
+            result=request.reason,
+            metadata={
+                "item_id": request.item_id,
+                "file_path": record["file_path"],
+                "previous_agent_name": record["previous_agent_name"],
+                "previous_lease_token": record["previous_lease_token"],
+                "discarded_result_count": record["discarded_result_count"],
+            },
+        )
+    )
+    await _broadcast(engagement.key, "queue_release", record)
     return record
 
 
@@ -2019,6 +2176,43 @@ def get_coverage(
     if detail == "cwe":
         return code_analysis.code_coverage_cwe_detail(engagement.id, repo_id=repo_id)
     return code_analysis.code_coverage_summary(engagement.id, repo_id=repo_id)
+
+
+@router.get("/coverage/inherited")
+def get_inherited_coverage(
+    engagement_key: str,
+    generation: int = Query(
+        ge=1,
+        description=(
+            "A superseded source generation to inherit verdicts from. Each"
+            " uncovered current file whose bytes are unchanged since that"
+            " generation is listed with the verdict it carried there, labelled"
+            " `inherited`. This read never makes a verdict current and never"
+            " satisfies the coverage gate."
+        ),
+    ),
+    repo_id: int | None = Query(default=None),
+    path_prefix: list[CodePathScope] | None = Query(
+        default=None,
+        max_length=MAX_PATH_SCOPE_VALUES,
+        description="Repeatable; a repository-relative directory or file path matched by whole segments.",
+    ),
+    limit: int = Query(
+        default=code_analysis.MAX_INHERITED_COVERAGE_PAGE,
+        ge=1,
+        le=code_analysis.MAX_INHERITED_COVERAGE_PAGE,
+    ),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
+    engagement = get_engagement_or_404(engagement_key)
+    return code_analysis.code_coverage_inherited(
+        engagement.id,
+        generation=generation,
+        repo_id=repo_id,
+        path_prefix=path_prefix,
+        limit=limit,
+        offset=offset,
+    )
 
 
 @router.get("/coverage/by-path")

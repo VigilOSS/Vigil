@@ -78,10 +78,11 @@ test("the recorded request method is copied verbatim, not upper-cased", () => {
 });
 
 test("an unusable poc_language cannot un-fence the payload", () => {
-  // `poc_language` is a free-form key inside `details`: a specialist writes it
-  // while reading target output, and nothing between there and here validates
-  // it — not `agent/`, not the backend, not a schema. It arrives via
-  // FindingsTab's `Derived` untouched and becomes a fence info string.
+  // `poc_language` is a free-TEXT key inside `details`: the schema admits it and
+  // says nothing about its contents, so a specialist writes whatever the
+  // target's own toolchain calls the language while reading target output. It
+  // arrives via FindingsTab's `Derived` untouched and becomes a fence info
+  // string, so the only check on it is this one.
   //
   // CommonMark forbids a backtick inside a BACKTICK fence's info string, so
   // ```` ```js`x` ```` opens nothing. Through a real renderer (micromark +
@@ -120,7 +121,16 @@ test("a usable poc_language is kept — the guard drops hints, not evidence", ()
   // A language hint is presentation. Dropping a hostile one costs a syntax
   // colour; dropping a real one would make the copy lossier than the page for
   // no reason, so the ordinary identifiers a specialist records still arrive.
-  for (const hint of ["sh", "http", "blade", "python", "c++", "c#", "objective-c", "json5"]) {
+  //
+  // A SPACE is among them. CommonMark 4.5 forbids only a backtick in a backtick
+  // fence's info string, and a renderer takes the first word as the language and
+  // ignores the rest — so `python 3` fences exactly as `python` does. Rejecting
+  // it dropped the multi-word hints a specialist actually writes while reading a
+  // target's own toolchain output, which is the degradation ADR 0019 forbids.
+  for (const hint of [
+    "sh", "http", "blade", "python", "c++", "c#", "objective-c", "json5",
+    "python 3", "shell script", "PowerShell Core",
+  ]) {
     const md = findingToMarkdown({
       slug: "VA-004",
       title: "T",
@@ -228,4 +238,51 @@ test("authored evidence remains Markdown while raw HTTP evidence stays fenced", 
     evidence: "HTTP/1.1 200 OK\nContent-Type: application/json\n\n{}",
   });
   assert.equal(fencedBlocks(rawHttp).length, 1);
+});
+
+test("the copy says when a verdict rests on operator authority rather than a receipt", () => {
+  // A terminal verdict normally requires a decision receipt. `finding verify
+  // --operator-authority --intel-id <id>` is the one route that does not: the
+  // operator stands behind it with evidence outside the engagement snapshot,
+  // and the backend stamps provenance.operator_authority instead of receipt
+  // ids. ADR 0019 permits that; what it must never become is invisible. This
+  // copy is filed in a ticket where nobody can open the drawer that said so,
+  // so the waiver travels on the status line beside the verdict it qualifies,
+  // and the operator's stated grounds travel verbatim.
+  const md = findingToMarkdown({
+    slug: "VA-008",
+    title: "Admin export reachable",
+    severity: "high",
+    workflowLabel: "Exploited",
+    verificationLabel: "Confirmed",
+    verificationKey: "confirmed",
+    operatorAuthority: {
+      kind: "out_of_snapshot",
+      intel_id: 17,
+      intel_type: "note",
+      at: "2026-10-01T12:00:00Z",
+      reason: "Vendor advisory ACME-2026-9 confirms the fix shipped out of snapshot.",
+    },
+  } as never);
+
+  const status = md.split("\n").find((line) => line.includes("**Verification:**"))!;
+  assert.match(status, /\*\*Operator authority · intel note 17\*\* \(no proof receipt\)/);
+  assert.ok(
+    md.includes("**Operator authority reason:** Vendor advisory ACME-2026-9 confirms the fix shipped out of snapshot."),
+    md,
+  );
+});
+
+test("an ordinary verified finding's copy claims no waiver", () => {
+  const md = findingToMarkdown({
+    slug: "VA-009",
+    title: "Admin export reachable",
+    severity: "high",
+    workflowLabel: "Exploited",
+    verificationLabel: "Confirmed",
+    verificationKey: "confirmed",
+  } as never);
+
+  assert.ok(md.includes("**Verification:** Confirmed"), md);
+  assert.doesNotMatch(md, /Operator authority/);
 });

@@ -1110,3 +1110,87 @@ def test_a_csharp_file_is_a_first_class_tree_sitter_language() -> None:
     assert sql_sinks, indexed["security_sinks"]
     assert all(sink["vuln_classes"] == ["sqli"] for sink in sql_sinks)
     assert any(sink["function"] == "GetUser" for sink in sql_sinks)
+
+
+PHP_LITERAL_IN_A_BODY_FRAGMENT = b"""<?php
+function inline($pdo, $sql) { $help = 'call $pdo->exec($sql) to run it';
+    $pdo->exec($sql);
+}
+"""
+
+PHP_ROWS_THAT_READ_A_LITERAL = b"""<?php
+function go($to, $replacement, $subject) {
+    header('Location: ' . $to);
+    $page = file_get_contents('http://acme.example/a');
+    $handle = fopen('http://acme.example/b', 'r');
+    return preg_replace('/x/e', $replacement, $subject);
+}
+"""
+
+PHP_TRAILING_COMMENT = b"""<?php
+function run() {
+    $total = 1; // mysql_query("id=".$_GET['id']);
+    mysql_query("id=" . $_GET['id']);
+}
+$top = 1; // mysql_query("id=".$_GET['id']);
+"""
+
+
+def test_a_php_string_naming_a_call_is_outside_the_sink_readers_scope() -> None:
+    """A line cannot tell a call from a string that names one; the grammar can.
+
+    The literal here sits on the body's opening line, so it reaches the reader
+    inside a body fragment that begins past column zero -- the one place a
+    fragment measured from its own start stops lining up with the spans the
+    grammar reported, and the match inside the quote is admitted again.
+    """
+    indexed = index_file("src/acme.php", "php", PHP_LITERAL_IN_A_BODY_FRAGMENT)
+
+    assert indexed["analysis_mode"] == "tree_sitter"
+    # Line 2 holds the literal and line 3 the call it describes.
+    assert {(sink["kind"], sink["line"]) for sink in indexed["security_sinks"]} == {
+        ("sql_exec", 3),
+        ("process_exec", 3),
+    }
+
+
+def test_php_rows_that_read_a_literal_match_from_outside_the_quote() -> None:
+    """The breadth that reading a string on purpose buys has to survive.
+
+    Four rows reach past the parenthesis into the argument -- a `Location`
+    redirect, an `http` URL opened by `file_get_contents` or `fopen`, and
+    `preg_replace`'s `/e` modifier -- and each starts its match at the callee,
+    outside the quote. Rejecting a match by where it starts keeps all four;
+    blanking the quoted text would have lost every one.
+    """
+    indexed = index_file("src/acme.php", "php", PHP_ROWS_THAT_READ_A_LITERAL)
+
+    assert {(sink["kind"], sink["line"]) for sink in indexed["security_sinks"]} == {
+        ("redirect", 3),
+        ("file_path", 4),
+        ("url_fetch", 4),
+        ("file_path", 5),
+        ("url_fetch", 5),
+        ("eval_exec", 6),
+    }
+
+
+def test_a_trailing_comment_reads_the_same_to_every_reader_of_one_artifact() -> None:
+    """One artifact, one answer about the same bytes.
+
+    The sink reader took the whole line, `_file_scope_lines` blanked the
+    comment span it masks, and the bounded source reader read the
+    comment-blanked bytes: three readings of one trailing comment, which left
+    a sink inside a callable that the same file's own file scope denied and
+    that no source record agreed with. The grammar calls that text commentary,
+    so the live call on the next line is the only thing any reader reports --
+    and it is reported, which is what separates agreement from silence.
+    """
+    indexed = index_file("src/acme.php", "php", PHP_TRAILING_COMMENT)
+
+    assert {(sink["kind"], sink["line"]) for sink in indexed["security_sinks"]} == {
+        ("sql_exec", 4)
+    }
+    assert [(source["kind"], source["line"]) for source in indexed["security_sources"]] == [
+        ("http_request_input", 4)
+    ]

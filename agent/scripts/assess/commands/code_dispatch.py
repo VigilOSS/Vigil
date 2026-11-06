@@ -9,11 +9,13 @@ import re
 import stat
 import sys
 from pathlib import Path
+from typing import NamedTuple
 from urllib.parse import urlencode
 
 from assess.lib.code_audit import write_json_snapshot
-from assess.lib.client import AssessmentClient
+from assess.lib.client import DEFAULT_READ_TIMEOUT_SECONDS, AssessError, AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import CODE_SKIP_REASONS
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.code_structural_identity import parse_code_file_page
 
@@ -24,6 +26,19 @@ _MAX_QUEUE_NORMALIZED_ITEMS = 10000
 _MAX_QUEUE_INPUT_BYTES = MAX_JSON_ARTIFACT_BYTES
 _QUEUE_SUBMISSION_BATCH_SIZE = 200
 _MAX_QUEUE_REPORTED_OUTCOMES = 200
+# Submitting a queue batch is not one insert per row: the backend merges each
+# item's triggers, synchronizes its file's priority and revalidates the
+# canonical attempt. A full batch therefore cannot be held to the 10s default
+# response budget; the per-row allowance matches bulk artifact registration.
+_QUEUE_SUBMISSION_SECONDS_PER_ITEM = 0.2
+# The analysis-queue listing's own server-side default page, used for the
+# one-page diagnostic read that explains an empty claim.
+_QUEUE_LISTING_PAGE_SIZE = 200
+# The listing's server-side maximum, used when specific row IDs have to be
+# located; bounded pages keep an id lookup from walking an unbounded queue.
+_QUEUE_LOOKUP_PAGE_SIZE = 1000
+_MAX_QUEUE_LOOKUP_PAGES = 50
+_MAX_REPORTED_UNCLAIMED_IDS = 100
 _PROCESS_DESCRIPTOR_PATH = re.compile(r"/(?:dev|proc/self)/fd/[0-9]+")
 _DONE_DISPOSITIONS = ("clean", "finding", "suspicious", "skipped")
 
@@ -52,11 +67,17 @@ _ACTION_HELP: dict[str, str] = {
         "Usage: vigil assess code-dispatch list [--status STATUS] [--repo-id ID] "
         "[--classification TIER] [--batch-theme THEME] [--queue-mode MODE] "
         "[--stale-minutes N] [--path-prefix PATH]... [--path-glob GLOB]... "
-        "[--limit N] [--offset N] [--json|--ids-only]\n\n"
+        "[--limit N] [--offset N] [--show-tokens] [--json|--ids-only]\n\n"
         "Page the current-generation analysis queue without claiming anything.\n"
         "Rows are ordered exactly as fetch claims them (priority desc, id asc).\n"
         "Every row carries AGE (seconds since the lease last proved life) and "
         "RCPT (receipts already recorded against it).\n"
+        "--show-tokens adds each row's lease_token to the table. That token is "
+        "the capability that spends the lease, so this is how a lane that lost "
+        "it — compaction, a client restart, a subagent that did not persist it "
+        "— reads it back and resumes heartbeat/record/done on the same attempt "
+        "instead of discarding the work. `--json` carries it unconditionally, "
+        "and `progress <item-id>` prints it for one row.\n"
         "--stale-minutes N narrows the page to processing rows whose lease has "
         "not proved life inside that window — the same abandonment measure "
         "`reset-stale N` and `adopt-lease --stale-minutes N` apply, though both "
@@ -83,8 +104,12 @@ _ACTION_HELP: dict[str, str] = {
     "progress": (
         "Usage: vigil assess code-dispatch progress <item-id> [--json]\n\n"
         "Read back what one queue attempt already carries: recorded receipts, "
-        "the CWE families they cover, the families closeout still needs, the "
-        "lease identity chain, and the current coverage-integrity projection.\n"
+        "the CWE families they cover, the full family set closeout enforces, "
+        "the families it still needs, the lease identity chain, and the current "
+        "coverage-integrity projection.\n"
+        "This is the pre-closeout read: it answers both \"which families does "
+        "`done` require for this file\" and \"what is my lease token\" without "
+        "a refused write.\n"
     ),
     "fetch": (
         "Usage: vigil assess code-dispatch fetch <limit> <agent-id> "
@@ -109,8 +134,16 @@ _ACTION_HELP: dict[str, str] = {
         "[--dry-run] [--skip-reason <reason>]\n\n"
         f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}.\n"
         "CWE coverage must be a JSON array such as "
-        "[{\"family\":\"ssrf\",\"effort\":80}].\n"
-        "--skip-reason is required when disposition=skipped.\n"
+        "[{\"family\":\"ssrf\",\"effort\":80}]. It must carry an entry for every "
+        "family the file requires; read that set with `code-dispatch progress "
+        "<item-id>` (or the claim's `applicable_vuln_classes`) before closing, "
+        "never from the queue item's own `slot_types`.\n"
+        "<notes> is a trailing positional and is REQUIRED when "
+        "disposition=clean; it is optional for every other disposition.\n"
+        f"--skip-reason is required when disposition=skipped, one of: "
+        f"{', '.join(CODE_SKIP_REASONS)}.\n"
+        "--dry-run renders the exact payload and names anything that would be "
+        "refused, without contacting the backend.\n"
     ),
     "error": (
         "Usage: vigil assess code-dispatch error "
@@ -122,9 +155,29 @@ _ACTION_HELP: dict[str, str] = {
         "<item-id> <agent-id> <lease-token> [expansion-json-file]\n\n"
         "Close the exact active lease while recording the missing context.\n"
     ),
+    "release": (
+        "Usage: vigil assess code-dispatch release <item-id> <agent-id> "
+        "<lease-token> --reason TEXT\n\n"
+        "Hand one leased row back to unleased `pending` without recording a "
+        "verdict for the file.\n"
+        "This is the verb for a lane that is holding work it cannot review — "
+        "another lane owns the file, the lane is being retired, the scope "
+        "changed. `clean` and `skipped` would both be false, and "
+        "`needs-context` claims the reviewer looked and needed more.\n"
+        "The reason is appended to the row's analysis notes and the attempt's "
+        "receipts are superseded, exactly as `reset-stale` does — so release "
+        "only after `progress` shows nothing worth keeping, or use "
+        "`adopt-lease` to move the work to its new owner instead.\n"
+    ),
     "reset-stale": (
-        "Usage: vigil assess code-dispatch reset-stale <minutes>\n\n"
+        "Usage: vigil assess code-dispatch reset-stale <minutes> "
+        "[--repo-id ID] [--batch-theme THEME] [--queue-mode MODE] "
+        "[--path-prefix PATH]... [--path-glob GLOB]...\n\n"
         "Return processing leases older than the threshold to pending.\n"
+        "Every filter is the one `list --stale-minutes N` previews with, so a "
+        "lane reaps its own window instead of every lane's. With no filter "
+        "this is the engagement-wide sweep it has always been.\n"
+        f"{_PATH_SCOPE_HELP}"
     ),
     "retry-error": (
         "Usage: vigil assess code-dispatch retry-error <id1,id2,...> [reason]\n\n"
@@ -175,7 +228,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "action",
         choices=tuple(_ACTION_HELP),
-        help="stats|list|progress|fetch|heartbeat|done|error|needs-context|adopt-lease|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
+        help="stats|list|progress|fetch|heartbeat|done|error|needs-context|release|adopt-lease|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs=argparse.REMAINDER, help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -237,7 +290,9 @@ def run(args) -> None:
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
                 "CWE coverage must be a JSON array like "
                 "[{\"family\":\"ssrf\",\"effort\":80}]\n"
-                "--skip-reason is required when disposition=skipped",
+                "<notes> is required when disposition=clean\n"
+                f"--skip-reason is required when disposition=skipped, one of: "
+                f"{', '.join(CODE_SKIP_REASONS)}",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -298,15 +353,35 @@ def run(args) -> None:
             sys.exit(1)
         expansion_file = extra[3] if len(extra) > 3 else None
         _needs_context(cfg, extra[0], extra[1], extra[2], expansion_file)
+    elif action == "release":
+        if len(extra) < 3:
+            print(
+                "Usage: code-dispatch release <item-id> <agent-id> "
+                "<lease-token> --reason TEXT",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        release_options = _parse_release_options(extra[3:])
+        _release(
+            cfg, extra[0], extra[1], extra[2], str(release_options["reason"])
+        )
     elif action == "reset-stale":
         if not extra:
-            print("Usage: code-dispatch reset-stale <minutes>", file=sys.stderr)
+            print(
+                "Usage: code-dispatch reset-stale <minutes> [--repo-id ID] "
+                "[--batch-theme THEME] [--queue-mode MODE] "
+                "[--path-prefix PATH]... [--path-glob GLOB]...",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if re.fullmatch(r"[0-9]+", extra[0]) is None:
+            print("ERROR: code-dispatch reset-stale requires minutes >= 1", file=sys.stderr)
             sys.exit(1)
         minutes = int(extra[0])
         if minutes < 1:
             print("ERROR: code-dispatch reset-stale requires minutes >= 1", file=sys.stderr)
             sys.exit(1)
-        _reset_stale(cfg, minutes)
+        _reset_stale(cfg, minutes, _parse_reset_stale_options(extra[1:]))
     elif action == "retry-error":
         if not extra:
             print("Usage: code-dispatch retry-error <id1,id2,...> [reason]", file=sys.stderr)
@@ -483,6 +558,89 @@ def _add_path_scope_value(scopes: dict[str, list[str]], option: str, value: str)
         values.sort()
 
 
+# `reset-stale` reaps leases; its scope must be expressible exactly as the
+# read-only preview (`list --stale-minutes N`) expresses it, or a lane cannot
+# rehearse the sweep it is about to run.
+_RESET_STALE_OPTIONS = {
+    "--repo-id": "repo_id",
+    "--batch-theme": "batch_theme",
+    "--queue-mode": "queue_mode",
+    **_PATH_SCOPE_OPTIONS,
+}
+
+
+def _parse_reset_stale_options(tokens: list[str]) -> dict[str, object]:
+    """Parse the lane scope the sweep is confined to; absent means engagement-wide."""
+    options: dict[str, object] = {}
+    path_scopes: dict[str, list[str]] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        field = _RESET_STALE_OPTIONS.get(token)
+        if field is None or index + 1 >= len(tokens):
+            print(
+                f"Unknown or incomplete code-dispatch reset-stale option: {token}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        if token in _PATH_SCOPE_OPTIONS:
+            _add_path_scope_value(path_scopes, token, value)
+            index += 2
+            continue
+        if field in options:
+            print(f"ERROR: {token} was specified more than once", file=sys.stderr)
+            raise SystemExit(1)
+        if field == "repo_id":
+            if re.fullmatch(r"[0-9]+", value) is None or int(value) < 1:
+                print("ERROR: --repo-id requires an integer >= 1", file=sys.stderr)
+                raise SystemExit(1)
+            options[field] = int(value)
+        else:
+            if not value.strip():
+                print(f"ERROR: {token} requires a value", file=sys.stderr)
+                raise SystemExit(1)
+            options[field] = value
+        index += 2
+    options.update(path_scopes)
+    return options
+
+
+def _parse_release_options(tokens: list[str]) -> dict[str, object]:
+    """Parse the mandatory release reason.
+
+    The reason is the only durable record of why a claimed file carries no
+    verdict, so the verb refuses to run without it.
+    """
+    options: dict[str, object] = {}
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token != "--reason" or index + 1 >= len(tokens):
+            print(
+                f"Unknown or incomplete code-dispatch release option: {token}",
+                file=sys.stderr,
+            )
+            raise SystemExit(1)
+        if "reason" in options:
+            print("ERROR: --reason was specified more than once", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        if not value.strip():
+            print("ERROR: --reason requires a value", file=sys.stderr)
+            raise SystemExit(1)
+        options["reason"] = value
+        index += 2
+    if "reason" not in options:
+        print(
+            "ERROR: code-dispatch release requires --reason TEXT; it is the only "
+            "record of why this file was handed back with no verdict",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    return options
+
+
 def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
     filters: dict[str, object] = {}
     path_scopes: dict[str, list[str]] = {}
@@ -536,21 +694,55 @@ _LIST_FILTER_OPTIONS = (
     ("--offset", "offset"),
 )
 _LIST_INT_MINIMUMS = {"repo_id": 1, "stale_minutes": 1, "limit": 1, "offset": 0}
+# A render-only key, never a query field: it is not in `_LIST_FILTER_OPTIONS`,
+# which is what `_list` builds the query string from.
+_LIST_SHOW_TOKENS_FIELD = "show_tokens"
 
 
 def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], str]:
-    """Parse `code-dispatch list` flags into query fields plus an output mode."""
+    """Parse `code-dispatch list` flags into query fields plus an output mode.
+
+    ``show_tokens`` lands in the returned mapping but is deliberately absent
+    from ``_LIST_FILTER_OPTIONS``, which is the only source the query builder
+    reads — so a render flag can never become a server-side filter the backend
+    would reject.
+    """
     fields = dict(_LIST_FILTER_OPTIONS)
     values: dict[str, str | list[str]] = {}
     path_scopes: dict[str, list[str]] = {}
     output = "table"
+    show_tokens = False
     index = 0
     while index < len(tokens):
         token = tokens[index]
+        if token == "--show-tokens":
+            if show_tokens:
+                print(
+                    "ERROR: --show-tokens was specified more than once",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            if output != "table":
+                print(
+                    "ERROR: --show-tokens only renders the table; --json and "
+                    "--ids-only already carry every row value",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            show_tokens = True
+            index += 1
+            continue
         if token in {"--json", "--ids-only"}:
             if output != "table":
                 print(
                     "ERROR: choose either --json or --ids-only, not both",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            if show_tokens:
+                print(
+                    "ERROR: --show-tokens only renders the table; --json and "
+                    "--ids-only already carry every row value",
                     file=sys.stderr,
                 )
                 raise SystemExit(1)
@@ -586,6 +778,8 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
         values[field] = value
         index += 2
     values.update(path_scopes)
+    if show_tokens:
+        values[_LIST_SHOW_TOKENS_FIELD] = "1"
     return values, output
 
 
@@ -664,15 +858,20 @@ def _list(cfg, filters: dict[str, str | list[str]], output: str) -> None:
     items = [item for item in (result.get("items") or []) if isinstance(item, dict)]
     total = result.get("total", len(items))
     offset = int(result.get("offset", 0) or 0)
+    show_tokens = bool(filters.get(_LIST_SHOW_TOKENS_FIELD))
     print(f"=== Code Analysis Queue ({len(items)} of {total}, offset {offset}) ===")
     if not items:
         print("No current-generation queue rows matched these filters.")
         return
+    lease_header = f"  {'LEASE':<38}" if show_tokens else ""
     print(
         f"{'ID':>8}  {'STATUS':<13}  {'MODE':<17}  {'PRI':>4}  {'CLASS':<10}  "
-        f"{'AGE':>8}  {'RCPT':>6}  {'THEME':<21}  {'AGENT':<17}  FILE"
+        f"{'AGE':>8}  {'RCPT':>6}  {'THEME':<21}  {'AGENT':<17}{lease_header}  FILE"
     )
     for item in items:
+        lease_cell = (
+            f"  {str(item.get('lease_token') or '-'):<38}" if show_tokens else ""
+        )
         print(
             f"{item.get('id', '?')!s:>8}  {item.get('status', ''):<13}  "
             f"{item.get('queue_mode', ''):<17}  {item.get('priority', 0)!s:>4}  "
@@ -680,7 +879,20 @@ def _list(cfg, filters: dict[str, str | list[str]], output: str) -> None:
             f"{_format_lease_age(item.get('heartbeat_age_seconds')):>8}  "
             f"{item.get('current_result_count', 0)!s:>6}  "
             f"{item.get('batch_theme', ''):<21}  "
-            f"{item.get('agent_name', ''):<17}  {item.get('file_path', '')}"
+            f"{item.get('agent_name', ''):<17}{lease_cell}  "
+            f"{item.get('file_path', '')}"
+        )
+    leased = [item for item in items if str(item.get("lease_token") or "")]
+    if leased and not show_tokens:
+        # The lease token is the capability that spends the lease, and losing it
+        # strands live work: heartbeat, record and done all refuse without it,
+        # and adoption refuses a lease that is still alive. The table used to
+        # drop it with nothing naming where to read it, which sent a lane to
+        # query the database directly. Say it once, here, where the row is.
+        print(
+            f"\n{len(leased)} listed row(s) carry an active lease whose token "
+            "this table omits. Add --show-tokens (or --json) to print it, or "
+            f"read one row with `code-dispatch progress {leased[0].get('id', '?')}`."
         )
     unclaimable = [
         item for item in items if str(item.get("repo_role") or "analysis") != "analysis"
@@ -770,6 +982,25 @@ def _parse_adopt_lease_options(tokens: list[str]) -> dict[str, object]:
     return options
 
 
+def _write_adopt_lease_snapshot(
+    cfg, agent_name: str, payload: dict[str, object], result: object
+) -> Path:
+    """Record an adoption response, whatever shape it came back in."""
+    identity = result if isinstance(result, dict) else {}
+    return write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-adopt-lease",
+        label=agent_name,
+        payload=result,
+        metadata={
+            "command": "code-dispatch adopt-lease",
+            "item_id": payload["item_id"],
+            "previous_agent_name": identity.get("previous_agent_name", ""),
+            "previous_lease_token": identity.get("previous_lease_token", ""),
+        },
+    )
+
+
 def _adopt_lease(
     cfg, item_id: str, agent_name: str, options: dict[str, object]
 ) -> None:
@@ -782,21 +1013,30 @@ def _adopt_lease(
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post("code/analysis-queue/adopt-lease", payload)
 
+    # The swap has COMMITTED and the response carries a brand-new lease token
+    # that exists nowhere else. Adoption is the lease-recovery verb, so losing
+    # its token is the worst place for this: whatever came back is recorded
+    # before it is validated, and a refusal can never be the reason the
+    # operator never learns the token the backend just issued.
     if not isinstance(result, dict) or not isinstance(result.get("item"), dict):
+        _write_adopt_lease_snapshot(cfg, agent_name, payload, result)
         print("Backend returned a non-object lease adoption response", file=sys.stderr)
         raise SystemExit(1)
     item = result["item"]
     lease_token = str(item.get("lease_token") or "")
     queue_item_id = item.get("id")
     if type(queue_item_id) is not int or queue_item_id < 1 or not lease_token:
+        _write_adopt_lease_snapshot(cfg, agent_name, payload, result)
         print("Invalid code-analysis claim identity returned by backend", file=sys.stderr)
         raise SystemExit(1)
-    scratch_relative = _prepare_dispatch_scratch_dir(
-        cfg.engagement_dir, queue_item_id=queue_item_id, lease_token=lease_token
+    # Both scratch identities are pure derivations of an id and a token, so the
+    # enriched record is complete before any directory is created — and the
+    # dead lease's directory is where the adopter reads whatever intermediate
+    # state its predecessor left behind.
+    scratch_relative = _dispatch_scratch_relative(
+        queue_item_id=queue_item_id, lease_token=lease_token
     )
     item["scratch_dir"] = scratch_relative.as_posix()
-    # The dead lease's scratch directory is derived from its token, so the
-    # adopter can read whatever intermediate state it left behind.
     previous_scratch = _dispatch_scratch_relative(
         queue_item_id=queue_item_id,
         lease_token=str(result.get("previous_lease_token") or ""),
@@ -804,17 +1044,9 @@ def _adopt_lease(
     result["previous_scratch_dir"] = previous_scratch.as_posix()
     # Snapshot the enriched record, so the audit trail holds the same scratch
     # identities the adopting agent was handed.
-    snapshot = write_json_snapshot(
-        cfg.engagement_dir,
-        category="code-queue-adopt-lease",
-        label=agent_name,
-        payload=result,
-        metadata={
-            "command": "code-dispatch adopt-lease",
-            "item_id": payload["item_id"],
-            "previous_agent_name": result.get("previous_agent_name", ""),
-            "previous_lease_token": result.get("previous_lease_token", ""),
-        },
+    snapshot = _write_adopt_lease_snapshot(cfg, agent_name, payload, result)
+    _prepare_dispatch_scratch_dir(
+        cfg.engagement_dir, queue_item_id=queue_item_id, lease_token=lease_token
     )
     # Diagnostics on stderr, the claim record on stdout — same split `fetch`
     # uses, so the adopted item pipes straight into whatever reads a claim.
@@ -874,6 +1106,15 @@ def _progress(cfg, item_id: str, *, as_json: bool) -> None:
             f"families={', '.join(receipt.get('cwe_families') or []) or '-'} "
             f"by {receipt.get('agent_name', '?')}"
         )
+    # The full required set, not only the remainder: this is the one list
+    # `done` enforces, and it is derived from the file's classification slot
+    # types, role and language — never from the queue item's own `slot_types`.
+    # Printing only the remainder left the authoritative list reachable solely
+    # through `--json`.
+    print(
+        "  cwe families required at closeout: "
+        f"{', '.join(result.get('applicable_vuln_classes') or []) or 'none'}"
+    )
     print(
         "  cwe families recorded: "
         f"{', '.join(result.get('recorded_cwe_families') or []) or '-'}"
@@ -947,65 +1188,419 @@ def _prepare_dispatch_scratch_dir(
     return relative
 
 
+# The claim filters that are also queue-listing query fields, in the canonical
+# order `_LIST_FILTER_OPTIONS` builds them, so the diagnostic read below asks
+# the same scope owner the claim asked. `status` is deliberately absent: the
+# question the diagnostic answers is what lies under the scope REGARDLESS of
+# whether it is claimable.
+_FETCH_SCOPE_QUERY_FIELDS = (
+    "repo_id",
+    "classification",
+    "batch_theme",
+    "queue_mode",
+    "path_prefix",
+    "path_glob",
+)
+
+
+def _queue_scope_query(filters: dict[str, object] | None, *, limit: int) -> str:
+    pairs: list[tuple[str, object]] = []
+    for field in _FETCH_SCOPE_QUERY_FIELDS:
+        value = (filters or {}).get(field)
+        if value in (None, ""):
+            continue
+        for item in value if isinstance(value, list) else [value]:
+            pairs.append((field, item))
+    pairs.append(("limit", limit))
+    return "code/analysis-queue?" + urlencode(pairs)
+
+
+def _explain_empty_claim(
+    client, filters: dict[str, object] | None, *, agent_name: str
+) -> None:
+    """Say which kind of empty a claim that returned nothing actually was.
+
+    "No rows matched" and "every matching row is already held or finished" are
+    different operator problems with different next verbs, and the claim itself
+    cannot tell them apart: `fetch_queue_items` answers with a bare array by
+    documented contract. One read-only listing over the SAME scope, minus the
+    status filter, separates them — and because it is the same scope owner, the
+    diagnostic cannot disagree with the claim query that produced it.
+    """
+    scope_text = _scope_text(filters)
+    try:
+        page = client.get(_queue_scope_query(filters, limit=_QUEUE_LISTING_PAGE_SIZE))
+    except AssessError as exc:
+        print(
+            "No current pending code-analysis queue items matched the claim filters "
+            f"({scope_text}), and the scope could not be read back to say why: "
+            f"{exc}. Inspect `vigil assess code-dispatch list` and "
+            "`code-dispatch stats`.",
+            file=sys.stderr,
+        )
+        return
+    if not isinstance(page, dict) or type(page.get("total")) is not int:
+        print(
+            "No current pending code-analysis queue items matched the claim filters "
+            f"({scope_text}); the backend returned a non-object analysis-queue "
+            "listing for the same scope. Inspect `vigil assess code-dispatch list` "
+            "and `code-dispatch stats`.",
+            file=sys.stderr,
+        )
+        return
+    total = page["total"]
+    if total == 0:
+        print(
+            "No current-generation queue row lies under this scope "
+            f"({scope_text}), so there was nothing for {agent_name} to claim. "
+            "Check the path against `vigil assess code-coverage --by-path`, then "
+            "`code-dispatch queue` the admitted files this lane owns.",
+            file=sys.stderr,
+        )
+        return
+    items = [item for item in (page.get("items") or []) if isinstance(item, dict)]
+    status_counts: dict[str, int] = {}
+    for item in items:
+        status_counts[str(item.get("status") or "unknown")] = (
+            status_counts.get(str(item.get("status") or "unknown"), 0) + 1
+        )
+    breakdown = ", ".join(f"{name}={status_counts[name]}" for name in sorted(status_counts))
+    sampled = (
+        f" (statuses counted over the first {len(items)} of them)"
+        if page.get("has_more")
+        else ""
+    )
+    print(
+        f"{total} row(s) match this scope ({scope_text}) but none is claimable "
+        f"now{sampled}: {breakdown or 'no rows returned'}.",
+        file=sys.stderr,
+    )
+    for item in items:
+        if str(item.get("status") or "") != "processing":
+            continue
+        print(
+            f"  item {item.get('id', '?')} {item.get('file_path', '?')} held by "
+            f"{item.get('agent_name') or '-'}, silent for "
+            f"{_format_lease_age(item.get('heartbeat_age_seconds'))}",
+            file=sys.stderr,
+        )
+    print(
+        "Recover an abandoned lease with `code-dispatch adopt-lease` (keeps its "
+        "receipts) or `code-dispatch reset-stale <minutes>` (discards them); a "
+        "terminal row needs `code-dispatch reanalyze` to be reviewed again. "
+        "`adopt-lease` pins the identity it swaps, so read the exact "
+        "agent/lease pair first with `code-dispatch list --show-tokens` or "
+        "`code-dispatch progress <item-id>`.",
+        file=sys.stderr,
+    )
+
+
+class _QueueRowLookup(NamedTuple):
+    """Queue rows located by id, and whether the walk could prove absence.
+
+    An id missing from an EXHAUSTIVE walk is genuinely not in the
+    current-generation listing. An id missing from a walk that stopped at its
+    page bound, or on a page the backend malformed, was simply never reached —
+    and "this row is gone" sends an operator somewhere "we stopped looking"
+    does not. Both callers render those as different answers, so the walk's
+    extent travels with its rows instead of being inferred from their absence.
+    """
+
+    rows: dict[int, dict]
+    exhaustive: bool
+    pages_read: int
+    rows_scanned: int
+
+    def unreached_detail(self) -> str:
+        """Why this walk cannot stand as proof that an id is absent."""
+        if not self.pages_read:
+            return "the current-generation analysis-queue listing was not read"
+        return (
+            "the current-generation analysis-queue listing's first "
+            f"{self.pages_read} page(s) ({self.rows_scanned} row(s)) did not "
+            "reach it and the walk stopped before the end of the listing"
+        )
+
+
+# A lookup that never ran: no rows, and nothing proven about any id. The
+# default for `_resolve_queue_file_ids`'s optional lookup argument, so a caller
+# that resolves without one cannot report an absence it never checked.
+_QUEUE_ROWS_NOT_READ = _QueueRowLookup({}, False, 0, 0)
+
+
+def _queue_rows_by_item_id(
+    client, item_ids: set[int], *, read_to_end: bool = False
+) -> _QueueRowLookup:
+    """Locate specific queue rows by id through the one listing that owns them.
+
+    The listing carries no id filter, so this pages it and stops as soon as
+    every requested id is accounted for. Diagnostics use a bounded walk;
+    reanalysis selection reads to the end so any current row remains selectable.
+
+    Deliberately NOT `current_only=true`. The listing is already
+    current-generation — the backend's `list_queue_items` applies
+    `queue.repo_generation = repos.active_generation` and
+    `queue.source_superseded_at IS NULL` unconditionally — and it keeps every
+    attempt in that generation, including an older active row and a row in a
+    repository demoted to `reference`, precisely "so its row IDs stay
+    recoverable". `current_only` narrows the page to each file's LATEST attempt
+    in its status lane (the rows `analysis-queue/stats` counts), which is
+    exactly the set of rows BOTH callers exist to explain: an id the claim
+    refused for being superseded, leased or reference-owned would come back as
+    no row at all.
+    """
+    found: dict[int, dict] = {}
+    offset = 0
+    pages_read = 0
+    rows_scanned = 0
+    previous_page_ids: tuple[int, ...] | None = None
+    while read_to_end or pages_read < _MAX_QUEUE_LOOKUP_PAGES:
+        page = client.get(
+            f"code/analysis-queue?limit={_QUEUE_LOOKUP_PAGE_SIZE}&offset={offset}"
+        )
+        if not isinstance(page, dict):
+            return _QueueRowLookup(found, False, pages_read, rows_scanned)
+        pages_read += 1
+        if page.get("offset", offset) != offset:
+            return _QueueRowLookup(found, False, pages_read, rows_scanned)
+        items = [item for item in (page.get("items") or []) if isinstance(item, dict)]
+        page_ids = tuple(item["id"] for item in items if type(item.get("id")) is int)
+        if page_ids and page_ids == previous_page_ids:
+            return _QueueRowLookup(found, False, pages_read, rows_scanned)
+        previous_page_ids = page_ids
+        rows_scanned += len(items)
+        for item in items:
+            row_id = item.get("id")
+            if type(row_id) is int and row_id in item_ids:
+                found[row_id] = item
+        if len(found) == len(item_ids) or not page.get("has_more"):
+            return _QueueRowLookup(found, True, pages_read, rows_scanned)
+        if not items:
+            # `has_more` over an empty page cannot advance `offset`, so the
+            # next request would repeat this one: the listing is not
+            # advancing, and the rest of it stays unread.
+            return _QueueRowLookup(found, False, pages_read, rows_scanned)
+        offset += len(items)
+    return _QueueRowLookup(found, False, pages_read, rows_scanned)
+
+
+def _warn_if_claim_is_partial(
+    client, result: list, item_ids: list[int], *, agent_name: str
+) -> None:
+    """Name every requested id this claim did not get, with its current status.
+
+    `--ids-file` is how a lane claims an exact file set, and the backend drops
+    any id that is no longer claimable without saying so. A 1,560-of-1,574
+    claim printed nothing at all, so fourteen files were held by no lane and
+    never reviewed. Same shape as `_warn_if_page_is_partial`: the short result
+    is on stdout with nothing in it to reveal that it is short.
+    """
+    claimed = {
+        item["id"]
+        for item in result
+        if isinstance(item, dict) and type(item.get("id")) is int
+    }
+    unclaimed = [item_id for item_id in item_ids if item_id not in claimed]
+    if not unclaimed:
+        return
+    reported = unclaimed[:_MAX_REPORTED_UNCLAIMED_IDS]
+    # "we looked and the row is gone", "we could not look" and "we stopped
+    # looking before we got there" are three different answers, so neither a
+    # failed lookup nor an unexhausted one is rendered as a missing row.
+    lookup_failure = ""
+    try:
+        lookup = _queue_rows_by_item_id(client, set(reported))
+    except AssessError as exc:
+        lookup = _QUEUE_ROWS_NOT_READ
+        lookup_failure = str(exc)
+    print(
+        f"code-dispatch fetch: {agent_name} claimed {len(claimed)} of the "
+        f"{len(item_ids)} requested id(s); {len(unclaimed)} were not claimable "
+        "and are held by no lane. A row is dropped silently when it is not "
+        "pending, is already leased, was superseded, belongs to a reference "
+        "repository, or is bound to an inactive generation.",
+        file=sys.stderr,
+    )
+    if lookup_failure:
+        print(
+            f"  (the queue could not be read back to report each id's status: "
+            f"{lookup_failure})",
+            file=sys.stderr,
+        )
+    for item_id in reported:
+        row = lookup.rows.get(item_id)
+        if row is None:
+            if lookup_failure:
+                unknown = "status unread"
+            elif lookup.exhaustive:
+                unknown = "no current-generation queue row found"
+            else:
+                unknown = f"not reached — {lookup.unreached_detail()}"
+            print(
+                f"  {item_id}: {unknown}; check "
+                f"`code-dispatch progress {item_id}`",
+                file=sys.stderr,
+            )
+            continue
+        holder = str(row.get("agent_name") or "")
+        held = f" held by {holder}" if holder else ""
+        print(
+            f"  {item_id} ({row.get('status', '?')}{held}): "
+            f"{row.get('file_path', '?')}, silent for "
+            f"{_format_lease_age(row.get('heartbeat_age_seconds'))}",
+            file=sys.stderr,
+        )
+    if len(unclaimed) > len(reported):
+        print(
+            f"  ... {len(unclaimed) - len(reported)} further unclaimed id(s): "
+            f"{', '.join(str(item_id) for item_id in unclaimed[len(reported):])}",
+            file=sys.stderr,
+        )
+    print(
+        "Account for every id before this lane reports its wave complete: "
+        "re-claim the recoverable rows, `adopt-lease` or `reset-stale` an "
+        "abandoned one, and `reanalyze` a terminal one.",
+        file=sys.stderr,
+    )
+
+
+def _normalize_claim_response(result: object) -> tuple[object, str | None]:
+    """Shape a claim exactly as the snapshot and stdout publish it.
+
+    Pure by construction. `_dispatch_scratch_relative` derives each item's
+    scratch path from its own id and lease token without touching the
+    filesystem, so the whole response can be shaped — and therefore made
+    durable — before anything that is allowed to fail. A malformed identity is
+    RETURNED rather than raised for the same reason: the leases are already
+    committed backend-side, so the record has to land before the refusal.
+    """
+    if not isinstance(result, list):
+        return result, None
+    normalized: list[object] = []
+    problem: str | None = None
+    for raw_item in result:
+        if not isinstance(raw_item, dict):
+            normalized.append(raw_item)
+            continue
+        item = dict(raw_item)
+        assigned_agent = item.pop("assigned_agent", None)
+        if "agent_name" not in item and assigned_agent is not None:
+            item["agent_name"] = assigned_agent
+        queue_item_id = item.get("id")
+        lease_token = item.get("lease_token")
+        if (
+            type(queue_item_id) is not int
+            or queue_item_id < 1
+            or not isinstance(lease_token, str)
+            or not lease_token
+        ):
+            problem = "Invalid code-analysis claim identity returned by backend"
+        else:
+            item["scratch_dir"] = _dispatch_scratch_relative(
+                queue_item_id=queue_item_id, lease_token=lease_token
+            ).as_posix()
+        normalized.append(item)
+    return normalized, problem
+
+
+def _create_claim_scratch_dirs(engagement_dir: str | Path, claim: object) -> None:
+    """Create the directory each published scratch path names."""
+    if not isinstance(claim, list):
+        return
+    for item in claim:
+        if not isinstance(item, dict) or not isinstance(item.get("scratch_dir"), str):
+            continue
+        _prepare_dispatch_scratch_dir(
+            engagement_dir,
+            queue_item_id=int(item["id"]),
+            lease_token=str(item["lease_token"]),
+        )
+
+
 def _fetch(cfg, limit: int, agent_name: str, filters: dict[str, object] | None = None) -> None:
     payload: dict[str, object] = {
         'limit': limit,
         'agent_name': agent_name,
         **(filters or {}),
     }
+    requested_ids = (filters or {}).get("item_ids")
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/fetch', payload)
-
-    if isinstance(result, list):
-        normalized_result: list[object] = []
-        for raw_item in result:
-            if not isinstance(raw_item, dict):
-                normalized_result.append(raw_item)
-                continue
-            item = dict(raw_item)
-            assigned_agent = item.pop("assigned_agent", None)
-            if "agent_name" not in item and assigned_agent is not None:
-                item["agent_name"] = assigned_agent
-            queue_item_id = item.get("id")
-            lease_token = item.get("lease_token")
-            if type(queue_item_id) is not int or queue_item_id < 1 or not isinstance(lease_token, str) or not lease_token:
-                print("Invalid code-analysis claim identity returned by backend", file=sys.stderr)
-                raise SystemExit(1)
-            scratch_relative = _prepare_dispatch_scratch_dir(
-                cfg.engagement_dir,
-                queue_item_id=queue_item_id,
-                lease_token=lease_token,
-            )
-            item["scratch_dir"] = scratch_relative.as_posix()
-            normalized_result.append(item)
-        result = normalized_result
-
-    if result == []:
-        filter_text = ", ".join(
-            f"{key}={','.join(map(str, value)) if isinstance(value, list) else value}"
-            for key, value in sorted((filters or {}).items())
-        ) or "none"
-        print(
-            "No current pending code-analysis queue items matched the claim filters "
-            f"({filter_text}). Inspect `vigil assess code-dispatch stats` and the "
-            "code-files queue join before retrying.",
-            file=sys.stderr,
+        # This POST has COMMITTED: every item in `result` is a live backend
+        # lease whose token exists nowhere else yet. So the claim is recorded
+        # before anything that may fail — a malformed identity, a refused
+        # scratch path, or a BrokenPipeError on the first diagnostic write
+        # when the operator pipes this command through `head`. With the
+        # snapshot last, a closed consumer left live leases with no local
+        # record at all: no token to heartbeat, close or release with, and
+        # recovery only through a direct database read.
+        result, identity_problem = _normalize_claim_response(result)
+        snapshot = write_json_snapshot(
+            cfg.engagement_dir,
+            category="code-queue-fetch",
+            label=agent_name,
+            payload=result,
+            metadata={
+                "command": "code-dispatch fetch",
+                "agent_name": agent_name,
+                "limit": limit,
+                "filters": filters or {},
+            },
         )
+        if identity_problem is not None:
+            print(identity_problem, file=sys.stderr)
+            raise SystemExit(1)
+        _create_claim_scratch_dirs(cfg.engagement_dir, result)
+        # An explicit id set gets the per-id report whether the claim came back
+        # short or empty: naming each id's current status answers both "why did
+        # I get nothing" and "which fourteen did I not get" at once. These are
+        # the writes a closed consumer breaks, so they run only once the record
+        # and the working directories are on disk.
+        if isinstance(result, list) and isinstance(requested_ids, list):
+            _warn_if_claim_is_partial(
+                client,
+                result,
+                [value for value in requested_ids if type(value) is int],
+                agent_name=agent_name,
+            )
+        elif result == []:
+            _explain_empty_claim(client, filters, agent_name=agent_name)
 
-    snapshot = write_json_snapshot(
-        cfg.engagement_dir,
-        category="code-queue-fetch",
-        label=agent_name,
-        payload=result,
-        metadata={
-            "command": "code-dispatch fetch",
-            "agent_name": agent_name,
-            "limit": limit,
-            "filters": filters or {},
-        },
-    )
     print(f"Saved audit snapshot: {snapshot.name}", file=sys.stderr)
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _done_invocation_problems(
+    disposition: str, notes: str, skip_reason: str
+) -> list[str]:
+    """Closeout rules decidable from the invocation alone.
+
+    These mirror `complete_queue_items`'s first refusals, which the backend
+    still owns and still applies. Checking them here is not a second rule: it
+    is the difference between learning that `clean` needs notes from `--help`
+    and learning it from a refused write that already cost a coverage-file
+    parse and a round trip. `--help` called `notes` optional, so there was
+    nowhere else to learn it.
+    """
+    problems: list[str] = []
+    if disposition == "clean" and not notes.strip():
+        problems.append(
+            "notes are required when disposition='clean'; pass them as the "
+            "trailing <notes> positional after the coverage file"
+        )
+    if disposition == "skipped":
+        stripped_reason = skip_reason.strip()
+        if not stripped_reason:
+            problems.append(
+                "--skip-reason is required when disposition='skipped', one of: "
+                + ", ".join(CODE_SKIP_REASONS)
+            )
+        elif stripped_reason not in CODE_SKIP_REASONS:
+            problems.append(
+                f"--skip-reason {stripped_reason!r} is not a standard skip "
+                "reason; expected one of: " + ", ".join(CODE_SKIP_REASONS)
+            )
+    return problems
 
 
 def _done(
@@ -1027,6 +1622,18 @@ def _done(
             f"ERROR: invalid disposition {disposition!r}; expected one of: {', '.join(_DONE_DISPOSITIONS)}",
             file=sys.stderr,
         )
+        sys.exit(1)
+
+    # Before the coverage file is opened: an invocation the backend will refuse
+    # on its shape costs nothing to catch here. A dry run reports them instead
+    # of refusing — its whole purpose is to render the payload beside its
+    # defects.
+    invocation_problems = _done_invocation_problems(
+        normalized_disposition, notes, skip_reason
+    )
+    if invocation_problems and not dry_run:
+        for problem in invocation_problems:
+            print(f"ERROR: {problem}", file=sys.stderr)
         sys.exit(1)
 
     cwe_path = Path(cwe_file)
@@ -1071,6 +1678,13 @@ def _done(
         payload['skip_reason'] = skip_reason
     if dry_run:
         print("Dry run only; no queue state was changed.")
+        for problem in invocation_problems:
+            print(f"WOULD BE REFUSED: {problem}")
+        print(
+            "Coverage completeness is checked by the backend against this "
+            f"file's required family set; read it with `code-dispatch progress "
+            f"{ids[0]}` before closing."
+        )
         print(json.dumps({"endpoint": "code/analysis-queue/done", "payload": payload}, indent=2, ensure_ascii=False))
         return
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -1152,22 +1766,91 @@ def _needs_context(
         print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
-def _reset_stale(cfg, minutes: int) -> None:
+def _scope_text(scope: dict[str, object] | None) -> str:
+    """Render a lane scope the same way every diagnostic in this verb does."""
+    return ", ".join(
+        f"{key}={','.join(map(str, value)) if isinstance(value, list) else value}"
+        for key, value in sorted((scope or {}).items())
+    ) or "none"
+
+
+def _reset_stale(cfg, minutes: int, scope: dict[str, object] | None = None) -> None:
+    payload: dict[str, object] = {'minutes': minutes, **(scope or {})}
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.post('code/analysis-queue/reset-stale', {'minutes': minutes})
+        result = client.post('code/analysis-queue/reset-stale', payload)
 
     snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-queue-reset-stale",
         label=f"{minutes}m",
         payload=result,
-        metadata={"command": "code-dispatch reset-stale", "minutes": minutes},
+        metadata={
+            "command": "code-dispatch reset-stale",
+            "minutes": minutes,
+            "scope": scope or {},
+        },
     )
     reset_count = result.get('reset', 0) if isinstance(result, dict) else 0
-    print(f"Reset {reset_count} stale item(s) (stuck > {minutes} min)")
+    print(
+        f"Reset {reset_count} stale item(s) (stuck > {minutes} min; "
+        f"scope: {_scope_text(scope)})"
+    )
     print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+def _release(
+    cfg, item_id: str, agent_name: str, lease_token: str, reason: str
+) -> None:
+    """Hand a leased row back to unleased `pending` without a verdict.
+
+    The terminal verbs all record what the reviewer concluded. A lane that
+    cannot review the file it holds has no true conclusion to record, and
+    inventing one ('clean', 'skipped', 'needs-context') puts a false verdict
+    into coverage. This returns ownership and records only the reason.
+    """
+    payload: dict[str, object] = {
+        "item_id": _validate_single_id(item_id),
+        "agent_name": agent_name,
+        "lease_token": lease_token,
+        "reason": reason,
+    }
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post("code/analysis-queue/release", payload)
+
+    # The release has COMMITTED — the row is unleased and its receipts are
+    # superseded — so the response is recorded before it is validated. A
+    # refusal here would otherwise discard the only local evidence of a
+    # state change the backend already made.
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-release",
+        label=agent_name,
+        payload=result,
+        metadata={
+            "command": "code-dispatch release",
+            "item_id": payload["item_id"],
+            "agent_name": agent_name,
+            "reason": reason,
+        },
+    )
+    if not isinstance(result, dict):
+        print("Backend returned a non-object lease release response", file=sys.stderr)
+        raise SystemExit(1)
+    print(
+        f"Released queue item {payload['item_id']} "
+        f"({result.get('file_path', '?')}) from "
+        f"{result.get('previous_agent_name', agent_name)} / "
+        f"{result.get('previous_lease_token', lease_token)} back to unleased "
+        f"pending; discarded {result.get('discarded_result_count', 0)} receipt(s)."
+    )
+    print(
+        "No verdict was recorded for this file: it is owed exactly as if it had "
+        "never been claimed, and this release earned no coverage credit."
+    )
+    print(f"Saved audit snapshot: {snapshot.name}")
+    print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _retry_error(cfg, id_list: str, reason: str = "") -> None:
@@ -1200,13 +1883,38 @@ def _retry_error(cfg, id_list: str, reason: str = "") -> None:
 
 
 def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
+    """Recover status='needs_context' queue items back to 'pending' by id.
+
+    The response snapshot is the same record `retry-error` writes, for the same
+    reason: both verbs commit new current attempts, so an operator
+    reconstructing a wave from `tools/analysis-state` would otherwise find a
+    hole exactly where one of the two verbs' writes went. The *request* is not
+    snapshotted — unlike the submit verbs, which carry an operator-authored
+    items file that a partially applied batch could lose — because this
+    invocation is two argv values and mints nothing.
+    """
     ids = _validate_id_list(id_list)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/retry-needs-context', {
             'item_ids': ids, 'reason': reason,
         })
-    print(f"Retried (needs_context -> pending): {result.get('retried', 0)} item(s)")
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-retry-needs-context",
+        label="items",
+        payload=result,
+        metadata={
+            "command": "code-dispatch retry-needs-context",
+            "item_ids": ids,
+            "reason": reason,
+        },
+    )
+    retried = result.get('retried', 0) if isinstance(result, dict) else 0
+    print(f"Retried (needs_context -> pending): {retried} item(s)")
+    print(f"Saved audit snapshot: {snapshot.name}")
+    if isinstance(result, dict) and result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _queue_lookup_matches(row: dict, selectors: list[dict]) -> bool:
@@ -1325,9 +2033,22 @@ def _normalize_string_list(value) -> list[str]:
     return [json.dumps(value, ensure_ascii=False, sort_keys=True)]
 
 
+# Every key that selects one file for a queue attempt. `queue_item_id` is the id
+# `list`, `fetch` and the dispatch prompts all hand the operator, so it must be
+# usable as a selector without a translation step the operator has to invent.
+_QUEUE_LEAF_SELECTORS = ("file_id", "file_path", "queue_item_id")
+
+
 def _flatten_queue_specs(item, inherited: dict | None = None) -> list[dict]:
     if not isinstance(item, dict):
-        print("Queue items must be JSON objects", file=sys.stderr)
+        print(
+            "Queue items must be JSON objects, not bare values: name one file per "
+            f"item with {' or '.join(_QUEUE_LEAF_SELECTORS)} (plus optional "
+            "repo_id, priority, batch_theme, slot_types, guidance_hypotheses), or "
+            "wrap a list in items/batches/files/file_paths. Example: "
+            '[{"queue_item_id": 41, "batch_theme": "reread"}]',
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     inherited_fields = dict(inherited or {})
@@ -1380,16 +2101,75 @@ def _flatten_queue_specs(item, inherited: dict | None = None) -> list[dict]:
         item = dict(item)
         item['file_path'] = item.pop('glob')
 
-    if 'file_id' in item or 'file_path' in item:
+    if any(key in item for key in _QUEUE_LEAF_SELECTORS):
         leaf = dict(inherited_fields)
         leaf.update(item)
         return [leaf]
 
-    print("Queue item is missing file_id/file_path or a supported batch wrapper", file=sys.stderr)
+    print(
+        "Queue item is missing "
+        f"{'/'.join(_QUEUE_LEAF_SELECTORS)} or a supported batch wrapper",
+        file=sys.stderr,
+    )
     sys.exit(1)
 
 
-def _resolve_queue_file_ids(item: dict, code_files: list[dict]) -> list[int]:
+def _resolve_queue_file_ids(
+    item: dict, code_files: list[dict], queue_rows: _QueueRowLookup | None = None
+) -> list[int]:
+    queue_item_id = item.get('queue_item_id')
+    if queue_item_id not in (None, ""):
+        # One selector per item, exactly as `_requeue_item` demands: a queue
+        # item id already names the file, so a second selector beside it is an
+        # unresolvable instruction rather than extra confirmation.
+        conflicting = [
+            key
+            for key in ("file_id", "file_path")
+            if item.get(key) not in (None, "")
+        ]
+        if conflicting:
+            print(
+                f"ERROR: queue item names both queue_item_id and "
+                f"{', '.join(conflicting)}; supply exactly one selector",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        if type(queue_item_id) is not int or queue_item_id <= 0:
+            print(f"Invalid queue queue_item_id: {queue_item_id!r}", file=sys.stderr)
+            sys.exit(1)
+        lookup = _QUEUE_ROWS_NOT_READ if queue_rows is None else queue_rows
+        row = lookup.rows.get(queue_item_id)
+        if row is None:
+            if lookup.exhaustive:
+                print(
+                    f"No current-generation queue row found for queue_item_id "
+                    f"{queue_item_id}; re-read it with `code-dispatch list` "
+                    f"or `code-dispatch progress {queue_item_id}`",
+                    file=sys.stderr,
+                )
+            else:
+                # The walk stopped short, so this id was never checked. Saying
+                # the row is gone would send the operator to re-queue a file
+                # whose attempt may be alive.
+                print(
+                    f"Could not reach queue_item_id {queue_item_id}: "
+                    f"{lookup.unreached_detail()}, which is not proof the row "
+                    f"is gone; read it directly with `code-dispatch progress "
+                    f"{queue_item_id}`, or narrow the listing with "
+                    "`code-dispatch list --repo-id <id> --path-prefix <path>` "
+                    "and re-run with the id it shows",
+                    file=sys.stderr,
+                )
+            sys.exit(1)
+        resolved_file_id = row.get("file_id")
+        if type(resolved_file_id) is not int or resolved_file_id <= 0:
+            print(
+                f"Queue row {queue_item_id} carries an invalid file_id",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return [resolved_file_id]
+
     file_id = item.get('file_id')
     if file_id not in (None, ""):
         if type(file_id) is not int or file_id <= 0:
@@ -1399,7 +2179,11 @@ def _resolve_queue_file_ids(item: dict, code_files: list[dict]) -> list[int]:
 
     file_path = str(item.get('file_path', '')).strip()
     if not file_path:
-        print("Queue item must include file_id or file_path", file=sys.stderr)
+        print(
+            "Queue item must include "
+            f"{' or '.join(_QUEUE_LEAF_SELECTORS)}",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     repo_id = item.get('repo_id')
@@ -1449,11 +2233,47 @@ def _normalize_queue_items(cfg, raw_items: list[dict], *, mode: str = "initial")
             )
             sys.exit(1)
 
-    needs_lookup = any(entry.get('file_id') in (None, "") for entry in flattened)
+    # `queue_item_id` names an attempt that already exists, so it selects a file
+    # for a DEEPER pass and never for an initial one — an initial submission
+    # against it could only conflict with the row the id came from.
+    if mode != "reanalysis":
+        misplaced = [
+            entry["queue_item_id"]
+            for entry in flattened
+            if entry.get("queue_item_id") not in (None, "")
+        ]
+        if misplaced:
+            print(
+                "Queue item selects by queue_item_id "
+                f"({', '.join(str(value) for value in misplaced)}), which names an "
+                "attempt that already exists. Use `code-dispatch reanalyze "
+                "<queue-items-json-file> <reason>` for a deeper pass, or select by "
+                "file_id/file_path for initial queueing.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+
+    # A queue_item_id resolves through the queue listing (whose rows carry
+    # file_id); a path resolves through the code/files inventory. Each lookup
+    # runs once for the whole submission, never per item.
+    requested_queue_item_ids = {
+        entry["queue_item_id"]
+        for entry in flattened
+        if type(entry.get("queue_item_id")) is int and entry["queue_item_id"] > 0
+    }
+    queue_rows = _QUEUE_ROWS_NOT_READ
+    if requested_queue_item_ids:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            queue_rows = _queue_rows_by_item_id(
+                client, requested_queue_item_ids, read_to_end=True
+            )
     lookup_selectors = [
-        entry for entry in flattened if entry.get("file_id") in (None, "")
+        entry
+        for entry in flattened
+        if entry.get("file_id") in (None, "")
+        and entry.get("queue_item_id") in (None, "")
     ]
-    code_files = _fetch_code_files(cfg, lookup_selectors) if needs_lookup else []
+    code_files = _fetch_code_files(cfg, lookup_selectors) if lookup_selectors else []
 
     normalized: list[dict] = []
     seen: set[str] = set()
@@ -1467,7 +2287,7 @@ def _normalize_queue_items(cfg, raw_items: list[dict], *, mode: str = "initial")
             )
             sys.exit(1)
 
-        file_ids = _resolve_queue_file_ids(entry, code_files)
+        file_ids = _resolve_queue_file_ids(entry, code_files, queue_rows)
         if mode == "initial" and entry.get('priority') in (None, ""):
             print("Queue item requires explicit priority", file=sys.stderr)
             sys.exit(1)
@@ -1644,7 +2464,18 @@ def submit_queue_items(
             batch = normalized_items[start : start + _QUEUE_SUBMISSION_BATCH_SIZE]
             batch_payload = dict(request_payload)
             batch_payload["items"] = batch
-            result = client.post("code/analysis-queue", batch_payload)
+            # A batch that fits the default budget is sent unchanged; only a
+            # batch whose per-item work exceeds it needs a wider one.
+            batch_timeout = _QUEUE_SUBMISSION_SECONDS_PER_ITEM * len(batch)
+            result = client.post(
+                "code/analysis-queue",
+                batch_payload,
+                **(
+                    {"read_timeout": batch_timeout}
+                    if batch_timeout > DEFAULT_READ_TIMEOUT_SECONDS
+                    else {}
+                ),
+            )
             response = result if isinstance(result, dict) else {}
             for key in totals:
                 totals[key] += int(response.get(key, len(batch) if key == "inserted" else 0))
@@ -1684,6 +2515,8 @@ def submit_queue_items(
         f"already-active={already_active_count}, conflicts={conflict_count}, "
         f"reanalysis={reanalysis_count}"
     )
+    if reanalysis_count:
+        _report_suspended_predecessors(reported_outcomes, reanalysis_count)
     snapshot_names = ", ".join(path.name for path in response_snapshots)
     print(f"Audit snapshots: {submit_snapshot.name}, {snapshot_names}")
     print(
@@ -1705,6 +2538,67 @@ def submit_queue_items(
             file=sys.stderr,
         )
         sys.exit(1)
+
+
+# Where the per-item outcome names the attempt this one supersedes. The request
+# field is `supersedes`, so that is the name read first; the stored column name
+# is accepted too, because the response is the backend's to shape.
+_PREDECESSOR_OUTCOME_FIELDS = (
+    "supersedes",
+    "reanalysis_of_queue_item_id",
+    "predecessor_queue_item_id",
+)
+
+
+def _report_suspended_predecessors(
+    outcomes: list[dict], reanalysis_count: int
+) -> None:
+    """State, per file, that the predecessor's verdict no longer counts.
+
+    Exactly one attempt per file is canonical, so the moment a reanalysis row
+    is inserted the predecessor's `done` receipts stop satisfying coverage —
+    the file reads as unanalyzed again, the gate can regress, and if the
+    re-review never closes it stays that way. That is the intended invariant,
+    not a defect; what was missing is anyone saying so at the moment it
+    happens, rather than leaving an unexplained coverage drop to be discovered
+    later in `code-coverage`.
+    """
+    reanalyzed = [
+        outcome
+        for outcome in outcomes
+        if isinstance(outcome, dict) and outcome.get("outcome") == "reanalysis"
+    ]
+    print(
+        f"\n{reanalysis_count} file(s) now carry a new attempt. Each "
+        "predecessor's verdict and coverage credit are SUSPENDED until the new "
+        "attempt reaches a terminal disposition: the file counts as unanalyzed "
+        "until then, and a re-review that never closes leaves it that way. "
+        "Close every new attempt, or `code-dispatch list --stale-minutes N` "
+        "and recover it. Each new row's `reanalysis_of_queue_item_id` in "
+        "`code-dispatch list` names the predecessor it suspended."
+    )
+    for outcome in reanalyzed:
+        predecessor = next(
+            (
+                outcome[field]
+                for field in _PREDECESSOR_OUTCOME_FIELDS
+                if type(outcome.get(field)) is int
+            ),
+            None,
+        )
+        subject = outcome.get("file_path") or f"file {outcome.get('file_id', '?')}"
+        predecessor_text = (
+            f"queue item {predecessor}" if predecessor is not None else "its predecessor"
+        )
+        print(
+            f"  {subject}: {predecessor_text} suspended; new attempt "
+            f"{outcome.get('queue_item_id', '?')}"
+        )
+    if reanalysis_count > len(reanalyzed):
+        print(
+            f"  ... {reanalysis_count - len(reanalyzed)} further suspended "
+            "predecessor(s); the per-item outcomes are in the response snapshots"
+        )
 
 
 # One strict selector per input. `list-triggers` rows carry `id` AND

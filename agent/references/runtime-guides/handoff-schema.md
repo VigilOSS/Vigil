@@ -18,7 +18,8 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
   questions, and role-specific extras.
 - **The operator hands the next dispatch a bounded blob.** `render-handoff` reads the
   handoff row, fetches each finding slug from the backend (404 → "slug missing"),
-  checks every working_artifact path on disk (missing → "(state: missing)"), and
+  checks every working_artifact path against the engagement directory (missing →
+  "(state: missing)", outside it → "(state: out-of-engagement)"), and
   emits a context excerpt capped at `--max-lines` (default 40). Use `--max-lines 0` for
   the complete recorded handoff, including specialty extras; a capped excerpt is not the full result. The next agent
   rebuilds its mental model from finding slugs, artifact paths, and the next-step
@@ -28,25 +29,32 @@ prompt by `vigil assess agent render-handoff <agent-id>`.
 
 ## Schema
 
+`Required` reads: **yes** — the write is refused without it; **write it** —
+every specialist-authored handoff sets it and the operator reads it, but the backend
+accepts the row without it, because an operator recovery write for a dispatch that
+returned without a handoff cannot attest a phase or a confidence it never saw;
+**optional** — supply it when it applies.
+
 | Field | Type | Required | Notes |
 |---|---|---|---|
 | `agent_id` | string | yes | The dispatching agent_id (the same id passed to `vigil assess agent start` / `POST /dispatches`). |
 | `agent_role` | string | yes | The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, etc.). |
-| `phase` | string | yes | The phase tag the dispatch was authorized for (canonical enum via `vigil assess list-commands --phase`; e.g. `recon`, `consume-test`, `exploit`, plus half-phase tags `recon-pivot` / `exploit-recon`). |
+| `phase` | string | write it | The phase tag the dispatch ACTUALLY ran at — the lane's own account, not a copy of the grant (canonical enum via `vigil assess list-commands --phase`; e.g. `recon`, `consume-test`, `exploit`, plus half-phase tags `recon-pivot` / `exploit-recon`). Normally equal to the packet's Runtime Identity `authorized_phase`; when the lane ran a narrower or less privileged branch than it was granted, record the phase it ran. `render-handoff` prints this beside `authorized_phase` from the immutable packet and names a divergence rather than reconciling it, so a self-downgraded lane stops looking identical to one that ran as dispatched. |
 | `summary` | string | yes | target about 2000 chars; hard limit 16384 characters; what was done in your own words. |
-| `confidence` | enum | yes | `low` / `medium` / `high` based on what you proved vs. inferred. |
+| `confidence` | enum | write it | `low` / `medium` / `high` based on what you proved vs. inferred. |
 | `finding_slugs` | string[] | optional | Slug strings only — the rich data lives in the findings table. The renderer fetches title + severity from the backend per slug. |
 | `coverage_gaps` | object[] | optional | Each entry: `{area, reason, recommended_followup}`. |
 | `next_steps` | object[] | optional | Each entry: `{action, target, recommended_agent, rationale}`. |
 | `runtime_issues` | object[] | optional | Each entry: `{kind, tool_or_target, detail, severity}`. |
-| `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme_social.txt`); the renderer checks each on disk. |
+| `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme_social.txt`). Both the write and `render-handoff` resolve it against the engagement directory and report `present` / `missing` / `out-of-engagement`; a path outside the engagement cannot be registered as an artifact at all. |
 | `open_questions` | string[] | optional | Free-text questions the operator/human must answer (vendor-SaaS in/out, scope ambiguity, missing credential, etc.). |
 | `recommended_next_agent` | string | optional | The role you'd hand off to (`vulnerability-analyst`, `exploit-developer`, `report-writer`, ...). |
 | `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `vigil assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
 | `closed_dispatch_status` | enum | optional | Dispatch status for `agent close` to apply (`completed`, `blocked`, `failed`, `aborted`). |
 | `handoff_version` | integer | backend-managed | Incremented on every checkpoint write. Specialists do not set it; the orchestrator increments it on each PATCH so concurrent updates and audit trails stay ordered. |
 | `last_checkpoint_at` | ISO datetime | backend-managed | Timestamp of the most recent handoff write. Backfilled to `created_at` for pre-lifecycle rows; updated by every checkpoint PATCH. Used by `agent reconcile-stale` to find dispatches that have not checkpointed recently. |
-| `extras` | object | optional | Opaque JSON object for role-specific fields (osint CVE-match counts, fuzzer hit/miss ratio, recon live_host_count, etc.). |
+| `extras` | object | optional | Opaque JSON object for role-specific fields (osint CVE-match counts, fuzzer hit/miss ratio, recon live_host_count, etc.). One reserved key: `skills_loaded` — the skills you actually loaded, as a list or a comma-separated string. `render-handoff` reads that exact name, so a dispatch whose `skills` the operator left self-selected has no other way to put its loadout on the record. |
+| `expected_handoff_version` | integer | optional | Update-only guard: the `handoff_version` you read. The write is refused (HTTP 409) if the row has moved since, so a recovery write cannot overwrite a checkpoint that landed in between. Never sent when creating the first handoff. |
 
 ## Field-by-field guidance
 
@@ -127,8 +135,15 @@ A list of objects — `{path, description, kind}`. Each entry is a file the next
 agent might consume. `path` is engagement-relative (`scans/sans_acme_social.txt`,
 `tools/exploit-state/EX-001-payload.sql`, `downloads/app.bundle.js`). `kind` is
 `data` / `script` / `payload` / `exploit_state` / `scan_output` / `download`.
-The renderer checks each path on disk and tags missing files as
-`(state: missing)` so the next agent doesn't chase deleted state.
+
+The write and the renderer resolve each path against the engagement directory and
+report the same three states, so the state you are told at write time is the state
+the next dispatch reads: `present`, `missing`, or `out-of-engagement` for a path
+that resolves outside the engagement (the artifact index refuses to register one, so
+no artifact row can ever exist for it). A `missing` entry survives the renderer's
+line budget ahead of a present one — it is the path the next agent must not chase.
+Declare the artifact after writing the file: a `ready` handoff that names a file it
+did not write is refused, and the row it already stored says so.
 
 ### `open_questions`
 
@@ -166,7 +181,190 @@ Opaque JSON object for role-specific fields. Examples:
 Anything that helps the next agent understand the shape of the prior dispatch
 without reading the audit pipeline.
 
+#### `extras.skills_loaded` — the one reserved key
+
+Every other name here is yours to invent. `skills_loaded` is not: `render-handoff`
+reads that exact spelling and renders it on the blob's **Skills loaded** line, so
+any other name (`skills`, `loaded_skills`, `skills_used`) leaves that line reading
+"not recorded" for the next dispatch. Write it whenever your dispatch prompt said
+`skills: self-selected` — the dispatch row then carries no skill audit at all, and
+this is the only record of which procedure context you ran under.
+
+- as a list: `{"skills_loaded": ["code-vulnerability-analysis", "code-variant-analysis"]}`
+- or comma-separated: `{"skills_loaded": "code-vulnerability-analysis,code-variant-analysis"}`
+
+Use the bare skill directory names (`vigil assess list-skills`), not paths. When the
+operator DID pass `--skills`, the dispatch row already records the request and the
+rendered line shows both; a mismatch between them is a real signal, so report what
+you loaded rather than echoing what was asked for.
+
 ## Per-role examples
+
+Only the fields in the Schema table are top-level keys — `agent handoff` refuses an
+unknown top-level name before the request, and `HandoffCreate` would 422 it. Every
+role-specific field belongs under `extras`, including the blue roles' `disposition`,
+`evidence_refs[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`,
+`cross_platform_correlation_notes` and `proposal_ids[]`. `evidence_refs[]` carries
+registered artifact IDs, never local paths.
+
+### `alert-triage-specialist` (blue L1 — triage)
+
+```json
+{
+  "agent_id": "ats_b7c2",
+  "agent_role": "alert-triage-specialist",
+  "phase": "triage",
+  "summary": "Triaged 9 Acme Okta alerts: 6 mechanical false-positive proposals against the known-benign register, 2 escalated to investigation, 1 blocked on a missing tenant-policy entry. No terminal verification status written at L1.",
+  "confidence": "medium",
+  "finding_slugs": ["BL-001", "BL-002"],
+  "coverage_gaps": [
+    {"area": "service-account lockouts on acme-sso.example", "reason": "tenant ref has no known-benign entry for the automation principal", "recommended_followup": "request the tenant-policy owner add the principal, then re-triage"}
+  ],
+  "next_steps": [
+    {"action": "investigate the two escalated sign-in clusters", "target": "BL-001, BL-002", "recommended_agent": "investigator", "rationale": "both show impossible-travel pairs that L1 cannot adjudicate"}
+  ],
+  "runtime_issues": [],
+  "working_artifacts": [],
+  "open_questions": ["Is the acme-automation service principal in scope for containment?"],
+  "recommended_next_agent": "investigator",
+  "handoff_status": "ready",
+  "closed_dispatch_status": "completed",
+  "extras": {
+    "disposition": "false_positive_proposed",
+    "evidence_refs": [412, 413, 418],
+    "mitre_techniques": ["T1078.004", "T1110.003"],
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-workspace.md"],
+    "alerts_triaged": 9
+  }
+}
+```
+
+### `investigator` (blue L2 — investigate)
+
+```json
+{
+  "agent_id": "inv_d4e8",
+  "agent_role": "investigator",
+  "phase": "investigate",
+  "summary": "Reconstructed the Acme sign-in cluster across Okta and M365: one principal authenticated from two ASNs within 6 minutes, then created an inbox rule. Recorded two findings; no disposition written at L2.",
+  "confidence": "medium",
+  "finding_slugs": ["BL-003", "BL-004"],
+  "coverage_gaps": [
+    {"area": "mailbox audit before 2026-09-01", "reason": "tenant retention window expired", "recommended_followup": "request the archived audit export from the customer"}
+  ],
+  "next_steps": [
+    {"action": "verify BL-003 under the five-check protocol", "target": "BL-003", "recommended_agent": "incident-verifier", "rationale": "the inbox-rule write is the load-bearing claim and L2 cannot set a terminal status"}
+  ],
+  "runtime_issues": [],
+  "working_artifacts": [],
+  "open_questions": [],
+  "recommended_next_agent": "incident-verifier",
+  "handoff_status": "ready",
+  "closed_dispatch_status": "completed",
+  "extras": {
+    "disposition": null,
+    "evidence_refs": [431, 432, 433],
+    "mitre_techniques": ["T1078.004", "T1114.003"],
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-workspace.md"],
+    "cross_platform_correlation_notes": "Okta session id ties to the M365 sign-in by device id and 6-minute window; both platforms were queried for the same UTC range."
+  }
+}
+```
+
+### `incident-verifier` (blue L3 — verify)
+
+```json
+{
+  "agent_id": "ivf_f9a1",
+  "agent_role": "incident-verifier",
+  "phase": "verify",
+  "summary": "Verified 4 Acme findings: 2 confirmed, 1 downgraded on a symmetric evidence bar, 1 killed as a mechanical false positive with its settling test named. Every verdict carries its five-check record and a devil's-advocate pass.",
+  "confidence": "high",
+  "finding_slugs": ["BL-003", "BL-004"],
+  "coverage_gaps": [],
+  "next_steps": [
+    {"action": "propose containment for the confirmed account takeover", "target": "BL-003", "recommended_agent": "ir-lead", "rationale": "confirmed with a proven write; containment needs an approved proposal"}
+  ],
+  "runtime_issues": [],
+  "working_artifacts": [],
+  "open_questions": [],
+  "recommended_next_agent": "ir-lead",
+  "handoff_status": "ready",
+  "closed_dispatch_status": "completed",
+  "extras": {
+    "disposition": "confirmed",
+    "evidence_refs": [441, 442],
+    "mitre_techniques": ["T1078.004"],
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-workspace.md"],
+    "verdicts": {"confirmed": 2, "downgraded": 1, "false_positive": 1}
+  }
+}
+```
+
+### `ir-lead` (blue L4 — respond)
+
+```json
+{
+  "agent_id": "irl_h2j5",
+  "agent_role": "ir-lead",
+  "phase": "respond",
+  "summary": "Recorded three containment proposals for the confirmed Acme takeover (session revoke, credential reset, inbox-rule removal); the operator executed two and the third is deferred pending the customer's maintenance window. Containment proof registered per executed proposal.",
+  "confidence": "high",
+  "finding_slugs": ["BL-003"],
+  "coverage_gaps": [
+    {"area": "blast radius for the delegated mailbox set", "reason": "delegate mapping is not in the tenant ref", "recommended_followup": "obtain the delegate map before the eradication proposal"}
+  ],
+  "next_steps": [
+    {"action": "execute the deferred inbox-rule removal", "target": "BL-003", "recommended_agent": "ir-lead", "rationale": "customer maintenance window opens after the report deadline"}
+  ],
+  "runtime_issues": [],
+  "working_artifacts": [],
+  "open_questions": ["Does the customer authorize a tenant-wide session revoke?"],
+  "recommended_next_agent": "report-writer",
+  "handoff_status": "ready",
+  "closed_dispatch_status": "completed",
+  "extras": {
+    "disposition": null,
+    "evidence_refs": [451, 452, 455],
+    "mitre_techniques": ["T1078.004"],
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-workspace.md"],
+    "proposal_ids": [71, 72, 73]
+  }
+}
+```
+
+### `osint-analyst` (blue incident mode — IOC enrichment)
+
+```json
+{
+  "agent_id": "osint_m8n3",
+  "agent_role": "osint-analyst",
+  "phase": "investigate",
+  "summary": "Enriched 14 IOCs from the Acme sign-in cluster: 3 ASNs attributed to a residential proxy provider, 2 domains with passive-DNS overlap, 9 with no reputation signal. Intel rows recorded and linked to BL-003.",
+  "confidence": "medium",
+  "finding_slugs": ["BL-003"],
+  "coverage_gaps": [
+    {"area": "passive DNS before 2026-06", "reason": "provider retention", "recommended_followup": "re-run enrichment if an earlier window becomes available"}
+  ],
+  "next_steps": [
+    {"action": "fold the proxy-provider attribution into the investigation narrative", "target": "BL-003", "recommended_agent": "investigator", "rationale": "changes how the impossible-travel pair should be read"}
+  ],
+  "runtime_issues": [
+    {"kind": "rate_limited", "tool_or_target": "passive-dns provider", "detail": "9 of 14 lookups deferred by provider quota", "severity": "warning"}
+  ],
+  "working_artifacts": [],
+  "open_questions": [],
+  "recommended_next_agent": "investigator",
+  "handoff_status": "ready",
+  "closed_dispatch_status": "completed",
+  "extras": {
+    "evidence_refs": [461, 462],
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-workspace.md"],
+    "iocs_enriched": 14,
+    "source_reputation": "two providers agreed on the residential-proxy attribution; one had no record"
+  }
+}
+```
 
 ### `recon-specialist`
 
@@ -474,15 +672,25 @@ cat > /tmp/handoff-recon-a3f9.json <<'JSON'
 JSON
 
 vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-recon-a3f9.json
+# ...or stream it, without a file on disk:
+#   printf '%s' "$handoff_json" | vigil assess agent handoff --agent-id <agent-id> --from-json -
 # Self-check: confirm the row is readable before exiting (404 → agent_id mismatch)
 vigil assess agent render-handoff a3f9
 ```
 
-For simple cases (one or two findings, no nested fields), flag-based alternatives
-exist — see `vigil assess agent handoff --help` for the live flag set.
-The `--from-json` form is the canonical path because it's the only way to record
-nested fields (`coverage_gaps`, `next_steps`, `runtime_issues`, `working_artifacts`)
-without shell-escaping pain.
+`--from-json` takes a path, `@path`, inline JSON, or `-` for stdin, and it is the
+only payload surface: every field above is recorded through it, including the nested
+ones (`coverage_gaps`, `next_steps`, `runtime_issues`, `working_artifacts`).
+`--agent-id` is the only other flag, and the payload's `agent_id` must equal it — the
+match is what stops another dispatch's handoff file from being re-sent under your id.
+A key the schema does not list is rejected by name before the request, so a misspelled
+`workign_artifacts` cannot be dropped silently.
+
+The receipt names `handoff_version`, `last_checkpoint_at`, `summary_characters`, and
+every `working_artifacts` path with its on-disk state. A missing path is a warning; a
+`ready` handoff that claims one exits non-zero after the row is written, because a
+finished result asserting a file it never wrote is a fabricated result — write the file
+or drop the entry, then re-run the same command.
 
 The renderer reads the row back:
 
@@ -506,7 +714,7 @@ payload. Call it after each major step in your methodology — not just at the
 end.
 
 The pattern: maintain a local handoff JSON file (e.g.
-`/tmp/handoff_<agent-id>.json`). After each tool or methodology step, update
+`/tmp/handoff-<agent-id>.json`). After each tool or methodology step, update
 the file with everything-known-so-far, then re-run `vigil assess agent handoff` against it.
 Latest write wins; `vigil assess agent render-handoff <agent-id>` always reflects the most
 recent state.

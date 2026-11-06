@@ -90,27 +90,39 @@ def register(subparsers) -> None:
         ),
     )
     p.add_argument(
+        "--inherited-from", type=_positive_int, default=None, metavar="GENERATION",
+        help=(
+            "Read each current unanalyzed file whose source hash is unchanged "
+            "since GENERATION together with the terminal verdict recorded then, "
+            "labelled inherited with its origin generation. A read only: an "
+            "inherited verdict satisfies no gate and makes no currency claim"
+        ),
+    )
+    p.add_argument(
         "--depth", type=_positive_int, default=None,
         help="With --by-path: directory segments below the repository root to group by (default 2)",
     )
     p.add_argument(
         "--path-prefix", action="append", default=None, metavar="PATH",
         help=(
-            "With --by-path: only files at or under PATH, matched by whole segments "
-            "and case-sensitively; repeatable"
+            "With --by-path or --inherited-from: only files at or under PATH, "
+            "matched by whole segments and case-sensitively; repeatable"
         ),
     )
     p.add_argument(
         "--limit", type=_positive_int, default=None,
-        help="With --by-path: directories per page (default 50)",
+        help=(
+            "With --by-path: directories per page (default 50). With "
+            "--inherited-from: files per page"
+        ),
     )
     p.add_argument(
         "--offset", type=_non_negative_int, default=None,
-        help="With --by-path: directories to skip",
+        help="With --by-path or --inherited-from: rows to skip",
     )
     p.add_argument(
         "--json", dest="as_json", action="store_true",
-        help="With --by-path: emit the backend page as JSON",
+        help="With --by-path or --inherited-from: emit the backend page as JSON",
     )
     p.set_defaults(func=run)
 
@@ -128,15 +140,32 @@ def _non_negative_int(value: str) -> int:
     return int(value)
 
 
-# Flags that only shape the --by-path view, and the views it cannot combine with.
-_BY_PATH_ONLY_OPTIONS = (
-    ("depth", "--depth"),
-    ("path_prefix", "--path-prefix"),
-    ("limit", "--limit"),
-    ("offset", "--offset"),
-    ("as_json", "--json"),
+# Flags that shape a row-listing view rather than the default summary, each with
+# the views that honour it. One table, because the flag surface and the refusal
+# that polices it are the same fact: a flag listed for a view the endpoint does
+# not accept is an unreachable option, and one withheld from a view the endpoint
+# DOES accept is a read an operator cannot narrow. `code/coverage/inherited`
+# takes path_prefix, limit and offset exactly as `code/coverage/by-path` does;
+# --depth groups directories, which only the by-path projection has rows for.
+_VIEW_ONLY_OPTIONS = (
+    ("depth", "--depth", ("--by-path",)),
+    ("path_prefix", "--path-prefix", ("--by-path", "--inherited-from")),
+    ("limit", "--limit", ("--by-path", "--inherited-from")),
+    ("offset", "--offset", ("--by-path", "--inherited-from")),
+    ("as_json", "--json", ("--by-path", "--inherited-from")),
 )
 _BY_PATH_EXCLUSIVE_OPTIONS = (
+    ("cwe_matrix", "--cwe-matrix"),
+    ("require_gate_pass", "--require-gate-pass"),
+    ("require_transition_ready", "--require-transition-ready"),
+    ("debt_paths", "--debt-paths"),
+    ("inherited_from", "--inherited-from"),
+)
+# `--inherited-from` is its own read against a prior generation, so it cannot
+# be combined with a view that reports the CURRENT one: one output carrying
+# both would be exactly the currency claim this read must never make.
+_INHERITED_EXCLUSIVE_OPTIONS = (
+    ("by_path", "--by-path"),
     ("cwe_matrix", "--cwe-matrix"),
     ("require_gate_pass", "--require-gate-pass"),
     ("require_transition_ready", "--require-transition-ready"),
@@ -145,6 +174,26 @@ _BY_PATH_EXCLUSIVE_OPTIONS = (
 
 
 def _refuse_misplaced_by_path_options(args) -> None:
+    if getattr(args, "inherited_from", None) is not None:
+        conflicts = [
+            flag
+            for field, flag in _INHERITED_EXCLUSIVE_OPTIONS
+            if getattr(args, field, None)
+        ]
+        conflicts += [
+            flag
+            for field, flag, views in _VIEW_ONLY_OPTIONS
+            if "--inherited-from" not in views
+            and getattr(args, field, None) is not None
+        ]
+        if conflicts:
+            print(
+                "ERROR: --inherited-from is its own read of a prior generation and "
+                f"cannot combine with {', '.join(conflicts)}",
+                file=sys.stderr,
+            )
+            raise SystemExit(2)
+        return
     if getattr(args, "by_path", False):
         conflicts = [flag for field, flag in _BY_PATH_EXCLUSIVE_OPTIONS if getattr(args, field, None)]
         if conflicts:
@@ -155,10 +204,12 @@ def _refuse_misplaced_by_path_options(args) -> None:
             raise SystemExit(2)
         return
     misplaced = [
-        flag for field, flag in _BY_PATH_ONLY_OPTIONS if getattr(args, field, None) not in (None, False)
+        f"{flag} requires {' or '.join(views)}"
+        for field, flag, views in _VIEW_ONLY_OPTIONS
+        if getattr(args, field, None) not in (None, False)
     ]
     if misplaced:
-        print(f"ERROR: {', '.join(misplaced)} requires --by-path", file=sys.stderr)
+        print(f"ERROR: {'; '.join(misplaced)}", file=sys.stderr)
         raise SystemExit(2)
 
 
@@ -187,6 +238,87 @@ def _run_by_path(cfg, args) -> None:
         print("Backend returned a non-object coverage-by-path page", file=sys.stderr)
         raise SystemExit(1)
     _print_coverage_by_path(result)
+
+
+def _inherited_endpoint(args) -> str:
+    query: list[tuple[str, object]] = [("generation", args.inherited_from)]
+    if getattr(args, "repo_id", None):
+        query.append(("repo_id", args.repo_id))
+    # Deduplicated and ordered exactly as `_by_path_endpoint` does it, so the
+    # same scope spelled twice is one query the backend can cache-compare.
+    for prefix in sorted(set(getattr(args, "path_prefix", None) or [])):
+        query.append(("path_prefix", prefix))
+    if getattr(args, "limit", None) is not None:
+        query.append(("limit", args.limit))
+    if getattr(args, "offset", None) is not None:
+        query.append(("offset", args.offset))
+    return "code/coverage/inherited?" + urlencode(query)
+
+
+def _run_inherited(cfg, args) -> None:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.get(_inherited_endpoint(args))
+    if getattr(args, "as_json", False):
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
+    if not isinstance(result, dict):
+        print("Backend returned a non-object inherited-coverage page", file=sys.stderr)
+        raise SystemExit(1)
+    _print_inherited_coverage(result, requested_generation=args.inherited_from)
+
+
+def _print_inherited_coverage(result: dict, *, requested_generation: int) -> None:
+    """Show the prior verdict each unchanged file already has, as a read only.
+
+    A generation change supersedes every receipt repo-wide, so a re-ingest that
+    touched one file reads as zero coverage for all of them. This names what
+    was already reviewed and still byte-identical — the shortest honest route
+    back to the work that matters. It deliberately does not carry that verdict
+    forward: coverage, the gate and readiness all read the active generation,
+    and a label that satisfied them would be a silent currency claim.
+    """
+    rows = [row for row in (result.get("files") or []) if isinstance(row, dict)]
+    origin = result.get("origin_generation", requested_generation)
+    active = result.get("active_generation", "?")
+    offset = int(result.get("offset", 0) or 0)
+    print(
+        f"=== Inherited Coverage from generation {origin} "
+        f"(active generation {active}; {len(rows)} of "
+        f"{result.get('total', len(rows))} files, offset {offset}) ==="
+    )
+    print(
+        "Each row is a file whose source hash is unchanged since that "
+        "generation and whose most recent terminal result from it is shown as "
+        "`inherited`. This is a read: an inherited verdict is NOT current, "
+        "does not satisfy the coverage gate or phase readiness, and the file "
+        "still owes a current attempt."
+    )
+    if not rows:
+        print("No unchanged file carries a terminal result from that generation.")
+        return
+    print(
+        f"{'FILE_ID':>8}  {'CLASS':<10}  {'INHERITED':<12}  {'FROM':>5}  "
+        f"{'RECORDED':<22}  {'REPO':<16}  PATH"
+    )
+    for row in rows:
+        # With several repositories in scope a path alone does not identify the
+        # file, and re-queueing is a per-repository decision.
+        repo = str(row.get("repo_key") or row.get("repo_id") or "")
+        print(
+            f"{row.get('file_id', '?')!s:>8}  "
+            f"{str(row.get('classification', '')):<10}  "
+            f"{str(row.get('disposition', '')):<12}  "
+            f"{row.get('origin_generation', origin)!s:>5}  "
+            f"{str(row.get('recorded_at') or ''):<22}  "
+            f"{repo:<16}  {row.get('file_path', '')}"
+        )
+    if result.get("has_more"):
+        print(f"\nMore files: re-run with --offset {offset + len(rows)}")
+    print(
+        "\nRe-review each file that still matters with `vigil assess "
+        "code-dispatch queue` (or `reanalyze` where a current attempt exists); "
+        "`code-coverage --by-path` shows where the uncovered ones are."
+    )
 
 
 def _tier_cell(row: dict, tier: str) -> str:
@@ -228,8 +360,32 @@ def _print_coverage_by_path(result: dict) -> None:
         "needs context, classified, pending). DEBT = degraded/unsupported/truncated "
         "structural analysis with no successful review; SKIPS = accounted skips."
     )
+    _print_dispositions_by_path(rows)
     if result.get("has_more"):
         print(f"More directories: re-run with --offset {offset + len(rows)}")
+
+
+def _print_dispositions_by_path(rows: list[dict]) -> None:
+    """Report what the reviews in each directory actually concluded.
+
+    The status census says a directory was reviewed; it does not say whether
+    the reviews found anything. Without this, choosing where the next wave
+    goes means reading two `code-dispatch list` dumps to recover information
+    the coverage page already holds.
+    """
+    counted = [
+        (row, row.get("by_disposition"))
+        for row in rows
+        if isinstance(row.get("by_disposition"), dict) and row["by_disposition"]
+    ]
+    if not counted:
+        return
+    print("\nBy Disposition (what the completed reviews concluded):")
+    for row, dispositions in counted:
+        census = ", ".join(
+            f"{name}={dispositions[name]}" for name in sorted(dispositions)
+        )
+        print(f"  {row.get('path', '?')}: {census}")
 
 
 def _next_code_gate(engagement_dir: str) -> str | None:
@@ -322,6 +478,9 @@ def _readiness_endpoint(target: str) -> str:
 def run(args) -> None:
     _refuse_misplaced_by_path_options(args)
     cfg = load_config(args.engagement_dir)
+    if getattr(args, "inherited_from", None) is not None:
+        _run_inherited(cfg, args)
+        return
     if getattr(args, "by_path", False):
         _run_by_path(cfg, args)
         return
@@ -851,6 +1010,15 @@ def _print_analysis_status(data: dict) -> None:
             "`vigil assess code-dispatch queue <queue-items-json-file>`; "
             "`analyzed` counts require queue receipts."
         )
+    # These are engagement-wide totals, so they say how much is left and
+    # nothing about where. Composing the next wave from them otherwise means
+    # paging `code-dispatch list` twice to recover a per-directory picture the
+    # coverage page already computes.
+    print(
+        "  Next: `vigil assess code-coverage --by-path` breaks these buckets, "
+        "the uncovered critical/high count and what the finished reviews "
+        "concluded down by directory — the read a dispatch wave is planned from."
+    )
 
 
 def _print_source_identity(data: dict) -> None:

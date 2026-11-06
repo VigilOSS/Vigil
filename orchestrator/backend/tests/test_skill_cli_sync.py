@@ -68,8 +68,10 @@ from __future__ import annotations
 
 import argparse
 import ast
+import difflib
 import importlib
 import re
+import shlex
 import sys
 from pathlib import Path
 from typing import Any
@@ -134,6 +136,51 @@ def _long_flags(parser: argparse.ArgumentParser) -> set[str]:
     return flags
 
 
+def _positional_action_choices(parser: argparse.ArgumentParser) -> set[str] | None:
+    """The first positional's ``choices`` set, when it has one.
+
+    Only the FIRST positional can be an action word: a bare value positional
+    consumes the token instead, so a ``choices`` tuple further along is an
+    argument's vocabulary rather than a verb's action roster. Read one parser at
+    a time so a nested action verb (`agent …`, `kali job …`) is covered too.
+    """
+    for action in parser._actions:  # noqa: SLF001
+        if action.option_strings or isinstance(action, argparse._SubParsersAction):
+            continue
+        choices = getattr(action, "choices", None)
+        if choices and all(isinstance(choice, str) for choice in choices):
+            return set(choices)
+        return None
+    return None
+
+
+def _positional_action_rosters(
+    top: dict[str, argparse.ArgumentParser],
+) -> dict[str, set[str]]:
+    """``{verb: {action, ...}}`` for every verb whose actions are a POSITIONAL.
+
+    `code-dispatch`, `work-buffer`, `app-unit` and `resolve` take their action as
+    a positional argument with a ``choices`` tuple instead of a subparser group,
+    so ``_subparser_choices`` sees nothing under them and every leaf — a whole
+    queue lifecycle in `code-dispatch`'s case — was invisible to the reverse
+    check. That is how `code-dispatch error` and `code-dispatch retry-error`
+    shipped named in no prompt and no doc at all, while `error` is a real queue
+    status an operator has to recover from and one that counts toward a
+    readiness blocker.
+
+    Derived from the live parser, never a hardcoded list: a new positional-action
+    verb joins this check the moment it registers its choices.
+    """
+    rosters: dict[str, set[str]] = {}
+    for verb, parser in top.items():
+        if _subparser_choices(parser):
+            continue  # a real subparser group; already covered above
+        choices = _positional_action_choices(parser)
+        if choices:
+            rosters[verb] = choices
+    return rosters
+
+
 def _load_assess_registries() -> dict[str, Any]:
     """Return assess verb sets keyed by group from agent/scripts/assess CLI."""
     cli = importlib.import_module("assess.cli")
@@ -151,6 +198,7 @@ def _load_assess_registries() -> dict[str, Any]:
         "assess": assess_verbs,
         "kali": kali_verbs,
         "kali_job": kali_job_verbs,
+        "positional_actions": _positional_action_rosters(top),
         # Parsers retained so flag coverage can introspect specific verbs, and
         # the root so the reverse flag lint can walk the tree from the top.
         "_top_parsers": top,
@@ -192,8 +240,10 @@ def _doc_files() -> list[Path]:
     - the ``docs/`` operator and maintainer pages that name concrete
       invocations — the assessment-CLI reference, the session-command
       reference, agent clients, authentication, blue engagements, code
-      analysis, OOB routing, operations, install integrity, installation, and
-      engagements. These are
+      analysis, OOB routing, operations, install integrity, installation,
+      engagements, and the per-directory subsystem-boundary map that CODE-MAP.md
+      points at (it carries the verb, flag and route narration CODE-MAP.md used
+      to hold inline, so it has to be linted on the same terms). These are
       living user-facing docs: a verb renamed out from under one of them is
       exactly the copy-paste failure this lint exists to catch,
     - the editor-rule pointer (.cursor) and the eval harness README.
@@ -237,6 +287,7 @@ def _doc_files() -> list[Path]:
         _REPO_ROOT / "docs" / "install-integrity.md",
         _REPO_ROOT / "docs" / "installation.md",
         _REPO_ROOT / "docs" / "engagements.md",
+        _REPO_ROOT / "docs" / "subsystem-boundaries.md",
         _REPO_ROOT / "CODE-MAP.md",
         _REPO_ROOT / "AGENTS.md",
         _REPO_ROOT / ".cursor" / "rules" / "operator.md",
@@ -294,6 +345,32 @@ _OOB_RE = re.compile(r"vigil oob (?!client )([a-z][a-z0-9-]*)")
 _OOB_CLIENT_RE = re.compile(r"vigil oob client ([a-z][a-z0-9-]*)")
 
 
+# ``vigil assess <verb> <action>`` — and the bare ``<verb> <action>`` prose
+# writes far more often — for the verbs whose ACTION is a positional with a
+# ``choices`` tuple (code-dispatch, work-buffer, app-unit, resolve).
+#
+# The ``vigil assess`` prefix is OPTIONAL because only a third of the corpus's
+# ``code-dispatch <action>`` mentions carry it: an operator core writes "return
+# them with ``code-dispatch retry-error <ids> [reason]``" and a phase prompt
+# writes "close each with ``code-dispatch resolve-triggers``". Requiring the
+# prefix read those as undocumented, which let the debt ledger below carry
+# entries that were no longer true while its own anti-staleness guard — reading
+# this same detector — stayed green.
+#
+# The verb alternation is built from the LIVE rosters rather than written by
+# hand, so a new positional-action verb is covered the moment it registers its
+# choices, and a match can never be read as a subverb claim about an ordinary
+# verb's positional VALUES. Roster keys carry dashes, so they are escaped and
+# ordered longest-first. ``(?<![\w-])`` / ``(?![\w-])`` bound both tokens: the
+# verb is a whole word (``foo-code-dispatch fetch`` is a different word, not a
+# match) and the action is captured whole (``retry-error``, never ``retry``).
+def _positional_action_re(rosters: dict[str, set[str]]) -> re.Pattern[str]:
+    verbs = "|".join(
+        re.escape(verb) for verb in sorted(rosters, key=lambda verb: (-len(verb), verb))
+    )
+    return re.compile(rf"(?<![\w-])({verbs})(?![\w-]) ([a-z][a-z0-9-]*)(?![\w-])")
+
+
 @pytest.fixture(scope="module")
 def assess_registries() -> dict[str, Any]:
     return _load_assess_registries()
@@ -310,8 +387,9 @@ def doc_files() -> list[Path]:
     assert files, "no markdown docs discovered — corpus glob is broken"
     # Anchor the corpus size so a glob that silently stops matching (which would
     # make the docs->CLI and CLI->docs checks vacuous) trips this instead. The
-    # corpus is ~330 files (exact count varies with repo state); keep a generous
-    # floor that still catches a collapse.
+    # corpus runs to several hundred files — 430-plus today, and the exact count
+    # moves with repo state as prompts and their rendered client wrappers are
+    # added; keep a generous floor that still catches a collapse.
     assert len(files) >= 250, (
         f"doc corpus shrank to {len(files)} files — a glob in _doc_files likely "
         "stopped matching; the sync-lint would silently weaken."
@@ -466,14 +544,6 @@ _KNOWN_UNDOCUMENTED_ASSESS: set[str] = {
     # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
     # any operator doc names the verb, forcing the entry back out.
     "list-mindsets",
-    # `code-lead` (B2) binds a tracked intel lead to a repository/file/line and
-    # is fully specified by `vigil assess contract code-lead`, its own --help,
-    # and the `code_leads_unresolved` readiness repair line that names it. Its
-    # prose wiring belongs to the prompt sweep, not to the CLI change that
-    # introduced it. Temporary by construction:
-    # `test_known_undocumented_allowlist_has_no_stale_entries` fails the moment
-    # any operator doc names the verb, forcing the entry back out.
-    "code-lead",
 }
 _KNOWN_UNDOCUMENTED_OOB = {
     "restart",  # stop+start convenience; ops doc start/stop/status/test/mint/poll
@@ -491,6 +561,46 @@ _KNOWN_UNDOCUMENTED_KALI: set[str] = set()
 # EMPTY today: list/logs/start/stop are all documented. A fifth client subverb
 # that shipped without docs would FAIL the reverse check.
 _KNOWN_UNDOCUMENTED_OOB_CLIENT: set[str] = set()
+
+# Positional ACTIONS (``<verb> <action>``, with or without the ``vigil assess``
+# prefix, where the action is a positional with a ``choices`` tuple rather than a
+# subparser) that are registered but named in no operator doc. A prompt that
+# writes the action bare against its verb documents it, so an entry here means
+# the action is named in neither spelling anywhere in the corpus. Each entry is
+# real documentation debt with its reason stated, not an exemption: the point of
+# this allowlist is that the debt is enumerated and shrinking rather than
+# structurally invisible, which is what it was before this check existed.
+# `test_known_undocumented_positional_actions_has_no_stale_entries` fails the
+# moment an action leaves the CLI or reaches a doc, forcing the entry back out.
+_KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS: dict[str, set[str]] = {
+    "code-dispatch": {
+        # The read half of the cross-file trigger lifecycle. The phase prompt
+        # drives `requeue-triggers` and `resolve-triggers` and names a
+        # `list-triggers` ROW as the shape its input takes — that is the payload,
+        # not the command that produces it, so the read itself is specified only
+        # by `vigil assess contract code-dispatch`. Real debt, not an exemption.
+        "list-triggers",
+    },
+    "work-buffer": {
+        # Operator-side triage leaves on the web work buffer. The prompts drive
+        # fetch / fetch-by-unit / peek / done / error / defer; these three are
+        # reached from `vigil assess work-buffer --help` and the contract.
+        "mark-manual",
+        "retry-errors",
+        "set-rationale",
+    },
+    "app-unit": {
+        # The depth-score advisory names `list`, `score` and `mark-deep`. The
+        # ledger read and the two clearing leaves are specified only by
+        # `vigil assess contract app-unit`; `clear-deep` reaches that advisory
+        # solely as the second half of a `mark-deep` / `clear-deep` pairing,
+        # where the slash elides the verb and nothing attributes the action to
+        # `app-unit` on its own.
+        "depth-ledger",
+        "clear-deep",
+        "clear",
+    },
+}
 
 
 def _documented_verbs(corpus_text: str) -> tuple[set[str], set[str]]:
@@ -564,6 +674,113 @@ def test_registered_verbs_are_documented(assess_registries, oob_registries, corp
         "These `vigil oob client <subverb>` verbs are registered but never "
         "named in the doc corpus and are not in _KNOWN_UNDOCUMENTED_OOB_CLIENT. "
         "Document or allowlist:\n  " + "\n  ".join(undocumented_oob_client)
+    )
+
+
+def _documented_positional_actions(
+    corpus_text: str, rosters: dict[str, set[str]]
+) -> dict[str, set[str]]:
+    """``{verb: {action token found in prose, ...}}`` for positional-action verbs.
+
+    A mention counts whether or not it carries the ``vigil assess`` prefix: the
+    prose names these actions bare far more often than fully qualified, and an
+    action an operator is told by name to run is named either way. Tokens that
+    are not on the verb's roster come back too (prose such as "resolve the") —
+    harmless, because both callers only ever ask about a registered action.
+    """
+    documented: dict[str, set[str]] = {verb: set() for verb in rosters}
+    for match in _positional_action_re(rosters).finditer(corpus_text):
+        verb, action = match.group(1), match.group(2)
+        if verb in documented and _is_literal_verb(action):
+            documented[verb].add(action)
+    return documented
+
+
+def test_a_bare_positional_action_mention_counts_as_documented(assess_registries):
+    """The detector's own regression, against the live rosters.
+
+    Both checks below read this one function, so what it fails to see it fails
+    to see in BOTH directions: an action goes on reading as undocumented, and
+    the allowlist entry that says so goes on reading as current debt while the
+    anti-staleness guard stays green over it. Only about a third of the corpus's
+    `code-dispatch <action>` mentions carry a `vigil assess` prefix — the prompts
+    write "return them with `code-dispatch retry-error <ids> [reason]`" — so a
+    prefix-only detector is the shape that rot takes.
+    """
+    rosters = assess_registries["positional_actions"]
+
+    documented = _documented_positional_actions(
+        "return them with `code-dispatch retry-error <ids> [reason]`\n"
+        "run `vigil assess work-buffer fetch-by-unit --unit-id <id>`\n"
+        "a foo-code-dispatch requeue-triggers note is a different word\n",
+        rosters,
+    )
+
+    # Bare and fully-qualified mentions both count.
+    assert "retry-error" in documented["code-dispatch"]
+    assert "fetch-by-unit" in documented["work-buffer"]
+    # The action is captured whole, not truncated at its first dash.
+    assert "retry" not in documented["code-dispatch"]
+    # A roster verb embedded in a longer token is not that verb.
+    assert "requeue-triggers" not in documented["code-dispatch"]
+
+
+def test_registered_positional_actions_are_documented(assess_registries, corpus_text):
+    """CLI -> docs for the action leaves a subparser walk cannot see.
+
+    `code-dispatch`, `work-buffer`, `app-unit` and `resolve` hand-parse an action
+    POSITIONAL, so the verb-level reverse check above cleared them on the verb
+    name alone while a whole lifecycle underneath went unmentioned anywhere an
+    operator reads. Every registered action is either named in the corpus or
+    carries its reason in `_KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS`.
+    """
+    rosters = assess_registries["positional_actions"]
+    assert rosters, "no positional-action verbs discovered — the derivation broke"
+    documented = _documented_positional_actions(corpus_text, rosters)
+
+    undocumented: list[str] = []
+    for verb, roster in sorted(rosters.items()):
+        allowed = _KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS.get(verb, set())
+        for action in sorted(roster - documented[verb] - allowed):
+            undocumented.append(f"vigil assess {verb} {action}")
+
+    assert not undocumented, (
+        "These positional ACTIONS are registered but never named in the doc "
+        "corpus and are not in _KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS. Document "
+        "the action in a SKILL.md / operator-core / phase prompt / reference, or "
+        "add it to that allowlist with its reason:\n  " + "\n  ".join(undocumented)
+    )
+
+
+def test_known_undocumented_positional_actions_has_no_stale_entries(
+    assess_registries, corpus_text
+):
+    """The positional-action allowlist is a ledger of debt, so it must not rot.
+
+    An entry is stale when the action no longer exists on the verb, when the verb
+    no longer takes a positional action at all, or when the action actually
+    became documented — each means the entry should leave, so the remaining list
+    stays an honest statement of what is still undocumented.
+    """
+    rosters = assess_registries["positional_actions"]
+    documented = _documented_positional_actions(corpus_text, rosters)
+
+    stale: list[str] = []
+    for verb, actions in sorted(_KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS.items()):
+        roster = rosters.get(verb)
+        if roster is None:
+            stale.append(f"{verb}: no longer takes a positional action")
+            continue
+        for action in sorted(actions):
+            if action not in roster:
+                stale.append(f"vigil assess {verb} {action}: no longer registered")
+            elif action in documented[verb]:
+                stale.append(f"vigil assess {verb} {action}: now documented")
+
+    assert not stale, (
+        "_KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS has stale entries. Remove each "
+        "one so the allowlist keeps naming only real, current debt:\n  "
+        + "\n  ".join(stale)
     )
 
 
@@ -1091,7 +1308,7 @@ def python_files() -> list[Path]:
     files = _python_files()
     # Same anchor role as ``doc_files``: a glob that silently stops matching
     # would make the runtime-string checks vacuous rather than red. The corpus
-    # is ~320 modules; keep a generous floor that still catches a collapse.
+    # is 360-plus modules; keep a generous floor that still catches a collapse.
     assert len(files) >= 250, (
         f"python corpus shrank to {len(files)} modules — a glob in "
         "_python_files likely stopped matching; the runtime-string flag lint "
@@ -1343,4 +1560,370 @@ def test_logs_tail_never_described_as_correlation(doc_files):
         "alongside correlation without disavowing it. Correlation is only "
         "`vigil oob poll`; the log tails are raw listener/FRP output for infra "
         "debugging:\n  " + "\n  ".join(offenders)
+    )
+
+
+# --------------------------------------------------------------------------
+# Contract command strings resolve against the real parser.
+#
+# `vigil assess contract <verb>` renders these tables verbatim, so every command
+# string in them is an authoritative instruction. The flag checks above read the
+# markdown corpus and Python string literals, but nothing has ever resolved a
+# contract string's VERB PATH — and that is the half that fails at argparse exit
+# 2 before a flag is even looked at. The shape is a real one: an advisory shipped
+# printing `vigil assess intel note get <id>` when the registered spelling is
+# `vigil assess intel get note <id>`, and `contract_registry.py` plus
+# `contracts.py` hold the largest body of command strings in the repository.
+#
+# Resolution walks the live parser: at each level, a bare word must be a
+# registered subcommand, or — for the positional-action verbs — one of that
+# verb's `choices`. Placeholders, flags and values end the walk, because only the
+# verb path can be checked without inventing argument semantics.
+# --------------------------------------------------------------------------
+_CONTRACT_PLACEHOLDER_PREFIXES = ("-", "<", "[", "{", '"', "'", "(")
+# Prose spellings that are deliberately not a single command: an alternation
+# (`proof-work list|get`), an elision (`agent …`), or a label with a trailing
+# colon (`finding link: <slug> ...`). None can resolve as a verb path, and
+# rewriting them would make the prose worse.
+# `*` covers a verb-family glob such as `vigil assess record-*`; `/` covers the
+# family notation `vigil assess kali/<subverb>` and a route argument like
+# `fetch code/repos`. No registered verb contains either character, so a token
+# carrying one can never be the verb path and is a stop rather than a failure.
+_CONTRACT_NON_COMMAND_MARKERS = ("|", "…", "...", "=", "*", "/")
+
+
+def _contract_verb_path_problem(
+    root: argparse.ArgumentParser, tokens: list[str]
+) -> str | None:
+    """``None`` when the leading verb path resolves, else what failed.
+
+    Stops at the first token that is not a bare word: a placeholder or a flag
+    ends the verb path, and so does a value positional, because a parser with no
+    subcommands and no ``choices`` positional accepts any word there.
+    """
+    parser = root
+    path: list[str] = []
+    for raw_token in tokens:
+        if raw_token.startswith(_CONTRACT_PLACEHOLDER_PREFIXES):
+            return None
+        if any(marker in raw_token for marker in _CONTRACT_NON_COMMAND_MARKERS):
+            return None
+        # `finding link: <slug> ...` is a prose label, not a three-word verb.
+        # The colon ends the path, but the verb before it is still checked.
+        token = raw_token.rstrip(":")
+        labelled = token != raw_token
+        choices = _subparser_choices(parser)
+        if choices:
+            if token not in choices:
+                nearest = difflib.get_close_matches(token, sorted(choices), n=1)
+                return (
+                    f"{' '.join(path + [token])!r} is not a registered verb"
+                    + (f" (nearest: {' '.join(path + [nearest[0]])})" if nearest else "")
+                )
+            parser = choices[token]
+            path.append(token)
+            if labelled:
+                return None
+            continue
+        positional = _positional_action_choices(parser)
+        if positional and token not in positional:
+            return (
+                f"{' '.join(path + [token])!r} is not a registered action; "
+                f"{path[-1] if path else 'the verb'} takes one of "
+                f"{sorted(positional)}"
+            )
+        return None
+    return None
+
+
+def _contract_modules():
+    contracts = importlib.import_module("assess.lib.contracts")
+    return contracts
+
+
+def _contract_invocation_strings() -> list[tuple[str, str]]:
+    """``(contract name, command string)`` for every invocation and example."""
+    contracts = _contract_modules()
+    rows: list[tuple[str, str]] = []
+    for name in contracts.contract_names():
+        contract = contracts.get_contract(name)
+        if contract is None:
+            continue
+        for invocation in contract.preferred_invocations:
+            rows.append((name, invocation))
+        for example in contract.examples:
+            command = example.get("command") if isinstance(example, dict) else None
+            if isinstance(command, str):
+                rows.append((name, command))
+    return rows
+
+
+_CONTRACT_BACKTICK_RE = re.compile(r"`([^`\n]{2,160})`")
+
+
+def _contract_prose_command_spans() -> list[tuple[str, str]]:
+    """Backticked spans in contract prose whose first word is a registered verb.
+
+    Unambiguous by construction: a span that opens with a top-level assess verb
+    is a command, so the rest of it has to resolve. Prose that merely names a
+    field, a status or a schema never starts with one.
+    """
+    contracts = _contract_modules()
+    registries = _load_assess_registries()
+    top = set(registries["assess"])
+    rows: list[tuple[str, str]] = []
+    for name in contracts.contract_names():
+        contract = contracts.get_contract(name)
+        if contract is None:
+            continue
+        texts: list[str] = [contract.summary or "", *contract.notes]
+        texts.extend(contract.author_supplied_fields)
+        texts.extend(f"{flag} {meaning}" for flag, meaning in contract.helper_defaults)
+        texts.extend(f"{trigger} {fix}" for trigger, fix in contract.common_mistakes)
+        for _field, _domain, meaning in contract.top_level_fields:
+            texts.append(meaning)
+        for text in texts:
+            for match in _CONTRACT_BACKTICK_RE.finditer(text):
+                span = re.sub(r"^vigil assess\s+", "", match.group(1).strip())
+                tokens = span.split()
+                if len(tokens) < 2 or tokens[0] not in top:
+                    continue
+                rows.append((name, span))
+    return rows
+
+
+def test_the_contract_verb_path_resolver_rejects_a_wrong_spelling(assess_registries):
+    """The resolver's own regression: the exact drift shape it exists to catch.
+
+    `intel get note <id>` is the registered spelling; `intel note get <id>` is
+    the one an advisory shipped. A resolver that passed both would make the two
+    checks below vacuous.
+    """
+    root = assess_registries["_root_parser"]
+
+    assert _contract_verb_path_problem(root, ["intel", "note", "get", "<id>"]) is not None
+    assert _contract_verb_path_problem(root, ["intel", "get", "note", "<id>"]) is None
+    # A placeholder or flag ends the walk rather than being treated as a verb.
+    assert _contract_verb_path_problem(root, ["intel", "--json"]) is None
+    assert _contract_verb_path_problem(root, ["not-a-verb"]) is not None
+    # A prose label keeps its colon; the verb inside it is still checked.
+    assert _contract_verb_path_problem(root, ["finding", "link:"]) is None
+    assert _contract_verb_path_problem(root, ["finding", "lnik:"]) is not None
+
+
+def test_contract_invocations_and_examples_resolve_against_the_real_parser(
+    assess_registries,
+):
+    root = assess_registries["_root_parser"]
+    rows = _contract_invocation_strings()
+    assert len(rows) >= 300, (
+        f"only {len(rows)} contract command strings collected — the collector "
+        "stopped reading preferred_invocations/examples and this check would be "
+        "vacuous"
+    )
+
+    problems: list[str] = []
+    for name, raw in rows:
+        text = raw.strip()
+        if not text.startswith("vigil assess "):
+            continue
+        try:
+            tokens = shlex.split(text)[2:]
+        except ValueError:
+            problems.append(f"{name}: unbalanced quoting in {text!r}")
+            continue
+        problem = _contract_verb_path_problem(root, tokens)
+        if problem:
+            problems.append(f"{name}: {problem} :: {text}")
+
+    assert not problems, (
+        "`vigil assess contract <verb>` renders these verbatim, so each one is "
+        "an instruction that exits 2 the moment an agent runs it:\n  "
+        + "\n  ".join(problems)
+    )
+
+
+def test_contract_prose_command_spans_resolve_against_the_real_parser(
+    assess_registries,
+):
+    root = assess_registries["_root_parser"]
+    rows = _contract_prose_command_spans()
+    assert len(rows) >= 100, (
+        f"only {len(rows)} backticked contract command spans collected — the "
+        "collector stopped reading contract prose and this check would be vacuous"
+    )
+
+    problems: list[str] = []
+    for name, span in rows:
+        problem = _contract_verb_path_problem(root, span.split())
+        if problem:
+            problems.append(f"{name}: {problem} :: `{span}`")
+
+    assert not problems, (
+        "a contract note names a command the CLI does not register:\n  "
+        + "\n  ".join(problems)
+    )
+
+
+# The same resolver over the markdown corpus.
+#
+# The flag lints above already compare `--flag` tokens both ways; the verb path
+# was never resolved anywhere, in the contracts or in the ~4000 `vigil assess …`
+# mentions the prompts, skills and references carry. A wrong verb path is the
+# more total failure: argparse exits 2 before a flag is read.
+#
+# Scanned per LINE over frontmatter-stripped text, so a mention cannot be
+# assembled out of two unrelated wrapped lines, and a `record-*` family glob is
+# excluded with the other non-command spellings.
+# `*` is inside the token class so a family glob is CAPTURED and then filtered by
+# _CONTRACT_NON_COMMAND_MARKERS; left out, `record-*` arrives as the bare stem
+# `record-` and reads as a misspelling of a real verb.
+_DOC_ASSESS_COMMAND_RE = re.compile(r"vigil assess((?:\s+[a-z][a-z0-9/_.*-]*)+)")
+
+
+def test_documented_assess_verb_paths_resolve_against_the_real_parser(
+    assess_registries, corpus_texts
+):
+    root = assess_registries["_root_parser"]
+    mentions = 0
+    problems: dict[str, set[str]] = {}
+    for text in corpus_texts:
+        for line in text.splitlines():
+            for match in _DOC_ASSESS_COMMAND_RE.finditer(line):
+                mentions += 1
+                problem = _contract_verb_path_problem(root, match.group(1).split())
+                if problem:
+                    problems.setdefault(problem, set()).add(line.strip()[:160])
+
+    assert mentions >= 2000, (
+        f"only {mentions} documented `vigil assess ...` mentions found — the "
+        "corpus or the pattern stopped matching and this check would be vacuous"
+    )
+    assert not problems, (
+        "a doc names an assess verb path the CLI does not register; an agent "
+        "following it exits 2 before any flag is read:\n  "
+        + "\n  ".join(
+            f"{problem} :: {sorted(lines)[0]}" for problem, lines in sorted(problems.items())
+        )
+    )
+
+
+# --------------------------------------------------------------------------
+# The same resolver over Python STRING LITERALS.
+#
+# This is where a named verb matters most and where nothing was resolving it: an
+# agent hits a 409, reads the verb in the `detail`, and runs it. A misspelling
+# sends them nowhere, at the one moment they have no other information. The
+# contract and markdown arms above cannot see these — they are Python strings.
+#
+# Two shapes proved this is not hypothetical. `code_record_modules.py` sent a
+# caller whose write may already have committed to "inspect `vigil assess code
+# list-modules`" — not a verb at all, when the read that answers the question is
+# `fetch code/modules`. And a CLI refusal named a reference file that did not
+# exist until a human read the line.
+#
+# The corpus and the literal folder are the ones `_python_files` /
+# `_python_string_literals` already own for the runtime-string FLAG lint: same
+# modules, same f-string placeholder, same reason for excluding `tests/` and
+# dot-directories. This arm resolves the VERB PATH those strings name, which the
+# flag lint never looks at.
+# --------------------------------------------------------------------------
+
+# Verb paths a literal names IN ORDER TO SAY THEY DO NOT EXIST. The one list the
+# check consults, and permanent. It is deliberately not a general allowlist for
+# verb paths that are merely wrong: those are corrected in the file that names
+# them, so nothing a reader would actually type can hide behind a "this is fine"
+# entry.
+_NONEXISTENT_BY_DESIGN_VERB_PATHS: dict[str, str] = {
+    # src/vigil_cli/blue.py module header, under "Critical CLI-verb drift
+    # handled here": names the wrong spelling so a blue translator reader knows
+    # which one to avoid. The real verb, `vigil assess log`, is in the same line.
+    "log-entry": "named only to state it does not exist; the verb is `log`",
+}
+
+
+def _literal_command_spans(paths: list[Path]) -> list[tuple[str, str, str]]:
+    """``(location, verb-path span, surrounding text)`` per `vigil assess …`."""
+    rows: list[tuple[str, str, str]] = []
+    for path in paths:
+        try:
+            literals = _python_string_literals(path)
+        except SyntaxError:
+            # A sibling mid-edit must not turn this check into a failure about
+            # someone else's unfinished file; the flag lint takes the same view.
+            continue
+        relative = path.relative_to(_REPO_ROOT).as_posix()
+        for line, text in literals:
+            if "vigil assess" not in text:
+                continue
+            for match in _DOC_ASSESS_COMMAND_RE.finditer(text):
+                context = text[max(0, match.start() - 40):match.end() + 40]
+                rows.append(
+                    (
+                        f"{relative}:{line}",
+                        match.group(1).strip(),
+                        " ".join(context.split()),
+                    )
+                )
+    return rows
+
+
+def test_literal_command_verb_paths_resolve_against_the_real_parser(
+    assess_registries, python_files
+):
+    root = assess_registries["_root_parser"]
+    rows = _literal_command_spans(python_files)
+    assert len(rows) >= 800, (
+        f"only {len(rows)} `vigil assess ...` string literals found across the "
+        "backend, the assess CLI and the installable CLI — the extraction or a "
+        "glob stopped matching and this check would be vacuous"
+    )
+
+    problems: dict[str, set[str]] = {}
+    for location, span, context in rows:
+        problem = _contract_verb_path_problem(root, span.split())
+        if not problem:
+            continue
+        verb = span.split()[0]
+        if verb in _NONEXISTENT_BY_DESIGN_VERB_PATHS:
+            continue
+        problems.setdefault(f"{problem} [{location}]", set()).add(context)
+
+    assert not problems, (
+        "a string literal names an assess verb path the CLI does not register. "
+        "An agent reading this out of a refusal runs a command that exits 2:\n  "
+        + "\n  ".join(
+            f"{problem} :: ...{sorted(contexts)[0]}..."
+            for problem, contexts in sorted(problems.items())
+        )
+    )
+
+
+def test_by_design_nonexistent_verb_paths_are_still_named_and_nonexistent(
+    assess_registries, python_files
+):
+    """The one excused list stays honest in both directions.
+
+    An entry no literal names any more excuses nothing and has to go; an entry
+    whose verb path now resolves means the prose saying it does not exist is
+    itself the defect. Either way the arm above would quietly stop covering a
+    verb path it is supposed to resolve."""
+    root = assess_registries["_root_parser"]
+    seen = {span.split()[0] for _loc, span, _ctx in _literal_command_spans(python_files)}
+
+    registered: list[str] = []
+    absent: list[str] = []
+    for verb, reason in _NONEXISTENT_BY_DESIGN_VERB_PATHS.items():
+        if verb not in seen:
+            absent.append(f"{verb} ({reason})")
+        elif _contract_verb_path_problem(root, [verb]) is None:
+            registered.append(f"{verb} — now a registered verb, so the literal "
+                              "that says it does not exist is the thing to correct")
+
+    assert not registered, (
+        "these verb paths now resolve:\n  " + "\n  ".join(registered)
+    )
+    assert not absent, (
+        "these excused verb paths no longer appear in any string literal, "
+        "so the entry is dead:\n  " + "\n  ".join(absent)
     )

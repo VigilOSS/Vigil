@@ -650,25 +650,37 @@ citable across dispatches).
 
 ```json
 {
-  "skill": "m365-signin-investigation",
-  "finding_slug": "<slug>",
-  "tier": "L2",
-  "platform": "m365",
-  "actor": {"upn": "user@<tenant>.onmicrosoft.com", "objectId": "<guid>", "aliases": ["..."]},
-  "time_window_utc": ["<iso-start>", "<iso-end>"],
-  "proposed_disposition": "confirmed",
+  "agent_id": "<runtime-agent-id>",
+  "agent_role": "investigator",
+  "phase": "investigate",
+  "summary": "<which sign-in / directory / UAL streams were pulled for <upn>, what the timeline establishes, and what the proposed disposition rests on>",
   "confidence": "high",
-  "confidence_rationale": "...",
-  "mitre_techniques": ["T1078.004", "T1098.001", "T1564.008"],
-  "evidence_refs": ["<artifact-id-1>", "<artifact-id-2>", "..."],
-  "timeline": [
-    {"t": "<iso>", "event": "<short description>", "evidence_ref": "<artifact-id>"}
+  "handoff_status": "ready",
+  "finding_slugs": ["<slug>"],
+  "recommended_next_agent": "incident-verifier",
+  "coverage_gaps": [
+    {"area": "<stream or window>", "reason": "<why it was unavailable>", "recommended_followup": "<proposed follow-up>"}
   ],
-  "coverage_gaps": ["<gap with proposed follow-up>"],
-  "containment_proposed": [
-    {"action": "revoke|disable|reset|remove", "target": "<specific principal/grant/rule>", "rollback": "<reverse action>"}
+  "next_steps": [
+    {"action": "five-check verification against the timeline above", "target": "<slug>", "recommended_agent": "incident-verifier", "rationale": "L2 does not own disposition"}
   ],
-  "next_specialist": "verifier"
+  "extras": {
+    "skill": "m365-signin-investigation",
+    "tier": "L2",
+    "platform": "m365",
+    "actor": {"upn": "user@<tenant>.onmicrosoft.com", "objectId": "<guid>", "aliases": ["..."]},
+    "time_window_utc": ["<iso-start>", "<iso-end>"],
+    "proposed_disposition": "confirmed",
+    "confidence_rationale": "...",
+    "mitre_techniques": ["T1078.004", "T1098.001", "T1564.008"],
+    "evidence_refs": ["<artifact-id-1>", "<artifact-id-2>", "..."],
+    "timeline": [
+      {"t": "<iso>", "event": "<short description>", "evidence_ref": "<artifact-id>"}
+    ],
+    "containment_proposed": [
+      {"action": "revoke|disable|reset|remove", "target": "<specific principal/grant/rule>", "rollback": "<reverse action>"}
+    ]
+  }
 }
 ```
 

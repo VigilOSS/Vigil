@@ -8,7 +8,8 @@
 // React. It accepts a structural subset of FindingsTab's `Derived` shape — the
 // `Derived` type satisfies `MarkdownFinding` without an explicit cast.
 
-import type { FindingPocRequest, FindingPocResponse } from "./api";
+import type { FindingOperatorAuthority, FindingPocRequest, FindingPocResponse } from "./api.ts";
+import { operatorAuthorityLabel } from "./findingWorkflow.ts";
 
 export type MarkdownFinding = {
   slug: string;
@@ -17,6 +18,11 @@ export type MarkdownFinding = {
   workflowLabel: string;
   verificationLabel: string;
   verificationKey: string;
+  // Present only when the verdict rests on the operator's own out-of-snapshot
+  // evidence instead of a decision receipt. The copy is what gets filed in a
+  // ticket, where nobody can see the drawer that said so — so the status line
+  // carries it rather than leaving the reader to assume a proof run.
+  operatorAuthority?: FindingOperatorAuthority | null;
   cvss_score?: number;
   cvss_vector?: string;
   canonical_location?: string;
@@ -87,9 +93,10 @@ function fenceFor(content: string): string {
  *
  * Twin of `fenceInfo` in orchestrator/report/src/lib/findingMarkdown.ts, and
  * the reason it exists lives on THIS side: the report twin only ever passes
- * literals, while this one passes `details.poc_language` — a free-form key a
- * specialist writes while reading target output, which no schema, prompt or
- * backend validates on the way here.
+ * literals, while this one passes `details.poc_language` — registered as FREE
+ * TEXT, so the record door admits the key and checks nothing about the value.
+ * A specialist writes whatever the target's own toolchain calls the language,
+ * while reading target output (ADR 0018), and it reaches here untouched.
  *
  * A backtick fence's info string may not contain a backtick (CommonMark 4.5),
  * so ```` ```js`x` ```` is not a fence — it is a paragraph, and the capture
@@ -97,13 +104,21 @@ function fenceFor(content: string): string {
  * A newline in the hint is worse: it splits the opening line, and a hint ending
  * in ``` closes the block on the line after it opens.
  *
- * Only a *language hint* is ever dropped, never a capture. The hint is
- * presentation — a syntax colour in whatever form the operator pastes into —
- * so ADR 0019 (do not degrade the operator's own data) is not engaged; the
- * capture the fence wraps still goes in byte for byte.
+ * An inner SPACE is admitted, because it breaks nothing: a renderer reads the
+ * first word of the info string as the language and ignores the rest, so
+ * ```` ```python 3 ```` fences exactly as ```` ```python ```` does. Rejecting it
+ * dropped the multi-word hints a specialist actually writes, and this guard
+ * exists to stop an escape, not to decide which labels are tidy.
+ *
+ * Only a *language hint* is ever dropped, never a capture, and only when it
+ * holds a character that would un-fence the block. The hint is presentation — a
+ * syntax colour in whatever form the operator pastes into — so ADR 0019 (do not
+ * degrade the operator's own data) is answered by the narrowness of the rule;
+ * the capture the fence wraps still goes in byte for byte. The page's own chip
+ * filters nothing at all, because a DOM text node holds no fence to break.
  */
 export function fenceInfo(hint: string): string {
-  return /^[A-Za-z0-9_+#.-]*$/.test(hint) ? hint : "";
+  return /^[A-Za-z0-9_+#.\- ]*$/.test(hint) ? hint : "";
 }
 
 export function findingToMarkdown(d: MarkdownFinding): string {
@@ -126,6 +141,11 @@ export function findingToMarkdown(d: MarkdownFinding): string {
   if (d.verificationKey && d.verificationKey !== "unreviewed") {
     statusParts.push(`**Verification:** ${d.verificationLabel}`);
   }
+  // On the same line as the verdict it qualifies, so a reader who skims one
+  // line cannot take the verdict for a dispatch-verified one.
+  if (d.operatorAuthority) {
+    statusParts.push(`**${operatorAuthorityLabel(d.operatorAuthority, d.verificationKey)}** (no proof receipt)`);
+  }
   push(statusParts.join(" · "));
   push();
 
@@ -138,10 +158,15 @@ export function findingToMarkdown(d: MarkdownFinding): string {
   // Raw, as the drawer's KV renders it: this twin's page does not title-case
   // the value, so neither does its clipboard.
   if (d.auth_context) push(`**Access required:** ${d.auth_context}`);
+  // Verbatim, as the operator wrote it, and in the same shape as the other
+  // labelled metadata: this is the justification the whole waiver rests on, so
+  // paraphrasing it would leave the ticket asserting a verdict whose stated
+  // grounds nobody can check.
+  if (d.operatorAuthority?.reason) push(`**Operator authority reason:** ${d.operatorAuthority.reason}`);
   if (d.cwe_id) push(`**CWE:** ${d.cwe_id}`);
   if (d.owasp_category) push(`**OWASP:** ${d.owasp_category}`);
   if (d.cvss_vector) push(`**CVSS vector:** \`${d.cvss_vector}\``);
-  if (d.canonical_location || d.auth_context || d.cwe_id || d.owasp_category || d.cvss_vector) {
+  if (d.canonical_location || d.auth_context || d.operatorAuthority?.reason || d.cwe_id || d.owasp_category || d.cvss_vector) {
     push();
   }
 

@@ -623,7 +623,18 @@ _HTML_ATTR_RE = re.compile(
 )
 _HTML_INLINE_HANDLER_RE = re.compile(r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", re.IGNORECASE)
 _HTML_JS_URL_RE = re.compile(r"""=\s*['"]\s*javascript:""", re.IGNORECASE)
-_HTML_MUSTACHE_RE = re.compile(r"\{\{[^}]+\}\}")
+# One step through the body of a `{{ ... }}` interpolation, quantified by each
+# caller. It steps over a lone brace rather than excluding `}` outright. A
+# `[^}]` body has to scan to the end of its text before `\}\}` can fail, so a
+# file of openers the template never closes costs O(n^2) -- and `code-index
+# build` reads every file in a repository. Stepping stops a failing candidate
+# at the next opener, and it also reads the hash literals templates really
+# write: `{{ include('p.twig', {'a': b}) }}` is one interpolation, not none.
+# The `_LINE` step is for a reader that attributes its records to the line it
+# is scanning, so a match of it must not cross a line boundary.
+_TEMPLATE_BRACE_STEP = r"(?:[^{}]|\{(?!\{)|\}(?!\}))"
+_TEMPLATE_BRACE_STEP_LINE = r"(?:[^{}\r\n]|\{(?!\{)|\}(?!\}))"
+_HTML_MUSTACHE_RE = re.compile(r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}")
 _HTML_ASP_RE = re.compile(r"<%[^%]+%>")
 # Code a lightweight reader holds but does not read: the script an inline
 # `<script>` element runs, unless its type names a data block, and the PHP a
@@ -679,9 +690,19 @@ def _mask_delimited_comments(
     a real tag sharing a line with a closed comment is still found. Without this a
     commented-out `<form>` registers as an entry point and a commented-out remote
     `<script src>` as a supply-chain sink -- a reachability claim on dead markup.
+
+    An opener the file never closes is not a comment region, so the run from it
+    is restored verbatim. Blanking it to the end of the file instead deletes
+    every signal below it *and* the inline code whose unread body is what
+    declares the debt, which leaves the file reporting a clean complete read
+    and owing no review -- the one answer a reader must never give. Both a
+    `{{#each}}` block whose `{#` opens a Twig comment by accident and the `{#`
+    Twig itself reads as literal text inside `{% verbatim %}` cost nothing this
+    way, and so does the `<!--` an HTML page simply forgot to close.
     """
     masked: list[str] = []
     in_comment = False
+    opened_at = (0, 0)
     for line in source_lines:
         out: list[str] = []
         i = 0
@@ -702,9 +723,14 @@ def _mask_delimited_comments(
                     i = len(line)
                 else:
                     out.append(line[i:start])
+                    opened_at = (len(masked), start)
                     i = start
                     in_comment = True
         masked.append("".join(out))
+    if in_comment:
+        index, column = opened_at
+        masked[index] = masked[index][:column] + source_lines[index][column:]
+        masked[index + 1:] = source_lines[index + 1:]
     return masked
 
 
@@ -824,10 +850,17 @@ def _extract_html(
 # boundaries in real templates (`{!! trans('k', [\n ... \n]) !!}`), which a
 # per-line pass cannot see. `@{{ ... }}` is Blade's own escape for a client-side
 # framework's braces and renders literally, so it is not an echo at all.
+# Each body steps over a lone opening brace instead of accepting any character,
+# for the reason `_TEMPLATE_BRACE_STEP` gives: a `.*?` body has to expand to the
+# end of the file before its closer can fail, so a file of openers the template
+# never closes costs O(n^2). Blade does not nest these constructs, so the only
+# text a stepping body cannot cross is a literal `{{--`/`{!!` written inside one
+# -- and failing to read that as a comment leaves its contents read as live
+# markup, which is the safe direction.
 _BLADE_CONSTRUCT_RE = re.compile(
-    r"\{\{--(?P<comment>.*?)--\}\}"
-    r"|\{!!(?P<raw>.*?)!!\}"
-    r"|(?<!@)\{\{(?P<escaped>.*?)\}\}",
+    r"\{\{--(?P<comment>(?:[^{]|\{(?!\{--))*?)--\}\}"
+    r"|\{!!(?P<raw>(?:[^{]|\{(?!!!))*?)!!\}"
+    r"|(?<!@)\{\{(?P<escaped>" + _TEMPLATE_BRACE_STEP + r"+)\}\}",
     re.DOTALL,
 )
 # The composition edges of the view graph: which template pulls in which.
@@ -971,6 +1004,9 @@ def _twig_constructs(text: str):
     Each closer is searched for once past the point it was last missed, so an
     unterminated `{{` cannot make every later opener rescan the file. Comments
     and `verbatim` blocks render nothing Twig evaluates and are skipped whole.
+    A `verbatim` the file never closes is not one of them: skipping to the end
+    of the file there would drop every output below it from a file that still
+    reported a complete read.
     """
     unclosed: set[str] = set()
     index = 0
@@ -988,8 +1024,8 @@ def _twig_constructs(text: str):
         index = end + 2
         inner = text[start + 2 : end].strip("-~")
         if opener == "%" and inner.strip() == "verbatim":
-            close = _TWIG_ENDVERBATIM_RE.search(text, index)
-            index = len(text) if close is None else close.end()
+            if (close := _TWIG_ENDVERBATIM_RE.search(text, index)) is not None:
+                index = close.end()
         elif opener != "#":
             yield start, opener, inner
 
@@ -1762,4 +1798,4 @@ def _extract_freemarker(
 # ---------------------------------------------------------------------------
 
 
-__all__ = ['_DOCKER_INSTR_RE', '_DOCKER_SECRET_NAMES', '_DOCKER_URL_RE', '_extract_dockerfile', '_SHELL_FUNC_PAREN_RE', '_SHELL_FUNC_KW_RE', '_SHELL_SOURCE_RE', '_extract_shell', '_find_enclosing_func', '_PS_FUNC_RE', '_PS_PARAM_BLOCK_RE', '_PS_FUNC_SIGNATURE_RE', '_PS_PARAM_NAME_RE', '_PS_IMPORT_RE', '_PS_DOT_SOURCE_RE', '_PS_SINK_PATTERNS', '_PS_LITERAL_ASSIGNMENT_RE', '_PS_COMPILED_SINKS', '_ps_balanced_span', '_ps_declared_params', '_ps_block_end', '_extract_powershell', '_LUA_FUNC_RE', '_LUA_LOCAL_FUNC_ASSIGN_RE', '_LUA_DYNAMIC_REDIS_COMMAND_RE', '_extract_lua', '_HTML_TAG_RE', '_HTML_ATTR_RE', '_HTML_INLINE_HANDLER_RE', '_HTML_JS_URL_RE', '_HTML_MUSTACHE_RE', '_HTML_ASP_RE', '_mask_delimited_comments', '_extract_html', '_BLADE_CONSTRUCT_RE', '_BLADE_IMPORT_RE', '_BLADE_SLOT_RE', '_blade_echoes', '_blade_template_sources', '_extract_blade', '_TWIG_CLOSERS', '_TWIG_ENDVERBATIM_RE', '_TWIG_RAW_RE', '_TWIG_IMPORT_RE', '_TWIG_DYNAMIC_RE', '_twig_constructs', '_extract_twig', '_CSS_IMPORT_RE', '_CSS_URL_RE', '_CSS_EXPRESSION_RE', '_CSS_BEHAVIOR_RE', '_CSS_BINDING_RE', '_extract_css', 'FREEMARKER_ESCAPE_OBSERVATIONS', 'FREEMARKER_OUTPUT_CONTEXTS', '_FREEMARKER_ESCAPER_BUILTINS', '_FREEMARKER_ESCAPE_SUPPRESSORS', '_FREEMARKER_ESCAPE_SCOPES', '_FREEMARKER_ESCAPING_FORMATS', '_FREEMARKER_ESCAPING_EXTENSIONS', '_FREEMARKER_FORM_FIELD_TAGS', '_FREEMARKER_URL_ATTRIBUTES', '_FREEMARKER_URL_VULN_CLASSES', '_FREEMARKER_BUILTIN_RE', '_FREEMARKER_DIRECTIVE_NAME_RE', '_FREEMARKER_CALLABLE_RE', '_FREEMARKER_TAG_NAME_RE', '_FREEMARKER_ATTRIBUTE_NAME_RE', '_FREEMARKER_STRING_LITERAL_RE', '_FREEMARKER_OUTPUT_FORMAT_RE', '_FREEMARKER_AUTO_ESC_RE', '_FREEMARKER_EVENT_ATTRIBUTE_RE', '_FREEMARKER_SCALAR_LITERAL_RE', '_FREEMARKER_DYNAMIC_EVAL_RE', '_FREEMARKER_MAX_EXPRESSION_CHARS', '_freemarker_split_top_level', '_freemarker_interpolation_end', '_freemarker_attribute_value_end', '_freemarker_span_interpolations', '_freemarker_builtins', '_freemarker_observed_escapers', '_freemarker_value_operands', '_freemarker_escape_observation', '_freemarker_scope_escaping', '_freemarker_attribute_context', '_freemarker_callable_params', '_freemarker_directive_end', '_freemarker_tag_regions', '_extract_freemarker']
+__all__ = ['_DOCKER_INSTR_RE', '_DOCKER_SECRET_NAMES', '_DOCKER_URL_RE', '_extract_dockerfile', '_SHELL_FUNC_PAREN_RE', '_SHELL_FUNC_KW_RE', '_SHELL_SOURCE_RE', '_extract_shell', '_find_enclosing_func', '_PS_FUNC_RE', '_PS_PARAM_BLOCK_RE', '_PS_FUNC_SIGNATURE_RE', '_PS_PARAM_NAME_RE', '_PS_IMPORT_RE', '_PS_DOT_SOURCE_RE', '_PS_SINK_PATTERNS', '_PS_LITERAL_ASSIGNMENT_RE', '_PS_COMPILED_SINKS', '_ps_balanced_span', '_ps_declared_params', '_ps_block_end', '_extract_powershell', '_LUA_FUNC_RE', '_LUA_LOCAL_FUNC_ASSIGN_RE', '_LUA_DYNAMIC_REDIS_COMMAND_RE', '_extract_lua', '_HTML_TAG_RE', '_HTML_ATTR_RE', '_HTML_INLINE_HANDLER_RE', '_HTML_JS_URL_RE', '_HTML_MUSTACHE_RE', '_HTML_ASP_RE', '_TEMPLATE_BRACE_STEP', '_TEMPLATE_BRACE_STEP_LINE', '_mask_delimited_comments', '_extract_html', '_BLADE_CONSTRUCT_RE', '_BLADE_IMPORT_RE', '_BLADE_SLOT_RE', '_blade_echoes', '_blade_template_sources', '_extract_blade', '_TWIG_CLOSERS', '_TWIG_ENDVERBATIM_RE', '_TWIG_RAW_RE', '_TWIG_IMPORT_RE', '_TWIG_DYNAMIC_RE', '_twig_constructs', '_extract_twig', '_CSS_IMPORT_RE', '_CSS_URL_RE', '_CSS_EXPRESSION_RE', '_CSS_BEHAVIOR_RE', '_CSS_BINDING_RE', '_extract_css', 'FREEMARKER_ESCAPE_OBSERVATIONS', 'FREEMARKER_OUTPUT_CONTEXTS', '_FREEMARKER_ESCAPER_BUILTINS', '_FREEMARKER_ESCAPE_SUPPRESSORS', '_FREEMARKER_ESCAPE_SCOPES', '_FREEMARKER_ESCAPING_FORMATS', '_FREEMARKER_ESCAPING_EXTENSIONS', '_FREEMARKER_FORM_FIELD_TAGS', '_FREEMARKER_URL_ATTRIBUTES', '_FREEMARKER_URL_VULN_CLASSES', '_FREEMARKER_BUILTIN_RE', '_FREEMARKER_DIRECTIVE_NAME_RE', '_FREEMARKER_CALLABLE_RE', '_FREEMARKER_TAG_NAME_RE', '_FREEMARKER_ATTRIBUTE_NAME_RE', '_FREEMARKER_STRING_LITERAL_RE', '_FREEMARKER_OUTPUT_FORMAT_RE', '_FREEMARKER_AUTO_ESC_RE', '_FREEMARKER_EVENT_ATTRIBUTE_RE', '_FREEMARKER_SCALAR_LITERAL_RE', '_FREEMARKER_DYNAMIC_EVAL_RE', '_FREEMARKER_MAX_EXPRESSION_CHARS', '_freemarker_split_top_level', '_freemarker_interpolation_end', '_freemarker_attribute_value_end', '_freemarker_span_interpolations', '_freemarker_builtins', '_freemarker_observed_escapers', '_freemarker_value_operands', '_freemarker_escape_observation', '_freemarker_scope_escaping', '_freemarker_attribute_context', '_freemarker_callable_params', '_freemarker_directive_end', '_freemarker_tag_regions', '_extract_freemarker']

@@ -14902,6 +14902,100 @@ def test_agent_close_preserves_variant_parent_scope_in_dispatch_row(
     assert json.loads(capsys.readouterr().out)["dispatch"]["status"] == "completed"
 
 
+def test_agent_close_all_ready_closes_every_closable_lane_and_quiet_drops_the_json(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A 28-lane wave cannot be closed from resume-brief, which renders 10 ids.
+
+    `--all-ready` applies the same predicate `reconcile-stale` uses (in-progress
+    dispatch with a ready/blocked handoff) with no age threshold, and `--quiet`
+    keeps the per-id dispatch+decision JSON out of a 28-row tally.
+    """
+    module = _load_assess_module(
+        "agent_command_module_close_all_ready",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    for index in (1, 2):
+        agent_id = f"AG-READY-{index}"
+        fake.dispatches_by_id[agent_id] = {
+            "agent_id": agent_id,
+            "agent_role": "code-vuln-hunter",
+            "status": "in-progress",
+        }
+        fake.handoffs_by_id[agent_id] = {
+            "agent_id": agent_id,
+            "handoff_status": "ready",
+            "handoff_version": 1,
+        }
+    fake.dispatches_by_id["AG-CHECKPOINTED"] = {
+        "agent_id": "AG-CHECKPOINTED",
+        "agent_role": "code-vuln-hunter",
+        "status": "in-progress",
+    }
+    fake.handoffs_by_id["AG-CHECKPOINTED"] = {
+        "agent_id": "AG-CHECKPOINTED",
+        "handoff_status": "checkpointed",
+        "handoff_version": 2,
+    }
+    fake.dispatches_by_id["AG-DONE"] = {
+        "agent_id": "AG-DONE",
+        "agent_role": "code-vuln-hunter",
+        "status": "completed",
+    }
+    fake.handoffs_by_id["AG-DONE"] = {
+        "agent_id": "AG-DONE",
+        "handoff_status": "ready",
+        "handoff_version": 1,
+    }
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="close",
+            extra=[],
+            agent_id=None,
+            completed_at=None,
+            reason="wave close",
+            all_ready=True,
+            quiet=True,
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert {agent_id for agent_id, _ in fake.patches} == {"AG-READY-1", "AG-READY-2"}
+    assert captured.out == ""
+    assert "closed 2" in captured.err
+
+
+def test_agent_close_all_ready_refuses_an_explicit_id_list(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_close_all_ready_conflict",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    with pytest.raises(SystemExit):
+        module.run(
+            SimpleNamespace(
+                action="close",
+                extra=["AG-1"],
+                agent_id=None,
+                completed_at=None,
+                reason="wave close",
+                all_ready=True,
+            )
+        )
+
+    assert fake.patches == []
+    assert "--all-ready" in capsys.readouterr().err
+
+
 def test_agent_reconcile_stale_dry_run_groups_handoffs(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
@@ -15224,6 +15318,7 @@ def test_dispatch_record_handoff_from_json_requires_agent_id_before_client(
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "agent_id is required" in err
+    assert "--agent-id" in err
 
 
 def test_dispatch_record_handoff_refuses_payload_for_another_agent_before_client(
@@ -15244,6 +15339,152 @@ def test_dispatch_record_handoff_refuses_payload_for_another_agent_before_client
     assert exc_info.value.code == 1
     err = capsys.readouterr().err
     assert "'ch-2'" in err and "'ch-1'" in err
+
+
+def test_dispatch_register_refuses_a_non_canonical_vuln_class_before_the_client(
+    capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--vuln-classes` was free text up to 2048 characters.
+
+    Every other class-token surface resolves against the canonical taxonomy, so
+    a typo here recorded a label no reader can resolve. Refused by name, with
+    the nearest canonical class, before any request.
+    """
+    module = _load_dispatch_module()
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.agent._build_register_payload(
+            _dispatch_args(
+                "register",
+                agent_id="AG-CLASSES",
+                agent_role="vulnerability-analyst",
+                task="Acme IDOR sweep",
+                dispatch_mode_arg="item-iterating",
+                vuln_classes="sqli,idorr",
+                no_target_traffic=True,
+            )
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "idorr" in err
+    assert "nearest: idor" in err
+    # The canonical token in the same list is not reported as a problem.
+    assert "'sqli'" not in err
+
+
+def test_dispatch_register_accepts_canonical_vuln_classes(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    module = _load_dispatch_module()
+
+    payload = module.agent._build_register_payload(
+        _dispatch_args(
+            "register",
+            agent_id="AG-CLASSES-OK",
+            agent_role="vulnerability-analyst",
+            task="Acme IDOR sweep",
+            dispatch_mode_arg="item-iterating",
+            vuln_classes="idor, BOLA ,sqli",
+            no_target_traffic=True,
+        )
+    )
+
+    assert payload["vuln_classes"] == "idor, BOLA ,sqli"
+
+
+def test_dispatch_record_handoff_missing_file_is_reported_as_a_missing_file(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A mistyped filename used to be retried as inline JSON and reported as
+    "invalid JSON", at the end of a dispatch, where a misread error is exactly
+    what produces an unwritten handoff."""
+    module = _load_dispatch_module()
+
+    with pytest.raises(SystemExit) as exc_info:
+        module.agent._record_handoff(
+            _dispatch_args(
+                "record-handoff",
+                from_json=str(tmp_path / "handof.json"),
+                agent_id="ch-1",
+            )
+        )
+
+    assert exc_info.value.code == 1
+    err = capsys.readouterr().err
+    assert "no such JSON file" in err
+    assert "handof.json" in err
+    assert "invalid JSON" not in err
+
+
+def test_dispatch_record_handoff_reads_the_payload_from_stdin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--from-json <path|->` is contract-advertised; `-` had no branch at all."""
+    import io as _io
+
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        _io.StringIO(
+            json.dumps(
+                {
+                    "agent_id": "HF-STDIN-1",
+                    "agent_role": "vulnerability-analyst",
+                    "summary": "Acme boundary reviewed.",
+                }
+            )
+        ),
+    )
+
+    fake = _run_dispatch_verb(
+        monkeypatch, "record-handoff", from_json="-", agent_id="HF-STDIN-1"
+    )
+
+    assert fake.handoff_response["summary"] == "Acme boundary reviewed."
+    assert json.loads(capsys.readouterr().out)["agent_id"] == "HF-STDIN-1"
+
+
+def test_dispatch_done_finding_slugs_append_to_the_rows_existing_scope(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`agent done --finding-slugs` is contract-documented as additive.
+
+    The backend PATCH replaces the column wholesale, so an operator who read the
+    contract and added one slug deleted the input scope the dispatch started
+    with. The union happens here, in the one caller that knows both lists.
+    """
+    module = _load_dispatch_module()
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-APPEND"] = {
+        "agent_id": "AG-APPEND",
+        "agent_role": "vulnerability-analyst",
+        "status": "in-progress",
+        "finding_slugs": ["VA-001"],
+    }
+    monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        module.agent,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_dir="/tmp/eng",
+            engagement_key="eng",
+            agent_root="/tmp",
+        ),
+    )
+
+    module.agent._update_dispatch_status(
+        _dispatch_args(
+            "update-status",
+            extra=["AG-APPEND"],
+            dispatch_status="completed",
+            finding_slugs="VA-003",
+        ),
+        ["AG-APPEND"],
+    )
+
+    assert fake.patches[0][1]["finding_slugs"] == ["VA-001", "VA-003"]
 
 
 def test_dispatch_register_writes_payload(
@@ -15811,6 +16052,29 @@ def test_dispatch_record_decision_friendly_flags(
     assert body["surfaced_to_user"] is True
 
 
+def test_dispatch_record_decision_overlays_friendly_flags_onto_payload_json(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """`--payload-json` used to return before any flag was read.
+
+    `--surfaced-to-user` applied on both paths, which is what made the silence
+    easy to miss: the row recorded a scope decision with no host at exit 0.
+    """
+    fake = _run_dispatch_verb(
+        monkeypatch,
+        "record-decision",
+        decision_kind="scope_decision",
+        payload_json='{"choice": "in_scope", "note": "from json"}',
+        decision_host="vendor-saas.acme.example",
+        decision_note="flag wins",
+    )
+
+    payload = fake.decisions_recorded[0]["payload"]
+    assert payload["host"] == "vendor-saas.acme.example"
+    assert payload["choice"] == "in_scope"
+    assert payload["note"] == "flag wins"
+
+
 def test_dispatch_record_decision_includes_reason_flag(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
@@ -15881,7 +16145,13 @@ def test_dispatch_handoff_can_patch_status_without_replacing_summary(
         "summary": "Specialist-authored detailed summary.",
         "handoff_status": "checkpointed",
     }
-    monkeypatch.setattr(module.agent, "_client_for", lambda _args: (fake, SimpleNamespace()))
+    # The receipt stats every artifact the stored row claims, so the fake config
+    # carries the engagement directory a real `load_config` always resolves.
+    monkeypatch.setattr(
+        module.agent,
+        "_client_for",
+        lambda _args: (fake, SimpleNamespace(engagement_dir=str(tmp_path))),
+    )
 
     payload_path = tmp_path / "handoff-update.json"
     payload_path.write_text(
@@ -15894,7 +16164,9 @@ def test_dispatch_handoff_can_patch_status_without_replacing_summary(
     assert row["handoff_status"] == "ready"
     assert row["summary"] == "Specialist-authored detailed summary."
     assert fake.handoff_calls == []
-    assert json.loads(capsys.readouterr().out)["agent_id"] == "HF-PROMOTE"
+    receipt = json.loads(capsys.readouterr().out)
+    assert receipt["agent_id"] == "HF-PROMOTE"
+    assert receipt["working_artifacts"] == []
 
 
 def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
@@ -16652,7 +16924,7 @@ def _load_auth_status_module():
 def test_auth_status_reports_bearer_token_and_recommends_refresh(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    """C42a: vigil assess auth-status reads auth.json and emits a structured
+    """C42a: vigil assess auth status reads auth.json and emits a structured
     snapshot — auth_context, mode, expires_state, the auth material it carries
     (raw values, the form an operator replays by hand), and a refresh-path
     recommendation matching the C42 recovery loop. The command does NOT write

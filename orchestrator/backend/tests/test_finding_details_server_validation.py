@@ -810,3 +810,223 @@ def test_a_plain_mechanism_based_kill_is_unaffected(seeded) -> None:
     accepted = _kill(seeded, "The upstream guard bounds the header to 8192 bytes.")
 
     assert accepted.status_code == 200, accepted.text
+
+
+# -- Defect: the server refusal named no alternative --------------------------
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "expected"),
+    [
+        # difflib finds nothing for `risk` at any sane cutoff, and the field is
+        # not homeless: `impact` is the attacker outcome, `severity_rationale`
+        # the rating's justification.
+        ("risk", "Any member reads another member's order.", "details.impact"),
+        # Here difflib finds the WRONG siblings; the key is a required SUB-field
+        # of details.replies[], written by `record-reply --new-evidence`.
+        ("new_evidence", "Replayed after the fix.", "details.replies[].new_evidence"),
+        ("indicators", ["10.42.0.18"], "details.iocs"),
+        # An exact nested leaf with no alias entry still routes to its path.
+        ("sent_status", "draft", "details.replies[].sent_status"),
+        # An ordinary typo keeps its difflib hit.
+        ("remediaton", "Parameterise the query.", "remediation"),
+    ],
+)
+def test_the_server_routes_a_refused_details_key_to_its_real_home(
+    seeded, key, value, expected
+) -> None:
+    """The API says what the CLI says.
+
+    The CLI door has offered a did-you-mean for a while; this one answered with
+    the allowed-keys pointer and nothing else, so an operator who reached the
+    server first (raw HTTP, or a CLI bypass) got strictly less help about the
+    same key.
+    """
+    response = seeded.patch(
+        f"{_base()}/findings/VA-001", json={"details": {key: value}}
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert f"details.{key} is not an allowed finding detail key" in detail
+    assert expected in detail, detail
+
+
+def test_an_unrelated_token_still_gets_no_server_route(seeded) -> None:
+    response = seeded.patch(
+        f"{_base()}/findings/VA-001", json={"details": {"fizzbuzz": 1}}
+    )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "details.fizzbuzz is not an allowed finding detail key" in detail
+    assert "did you mean" not in detail.lower()
+
+
+# -- Defect: keys the prompts instruct and the schema refused -----------------
+
+
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        # vigil blue tier / verify / contain
+        ("tier", "L3"),
+        ("tier_notes", "L2 corroborated the grant."),
+        ("evidence_refs", ["ir/oauth-grant.json"]),
+        ("containment_status", "contained"),
+        ("containment_action", "revoke_session"),
+        ("containment_command_run_id", None),
+        # agent/agents/incident-verifier.md copy-paste commands
+        ("checks", [{"check": 1, "result": "PASS"}]),
+        ("devils_advocate", [{"hypothesis": "Deliberate grant", "discharged": True}]),
+        # blue skills and the IR lead's respond review
+        ("network_window_utc", ["2026-09-08T00:00:00Z", "2026-10-08T00:00:00Z"]),
+        ("coverage", {"flows": 182340, "retention_days": 30}),
+        ("cross_skill_correlation_ids", ["EDR-004"]),
+        ("disposition_recommendation", "confirmed"),
+        ("respond_review", "No containment warranted: the tenant revoked the grant."),
+        # read by the operator views and the report renderer as poc_code's fence
+        ("poc_language", "python"),
+        # the L1 alert-triage finding skeleton
+        ("alert_normalized", {"actor": "okta-user-00uabc", "action": "oauth_grant"}),
+        ("platform", "gws"),
+        ("source_signal", {"rule_name": "Suspicious OAuth grant", "rule_id": "R-204"}),
+        ("alert_external_id", "a3f1c0de-0000-4000-8000-000000000001"),
+        ("tenant_ref_paths_consulted", ["agent/references/tenants/acme-workspace.md"]),
+    ],
+)
+def test_an_instructed_detail_key_is_writable(seeded, key, value) -> None:
+    """Every one of these is sent by a shipped verb or instructed verbatim.
+
+    ``details`` is a closed allow-list, so an unregistered key here is not a
+    missing nicety — it is a write the author was told to make and cannot.
+    """
+    response = seeded.patch(
+        f"{_base()}/findings/VA-001", json={"details": {key: value}}
+    )
+
+    assert response.status_code == 200, response.text
+
+
+def test_the_l1_alert_triage_finding_skeleton_records_whole() -> None:
+    """The skill hands out a COMPLETE `finding record` payload.
+
+    One rejected key refuses the whole write, so the template has to validate as
+    a unit rather than key by key. The actor, the target, the alert's own window
+    and the confidence rationale ride their existing homes (``iocs``,
+    ``alert_normalized.time_window_utc``, ``severity_rationale``) rather than
+    gaining synonyms.
+    """
+    validate_finding_details(
+        {
+            "platform": "gws",
+            "iocs": ["okta-user-00uabc", "jsmith@acme.example"],
+            "alert_normalized": {
+                "actor": "okta-user-00uabc",
+                "target": "jsmith@acme.example",
+                "action": "oauth_grant",
+                "time_window_utc": ["2026-05-17T03:22:14Z", "2026-05-17T03:24:58Z"],
+                "source_signal": {"rule_name": "Suspicious OAuth grant"},
+            },
+            "mitre_techniques": ["T1078.004", "T1098.001"],
+            "severity_rationale": "Adversarial grant against a privileged mailbox; single rule fire so far.",
+            "confidence": "low",
+            "source_signal": {
+                "rule_name": "Suspicious OAuth grant",
+                "rule_id": "R-204",
+                "detection_control": "Workspace alert center",
+                "severity_hint": "medium",
+            },
+            "alert_external_id": "a3f1c0de-0000-4000-8000-000000000001",
+            "tenant_ref_paths_consulted": [
+                "agent/references/tenants/acme-workspace.md"
+            ],
+        }
+    )
+
+
+def test_replay_commands_is_a_list_of_command_run_ids() -> None:
+    """The replay steps' audit rows, as ids — not prose about them.
+
+    The ids themselves are resolved against the engagement's runs by the write
+    path; the vocabulary entry is what makes the key writable at all, and its
+    type is what stops a paraphrase landing where an id belongs.
+    """
+    validate_finding_details({"replay_commands": [11, 12]})
+
+    with pytest.raises(HTTPException) as refusal:
+        validate_finding_details({"replay_commands": ["command-runs 11/12"]})
+    assert "details.replay_commands[0]" in refusal.value.detail
+
+    with pytest.raises(HTTPException):
+        validate_finding_details({"replay_commands": [0]})
+
+
+# -- Defect: provenance was creatable-or-maintainable, pick one ---------------
+
+
+_PRESCRIBED_PROVENANCE = {
+    "reported_by": "Acme Security Research",
+    "captured_at": "2026-10-08T11:04:00Z",
+    "artifact_ref": "findings.md",
+    "evidence_quote": "HTTP/1.1 200 OK",
+}
+
+
+def test_the_record_door_accepts_the_provenance_the_skills_prescribe(seeded) -> None:
+    """The record door refused four keys the update door accepted.
+
+    The report-generation skill instructs ``reported_by`` and the operator views
+    render ``captured_at`` / ``artifact_ref`` / ``evidence_quote``, so recording
+    a finding that carries them has to work — refusing on create while accepting
+    on patch is what made provenance creatable-or-maintainable, pick one.
+    """
+    response = seeded.post(
+        f"{_base()}/findings",
+        json=_payload(
+            "VA-010",
+            root_cause_key="a-distinct-root-cause",
+            canonical_location="https://app.example/api/orders",
+            provenance={
+                "agent_id": "HUNT-1",
+                "agent_name": "vulnerability-analyst",
+                **_PRESCRIBED_PROVENANCE,
+            },
+        ),
+    )
+
+    assert response.status_code == 201, response.text
+    stored = seeded.get(f"{_base()}/findings/VA-010").json()["provenance"]
+    for key, value in _PRESCRIBED_PROVENANCE.items():
+        assert stored[key] == value
+
+
+@pytest.mark.parametrize("route", ["record", "patch", "verify"])
+def test_an_unknown_provenance_key_is_refused_on_every_write_path(seeded, route) -> None:
+    """One closed vocabulary, enforced at every door that writes provenance."""
+    if route == "record":
+        response = seeded.post(
+            f"{_base()}/findings",
+            json=_payload(
+                "VA-011",
+                root_cause_key="another-distinct-root-cause",
+                canonical_location="https://app.example/api/invoices",
+                provenance={"agent_id": "HUNT-1", "reportedby": "Acme"},
+            ),
+        )
+    elif route == "patch":
+        response = seeded.patch(
+            f"{_base()}/findings/VA-001", json={"provenance": {"reportedby": "Acme"}}
+        )
+    else:
+        response = seeded.post(
+            f"{_base()}/findings/VA-001/verify",
+            json={
+                "verification_status": "disputed",
+                "reason_text": "Needs a second look.",
+                "provenance": {"reportedby": "Acme"},
+            },
+        )
+
+    assert response.status_code == 422, response.text
+    assert "provenance" in json.dumps(response.json())

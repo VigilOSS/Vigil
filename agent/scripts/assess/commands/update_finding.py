@@ -44,7 +44,9 @@ def register(subparsers) -> None:
         dest="payload_file",
         help=(
             "Path to a JSON patch for one finding. Must contain expected_row_version "
-            "as a positive integer; the optional rationale key is reason_text. "
+            "as a positive integer unless its only mutation is a notes append "
+            "(notes + notes_mode 'append'), which commutes and needs no "
+            "compare-and-swap; the optional rationale key is reason_text. "
             "Cannot be combined with request-content flags, including --source-name "
             "or --reason. A successful update returns the next row_version; refresh "
             "the file before reusing it. See `vigil assess contract finding update`."
@@ -196,6 +198,42 @@ _PATCH_CONTROL_FIELDS = frozenset(
         "dispatch_agent_id",
     }
 )
+
+
+# Keys a patch may carry alongside a notes append without the write becoming a
+# read-modify-write of something the author read first. `notes`/`notes_mode` are
+# the append itself; `source_name` names the WRITER, not finding content — the
+# patch route pins the stored column to "" ("discovery attribution is immutable
+# on patch") and uses the value only as the transition actor; the rest are the
+# concurrency / mode / transition-metadata controls already enumerated by
+# `_PATCH_CONTROL_FIELDS`.
+_APPEND_ONLY_PATCH_KEYS = (
+    frozenset({"notes", "notes_mode", "source_name"}) | _PATCH_CONTROL_FIELDS
+)
+
+
+def _is_append_only_notes_patch(payload: dict[str, object]) -> bool:
+    """Whether this patch's only mutation is an append to ``notes``.
+
+    ``expected_row_version`` exists so a read-modify-write cannot silently
+    revert a writer who moved the field in between. An append is not that write:
+    the concatenation runs server-side inside the same ``BEGIN IMMEDIATE``
+    transaction that reads the stored notes, checks the compare-and-swap and
+    writes the row, so two appends serialize and neither is lost. The backend
+    says the same thing by requiring the token for ``notes_mode``
+    'replace'/'rotate' and ``details_mode`` 'replace' only.
+
+    Every OTHER field in a patch IS blind-overwritten from what the author read
+    into the document, so one non-append key brings the requirement back.
+    """
+    if payload.get("notes_mode") != "append":
+        return False
+    notes = payload.get("notes")
+    if not isinstance(notes, str) or not notes:
+        return False
+    if payload.get("details_mode") == "replace":
+        return False
+    return all(key in _APPEND_ONLY_PATCH_KEYS for key in payload)
 
 
 def _has_patch_content(payload: dict[str, object]) -> bool:
@@ -433,22 +471,39 @@ def run(args) -> None:
             )
             sys.exit(1)
 
-    # Validate `details` against the record contract (see `_FINDING_SCHEMA` above),
-    # in PATCH mode so a partial update is not required to carry every field. The
-    # top-level patch shape is already strict server-side (`FindingPatchRequest`
-    # forbids extras), but `details` is an opaque `dict[str, Any]` there, so
-    # nothing checked it until now — this gets a did-you-mean at author time.
+    # Validate `details` AND `provenance` against the record contract (see
+    # `_FINDING_SCHEMA` above), in PATCH mode so a partial update is not required
+    # to carry every field. The top-level patch shape is already strict
+    # server-side (`FindingPatchRequest` forbids extras), but both of these are
+    # opaque `dict[str, Any]` there, so nothing checked them — this gets a
+    # did-you-mean at author time.
     #
-    # `provenance` is deliberately NOT validated here. Its schema admits only
-    # `agent_name`/`artifact`, while the report-generation skill instructs
-    # `reported_by` and the operator UI reads `artifact_ref`/`captured_at`/
-    # `evidence_quote`; until those three agree on one vocabulary, enforcing any
-    # of them would reject writes the prompts ask for.
+    # `provenance` used to be skipped here because the two doors disagreed about
+    # its vocabulary: the record schema admitted four keys while the skills
+    # instructed `reported_by` and the operator views read `artifact_ref` /
+    # `captured_at` / `evidence_quote`, so enforcing the schema would have
+    # rejected writes the prompts ask for. `FindingProvenance` now carries one
+    # closed vocabulary covering all of them, so the maintenance door can hold
+    # to the same contract the create door does.
     schema_errors: list[str] = []
-    details_schema = _FINDING_SCHEMA["properties"].get("details")
-    if isinstance(payload.get("details"), dict) and isinstance(details_schema, dict):
-        schema_errors += collect_patch_validation_errors(
-            payload["details"], details_schema, path="details"
+    for field, path in (("details", "details"), ("provenance", "provenance")):
+        value = payload.get(field)
+        field_schema = _FINDING_SCHEMA["properties"].get(field)
+        if isinstance(value, dict) and isinstance(field_schema, dict):
+            schema_errors += collect_patch_validation_errors(
+                value, field_schema, path=path
+            )
+    # The schema cannot say "allowed on create, reserved on patch", and
+    # `code_snapshot` is exactly that: re-binding a finding to a different source
+    # snapshot is the claim that the new bytes were reviewed, so it belongs to a
+    # fresh verification. Say that here instead of letting a payload the client
+    # just called valid come back a 422 naming no route.
+    if isinstance(payload.get("provenance"), dict) and "code_snapshot" in payload["provenance"]:
+        schema_errors.append(
+            "provenance.code_snapshot is reserved and cannot be changed by a generic "
+            "finding update; rebind it with `vigil assess finding verify <slug> "
+            "--provenance-inline '{\"code_snapshot\": {...}}'`, which is the write that "
+            "asserts you reviewed the new bytes"
         )
     if schema_errors:
         print("finding update: payload failed schema validation:", file=sys.stderr)
@@ -462,14 +517,19 @@ def run(args) -> None:
 
     if payload_file:
         row_version = payload.get("expected_row_version")
-        if (
+        # An append-only patch is exempt, and only when it names no token at
+        # all: a token the author DID write still has to be a usable one.
+        append_only = row_version is None and _is_append_only_notes_patch(payload)
+        if not append_only and (
             not isinstance(row_version, int)
             or isinstance(row_version, bool)
             or row_version < 1
         ):
             print(
                 "finding update: a payload file must contain expected_row_version as a positive "
-                "integer; refresh it from the successful response before the next update.",
+                "integer; refresh it from the successful response before the next update. "
+                "Exempt: a patch whose only mutation is a notes append (\"notes\" plus "
+                "\"notes_mode\": \"append\"), which commutes and so has nothing to guard.",
                 file=sys.stderr,
             )
             sys.exit(1)

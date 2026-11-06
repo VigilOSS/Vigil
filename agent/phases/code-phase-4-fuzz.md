@@ -35,7 +35,7 @@ durable current-generation receipt, not an absent campaign, prose handoff, or im
 Use current backend state, not filesystem guesses:
 ```bash
 vigil assess fetch findings
-vigil assess fetch "code/files?repo_id=<id>&limit=5000"
+vigil assess fetch "code/files?repo_id=<id>" --paginate
 vigil assess contract code-record fuzz-decision
 vigil assess code-record fuzz-decision <decision-json-file>
 vigil assess code-coverage --require-transition-ready fuzz
@@ -43,9 +43,11 @@ vigil assess transition-phase fuzz
 ```
 
 The decision evidence binds the current source generation/digest and the finding,
-classification, parser, and fuzzer-inventory review. Required campaign debt is visible but does
-not block entry because Phase 4 exists to close it. A `not_required` receipt clears campaign debt
-for this generation while preserving terminal submission/readiness gates.
+classification, parser, and fuzzer-inventory review. The classification read needs `--paginate` to
+reach every admitted file; a hand-written `limit` returns one bounded page, so a `not_required`
+receipt built from it is silent about the files that never arrived. Required campaign debt is
+visible but does not block entry because Phase 4 exists to close it. A `not_required` receipt
+clears campaign debt for this generation while preserving terminal submission/readiness gates.
 
 ## Phase 4 entry and execution (read after transition)
 
@@ -85,9 +87,11 @@ Provide:
   `null-dereference`, `type-confusion`, `uninitialized-memory`, or `use-after-free`.
   Include slugs, canonical locations, severity, and
   `verification_status` (confirmed/unreviewed). Pass as a concise summary, not raw JSON dump.
-- File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
-  identify critical/high C/C++ files with relevant slot types. The fuzz engineer uses these to
-  cross-reference targets against structural index data.
+- File classifications: `vigil assess fetch "code/files?repo_id=<id>" --paginate` —
+  identify critical/high C/C++ files with relevant slot types. `--paginate` is the complete read;
+  a hand-written `limit` returns one bounded page, so target selection would rank only the files
+  that landed on it. The fuzz engineer uses these to cross-reference targets against structural
+  index data.
 
 **Filesystem artifact paths (the fuzz engineer reads these directly):**
 - Structural index manifest from the Code Source Identity block

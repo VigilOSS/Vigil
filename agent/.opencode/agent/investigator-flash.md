@@ -70,7 +70,7 @@ promoted finding's narrative fields) — not a precondition of this checkpoint.
 
 - Pull the platform telemetry the L1 handoff named, plus the corroborating pulls the platform skill prescribes
 - Build the evidence ladder: each step cites a `command-run-id` (platform CLI pull) or an `artifact-id` (raw log dump, exported timeline)
-- Promote the L1 draft finding from `status=draft` to `status=active` with the full evidence, the UTC timeline, the IOC array, the MITRE techniques, the confidence label, and the severity rationale
+- Promote the L1 draft finding from `workflow_status=draft` to `workflow_status=active` with the full evidence, the UTC timeline, the IOC array, the MITRE techniques, the confidence label, and the severity rationale
 - Run OSINT enrichment on every IOC in `details.iocs[]` (or hand off in parallel to `osint-analyst` if the dispatch sized that way); record `intel_*` rows and link them to the finding via `assessment_finding_links`
 - Surface coverage gaps explicitly — which telemetry was unavailable, which retention window expired, which identity could not be correlated. The verifier reads these gaps directly.
 - Leave `verification_status=unreviewed` on every finding. L3 owns the transition.
@@ -87,11 +87,11 @@ promoted finding's narrative fields) — not a precondition of this checkpoint.
 
 | Field | Value |
 |-------|-------|
-| Finding | `status=active`, `verification_status=unreviewed`, severity per `agent/rules/triage.md` §2, `details.timeline[]` (UTC ISO-8601 with `source_file` and `command_run_id` citations per `agent/rules/ir-evidence.md` rule 3), `details.iocs[]`, `details.mitre_techniques[]`, `details.confidence`, `details.severity_rationale` |
+| Finding | `workflow_status=active`, `verification_status=unreviewed`, severity per `agent/rules/triage.md` §2, `details.timeline[]` (UTC ISO-8601 with `source_file` and `command_run_id` citations per `agent/rules/ir-evidence.md` rule 3), `details.iocs[]`, `details.mitre_techniques[]`, `details.confidence`, `details.severity_rationale` |
 | Intel rows | `vigil assess intel record <type>` for each new IOC; `<type>` ∈ `{domain, email, dns-record, cve, breach-record, note}` |
 | Finding↔intel links | `vigil assess finding link <slug> --intel <intel-id>` (repeatable) after each `intel record`; `cve` rows can instead carry `linked_finding_slug` in the record payload |
 | Artifacts | Every raw pull registered under `ir/reports/`; every derived analysis under `ir/evidence/`; PII-bearing exports indexed verbatim |
-| Handoff JSON | `disposition=null` (L2 NEVER sets disposition), `evidence_refs[]` (artifact IDs), `coverage_gaps[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes` when `platforms.length > 1` |
+| Handoff JSON | Top-level: `agent_id`, `agent_role: investigator` (an L2 platform dispatch hands off under this role, never under a name derived from its platform skill), `phase`, `summary`, `confidence`, `finding_slugs[]`, `handoff_status`, `recommended_next_agent`, and `coverage_gaps[]` / `next_steps[]` in their object shapes. Under `extras`: `disposition=null` (L2 NEVER sets disposition), `evidence_refs[]` (artifact IDs), `mitre_techniques[]`, `tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes` when `platforms.length > 1`. `agent handoff` refuses any other top-level key — see `agent/shared-constraints-blue.md` "Dispatch Handoff Conventions" |
 
 ## Telemetry Pull Discipline
 
@@ -152,7 +152,7 @@ re-do the comparison and earns a `coverage_gaps` entry.
 ## Cross-Platform Correlation (multi-platform incidents)
 
 When the dispatch names more than one platform, the L2 handoff's
-`cross_platform_correlation_notes` field is **mandatory and non-empty**. The
+`extras.cross_platform_correlation_notes` field is **mandatory and non-empty**. The
 paragraph documents:
 
 - Which clock is authoritative (Google's vs Microsoft's vs Okta's — sub-minute

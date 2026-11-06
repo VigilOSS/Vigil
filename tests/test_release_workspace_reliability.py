@@ -98,6 +98,132 @@ def test_invalid_retained_snapshot_does_not_make_source_resumable(tmp_path):
     assert result['sealed_source_errors']
 
 
+def test_source_state_does_not_reread_sealed_snapshot_bytes(tmp_path):
+    """The source projection reports retained copies without re-reading them.
+
+    ``engagement_source_state`` runs on ``vigil engagement start``, on every
+    ``vigil engagement mode`` (which the code operator core runs at session
+    start, on resume and after every compaction) and on the creation footer. A
+    per-file content attestation there costs one full re-read of every sealed
+    byte of every retained generation, on the critical path between the operator
+    and the client exec, to render a path and a one-word state.
+
+    The attestation belongs to the commands that read those bytes
+    (``code-index``, ``code-index sync``, ``code-history``,
+    ``code-dependencies``), and this pins the split: a sealed file rewritten to
+    the same length and line count keeps every constant-time binding intact, so
+    only a per-file content check can see the difference. The point-of-use
+    attestation must still refuse it; the projection must not pay for it.
+    """
+    from vigil_cli.paths import add_assess_import_path
+    from vigil_cli.engagements import engagement_source_state
+    add_assess_import_path(tmp_path)
+    from assess.lib.code_snapshot import RootedSourceTree, SnapshotBuilder, validate_snapshot
+    original = tmp_path / 'original'
+    original.mkdir()
+    (original / 'acme.py').write_text('print("Acme")\n')
+    engagement = tmp_path / 'engagement'
+    builder = SnapshotBuilder(engagement / 'tools/analysis-state/code-snapshots', 'acme')
+    with RootedSourceTree(original) as tree:
+        builder.add('acme.py', tree.capture('acme.py'), language='python')
+    snapshot = builder.finish(repo_key='acme', repo_name='Acme', source_origin_path=str(original), git={})
+    shutil.rmtree(original)
+
+    sealed = snapshot.source_path / 'acme.py'
+    sealed.chmod(0o644)
+    sealed.write_text('print("ACME")\n')  # same size, same loc, different bytes
+    sealed.chmod(0o444)
+
+    with pytest.raises(ValueError, match='file mismatch'):
+        validate_snapshot(snapshot.manifest_path.parent)
+
+    result = engagement_source_state(engagement)
+    assert result['state'] == 'sealed'
+    assert 'sealed_source_errors' not in result
+    assert result['sealed_sources'] == [{
+        'path': str(snapshot.source_path),
+        'repo_key': 'acme',
+        'snapshot_digest': snapshot.snapshot_digest,
+        'file_count': 1,
+    }]
+
+
+def test_source_state_still_refuses_a_manifest_that_does_not_match_itself(tmp_path):
+    """The shallow read keeps every check that does not cost a sealed byte.
+
+    Skipping the per-file walk is only safe because the manifest's own content
+    address is still recomputed. A manifest edited in place -- a file added to its
+    inventory, its repo_name blanked -- keeps the snapshot digest and the directory
+    name it is bound to, so nothing but that recomputation can see it. If the
+    projection reported such a snapshot as ``sealed`` it would tell the operator the
+    copy is intact at the moment they are deciding whether to resume or re-ingest,
+    which is the one wrong answer this read must never give.
+    """
+    from vigil_cli.paths import add_assess_import_path
+    from vigil_cli.engagements import engagement_source_state
+    add_assess_import_path(tmp_path)
+    from assess.lib.code_snapshot import RootedSourceTree, SnapshotBuilder, validate_snapshot
+    original = tmp_path / 'original'
+    original.mkdir()
+    (original / 'acme.py').write_text('print("Acme")\n')
+    engagement = tmp_path / 'engagement'
+    builder = SnapshotBuilder(engagement / 'tools/analysis-state/code-snapshots', 'acme')
+    with RootedSourceTree(original) as tree:
+        builder.add('acme.py', tree.capture('acme.py'), language='python')
+    snapshot = builder.finish(
+        repo_key='acme', repo_name='Acme', source_origin_path=str(original), git={}
+    )
+
+    manifest_path = snapshot.manifest_path
+    snapshot_root = manifest_path.parent
+    payload = json.loads(manifest_path.read_text())
+    payload['files'] = list(payload['files']) + [dict(payload['files'][0], path='ghost.py')]
+    payload['repo_name'] = ''
+    snapshot_root.chmod(0o755)
+    manifest_path.chmod(0o644)
+    manifest_path.write_text(json.dumps(payload))
+    manifest_path.chmod(0o444)
+    snapshot_root.chmod(0o555)
+
+    with pytest.raises(ValueError):
+        validate_snapshot(snapshot_root, deep=False)
+
+    result = engagement_source_state(engagement)
+    assert 'sealed_sources' not in result
+    assert result['sealed_source_errors']
+    assert result['state'] != 'sealed'
+
+
+def test_install_digest_does_not_descend_into_engagement_source_or_snapshots(tmp_path):
+    """Engagement data is private workspace state, never install-managed content.
+
+    The install-managed content digest reads every byte of every declared input,
+    so an engagement tree reachable from it would put the ingested source and
+    every sealed snapshot on the critical path of every freshness comparison
+    (``vigil status``, the engagement-start staleness warning, workspace
+    adoption). The legacy ``agent/engagements`` location is preserved rather
+    than copied, and this pins that the digest stops there.
+    """
+    from vigil_cli.install_manifest import install_source_content_sha256
+
+    source = tmp_path / 'source'
+    (source / 'src').mkdir(parents=True)
+    (source / 'src' / 'feature.py').write_text('enabled = True\n', encoding='utf-8')
+    sealed = (source / 'agent/engagements/acme/tools/analysis-state/code-snapshots'
+              / 'acme' / ('a' * 64) / 'source')
+    sealed.mkdir(parents=True)
+    ingested = source / 'agent/engagements/acme/source'
+    ingested.mkdir(parents=True)
+    expected = install_source_content_sha256(source)
+
+    (sealed / 'sealed.py').write_text('print("Acme sealed")\n', encoding='utf-8')
+    (ingested / 'ingested.py').write_text('print("Acme ingested")\n', encoding='utf-8')
+    assert install_source_content_sha256(source) == expected
+
+    (source / 'src' / 'added.py').write_text('added = True\n', encoding='utf-8')
+    assert install_source_content_sha256(source) != expected
+
+
 @pytest.mark.parametrize('value', ['0', '-2g', 'unlimited', '1g extra'])
 def test_runtime_shared_memory_rejects_invalid_size(tmp_path, monkeypatch, value):
     monkeypatch.delenv('VIGIL_RUNTIME_SHM_SIZE', raising=False)

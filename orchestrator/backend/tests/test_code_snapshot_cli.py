@@ -5701,3 +5701,78 @@ def test_a_built_structural_index_syncs_its_callables_to_the_backend(
             ],
             key=lambda identity: identity[1],
         )
+
+
+def test_code_ingest_scales_the_staging_budget_per_batch(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A 200-row staging write cannot be held to the 10s default budget.
+
+    Each staged row carries the file's header snippet, so a full batch is a
+    bulk insert whose cost scales with the batch — exactly the reason the
+    commit below it already widens its own budget.
+    """
+    module = _load_command("code_ingest.py", "test_sealed_ingest_staging_budget")
+    repo = tmp_path / "repo"
+    (repo / "src").mkdir(parents=True)
+    for index in range(250):
+        (repo / "src" / f"module{index:03d}.py").write_text(
+            f"def f{index}():\n    return {index}\n", encoding="utf-8"
+        )
+    engagement = tmp_path / "engagement"
+    engagement.mkdir()
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(engagement),
+        ),
+    )
+    monkeypatch.setattr(
+        module,
+        "_setup_ctags",
+        lambda *_args, **kwargs: {"available": False, **kwargs},
+    )
+    staged: list[tuple[int, float | None]] = []
+
+    class FakeClient:
+        def __init__(self, *_args, **_kwargs):
+            pass
+
+        def post(self, endpoint: str, payload: dict, **options):
+            if endpoint == "code/repos/refresh/start":
+                return {"repo_id": 7, "refresh_token": "refresh-7"}
+            if endpoint == "code/repos/7/refresh/files":
+                staged.append((len(payload["files"]), options.get("read_timeout")))
+                return {"staged": len(payload["files"])}
+            if endpoint == "code/repos/7/refresh/commit":
+                return {
+                    "repo_id": 7,
+                    "repo_generation": 1,
+                    "source_manifest_digest": "d" * 64,
+                    "retired": 0,
+                    "repo_role": "analysis",
+                }
+            if endpoint == "code/repos/7/lsp-config":
+                return _lsp_publish_response(payload)
+            raise AssertionError(endpoint)
+
+        def patch(self, endpoint: str, _payload: dict):
+            return {"id": 7}
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    module.run(_ingest_args(repo, engagement))
+
+    assert [size for size, _budget in staged] == [200, 50]
+    full_batch_budget = staged[0][1]
+    assert full_batch_budget is not None and full_batch_budget > 10.0
+    # A batch that fits the default budget is sent unchanged.
+    assert staged[1][1] is None

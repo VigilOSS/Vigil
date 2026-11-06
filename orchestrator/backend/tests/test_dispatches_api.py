@@ -168,6 +168,41 @@ def test_dispatch_post_get_list_patch(client, isolate_settings) -> None:
     assert updated["finding_slugs"] == ["VA-001", "VA-002"]
 
 
+def test_dispatch_patch_finding_slugs_replaces_the_stored_set(
+    client, isolate_settings
+) -> None:
+    """The PATCH is a replace, and that is deliberate.
+
+    A correction has to be able to remove a slug, so this route cannot append.
+    The additive behaviour `vigil assess agent done --finding-slugs` and
+    `agent close` promise is therefore the CLI's job: both read the row and send
+    the union. Pinning the replace here keeps that division of labour executable
+    — if this route ever starts appending, the CLI's union is doing it twice.
+    """
+    _seed(client, isolate_settings)
+    created = client.post(
+        f"{BASE}/dispatches",
+        json={
+            "agent_id": "AG-SLUG-SCOPE",
+            "agent_role": "vulnerability-analyst",
+            "task": "Validate the Acme input scope",
+            "finding_slugs": ["VA-001"],
+        },
+    )
+    assert created.status_code == 201, created.text
+
+    patched = client.patch(
+        f"{BASE}/dispatches/AG-SLUG-SCOPE",
+        json={"finding_slugs": ["VA-002"]},
+    )
+
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["finding_slugs"] == ["VA-002"]
+    assert client.get(f"{BASE}/dispatches/AG-SLUG-SCOPE").json()["finding_slugs"] == [
+        "VA-002"
+    ]
+
+
 def test_dispatch_duplicate_agent_id_returns_409(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
 

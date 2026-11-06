@@ -234,6 +234,18 @@ set:
      separately; a one-line cross-reference to the shared root is enough.
 4. **Record the decision** so it is not re-litigated: `finding link <sibling> --root-cause <lead>`
    for the backend cluster, and state the lead-vs-sibling framing in each submission's dedup notes.
+   Pick `--effect` by a question step 3 did not ask — **would the same programmatic fix resolve
+   both?** Step 3 decided how many tickets to file; `--effect` states what the root *fix* retires,
+   and the two can part ways:
+   - **Distinct fixes → `eliminates_attack_path`**, the default, so the bare command above is
+     already this. The sibling survives the root fix as a standalone remediation item, so the
+     grouping costs nothing and disturbs no verdict. Use it even when step 3 said consolidate: a
+     cluster can be one ticket to the program and still two fixes in the code.
+   - **One fix → add `--effect eliminates_finding`.** Say it explicitly; the default does not.
+     Answer from where the fix would land — two endpoints missing the same check are one fix when
+     the check lives in shared code and two when it does not. The claim raises a claim review on a
+     confirmed or downgraded sibling, plus a `finding_claim_review_pending` report blocker, so
+     settle it with an independent `claim_equivalence` decision before the report.
 
 The failure mode this prevents: filing a P3 read and a P2 write on the same broken endpoint family as
 two independent tickets, then having the read dup-closed into the write — burning triage goodwill and

@@ -939,14 +939,24 @@ def process(user_input, size):
     return result
 """
     idx = index_file("test.py", "python", source=source)
-    calls = idx["call_sites"]
-    validate_call = next((c for c in calls if c["callee"] == "validate"), None)
-    transform_call = next((c for c in calls if c["callee"] == "transform"), None)
 
-    if validate_call:
-        assert validate_call["passes_caller_params"] is True
-    if transform_call:
-        assert transform_call.get("passes_caller_params", False) is False
+    # Exact shapes, because `passes_caller_params` and `receiver` are carried
+    # ONLY when set. `transform_call.get("passes_caller_params", False) is
+    # False` read the test's own default: it held whether the key was absent or
+    # present-and-false, so it could not see that distinction at all. The two
+    # `if <call>:` guards were the same hole one level up — had the indexer
+    # stopped emitting either site, both bodies would have been skipped and the
+    # test would have passed having asserted nothing.
+    assert idx["call_sites"] == [
+        {
+            "caller": "process",
+            "callee": "validate",
+            "line": 2,
+            "passes_caller_params": True,
+        },
+        # `transform(42)` forwards no caller parameter, so the key is omitted.
+        {"caller": "process", "callee": "transform", "line": 3},
+    ]
 
 
 @needs_treesitter

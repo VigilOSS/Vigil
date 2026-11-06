@@ -54,6 +54,10 @@ Before producing any output, confirm:
 - [ ] Complete current threat-model envelope is present with `current: true`, matching
       generation/digest, and the module product-surface profile plus separate product-reachability
       and attacker-control status; any clipped summary is supplemental only
+- [ ] Trusted inputs in that envelope are read as advisory, each with its cited reason. An entry
+      cannot carry a KILL on its own: PASS/KILL symmetry means re-reading the writer in source and
+      treating the source as attacker-influenced when the code shows a less-trusted writer or the
+      entry carries no reason. A wrong entry silently suppresses a real finding
 - [ ] All findings present with: CWE, taint path or supported operation/state/lifetime sequence, evidence, canonical location
 - [ ] Each finding's stored source identity is visible; stale/unbound findings are explicitly marked
       for independent current-source review before the verification-only rebind
@@ -97,6 +101,16 @@ modeled on `agent/agents/vulnerability-analyst.md` "Report-ready story gate":
    `cvss_score` recomputed against the C5 check, and `remediation` — via `vigil assess finding
    update <slug> --details-inline '{...}'`, so the report phase formats the story instead of
    re-authoring it.
+4. Carry the band on the verification itself. `--new-severity` applies to any terminal `--status`,
+   so a re-band and a fresh attestation land in one write; reaching for
+   `finding update --severity` first invalidates the verdict you are about to record. `downgraded`
+   still means the band moved strictly lower, so a correction upward rides on
+   `--status confirmed --new-severity <band>`.
+5. A sub-claim this finding does NOT establish goes in `details.honest_bounds`, authored by you.
+   It is not a kill: `confirm_check.falsified_claim` is refused on a confirm check, because
+   `falsified_claim` is what a counter-check uses to establish `false_positive`. Bounding a
+   confirmed finding honestly is what keeps a reader from over-reading the claim. When review
+   re-adjudicates what the mechanism actually is, record that in `details.mechanism_verdict`.
 
 Do this before the closing verbs run — `finding verify` persists the disposition, but the
 report-ready `details` must already be on the finding when it fires.
@@ -104,8 +118,12 @@ report-ready `details` must already be on the finding when it fires.
 ## FP Persistence
 
 When a finding is killed, persist that decision durably through the finding verification
-lifecycle. Use `finding verify --status false_positive --counter-check-file <json>` for direct
-false-positive decisions and `finding verify --status <confirmed|downgraded|disputed>` for confirm,
+lifecycle. Use `finding verify --status false_positive --counter-check-file <json> --details-inline
+'{"kill_reason": "<which check falsified the claim and why>", "kill_check": <1-5>}'` for direct
+false-positive decisions — the write is refused without both keys. `--status disputed` is the cheap
+withdrawal when the counter-check bar cannot be met: only `--reason` is required and the finding
+still survives a later sweep, so a claim you no longer stand behind never comes back as
+`unreviewed`. Use `finding verify --status <confirmed|downgraded|disputed>` for confirm,
 downgrade, or dispute outcomes. Terminal outcomes cite proof receipts from this independent verifier
 dispatch. The goal is suppression by identity: later rediscovery of the same
 `(defect_family, root_cause_key, canonical_location, auth_context)` should merge back into that
@@ -133,12 +151,13 @@ the write response's `verification_effect` and follow it rather than assuming th
 
 Before your dispatch returns, run in this order:
 
-1. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>" --agent-id <your-agent_id>` for each decision (`--agent-id` is what the stored code-snapshot attestation resolves to; without it the binding attests to no dispatch); confirmed/downgraded decisions add `--proof-receipt-id` and `--confirm-check-file` (the completed falsification check), false-positive decisions add `--counter-check-file`, and `pending_runtime_proof` decisions add `--next-test-file` (the owed test's hypothesis, confirming and falsifying observations, and route hint; see the `code-finding-verification` skill). Read `vigil assess contract finding verify` for the exact shape.
-2. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
-3. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
-4. `vigil assess finding record code-vuln-verifier <new-finding-json> --agent-id <your-agent_id>` for net-new spot-check bugs (rare)
-5. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
-6. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+1. `vigil assess fetch report-readiness` before the first `finding verify`. Inspect evidence and root-cause blockers for your assigned findings and address applicable ones before adjudication. Leave verification-status blockers for the decisions below; unrelated findings and engagement-wide completion debt are outside this preflight. `finding_missing_evidence_ref` and `duplicate_root_cause` are both cleared by writing to the finding, and a material write after a verdict returns that verdict to unreviewed for a fresh proof run -- so clearing them afterwards costs the whole run again.
+2. `vigil assess finding verify <slug> --status <verdict> --reason "<rationale>" --agent-id <your-agent_id>` for each decision (`--agent-id` is what the stored code-snapshot attestation resolves to; without it the binding attests to no dispatch); confirmed/downgraded decisions add `--proof-receipt-id` and `--confirm-check-file` (the completed falsification check), false-positive decisions add `--counter-check-file`, and `pending_runtime_proof` decisions add `--next-test-file` (the owed test's hypothesis, confirming and falsifying observations, and route hint; see the `code-finding-verification` skill). Read `vigil assess contract finding verify` for the exact shape.
+3. For each retained finding still in workflow status `draft`, run `vigil assess finding update <slug> --status active --reason "Verification retained this finding"`; otherwise merge or kill it before returning
+4. `vigil assess record-chain code-vuln-verifier <chain-json>` for any composed chains
+5. `vigil assess finding record code-vuln-verifier <new-finding-json> --agent-id <your-agent_id>` for net-new spot-check bugs (rare)
+6. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (e.g. report-writer dispatch when verification gate complete), runtime issues, working artifacts, open questions, and role-specific extras (`reviewed`, `confirmed`, `downgraded`, `killed`)
+7. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 

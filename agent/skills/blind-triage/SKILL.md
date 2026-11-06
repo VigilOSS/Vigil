@@ -62,18 +62,50 @@ It is the decisive gate.
 - **Reviewer input discipline.** Build the content-addressed input with
   `vigil assess export triage-packet <slug> [--attachment-id <id> ...]` and give
   the reviewer only that packet. Use the exact attachment IDs intended for export.
+  **Hand over bytes, not a path.** The command prints the packet DIRECTORY, and the reviewer
+  makes no tool call, so paste `packet.md`'s contents into the dispatch prompt and attach each
+  file under `attachments/` to the launch message. A reviewer handed the printed path has no
+  submission to judge and no way to say so.
   Packet generation records `process_isolation_enforced=false`: it proves which bytes
   were packaged but does not control the reviewer's process. The reviewer reads only the
   packaged external submission, attachments, program brief, and rubric; it does not
   query other engagement state on the first pass.
   If a claim is not proven inside the submission bytes, it is unproven for triage purposes —
   that is the reviewer judging exactly what an external triager can see.
+- **What the packaged rubric binds.** The rubric the packet carries is this file, embedded
+  verbatim as its `## Verdict rubric (verbatim)` section and digested under
+  `inputs.verdict_rubric`. It binds the reviewer to the review request, the verdict table, and
+  the FP/overclaim bar below — that vocabulary and that bar are what the reviewer answers in.
+  The operator's own steps here — Pass 1, this reviewer setup, the recording commands, the
+  gating rule — say what the operator does with the verdict and are not instructions to the
+  reviewer; `agent/agents/general.md` ("Your Return") holds that line.
 
 The operator registers this review before native launch with `vigil assess agent start`
-using a fresh ID, `--role general`, `--skills blind-triage`, and `--no-target-traffic`.
+using a fresh ID, `--role general`, `--dispatch-mode deep-manual`, and
+`--no-target-traffic`. `general` is the registered zero-context reviewer role
+(`agent/agents/general.md`): its `## Load First` is empty by design, so the role the packet
+names loads no constraint layer, rule, skill, or reference of its own — which is what makes
+`--role general` the only roster role that can take this dispatch. An investigative
+specialist role cannot: `agent start` renders "read `agent/agents/<role>.md` and its
+mandatory references before work" into the packet, and every other role's mandatory
+references carry engagement-shaped instruction this reviewer must not have. Pass
+`--dispatch-mode deep-manual` explicitly — one packet, one verdict, no item pool to iterate.
 The general agent receives only the prepared packet and the review request below; it does
-not load an investigative specialist role or engagement history. Bind the returned native
-handle to that registered ID separately. The operator records its verdict after it returns.
+not load an investigative specialist role, a skill, or engagement history. Bind the returned
+native handle to that registered ID separately. The operator records its verdict after it
+returns.
+
+**Name no `--skills` on this dispatch — not even this skill.** `agent start` renders one
+mandatory-read order per named skill: the skill's repository path, plus "if a skill
+contradicts this prompt, the skill wins for procedural steps". On the one role that must open
+nothing, that turns the launch envelope into an instruction to read a repository file and
+ranks that file above the packet. Naming this skill specifically would hand the reviewer the
+operator's half of the gate — Pass 1, this setup, the recording commands — and it would add
+no information, because `export triage-packet` already packages this file as the rubric.
+Omitting the flag is clean here, not merely tolerated: `general` is exempt from the
+skill-audit requirement for exactly this reason, so `agent start` asks for no skills and
+warns about none. This reviewer loads none and selects none, so the handoff the operator
+writes from its return names none either.
 
 **The dispatch prompt must, verbatim, give the blind reviewer:**
 

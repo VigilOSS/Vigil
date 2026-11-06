@@ -1,10 +1,13 @@
 """Shared pytest setup for the assess CLI test suite.
 
 These tests exercise the host-side ``vigil assess`` CLI in isolation: no
-FastAPI backend, no live runtime container. ``agent/scripts`` is placed on
-``sys.path`` so ``import assess.*`` resolves to the source tree, and assess
-modules are force-reloaded per test so a ``monkeypatch`` of e.g.
-``assess.commands.kali_sweep.kali_exec`` cannot leak across tests.
+FastAPI backend, no live runtime container. This file owns two pieces of
+suite-wide setup: the import roots, so that both ``import assess.*`` and the
+``vigil_cli`` imports inside assess modules resolve to the source tree, and the
+per-test ``$VIGIL_CONFIG`` isolation below. A test that patches module state —
+e.g. ``assess.commands.kali_sweep.kali_exec`` — owns undoing it, through
+``monkeypatch`` rather than a bare assignment, because the assess modules are
+imported once for the whole session.
 """
 from __future__ import annotations
 
@@ -15,12 +18,23 @@ import pytest
 
 
 # conftest.py is imported by pytest BEFORE any test module is collected, and a
-# conftest at this location is always loaded for tests under tests/. Insert
-# `agent/scripts` on sys.path here (at import time, not in a fixture) so the
-# top-level `import assess.*` in each test module resolves during collection.
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[2]  # agent/scripts
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
+# conftest at this location is always loaded for tests under tests/. Set the
+# roots here (at import time, not in a fixture) so the top-level
+# `import assess.*` in each test module resolves during collection.
+#
+# Every assess test selection gets the same canonical import roots, exactly as
+# `orchestrator/backend/tests/conftest.py` does for its own scope. Individual
+# modules must not depend on a previously collected test mutating `sys.path`:
+# `vigil_cli` is not installed in the backend venv, assess modules import it
+# (`assess/lib/code_structural_identity.py` -> `vigil_cli.image_freshness`,
+# reached through the bootstrap in `assess/lib/scope.py`), and leaving `src` to
+# whichever module happened to be collected first made focused commands, `-k`
+# filters and reordered runs fail while a full-suite run happened to pass.
+_REPO_ROOT = Path(__file__).resolve().parents[4]
+sys.path[:0] = [
+    str(_REPO_ROOT / "agent" / "scripts"),
+    str(_REPO_ROOT / "src"),
+]
 
 # The tests directory is on sys.path (pytest prepend import mode; no __init__.py
 # here), so the shared, backend-less fake for AssessmentClient imports as a

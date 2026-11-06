@@ -14,7 +14,13 @@ import {
 import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "../lib/poc";
 import { reproRunIds, stepsText } from "../lib/steps";
 import { Markdown } from "./Markdown";
-import { CopyMarkdownButton, ReferenceList, ReproRunProvenance } from "./FindingParts";
+import {
+  CopyMarkdownButton,
+  OperatorAuthorityAttestation,
+  OperatorAuthorityTag,
+  ReferenceList,
+  ReproRunProvenance,
+} from "./FindingParts";
 
 interface Props {
   data: ReportData;
@@ -97,12 +103,19 @@ function FindingBlock({
           {finding.verification_status && (
             <span className="rpt-chip">{formatLabel(finding.verification_status)}</span>
           )}
+          {/* Immediately after the status word it qualifies: `Verified` reads
+              the same whether a dispatch proved it or the operator attested to
+              it, and this document's reader has nothing else to go on. */}
+          <OperatorAuthorityTag finding={finding} />
           {finding.workflow_status && (
             <span className="rpt-chip">{formatLabel(finding.workflow_status)}</span>
           )}
           <CopyMarkdownButton finding={finding} />
         </div>
       </header>
+      {/* Before the finding's own claims, because it qualifies all of them:
+          what the verdict rests on is read first or not at all. */}
+      <OperatorAuthorityAttestation finding={finding} />
       {finding.canonical_location && (
         <p className="rpt-doc-location rpt-mono">{finding.canonical_location}</p>
       )}

@@ -1817,6 +1817,18 @@ def test_code_dispatch_fetch_posts_atomic_lane_filters(monkeypatch, tmp_path):
             captured["payload"] = payload
             return []
 
+        def get(self, _endpoint: str):
+            # An empty claim makes `fetch` read the queue back to say whether the
+            # scope matched no row or only unclaimable ones.
+            return {
+                "total": 0,
+                "offset": 0,
+                "count": 0,
+                "has_more": False,
+                "item_ids": [],
+                "items": [],
+            }
+
         def __enter__(self):
             return self
 

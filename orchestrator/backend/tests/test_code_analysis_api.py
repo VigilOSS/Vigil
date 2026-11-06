@@ -33,7 +33,7 @@ if str(SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(SCRIPTS_ROOT))
 
 from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file  # noqa: E402
-from assess.commands import code_dispatch  # noqa: E402
+from assess.commands import code_coverage, code_dispatch  # noqa: E402
 from assess.lib.treesitter_index import index_file  # noqa: E402
 from assess.lib.code_structural_identity import (  # noqa: E402
     STRUCTURAL_INDEX_SCHEMA as CLI_STRUCTURAL_INDEX_SCHEMA,
@@ -116,6 +116,13 @@ def test_million_file_inventory_dispatch_and_queue_retry_qualification(
         returned_rows = {1: 0, 2: 0}
         requested_offsets = {1: [], 2: []}
         max_page_rows = 0
+
+        def create_function(self, _name, _argc, _func, **_kwargs):
+            # The real listing registers its glob predicate on the connection
+            # before it runs. This double answers by inspecting statement text
+            # and never evaluates SQL, so the predicate is never called -- but
+            # it has to be registrable, or page-scoped listing cannot run here.
+            return None
 
         def execute(self, statement: str, _params=()):
             if "SELECT COUNT(*)" in statement:
@@ -256,7 +263,13 @@ def test_million_file_inventory_dispatch_and_queue_retry_qualification(
         def __exit__(self, *_exc):
             return False
 
-        def post(self, endpoint: str, payload: dict[str, object]):
+        def post(
+            self,
+            endpoint: str,
+            payload: dict[str, object],
+            *,
+            read_timeout: float | None = None,
+        ):
             assert endpoint == "code/analysis-queue"
             request = QueueItemsBulkCreateRequest.model_validate(payload)
             posted_sizes.append(len(request.items))
@@ -743,6 +756,9 @@ def _classify_file(
                     "role": "parser" if classification != "low" else "helper",
                     "slot_types": ["NETWORK-INPUT"] if classification != "low" else [],
                     "analysis_priority": analysis_priority,
+                    # A `skip` is an exclusion decision and owes a standard
+                    # reason on this door, exactly as `done skipped` does.
+                    **({"skip_reason": "generated-code"} if classification == "skip" else {}),
                 }
             ]
         },
@@ -4440,6 +4456,426 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
     }
 
 
+@pytest.mark.parametrize("mutation_mode", ["bulk-classify", "file-patch", "staging"])
+def test_classification_refuses_a_language_the_index_cannot_bind(
+    client, isolate_settings, mutation_mode
+):
+    """One unvalidated classify value takes the whole repository down.
+
+    `canonical_structural_language` runs over every file in a repository from
+    `structural_input_identity_digest`, so a single non-canonical language makes
+    `code-index sync` refuse the entire repository, unbinds the structural
+    index, and then blocks every new dispatch — long after the classify call
+    that wrote it returned 200.
+    """
+    engagement_key = f"2026-11-06-code-language-enum-{mutation_mode}"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key=f"language-enum-{mutation_mode}")
+    repo_id = int(repo["id"])
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, repo_id)
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+
+    if mutation_mode == "bulk-classify":
+        response = client.post(
+            f"{base}/files/bulk-classify",
+            json={
+                "classifications": [
+                    {
+                        "file_id": parser["id"],
+                        "classification": "low",
+                        "language": "prisma",
+                        "analysis_priority": 10,
+                    }
+                ]
+            },
+        )
+    elif mutation_mode == "file-patch":
+        response = client.patch(
+            f"{base}/files/{parser['id']}", json={"language": "not-a-language"}
+        )
+    else:
+        repo_row = client.get(f"{base}/repos/{repo_id}").json()
+        manifest = [
+            {
+                key: row[key]
+                for key in (
+                    "file_path", "language", "loc", "file_hash",
+                    "header_snippet", "git_churn_score", "has_past_cve_fix",
+                )
+            }
+            for row in client.get(
+                f"{base}/files?repo_id={repo_id}&limit=100&include_header_snippet=true"
+            ).json()["items"]
+        ]
+        for record in manifest:
+            if record["file_path"] == "src/parser.py":
+                record["language"] = "prisma"
+        started = client.post(
+            f"{base}/repos/refresh/start",
+            json=_verified_repo_payload(
+                client,
+                engagement_key,
+                str(repo_row["repo_key"]),
+                manifest,
+                source_origin_path=str(repo_row["source_origin_path"]),
+                repo_name=str(repo_row["name"]),
+            ),
+        )
+        assert started.status_code == 201, started.text
+        response = client.post(
+            f"{base}/repos/{repo_id}/refresh/files",
+            json={"refresh_token": started.json()["refresh_token"], "files": manifest},
+        )
+
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "python" in detail
+    assert "src/parser.py" in detail
+    assert client.get(f"{base}/files/{parser['id']}").json()["language"] == "python"
+
+    # A canonical alias still lands, so the refusal is an enum and not a freeze.
+    accepted = client.patch(f"{base}/files/{parser['id']}", json={"language": "c++"})
+    assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["language"] == "c++"
+
+
+def test_staged_ingest_language_cannot_unbind_the_repository_index(
+    client, isolate_settings
+):
+    """A padded ingest language commits once and refuses the whole repository.
+
+    `code-ingest --default-language-for-unknown` writes its value into the
+    sealed manifest and the staged record unchanged, so `' python '` lands in
+    `code_files.language` behind a 200. From there
+    `structural_input_identity_digest` runs `canonical_structural_language` over
+    EVERY file in the repository, so `code-index sync` then refuses all of them,
+    unbinds the structural index and blocks every new dispatch — long after the
+    ingest that caused it returned. The staged record is attested byte-for-byte
+    against the sealed manifest at commit, so the spelling is held to the
+    canonical one at the staging door rather than folded into shape there.
+    """
+    engagement_key = "2026-11-07-code-staged-language-padding"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="staged-language-padding")
+    repo_id = int(repo["id"])
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, repo_id)
+    manifest_fields = (
+        "file_path", "language", "loc", "file_hash",
+        "header_snippet", "git_churn_score", "has_past_cve_fix",
+    )
+    manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    manifest.append(
+        {
+            "file_path": "src/padded.py",
+            "language": " python ",
+            "loc": 20,
+            "file_hash": _source_hash("staged-padded-language"),
+            "header_snippet": "",
+            "git_churn_score": 0,
+            "has_past_cve_fix": False,
+        }
+    )
+    repo_row = client.get(f"{base}/repos/{repo_id}").json()
+    started = client.post(
+        f"{base}/repos/refresh/start",
+        json=_verified_repo_payload(
+            client,
+            engagement_key,
+            str(repo_row["repo_key"]),
+            manifest,
+            source_origin_path=str(repo_row["source_origin_path"]),
+            repo_name=str(repo_row["name"]),
+        ),
+    )
+    assert started.status_code == 201, started.text
+    refresh_token = started.json()["refresh_token"]
+    staged = client.post(
+        f"{base}/repos/{repo_id}/refresh/files",
+        json={"refresh_token": refresh_token, "files": manifest},
+    )
+    committed = client.post(
+        f"{base}/repos/{repo_id}/refresh/commit",
+        json={"refresh_token": refresh_token, "manifest_complete": True},
+    )
+
+    # Nothing the ingest admitted carries a spelling the index cannot bind, so
+    # the repository's own structural sync still covers every file in it.
+    admitted = client.get(
+        f"{base}/files?repo_id={repo_id}&limit=100&include_header_snippet=true"
+    ).json()["items"]
+    assert {str(row["file_path"]): str(row["language"]) for row in admitted} == {
+        "src/parser.py": "python",
+        "src/helpers.py": "python",
+    }
+    _publish_structural_totals(client, engagement_key, repo_id, admitted, {})
+
+    # The refusal that keeps it that way names the file and the roster.
+    assert staged.status_code == 400, staged.text
+    detail = staged.json()["detail"]
+    assert "src/padded.py" in detail
+    assert "canonical unpadded string" in detail
+    assert "python" in detail
+    assert committed.status_code == 409, committed.text
+
+    # The door is an enum and not a freeze: the same file ingests, commits and
+    # syncs under the canonical spelling.
+    manifest[-1]["language"] = "python"
+    rebuilt = _refresh_repo_files(client, engagement_key, repo_id, manifest)
+    assert {str(row["file_path"]): str(row["language"]) for row in rebuilt} == {
+        "src/parser.py": "python",
+        "src/helpers.py": "python",
+        "src/padded.py": "python",
+    }
+    _publish_structural_totals(client, engagement_key, repo_id, rebuilt, {})
+
+
+def test_bulk_classify_reports_the_structural_invalidation_it_caused(
+    client, isolate_settings
+):
+    """The CLI prints the exact repair commands — from keys the backend owed.
+
+    `code-classify` reads `structural_index_invalidated_repo_ids` and
+    `language_changes` to print the `code-index build` + `sync --repo-id` repair
+    pair. The service already accumulated the repo ids internally and returned
+    only `{updated, total}`, so the whole repair hint could never fire.
+    """
+    engagement_key = "2026-11-06-code-classify-invalidation-report"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="classify-invalidation-repo")
+    repo_id = int(repo["id"])
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, repo_id)
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+
+    unchanged = client.post(
+        f"{base}/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": helper["id"],
+                    "classification": "low",
+                    "analysis_priority": 10,
+                }
+            ]
+        },
+    )
+    assert unchanged.status_code == 200, unchanged.text
+    assert unchanged.json() == {
+        "updated": 1,
+        "total": 1,
+        "structural_index_invalidated_repo_ids": [],
+        "language_changes": [],
+    }
+
+    corrected = client.post(
+        f"{base}/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": parser["id"],
+                    "classification": "high",
+                    "role": "parser",
+                    "slot_types": ["NETWORK-INPUT"],
+                    "language": "c++",
+                    "analysis_priority": 70,
+                }
+            ]
+        },
+    )
+    assert corrected.status_code == 200, corrected.text
+    assert corrected.json() == {
+        "updated": 1,
+        "total": 1,
+        "structural_index_invalidated_repo_ids": [repo_id],
+        "language_changes": [
+            {
+                "file_id": int(parser["id"]),
+                "file_path": "src/parser.py",
+                "previous_language": "python",
+                "language": "c++",
+            }
+        ],
+    }
+
+
+def test_classification_records_a_standard_skip_reason(client, isolate_settings):
+    """`skip` is a decision that owes a reason, at classify time too.
+
+    The CLOSE path has enforced a standard reason since C50, and
+    `code_files.skip_reason` has existed the whole time while being unwritable
+    — so five of six lanes kept their skip rationale in sidecar JSON files that
+    no projection reads.
+    """
+    engagement_key = "2026-11-06-code-classify-skip-reason"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="classify-skip-reason-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+
+    def classify(file_id, **extra):
+        return client.post(
+            f"{base}/files/bulk-classify",
+            json={
+                "classifications": [
+                    {"file_id": file_id, "classification": "skip", "analysis_priority": 0, **extra}
+                ]
+            },
+        )
+
+    without_reason = classify(parser["id"])
+    assert without_reason.status_code == 400, without_reason.text
+    assert "skip_reason" in without_reason.json()["detail"]
+    assert "generated-code" in without_reason.json()["detail"]
+
+    non_standard = classify(parser["id"], skip_reason="looked boring")
+    assert non_standard.status_code == 400, non_standard.text
+    assert "looked boring" in non_standard.json()["detail"]
+
+    accepted = classify(parser["id"], skip_reason="generated-code")
+    assert accepted.status_code == 200, accepted.text
+    assert client.get(f"{base}/files/{parser['id']}").json()["skip_reason"] == "generated-code"
+
+    # A reason only describes a skip, so any other classification refuses one.
+    misplaced = client.post(
+        f"{base}/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": helper["id"],
+                    "classification": "low",
+                    "analysis_priority": 10,
+                    "skip_reason": "generated-code",
+                }
+            ]
+        },
+    )
+    assert misplaced.status_code == 400, misplaced.text
+
+    # Re-classifying away from `skip` drops the reason it no longer carries.
+    reclassified = client.patch(
+        f"{base}/files/{parser['id']}",
+        json={"classification": "low", "analysis_priority": 10},
+    )
+    assert reclassified.status_code == 200, reclassified.text
+    assert client.get(f"{base}/files/{parser['id']}").json()["skip_reason"] == ""
+
+
+def test_both_classify_doors_refuse_the_same_unexplained_skip(
+    client, isolate_settings
+):
+    """The partial PATCH applies the skip-reason rule to its own result.
+
+    `vigil assess contract code-record classify` promises the file PATCH holds
+    the RESULTING classification to the same rule bulk classify applies, and
+    accounting only admits a skip that carries a reason
+    (`_CURRENT_ACCOUNTED_FILE_EXISTS_SQL`). Validating only the reason the
+    payload happened to carry let the narrower door through: the same decision
+    was a 400 in bulk and a 200 through the patch, which stored an unexplained
+    skip the coverage obligation can never account for.
+    """
+    engagement_key = "2026-11-07-code-patch-skip-reason-parity"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="patch-skip-reason-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+
+    bulk = client.post(
+        f"{base}/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": parser["id"],
+                    "classification": "skip",
+                    "analysis_priority": 0,
+                }
+            ]
+        },
+    )
+    patched = client.patch(
+        f"{base}/files/{parser['id']}",
+        json={"classification": "skip", "analysis_priority": 0},
+    )
+    assert (bulk.status_code, patched.status_code) == (400, 400), patched.text
+    for refusal in (bulk, patched):
+        refusal_detail = refusal.json()["detail"]
+        assert "skip_reason" in refusal_detail
+        assert "generated-code" in refusal_detail
+    unchanged = client.get(f"{base}/files/{parser['id']}").json()
+    assert (unchanged["classification"], unchanged["skip_reason"]) == (
+        "unclassified",
+        "",
+    )
+
+    # Naming the reason lands through the patch door too.
+    explained = client.patch(
+        f"{base}/files/{parser['id']}",
+        json={
+            "classification": "skip",
+            "analysis_priority": 0,
+            "skip_reason": "generated-code",
+        },
+    )
+    assert explained.status_code == 200, explained.text
+    assert explained.json()["skip_reason"] == "generated-code"
+
+    # A patch that does not restate the reason keeps the row's own, so editing
+    # a skipped file is not a demand to re-explain the skip.
+    kept = client.patch(
+        f"{base}/files/{parser['id']}", json={"notes": "excluded from review"}
+    )
+    assert kept.status_code == 200, kept.text
+    assert kept.json()["skip_reason"] == "generated-code"
+
+    # Flipping the file off `skip` still drops the reason with it, and a reason
+    # on any other classification is still refused.
+    reclassified = client.patch(
+        f"{base}/files/{parser['id']}",
+        json={"classification": "low", "analysis_priority": 10},
+    )
+    assert reclassified.status_code == 200, reclassified.text
+    assert reclassified.json()["skip_reason"] == ""
+    misplaced = client.patch(
+        f"{base}/files/{parser['id']}", json={"skip_reason": "generated-code"}
+    )
+    assert misplaced.status_code == 400, misplaced.text
+
+    # A priority correction on an explained skip is refused by the band it
+    # breaks, and leaves the reason it never asked about alone.
+    _classify_file(client, engagement_key, int(helper["id"]), "skip", 0)
+    band = client.patch(f"{base}/files/{helper['id']}", json={"analysis_priority": 5})
+    assert band.status_code == 400, band.text
+    assert "must be 0" in band.json()["detail"]
+    assert (
+        client.get(f"{base}/files/{helper['id']}").json()["skip_reason"]
+        == "generated-code"
+    )
+
+    # A row already sitting on an unexplained skip is repaired by naming the
+    # reason alone, so holding the effective reason to the vocabulary leaves a
+    # way forward instead of freezing the row.
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE code_files SET skip_reason = '' WHERE id = ?",
+            (int(helper["id"]),),
+        )
+        connection.commit()
+    frozen = client.patch(f"{base}/files/{helper['id']}", json={"notes": "excluded"})
+    assert frozen.status_code == 400, frozen.text
+    assert "skip_reason" in frozen.json()["detail"]
+    repaired = client.patch(
+        f"{base}/files/{helper['id']}", json={"skip_reason": "vendored-dependency"}
+    )
+    assert repaired.status_code == 200, repaired.text
+    assert repaired.json()["skip_reason"] == "vendored-dependency"
+
+
 @pytest.mark.parametrize(
     ("mutation_mode", "mutation"),
     [
@@ -6284,6 +6720,318 @@ def test_reanalysis_result_can_supersede_receipt_from_completed_predecessor(
     assert [row["id"] for row in current.json()] == [replacement.json()["id"]]
 
 
+def _completed_queue_projection(item_id: int) -> dict[str, object]:
+    with db_module.get_connection() as connection:
+        return dict(
+            connection.execute(
+                """
+                SELECT status, disposition, skip_reason, analysis_notes
+                FROM code_analysis_queue WHERE id = ?
+                """,
+                (item_id,),
+            ).fetchone()
+        )
+
+
+def test_completed_row_correction_reapplies_the_done_time_disposition_gates(
+    client, isolate_settings
+):
+    """A correction rewrites a `done` row, so it owes that row's own gates.
+
+    `code-record analysis --supersede` writes the queue projection from the
+    WIDER receipt vocabulary. Unchecked it could leave `status='done'` carrying
+    `needs_context` (a state no verb produces), `skipped` on a high file or
+    without a standard reason, or `finding`/`suspicious` with nothing
+    evidenced — each a row whose projection contradicts its own receipt.
+    """
+    engagement_key = "2026-09-25-code-correction-gates"
+    _repo, parser, claim, original = _seed_reviewed_parser(
+        client, isolate_settings, engagement_key
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    before = _completed_queue_projection(int(claim["id"]))
+    assert before == {
+        "status": "done",
+        "disposition": "clean",
+        "skip_reason": "",
+        "analysis_notes": "review complete",
+    }
+
+    def correct(**overrides):
+        return client.post(
+            f"{base}/analysis-results",
+            json=_owned(claim, queue_item_id=claim["id"], supersedes=original["id"], **overrides),
+        )
+
+    outside_vocabulary = correct(
+        disposition="needs_context",
+        hypothesis="The caller is missing.",
+        evidence="source evidence from the corrective pass",
+    )
+    assert outside_vocabulary.status_code == 400, outside_vocabulary.text
+    assert "needs_context" in outside_vocabulary.json()["detail"]
+    assert _completed_queue_projection(int(claim["id"])) == before
+
+    skipped_without_reason = correct(
+        disposition="skipped",
+        reviewed_spans=[
+            {"file_id": parser["id"], "start_line": 1, "end_line": int(parser["loc"])}
+        ],
+    )
+    assert skipped_without_reason.status_code == 400, skipped_without_reason.text
+    assert _completed_queue_projection(int(claim["id"])) == before
+
+    unevidenced = correct(
+        disposition="suspicious",
+        hypothesis="The input reaches the parser without a rejecting guard.",
+    )
+    assert unevidenced.status_code == 400, unevidenced.text
+    assert "evidence" in unevidenced.json()["detail"]
+    assert _completed_queue_projection(int(claim["id"])) == before
+
+    evidenced = correct(
+        disposition="suspicious",
+        hypothesis="The input reaches the parser without a rejecting guard.",
+        evidence="source evidence from the corrective pass",
+    )
+    assert evidenced.status_code == 201, evidenced.text
+    assert _completed_queue_projection(int(claim["id"])) == {
+        **before,
+        "disposition": "suspicious",
+    }
+
+
+def test_completed_row_correction_clears_a_skip_reason_it_no_longer_carries(
+    client, isolate_settings
+):
+    engagement_key, _repo, file_row = _seed_queue_contract_file(
+        client, isolate_settings, "correction-skip-reason"
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    file_id = int(file_row["id"])
+    _classify_file(client, engagement_key, file_id, "low", 10)
+    claim = _claim_file_for_analysis(client, engagement_key, file_id, priority=10)
+    spans = [{"file_id": file_id, "start_line": 1, "end_line": int(file_row["loc"])}]
+    skipped_receipt = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="skipped",
+            reviewed_spans=spans,
+            notes="generated protobuf stubs",
+        ),
+    )
+    assert skipped_receipt.status_code == 201, skipped_receipt.text
+    closed = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="skipped",
+            skip_reason="generated-code",
+        ),
+    )
+    assert closed.status_code == 200, closed.text
+    assert _completed_queue_projection(int(claim["id"]))["skip_reason"] == "generated-code"
+
+    corrected = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            supersedes=skipped_receipt.json()["id"],
+            disposition="suspicious",
+            reviewed_spans=spans,
+            hypothesis="The generated stub hand-writes a length cast.",
+            evidence="the cast truncates before the bounds check",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert corrected.status_code == 201, corrected.text
+    assert _completed_queue_projection(int(claim["id"])) == {
+        "status": "done",
+        "disposition": "suspicious",
+        "skip_reason": "",
+        "analysis_notes": "",
+    }
+
+
+def test_durable_code_classes_must_be_canonical(client, isolate_settings):
+    """A non-canonical family or vuln_class is a durable value nobody can match.
+
+    An EXTRA `cwe_coverage` family was accepted, persisted in
+    `cwe_coverage_json` and rendered as a real column by `code-coverage
+    --cwe-matrix` — phantom coverage in the operator's primary effort view. A
+    `cross_file_triggers` vuln_class typo became an obligation that no canonical
+    required-family set can ever discharge.
+    """
+    engagement_key = "2026-11-06-code-canonical-classes"
+    engagement_key, _repo, file_row = _seed_queue_contract_file(
+        client, isolate_settings, "canonical-classes"
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    file_id = int(file_row["id"])
+    claim = _claim_file_for_analysis(client, engagement_key, file_id)
+    _record_fixture_source_receipt(client, engagement_key, claim)
+
+    bad_trigger = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            evidence="reviewed",
+            cross_file_triggers=[
+                {
+                    "file_path": "src/helpers.py",
+                    "vuln_class": "path-traversl",
+                    "reason": "shared helper",
+                }
+            ],
+        ),
+    )
+    assert bad_trigger.status_code == 400, bad_trigger.text
+    assert "path-traversal" in bad_trigger.json()["detail"]
+    assert client.get(f"{base}/triggers").json() == []
+
+    # The hint has to fold case before matching: `sqli`, `xss` and `csrf` all
+    # exist verbatim, so a class typed in the wrong case is a spelling the
+    # roster already holds and not an invitation to a different class.
+    for typed, nearest in (("SQLI", "sqli"), ("XSS", "xss"), ("CSRF", "csrf")):
+        wrong_case = client.post(
+            f"{base}/analysis-results",
+            json=_owned(
+                claim,
+                queue_item_id=claim["id"],
+                disposition="clean",
+                evidence="reviewed",
+                cross_file_triggers=[
+                    {
+                        "file_path": "src/helpers.py",
+                        "vuln_class": typed,
+                        "reason": "shared helper",
+                    }
+                ],
+            ),
+        )
+        assert wrong_case.status_code == 400, wrong_case.text
+        assert (
+            f"nearest canonical class: '{nearest}'" in wrong_case.json()["detail"]
+        )
+
+    # With nothing plausibly close the refusal names the roster instead of the
+    # token that merely sorts nearest.
+    unrelated = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="clean",
+            evidence="reviewed",
+            cross_file_triggers=[
+                {
+                    "file_path": "src/helpers.py",
+                    "vuln_class": "CWE-89",
+                    "reason": "shared helper",
+                }
+            ],
+        ),
+    )
+    assert unrelated.status_code == 400, unrelated.text
+    unrelated_detail = unrelated.json()["detail"]
+    assert "nearest canonical class" not in unrelated_detail
+    assert "Allowed values: " in unrelated_detail
+    assert "sqli" in unrelated_detail
+    assert client.get(f"{base}/triggers").json() == []
+
+    bad_family = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="reviewed",
+            cwe_coverage=[
+                *_network_input_coverage(default_effort=80),
+                {"family": "manual-structural-review", "effort": 100},
+            ],
+        ),
+    )
+    assert bad_family.status_code == 400, bad_family.text
+    assert "manual-structural-review" in bad_family.json()["detail"]
+    assert (
+        client.get(f"{base}/analysis-queue?status=processing").json()["total"] == 1
+    )
+
+    accepted = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="reviewed",
+            cwe_coverage=[
+                *_network_input_coverage(default_effort=80),
+                {"family": "race-condition", "effort": 0, "not_applicable": True},
+            ],
+        ),
+    )
+    assert accepted.status_code == 200, accepted.text
+
+
+def test_stale_finding_slug_refusal_names_the_one_write_that_rebinds_it(
+    client, isolate_settings
+):
+    """The constraint is right (ADR 0026) but the refusal owed a way forward.
+
+    A finding bound to a superseded generation cannot back a `finding`
+    disposition, and `finding verify --provenance-inline` is the only write that
+    rebinds one — so the 409 names it instead of leaving the hunter to rediscover
+    it.
+    """
+    engagement_key = "2026-11-06-code-stale-finding-slug"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="stale-slug-repo")
+    repo_id = int(repo["id"])
+    files = _create_files(client, engagement_key, repo_id)
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    _create_code_parent_finding(client, engagement_key, repo_id, slug="VF-901")
+
+    # Advancing the generation on an unrelated file strands the finding's
+    # binding on the previous one.
+    _refresh_one_file_metadata(
+        client,
+        engagement_key,
+        repo_id,
+        int(helper["id"]),
+        file_hash=_source_hash("stale-slug-helper-moved"),
+    )
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 95)
+    queue_item = _claim_file_for_analysis(
+        client, engagement_key, int(parser["id"]), priority=95
+    )
+
+    refused = client.post(
+        f"{base}/analysis-results",
+        json=_owned(
+            queue_item,
+            queue_item_id=queue_item["id"],
+            disposition="finding",
+            finding_slug="VF-901",
+            hypothesis="The decoded length is not bounds-checked.",
+            evidence="parse() indexes with the attacker length.",
+        ),
+    )
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert "current verified repository source generation" in detail
+    assert "vigil assess finding verify VF-901 --provenance-inline" in detail
+
+
 def test_reanalysis_stale_predecessor_is_reported_per_item_and_batch_continues(
     client, isolate_settings
 ):
@@ -7188,6 +7936,161 @@ def test_coverage_projections_exclude_receipts_from_an_unrelated_file_refresh_ge
     assert [row["id"] for row in history] == [result.json()["id"]]
 
 
+def test_inherited_coverage_reads_byte_identical_verdicts_without_claiming_currency(
+    client, isolate_settings
+):
+    """A new generation discards every verdict, including for untouched files.
+
+    Re-ingesting at a new commit takes a repository with hundreds of reviewed
+    files back to zero analyzed, even where the bytes never moved — so the
+    operator cannot tell "never reviewed" from "reviewed against identical
+    bytes last generation". This is a READ: it labels the carry-forward
+    candidates `inherited` with their origin generation, and deliberately does
+    NOT make them current, because a current row would claim a currency it does
+    not have (CODE-MAP.md's no-silent-currency rule).
+    """
+    engagement_key = "2026-11-06-code-inherited-coverage"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="inherited-coverage-repo")
+    repo_id = int(repo["id"])
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, repo_id)
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(parser["id"]), "high", 79)
+    _classify_file(client, engagement_key, int(helper["id"]), "high", 60)
+    for file_row in (parser, helper):
+        claim = _claim_file_for_analysis(
+            client,
+            engagement_key,
+            int(file_row["id"]),
+            agent_name=f"hunter-{file_row['id']}",
+        )
+        _record_fixture_source_receipt(client, engagement_key, claim)
+        closed = client.post(
+            f"{base}/analysis-queue/done",
+            json=_owned(
+                claim,
+                item_ids=[claim["id"]],
+                disposition="clean",
+                notes="Reviewed at the original generation.",
+                cwe_coverage=_network_input_coverage(default_effort=80),
+            ),
+        )
+        assert closed.status_code == 200, closed.text
+    previous_generation = int(client.get(f"{base}/repos/{repo_id}").json()["active_generation"])
+
+    manifest_fields = {
+        "file_path", "language", "loc", "file_hash",
+        "header_snippet", "git_churn_score", "has_past_cve_fix",
+    }
+    _refresh_repo_files(
+        client,
+        engagement_key,
+        repo_id,
+        [
+            {key: parser[key] for key in manifest_fields},
+            {
+                **{key: helper[key] for key in manifest_fields},
+                "file_hash": _source_hash("inherited-helpers-moved"),
+            },
+            *[
+                {key: row[key] for key in manifest_fields}
+                for row in files
+                if row["id"] not in {parser["id"], helper["id"]}
+            ],
+        ],
+    )
+    current_generation = int(client.get(f"{base}/repos/{repo_id}").json()["active_generation"])
+    assert current_generation == previous_generation + 1
+
+    # Do-not-break: the coverage gate still sees nothing analyzed.
+    summary = client.get(f"{base}/coverage?repo_id={repo_id}").json()
+    assert summary["by_classification"]["high"]["analyzed"] == 0
+
+    # Drive the route through the URL the shipped CLI actually builds, so a
+    # rename on either side is a failure here rather than a 404 in the field.
+    cli_endpoint = code_coverage._inherited_endpoint(
+        SimpleNamespace(
+            inherited_from=previous_generation,
+            repo_id=repo_id,
+            limit=None,
+            offset=None,
+        )
+    )
+    assert cli_endpoint.startswith("code/coverage/inherited?")
+    inherited = client.get(f"/engagements/{engagement_key}/assessment/{cli_endpoint}")
+    assert inherited.status_code == 200, inherited.text
+    payload = inherited.json()
+    # The page header the CLI prints names both ends of the comparison, so an
+    # operator can see at a glance which generation the verdict came from and
+    # which one the file now owes.
+    assert payload["origin_generation"] == previous_generation
+    assert payload["active_generation"] == current_generation
+    assert payload["total"] == 1
+    assert payload["count"] == 1
+    assert payload["offset"] == 0
+    assert payload["has_more"] is False
+    assert payload["by_disposition"] == {"clean": 1}
+    (row,) = payload["files"]
+    assert row["file_path"] == "src/parser.py"
+    assert row["file_id"] == int(parser["id"])
+    assert row["classification"] == "high"
+    assert row["disposition"] == "clean"
+    # Both labels are the point of the row: the verdict is carried from an
+    # earlier generation, and it is offered only because the bytes never moved.
+    assert row["inherited"] is True
+    assert row["file_hash_unchanged"] is True
+    assert row["origin_generation"] == previous_generation
+    assert row["current_generation"] == current_generation
+    assert row["recorded_at"]
+    assert row["repo_id"] == repo_id
+    assert row["repo_key"] == "inherited-coverage-repo"
+    assert row["file_hash"] == parser["file_hash"]
+    assert row["analysis_notes"] == "Reviewed at the original generation."
+    assert [entry["family"] for entry in row["cwe_coverage"]] == [
+        entry["family"] for entry in _network_input_coverage(default_effort=80)
+    ]
+    # The moved file inherits nothing: its bytes are not the reviewed bytes.
+    assert "src/helpers.py" not in {item["file_path"] for item in payload["files"]}
+
+    # A generation that was never recorded is a refusal, not an empty answer.
+    missing = client.get(
+        f"{base}/coverage/inherited?repo_id={repo_id}&generation=99"
+    )
+    assert missing.status_code == 400, missing.text
+    assert str(previous_generation) in missing.json()["detail"]
+    assert (
+        client.get(
+            f"{base}/coverage/inherited?repo_id={repo_id}"
+            f"&generation={current_generation}"
+        ).status_code == 400
+    )
+
+    # Once the file is reviewed against the current bytes it is no longer a
+    # carry-forward candidate: it is simply covered.
+    current_claim = _claim_file_for_analysis(
+        client, engagement_key, int(parser["id"]), agent_name="hunter-current"
+    )
+    _record_fixture_source_receipt(client, engagement_key, current_claim)
+    closed = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            current_claim,
+            item_ids=[current_claim["id"]],
+            disposition="clean",
+            notes="Reviewed against the current bytes.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert closed.status_code == 200, closed.text
+    after = client.get(
+        f"{base}/coverage/inherited?repo_id={repo_id}&generation={previous_generation}"
+    ).json()
+    assert after["files"] == []
+    assert after["total"] == 0
+
+
 def test_coverage_projections_require_result_lease_identity(client, isolate_settings):
     engagement_key = "2026-08-05-code-coverage-result-lease"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -7752,6 +8655,10 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     assert item["repo"]["lsp_config"]["ctags"]["available"] is True
     assert "applicable_vuln_classes" in item
     assert "web-app-injection" in item["applicable_vuln_classes"]
+    # Every write names this key (`queue_item_id`), so the claim that grants the
+    # lease has to hand it back under that name and not only as `id`.
+    assert item["queue_item_id"] == item["id"]
+    assert isinstance(item["queue_item_id"], int)
 
     file_after_fetch = client.get(
         f"/engagements/{engagement_key}/assessment/code/files/{parser_file['id']}"
@@ -8391,6 +9298,11 @@ def test_reset_stale_does_not_supersede_results_when_heartbeat_wins_cas(
             if "SELECT queue.id, queue.file_id, queue.lease_token" in sql and "lease_activity_at" in sql:
                 return CursorProxy(cursor, self._connection)
             return cursor
+
+        def __getattr__(self, name):
+            # A faithful stand-in for the real connection: the sweep registers
+            # its path-scope SQL function on whatever connection it is handed.
+            return getattr(self._connection, name)
 
     @contextmanager
     def raced_connection():
@@ -9104,6 +10016,144 @@ def test_effort_gate_names_every_family_under_the_threshold(client, isolate_sett
 
     assert any("family 'ssrf' effort 10 < 70" in reason for reason in reasons)
     assert any("family 'file-upload' effort 20 < 70" in reason for reason in reasons)
+
+
+def test_effort_harness_measures_medium_files_and_leaves_low_alone(
+    client, isolate_settings
+):
+    """`done` demands a coverage entry per applicable family at every tier, but
+    an `effort: 0` entry satisfies it, so a medium file can close with a token
+    number. The harness measures that against the medium threshold and names it
+    in `effort_warnings`; `tests/test_code_effort_gate_tiers.py` owns which
+    tiers the number is allowed to refuse the gate for.
+
+    Precision matters more than reach here: medium files are not required to
+    carry slot_types, so the two metadata-completeness warnings stay
+    critical/high-only and only the per-family measurement extends. `low` stays
+    out of the harness entirely.
+    """
+    engagement_key = "2026-11-06-code-effort-gate-medium"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="effort-gate-medium-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
+    medium = next(row for row in files if row["file_path"] == "src/parser.py")
+    low = next(row for row in files if row["file_path"] == "src/helpers.py")
+
+    def close(file_row, tier, priority, effort):
+        classified = client.post(
+            f"{base}/files/bulk-classify",
+            json={
+                "classifications": [
+                    {
+                        "file_id": file_row["id"],
+                        "classification": tier,
+                        "role": "utility",
+                        "analysis_priority": priority,
+                    }
+                ]
+            },
+        )
+        assert classified.status_code == 200, classified.text
+        claim = _claim_file_for_analysis(
+            client, engagement_key, int(file_row["id"]), priority=priority,
+            agent_name=f"hunter-{file_row['id']}",
+        )
+        _record_fixture_source_receipt(client, engagement_key, claim)
+        done = client.post(
+            f"{base}/analysis-queue/done",
+            json=_owned(
+                claim,
+                item_ids=[claim["id"]],
+                disposition="clean",
+                notes="Reviewed.",
+                cwe_coverage=[
+                    {"family": "algorithmic-dos", "effort": effort},
+                    {"family": "error-handling", "effort": effort},
+                ],
+            ),
+        )
+        assert done.status_code == 200, done.text
+
+    close(medium, "medium", 40, 10)
+    close(low, "low", 10, 10)
+
+    gate = client.get(f"{base}/coverage?repo_id={repo['id']}").json()["gate"]
+    warnings = gate["effort_warnings"]
+    assert any(
+        "Medium file src/parser.py: family 'algorithmic-dos' effort 10 < 30" in warning
+        for warning in warnings
+    ), warnings
+    assert any(
+        "Medium file src/parser.py: family 'error-handling' effort 10 < 30" in warning
+        for warning in warnings
+    ), warnings
+    # A medium file carries no slot_types obligation, so the harness must not
+    # invent one for it.
+    assert not any("missing slot_types" in warning for warning in warnings), warnings
+    assert not any(
+        "applicable vulnerability families" in warning for warning in warnings
+    ), warnings
+    # `low` stays out of the effort harness entirely.
+    assert not any("src/helpers.py" in warning for warning in warnings), warnings
+    # Measuring medium never refuses the gate: the effort number is
+    # self-attested (ADR 0001 decision 3).
+    assert gate["passed"] is True, gate["reasons"]
+    assert not [
+        reason for reason in gate["reasons"] if "src/parser.py" in reason
+    ], gate["reasons"]
+
+
+def test_effort_harness_accepts_a_medium_file_over_its_threshold(
+    client, isolate_settings
+):
+    """30 is the medium floor, not the first value above it."""
+    engagement_key = "2026-11-06-code-effort-gate-medium-pass"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="effort-gate-medium-pass-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
+    medium = next(row for row in files if row["file_path"] == "src/parser.py")
+    classified = client.post(
+        f"{base}/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": medium["id"],
+                    "classification": "medium",
+                    "role": "utility",
+                    "analysis_priority": 40,
+                }
+            ]
+        },
+    )
+    assert classified.status_code == 200, classified.text
+    claim = _claim_file_for_analysis(
+        client, engagement_key, int(medium["id"]), priority=40
+    )
+    _record_fixture_source_receipt(client, engagement_key, claim)
+    done = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="Reviewed.",
+            cwe_coverage=[
+                {"family": "algorithmic-dos", "effort": 30},
+                {"family": "error-handling", "effort": 45},
+            ],
+        ),
+    )
+    assert done.status_code == 200, done.text
+
+    gate = client.get(f"{base}/coverage?repo_id={repo['id']}").json()["gate"]
+    assert not [
+        warning for warning in gate["effort_warnings"] if "src/parser.py" in warning
+    ], gate["effort_warnings"]
+    assert not [reason for reason in gate["reasons"] if "src/parser.py" in reason]
 
 
 def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
@@ -11004,6 +12054,140 @@ def test_verify_readiness_requires_every_file_accounted_but_skip_is_not_semantic
     assert "critical_high_incomplete" in {blocker["code"] for blocker in after["blockers"]}
 
 
+def test_queue_outcomes_name_the_file_and_the_attempt_a_reanalysis_suspends(
+    client, isolate_settings
+):
+    """Each per-item outcome carries its path, and a reanalysis its predecessor.
+
+    Queueing a reanalysis withdraws the predecessor attempt's verdict and its
+    coverage credit until the new attempt closes. An outcome that names only
+    the new item cannot tell the operator which attempt just lost its credit --
+    the half of that warning they act on -- and leaves every caller that wants
+    to name the file at all doing a second lookup for the path.
+    """
+    engagement_key = "2026-11-06-code-queue-outcome-predecessor"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="queue-outcome-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    helper = next(row for row in files if row["file_path"] == "src/helpers.py")
+    _classify_file(client, engagement_key, int(helper["id"]), "low", 10)
+
+    first = client.post(
+        f"{base}/analysis-queue",
+        json={"items": [{"file_id": helper["id"], "priority": 10}]},
+    )
+    assert first.status_code == 201, first.text
+    (initial,) = first.json()["outcomes"]
+    assert initial["outcome"] == "inserted"
+    assert initial["file_path"] == "src/helpers.py"
+    # Nothing is suspended by a first attempt, and the key says so rather than
+    # being absent.
+    assert initial["supersedes"] is None
+
+    claimed = client.post(
+        f"{base}/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    )
+    assert claimed.status_code == 200, claimed.text
+    claim = claimed.json()[0]
+    skipped = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="skipped",
+            skip_reason="generated-code",
+        ),
+    )
+    assert skipped.status_code == 200, skipped.text
+
+    requeued = client.post(
+        f"{base}/analysis-queue",
+        json={
+            "mode": "reanalysis",
+            "reason": "Second pass after the generated-code call was disputed",
+            "items": [
+                {"file_id": helper["id"], "priority": 10, "supersedes": claim["id"]}
+            ],
+        },
+    )
+    assert requeued.status_code == 201, requeued.text
+    (outcome,) = requeued.json()["outcomes"]
+    assert outcome["outcome"] == "reanalysis"
+    assert outcome["file_id"] == int(helper["id"])
+    assert outcome["file_path"] == "src/helpers.py"
+    assert outcome["supersedes"] == int(claim["id"])
+    assert outcome["queue_item_id"] != int(claim["id"])
+
+
+def test_directory_verdicts_read_the_population_their_status_counts_read(
+    client, isolate_settings
+):
+    """A directory cannot report a verdict for a file it calls unreviewed.
+
+    `by_status.analyzed`, `by_classification[...].analyzed` and
+    `accounted_skips` are all drawn from a terminal attempt that proved a
+    claimed owner (`_valid_claimed_terminal_attempt_sql`), so a `done` row with
+    no agent on it is not a review. Reading the verdict off the same row
+    WITHOUT that guard made one directory report `by_disposition {"clean": 1}`
+    beside `by_status.analyzed: 0`, so coverage said the same file was both
+    reviewed and not reviewed.
+    """
+    engagement_key = "2026-11-07-code-coverage-path-verdict-population"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="coverage-path-verdict-repo")
+    base = f"/engagements/{engagement_key}/assessment/code"
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    _classify_file(client, engagement_key, int(parser["id"]), "critical", 95)
+    claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
+    _record_fixture_source_receipt(client, engagement_key, claim)
+    done = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="Reviewed the parser end to end.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
+    )
+    assert done.status_code == 200, done.text
+
+    def directory(path: str) -> dict[str, object]:
+        response = client.get(f"{base}/coverage/by-path")
+        assert response.status_code == 200, response.text
+        rows = response.json()["directories"]
+        for row in rows:
+            analyzed = sum(
+                tier["analyzed"] for tier in row["by_classification"].values()
+            )
+            assert sum(row["by_disposition"].values()) == (
+                analyzed + row["accounted_skips"]
+            ), row
+        return next(row for row in rows if row["path"] == path)
+
+    reviewed = directory("src")
+    assert reviewed["by_status"]["analyzed"] == 1
+    assert reviewed["by_disposition"] == {"clean": 1}
+
+    # An attempt carrying no agent never proved a claimed review, which is
+    # exactly why `analyzed` and `accounted_skip` both drop it.
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE code_analysis_queue SET assigned_agent = '' WHERE id = ?",
+            (int(claim["id"]),),
+        )
+        connection.commit()
+
+    unclaimed = directory("src")
+    assert unclaimed["by_status"]["analyzed"] == 0
+    assert unclaimed["accounted_skips"] == 0
+    assert unclaimed["by_disposition"] == {}
+    assert unclaimed["uncovered_critical_high"] == 1
+
+
 def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
     client, isolate_settings
 ):
@@ -11423,9 +12607,8 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
             disposition="clean",
             notes="Manual sealed-source review completed.",
                 cwe_coverage=[
-                    {"family": "manual-structural-review", "effort": 100},
-                    {"family": "algorithmic-dos", "effort": 80},
-                    {"family": "error-handling", "effort": 80},
+                    {"family": "algorithmic-dos", "effort": 100},
+                    {"family": "error-handling", "effort": 100},
                 ],
         ),
     )
@@ -12813,6 +13996,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
                     "role": "build-configuration",
                     "slot_types": [],
                     "analysis_priority": 0,
+                    "skip_reason": "out-of-scope-language",
                 }
             ]
         },
@@ -12927,6 +14111,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
                 "vigil assess agent start --role code-variant-hunter "
                 f"--code-repo-id {repo['id']} --finding-slugs VF-001"
             ),
+            "severity": "block",
         }
     ]
     blocked_export = client.post(
@@ -14110,6 +15295,65 @@ def test_queue_needs_context_rejects_items_reclaimed_after_validation(client, is
     assert "changed state before needs_context transition" in needs_context.json()["detail"]
 
 
+@pytest.mark.parametrize(
+    ("verb", "payload_keys", "unknown_field"),
+    [
+        ("error", ("item_ids", "agent_name", "lease_token", "notes"), "note"),
+        (
+            "needs-context",
+            ("item_ids", "agent_name", "lease_token", "expansion_request"),
+            "expansion_requests",
+        ),
+        ("reset-stale", ("minutes",), "minute"),
+        ("retry-error", ("item_ids", "reason"), "reasons"),
+        ("retry-needs-context", ("item_ids", "reason"), "resaon"),
+        ("heartbeat", ("item_id", "agent_name", "lease_token"), "item_ids"),
+    ],
+)
+def test_queue_lifecycle_verbs_reject_unknown_fields(
+    client, isolate_settings, verb, payload_keys, unknown_field
+):
+    """A typo must not be accepted and silently dropped.
+
+    Every one of these verbs carries its whole payload in one optional field:
+    the failure record on `error`, the context request on `needs-context` (which
+    `retry-needs-context` later claims was supplied), the abandonment window on
+    `reset-stale`. Accepting `notes`/`expansion_requests`/`minute` and writing
+    the default instead loses exactly the thing the call was made for.
+    """
+    engagement_key, _, file_row = _seed_queue_contract_file(
+        client, isolate_settings, f"unknown-field-{verb}"
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    queue_item = _claim_file_for_analysis(client, engagement_key, int(file_row["id"]))
+    available = {
+        "item_ids": [queue_item["id"]],
+        "item_id": queue_item["id"],
+        "agent_name": queue_item["agent_name"],
+        "lease_token": queue_item["lease_token"],
+        "notes": "toolchain unavailable",
+        "expansion_request": {"reason": "need the caller", "functions": ["parse"]},
+        "minutes": 30,
+        "reason": "operator recovery",
+    }
+    payload = {key: available[key] for key in payload_keys}
+
+    response = client.post(f"{base}/analysis-queue/{verb}", json={**payload, unknown_field: "x"})
+
+    assert response.status_code == 422, response.text
+    assert any(
+        unknown_field in entry.get("loc", ()) for entry in response.json()["detail"]
+    ), response.text
+    with db_module.get_connection() as connection:
+        row = dict(
+            connection.execute(
+                "SELECT status, analysis_notes FROM code_analysis_queue WHERE id = ?",
+                (queue_item["id"],),
+            ).fetchone()
+        )
+    assert row == {"status": "processing", "analysis_notes": ""}
+
+
 def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, isolate_settings, monkeypatch):
     engagement_key = "2026-04-09-analysis-result-race"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -14937,7 +16181,10 @@ def test_initial_queue_retry_updates_pending_row_without_duplication(client, iso
         "outcomes": [
             {
                 "file_id": file_row["id"],
+                "file_path": file_row["file_path"],
                 "queue_item_id": queue_item_id,
+                # An update to a pending initial row suspends no attempt.
+                "supersedes": None,
                 "outcome": "updated",
                 "status": "pending",
                 "detail": "updated pending initial queue item",
@@ -15665,6 +16912,114 @@ def test_queue_stats_projects_latest_attempt_and_reports_preserved_history(
     }
 
 
+def _live_lease_queue_row(file_id: int) -> dict[str, object]:
+    with db_module.get_connection() as connection:
+        row = connection.execute(
+            """
+            SELECT queue.id, queue.status, queue.disposition,
+                   queue.assigned_agent, queue.lease_token,
+                   (SELECT COUNT(*) FROM code_analysis_results AS results
+                     WHERE results.queue_item_id = queue.id
+                       AND results.superseded_at IS NULL) AS current_results
+            FROM code_analysis_queue AS queue
+            WHERE queue.file_id = ?
+            ORDER BY queue.id DESC LIMIT 1
+            """,
+            (file_id,),
+        ).fetchone()
+    return dict(row)
+
+
+def test_reclassification_refuses_to_force_close_a_live_lease(
+    client, isolate_settings
+):
+    """A re-classification must not discharge work another agent still holds.
+
+    `analysis_priority` has always been refused while a lease is live; the
+    review identity (classification / role / slot_types / language) took the
+    same reopen path with no guard, closing the row `done`/`superseded` and
+    superseding every receipt under the holder's feet. The holder then saw a
+    plain "not processing" and "current status is done" — indistinguishable
+    from a reclaim.
+    """
+    engagement_key, _, file_row = _seed_queue_contract_file(
+        client, isolate_settings, "live-lease-reclassify"
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    file_id = int(file_row["id"])
+    queue_item = _claim_file_for_analysis(client, engagement_key, file_id)
+    _record_fixture_source_receipt(client, engagement_key, queue_item)
+    before = _live_lease_queue_row(file_id)
+    assert before["status"] == "processing"
+    assert before["current_results"] == 1
+
+    patched = client.patch(f"{base}/files/{file_id}", json={"role": "network-parser-v2"})
+    assert patched.status_code == 409, patched.text
+    detail = patched.json()["detail"]
+    assert str(queue_item["agent_name"]) in detail
+    assert str(queue_item["lease_token"]) in detail
+    assert _live_lease_queue_row(file_id) == before
+
+    classified = client.post(
+        f"{base}/files/bulk-classify",
+        json={
+            "classifications": [
+                {
+                    "file_id": file_id,
+                    "classification": "high",
+                    "role": "network-parser-v2",
+                    "slot_types": ["NETWORK-INPUT"],
+                    "analysis_priority": 70,
+                }
+            ]
+        },
+    )
+    assert classified.status_code == 409, classified.text
+    assert str(queue_item["agent_name"]) in classified.json()["detail"]
+    assert _live_lease_queue_row(file_id) == before
+
+    # The holder's own lifecycle calls still work: nothing was taken from it.
+    heartbeat = client.post(
+        f"{base}/analysis-queue/heartbeat",
+        json={
+            "item_id": queue_item["id"],
+            "agent_name": queue_item["agent_name"],
+            "lease_token": queue_item["lease_token"],
+        },
+    )
+    assert heartbeat.status_code == 200, heartbeat.text
+
+
+def test_heartbeat_conflict_names_the_queue_item_status(client, isolate_settings):
+    engagement_key, _, file_row = _seed_queue_contract_file(
+        client, isolate_settings, "heartbeat-status"
+    )
+    base = f"/engagements/{engagement_key}/assessment/code"
+    file_id = int(file_row["id"])
+    queue_item = _claim_file_for_analysis(client, engagement_key, file_id)
+    errored = client.post(
+        f"{base}/analysis-queue/error",
+        json={
+            "item_ids": [queue_item["id"]],
+            "agent_name": queue_item["agent_name"],
+            "lease_token": queue_item["lease_token"],
+            "notes": "toolchain unavailable",
+        },
+    )
+    assert errored.status_code == 200, errored.text
+
+    heartbeat = client.post(
+        f"{base}/analysis-queue/heartbeat",
+        json={
+            "item_id": queue_item["id"],
+            "agent_name": queue_item["agent_name"],
+            "lease_token": queue_item["lease_token"],
+        },
+    )
+    assert heartbeat.status_code == 409, heartbeat.text
+    assert "current status is error" in heartbeat.json()["detail"]
+
+
 def _seed_priority_contract_files(client, isolate_settings, suffix: str):
     engagement_key = f"2026-08-05-priority-contract-{suffix}"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
@@ -15690,6 +17045,7 @@ def _classification_record(
             else (slot_types or [])
         ),
         "analysis_priority": priority,
+        **({"skip_reason": "generated-code"} if classification == "skip" else {}),
     }
 
 
@@ -15874,7 +17230,11 @@ def test_file_patch_validates_resulting_classification_priority_pair(
     assert atomic.status_code == 200, atomic.text
     skipped = client.patch(
         f"{base}/files/{file_row['id']}",
-        json={"classification": "skip", "analysis_priority": 0},
+        json={
+            "classification": "skip",
+            "analysis_priority": 0,
+            "skip_reason": "generated-code",
+        },
     )
     assert skipped.status_code == 200, skipped.text
     invalid_skip = client.patch(
@@ -16480,6 +17840,7 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
                 "repository has 1 current suspicious code-analysis attempt(s); "
                 "promote each to a finding or complete a clean terminal reanalysis"
             ),
+            "severity": "block",
         }
     ]
     from assess.lib.coverage_checks import render_report_readiness

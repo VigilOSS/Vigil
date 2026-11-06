@@ -232,6 +232,67 @@ it("summarizes report blockers by kind and keeps every blocker one click away", 
   expect(within(panel).getByText("Blocker detail 15")).toBeTruthy();
 });
 
+it("shows the advisories a passing gate leaves behind, and says they never block", async () => {
+  // `report_readiness` returns advisories alongside blockers and they are not
+  // empty just because the gate passes — they quote QA doubt about the
+  // engagement's own evidence. The SPA rendered none of them, so the only way
+  // to read them was the CLI.
+  vi.mocked(getReportReadiness).mockResolvedValue({
+    ready: true,
+    blocker_count: 0,
+    blockers: [],
+    advisory_count: 2,
+    advisories: [
+      { kind: "missing_cited_markdown_artifact", severity: "advisory", slug: "acme-1", detail: "notes/scope.md cites an artifact that is absent." },
+      { kind: "finding_repro_runs_missing", severity: "advisory", slug: "acme-2", detail: "advisory, not a report blocker: no command run backs the steps." },
+    ],
+  } as unknown as ReportReadiness);
+  render(<OverviewTab {...props} />);
+
+  const panel = await screen.findByRole("region", { name: "Report advisories" });
+  expect(panel.textContent).toContain("None of these blocks a final report export");
+  expect(within(panel).getByText("notes/scope.md cites an artifact that is absent.")).toBeTruthy();
+  expect(screen.getByTestId("readiness-advisory-count").textContent).toContain("2");
+  // The blockers panel is a different gate and must not appear for them.
+  expect(screen.queryByRole("region", { name: "Report blockers" })).toBeNull();
+});
+
+it("gates each readiness item on the severity the backend stamped, not the array it arrived in", async () => {
+  // `missing_cited_markdown_artifact` never gates and
+  // `finding_evidence_missing_artifact` always does, yet both describe a cited
+  // artifact that is absent. The stamp is the only thing that tells them
+  // apart, so the panels read it rather than the list position.
+  vi.mocked(getReportReadiness).mockResolvedValue({
+    ready: false,
+    blocker_count: 1,
+    blockers: [{ kind: "misfiled_advisory", severity: "advisory", detail: "Stamped advisory, delivered in blockers." }],
+    advisories: [{ kind: "misfiled_blocker", severity: "block", detail: "Stamped block, delivered in advisories." }],
+  } as unknown as ReportReadiness);
+  render(<OverviewTab {...props} />);
+
+  const blockers = await screen.findByRole("region", { name: "Report blockers" });
+  expect(within(blockers).getByText("Stamped block, delivered in advisories.")).toBeTruthy();
+  expect(within(blockers).queryByText("Stamped advisory, delivered in blockers.")).toBeNull();
+
+  const advisories = screen.getByRole("region", { name: "Report advisories" });
+  expect(within(advisories).getByText("Stamped advisory, delivered in blockers.")).toBeTruthy();
+});
+
+it("keeps an unstamped payload's items in the bucket that delivered them", async () => {
+  vi.mocked(getReportReadiness).mockResolvedValue({
+    ready: false,
+    blocker_count: 1,
+    blockers: [{ kind: "unstamped_blocker", detail: "No severity key." }],
+    advisories: [{ kind: "unstamped_advisory", detail: "Also no severity key." }],
+  } as unknown as ReportReadiness);
+  render(<OverviewTab {...props} />);
+
+  const blockers = await screen.findByRole("region", { name: "Report blockers" });
+  expect(within(blockers).getByText("No severity key.")).toBeTruthy();
+  const advisories = screen.getByRole("region", { name: "Report advisories" });
+  expect(within(advisories).getByText("Also no severity key.")).toBeTruthy();
+});
+
 it("opens with a page header naming what the page is for", async () => {
   render(<OverviewTab {...props} readinessRefreshVersion={0} />);
   expect(screen.getByRole("heading", { level: 1, name: "Overview" })).toBeTruthy();

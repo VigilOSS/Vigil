@@ -45,8 +45,9 @@ export function CodeQuality({ engagementKey, warnings }: Props) {
       <header className="cv-section-head">
         <h3 id="cv-quality-title">Review quality</h3>
         <p className="meta-text">
-          Every reviewed critical or high file must show enough review effort on each vulnerability type that applies to
-          it. Files below that bar are grouped by vulnerability type.
+          Every reviewed critical, high or medium file must show enough review effort on each vulnerability type that
+          applies to it; only critical and high withhold the gate. Files below that bar are grouped by vulnerability
+          type.
         </p>
       </header>
       {warnings.length === 0 ? (

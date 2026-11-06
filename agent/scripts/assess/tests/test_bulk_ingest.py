@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import pytest
 
+from assess.lib import bulk_ingest
 from assess.lib.bulk_ingest import (
     DEFAULT_BULK_WRITE_SIZE,
     post_coverage_items_bulk,
     post_request_observations_bulk,
 )
-from assess.lib.client import AssessError
+from assess.lib.client import DEFAULT_READ_TIMEOUT_SECONDS, AssessError
 
 
 def _observation_receipt(row_id: int = 1) -> dict:
@@ -21,7 +22,7 @@ def test_coverage_items_bulk_chunks_at_backend_cap() -> None:
     calls: list[tuple[str, int]] = []
 
     class Client:
-        def post(self, endpoint: str, payload: dict) -> dict:
+        def post(self, endpoint: str, payload: dict, **_kwargs) -> dict:
             calls.append((endpoint, len(payload["items"])))
             records = [
                 {
@@ -149,6 +150,78 @@ def test_coverage_items_bulk_rejects_malformed_success_receipt() -> None:
         )
 
     assert "do not retry automatically" in str(exc.value)
+
+
+def test_bulk_writes_get_a_response_budget_that_scales_with_the_chunk() -> None:
+    """A full chunk on the flat 10 s default times out before it commits.
+
+    ``request-observations`` rows carry request and response bodies, so a
+    500-row chunk is routinely multi-megabyte and the backend writes a variant
+    plus an observation for each one in a single transaction. A read timeout
+    there is not a cheap retry: the rows may already be durable, so the caller
+    can only report the batch as uncertain — the outcome the two sibling scaled
+    bulk writes already avoid.
+    """
+    budgets: list[float | None] = []
+
+    class Client:
+        def post(self, endpoint: str, payload: dict, *, read_timeout=None) -> dict:
+            budgets.append(read_timeout)
+            rows = payload["items"]
+            if endpoint == "request-observations/bulk":
+                records = [
+                    {
+                        "request_variant": {"id": index, "method": "GET"},
+                        "request_observation": {
+                            "id": index,
+                            "request_variant_id": index,
+                            "observed_url": item["url"],
+                        },
+                    }
+                    for index, item in enumerate(rows, start=1)
+                ]
+            else:
+                records = [
+                    {
+                        "id": index,
+                        "request_variant_id": item.get("request_variant_id"),
+                        "service_id": item.get("service_id"),
+                        "auth_context": "anonymous",
+                        "input_slot": "endpoint",
+                        "attack_family": item["attack_family"],
+                    }
+                    for index, item in enumerate(rows, start=1)
+                ]
+            return {"count": len(records), "records": records}
+
+    client = Client()
+    full = DEFAULT_BULK_WRITE_SIZE
+    post_request_observations_bulk(
+        client,
+        [
+            {"url": f"https://acme.example/items/{index}", "method": "GET"}
+            for index in range(full)
+        ],
+        warn_prefix="test",
+    )
+    post_coverage_items_bulk(
+        client,
+        [{"attack_family": "idor"} for _ in range(full)],
+        warn_prefix="test",
+    )
+    post_request_observations_bulk(
+        client, [{"url": "https://acme.example/one", "method": "GET"}], warn_prefix="test"
+    )
+    post_coverage_items_bulk(client, [{"attack_family": "idor"}], warn_prefix="test")
+
+    observation_budget, coverage_budget, small_observation, small_coverage = budgets
+    assert observation_budget == bulk_ingest._OBSERVATION_SECONDS_PER_ROW * full
+    assert coverage_budget == bulk_ingest._COVERAGE_ITEM_SECONDS_PER_ROW * full
+    assert observation_budget > DEFAULT_READ_TIMEOUT_SECONDS
+    assert coverage_budget > DEFAULT_READ_TIMEOUT_SECONDS
+    # A single-row chunk cannot outrun the default, so it does not ask to.
+    assert small_observation is None
+    assert small_coverage is None
 
 
 def test_the_client_chunk_size_never_exceeds_the_backend_bulk_cap():

@@ -191,3 +191,88 @@ def test_code_continuation_uses_current_paths_for_the_same_pinned_content(monkey
     assert captured['context']['source_identity'] == current
     assert captured['context']['queue_item_ids'] == [41]
     assert 'snapshot_path: source/acme/current' in captured['rendered_prompt']
+
+
+@pytest.mark.parametrize('channel', ['role_specific_additions', 'packet_file'])
+def test_per_slug_obligation_without_assigned_slugs_is_advised(monkeypatch, tmp_path, capsys, channel):
+    """A verifier-shaped obligation block rendered into a lane with no slugs.
+
+    `role_specific_additions` and the captured assignment text are passed through
+    verbatim with no cross-check, so a block reading "every assigned slug must
+    leave this dispatch with a terminal verdict" reached a variant lane that was
+    never given a slug. Mechanically detectable, so it is an advisory signal —
+    the operator still owns the authored text.
+    """
+    args, client = setup_start(monkeypatch, tmp_path, role='code-variant-hunter', mode='code')
+    obligation = 'Every assigned slug must leave this dispatch with a terminal verdict.'
+    if channel == 'packet_file':
+        supplement = tmp_path / 'assignment.txt'
+        supplement.write_text(obligation + '\n')
+        args.packet_file = str(supplement)
+    else:
+        args.prompt_context = {'role_specific_additions': obligation}
+    agent._start(args)
+    err = capsys.readouterr().err
+    assert 'ADVISORY dispatch packet' in err
+    assert 'finding_slugs' in err
+    assert obligation[:40] in err
+
+
+def test_a_lane_that_was_given_its_slugs_draws_no_obligation_advisory(monkeypatch, tmp_path, capsys):
+    args, client = setup_start(monkeypatch, tmp_path, role='code-variant-hunter', mode='code')
+    monkeypatch.setattr(agent.dispatch, '_build_register_payload', lambda _: {
+        'agent_id': 'acme-lane', 'agent_role': 'code-variant-hunter', 'task': args.task,
+        'assessment_mode': 'code', 'finding_slugs': ['VF-001'],
+    })
+    args.prompt_context = {'role_specific_additions': 'Every assigned slug must leave this dispatch with a terminal verdict.'}
+    agent._start(args)
+    assert 'per-slug' not in capsys.readouterr().err
+
+
+def test_ordinary_produced_slug_guidance_is_not_mistaken_for_an_obligation(monkeypatch, tmp_path, capsys):
+    args, client = setup_start(monkeypatch, tmp_path, role='code-vuln-hunter', mode='code')
+    args.prompt_context = {'role_specific_additions': 'Record any finding slug you produce with `finding record`.'}
+    agent._start(args)
+    assert 'per-slug' not in capsys.readouterr().err
+
+
+def test_start_refuses_a_role_that_has_no_prompt_in_the_resolvable_roster(monkeypatch, tmp_path, capsys):
+    """The packet tells the specialist to read `agent/agents/<role>.md`.
+
+    A typo'd or invented role produced a valid-looking row, an immutable packet
+    and a launch envelope pointing at a file that does not exist — the backend's
+    own role cross-check only fires once the specialist has already run.
+    """
+    args, client = setup_start(monkeypatch, tmp_path, role='vulnerability-analist', mode='web')
+    roster = tmp_path / 'agents'
+    roster.mkdir()
+    (roster / 'vulnerability-analyst.md').write_text('# role\n')
+
+    with pytest.raises(SystemExit):
+        agent._start(args)
+
+    err = capsys.readouterr().err
+    assert 'vulnerability-analist' in err
+    assert 'vulnerability-analyst' in err
+    assert client.writes == []
+
+
+def test_start_accepts_a_role_whose_prompt_is_in_the_roster(monkeypatch, tmp_path):
+    args, client = setup_start(monkeypatch, tmp_path, role='vulnerability-analyst', mode='web')
+    roster = tmp_path / 'agents'
+    roster.mkdir()
+    (roster / 'vulnerability-analyst.md').write_text('# role\n')
+
+    agent._start(args)
+
+    assert client.writes[0]['agent_role'] == 'vulnerability-analyst'
+
+
+def test_start_does_not_refuse_a_role_when_the_roster_does_not_resolve(monkeypatch, tmp_path):
+    """No roster on disk proves nothing, so an unreadable install cannot block a
+    dispatch; instruction identity already reports unresolvable prompt files."""
+    args, client = setup_start(monkeypatch, tmp_path, role='vulnerability-analist', mode='web')
+
+    agent._start(args)
+
+    assert client.writes[0]['agent_role'] == 'vulnerability-analist'

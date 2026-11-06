@@ -22,7 +22,12 @@ from assess.lib.client import (
     DEFAULT_READ_TIMEOUT_SECONDS,
     require_write_result,
 )
-from assess.lib.code_languages import HEADER_DECIDED_EXTENSIONS, detect_language
+from assess.lib.code_languages import (
+    CANONICAL_CODE_LANGUAGES,
+    HEADER_DECIDED_EXTENSIONS,
+    canonical_backend_language,
+    detect_language,
+)
 from assess.lib.code_snapshot import (
     RootedSourceTree,
     SealedSnapshot,
@@ -73,17 +78,52 @@ SKIP_EXTENSIONS = frozenset({
 # `src/Vendor/`, an `env/production.php` of settings. Such a directory is
 # skipped, in any casing, only when it holds what its tool writes there, named
 # exactly: a case-folding filesystem would otherwise read a first-party
-# `src/Vendor/Bundle/` as Bundler's `bundle/`. Go tools older than modules
-# (dep, glide, godep, govendor) lay `vendor/` out by import path.
-# PascalCase `Build/`, `Coverage/` and `Target/` are ordinary .NET source
-# directories, so SKIP_DIRS stays exact.
+# `src/Vendor/Bundle/` as Bundler's `bundle/`. PascalCase `Build/`, `Coverage/`
+# and `Target/` are ordinary .NET source directories, so SKIP_DIRS stays exact.
+#
+# A marker is a path shape, not only a child name, because the generated file
+# that names the tool is the file a repository is most likely to have gitignored
+# while committing the installed packages themselves. `_SkipPolicy._holds`
+# defines the segment forms.
 _TOOL_OUTPUT_DIR_MARKERS = {
+    # Cheapest first within each tool: the markers naming one child answer the
+    # question with one directory read, and a miss is what pays for the search.
     'vendor': (
-        'autoload.php', 'modules.txt', 'composer', 'bundle',
-        'vendor.json', 'github.com', 'golang.org', 'gopkg.in',
+        # Composer: its own directory, the generated autoloader, and the
+        # manifest it installs with every package at `<vendor>/<package>/` —
+        # which is what survives gitignoring the generated files.
+        'composer', '**/autoload.php', '*/*/composer.json',
+        # Bundler: the install path, the gem cache, and the older layout.
+        'bundle', 'cache/*.gem', 'gems/*/*.gemspec',
+        # Go: `go mod vendor` writes modules.txt and govendor vendor.json, and
+        # every Go vendoring tool, modules or not, lays the tree out by import
+        # path. The host alone is a weak signal — a hand-copied `jquery.ui/` is
+        # dotted too — so Go source beneath it has to corroborate.
+        '**/modules.txt', '**/vendor.json', '@host/**/*.go',
     ),
-    'env': ('pyvenv.cfg', 'bin/activate', 'Scripts/activate'),
+    'env': (
+        # virtualenv and venv, on either platform, plus conda's package ledger.
+        'bin/activate', 'Scripts/activate', 'conda-meta', '**/pyvenv.cfg',
+        # The library root a virtualenv or conda environment keeps when its
+        # `bin/` and `pyvenv.cfg` were not committed.
+        'Lib/site-packages', 'lib/*/site-packages',
+    ),
 }
+# A Go module path begins at the host that serves it, and that host set is open:
+# `github.com`, `gopkg.in`, `google.golang.org`, `k8s.io` and `go.uber.org` are
+# all real, so any exact list is one module short — `google.golang.org` is not a
+# sub-name of `golang.org` and comparing them fails. The shape decides instead:
+# a lowercase, dotted name ending in a letters-only label. A Composer, npm or
+# hand-copied package directory is usually none of those, and the `*.go` segment
+# that follows rules out the ones that are.
+_GO_MODULE_HOST_RE = re.compile(r'^[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)*\.[a-z]{2,}$')
+# How far a marker is looked for below the directory it would exclude. Composer,
+# Bundler and Go each write one into every installed package, so the first few
+# siblings answer the question for the whole tree; the caps bound the walk over a
+# first-party directory, where every marker misses and the search runs in full.
+_TOOL_OUTPUT_MARKER_DEPTH = 4
+_TOOL_OUTPUT_MARKER_BREADTH = 32
+_TOOL_OUTPUT_MARKER_DIRS = 512
 
 # Bundler output named by content hash (`main.3f2a1b9c.chunk.js`). An unhashed
 # `vendors.chunk.js` is as likely to be hand-written as generated, so the hash
@@ -127,6 +167,11 @@ DEFAULT_MAX_INCLUDED_SKIPPED_BYTES = 2_000_000
 # the first Phase 0 command is worse than a loud one.
 _COLLAPSED_ADMISSION_RATIO = 0.25
 _COLLAPSED_ADMISSION_MIN_SKIPPED = 100
+# The inverse: a `vendor`- or `env`-named directory this much of the admitted
+# set. Held well above a handful of files so a marketplace's `src/Vendor/` or a
+# repository's `env/production.php` does not earn a warning on every ingest.
+_VENDOR_NAMED_ADMISSION_RATIO = 0.25
+_VENDOR_NAMED_ADMISSION_MIN_FILES = 25
 
 
 _GIT_LOG_TIMEOUT_SECONDS = 120
@@ -139,6 +184,7 @@ _SHA256_PATTERN = re.compile(r"^[0-9a-fA-F]{64}$")
 _BUILD_REFERENCE_SCAN_BYTES = 64 * 1024
 _SCAN_PROGRESS_FILES = 1000
 _REFRESH_SECONDS_PER_FILE = 0.02
+_REFRESH_STAGE_SECONDS_PER_FILE = 0.1
 _REFRESH_BYTES_PER_SECOND = 16 * 1024 * 1024
 _REFRESH_COMMIT_POLL_SECONDS = 5.0
 
@@ -482,8 +528,53 @@ def _setup_ctags(
     return config
 
 
+# `code-ingest` has one positional and it is a path, so a verb-shaped argument
+# resolves against the working directory and fails as a missing repository. The
+# listing it was reaching for is a `fetch` route, which nothing in this command's
+# help previously named.
+CODE_REPO_LISTING_ROUTE = "vigil assess fetch code/repos"
+
+
+def _validated_default_language(value: object) -> str | None:
+    """Canonicalize the unknown-extension language, or refuse the ingest.
+
+    This value is stamped verbatim onto every file whose extension Vigil does
+    not recognize, and `code-index build`/`sync` bind the structural index
+    against the backend's canonical language set. An unrecognized label here
+    therefore does not degrade one file: it makes the next index publication
+    refuse the entire repository, for a repository that was never classified.
+    """
+    if value in (None, ""):
+        return None
+    try:
+        # Operator-typed, so casing is folded before the backend's own
+        # canonicalization decides; `code-record classify` folds the same way.
+        return canonical_backend_language(str(value).strip().lower())
+    except ValueError:
+        # The canonical set includes the empty language (an unclassified file),
+        # which is what omitting this flag already means, so naming it here
+        # would read as a usable value.
+        accepted = ", ".join(sorted(name for name in CANONICAL_CODE_LANGUAGES if name))
+        print(
+            f"Cannot ingest repository: --default-language-for-unknown {value!r} is "
+            "not a language the backend accepts, and stamping it would make the "
+            "next `code-index build`/`sync` refuse this whole repository. "
+            f"Accepted: {accepted}",
+            file=sys.stderr,
+        )
+        raise SystemExit(1) from None
+
+
 def register(subparsers) -> None:
-    p = subparsers.add_parser("code-ingest", help="Ingest a code repository for analysis")
+    p = subparsers.add_parser(
+        "code-ingest",
+        help="Ingest a code repository for analysis",
+        epilog=(
+            "code-ingest takes a repository path and has no subcommands. "
+            f"To list the repositories already ingested, run `{CODE_REPO_LISTING_ROUTE}`; "
+            "`vigil assess code-coverage` reports their coverage and binding state."
+        ),
+    )
     p.add_argument("repo_path", help="Path to the repository root")
     p.add_argument("--name", default=None, help="Repository name (default: directory basename)")
     p.add_argument("--language", default=None, help="Override repository primary language (does NOT auto-tag unknown files; use --default-language-for-unknown for that)")
@@ -719,15 +810,90 @@ class _SkipPolicy:
         return f"skipped_dir:{lowered}" if self._tool_output[rel_dir] else None
 
     def _holds(self, rel_dir: str, marker: str) -> bool:
-        for name in marker.split("/"):
-            try:
-                listing = next(self.tree.walk(rel_dir))
-            except (OSError, ValueError):
+        """Whether *marker*'s path shape exists under *rel_dir*.
+
+        A segment is an exact name, `*` for one directory, `**` for any number
+        of levels within `_TOOL_OUTPUT_MARKER_DEPTH`, `*.<ext>` for a file with
+        that extension, or `@host` for a Go module host. Exact names are
+        compared verbatim, so a case-folding filesystem cannot read a
+        first-party `src/Vendor/Bundle/` as Bundler's `bundle/`.
+        """
+        segments = marker.split("/")
+        candidates = [rel_dir]
+        for position, segment in enumerate(segments):
+            if segment == "**":
+                candidates = self._within_marker_depth(candidates)
+                continue
+            last = position == len(segments) - 1
+            matched: list[str] = []
+            for candidate in candidates:
+                listing = self._listing(candidate)
+                if listing is None:
+                    continue
+                if segment.startswith("*."):
+                    # An extension only ever names the marker itself.
+                    if last and any(
+                        name.endswith(segment[1:]) for name in listing.regular_files
+                    ):
+                        return True
+                    continue
+                names = self._segment_matches(segment, listing)
+                if names and last:
+                    return True
+                matched.extend(f"{candidate}/{name}" for name in names)
+            if not matched:
                 return False
-            if name not in listing.regular_files and name not in listing.directories:
-                return False
-            rel_dir = f"{rel_dir}/{name}"
+            candidates = matched
         return True
+
+    def _listing(self, rel_dir: str):
+        """One level of *rel_dir*, or None when it cannot be read."""
+        try:
+            return next(self.tree.walk(rel_dir))
+        except (OSError, ValueError, StopIteration):
+            return None
+
+    @staticmethod
+    def _segment_matches(segment: str, listing) -> list[str]:
+        """The entries of *listing* one marker segment names.
+
+        Sorted before the breadth cap applies, so the same tree answers the same
+        way on every pass — `_verify_source_inventory` re-runs this walk and
+        compares the partition it produced.
+        """
+        if segment == "*":
+            names = sorted(listing.directories)
+        elif segment == "@host":
+            names = sorted(
+                name for name in listing.directories if _GO_MODULE_HOST_RE.match(name)
+            )
+        elif segment in listing.directories or segment in listing.regular_files:
+            return [segment]
+        else:
+            return []
+        return names[:_TOOL_OUTPUT_MARKER_BREADTH]
+
+    def _within_marker_depth(self, roots: list[str]) -> list[str]:
+        """*roots* and the directories under them a `**` segment can reach."""
+        reached = list(roots)
+        frontier = roots
+        for _ in range(_TOOL_OUTPUT_MARKER_DEPTH):
+            following: list[str] = []
+            for candidate in frontier:
+                if len(reached) + len(following) >= _TOOL_OUTPUT_MARKER_DIRS:
+                    break
+                listing = self._listing(candidate)
+                if listing is None:
+                    continue
+                following.extend(
+                    f"{candidate}/{name}"
+                    for name in sorted(listing.directories)[:_TOOL_OUTPUT_MARKER_BREADTH]
+                )
+            if not following:
+                break
+            reached.extend(following)
+            frontier = following
+        return reached
 
     def file_reason(self, rel_path: str, filename: str) -> str | None:
         reason = _skip_file_reason(rel_path, filename, self.skip_dirs)
@@ -948,6 +1114,69 @@ def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -
         f"re-run with {remedy}. A changed admitted set advances the repository generation.",
         file=sys.stderr,
     )
+
+
+def _vendor_named_admission_census(admitted) -> dict[str, int]:
+    """Admitted files per `vendor`- or `env`-named directory holding them.
+
+    Counted against the shallowest such ancestor, so one installed tree is one
+    row however many `vendor/` directories nest inside it.
+    """
+    census: dict[str, int] = {}
+    for rel_path in admitted:
+        parts = PurePosixPath(rel_path.replace(os.sep, "/")).parts[:-1]
+        for depth, part in enumerate(parts, 1):
+            if part.lower() in _TOOL_OUTPUT_DIR_MARKERS:
+                rel_dir = "/".join(parts[:depth])
+                census[rel_dir] = census.get(rel_dir, 0) + 1
+                break
+    return census
+
+
+def _warn_on_vendor_named_admission(admitted, args) -> None:
+    """Say so when a `vendor`- or `env`-named directory is most of what was kept.
+
+    `_warn_on_collapsed_admission` covers the opposite failure, a skip policy
+    that discarded the repository, and stays silent here by construction: a
+    large admitted vendor tree pushes the admitted ratio towards 1.0. The risk
+    on this side is a third-party distribution whose generated files were never
+    committed, which no marker can recognize and which is then hashed, sealed,
+    parsed and reviewed as the operator's own code with nothing saying so.
+
+    Naming the directory and the flag that drops it leaves the decision with
+    the operator, who is the authority over their own engagement
+    ([ADR 0019](docs/adr/0019-vigil-does-not-defend-against-its-own-operator.md));
+    capping the ingest would instead refuse legitimate work on a large
+    first-party tree.
+    """
+    total = len(admitted)
+    if not total:
+        return
+    census = sorted(
+        _vendor_named_admission_census(admitted).items(),
+        key=lambda item: (-item[1], item[0]),
+    )
+    for rel_dir, count in census:
+        if count < _VENDOR_NAMED_ADMISSION_MIN_FILES:
+            continue
+        if count / total < _VENDOR_NAMED_ADMISSION_RATIO:
+            continue
+        if _should_descend_skipped_dir(rel_dir, PurePosixPath(rel_dir).name, args):
+            # An explicit include put these here; the operator already knows.
+            continue
+        print(
+            f"code-ingest: WARNING — {rel_dir}/ holds {count} of {total} admitted "
+            f"files ({count / total:.1%}) and nothing in it was written by a "
+            "package manager or a virtualenv, so it was ingested as first-party "
+            "source.",
+            file=sys.stderr,
+        )
+        print(
+            "  If those bytes are somebody else's distribution, re-run with "
+            f"--exclude-path '{rel_dir}'. A changed admitted set advances the "
+            "repository generation.",
+            file=sys.stderr,
+        )
 
 
 def _should_descend_skipped_dir(rel_dir: str, dirname: str, args) -> bool:
@@ -1709,9 +1938,25 @@ def _git_security_files(repo_path: str, history_args: list[str] | None = None) -
 
 
 def run(args) -> None:
+    default_language = _validated_default_language(
+        getattr(args, "default_language_for_unknown", None)
+    )
+    args.default_language_for_unknown = default_language
     repo_path = os.path.realpath(os.path.abspath(args.repo_path))
     if not os.path.isdir(repo_path):
-        print(f"Repository path not found: {repo_path}", file=sys.stderr)
+        message = f"Repository path not found: {repo_path}"
+        # A bare word with no separator is almost always a verb the operator
+        # expected this command to take. Naming the real route costs one
+        # sentence; accepting a literal `list` would shadow a directory that is
+        # genuinely named `list`.
+        raw = str(args.repo_path)
+        if not any(separator in raw for separator in ("/", os.sep)):
+            message += (
+                f". `code-ingest` takes a repository path, not a subcommand: run "
+                f"`{CODE_REPO_LISTING_ROUTE}` to list the repositories already "
+                "ingested"
+            )
+        print(message, file=sys.stderr)
         sys.exit(1)
 
     _expand_directory_include_patterns(repo_path, args)
@@ -1873,6 +2118,7 @@ def run(args) -> None:
         )
 
     _warn_on_collapsed_admission(skip_census, len(files))
+    _warn_on_vendor_named_admission([str(record["file_path"]) for record in files], args)
     for warning in _excluded_build_reference_warnings(
         admitted_build_files, skipped_records,
         {str(record["file_path"]) for record in files},
@@ -1960,7 +2206,19 @@ def run(args) -> None:
                 'refresh_token': refresh_token,
                 'files': batch,
             }
-            resp = client.post(f'code/repos/{repo_id}/refresh/files', files_payload)
+            # Staging a batch writes one row per file with its header snippet,
+            # so a full batch cannot be held to the default response budget any
+            # more than the commit below can.
+            stage_timeout = _REFRESH_STAGE_SECONDS_PER_FILE * len(batch)
+            resp = client.post(
+                f'code/repos/{repo_id}/refresh/files',
+                files_payload,
+                **(
+                    {"read_timeout": stage_timeout}
+                    if stage_timeout > DEFAULT_READ_TIMEOUT_SECONDS
+                    else {}
+                ),
+            )
             require_write_result(
                 resp,
                 operation="stage code repository files",

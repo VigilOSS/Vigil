@@ -170,7 +170,17 @@ def test_words_that_merely_contain_a_token_and_non_source_paths_point_at_nothing
     assert not suggested & _WORKFLOW_STATE
 
 
-def _claim_classified_file(client, isolate_settings, engagement_key, *, file_path, language, role):
+def _claim_classified_file(
+    client,
+    isolate_settings,
+    engagement_key,
+    *,
+    file_path,
+    language,
+    role,
+    classification="critical",
+    priority=90,
+):
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     base = f"/engagements/{engagement_key}/assessment/code"
     repo = _create_repo(client, engagement_key, repo_key="workflow-families")
@@ -198,17 +208,18 @@ def _claim_classified_file(client, isolate_settings, engagement_key, *, file_pat
             "classifications": [
                 {
                     "file_id": file_id,
-                    "classification": "critical",
+                    "classification": classification,
                     "role": role,
                     "slot_types": ["NETWORK-INPUT"],
-                    "analysis_priority": 90,
+                    "analysis_priority": priority,
                 }
             ]
         },
     )
     assert classified.status_code == 200, classified.text
     queued = client.post(
-        f"{base}/analysis-queue", json={"items": [{"file_id": file_id, "priority": 90}]}
+        f"{base}/analysis-queue",
+        json={"items": [{"file_id": file_id, "priority": priority}]},
     )
     assert queued.status_code == 201, queued.text
     claim = client.post(
@@ -308,3 +319,78 @@ def test_a_checkout_value_object_closes_without_race_coverage_and_the_gate_stays
 
     gate = client.get(f"{base}/coverage?repo_id={repo_id}").json()["gate"]
     assert not [reason for reason in gate["reasons"] if path in reason]
+
+
+@pytest.mark.parametrize(
+    "role",
+    [
+        "auth_controller",
+        "login_controller",
+        "signin_handler",
+        "SessionService",
+        "oauth_token_endpoint",
+        "sso_entry",
+    ],
+)
+def test_credential_presentation_roles_require_rate_limit_review(role):
+    """A credential entry point owes guessing review, OTP or not.
+
+    `rate-limit` used to be reachable only through the one-time-code workflow
+    words, so a plain `login_controller` owed `auth-bypass` and `web-app-auth`
+    and nothing about credential stuffing or brute force — the two cheapest
+    attacks on exactly that file.
+    """
+    required, suggested = _families(["NETWORK-INPUT"], language="python", role=role)
+    assert "rate-limit" in required
+    assert {"auth-bypass", "web-app-auth"} <= required
+    assert "rate-limit" not in suggested
+
+
+@pytest.mark.parametrize("role", ["permission_policy", "rbac_evaluator", "acl_resolver"])
+def test_authorization_policy_roles_do_not_owe_rate_limit(role):
+    """Precision: a policy decision point is not a guessing surface. Requiring
+    `rate-limit` there would make the obligation noise on files that present no
+    credential."""
+    required, _suggested = _families(["NETWORK-INPUT"], language="python", role=role)
+    assert {"auth-bypass", "web-app-auth"} <= required
+    assert "rate-limit" not in required
+
+
+def test_a_medium_transactional_role_is_still_held_to_the_workflow_families(
+    client, isolate_settings
+):
+    """The role label makes the workflow families required at every tier.
+
+    `done` validates against `_applicable_families_for_file`, which reads the
+    role and never the classification — so a refund handler classified `medium`
+    owes the same check-then-act review a `critical` one does. Only the EFFORT
+    threshold is tier-dependent.
+    """
+    base, _repo_id, claim = _claim_classified_file(
+        client,
+        isolate_settings,
+        "2026-11-06-workflow-families-medium",
+        file_path="src/billing/refund_service.py",
+        language="python",
+        role="refund_service",
+        classification="medium",
+        priority=40,
+    )
+    assert _WORKFLOW <= set(claim["applicable_vuln_classes"])
+
+    refused = _done(client, base, claim, _network_input_coverage(default_effort=80))
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "race-condition" in detail and "business-logic" in detail
+
+    accepted = _done(
+        client,
+        base,
+        claim,
+        [
+            *_network_input_coverage(default_effort=80),
+            {"family": "race-condition", "effort": 80},
+            {"family": "business-logic", "effort": 80},
+        ],
+    )
+    assert accepted.status_code == 200, accepted.text

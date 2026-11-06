@@ -126,6 +126,31 @@ it("renders severity and statuses in the shared sentence-case styles", () => {
   expect(cell("submission")).toEqual({ text: "Needs info", pill: expect.anything() });
 });
 
+it("marks a verdict the operator took on their own authority, in the ledger itself", () => {
+  // The ledger is where a reviewer decides which findings to open, so it
+  // cannot be the one view that shows a verdict reached without a decision
+  // receipt as an ordinary verified one. ADR 0019 permits the waiver; the
+  // stamp exists so it is never silent.
+  render(<FindingsGrid rows={[]} selected={null} onOpen={() => {}} onOrderChange={() => {}} />);
+  const Renderer = grid.columnDefs.find((column) => column.colId === "verification")!.cellRenderer as (props: { data: Derived }) => ReactElement;
+  const base = { slug: "VA-001", verificationKey: "confirmed" };
+
+  // Deliberately typeless: a stamp written before the cited row's table was
+  // recorded has an id and nothing to resolve it against, and the ledger cell
+  // names the id by itself rather than guessing one of the ten intel tables.
+  const waived = render(<Renderer data={{ ...base, operatorAuthority: { kind: "out_of_snapshot", intel_id: 17, reason: "Vendor advisory" } } as unknown as Derived} />);
+  expect(waived.container.textContent).toContain("Verified");
+  expect(waived.container.textContent).toContain("Operator authority · intel 17");
+
+  const typed = render(<Renderer data={{ ...base, operatorAuthority: { kind: "out_of_snapshot", intel_id: 17, intel_type: "note", reason: "Vendor advisory" } } as unknown as Derived} />);
+  expect(typed.container.textContent).toContain("Operator authority · intel note 17");
+  typed.unmount();
+  waived.unmount();
+
+  const verified = render(<Renderer data={{ ...base, operatorAuthority: null } as unknown as Derived} />);
+  expect(verified.container.textContent).toBe("Verified");
+});
+
 // ag-grid calls a comparator with `isDescending` and then reverses its result
 // for a descending sort.
 function agSort(colId: string, values: string[], direction: "asc" | "desc") {

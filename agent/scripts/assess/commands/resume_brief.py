@@ -314,12 +314,7 @@ def _render_markdown(brief: dict) -> str:
             f"(track unattributed; intent omitted): "
             f"`{shared_checkpoint.get('read_command')}`"
         ))
-    lines.extend(["", "## Finding Counts"])
-    counts = brief.get("finding_counts") or {}
-    for key in ("workflow", "verification_status", "severity", "source"):
-        values = counts.get(key) or {}
-        compact = ", ".join(f"{name}={count}" for name, count in sorted(values.items())) or "-"
-        lines.append(contain_separators(f"- {key}: {compact}"))
+    _render_finding_counts(lines, brief)
     target = brief.get("target_finding")
     if target:
         lines.extend(["", "## Target Finding", _finding_line(target)])
@@ -501,6 +496,30 @@ def _render_markdown(brief: dict) -> str:
             entity = f" [{row.get('entity_kind')} {row.get('entity_id')}]"
         lines.append(contain_separators(f"- {row.get('reason')}{entity}: `{row.get('command')}`"))
     return "\n".join(lines)
+
+
+def _render_finding_counts(lines: list, brief: dict) -> None:
+    """The ledger's live breakdown, with the single total every brief needs.
+
+    Dispatch prompts tell specialists to dedupe against "the N existing
+    findings", and the brief only ever showed the per-key breakdowns, so N had to
+    be summed by hand — which is how a stale count reached three consecutive
+    waves. Every finding carries exactly one workflow status, so the workflow row
+    is the ledger size; it is stated outright rather than left to be added up.
+    """
+    lines.extend(["", "## Finding Counts"])
+    counts = brief.get("finding_counts") or {}
+    workflow = counts.get("workflow")
+    total = sum(
+        int(value)
+        for value in (workflow.values() if isinstance(workflow, dict) else ())
+        if isinstance(value, (int, float)) and not isinstance(value, bool)
+    )
+    lines.append(f"- total: {total}")
+    for key in ("workflow", "verification_status", "severity", "source"):
+        values = counts.get(key) or {}
+        compact = ", ".join(f"{name}={count}" for name, count in sorted(values.items())) or "-"
+        lines.append(contain_separators(f"- {key}: {compact}"))
 
 
 def _render_operator_checkpoint(lines: list, checkpoint: object) -> None:
@@ -947,7 +966,7 @@ def _render_code_analysis(lines: list, code_analysis: dict) -> None:
     if not leases and not any(
         key in code_analysis for key in (
             "queue_count", "coverage_by_classification", "trigger_counts",
-            "next_gate", "reference_repos",
+            "next_gate", "reference_repos", "coverage_gate",
         )
     ):
         return
@@ -991,9 +1010,17 @@ def _render_code_analysis(lines: list, code_analysis: dict) -> None:
     if coverage_gate:
         state = "PASS" if coverage_gate.get("passed") is True else "NEEDS ATTENTION"
         reasons = "; ".join(str(item) for item in coverage_gate.get("reasons", [])[:3])
+        # A medium-tier gap reaches `advisories` and never `reasons`, so the gate
+        # reads PASS while review effort is still owed. Rendering both keeps the
+        # brief honest about the difference instead of silently dropping the half
+        # that does not block.
+        advisories = "; ".join(
+            str(item) for item in coverage_gate.get("advisories", [])[:3]
+        )
         lines.append(contain_separators(
             f"- coverage quality gate: {state}"
             + (f" ({reasons})" if reasons else "")
+            + (f" [advisory: {advisories}]" if advisories else "")
         ))
     references = code_analysis.get("reference_repos") or []
     for repo in references:

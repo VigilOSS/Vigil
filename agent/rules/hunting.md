@@ -72,6 +72,19 @@ Record it on the finding as `details.block_reason` + `details.unblock_requiremen
 `vigil assess contract finding record`), and record the technique-level wall itself with
 `vigil assess block-technique`.
 
+The sibling terminal verdict carries the same shape of requirement: `finding verify --status
+false_positive` is refused without `details.kill_reason` (which check falsified the claim, and why)
+and `details.kill_check` (that check's number, an integer 1-5). Pass them on the same call with
+`--details-inline '{"kill_reason": "...", "kill_check": N}'`. A `kill_reason` saying the experiment
+could not be RUN is `blocked` rather than a kill, unless `details.required_followup` names the test
+that would settle it.
+
+`disputed` is the cheap withdrawal beside it: it needs only `--reason`, and it survives a later
+sweep the same way `false_positive` does, so an author whose own claim did not hold up has a route
+that does not require a completed counter-check. Reach for `false_positive` when you have the
+counter-evidence and for `disputed` when you do not; leaving the finding `unreviewed` is the one
+option that reads as never having been looked at and gets the claim re-filed.
+
 A `blocked` finding stays OUT of the report — unlike an `roe_blocked` candidate, it is
 not gradeable at impact-if-true, because the primitive itself was never reached. But the
 unblock path is first-class, not a dead end: when a later finding or chain lands that

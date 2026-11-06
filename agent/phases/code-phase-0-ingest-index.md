@@ -55,19 +55,26 @@ The `code-ingest` command:
   Git reads the repository's history and index as data and never runs a program its config,
   attributes or hooks name
 - Marks generated/vendored/test/doc files as `skip` candidates. The default policy excludes
-  `vendor/` in any casing only when it holds `autoload.php`, `modules.txt`, `vendor.json`,
-  `composer/`, `bundle/` or a `github.com/`, `golang.org/` or `gopkg.in/` import-path tree, `env/`
-  only when it holds `pyvenv.cfg`, `bin/activate` or `Scripts/activate`, `.phps` source-display
-  copies, and minified JavaScript/CSS (`.min.*`, `.bundle.*`, content-hashed `*.chunk.*`, or a
-  file whose line shape is minified). A copy of another project unpacked into the tree is admitted
-  as source; leave it out with `--exclude-path '<dir>'`. Re-admit a skipped directory with
-  `--include-path '<dir>/**'`, minified files with `--include-minified`, and other skips with
-  `--include-skipped`. `code-index build` warns once for each excluded directory a PHP include
-  reaches, except package-manager `vendor/`
+  `vendor/` in any casing only when it holds what a package manager wrote there — `composer/`,
+  an `autoload.php` or a `<vendor>/<package>/composer.json`; `bundle/`, `cache/<gem>.gem` or
+  `gems/<gem>/<name>.gemspec`; `modules.txt`, `vendor.json` or an import-path tree under a
+  module host with Go source beneath it — and `env/` only when it holds `bin/activate`,
+  `Scripts/activate`, `conda-meta/`, `pyvenv.cfg` or a `site-packages/` library root. A marker
+  counts wherever it sits inside the directory, not only at its root. The policy also excludes
+  `.phps` source-display copies, and minified JavaScript/CSS (`.min.*`, `.bundle.*`,
+  content-hashed `*.chunk.*`, or a file whose line shape is minified). A copy of another project
+  unpacked into the tree is admitted as source, and so is a `vendor/` or `env/` directory holding
+  no tool output — when such a directory is a quarter or more of the admitted set, the ingest
+  summary names it and the `--exclude-path` that drops it. Leave a copy out with
+  `--exclude-path '<dir>'`. Re-admit a skipped directory with `--include-path '<dir>/**'`,
+  minified files with `--include-minified`, and other skips with `--include-skipped`.
+  `code-index build` warns once for each excluded directory a PHP include reaches, except
+  package-manager `vendor/`
 - Atomically refreshes the backend manifest — the backend assigns each file an integer
   `file_id` (primary key). Retrieve the mapping via
-  `vigil assess fetch "code/files?repo_id=<repo-id>&limit=5000"`;
-  queue fetch responses also include the full file object with `file_id`.
+  `vigil assess fetch "code/files?repo_id=<repo-id>" --paginate`; without `--paginate` the route
+  serves one bounded page and every `file_id` past it reads as missing. Queue fetch responses
+  also include the full file object with `file_id`.
 - Prints the authoritative repo ID (also as a greppable `repo_id: <id>` line), active generation,
   source-manifest digest, sealed snapshot path, and the exact `code-index build --repo-id` and
   `code-index sync --repo-id` follow-up commands
@@ -98,7 +105,10 @@ The `code-index` command:
   closed instead of falling back from the filename
 - Writes a `structural-index/v7` per-repo manifest bound to `repo_id`, generation, source-manifest
   digest, snapshot path, per-file source hashes, and a canonical structural-input digest that includes
-  every indexed language. Its `path_to_index` map is the only supported file-to-index lookup; the
+  every indexed language. Its `path_to_index` map is the only supported file-to-index lookup, and
+  its values are relative to the `structural-index/` root -- six levels above the manifest's own
+  directory -- so a consumer joins them to that root (equivalently
+  `<manifest-dir>/files/<basename>`), never to the manifest's directory; the
   backend's `structural_index_schema` and `structural_index_manifest_path` record the accepted
   contract and location. A language-only correction creates a distinct immutable derived artifact
   while retaining the old one as history. The artifact path also carries an indexer digest over

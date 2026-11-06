@@ -91,8 +91,9 @@ Before producing any output, confirm:
 - [ ] **Guidance hypotheses available** (optional -- test AFTER broad analysis, see the skill's Step 4)
 - [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from
       dispatch context `applicable_vuln_classes`), plus any `path_suggested_vuln_classes`
-- [ ] **C/C++ baseline families present** -- `error-handling` and `algorithmic-dos` cover partial
-      I/O, cleanup/resource leaks, unbounded work, retries, allocation, and retention even when no
+- [ ] **Baseline families present, whatever the language** -- the backend seeds `error-handling`
+      and `algorithmic-dos` for every structurally analyzed language, and they cover partial I/O,
+      cleanup/resource leaks, unbounded work, retries, allocation, and retention even when no
       classic memory-corruption family fires
 - [ ] Sealed-source access confirmed -- can Read, `rg`, and Glob beyond the file batch while
       keeping `snapshot_path` as the source root
@@ -106,6 +107,15 @@ The families in `applicable_vuln_classes` are required because the architect's r
 file's slot types named them, and covering all of them is a good sign that still leaves the rest
 of the file's behaviour yours to read.
 
+The list in your packet is a DISPATCH-TIME SNAPSHOT of a backend-computed set: it is recomputed
+from current classification when `code-dispatch done` checks your coverage, so a re-classification
+between dispatch and closeout moves it. Prefer the packet's backend queue manifest line
+(`applicable_vuln_classes=...` per `queue_item_id`) over any list restated in operator prose, and
+re-read the live set with `vigil assess code-dispatch progress <item-id>` before `done` — its
+`missing_cwe_families` is exactly what the closeout will still require of you. A `done` refusal
+naming a family your packet never mentioned is this drift, not an error on your part: cover it,
+or say in your handoff that the set moved under the dispatch.
+
 Load the CWE pattern reference for a class as its signal appears in the code, from
 `agent/references/code-vuln-patterns/` -- not as a precondition to starting. If a class in
 `applicable_vuln_classes` never shows a matching pattern file, use the nearest general reference
@@ -114,12 +124,40 @@ and keep the same depth; missing a dedicated file never reduces the expected eff
 If the file batch itself, or the applicable-classes list, is missing, stop and request it from the
 operator before proceeding -- everything else above is either self-serviceable or trigger-gated.
 
+### Non-covering discovery mode (no queue lease)
+
+`code-record analysis` and `code-dispatch done` both require the fetched `queue_item_id`,
+`agent_name`, and `lease_token`, so a dispatch that carries no queue leases cannot write a receipt
+for anything it reads. That dispatch is legitimate -- a pre-queue reconnaissance read of a module,
+or a hunt over files the operator has not queued yet -- but it is NON-COVERING, and it is not a
+reason to skip the closing sequence or to treat the reading as reviewed. `agent start` prints an
+advisory naming this mode when a hunter dispatch carries neither `queue_item_ids` nor a `lane_file`.
+
+Do not invent, guess, or reuse a lease token, and do not call `code-dispatch done` on an item you
+did not fetch. Instead, what you owe in place of receipts:
+
+- Label the work `non-covering discovery` in the handoff summary and state plainly that this
+  dispatch recorded NO `code-record analysis` receipts, so every file it read is still unreviewed
+  in `code-coverage` and a later wave will re-read it.
+- List every file you read in full, with its disposition and the classes you actually covered, as
+  `coverage_gaps` entries (`area` = the file path, `reason` = no queue lease held, so no receipt
+  could be recorded, `recommended_followup` = queue it and re-dispatch with the lease) so the
+  operator can queue exactly that set rather than rediscovering it.
+- Put the same file list under `extras.files_read` so the next dispatch can diff it against the
+  queue without parsing prose.
+- Record findings normally: `finding record` needs no lease, and a real bug is not withheld because
+  the lane could not close a queue item.
+
+If the operator intended this lane to be covering, say so in `open_questions` and ask for the
+fetched leases -- one `code-dispatch fetch` turns the same reading into coverage, while a silent
+receiptless pass throws it away.
+
 ## Methodology
 
 The full Trail-of-Bits-style deep audit protocol — read-whole-file-then-deepen-adaptively,
 taint mapping (sources/transformations/sinks/guards), the unconstrained-pass-before-hypotheses
 ordering, the error-path deep dive, iterative escalation, CWE-directed re-analysis, and the
-classify/disposition contract (`finding`/`suspicious`/`clean`, `cwe_coverage`,
+classify/disposition contract (`finding`/`suspicious`/`clean`/`skipped`, `cwe_coverage`,
 `cross_file_triggers`) — is defined in `agent/skills/code-vulnerability-analysis/SKILL.md`
 Steps 1-8 (already MANDATORY in Load First above; load it before any analysis work). This role
 does not re-derive that methodology here — apply the skill's steps directly. The skill's
@@ -229,8 +267,8 @@ so in your handoff instead of forcing the remint — the operator reopens it wit
 Before your dispatch returns, run in this order:
 
 1. `vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>` per finding
-2. `vigil assess code-record analysis <analysis-json>` per queue item (carries grouped file/call-chain receipts, exact callable/span anchors, dispositions, CWE coverage, cross-file triggers, and the fetched queue lease) — record per cluster as each finishes, not at end-of-lane; a dispatch that dies keeps only what it already wrote
-3. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`)
+2. `vigil assess code-record analysis <analysis-json>` per queue item (carries grouped file/call-chain receipts, exact callable/span anchors, dispositions, CWE coverage, cross-file triggers, and the fetched queue lease) — record per cluster as each finishes, not at end-of-lane; a dispatch that dies keeps only what it already wrote. Step 2 needs the fetched lease; when this dispatch holds none, it is unreachable and "Non-covering discovery mode (no queue lease)" above replaces it — never skip it silently and never substitute a lease you did not fetch
+3. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`, and `skills_loaded` when the dispatch left your skills self-selected — `render-handoff` reads `extras.skills_loaded`)
 4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
 Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.

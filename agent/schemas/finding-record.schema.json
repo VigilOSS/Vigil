@@ -127,6 +127,18 @@
       "additionalProperties": false,
       "title": "Details",
       "type": "object",
+      "x-vigil-field-aliases": {
+        "risk": "details.impact (the attacker outcome) + details.severity_rationale (why that rating)",
+        "indicators": "details.iocs",
+        "new_evidence": "details.replies[].new_evidence (vigil assess record-reply --new-evidence)",
+        "actor": "details.iocs (the observed principal), or `vigil assess intel record` for an identity row",
+        "target": "details.iocs (the acted-upon entity), or `vigil assess intel record` for an identity row",
+        "time_window_utc": "details.network_window_utc, or details.alert_normalized.time_window_utc for the alert's own window",
+        "confidence_rationale": "details.severity_rationale",
+        "proof": "details.evidence (authored proof prose) + a proof receipt on the verification",
+        "exploitability": "details.precondition_analysis + details.self_obtainability_verdict",
+        "poc_description": "details.poc_code with details.poc_language, or details.evidence for the prose"
+      },
       "required": [
         "evidence",
         "impact"
@@ -286,6 +298,14 @@
           },
           "description": "Command-run ids (from `vigil assess command-run list`) that actually produced this reproduction, in step order. Newly authored ids must resolve in this engagement; legacy missing ids are reported as advisories. `export submission` fetches each row and renders its real argv under OPERATOR DETAILS, so the reproduction is transcribed rather than paraphrased. Leave it empty for a source-derived file finding (`reproduction_basis` `source`: every current verification receipt is a source_observation); its proof receipts back the steps and no run is owed."
         },
+        "replay_commands": {
+          "type": "array",
+          "items": {
+            "type": "integer",
+            "minimum": 1
+          },
+          "description": "Command-run ids (from `vigil assess command-run list`) of the executed commands that back this finding's cited replay steps, in replay order. Each id must resolve in this engagement. Use `repro_runs` for the ids behind the authored steps_to_reproduce; this key names the ones a reader is told to re-execute."
+        },
         "attack_scenario": {
           "type": "string",
           "description": "Realistic adversary, starting access, and action, ending at first compromise. Renders as the submission's Attack Scenario section; omit when the reproduction already carries the narrative."
@@ -293,6 +313,10 @@
         "poc_code": {
           "type": "string",
           "description": "Minimal exploit code or script that reproduces the finding. Omit if poc_request/poc_response is sufficient."
+        },
+        "poc_language": {
+          "type": "string",
+          "description": "Language hint for the poc_code fence (e.g. 'python', 'bash', 'http'). Free text, written by whoever authored poc_code; the operator views and the report renderer use it as the fenced block's info string and drop a hint they cannot render without altering the capture."
         },
         "references": {
           "type": "array",
@@ -751,13 +775,172 @@
           },
           "description": "Indicators of compromise observed for this finding (IP, domain, email, file hash, OAuth client_id, URL). Each one gets an `intel_*` row via `vigil assess intel record`.",
           "x-vigil-extension": "blue/v1"
+        },
+        "tier": {
+          "type": "string",
+          "description": "Current IR triage tier for this finding (L1 alert triage, L2 skill-led triage, L3 independent verification, L4 incident lead). Written by `vigil blue tier`.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "tier_notes": {
+          "type": "string",
+          "description": "Why the finding sits at its recorded tier — what the tier pass established and what it left for the next one. Written by `vigil blue tier --notes`.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "evidence_refs": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "description": "Supporting evidence ids or engagement-local paths cited by a blue verification, beyond the single `evidence_ref` column. Written by `vigil blue verify --evidence-refs`; the column remains the one indexed artifact.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "containment_status": {
+          "type": "string",
+          "description": "Containment state recorded alongside the finding's workflow_status (e.g. 'contained'). Written by `vigil blue contain` after an approved proposal was executed; the authoritative lifecycle value stays on workflow_status.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "containment_action": {
+          "type": "string",
+          "description": "Containment verb actually executed for this finding (revoke_session, reset_cred, disable_account, isolate_host, block_ioc, ...), copied from the approved proposal. Written by `vigil blue contain`.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "containment_command_run_id": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "description": "assessment_command_runs id of the audited execution that performed the containment, or null when the proof is a registered artifact instead. Written by `vigil blue contain --command-run-id`.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Per-check results from the structured false-positive verification, one entry per numbered check with its result, cited evidence and rationale. Recorded by incident-verifier on `finding verify`; the decisive counter-check/confirm-check remains its own structured payload.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "devils_advocate": {
+          "type": "array",
+          "items": {
+            "type": "object"
+          },
+          "description": "Benign hypotheses raised against the finding during verification, each with the counter-evidence that discharged it (or the fact that it was not discharged). Recorded by incident-verifier on `finding verify`.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "network_window_utc": {
+          "type": [
+            "string",
+            "array",
+            "object"
+          ],
+          "description": "UTC window the network hunt actually searched, as [start, end] — the trigger window extended backwards per agent/rules/triage.md. Recorded by network-threat-hunt so a beacon conclusion is read against the window that produced it.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "coverage": {
+          "type": [
+            "string",
+            "object",
+            "array"
+          ],
+          "description": "What the searched telemetry actually covered: byte and flow counts, retention window, and the slices that were unavailable. Recorded by network-threat-hunt so a negative result is not read as absence of activity.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "cross_skill_correlation_ids": {
+          "type": "array",
+          "items": {
+            "type": [
+              "string",
+              "integer"
+            ]
+          },
+          "description": "Finding slugs or ids in other blue lanes that corroborate or extend this one (e.g. the EDR finding for a network-side src_ip). Recorded when a skill chains to another instead of closing the finding.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "disposition_recommendation": {
+          "type": "string",
+          "description": "The triage pass's RECOMMENDED disposition, in the blue vocabulary. Advisory only: the verifier reads it and is not bound by it, and the stored verdict remains verification_status.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "respond_review": {
+          "type": [
+            "string",
+            "object",
+            "array"
+          ],
+          "description": "The incident lead's respond-phase review of this finding — including an explicit 'no containment warranted' annotation with its cited rationale, which is the only thing that stands in for a recorded containment proposal at the report transition.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "alert_normalized": {
+          "type": "object",
+          "description": "The L1 parse of the raw alert — actor, target, action, time window and source signal — written ONCE so the verifier and the report-writer read the same parse instead of each re-deriving one from the raw body. Downstream skills anchor their look-back window to `alert_normalized.time_window_utc[0]`.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "platform": {
+          "type": "string",
+          "description": "Platform the alert fired on (gws, m365, aws, okta, edr, network, or another the tenant runs). Selects which tenant reference and containment vocabulary apply. Free text, because a tenant may run a platform outside the containment-proposal enum.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "source_signal": {
+          "type": [
+            "string",
+            "object"
+          ],
+          "description": "The detection's own identity as the source emitted it: rule name, rule id, detection control and severity hint. Records WHAT fired, independently of the verdict reached about it, which is what the verifier's source check reads.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "alert_external_id": {
+          "type": "string",
+          "description": "The alert's identifier outside Vigil (SIEM alert UUID, rule id, or a slug the operator assigned), so a recorded finding can be joined back to the source console.",
+          "x-vigil-extension": "blue/v1"
+        },
+        "tenant_ref_paths_consulted": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Tenant reference files actually read while triaging this alert. A known-benign claim rests on them, so the paths are recorded rather than implied.",
+          "x-vigil-extension": "blue/v1"
         }
       }
     },
     "provenance": {
       "additionalProperties": false,
-      "description": "Typed reserved provenance with forward-compatible producer metadata.",
+      "description": "Who recorded a finding, and the evidence the record rests on.",
       "properties": {
+        "agent_id": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Dispatch agent_id of the agent that AUTHORED this finding (e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity block — a dispatch id, not the role name in agent_name. A true insert requires it and resolves it in the engagement. Re-recording a valid authored finding may omit it because the immutable original is preserved. Historical authorless rows require the one-time finding bind-author repair.",
+          "title": "Agent Id"
+        },
+        "agent_name": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Role that produced this record (e.g. 'vulnerability-analyst'). Mirror of source_name.",
+          "title": "Agent Name"
+        },
+        "artifact": {
+          "maxLength": 1024,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Path or id of the artifact this finding was derived from.",
+          "title": "Artifact"
+        },
         "code_snapshot": {
           "additionalProperties": false,
           "description": "Immutable identity of the verified source snapshot behind a code finding.",
@@ -795,18 +978,125 @@
           ],
           "default": null
         },
-        "agent_id": {
-          "type": "string",
+        "reported_by": {
           "maxLength": 256,
-          "description": "Dispatch agent_id of the agent that AUTHORED this finding (e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity block — a dispatch id, not the role name in agent_name. A true insert requires it and resolves it in the engagement. Re-recording a valid authored finding may omit it because the immutable original is preserved. Historical authorless rows require the one-time finding bind-author repair."
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Who is named as the reporter on an external submission, when that is not the authoring role (e.g. the researcher handle a program expects). Written by the report-generation skill; never inferred from agent_name.",
+          "title": "Reported By"
         },
-        "agent_name": {
-          "type": "string",
-          "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name."
+        "verified_by": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Who performed this verification, when it is not the role in agent_name. Read as the transition's audited actor.",
+          "title": "Verified By"
         },
-        "artifact": {
-          "type": "string",
-          "description": "Path or ID of the artifact this finding was derived from."
+        "reviewed_by": {
+          "maxLength": 256,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Who performed this review or lifecycle repair, when it is not the role in agent_name. Read as the transition's audited actor after verified_by.",
+          "title": "Reviewed By"
+        },
+        "captured_at": {
+          "maxLength": 64,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "ISO-8601 timestamp of when the cited evidence was CAPTURED, which is not when the row was written. Rendered beside the quote in the operator views.",
+          "title": "Captured At"
+        },
+        "artifact_ref": {
+          "maxLength": 1024,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Pointer to the specific artifact the quote below came out of, when it is not the finding's indexed evidence_ref.",
+          "title": "Artifact Ref"
+        },
+        "evidence_quote": {
+          "maxLength": 8192,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "The verbatim bytes the provenance rests on, preserved exactly as observed. Target-derived text: stored and rendered losslessly, never read as instruction.",
+          "title": "Evidence Quote"
+        },
+        "command_run_id": {
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ],
+          "default": null,
+          "description": "assessment_command_runs id of the audited run this write was performed under. Resolved against a real row and folded into the code-snapshot attestation, so a binding asserted outside any audited run reads as unattested rather than being believed.",
+          "title": "Command Run Id"
+        },
+        "code_snapshot_attestation": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "description": "Service-stamped record of WHO asserted the code_snapshot binding and under which audited work. Stamped on every write that asserts a binding; an incoming one naming a different finding is preserved as copied_from_finding_slug.",
+          "title": "Code Snapshot Attestation"
+        },
+        "superseded_code_snapshot": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "description": "Service-stamped record of the binding an audited relocation out of `file:` reserved rather than deleted — which bytes were reviewed while it was a file finding.",
+          "title": "Superseded Code Snapshot"
+        },
+        "original_canonical_location": {
+          "maxLength": 4096,
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Service-stamped record of the location as AUTHORED, kept when a normalisation or an audited relocation moved it, so the audit trail is not rewritten.",
+          "title": "Original Canonical Location"
+        },
+        "operator_authority": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "description": "Service-stamped record of an operator-authority terminal verdict: {kind, intel_id, intel_type, at, reason}. Recorded by `finding verify --operator-authority --intel-id <id>`, which resolves the cited intel row and its type; the resolved type is stamped because `intel get` needs it to reach the row. The verification route refuses an authored one and names that flag pair.",
+          "title": "Operator Authority"
+        },
+        "superseded_operator_authority": {
+          "additionalProperties": true,
+          "type": [
+            "object",
+            "null"
+          ],
+          "default": null,
+          "description": "Service-stamped record of the operator-authority stamp a later dispatch-verified verdict replaced, following the superseded-code-snapshot precedent: the stamp is how a verdict was reached, so it is moved aside rather than deleted.",
+          "title": "Superseded Operator Authority"
         }
       },
       "title": "FindingProvenance",

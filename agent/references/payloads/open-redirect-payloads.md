@@ -142,12 +142,14 @@ data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==
 
 ```bash
 # Test common parameters with redirect payload
-PARAMS="redirect url next return goto dest redir redirect_url return_to"
-TARGET="http://target.example"
-
-for p in $PARAMS; do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/?$p=https://evil.example")
-  LOCATION=$(curl -s -I "$TARGET/?$p=https://evil.example" | grep -i "location:")
-  echo "$p -> $CODE $LOCATION"
-done
+vigil assess kali exec --technique OPEN-REDIRECT \
+  --intent "open-redirect parameter sweep over the common redirect parameter names" \
+  --probe-kind payload --phase consume-test --timeout 600 -- bash -c '
+  TARGET="https://target.example"
+  for p in redirect url next return goto dest redir redirect_url return_to; do
+    CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/?$p=https://evil.example")
+    LOCATION=$(curl -s -I "$TARGET/?$p=https://evil.example" | grep -i "location:")
+    echo "$p -> $CODE $LOCATION"
+  done
+'
 ```

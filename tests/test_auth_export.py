@@ -258,7 +258,7 @@ def test_export_curl_args_includes_csrf_on_post_only(tmp_path, monkeypatch):
 
 
 # --------------------------------------------------------------------------- #
-# Liveness classifier + probe (mirror of assess auth-status). Network-free: the
+# Liveness classifier + probe (mirror of assess auth status). Network-free: the
 # classifier is pure and operator-configured (material.liveness =
 # {expect_status, authed_marker, dead_marker}); the probe is exercised with a
 # fake HTTP connection. There is NO auto-detection of where auth lives.

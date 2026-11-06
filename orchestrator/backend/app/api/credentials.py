@@ -237,7 +237,7 @@ async def persist_liveness(
 ) -> dict[str, Any]:
     """Record an LLM-owned liveness-probe verdict for one stored identity (WS4).
 
-    The CLI probe (``vigil assess auth-status --probe --identity`` / operator
+    The CLI probe (``vigil assess auth status --probe --identity`` / operator
     ``vigil auth status --probe --identity``) classifies a session with the
     identity's ``material.liveness`` signature, then persists the verdict here so
     a proven-dead session is hidden from the default list and a ``live`` probe

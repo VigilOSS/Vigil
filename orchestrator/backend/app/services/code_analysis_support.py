@@ -846,8 +846,11 @@ def _require_current_reportable_root_file_finding(
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
-                "finding_slug must reference a finding bound to the current verified "
-                "repository source generation"
+                f"finding_slug {slug!r} must reference a finding bound to the current "
+                "verified repository source generation. Re-read the current sealed "
+                "bytes and rebind it with `vigil assess finding verify "
+                f"{slug} --provenance-inline '{{\"code_snapshot\": {{...}}}}'`, which "
+                "is the only write that rebinds a stale file finding"
             ),
         )
     variant_link = connection.execute(
@@ -1548,15 +1551,26 @@ def _queue_lease_mismatch(
             f"lease {lease_token!r} on queue item {item_id} was reset and the item reclaimed "
             f"by agent {holder!r}"
         )
+    # A token the row has never seen is either mistyped or lost — the second is
+    # ordinary after a context boundary, a client restart or a subagent that did
+    # not persist it. Both are recovered by the same read-only verb, so name it
+    # rather than leaving the reader to query the database directly.
+    recovery = (
+        f" The active lease identity for this item is readable with "
+        f"`code-dispatch progress {item_id}`, or `code-dispatch list "
+        "--show-tokens`."
+    )
     if sorted(lease_token) == sorted(current):
         return (
             f"no lease with token {lease_token!r} exists for queue item {item_id}; it differs from "
-            f"the current lease held by agent {holder!r} only in character order, so check for a typo"
+            f"the current lease held by agent {holder!r} only in character order, so check for a typo."
+            + recovery
         )
     return (
         f"no lease with token {lease_token!r} exists for queue item {item_id}; its current lease is "
         f"held by agent {holder!r} since {row.get('consumed_at') or 'an unknown time'}. Check the "
-        "token for a typo; if you fetched before that time, your lease was reset and reclaimed"
+        "token for a typo; if you fetched before that time, your lease was reset and reclaimed."
+        + recovery
     )
 
 

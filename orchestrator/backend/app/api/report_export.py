@@ -139,6 +139,14 @@ _FINDING_FIELDS = (
     "severity",
     "workflow_status",
     "verification_status",
+    # The operator-authority stamp, carried whole. ``verification_status`` alone
+    # cannot distinguish a dispatch-verified verdict from one the operator
+    # reached on out-of-snapshot evidence they hold themselves, and ADR 0043
+    # names this delivered report as one of the surfaces that must. Dropping it
+    # would ship a waived verdict to the recipient as proof; reducing it to a
+    # boolean would lose the intel row and the reason, which are the parts that
+    # make the waiver readable. ``null`` on every ordinary finding.
+    "operator_authority",
     "canonical_location",
     "auth_context",
     "evidence_type",

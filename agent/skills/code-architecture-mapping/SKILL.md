@@ -231,9 +231,10 @@ enforce a supported security invariant.
   Documentation and data files close as `out-of-scope-language`.
 - Examples: auto-generated protobuf stubs, test data files, vendored dependencies, images, fonts
 
-### Step 10: Annotate Slot Types on Critical/High Files
+### Step 10: Annotate Slot Types and Role Labels
 
-For each critical and high file, annotate which Shannon slot types apply:
+**Slot types — critical and high files.** For each critical and high file, annotate which Shannon
+slot types apply:
 
 | Slot Type | Description | Example |
 |-----------|-------------|---------|
@@ -251,18 +252,30 @@ A file may have multiple slot types. Record the primary slot type and any second
 Config files that define how commands are executed, what plugins load, what crypto parameters
 apply, or what access policies are enforced should receive `EXEC-POLICY` and classification
 `high` regardless of language.
-Use a precise role label for each critical/high file because the backend derives additional required
-coverage families from the role label and the language. Prefer labels like `auth_handler`,
-`crypto_impl`, `error_handler`, `memory_allocator`, `graphql_resolver`, `llm_orchestrator`, and
-`deserializer` over generic labels like `handler` or `utils`. Name what a transactional file moves:
-`refund_service`, `booking_controller`, `seat_hold_handler`, `quota_manager`, `store_credit_ledger`,
-`coupon_redeem_controller`, `payment_webhook`, `otp_verifier`, or `password_reset_controller`. In a
-role, whole words such as refund, booking, hold, quota, credit, coupon, wallet, balance, payment,
-checkout, inventory and webhook make `race-condition` and `business-logic` required, and otp, mfa,
-totp, passcode and password reset make `rate-limit` required: the hunter's `done` is refused without
-them and the effort gate holds the file to them. Write such a role only for a file you read as
-moving value, granting something once or checking a one-time code; a `Checkout` directory also
-holds value objects, events and views that do none of that.
+**Role label — every file, every tier.** Use a precise role label on every file you classify,
+whatever its tier, because the backend derives additional required coverage families from the role
+label and the language. Prefer labels like `auth_handler`, `crypto_impl`, `error_handler`,
+`memory_allocator`, `graphql_resolver`, `llm_orchestrator`, and `deserializer` over generic labels
+like `handler` or `utils`. Name what a transactional file moves: `refund_service`,
+`booking_controller`, `seat_hold_handler`, `quota_manager`, `store_credit_ledger`,
+`coupon_redeem_controller`, `payment_webhook`, `otp_verifier`, or `password_reset_controller`.
+
+Write a transactional role for any file you read as moving value, granting something once, or
+checking a one-time code — `medium` and `low` included. The Classification Decision Framework below
+routes a shared-state helper to MEDIUM as a utility, and a shared-state helper is exactly where a
+read-availability/read-quota/insert TOCTOU lives; with a generic role it owes only the language
+baseline and nothing holds it to `race-condition` or `business-logic`. A `Checkout` directory also
+holds value objects, events and views that move nothing, so those keep their own descriptive role.
+
+In a role, whole words such as refund, booking, hold, quota, credit, coupon, wallet, balance,
+payment, checkout, inventory and webhook make `race-condition` and `business-logic` required, and
+otp, mfa, totp, passcode and password reset make `rate-limit` required: the hunter's `done` is
+refused without them and the effort gate holds the file to them. That list is illustrative. The
+authoritative word set is `WORKFLOW_CONTEXT_VULN_CLASSES` in
+`orchestrator/backend/app/services/code_analysis.py` — it carries more words than are named here,
+and `_applicable_families_for_file` beside it is what computes each claim's
+`applicable_vuln_classes`. Read the computed set off the queue item rather than predicting it from
+this paragraph.
 
 The backend reads the same words from the file's directories and name as hints. A path match lists
 the families in `path_suggested_vuln_classes` for the hunter to consider and never makes them
@@ -313,14 +326,23 @@ classification cap:
 
 | Bonus | Value |
 |-------|-------|
-| `git_churn_bonus` | top-10 churn=15, top-20=10, top-30=5, other=0 |
+| `git_churn_bonus` | rank 1-10 in `repo.git_churn.churn_scores`=15, rank 11-20=10, rank 21-30=5, absent from it=0 |
 | `entry_point_proximity` | direct entry point=15, one hop from entry=10, two hops=5, other=0 |
 | `past_cve_bonus` | changed by a `code-history` commit naming a CVE or GHSA id=20, changed by another security-relevant commit or flagged `has_past_cve_fix` at ingest=10, other=0 |
 
+The churn rank is literal position in `repo.git_churn.churn_scores` from
+`vigil assess fetch "code/repos/<repo-id>"`, which holds at most 30 entries already sorted
+descending. A file absent from that map scores 0 even when its own record carries a nonzero
+`git_churn_score`, because that per-file field is a full-corpus count with no rank attached — two
+lanes reading it as the population produce different bonuses for the same file and both validate,
+since only band membership is checked.
+
 Do not apply bonuses to `skip`: its score remains exactly 0. The cap keeps bonuses inside the
 classification tier, so they rank files within a tier and never promote a lower-tier file above a
-higher-tier one. Sort queue work by descending `priority`; every admitted file still enters the
-queue, because the score controls order only.
+higher-tier one. In the `low` band a `+20` `past_cve_bonus` reaches the cap of 19 on its own, so a
+CVE-flagged low file sorts identically to a churn-only one; when that distinction matters, record it
+in the classification rationale rather than in the score. Sort queue work by descending `priority`;
+every admitted file still enters the queue, because the score controls order only.
 
 ### Step 11: Build Cross-Module Call Graph
 
@@ -392,9 +414,12 @@ From the call graph, extract complete chains from entry points to security-relev
 1. For each entry point: depth-first traversal following callee edges
 2. At each node: check if it reaches a critical/high function, security-relevant decision, or harm-bearing operation
 3. If yes: record the complete chain with untrusted data annotations
-4. Rank chains by: impact severity x target-kind entry-reachability weight x
-   `max(1, trust-boundary crossings)`. A supported public API/host entry remains rankable when the
-   implementation has no additional internal boundary crossing.
+4. Rank chains by `impact_severity x entry_point_reachability x max(1, boundary_crossings)`. The
+   two weight scales are defined once, in Step 13's "Prioritize by" list below; take them from
+   there. Each input comes off the chain record: the entry's trust level supplies reachability, the
+   target type supplies impact severity, and `boundary_crossings` supplies the third factor. A
+   supported public API/host entry remains rankable when the implementation has no additional
+   internal boundary crossing.
 
 Output format:
 ```json
@@ -454,9 +479,9 @@ Produce a structured architecture map containing:
 3. **Trust Boundary Map**: boundary name, entry function, data format, slot type
 4. **File Classification Table**: records keyed by backend `file_id` (with `file_path` as helper context when useful), plus classification tier, slot types, and `analysis_priority`. Do not emit path-only classifications.
 5. **File Analysis Queue**: flat ordered list of every admitted file for Phase 2 (Hunt) dispatch, grouped by `batch_theme` for cross-file reasoning and with queue `priority` exactly equal to classification `analysis_priority` for the same file. Written to `tools/analysis-state/file-analysis-queue.json`. Classification controls order, not inclusion; even a `skip` classification appears so closeout must record an explicit reason. Emit one object per file with concrete `file_id` and `file_path` — no nested batch wrappers, no globs. Do not emit `context_id`; the queue is file-level and supporting structure resolves through the bound structural manifest.
-6. **Call Graph**: JSON adjacency list with edges, entry points, and critical targets. Written to `tools/analysis-state/call-graph.json`.
+6. **Call Graph**: JSON adjacency list with edges, entry points, and critical targets. Written to `tools/analysis-state/call-graph.json`. **Advisory artifact** — no `check-` verb validates it, so downstream dispatches read its edges as navigation and confirm any load-bearing edge in source. Record what you could not resolve in `audit_metadata` rather than emitting a confident edge.
 7. **Entry-Point Chains**: ranked list of complete data flow chains from entry to target.
-8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, target, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`.
+8. **Attack Hypotheses**: prioritized list of specific vulnerability hypotheses. Each includes: entry point, chain, target, CWE, concrete scenario, score. Written to `tools/analysis-state/attack-hypotheses.json`. **Advisory artifact** — unchecked like the call graph, and the hunter tests hypotheses only after its unconstrained pass, so a wrong hypothesis costs ordering rather than coverage.
 9. **Structural Index Integration**: the call graph and entry-point chains incorporate tree-sitter-derived function definitions, call sites, and security-relevant operations resolved through the Code Source Identity manifest.
 10. **Historical CVE Bug Shapes (optional)**: when `code-history` exposes a concrete
     vulnerable-to-fixed delta, write `tools/analysis-state/cve-bug-shapes.jsonl`, one compact JSON

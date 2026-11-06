@@ -52,14 +52,36 @@ def register(subparsers) -> None:
         "--effect",
         dest="root_cause_effect",
         choices=["eliminates_finding", "eliminates_attack_path"],
-        default="eliminates_finding",
-        help="Whether fixing the root fully resolves the finding or only this attack path",
+        # Grouping alone makes no claim about what the root fix retires, and
+        # `eliminates_finding` does: it raises a claim review on every confirmed
+        # or downgraded sibling and a `finding_claim_review_pending` report
+        # blocker with it. So a pure grouping pass costs nothing by default, and
+        # the claim that the root fix retires the sibling is asked for.
+        default="eliminates_attack_path",
+        help=(
+            "Whether fixing the root fully resolves the finding "
+            "(eliminates_finding) or only this attack path "
+            "(eliminates_attack_path, the default). eliminates_finding claims the "
+            "root fix retires the sibling, so it raises a claim review on a "
+            "confirmed or downgraded one."
+        ),
     )
     p.add_argument(
         "--reason",
+        # The rationale lands in the LINK's own text field — `notes` on a
+        # generic typed link, `note` on the root-cause link — so `--notes` is
+        # what a caller coming from `finding update --notes` reaches for, and
+        # argparse answered it from the root parser with the whole verb roster.
+        # Same flag, same dest; `--reason` stays the documented spelling.
+        "--notes",
         dest="reason_text",
         default=None,
-        help="One-sentence relationship rationale (root-cause, intel, and generic modes)",
+        help=(
+            "One-sentence relationship rationale (root-cause, intel, and generic "
+            "modes). Lands as the link's own `notes` on a generic typed link and "
+            "as `note` on the root-cause link; `--notes` is accepted as the same "
+            "flag."
+        ),
     )
     p.add_argument(
         "--note",

@@ -55,9 +55,11 @@ Consume Phase 1-3 artifacts and rank functions for fuzzing value.
   `format-string`, `integer-overflow`, `null-dereference`, `type-confusion`,
   `uninitialized-memory`, or `use-after-free`.
   Check `verification_status` for Phase 3 confirmation status.
-- File classifications: `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` —
-  `classification`, `slot_types`, `role`, `language` per file. Target critical/high C/C++ files
-  with `NETWORK-INPUT`, `FILE-CONTENT`, `PROTOCOL-FIELD`, or `SERIALIZED-DATA` slot types.
+- File classifications: `vigil assess fetch "code/files?repo_id=<id>" --paginate` —
+  `classification`, `slot_types`, `role`, `language` per file. `--paginate` is the complete
+  read; a hand-written `limit` returns one bounded page, so target selection would rank only
+  the files that happened to land on it. Target critical/high C/C++ files with
+  `NETWORK-INPUT`, `FILE-CONTENT`, `PROTOCOL-FIELD`, or `SERIALIZED-DATA` slot types.
 
 **Inputs (filesystem — read directly):**
 - Structural indexes for candidate targets, resolved via

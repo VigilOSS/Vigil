@@ -216,6 +216,35 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         "--counter-check-file",
         help="Completed structured false-positive counter-check JSON",
     )
+    verify_p.add_argument(
+        "--confirm-check-file",
+        help=(
+            "REQUIRED with --disposition verified or downgraded: completed structured "
+            "falsification check JSON {method, attempted_falsification, expected_result, "
+            "observed_result, completed, proof_receipt_ids}. A terminal verdict with no "
+            "recorded falsification attempt is refused; see "
+            "`vigil assess contract finding verify`."
+        ),
+    )
+    verify_p.add_argument(
+        "--kill-reason",
+        default=None,
+        help=(
+            "REQUIRED with --disposition false_positive: which check failed and why the "
+            "alert is not a real incident. Stored as details.kill_reason, which the "
+            "backend demands before it will record a false-positive verdict."
+        ),
+    )
+    verify_p.add_argument(
+        "--kill-check",
+        type=int,
+        default=None,
+        choices=(1, 2, 3, 4, 5),
+        help=(
+            "REQUIRED with --disposition false_positive: the numbered verification check "
+            "(1-5) that produced the false-positive verdict. Stored as details.kill_check."
+        ),
+    )
     verify_p.add_argument("--new-severity", default=None)
     verify_p.add_argument("--force", action="store_true", help="Bypass the incident-verifier dispatch gate")
     verify_p.add_argument("-k", "--engagement-key", default=None)
@@ -909,10 +938,33 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
                 "verify --disposition false_positive requires --counter-check-file "
                 "with a completed structured counter-check (finding verify contract)"
             )
+        # Mirror of the --kill-reason/--kill-check guard on the surviving-finding
+        # side. This branch forwards the counter-check and nothing else, so an
+        # accepted --confirm-check-file would leave the operator reading a
+        # recorded kill as though their invocation had gone through as written.
+        if getattr(args, "confirm_check_file", None):
+            raise SystemExit(
+                f"verify --confirm-check-file belongs to --disposition verified or "
+                f"downgraded, not {blue_disp!r}: it records the falsification a "
+                f"SURVIVING finding withstood. A false positive is DISPROVED by "
+                f"--counter-check-file plus --kill-reason/--kill-check"
+            )
         details = {
             "disposition": blue_disp,  # preserve blue vocab verbatim for report-writer
             "evidence_refs": evidence_refs,
         }
+        # The counter-check is the structured decision; details.kill_reason +
+        # details.kill_check are a SEPARATE backend requirement for the same
+        # verdict, and the wrapper had no way to carry them at all — so a blue
+        # kill could not be recorded however it was invoked. The backend owns
+        # the refusal when they are missing (it names both keys and the 1-5
+        # range); what belongs here is the ability to supply them.
+        kill_reason = (getattr(args, "kill_reason", None) or "").strip()
+        kill_check = getattr(args, "kill_check", None)
+        if kill_reason:
+            details["kill_reason"] = kill_reason
+        if kill_check is not None:
+            details["kill_check"] = int(kill_check)
         assess_args = [
             "finding",
             "verify",
@@ -927,6 +979,11 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             json.dumps(details),
         ]
     else:
+        if getattr(args, "kill_reason", None) or getattr(args, "kill_check", None) is not None:
+            raise SystemExit(
+                f"verify --kill-reason/--kill-check belong to --disposition false_positive, "
+                f"not {blue_disp!r}: they record which check DISPROVED the finding"
+            )
         details = {
             "disposition": blue_disp,  # blue vocab verbatim
             "evidence_refs": evidence_refs,
@@ -947,6 +1004,19 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
                 f"verify --disposition {blue_disp} requires at least one "
                 "--proof-receipt-id (finding verify contract)"
             )
+        # A terminal verdict carries its falsification attempt. `finding verify`
+        # and the backend both refuse confirmed/downgraded without a completed
+        # confirm_check, and the wrapper had no flag to forward one — so
+        # `--disposition verified` could not complete either. The refusal stays
+        # where it is; the flag is what was missing.
+        confirm_check_file = getattr(args, "confirm_check_file", None)
+        if confirm_check_file:
+            if blue_disp not in {"verified", "downgraded"}:
+                raise SystemExit(
+                    f"verify --confirm-check-file applies only to --disposition verified "
+                    f"or downgraded, not {blue_disp!r}"
+                )
+            assess_args.extend(["--confirm-check-file", confirm_check_file])
         for receipt_id in proof_receipt_ids:
             assess_args.extend(["--proof-receipt-id", str(receipt_id)])
         if blue_disp == "downgraded":

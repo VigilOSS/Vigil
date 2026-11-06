@@ -105,13 +105,27 @@ def fetch_backend_file_inventory(client: Any, repo_id: int) -> dict[str, dict[st
         offset += len(items)
 
 
+# How many offending paths one binding refusal quotes. The total is always
+# stated, so a capped list is a shorter message and never a smaller problem.
+MAX_REPORTED_BINDING_FAILURES = 20
+
+
 def bind_structural_inputs(
     source_files: list[dict[str, Any]],
     backend_by_path: dict[str, dict[str, Any]],
     *,
     repo_id: int,
 ) -> dict[str, dict[str, Any]]:
-    """Bind sealed source hashes to current canonical backend languages."""
+    """Bind sealed source hashes to current canonical backend languages.
+
+    Every per-path problem in the inventory is collected before raising. The
+    callers (`code-index build` and `code-index sync`) print the refusal and
+    exit, so raising on the first offender turned one repair into one run per
+    offender — sixteen mis-languaged files cost three round trips to even
+    enumerate. The inventory-wide problems above still fail immediately,
+    because a mismatched or duplicated inventory makes every per-path answer
+    meaningless.
+    """
 
     source_by_path: dict[str, dict[str, Any]] = {}
     for item in source_files:
@@ -126,31 +140,46 @@ def bind_structural_inputs(
 
     bound: dict[str, dict[str, Any]] = {}
     seen_ids: set[int] = set()
+    failures: list[str] = []
     for rel_path in sorted(source_by_path):
         source = source_by_path[rel_path]
         backend = backend_by_path[rel_path]
         file_id = backend.get("id")
         backend_repo_id = backend.get("repo_id")
         if not isinstance(file_id, int) or file_id < 1 or file_id in seen_ids:
-            raise ValueError(f"repo {repo_id} backend file identity is invalid for {rel_path}")
+            failures.append(f"{rel_path}: backend file identity is invalid")
+            continue
         if not isinstance(backend_repo_id, int) or backend_repo_id != repo_id:
-            raise ValueError(f"repo {repo_id} backend file repo binding differs for {rel_path}")
+            failures.append(f"{rel_path}: backend file repo binding differs")
+            continue
         seen_ids.add(file_id)
         source_sha = source.get("source_sha256")
         if not isinstance(source_sha, str) or len(source_sha) != 64:
-            raise ValueError(f"repo {repo_id} snapshot source hash is invalid for {rel_path}")
+            failures.append(f"{rel_path}: snapshot source hash is invalid")
+            continue
         if backend.get("file_hash") != source_sha:
-            raise ValueError(f"repo {repo_id} backend source hash differs for {rel_path}")
+            failures.append(f"{rel_path}: backend source hash differs")
+            continue
         try:
             language = canonical_backend_language(backend.get("language"))
         except ValueError as exc:
-            raise ValueError(f"repo {repo_id} {exc} for {rel_path}") from exc
+            failures.append(f"{rel_path}: {exc}")
+            continue
         bound[rel_path] = {
             "file_id": file_id,
             "file_path": rel_path,
             "source_sha256": source_sha,
             "language": language,
         }
+    if failures:
+        reported = failures[:MAX_REPORTED_BINDING_FAILURES]
+        detail = "; ".join(reported)
+        if len(failures) > len(reported):
+            detail += f"; ... {len(failures) - len(reported)} more"
+        raise ValueError(
+            f"repo {repo_id} cannot bind {len(failures)} of "
+            f"{len(source_by_path)} file(s): {detail}"
+        )
     return bound
 
 

@@ -56,7 +56,7 @@ def run(args) -> None:
             f"{root.get('title', '')}"
         )
         for sibling in group.get("siblings", []):
-            effect = sibling.get("root_cause_effect", "eliminates_finding")
+            effect = sibling.get("root_cause_effect", "eliminates_attack_path")
             marker = "residual" if effect == "eliminates_attack_path" else "resolved-by-root"
             print(
                 f"  - {sibling.get('slug', '')} [{sibling.get('severity', 'info')}] "

@@ -791,7 +791,22 @@ class SnapshotBuilder:
             self._finished = True
 
 
-def validate_snapshot(snapshot_root: Path, *, expected_digest: str | None = None) -> dict[str, Any]:
+def validate_snapshot(
+    snapshot_root: Path,
+    *,
+    expected_digest: str | None = None,
+    deep: bool = True,
+) -> dict[str, Any]:
+    """Validate a sealed snapshot and return its manifest.
+
+    ``deep=False`` stops after the manifest self-checks -- the seal, the schema, the
+    three path bindings and the content-address recomputation -- and skips the walk
+    that opens, reads and hashes every sealed file. Those checks are O(manifest); the
+    walk is O(sealed bytes) and costs ~0.19ms per file per retained generation, so a
+    display projection reads shallow and anything that acts on the bytes reads deep.
+    A shallow read still refuses a manifest whose own content address does not match,
+    which is what makes it safe to report a snapshot from.
+    """
     manifest_path = snapshot_root / "manifest.json"
     source = snapshot_root / "source"
     for directory in (snapshot_root, source):
@@ -903,6 +918,9 @@ def validate_snapshot(snapshot_root: Path, *, expected_digest: str | None = None
     ).hexdigest()
     if computed != digest or snapshot_root.name != digest:
         raise ValueError(f"sealed snapshot content address mismatch: {snapshot_root}")
+
+    if not deep:
+        return manifest
 
     actual_paths: set[str] = set()
     with RootedSourceTree(source) as source_tree:

@@ -387,40 +387,43 @@ The L2 handoff JSON consumed by the verifier:
 ```json
 {
   "agent_id": "<runtime-agent-id>",
-  "agent_role": "okta-investigator",
+  "agent_role": "investigator",
   "phase": "investigate",
-  "handoff_status": "ready",
-  "finding_slug": "<from L1 handoff>",
-  "skill_consumed": "okta-investigation",
-  "platform": "okta",
-  "okta_org": "<org>.okta.com",
-  "actor": "<upn>",
-  "actor_id": "<00u...>",
-  "time_window_utc": ["<since>", "<until>"],
-  "mitre_techniques_observed": ["T1621", "T1556.006", "T1539"],
-  "severity_recommendation": "high",
+  "summary": "<which of the six steps fired for <upn>, what the SystemLog / factor / token / policy pulls establish, and what the severity recommendation rests on>",
   "confidence": "medium",
-  "confidence_rationale": "<one sentence citing the corroborating signals>",
-  "evidence_refs": [<artifact-id>, ...],
-  "step_outcomes": {
-    "step1_systemlog": {"events": <int>, "histogram_artifact": <id>},
-    "step2_factors": {"new_factors": [...], "helpdesk_ticket": "<id|none>"},
-    "step3_push_fatigue": {"clusters": <int>, "allowed_after_denied": true|false},
-    "step4_session_replay": {"new_fingerprints": [...], "session_ids": [...]},
-    "step5_admin_api_tokens": {"new_admins": [...], "new_tokens": [...]},
-    "step6_ad_drift": {"drift_fields": [...], "within_sync_window": true|false}
-  },
+  "handoff_status": "ready",
+  "finding_slugs": ["<from L1 handoff>"],
+  "recommended_next_agent": "incident-verifier",
   "coverage_gaps": [
-    "<e.g. tenant did not enable user.session.start for non-interactive flows; cannot confirm AiTM via session_start alone>"
+    {"area": "user.session.start for non-interactive flows", "reason": "tenant did not enable the event type", "recommended_followup": "AiTM cannot be confirmed from session_start alone; corroborate from the service-provider side"}
   ],
-  "cross_platform_correlation_notes": "<if M365 / AWS / Workspace artifacts already exist in the engagement, name them by ID and describe the chain>",
-  "next_specialist": "verifier",
   "next_steps": [
-    "Five-check verification on <finding-slug> with the step-outcomes above as primary evidence",
-    "Devil's-advocate against tenant-ref `factor_reset_helpdesk_pattern` / `traveling_user_pattern` / `api_token_baseline`",
-    "If verified: hand to ir-lead with proposals for `revoke_session`, `force_mfa_reenroll`, `revoke_api_token` per `incident-containment`"
+    {"action": "five-check verification with the step outcomes above as primary evidence", "target": "<finding-slug>", "recommended_agent": "incident-verifier", "rationale": "L2 does not own disposition"},
+    {"action": "devil's-advocate against the factor_reset_helpdesk_pattern / traveling_user_pattern / api_token_baseline registers", "target": "<finding-slug>", "recommended_agent": "incident-verifier", "rationale": "those three registers carry the usual benign explanation"},
+    {"action": "author revoke_session / force_mfa_reenroll / revoke_api_token proposals once verified", "target": "<actor-id>", "recommended_agent": "ir-lead", "rationale": "incident-containment owns the proposal contract"}
   ],
-  "rationale": "<one paragraph: which steps fired, what evidence corroborates, what the verifier should focus the five-check on first>"
+  "extras": {
+    "skill_consumed": "okta-investigation",
+    "platform": "okta",
+    "okta_org": "<org>.okta.com",
+    "actor": "<upn>",
+    "actor_id": "<00u...>",
+    "time_window_utc": ["<since>", "<until>"],
+    "mitre_techniques_observed": ["T1621", "T1556.006", "T1539"],
+    "severity_recommendation": "high",
+    "confidence_rationale": "<one sentence citing the corroborating signals>",
+    "evidence_refs": [<artifact-id>, "..."],
+    "step_outcomes": {
+      "step1_systemlog": {"events": <int>, "histogram_artifact": <id>},
+      "step2_factors": {"new_factors": [...], "helpdesk_ticket": "<id|none>"},
+      "step3_push_fatigue": {"clusters": <int>, "allowed_after_denied": true|false},
+      "step4_session_replay": {"new_fingerprints": [...], "session_ids": [...]},
+      "step5_admin_api_tokens": {"new_admins": [...], "new_tokens": [...]},
+      "step6_ad_drift": {"drift_fields": [...], "within_sync_window": true|false}
+    },
+    "cross_platform_correlation_notes": "<if M365 / AWS / Workspace artifacts already exist in the engagement, name them by ID and describe the chain>",
+    "rationale": "<one paragraph: which steps fired, what evidence corroborates, what the verifier should focus the five-check on first>"
+  }
 }
 ```
 
@@ -459,10 +462,10 @@ Run in order at the end of the L2 dispatch:
      --actor-kind agent
    ```
 
-4. **Emit the handoff JSON** to `/tmp/handoff.json` and record it:
+4. **Emit the handoff JSON** to `/tmp/handoff-<agent-id>.json` and record it:
 
    ```bash
-   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-<agent-id>.json
    ```
 
 ## Common Failure Modes

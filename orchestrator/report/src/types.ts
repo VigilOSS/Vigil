@@ -62,6 +62,12 @@ export interface ReportFinding {
   severity?: string;
   workflow_status?: string;
   verification_status?: string;
+  // The operator-authority waiver behind this verdict, or null when it rests on
+  // a dispatch-verified proof receipt: {kind, intel_id, intel_type, at, reason} as stamped by
+  // proofs.py:OPERATOR_AUTHORITY_PROVENANCE_KEY. `verification_status` alone cannot
+  // distinguish the two, and ADR 0043 requires that this delivered report can.
+  // Typed `unknown` and narrowed in a lib helper, exactly as poc_request is.
+  operator_authority?: unknown;
   canonical_location?: string;
   // Severity-defining context a reader needs before the severity means anything:
   // what privilege the attack requires, and whether the proof was observed on
@@ -172,6 +178,14 @@ export interface ReportReadinessItem {
   kind?: string;
   detail?: string;
   slug?: string;
+  // The gating class the backend stamps on every item as it leaves
+  // report_readiness: `block` refuses a final export, `advisory` never does.
+  // Declared rather than left to the index signature because the item — kind
+  // plus detail — is what gets copied out of this panel, and it arrives at its
+  // next reader with the blockers/advisories split long gone. Two near-homonym
+  // kinds gate oppositely: `missing_cited_markdown_artifact` never blocks,
+  // `finding_evidence_missing_artifact` always does.
+  severity?: "block" | "advisory";
   [key: string]: unknown;
 }
 

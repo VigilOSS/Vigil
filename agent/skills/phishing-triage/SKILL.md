@@ -642,22 +642,34 @@ The specialist returns this JSON from the dispatch:
 
 ```json
 {
-  "finding_slug": "...",
-  "skill_used": "phishing-triage",
-  "disposition_recommendation": "confirmed|false_positive|downgraded|disputed|pending_runtime_proof",
-  "evidence_refs": ["<artifact-id-eml>", "<artifact-id-parsed>", "<artifact-id-urlscan>"],
-  "intel_ids": [<intel-id-1>, <intel-id-2>],
-  "mitre_techniques": ["T1566.002", "T1078.004"],
-  "tenant_ref_paths_consulted": ["agent/references/tenants/<slug>-m365.md"],
-  "next_specialist": "verifier|m365-signin-investigation|incident-containment",
+  "agent_id": "<runtime-agent-id>",
+  "agent_role": "investigator",
+  "phase": "investigate",
+  "summary": "<what the header chain, sender-authentication state, URL/attachment detonation and BEC checks establish, and what the recommendation rests on>",
   "confidence": "high|medium|low",
-  "confidence_rationale": "...",
-  "rationale": "<one paragraph: what was found, what the recommendation rests on, what the verifier should re-read first>",
-  "coverage_gaps": ["VT_API_KEY missing — file hashes not enriched"],
-  "containment_hints": [
-    {"action": "purge_message", "target": "<message-id>", "blast_radius": "single-user|all-recipients", "rationale": "..."},
-    {"action": "block_sender_domain", "target": "<sender-domain>", "rationale": "..."}
-  ]
+  "handoff_status": "ready",
+  "finding_slugs": ["..."],
+  "recommended_next_agent": "incident-verifier",
+  "coverage_gaps": [
+    {"area": "file-hash reputation", "reason": "VT_API_KEY missing", "recommended_followup": "re-run the attachment hash enrichment once the key lands"}
+  ],
+  "next_steps": [
+    {"action": "five-check verification of the disposition recommendation", "target": "<slug>", "recommended_agent": "incident-verifier", "rationale": "L2 does not own disposition"}
+  ],
+  "extras": {
+    "skill_used": "phishing-triage",
+    "disposition_recommendation": "confirmed|false_positive|downgraded|disputed|pending_runtime_proof",
+    "evidence_refs": ["<artifact-id-eml>", "<artifact-id-parsed>", "<artifact-id-urlscan>"],
+    "intel_ids": [<intel-id-1>, <intel-id-2>],
+    "mitre_techniques": ["T1566.002", "T1078.004"],
+    "tenant_ref_paths_consulted": ["agent/references/tenants/<slug>-m365.md"],
+    "confidence_rationale": "...",
+    "containment_hints": [
+      {"action": "purge_message", "target": "<message-id>", "blast_radius": "single-user|all-recipients", "rationale": "..."},
+      {"action": "block_sender_domain", "target": "<sender-domain>", "rationale": "..."}
+    ],
+    "rationale": "<one paragraph: what was found, what the recommendation rests on, what the verifier should re-read first>"
+  }
 }
 ```
 
@@ -713,7 +725,7 @@ Run these four steps in order before returning the handoff JSON:
 
 5. **Emit the handoff JSON** via `vigil assess agent handoff
    --agent-id <your dispatch agent_id> --from-json /tmp/phishing-triage-handoff.json`. Shape per Output
-   Contract above. `next_specialist` routes to:
+   Contract above. `recommended_next_agent` routes to:
    - `verifier` for any disposition recommendation with met
      evidence rigor
    - `m365-signin-investigation` when AiTM

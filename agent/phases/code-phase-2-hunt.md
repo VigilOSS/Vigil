@@ -31,12 +31,19 @@ bound structural index, call graph excerpts, and attack hypotheses as guidance. 
 sealed-source access to trace beyond the provided file batch when needed.
 
 Adaptive batching is part of the method, not a convenience:
-- Default to 1 logical module or 1-3 tightly related files per hunter dispatch
+- The unit of REASONING is 1 logical module or 1-3 tightly related files -- one `code-record
+  analysis` + `done` closes each unit on its own evidence
 - Shrink further when files are large, parser-heavy, stateful, or the supporting metadata would
   crowd out the actual source
 - Widen only when multiple files form one tight entry-chain and the added context materially
   improves reasoning
 - Treat fetch size as queue mechanics, not mandatory prompt size
+- One dispatch MAY carry several same-`batch_theme` leases and work them sequentially, recording the
+  per-item receipt and `done` as each finishes. The hunter pays its skill, index, threat-model, and
+  source ramp-up once per dispatch, so a lane of related leases amortizes it. The ceiling is the
+  context-budget rule below ("Context budget rule"): stop adding leases at the point where
+  supporting metadata or earlier items' context would crowd out the source of the one being read.
+  Unrelated themes still split into separate parallel dispatches
 
 #### Phase 2A -- Broad Hunt
 
@@ -111,13 +118,22 @@ through every current row. Write `--ids-only` straight to the ids file -- it is 
 Two things make that file a *claim* set rather than an inventory: pass `--status pending`, because
 `list` deliberately reports every current attempt while `fetch` only claims unleased pending rows;
 and read its stderr, because a page that stopped at `--limit` says so there and nowhere else.
+Then reconcile what you asked for against what you got: when you fetched with `--ids-file`, compare
+the returned ids to the file's and account for every missing one by its current status, because
+`fetch` claims only currently-claimable rows and leaves the rest where they were. An unreconciled
+short claim is silent: a claim short by fourteen ids leaves fourteen files owned by no lane, and
+nothing surfaces them until a phase transition's readiness check.
 Requeued cross-file-trigger rows keep `queue_mode=trigger`, which is how you find them in either
 command after they leave their original theme's lane.
 
 Pass lane filters to `fetch` instead of claiming broadly and filtering the response -- repository,
 classification, theme, queue-mode, and explicit-id predicates run inside the serialized claim query,
 leaving unrelated pending work available. Preserve each returned `agent_name`, `lease_token`, and
-`repo_generation` for results, heartbeats, and closeout.
+`repo_generation` for results, heartbeats, and closeout. When a token is lost rather than
+superseded, recover it instead of re-claiming: `code-dispatch progress <item-id>` prints that
+item's live holder and token, and `code-dispatch list --show-tokens` prints them per lane. A token
+those commands no longer show against your `agent_name` was reclaimed, which is an `adopt-lease`
+or `reset-stale` decision, not a recovery.
 
 Split the claimed batch into the smaller per-dispatch sizes above whenever code volume, framework
 noise, or support metadata would outweigh the source files, or when fetched items span unrelated
@@ -127,20 +143,32 @@ one oversized mixed batch to a single agent.
 **Dispatch `code-vuln-hunter`** with `agent/skills/code-vulnerability-analysis/SKILL.md` and:
 
 - **File paths** -- from the fetched queue items; resolve every relative path beneath the current
-  Code Source Identity `snapshot_path`, never beneath the mutable origin.
+  Code Source Identity `snapshot_path`, never beneath the mutable origin. Set
+  `prompt_context.lane_file` to the `fetch` JSON so `agent start` resolves every lane path against
+  the live `code/files` inventory and refuses the dispatch on a miss; a path you type into `--task`
+  or other `prompt_context` text is captured verbatim and gets no such check.
 - **Batch theme** -- the logical module grouping, so files in the batch share cross-file context.
 - **Slot types** -- the slot type annotations for each file from Phase 1 classification.
-- **Applicable vulnerability classes** -- pass the backend-computed `applicable_vuln_classes` list
+- **Applicable vulnerability classes** -- do not type them at all. Set
+  `prompt_context.queue_item_ids` (or the `lane_file` above): `agent start` then reads each item's
+  `code/analysis-queue/<id>/progress` row and renders `applicable_vuln_classes`,
+  `path_suggested_vuln_classes`, and `missing_cwe_families` per item into the packet's backend
+  queue manifest, refusing the dispatch when a row cannot state its families. That manifest is the
+  only backend-derived family channel into a hunter's packet, because the hunter never runs
+  `code-dispatch fetch` -- you do. Anything you write in prose is a second, unvalidated copy of a
+  backend-owned value, and when it disagrees the backend wins at `done`. If you must restate it,
+  pass the backend-computed `applicable_vuln_classes` list
   through unmodified (`_applicable_families_for_file` in
   `orchestrator/backend/app/services/code_analysis.py` derives it from slot types, language and
   role over the canonical taxonomy `agent/scripts/assess/lib/vuln_taxonomy.py`); do not hand-copy a
   slot->class table, it drifts from the backend. This is a coverage floor, not a
   ceiling -- every named class gets an effort score, and anything else the reading surfaces is
-  still the hunter's to flag. For every C/C++ file, sanity-check that the list includes
-  `error-handling` and `algorithmic-dos`: cleanup/partial-I/O failures and attacker-controlled
-  CPU, allocation, retry, or retention are baseline review surfaces, not optional memory-safety
-  extras. A missing baseline family is a dispatch-input defect to repair before review, not
-  permission to omit it.
+  still the hunter's to flag. For every structurally analyzed file, whatever its language,
+  sanity-check that the list includes `error-handling` and `algorithmic-dos`: the backend seeds
+  those two for every language it analyzes structurally, because cleanup/partial-I/O failures and
+  attacker-controlled CPU, allocation, retry, or retention are baseline review surfaces rather
+  than memory-safety extras. A missing baseline family is a dispatch-input defect to repair before
+  review, not permission to omit it.
 - **Path hints** -- pass `path_suggested_vuln_classes` through beside it. A whole word of the
   file's path (`Checkout`, `refunds`, `webhooks`) marks the file as one to consider for
   race-condition, business-logic or rate-limit review. The hunter checks whether the code moves
@@ -220,7 +248,10 @@ vigil assess code-record analysis <analysis-json>   # cwe_coverage + cross_file_
 vigil assess code-dispatch progress <item-id>      # what this item still owes
 
 # Preview the completion payload before committing queue history when unsure:
-vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> ["notes"] --dry-run [--skip-reason <reason>]
+# "notes" is positional-optional to the CLI but REQUIRED by the backend for
+# disposition=clean -- a clean closeout with empty notes is refused, because the
+# review reasoning that ruled each family out is the only record a clean file leaves.
+vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> <cwe-coverage-json> "<notes: required for clean>" --dry-run [--skip-reason <reason>]
 
 # cwe-coverage-json is a file path, not inline JSON -- write the bare array (shape:
 # agent/skills/code-vulnerability-analysis/SKILL.md "CWE Coverage") to a temp file first:
@@ -228,7 +259,7 @@ cat > /tmp/cwe_<item-id>.json <<'JSON'
 [{"family": "buffer-overflow", "effort": 85, "functions_analyzed": 12, "entry_chains_traced": 3, "total_entry_chains": 3, "notes": "Traced all applicable parser entry chains"}]
 JSON
 
-vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json ["notes"] [--skip-reason <reason>]
+vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json "<notes: required for clean>" [--skip-reason <reason>]
 vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
 vigil assess code-dispatch list --stale-minutes 10   # before fetching the next batch: read first

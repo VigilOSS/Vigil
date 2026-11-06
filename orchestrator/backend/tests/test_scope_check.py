@@ -304,7 +304,7 @@ def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> 
 
 
 # ---------------------------------------------------------------------------
-# Wildcard-includes-apex semantics — `vigil assess ingest-endpoints` regressions
+# Wildcard-includes-apex semantics — `vigil assess ingest endpoints` regressions
 # ---------------------------------------------------------------------------
 
 

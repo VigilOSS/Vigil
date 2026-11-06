@@ -18,6 +18,7 @@ from assess.lib.treesitter_common import _gate_literals, _literal_gate, _php_imp
 from assess.lib.treesitter_lightweight import (
     _LUA_DYNAMIC_REDIS_COMMAND_RE,
     _PS_SINK_PATTERNS,
+    _TEMPLATE_BRACE_STEP_LINE,
 )
 
 UNSCANNED_SCOPE_DEGRADATION_REASON = "unscanned_function_scope"
@@ -111,7 +112,8 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
     # hand, which is every path but this one; `_STREAM_EXTRA_SINK_PATTERNS`
     # reads Blade's sinks with the same limit, so the two stay symmetrical.
     "blade": [
-        ("template_input", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}"),
+        ("template_input",
+         r"\{\{(?!--)" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}|\{!![^!\r\n]+!!\}"),
     ],
     "php": [
         # `$_SERVER['argv']` is read below, as process and request input both.
@@ -181,16 +183,16 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         ("script_argument", r"\b(?:ARGV|KEYS)\s*\["),
     ],
     "html": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>"),
+        ("template_input", r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}|<%[^%\r\n]+%>"),
     ],
     "css": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}|<%[^%\r\n]+%>"),
+        ("template_input", r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}|<%[^%\r\n]+%>"),
     ],
     "freemarker": [
         ("template_input", r"[$#]\{[^}\r\n]+\}"),
     ],
     "twig": [
-        ("template_input", r"\{\{[^}\r\n]+\}\}"),
+        ("template_input", r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}"),
     ],
 }
 
@@ -246,7 +248,8 @@ _STREAM_IMPORT_PATTERNS: dict[str, list[str]] = {
 _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
     "blade": [
         ("unescaped_output", r"\{!![^!\r\n]+!!\}", ["xss"]),
-        ("template_interpolation", r"\{\{(?!--)[^}\r\n]+\}\}", ["xss"]),
+        ("template_interpolation",
+         r"\{\{(?!--)" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}", ["xss"]),
         ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
     ],
     "php": [
@@ -272,7 +275,8 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
     ],
     "html": [
         ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
-        ("template_interpolation", r"\{\{[^}\r\n]+\}\}", ["xss", "ssti"]),
+        ("template_interpolation",
+         r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}", ["xss", "ssti"]),
     ],
     "css": [
         ("css_expression", r"\bexpression\s*\(", ["xss"]),
@@ -288,8 +292,12 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
         ),
     ],
     "twig": [
-        ("unescaped_output", r"\{\{[^}\r\n]*\|\s*raw\b[^}\r\n]*\}\}|\{%[-~]?\s*autoescape\s+false\b", ["xss", "ssti"]),
-        ("template_interpolation", r"\{\{(?![^}\r\n]*\|\s*raw\b)[^}\r\n]+\}\}", ["xss", "ssti"]),
+        ("unescaped_output",
+         r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"*\|\s*raw\b" + _TEMPLATE_BRACE_STEP_LINE
+         + r"*\}\}|\{%[-~]?\s*autoescape\s+false\b", ["xss", "ssti"]),
+        ("template_interpolation",
+         r"\{\{(?!" + _TEMPLATE_BRACE_STEP_LINE + r"*\|\s*raw\b)"
+         + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}", ["xss", "ssti"]),
         ("inline_event_handler", r"\bon[a-z]+\s*=\s*['\"][^'\"]+['\"]", ["xss"]),
         ("twig_dynamic_evaluation", r"\btemplate_from_string\s*\(", ["ssti", "injection"]),
     ],
@@ -407,6 +415,19 @@ _HASH_COMMENT_LANGUAGES = frozenset(
 # script's interpreter line, which is that language's own entry-point signal,
 # and `#[` opens a PHP 8 attribute, which carries the framework route table.
 _HASH_CODE_PREFIXES: dict[str, bytes] = {"php": b"#[", "shell": b"#!"}
+# Languages whose grammar ends a `//` or `#` comment where a template tag
+# closes, which puts the rest of that line back in code: `// legacy ?><?php
+# system($cmd);` runs the command.
+_LINE_COMMENT_CLOSERS: dict[str, bytes] = {"php": b"?>"}
+# Languages with a `/* ... */` comment, which the parse-tree reader labels as
+# commentary however many lines it spans. A docblock continuation (` * ...`)
+# only reads as commentary inside one; outside it a leading `*` is a
+# dereference or a multiplication, and the call after it runs.
+_BLOCK_COMMENT_LANGUAGES = frozenset(
+    {"c", "cpp", "csharp", "css", "go", "java", "javascript", "php", "typescript"}
+)
+_BLOCK_COMMENT_OPEN = b"/*"
+_BLOCK_COMMENT_CLOSE = b"*/"
 
 
 class StreamingSecurityScanner:
@@ -421,6 +442,7 @@ class StreamingSecurityScanner:
         window_bytes: int = STREAMING_SCAN_WINDOW_BYTES,
         overlap_bytes: int = STREAMING_SCAN_OVERLAP_BYTES,
         sources_only: bool = False,
+        text_from_line: int | None = None,
     ) -> None:
         if signal_limit < 1:
             raise ValueError("signal_limit must be positive")
@@ -441,6 +463,20 @@ class StreamingSecurityScanner:
         self._line_number = 1
         self._line_had_bytes = False
         self._line_comment: bool | None = None
+        # Carried across the pieces of one line: a `//` or `#` comment runs to
+        # the line's end, so no later piece of that line can hold code, and
+        # the last byte of a piece is where the next one's `*/` may begin.
+        self._line_to_end_comment = False
+        self._piece_tail = b""
+        # Carried across lines: a `/*` runs until its `*/`, however far away.
+        self._block_comment = False
+        self._block_comment_line = 0
+        # The line a previous read of this same source opened a `/*` on and
+        # never closed. A `/*` at or after it opens nothing: see `_scan_bytes`.
+        self._text_from_line = text_from_line
+        # Where this read left a `/*` open at the end of the source, which is
+        # the one position at which it read bytes it never proved were comment.
+        self.unclosed_block_line: int | None = None
         self._line_windows = 0
         self._php_use_open = True
         self._php_use_pending: list[tuple[int, bytearray]] | None = None
@@ -568,22 +604,147 @@ class StreamingSecurityScanner:
                     self._pending_cr = True
 
     def _opens_a_comment(self, stripped: bytes) -> bool:
-        """Whether *stripped* — a line's first non-blank bytes — starts a comment."""
+        """Whether *stripped* — bytes at a line position — opens a `//`/`#` comment."""
         if stripped.startswith(b"//"):
             return True
         if not stripped.startswith(b"#") or self.language not in _HASH_COMMENT_LANGUAGES:
             return False
         code_prefix = _HASH_CODE_PREFIXES.get(self.language)
-        return code_prefix is None or not stripped.startswith(code_prefix)
+        if code_prefix is None:
+            return True
+        # A `#` with nothing after it is either a comment holding nothing a
+        # reader could want or the `#[`/`#!` a piece boundary cut in two, and
+        # reading it as code costs the first nothing while it keeps the second
+        # -- a route table, an interpreter line -- and the rest of its line.
+        return len(stripped) >= len(code_prefix) and not stripped.startswith(code_prefix)
+
+    def _line_is_commentary(self, line: bytes) -> bool:
+        """Whether every byte of *line* is commentary, carrying block state.
+
+        The parse-tree reader calls a line commentary only when the grammar
+        puts all of its text in comments, and this asks the same question of
+        bytes: a `//` or `#` comment runs to the end of its line unless the
+        language closes one at a tag, and a `/*` runs to its `*/`, which may
+        be lines away. Agreeing on this is what keeps a finding from appearing
+        or vanishing with the reader that ran; a line holding code anywhere is
+        read whole by both, comment text included.
+
+        A block is entered only from a line that *opens* with one, so a `/*`
+        written inside a string literal -- which no line reader can see -- can
+        never blind the scan to the code that follows it. A block opened after
+        code on its line therefore reads as code, which over-reports its
+        continuation lines rather than dropping them.
+
+        An opener the source never closes is not a comment region either, and
+        reading one as if it were is the one error with no safe direction: it
+        drops every signal below the opener while the artifact still reports a
+        clean complete read. `_mask_delimited_comments` restores an unclosed
+        markup opener verbatim for that reason, and *text_from_line* is how a
+        re-read of the same source restores this one.
+        """
+        position = 0
+        while position < len(line):
+            if self._block_comment:
+                close = line.find(_BLOCK_COMMENT_CLOSE, position)
+                if close < 0:
+                    return True
+                self._block_comment = False
+                position = close + len(_BLOCK_COMMENT_CLOSE)
+                continue
+            stripped = line[position:].lstrip(b" \t\v\f")
+            if not stripped:
+                return True
+            position = len(line) - len(stripped)
+            if self._opens_a_comment(stripped):
+                closer = _LINE_COMMENT_CLOSERS.get(self.language)
+                if closer is not None and line.find(closer, position) >= 0:
+                    return False
+                self._line_to_end_comment = True
+                return True
+            if (
+                self.language in _BLOCK_COMMENT_LANGUAGES
+                and stripped.startswith(_BLOCK_COMMENT_OPEN)
+            ):
+                if (
+                    self._text_from_line is not None
+                    and self._line_number >= self._text_from_line
+                ):
+                    return False
+                self._block_comment = True
+                self._block_comment_line = self._line_number
+                position += len(_BLOCK_COMMENT_OPEN)
+                continue
+            return False
+        # Read to the end: the last byte went into a delimiter or a blank run,
+        # so the next piece of this line carries nothing. Every other exit
+        # leaves that byte unread, which is what `_closes_in_piece` searches.
+        self._piece_tail = b""
+        return True
+
+    def _closes_in_piece(self, carry: bytes, piece: bytes, closer: bytes) -> int:
+        """Where *closer* ends inside *piece*, or -1 if it is not in it.
+
+        The delimiter may straddle the boundary between two pieces of one
+        line, so the search runs over *carry* -- the unread byte the piece
+        before it ended on -- and a hit that starts there ends at the front
+        of this piece.
+        """
+        found = (carry + piece).find(closer)
+        if found < 0:
+            return -1
+        return max(found + len(closer) - len(carry), 0)
+
+    def _piece_is_commentary(self, piece: bytes) -> bool:
+        """`_line_is_commentary` for one more piece of the line already begun.
+
+        A line the reader is not handed whole -- one longer than a window, or
+        one a chunk boundary falls inside -- arrives in pieces, and a comment
+        open in the first of them closes wherever the line puts its delimiter,
+        which may be any piece. Reading past that delimiter costs signal in
+        silence: a `/*` runs on to whatever `*/` comes next and the lines
+        between read as comment text, and a `//` or `#` holds the rest of a
+        line whose template tag already ended it.
+
+        Nothing is *opened* from a later piece. A `/*` a boundary happens to
+        land on sits mid-line, where `_line_is_commentary` opens no block
+        either, and once the line holds code it is read whole however many
+        pieces that takes.
+        """
+        carry, self._piece_tail = self._piece_tail, piece[-1:]
+        if self._block_comment:
+            position = self._closes_in_piece(carry, piece, _BLOCK_COMMENT_CLOSE)
+            if position < 0:
+                return True
+            self._block_comment = False
+            return self._line_is_commentary(piece[position:])
+        if self._line_to_end_comment:
+            closer = _LINE_COMMENT_CLOSERS.get(self.language)
+            if closer is None:
+                return True
+            if self._closes_in_piece(carry, piece, closer) < 0:
+                return True
+            # The tag put the rest of the line back in code, which is what
+            # `_line_is_commentary` answers for the same line read whole.
+            self._line_to_end_comment = False
+            return False
+        if self._line_comment is False:
+            return False
+        return self._line_is_commentary(piece)
 
     def _append_line_bytes(self, data: bytes) -> None:
         if not data:
             return
         self._line_had_bytes = True
-        if self._line_comment is None:
-            stripped = data.lstrip(b" \t\v\f")
-            if stripped:
-                self._line_comment = self._opens_a_comment(stripped)
+        if data.strip(b" \t\v\f") or self._block_comment:
+            commentary = self._piece_is_commentary(data)
+            # The first piece with text owns the verdict, and a later one that
+            # reaches code past a closing delimiter overrides it: a line
+            # holding code anywhere is read whole, so what is left of it after
+            # that piece is scanned.
+            if self._line_comment is None or not commentary:
+                self._line_comment = commentary
+        else:
+            self._piece_tail = data[-1:]
         self._line_buffer.extend(data)
         while len(self._line_buffer) >= self.window_bytes:
             window = bytes(self._line_buffer[: self.window_bytes])
@@ -598,14 +759,15 @@ class StreamingSecurityScanner:
         place instead of being copied through the buffer.
         """
         if line:
-            stripped = line.lstrip(b" \t\v\f")
-            if stripped:
-                self._line_comment = self._opens_a_comment(stripped)
+            if line.strip(b" \t\v\f") or self._block_comment:
+                self._line_comment = self._line_is_commentary(line)
             self._scan_window(line, accept_before=len(line))
         self.total_lines += 1
         self._line_number += 1
         self._line_had_bytes = False
         self._line_comment = None
+        self._line_to_end_comment = False
+        self._piece_tail = b""
         self._line_windows = 0
 
     def _finish_line(self) -> None:
@@ -616,6 +778,8 @@ class StreamingSecurityScanner:
         self._line_buffer.clear()
         self._line_had_bytes = False
         self._line_comment = None
+        self._line_to_end_comment = False
+        self._piece_tail = b""
         self._line_windows = 0
 
     @staticmethod
@@ -790,6 +954,20 @@ class StreamingSecurityScanner:
             self._finish_line()
         if self._php_use_pending is not None:
             self._publish_php_use()
+        if self._block_comment:
+            # The source ended inside a `/*` it never closed, so the lines
+            # from the opener were read as comment text without that ever
+            # being true. A caller holding the bytes re-reads them from the
+            # opener instead (`_scan_bytes`); a chunk-fed caller cannot, and
+            # the debt is what it publishes: a dimension that retained
+            # nothing is named unavailable below, and one that retained
+            # records says here that it does not carry all of them.
+            self.unclosed_block_line = self._block_comment_line
+            self._truncated.update(
+                dimension
+                for dimension in _SIGNAL_DIMENSIONS
+                if self.signal_counts[dimension]
+            )
         for dimension in _KINDED_SIGNAL_LISTS:
             records = getattr(self, dimension)
             if len(records) > self.signal_limit:
@@ -804,7 +982,23 @@ class StreamingSecurityScanner:
             ("security_sinks", self._sink_patterns),
             ("security_sources", self._source_patterns),
         ):
-            if not patterns:
+            # A dimension with no reader was never measured, and so was one
+            # whose reader retained nothing: the line tables see neither what
+            # the grammar sees -- a script's own statements as its entry point,
+            # a sink name that is only quoted text -- nor past the window they
+            # read, so silence here is not the negative that an empty
+            # dimension on a complete artifact is. A dimension that did retain
+            # records says so through the degraded mode and each record's
+            # `heuristic_streaming` detection instead; it cannot be named here,
+            # because `code_structural_metadata.validated_structural_metadata`
+            # and the backend's `StructuralMetadataItem` both require an
+            # unavailable dimension to hold nothing at all.
+            #
+            # The sources-only scan is the exception. Its caller hands it
+            # source the grammar already blanked every comment out of and
+            # keeps that reading as the file's own, so an empty answer there
+            # is the measurement, not the absence of one.
+            if not patterns or not (self.sources_only or self.signal_counts[dimension]):
                 unavailable.add(dimension)
         return {
             "file_path": self.file_path,
@@ -850,12 +1044,46 @@ def streaming_security_fallback(
     return scanner.finish(degradation_reason=degradation_reason)
 
 
-def _scan_bytes(
+def _feed_bytes(
     scanner: StreamingSecurityScanner, source: bytes, *, degradation_reason: str
 ) -> dict[str, Any]:
     for offset in range(0, len(source), STREAMING_SCAN_WINDOW_BYTES):
         scanner.feed(source[offset : offset + STREAMING_SCAN_WINDOW_BYTES])
     return scanner.finish(degradation_reason=degradation_reason)
+
+
+def _scan_bytes(
+    scanner: StreamingSecurityScanner, source: bytes, *, degradation_reason: str
+) -> dict[str, Any]:
+    """`_feed_bytes`, re-read from an opener the source never closes.
+
+    A scan that ends inside a `/*` read every line from its opener as comment
+    text, which is the one reading nothing in the source supports: the opener
+    is a construct the file got wrong, and `_mask_delimited_comments` restores
+    such an opener verbatim rather than deleting the signals below it. Having
+    the bytes, this does the same -- the second read treats a `/*` at or after
+    that line as the text it is, and finds what the first read passed over.
+
+    One re-read is always enough. The first read searched every line from the
+    opener for a `*/` and found none, so the source holds none after it, and
+    no opener at or after that line can close either.
+    """
+    observed = _feed_bytes(scanner, source, degradation_reason=degradation_reason)
+    if scanner.unclosed_block_line is None:
+        return observed
+    return _feed_bytes(
+        StreamingSecurityScanner(
+            scanner.file_path,
+            scanner.language,
+            signal_limit=scanner.signal_limit,
+            window_bytes=scanner.window_bytes,
+            overlap_bytes=scanner.overlap_bytes,
+            sources_only=scanner.sources_only,
+            text_from_line=scanner.unclosed_block_line,
+        ),
+        source,
+        degradation_reason=degradation_reason,
+    )
 
 
 def _fallback_from_bytes(

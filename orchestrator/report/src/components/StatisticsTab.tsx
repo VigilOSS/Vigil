@@ -1,6 +1,7 @@
 import type { ReportData, ReportReadinessItem } from "../types";
 import { SeverityDonut } from "./SeverityDonut";
-import { formatDateTime, formatLabel, SEVERITY_RANK } from "../lib/format";
+import { flattenFindings, formatDateTime, formatLabel, SEVERITY_RANK } from "../lib/format";
+import { asOperatorAuthority } from "../lib/operatorAuthority";
 
 interface Props {
   data: ReportData;
@@ -19,9 +20,14 @@ function ReadinessNotice({ data }: Props) {
   const advisories = readiness?.advisories ?? [];
   if (blockers.length === 0 && advisories.length === 0) return null;
 
+  // The gating class rides on each ROW, not only on the section heading above
+  // it: a row pasted into a handoff or a ticket arrives without the section,
+  // and `missing_cited_markdown_artifact` (never gates) reads exactly like
+  // `finding_evidence_missing_artifact` (always does) once it does.
   const renderItem = (item: ReportReadinessItem, index: number) => (
     <li key={`${item.kind ?? "item"}-${index}`}>
       <span className="rpt-mono">{item.kind ?? "unknown"}</span>
+      {item.severity && <span className="rpt-gating">{item.severity === "advisory" ? "advisory" : "blocking"}</span>}
       {item.detail ? ` — ${item.detail}` : ""}
     </li>
   );
@@ -92,6 +98,16 @@ export function StatisticsTab({ data }: Props) {
       .filter(([sev]) => (SEVERITY_RANK[sev] ?? 0) >= SEVERITY_RANK.high)
       .reduce((sum, [, v]) => sum + v, 0) ?? 0;
 
+  // How many of the delivered verdicts were recorded on the operator's own
+  // attestation rather than a proof receipt. The Verification bar states a
+  // DISTRIBUTION — "Verified: 4" — and a reader takes all four for proof, which
+  // is the laundering ADR 0043's visibility obligation exists to stop. Counted
+  // from this report's own findings, the same way the backend derives the
+  // rollups it ships, so the note and the bar describe one population.
+  const attestedCount = flattenFindings(data.finding_groups).filter(
+    (entry) => asOperatorAuthority(entry.finding.operator_authority) !== null,
+  ).length;
+
   const cards: StatCard[] = [
     { label: "Findings", value: findingCount },
     { label: "High+ severity", value: highCount },
@@ -157,6 +173,13 @@ export function StatisticsTab({ data }: Props) {
         <div className="rpt-panel">
           <BreakdownBars title="Workflow status" counts={summary.finding_workflow_statuses ?? {}} />
           <BreakdownBars title="Verification status" counts={summary.finding_verification_statuses ?? {}} />
+          {attestedCount > 0 && (
+            <p className="rpt-breakdown-note">
+              {attestedCount === 1
+                ? "1 of these verdicts was recorded on the operator's attestation rather than a proof receipt; the finding says which."
+                : `${attestedCount} of these verdicts were recorded on the operator's attestation rather than a proof receipt; each finding says so.`}
+            </p>
+          )}
         </div>
       </section>
 

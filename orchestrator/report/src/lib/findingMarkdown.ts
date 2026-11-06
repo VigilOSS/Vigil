@@ -10,6 +10,7 @@
 
 import type { ReportFinding } from "../types";
 import { formatLabel, referenceLink } from "./format";
+import { asOperatorAuthority, operatorAuthorityLabel } from "./operatorAuthority";
 import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "./poc";
 
 export { stepsText } from "./steps";
@@ -55,12 +56,17 @@ function fenceFor(content: string): string {
  * degrade the operator's own data) is not engaged. The capture the fence wraps
  * still goes in byte for byte.
  *
+ * An inner SPACE is admitted, because it breaks nothing: a renderer reads the
+ * first word of the info string as the language and ignores the rest, so
+ * ```` ```python 3 ```` fences exactly as ```` ```python ```` does. A line
+ * ending is still refused — `\r` and `\n` both split the opening line.
+ *
  * This twin only ever passes literals. Its sibling in orchestrator/frontend
  * passes `details.poc_language`, which is a free-form key no schema, prompt or
  * backend validates, so the guard lives in both and neither can drift.
  */
 export function fenceInfo(hint: string): string {
-  return /^[A-Za-z0-9_+#.-]*$/.test(hint) ? hint : "";
+  return /^[A-Za-z0-9_+#.\- ]*$/.test(hint) ? hint : "";
 }
 
 export function findingToMarkdown(d: ReportFinding): string {
@@ -87,6 +93,14 @@ export function findingToMarkdown(d: ReportFinding): string {
   if (d.verification_status && d.verification_status !== "unreviewed") {
     statusParts.push(`**Verification:** ${d.verification_status}`);
   }
+  // On the same line as the verdict it qualifies. A finding copied out of this
+  // report is pasted into a submission form or a ticket, where the attestation
+  // block on the page is gone and the status word alone would present an
+  // operator attestation as a dispatch-verified proof (ADR 0043).
+  const authority = asOperatorAuthority(d.operator_authority);
+  if (authority) {
+    statusParts.push(`**${operatorAuthorityLabel(authority)}** (no proof receipt)`);
+  }
   if (statusParts.length > 0) {
     push(statusParts.join(" · "));
     push();
@@ -109,6 +123,11 @@ export function findingToMarkdown(d: ReportFinding): string {
   if (d.cwe_id) metaParts.push(`**CWE:** ${d.cwe_id}`);
   if (d.owasp_category) metaParts.push(`**OWASP:** ${d.owasp_category}`);
   if (d.cvss_vector) metaParts.push(`**CVSS vector:** \`${d.cvss_vector}\``);
+  // Verbatim, as the operator wrote it, and labelled like the metadata beside
+  // it: this is the only statement of what the out-of-snapshot evidence
+  // settles, so a copy that paraphrased it would assert a verdict whose stated
+  // grounds nobody can check.
+  if (authority?.reason) metaParts.push(`**Operator attestation:** ${authority.reason}`);
   if (metaParts.length > 0) {
     metaParts.forEach((part) => push(part));
     push();

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
+import ipaddress
 import json
 import os
 import shutil
+import socket
 import sys
 import tempfile
+import threading
+import time
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
@@ -401,22 +405,122 @@ def _surface_egress_choice(egress: RuntimeEgress) -> None:
 # mapping to the host gateway (below).
 _LOCAL_REPLICA_SUFFIX = ".local"
 
+# Resolving the remaining scoped hosts is what catches a replica that does NOT
+# carry the suffix, but it must never be able to stall `vigil runtime start` or
+# `vigil scope add-host` behind a slow or unreachable resolver. The probe is
+# advisory — a host it does not reach behaves exactly as it did before the probe
+# existed — so this bounds the sweep's WALL TIME, including a single resolver
+# call that never comes back, and whatever has been answered by then is the
+# answer. See :func:`_loopback_resolving_hosts` for why that needs a thread.
+_LOOPBACK_PROBE_BUDGET_SECONDS = 3.0
+
+
+def _resolves_only_to_loopback(host: str) -> bool:
+    """True when the HOST's own resolver answers ``host`` with loopback only.
+
+    This is the mechanism the ``.local`` suffix only approximates: a local
+    replica is a name the host maps to 127.0.0.0/8 or ``::1``, usually through a
+    line in ``/etc/hosts``. The container has no such line, so without an
+    ``extra_hosts`` entry its resolver falls through to public DNS and the probe
+    reaches the LIVE host instead of the replica.
+
+    Requires EVERY answer to be loopback, not merely one. A name that also
+    answers with a routable address is pinnable, and
+    ``kali_resolve.apply_resolve_pin`` does pin it to that routable address; an
+    ``extra_hosts`` entry for the same name would send every other tool to the
+    host gateway instead, leaving two mechanisms disagreeing about where the
+    probe goes. A resolution failure is not a loopback answer.
+    """
+    try:
+        infos = socket.getaddrinfo(host, None, proto=socket.IPPROTO_TCP)
+    except (OSError, UnicodeError, ValueError):
+        return False
+    answered = False
+    for info in infos:
+        sockaddr = info[4] if len(info) > 4 else None
+        if not sockaddr:
+            continue
+        try:
+            address = ipaddress.ip_address(str(sockaddr[0]))
+        except ValueError:
+            return False
+        answered = True
+        if not address.is_loopback:
+            return False
+    return answered
+
+
+def _loopback_resolving_hosts(candidates: list[str]) -> set[str]:
+    """The subset of ``candidates`` the host resolves to loopback only.
+
+    Bounded by ``_LOOPBACK_PROBE_BUDGET_SECONDS`` of wall time no matter how
+    long one name takes. ``socket.getaddrinfo`` accepts no timeout and is not
+    interruptible, so a deadline consulted BETWEEN hosts bounds nothing: a
+    single 8-second resolver call made this function take 8 seconds against a
+    3-second budget, and `vigil runtime start` waited behind it. Running the
+    sweep on a daemon thread and waiting on a join deadline is the one
+    mechanism that bounds a call the caller cannot cancel — a subprocess per
+    name would bound it too, at a process apiece for an advisory probe. The
+    thread also re-checks the deadline between names so an abandoned sweep
+    winds itself down; being a daemon, it can never hold interpreter exit, and
+    it finishes into a set nobody reads any more.
+
+    Fails open in both directions. Names the sweep did not get to are simply
+    not admitted — exactly the behaviour from before the probe existed — and a
+    resolver that raises cannot reach the caller from inside the thread, so
+    nothing here can stop a runtime from starting.
+    """
+    if not candidates or _LOOPBACK_PROBE_BUDGET_SECONDS <= 0:
+        return set()
+    found: set[str] = set()
+    # The caller reads `found` the moment its join deadline expires, while an
+    # abandoned sweep may still be writing to it.
+    found_lock = threading.Lock()
+    deadline = time.monotonic() + _LOOPBACK_PROBE_BUDGET_SECONDS
+
+    def _sweep() -> None:
+        for host in candidates:
+            if time.monotonic() >= deadline:
+                return
+            if _resolves_only_to_loopback(host):
+                with found_lock:
+                    found.add(host)
+
+    prober = threading.Thread(target=_sweep, name="vigil-loopback-probe", daemon=True)
+    prober.start()
+    prober.join(max(0.0, deadline - time.monotonic()))
+    with found_lock:
+        return set(found)
+
 
 def local_replica_hosts(install_root: Path) -> list[str]:
-    """Exact ``.local`` replica host names declared across all live engagements.
+    """Exact local-replica host names declared across all live engagements.
 
     A local replica resolves to loopback, which inside the runtime container is
     the container itself. Each such host is wired into the container's
     ``/etc/hosts`` via ``--add-host <host>:host-gateway`` so EVERY tool — not
     just curl — resolves it to the host machine. The runtime is shared across
     engagements (like the proxy), so the set is the union across all of them.
-    Wildcard ``*.<domain>`` roots are excluded: ``extra_hosts`` / ``/etc/hosts``
-    cannot express a wildcard, so only exact names are injected.
+
+    Two selectors, unioned. A ``.local`` suffix is the operator's explicit
+    declaration and stands on its own, with no resolution attempted. Every other
+    exact scoped host is probed on the host and admitted when its resolution is
+    loopback only (:func:`_resolves_only_to_loopback`) — the suffix is a
+    convention, and selecting on it alone left a loopback-resolving host like
+    ``replica.acme.example`` with neither an ``extra_hosts`` entry nor a
+    ``--resolve`` pin, so the container resolved it through public DNS and the
+    probe silently left the replica for the live host.
+
+    Wildcard ``*.<domain>`` roots are excluded from both selectors:
+    ``extra_hosts`` / ``/etc/hosts`` cannot express a wildcard, so only exact
+    names are injected (``agent/operator-core.md`` already tells operators to
+    enumerate the exact subdomains they intend to test).
     """
     engagements_dir = engagements_root(install_root)
     if not engagements_dir.is_dir():
         return []
     hosts: set[str] = set()
+    probe: set[str] = set()
     for scope_path in sorted(engagements_dir.glob("*/scope.json")):
         try:
             scope = json.loads(scope_path.read_text())
@@ -434,6 +538,9 @@ def local_replica_hosts(install_root: Path) -> list[str]:
             host = classified["host"]
             if host.endswith(_LOCAL_REPLICA_SUFFIX):
                 hosts.add(host)
+            else:
+                probe.add(host)
+    hosts |= _loopback_resolving_hosts(sorted(probe - hosts))
     return sorted(hosts)
 
 
@@ -450,7 +557,7 @@ def _print_local_host_restart_notice(hosts: list[str]) -> None:
         file=sys.stderr,
     )
     print(
-        "  Local .local hosts are wired into the runtime only at container "
+        "  Local replica hosts are wired into the runtime only at container "
         "creation. Run `vigil runtime restart` to pick them up — first ensure no "
         "other engagement is running against the shared runtime, as a restart "
         "terminates any in-flight `vigil assess kali` sessions.",
@@ -464,8 +571,8 @@ def warn_if_local_hosts_need_restart(
     container_name: str | None = None,
     runner: docker.Runner = docker.run_command,
 ) -> list[str]:
-    """Warn (and return the list) when scoped ``.local`` hosts are missing from
-    the RUNNING runtime.
+    """Warn (and return the list) when scoped local replica hosts are missing
+    from the RUNNING runtime.
 
     ``extra_hosts`` are fixed at container creation, so a local host scoped after
     the runtime came up is not reachable until it is recreated. A stopped runtime
@@ -612,8 +719,10 @@ def _start_runtime_locked(
         f"{engagements_dir}:/engagements",
         docker.HOST_GATEWAY_ARG,
     ]
-    # Wire every in-scope .local replica host to the host gateway so ALL tools —
-    # not just curl's --resolve path — resolve them to the host machine.
+    # Wire every in-scope local replica host — `.local` by declaration, or any
+    # exact scoped host the machine resolves to loopback only — to the host
+    # gateway so ALL tools, not just curl's --resolve path, resolve them to the
+    # host machine.
     local_hosts = local_replica_hosts(install_root)
     argv.extend(_extra_host_run_args(local_hosts))
     if env_file.exists():

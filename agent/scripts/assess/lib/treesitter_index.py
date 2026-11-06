@@ -1924,6 +1924,9 @@ _PHP_STRING_PART_TYPES = frozenset({
     "string_content", "string_value", "escape_sequence", "heredoc_start",
     "heredoc_body", "heredoc_end", "nowdoc_body", "nowdoc_string",
 })
+# The parts above that are a *container*: a heredoc or nowdoc keeps its text
+# and its interpolations one level further down, under its body.
+_PHP_STRING_BODY_TYPES = frozenset({"heredoc_body", "nowdoc_body"})
 _PHP_STRING_ESCAPES = {"\\\\": "\\", "\\'": "'", '\\"': '"', "\\$": "$"}
 # Paths are written with `/` on every platform the repository targets.
 _PHP_PATH_CONSTANTS = {"DIRECTORY_SEPARATOR": "/"}
@@ -3301,7 +3304,19 @@ def _function_scan_lines(
                         if excluded_end < visible_end:
                             next_visible.append((excluded_end, visible_end))
                 visible = next_visible
-            lines.extend((line_index, line[start:end]) for start, end in visible if start < end)
+            # Each fragment keeps its own columns, padded rather than cut to
+            # column zero, so a reader that rejects a match by where it falls
+            # -- PHP's string literals -- asks the question in the line's own
+            # coordinates. `_file_scope_lines` answers in those coordinates
+            # too, by blanking what it masks instead of cutting it out, and a
+            # fragment stays its own string so no pattern can match across the
+            # gap between two of them. Every snippet survives `.strip()`
+            # unchanged.
+            lines.extend(
+                (line_index, " " * start + line[start:end])
+                for start, end in visible
+                if start < end
+            )
     return lines
 
 
@@ -4381,14 +4396,116 @@ def _go_fetch_bindings(lines: list[str], http_aliases: set[str]) -> set[str]:
     return bindings
 
 
+def _php_interpolated_calls(node: Any) -> list[Any]:
+    """The interpolations of a PHP string literal that reach a call.
+
+    `"{$pdo->exec($sql)}"` runs the method; `"$pdo->exec($sql)"` reads the
+    `exec` *property* and renders `($sql)` verbatim, which is why the test is
+    whether the grammar put a call inside the interpolation rather than
+    whether it put an expression there. A `nowdoc` and a single-quoted
+    `string` interpolate nothing and have no such child at all.
+    """
+    reached: list[Any] = []
+    for child in node.named_children:
+        if child.type in _PHP_STRING_BODY_TYPES:
+            reached.extend(_php_interpolated_calls(child))
+        elif child.type not in _PHP_STRING_PART_TYPES and any(
+            descendant.type in _CALL_NODE_TYPES["php"]
+            for descendant in _walk_named_nodes(child)
+        ):
+            reached.append(child)
+    return reached
+
+
+def _span_outside(
+    span: tuple[int, int | None], holes: list[tuple[int, int | None]]
+) -> list[tuple[int, int | None]]:
+    """*span* with each of *holes* -- ordered and disjoint -- taken out of it.
+
+    `None` is the end of the line, which is past every column on it.
+    """
+    start, end = span
+    pieces: list[tuple[int, int | None]] = []
+    cursor = start
+    for hole_start, hole_end in holes:
+        stop = hole_start if end is None else min(hole_start, end)
+        if cursor < stop:
+            pieces.append((cursor, stop))
+        if hole_end is None:
+            return pieces
+        cursor = max(cursor, hole_end)
+        if end is not None and cursor >= end:
+            return pieces
+    if end is None or cursor < end:
+        pieces.append((cursor, end))
+    return pieces
+
+
+def _php_quoted_spans(tree: Any, source: bytes) -> dict[int, list[tuple[int, int | None]]]:
+    """Per line, the character columns each PHP string literal covers as text.
+
+    A line cannot tell a call from the text of a string that names one, so
+    `$help = 'call $pdo->exec($sql) to run it';` reported a `sql_exec` the file
+    never runs -- and through it a classification priority and a hunt the file
+    had not earned. The grammar can tell them apart, and these are its spans.
+
+    Where PHP evaluates part of a literal it is code, not text: an
+    `encapsed_string` or `heredoc` carries `{$...}` as a child expression, and
+    the span of one that reaches a call is taken back out. Covering it instead
+    dropped the `sql_exec` and `process_exec` of `"rows: {$pdo->exec($sql)}"`,
+    which the file does run. Every other byte of the literal stays covered, so
+    a call named in its text is still only text.
+
+    Only where a match *starts* is tested, and the content is left in place
+    rather than blanked, because four PHP rows read a literal on purpose:
+    `header('Location`, the `http` of `file_get_contents` and `fopen`, and
+    `preg_replace`'s `/e`. Each of those starts outside the quote that holds
+    what it reads, so rejecting by match start keeps every one of them.
+    """
+    spans: dict[int, list[tuple[int, int | None]]] = {}
+    for node in _named_nodes_of_types(tree, _PHP_STRING_TYPES):
+        start_line, start_column, end_line, end_column = _node_character_range(node, source)
+        holes = [
+            _node_character_range(call, source)
+            for call in _php_interpolated_calls(node)
+        ]
+        for line_number in range(start_line, end_line + 1):
+            covered = (
+                start_column if line_number == start_line else 0,
+                end_column if line_number == end_line else None,
+            )
+            spans.setdefault(line_number - 1, []).extend(_span_outside(covered, [
+                (
+                    hole_start_column if line_number == hole_start_line else 0,
+                    hole_end_column if line_number == hole_end_line else None,
+                )
+                for hole_start_line, hole_start_column, hole_end_line, hole_end_column in holes
+                if hole_start_line <= line_number <= hole_end_line
+            ]))
+    return spans
+
+
+def _starts_inside_quote(spans: list[tuple[int, int | None]], column: int) -> bool:
+    """Whether *column* is strictly inside one of *spans*."""
+    return any(
+        start < column and (end is None or column < end) for start, end in spans
+    )
+
+
 def _detect_sinks(
     functions: list[dict[str, Any]],
     classes: list[dict[str, Any]],
     language: str,
     source_lines: list[str],
     file_scope_lines: list[tuple[int, str]],
+    quoted_spans: dict[int, list[tuple[int, int | None]]] | None = None,
 ) -> list[dict[str, Any]]:
-    """Detect security-sensitive API calls in callable bodies and file scope."""
+    """Detect security-sensitive API calls in callable bodies and file scope.
+
+    *quoted_spans* names the string literals a language's grammar resolved, for
+    the languages whose rows are read off a line; a match starting inside one
+    is reading text, not a call. See `_php_quoted_spans`.
+    """
     sinks: list[dict[str, Any]] = []
     java_class_receivers: dict[int, dict[str, str]] = {}
     java_class_for_line: dict[int, dict[str, Any]] = {}
@@ -4494,6 +4611,12 @@ def _detect_sinks(
                             if _csharp_fetch_call_matches_type(
                                 line_text, match.start(), pat, csharp_fetch_receivers
                             )
+                        )
+                    if quoted_spans is not None:
+                        quoted = quoted_spans.get(line_idx, [])
+                        matches = (
+                            match for match in matches
+                            if not _starts_inside_quote(quoted, match.start())
                         )
                     if next(matches, None) is not None:
                         identity = (sink_def["kind"], func["name"], line_idx)
@@ -5630,10 +5753,16 @@ def index_file(
         effective_lang = "typescript" if parse_lang == "tsx" else language
         uncommented = _uncommented_source(tree, source)
         code_lines = _source_lines(uncommented)
-        # A line is commentary only when the grammar puts all of its text in comments.
-        reader_lines = [
-            line if code.strip() else "" for line, code in zip(source_lines, code_lines)
-        ]
+        # The line readers read code and never commentary, and
+        # `_uncommented_source` blanked each comment where it stood: a line
+        # holding both keeps its code at its own columns, and a line that is
+        # all commentary reads as empty. That is the answer `_file_scope_lines`
+        # already gives by blanking the comment spans it masks, and the one
+        # `_attach_bounded_security_sources` gives by reading `uncommented`.
+        # Reading the raw line instead reported a sink for the text of a
+        # trailing comment that neither of the other two readers of the same
+        # artifact agreed with.
+        reader_lines = [code if code.strip() else "" for code in code_lines]
         _enrich_qualified_names(functions, classes, effective_lang, source)
         if effective_lang == "cpp":
             functions = _deduplicate_cpp_functions(functions)
@@ -5658,7 +5787,8 @@ def index_file(
                 ),
             ))
         sinks = _detect_sinks(
-            functions, classes, effective_lang, reader_lines, file_scope.scanned
+            functions, classes, effective_lang, reader_lines, file_scope.scanned,
+            _php_quoted_spans(tree, source) if effective_lang == "php" else None,
         )
         if effective_lang == "php":
             locator = _PhpCallableLocator(functions)

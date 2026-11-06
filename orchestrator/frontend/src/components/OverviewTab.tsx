@@ -12,6 +12,7 @@ import type {
   PerHostOutcome,
   ReportReadiness,
   ReportReadinessCoverage,
+  ReportReadinessItem,
 } from "../lib/api";
 import { getReportReadiness } from "../lib/api";
 import { listActivityFeed, type ActivityFeedPage } from "../lib/activityApi";
@@ -43,6 +44,34 @@ const LATEST_ACTIVITY_LIMIT = 5;
 // Report blockers listed per kind before that kind's "Show all" expander.
 const REPORT_BLOCKER_CAP = 10;
 const REPORT_BLOCKERS_ID = "report-blockers";
+const REPORT_ADVISORIES_ID = "report-advisories";
+
+/**
+ * Split readiness items by the gating class the BACKEND stamped on each one.
+ *
+ * `report_readiness` returns two arrays and stamps every item with
+ * `severity` — `block` refuses a final export, `advisory` never does. Reading
+ * the stamp rather than the array it arrived in is the point: two near-homonym
+ * kinds gate oppositely (`missing_cited_markdown_artifact` never blocks,
+ * `finding_evidence_missing_artifact` always does), so a reader who infers
+ * gating from position has to already know the answer. The array supplies the
+ * default only for a payload that predates the stamp.
+ */
+function partitionReadinessItems(readiness: ReportReadiness): {
+  blocking: ReportReadinessItem[];
+  advisory: ReportReadinessItem[];
+} {
+  const blocking: ReportReadinessItem[] = [];
+  const advisory: ReportReadinessItem[] = [];
+  const sort = (items: ReportReadinessItem[] | undefined, fallback: "block" | "advisory") => {
+    for (const item of items ?? []) {
+      ((item.severity ?? fallback) === "advisory" ? advisory : blocking).push(item);
+    }
+  };
+  sort(readiness.blockers, "block");
+  sort(readiness.advisories, "advisory");
+  return { blocking, advisory };
+}
 
 // Per-host coverage matrix: cap visible rows and collapse the whole section
 // when the host count is large. Both are scroll-length controls; all hosts
@@ -163,6 +192,10 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
   const mounted = useRef(true);
   // Memoized so a live refresh that leaves `findings` unchanged does not re-sort.
   const queue = useMemo(() => verificationQueue(findings), [findings]);
+  const readinessItems = useMemo(
+    () => (readiness ? partitionReadinessItems(readiness) : { blocking: [], advisory: [] }),
+    [readiness],
+  );
   const awaitingHref = engagementHref(engagementKey, { tab: "findings", verification: AWAITING_VERIFICATION.join(",") });
 
   // Each chain's linked findings, in chainLinks order: slug/id indexes are
@@ -426,11 +459,17 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
       </section>
 
       {readiness && (
-        <ReadinessPanel readiness={readiness} />
+        <ReadinessPanel readiness={readiness} advisoryCount={readinessItems.advisory.length} />
       )}
 
-      {readiness && !readiness.ready && (
-        <ReportBlockers engagementKey={engagementKey} blockers={readiness.blockers} coverage={readiness.coverage} />
+      {readiness && readinessItems.blocking.length > 0 && (
+        <ReadinessItemsPanel engagementKey={engagementKey} gating="block" items={readinessItems.blocking} coverage={readiness.coverage} />
+      )}
+      {/* Not gated on `!ready`: when every gate passes, the advisories that
+          survive it are the only QA doubt left on the engagement, and they
+          were previously visible nowhere in the SPA at all. */}
+      {readiness && readinessItems.advisory.length > 0 && (
+        <ReadinessItemsPanel engagementKey={engagementKey} gating="advisory" items={readinessItems.advisory} coverage={readiness.coverage} />
       )}
       {readinessError && (
         <section className="panel">
@@ -502,36 +541,57 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
 }
 
 
-// Report blockers grouped by kind, largest kind first and open; each kind
-// lists its blockers as one compact line each, with every blocker one click
-// away. The coverage blocker names the surfaces behind the coverage check.
-function ReportBlockers({ engagementKey, blockers, coverage }: { engagementKey: string; blockers: ReportReadiness["blockers"]; coverage?: ReportReadinessCoverage }) {
+// One gating class of readiness items, grouped by kind, largest kind first and
+// open; each kind lists its items as one compact line each, with every item one
+// click away. The coverage blocker names the surfaces behind the coverage check.
+const READINESS_PANEL_COPY = {
+  block: {
+    id: REPORT_BLOCKERS_ID,
+    title: "Report blockers",
+    noun: "blocker",
+    plural: "blockers",
+    lede: "Everything that stops a final report export, grouped by kind. Open a kind to see each blocker and the findings it names.",
+  },
+  advisory: {
+    id: REPORT_ADVISORIES_ID,
+    title: "Report advisories",
+    noun: "advisory",
+    plural: "advisories",
+    // Says it twice, because the cost of a reader mistaking this panel for the
+    // one above is chasing a gate that is not there.
+    lede: "Recorded QA doubt about this engagement's own evidence. None of these blocks a final report export; they are worth clearing before one is filed.",
+  },
+} as const;
+
+function ReadinessItemsPanel({ engagementKey, gating, items, coverage }: { engagementKey: string; gating: "block" | "advisory"; items: ReportReadinessItem[]; coverage?: ReportReadinessCoverage }) {
+  const copy = READINESS_PANEL_COPY[gating];
   const kinds = useMemo(() => {
-    const byKind = new Map<string, ReportReadiness["blockers"]>();
-    for (const blocker of blockers) {
-      const list = byKind.get(blocker.kind);
-      if (list) list.push(blocker);
-      else byKind.set(blocker.kind, [blocker]);
+    const byKind = new Map<string, ReportReadinessItem[]>();
+    for (const item of items) {
+      const list = byKind.get(item.kind);
+      if (list) list.push(item);
+      else byKind.set(item.kind, [item]);
     }
     return [...byKind.entries()].sort((a, b) => b[1].length - a[1].length || a[0].localeCompare(b[0]));
-  }, [blockers]);
+  }, [items]);
+  const plural = items.length === 1 ? copy.noun : copy.plural;
   return (
-    <section className="panel report-blockers-panel" id={REPORT_BLOCKERS_ID} tabIndex={-1} aria-labelledby="report-blockers-title">
+    <section className="panel report-blockers-panel" id={copy.id} tabIndex={-1} aria-labelledby={`${copy.id}-title`}>
       <div className="panel-header">
-        <h2 id="report-blockers-title">Report blockers</h2>
-        <span className="meta-text">{blockers.length.toLocaleString("en-US")} {blockers.length === 1 ? "blocker" : "blockers"} in {kinds.length} {kinds.length === 1 ? "kind" : "kinds"}</span>
+        <h2 id={`${copy.id}-title`}>{copy.title}</h2>
+        <span className="meta-text">{items.length.toLocaleString("en-US")} {plural} in {kinds.length} {kinds.length === 1 ? "kind" : "kinds"}</span>
       </div>
-      <p className="meta-text">Everything that stops a final report export, grouped by kind. Open a kind to see each blocker and the findings it names.</p>
+      <p className="meta-text">{copy.lede}</p>
       <div className="report-blocker-groups">
-        {kinds.map(([kind, items], index) => (
-          <ReportBlockerKind key={kind} engagementKey={engagementKey} kind={kind} items={items} coverage={coverage} defaultOpen={index === 0} />
+        {kinds.map(([kind, kindItems], index) => (
+          <ReportBlockerKind key={kind} engagementKey={engagementKey} kind={kind} items={kindItems} coverage={coverage} defaultOpen={index === 0} noun={copy.plural} />
         ))}
       </div>
     </section>
   );
 }
 
-function ReportBlockerKind({ engagementKey, kind, items, coverage, defaultOpen }: { engagementKey: string; kind: string; items: ReportReadiness["blockers"]; coverage?: ReportReadinessCoverage; defaultOpen: boolean }) {
+function ReportBlockerKind({ engagementKey, kind, items, coverage, defaultOpen, noun }: { engagementKey: string; kind: string; items: ReportReadinessItem[]; coverage?: ReportReadinessCoverage; defaultOpen: boolean; noun: string }) {
   const [expanded, setExpanded] = useState(false);
   const visible = expanded ? items : items.slice(0, REPORT_BLOCKER_CAP);
   return (
@@ -564,7 +624,7 @@ function ReportBlockerKind({ engagementKey, kind, items, coverage, defaultOpen }
           onClick={() => setExpanded((value) => !value)}
           aria-expanded={expanded}
         >
-          {expanded ? "Show fewer" : `Show all ${items.length} ${humanizeStatus(kind).toLowerCase()} blockers`}
+          {expanded ? "Show fewer" : `Show all ${items.length} ${humanizeStatus(kind).toLowerCase()} ${noun}`}
         </button>
       )}
     </details>
@@ -646,6 +706,14 @@ function LatestActivity({ engagementKey, page, error }: { engagementKey: string;
 
 type ReadinessPanelProps = {
   readiness: ReportReadiness;
+  /**
+   * Readiness items stamped `advisory`, counted by the caller's partition.
+   *
+   * Passed in rather than read off `advisory_count` so the stat and the
+   * Advisories panel below cannot disagree: both describe the same partition
+   * by stamped gating class, not the arrays the payload grouped them into.
+   */
+  advisoryCount: number;
 };
 
 // C58 — Readiness panel renders:
@@ -712,7 +780,7 @@ function deriveScopeLiterals(scopeHosts: string[] | undefined): Set<string> {
   return out;
 }
 
-function ReadinessPanel({ readiness }: ReadinessPanelProps) {
+function ReadinessPanel({ readiness, advisoryCount }: ReadinessPanelProps) {
   const perHost = readiness.per_host_coverage;
   const totalUnmet = perHost
     ? perHost.hosts.reduce((sum, row) => sum + row.unmet_objectives.length, 0)
@@ -750,6 +818,10 @@ function ReadinessPanel({ readiness }: ReadinessPanelProps) {
         <article className="stat-card">
           <span className="stat-value">{readiness.blocker_count}</span>
           <span className="meta-text">Report blockers</span>
+        </article>
+        <article className="stat-card" data-testid="readiness-advisory-count">
+          <span className="stat-value">{advisoryCount}</span>
+          <span className="meta-text">Advisories (never blocking)</span>
         </article>
         <article className="stat-card">
           <span className="stat-value">{perHost?.hosts.length ?? "Unknown"}</span>

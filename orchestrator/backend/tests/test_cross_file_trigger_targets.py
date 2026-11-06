@@ -200,3 +200,94 @@ def test_outside_snapshot_must_be_a_boolean(client, isolate_settings):
 
     assert refused.status_code == 400, refused.text
     assert "outside_snapshot must be a boolean" in refused.json()["detail"]
+
+
+def test_every_malformed_trigger_key_is_reported_in_one_pass(client, isolate_settings):
+    """One refusal names every problem across every entry.
+
+    Validating one key per call cost a hunt wave a round trip per missing key
+    per entry: the first entry's missing `file_path`, then its missing
+    `vuln_class`, then the next entry's. Nothing about the payload changes
+    between those calls, so every defect is knowable on the first read.
+    """
+    engagement_key = "2026-11-07-trigger-one-pass"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    _repo, parser, queue_item = _seed(client, engagement_key)
+    base = f"/engagements/{engagement_key}/assessment/code"
+
+    refused = client.post(
+        f"{base}/analysis-results",
+        json=_result(
+            queue_item,
+            parser,
+            [
+                {"reason": "shared helper"},
+                {"file_path": "src/helpers.py", "vuln_class": "web-app-injection"},
+                {
+                    "file_path": "src/helpers.py",
+                    "vuln_class": "not-a-canonical-class",
+                    "reason": "shared helper",
+                    "outside_snapshot": "yes",
+                },
+            ],
+        ),
+    )
+
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "entry 0 is missing file_path" in detail
+    assert "entry 0 is missing vuln_class" in detail
+    assert "entry 1 is missing reason" in detail
+    assert "entry 2" in detail and "not-a-canonical-class" in detail
+    assert "entry 2 outside_snapshot must be a boolean" in detail
+    assert client.get(f"{base}/triggers").json() == []
+
+
+def test_a_trigger_spelled_with_target_path_is_told_the_canonical_key(
+    client, isolate_settings
+):
+    """`file_path` is the one accepted spelling, and the refusal says so.
+
+    A near-miss key is the likeliest cause of a "missing file_path" on a
+    payload that plainly carries a path, so the refusal names the key it found
+    instead of leaving the author to diff the schema.
+    """
+    engagement_key = "2026-11-07-trigger-alias-key"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    _repo, parser, queue_item = _seed(client, engagement_key)
+    base = f"/engagements/{engagement_key}/assessment/code"
+
+    refused = client.post(
+        f"{base}/analysis-results",
+        json=_result(
+            queue_item,
+            parser,
+            [
+                {
+                    "target_path": "src/helpers.py",
+                    "vuln_class": "web-app-injection",
+                    "reason": "shared helper",
+                }
+            ],
+        ),
+    )
+
+    assert refused.status_code == 400, refused.text
+    detail = refused.json()["detail"]
+    assert "entry 0 is missing file_path" in detail
+    assert "target_path" in detail
+    assert client.get(f"{base}/triggers").json() == []
+
+
+def test_the_cli_and_api_agree_on_one_trigger_alias_roster() -> None:
+    """One roster of near-miss keys, two declarations.
+
+    `code-record analysis` names the near miss before the round trip and the
+    backend names it again on the durable door. A mirror without this guard is
+    how one side would start recognising a spelling the other leaves
+    undiagnosed.
+    """
+    from app.services.code_analysis import _CROSS_FILE_TRIGGER_KEY_ALIASES
+    from assess.commands import code_record_analysis
+
+    assert code_record_analysis._TRIGGER_KEY_ALIASES == _CROSS_FILE_TRIGGER_KEY_ALIASES

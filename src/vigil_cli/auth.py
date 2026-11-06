@@ -274,7 +274,7 @@ def status_line(
     # SiteMinder sessions carry none) the old code hardcoded `stale=false`, i.e.
     # asserted the session was fresh when we had no basis to. A dead session then
     # reads as live (a false negative). Emit `stale=unknown` instead; a live probe
-    # (`vigil assess auth-status --probe`) is the only way to confirm liveness.
+    # (`vigil assess auth status --probe`) is the only way to confirm liveness.
     if expires_at:
         stale_repr = "true" if _is_stale(str(expires_at)) else "false"
     else:

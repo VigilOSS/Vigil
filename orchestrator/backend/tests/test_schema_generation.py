@@ -210,3 +210,126 @@ def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession():
     assert "whole-file" in reviewed_spans["description"]
     for incomplete_dimension in ("truncated", "unavailable", "unsupported"):
         assert incomplete_dimension in reviewed_spans["description"]
+
+
+def test_finding_record_schema_carries_the_blue_annotation_vocabulary():
+    """``vigil blue`` writes these, and ``details`` is a closed allow-list.
+
+    The generated schema is what the CLI validator enforces, so a blue key
+    missing here is a blue verb that exits non-zero having written nothing.
+    """
+    module = _load_schema_generator_module()
+
+    details = module.build_schema_bundle()["finding-record.schema.json"][
+        "properties"
+    ]["details"]["properties"]
+
+    for key in (
+        "tier",
+        "tier_notes",
+        "evidence_refs",
+        "containment_status",
+        "containment_action",
+        "containment_command_run_id",
+        "checks",
+        "devils_advocate",
+        "network_window_utc",
+        "coverage",
+        "cross_skill_correlation_ids",
+        "disposition_recommendation",
+        "respond_review",
+        "alert_normalized",
+        "platform",
+        "source_signal",
+        "alert_external_id",
+        "tenant_ref_paths_consulted",
+    ):
+        assert key in details, key
+        assert details[key]["x-vigil-extension"] == "blue/v1"
+
+
+def test_finding_record_schema_carries_the_keys_the_renderers_read():
+    """A key a renderer reads but no door can write is permanently unset."""
+    module = _load_schema_generator_module()
+
+    details = module.build_schema_bundle()["finding-record.schema.json"][
+        "properties"
+    ]["details"]["properties"]
+
+    # The fence info string for poc_code, read by the operator views and the
+    # report renderer. Free text by design: the renderers neutralise a hint
+    # they cannot render rather than dropping the capture.
+    assert details["poc_language"]["type"] == "string"
+    assert "enum" not in details["poc_language"]
+    # The executed commands behind the cited replay steps.
+    replay = details["replay_commands"]
+    assert replay["type"] == "array"
+    assert replay["items"] == {"type": "integer", "minimum": 1}
+
+
+def test_finding_detail_aliases_route_names_that_are_not_homeless():
+    """Projected from the backend table so both doors quote one sentence.
+
+    An alias may never name a key that IS registered: the suggester only reaches
+    the table for a REFUSED key, so an alias for a live key is dead text.
+    """
+    module = _load_schema_generator_module()
+
+    details = module.build_schema_bundle()["finding-record.schema.json"][
+        "properties"
+    ]["details"]
+    aliases = details["x-vigil-field-aliases"]
+
+    assert aliases["risk"].startswith("details.impact")
+    assert "details.severity_rationale" in aliases["risk"]
+    assert aliases["indicators"] == "details.iocs"
+    assert "details.replies[].new_evidence" in aliases["new_evidence"]
+    assert "record-reply" in aliases["new_evidence"]
+    for name in aliases:
+        assert name not in details["properties"], name
+
+
+def test_finding_record_schema_closes_provenance_on_one_vocabulary():
+    """Both doors, one list.
+
+    The record door refused four keys the update door accepted, the backend
+    stored, a skill prescribes and the operator views render. The server-stamped
+    blocks stay declared because this schema also validates STORED records, and
+    because the code-snapshot attestation is read back off an incoming
+    provenance to mark a copied binding.
+    """
+    module = _load_schema_generator_module()
+
+    provenance = module.build_schema_bundle()["finding-record.schema.json"][
+        "properties"
+    ]["provenance"]
+
+    assert provenance["additionalProperties"] is False
+    assert set(provenance["properties"]) == {
+        "agent_id",
+        "agent_name",
+        "artifact",
+        "code_snapshot",
+        "reported_by",
+        "captured_at",
+        "artifact_ref",
+        "evidence_quote",
+        "verified_by",
+        "reviewed_by",
+        "command_run_id",
+        "code_snapshot_attestation",
+        "superseded_code_snapshot",
+        "original_canonical_location",
+        "operator_authority",
+        "superseded_operator_authority",
+    }
+
+
+def test_the_finding_verify_request_carries_the_operator_authority_citation():
+    """A waiver that names no evidence is indistinguishable from an unbacked claim."""
+    from app.api.assessment import FindingVerifyRequest
+
+    fields = FindingVerifyRequest.model_fields
+    assert fields["operator_authority"].annotation is bool
+    assert fields["operator_authority"].default is False
+    assert fields["operator_authority_intel_id"].default is None

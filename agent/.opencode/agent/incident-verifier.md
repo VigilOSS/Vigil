@@ -156,10 +156,13 @@ vigil assess finding verify <slug> --status confirmed --reason "<one-paragraph r
   }'
 
 # false_positive — a completed structured counter-check is decisive evidence;
-# checks[]/devils_advocate[] remain supporting finding details
+# checks[]/devils_advocate[] remain supporting finding details. kill_reason + kill_check are
+# required: without them the write is refused and the finding stays unreviewed. When the
+# counter-check cannot be completed, --status disputed --reason "<why>" is the cheap withdrawal
+# and still survives a later sweep.
 vigil assess finding verify <slug> --status false_positive --reason "<one-paragraph rationale>" \
   --counter-check-file <counter-check.json> \
-  --details-inline '{"disposition": "false_positive", "checks": [...], "devils_advocate": [...]}'
+  --details-inline '{"disposition": "false_positive", "kill_reason": "<which check falsified the claim and why>", "kill_check": <1-5>, "checks": [...], "devils_advocate": [...]}'
 ```
 
 Repeat `--proof-receipt-id` when a decision depends on several observations from the same

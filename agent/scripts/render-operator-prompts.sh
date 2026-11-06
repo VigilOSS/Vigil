@@ -141,11 +141,15 @@ AGENT_NAMES=(
   code-variant-hunter
   code-vuln-verifier
   code-fuzz-engineer
+  general
 )
 
-# Blue specialist roster. Note that `operator`, `osint-analyst`, and
-# `report-writer` are shared with red and their source files live under
-# agent/agents/<name>.md exactly as before. The other four are blue-only.
+# Blue specialist roster. Note that `operator`, `osint-analyst`,
+# `report-writer`, and `general` are shared with red and their source files live
+# under agent/agents/<name>.md exactly as before. The other four are blue-only.
+# `general` is the blind-triage Pass-2 reviewer. The gate it clears
+# (`transition-phase report` / `complete` blocking every Medium-or-above
+# finding) applies to both tracks, so both rosters render its wrapper.
 BLUE_AGENT_NAMES=(
   operator
   alert-triage-specialist
@@ -154,6 +158,7 @@ BLUE_AGENT_NAMES=(
   ir-lead
   osint-analyst
   report-writer
+  general
 )
 
 # -----------------------------------------------------------------------------
@@ -576,6 +581,7 @@ agent_description() {
     investigator) printf '%s\n' "L2 platform investigator. Pulls telemetry, builds evidence ladder, drafts findings with timeline + IOCs + MITRE techniques. Loads one platform skill per dispatch." ;;
     incident-verifier) printf '%s\n' "L3 false-positive verifier. Five-check protocol with symmetric evidence bar. Only role that records terminal verification_status decisions." ;;
     ir-lead) printf '%s\n' "L4 incident response lead. Containment / eradication / recovery proposals via propose-contain → operator approval → host-exec → contain. No automated WRITE actions." ;;
+    general) printf '%s\n' "Zero-context blind reviewer for the blind-triage Pass-2 gate. Judges a prepared packet's own bytes only — no repository read, no command, no backend query, no engagement history." ;;
   esac
 }
 
@@ -620,7 +626,8 @@ agent_model() {
     # Pro — operator + hard multi-step exploit/analysis/verification/synthesis.
     # (operator, vulnerability-analyst, exploit-developer, osint-analyst,
     #  report-writer, code-architect, code-vuln-hunter, code-vuln-verifier,
-    #  code-fuzz-engineer, investigator, incident-verifier, ir-lead, + default.)
+    #  code-fuzz-engineer, investigator, incident-verifier, ir-lead, general,
+    #  + default.)
     *)
       printf '%s\n' "$OPENCODE_PRO_MODEL" ;;
   esac

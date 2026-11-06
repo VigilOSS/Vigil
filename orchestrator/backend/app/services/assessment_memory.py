@@ -891,6 +891,13 @@ def _code_analysis_section(
         "coverage_gate": {
             "passed": coverage_gate.get("passed") is True,
             "reasons": list(coverage_gate.get("reasons") or []),
+            # The advisory half of the same gate. `reasons` carries only what
+            # refuses the gate (critical and high), so projecting it alone would
+            # make a medium-only gap invisible to the brief the operator reads
+            # on resume -- and ADR 0001 makes this machinery a harness whose
+            # whole job is to say what was likely missed. Advisory, never a
+            # refusal: nothing keys a transition on this list.
+            "advisories": list(coverage_gate.get("effort_warnings") or []),
         },
         "next_gate": None if readiness is None else {
             "target_phase": readiness_target,

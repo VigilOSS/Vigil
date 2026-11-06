@@ -226,6 +226,7 @@ def _normalize_payload(
     candidate_slug: str,
     dispatch_agent_id: str = "",
     evidence_type: str = "",
+    existing: dict | None = None,
 ) -> dict:
     normalized = dict(payload)
     normalized["slug"] = candidate_slug
@@ -235,11 +236,30 @@ def _normalize_payload(
     _refuse_non_initial_verification_status(normalized)
     normalized.setdefault("verification_status", _RECORD_TIME_VERIFICATION_STATUS)
     _apply_evidence_type(normalized, evidence_type)
-    normalized.setdefault("defect_family", normalized.get("title", candidate_slug))
+    # On a NEW record the title is a sane floor for defect_family and summary.
+    # On `--update <slug>` it is the wrong one: defect_family is an INVALIDATE
+    # axis and summary a CLAIM_REVIEW one, so a re-record that only CORRECTED a
+    # title arrived carrying a changed dedup family and a one-line summary over
+    # the author's real one — resetting the verdict, which is exactly what
+    # making title a KEEP axis was supposed to stop. ``auth_context`` is the
+    # same shape with a different constant: defaulting it to "anonymous" rewrote
+    # the stored privilege of any finding re-recorded without one.
+    #
+    # So no CLI default invents a dedup-tuple value on the update path: an
+    # omitted field is sent empty (how the backend upsert spells "preserve what
+    # is stored": ``COALESCE(NULLIF(?, ''), …)``), except where the request model
+    # requires a non-empty value, which is seeded from the stored row. An
+    # explicitly authored value still lands on either path.
+    updating = isinstance(existing, dict)
+    title_fallback = "" if updating else normalized.get("title", candidate_slug)
+    stored_auth_context = (
+        str(existing.get("auth_context") or "").strip() if updating else ""
+    )
+    normalized.setdefault("defect_family", title_fallback)
     normalized.setdefault("root_cause_key", "")
-    normalized.setdefault("auth_context", "anonymous")
+    normalized.setdefault("auth_context", stored_auth_context or "anonymous")
     normalized.setdefault("canonical_location", "")
-    normalized.setdefault("summary", normalized.get("title", candidate_slug))
+    normalized.setdefault("summary", title_fallback)
     normalized.setdefault("evidence_ref", "")
     normalized.setdefault("notes", "")
 
@@ -273,6 +293,46 @@ def _normalize_payload(
 # artifact row gets minted.
 _evidence_file_exists = evidence_ref_exists
 _is_single_path_shaped = is_single_path_shaped
+
+
+# The three values that make a code-snapshot binding complete, mirroring
+# ``CodeSnapshotProvenance``'s required set.
+_CODE_SNAPSHOT_BINDING_FIELDS = (
+    "repo_id",
+    "repo_generation",
+    "source_manifest_digest",
+)
+
+
+def source_bound_evidence_exempt(payload: dict) -> bool:
+    """Whether this finding owes no captured evidence artifact.
+
+    The record-time half of the source-bound evidence exemption: a finding whose
+    ``canonical_location`` is source-bound (``file:``) and that carries a
+    code-snapshot binding has its proof in the sealed source and its source
+    observation receipts, not in a captured artifact — the same reason
+    report-readiness already exempts ``reproduction_basis == "source"`` from
+    owing ``repro_runs``.
+
+    The currency half of the predicate is structural here rather than queried:
+    ``_fill_derivable_provenance`` has already derived the repository's CURRENT
+    identity for any author who did not transcribe one, and the POST that
+    follows refuses a ``file:`` record whose authored binding is stale
+    (``_require_current_code_snapshot``). So a binding that is present at this
+    point is either current or belongs to a record that will not land — and a
+    silenced warning about a record that never happened costs nothing.
+
+    Paired with the report-readiness end by design (FIXPLAN §7): silencing only
+    the record-time warning would hide a blocker that still fires at report
+    time, which is worse than the noise.
+    """
+    if not is_source_bound(str(payload.get("canonical_location", ""))):
+        return False
+    provenance = payload.get("provenance")
+    binding = provenance.get("code_snapshot") if isinstance(provenance, dict) else None
+    if not isinstance(binding, dict):
+        return False
+    return all(binding.get(field) for field in _CODE_SNAPSHOT_BINDING_FIELDS)
 
 
 def _normalize_evidence_ref(payload: dict, *, eng_dir: str, engagement_key: str, allow_unindexed: bool) -> None:
@@ -639,12 +699,28 @@ def _park_pending_runtime_proof(
     )
 
 
+_VALIDATION_FAILURE_HEADER = "finding payload invalid after helper defaults:"
+
+
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
-    print("finding payload invalid after helper defaults:", file=sys.stderr)
-    for error in errors:
-        print(f"  - {error}", file=sys.stderr)
+    """Print the refusal, the contract, and then the refusal again.
+
+    The contract is the reference an author needs, and at ~340 lines it is also
+    the reason nobody read the three lines that mattered: the failure landed on
+    lines 1-3 of a 349-line block, so ``tail -20`` showed the end of the allowed
+    detail-key table and nothing about what was wrong. Everything was already on
+    stderr, so this is purely ORDERING — the compact failure is re-emitted as the
+    LAST thing written, where a truncated view actually looks.
+    """
+
+    def _print_failure() -> None:
+        print(_VALIDATION_FAILURE_HEADER, file=sys.stderr)
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
 
     hints = common_mistake_hints("finding record", payload)
+    _print_failure()
+
     if hints:
         print("Common legacy-field fixes:", file=sys.stderr)
         for hint in hints:
@@ -654,6 +730,8 @@ def _report_validation_errors(payload: dict, errors: list[str]) -> None:
     print("Run `vigil assess contract finding record` for the canonical helper contract.", file=sys.stderr)
     print("", file=sys.stderr)
     print(render_contract("finding record"), file=sys.stderr)
+    print("", file=sys.stderr)
+    _print_failure()
     sys.exit(1)
 
 
@@ -721,6 +799,7 @@ def run(args) -> None:
             candidate_slug=candidate_slug,
             dispatch_agent_id=(getattr(args, "agent_id", "") or "").strip(),
             evidence_type=(getattr(args, "evidence_type", "") or "").strip(),
+            existing=existing_update,
         )
         _fill_derivable_provenance(
             payload, base_url=cfg.base_url, engagement_key=cfg.engagement_key
@@ -742,6 +821,7 @@ def run(args) -> None:
             allow_unindexed=(
                 getattr(args, "allow_unindexed_evidence", False)
                 or getattr(args, "quiet", False)
+                or source_bound_evidence_exempt(payload)
             ),
         )
 

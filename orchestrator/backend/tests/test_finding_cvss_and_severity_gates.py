@@ -2,10 +2,11 @@
 
 Two defects the report gate could only observe after the fact:
 
-1. ``finding verify --new-severity`` was consumed ONLY by the ``downgraded``
-   branch. Under any other disposition the flag was accepted, silently dropped,
-   and answered 200 — a verifier who believed they had re-banded a finding got
-   the old band back.
+1. ``finding verify --new-severity`` is consumed by every TERMINAL disposition,
+   so one attested write both re-bands and re-attests. A non-terminal
+   disposition records no fresh attestation, so it cannot move the band: the
+   flag used to be accepted there, silently dropped, and answered 200 — a
+   verifier who believed they had re-banded a finding got the old band back.
 2. Nothing held ``details.cvss_score`` to ``details.cvss_vector`` on write. The
    report-readiness blocker caught the drift, but only for findings that reached
    ``verified`` + ``confirmed``/``downgraded``, and only at report time.
@@ -137,17 +138,23 @@ def _verify(client, slug: str, **overrides):
 
 
 # --------------------------------------------------------------------------- #
-# new_severity outside the downgraded disposition
+# new_severity outside a terminal disposition
 # --------------------------------------------------------------------------- #
 
 
 @pytest.mark.parametrize(
     "disposition",
-    ["confirmed", "pending_runtime_proof", "blocked", "false_positive", "disputed"],
+    ["pending_runtime_proof", "blocked", "disputed"],
 )
-def test_verify_rejects_new_severity_outside_downgraded(
+def test_verify_rejects_new_severity_outside_a_terminal_disposition(
     client, isolate_settings, disposition
 ):
+    """A band that moved with no fresh attestation behind it is an unproven band.
+
+    The terminal dispositions (confirmed, downgraded, false_positive) each carry
+    a decision receipt or an operator-authority stamp, which is what lets the
+    same write re-band; see ``test_verification_evidence_gates``.
+    """
     _seed(client, isolate_settings)
     assert _record(client, "VA-001").status_code == 201
 

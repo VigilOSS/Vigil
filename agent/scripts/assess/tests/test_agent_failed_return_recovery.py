@@ -44,13 +44,24 @@ class RecoveryClient:
         pass
 
 
-def args(reason=' Native worker returned at its context limit; owned commands have ended.\n'):
+def args(reason=' Native worker returned at its context limit; owned commands have ended.\n',
+         status='failed'):
     return SimpleNamespace(extra=['HUNT-1'], agent_id=None, completed_at=None,
-                           close_status='failed', reason=reason)
+                           close_status=status, reason=reason)
 
 
 @pytest.mark.parametrize('checkpoint', [False, True])
-def test_failed_return_has_audited_closure_and_preserves_checkpoint(monkeypatch, checkpoint):
+@pytest.mark.parametrize('status', ['failed', 'blocked'])
+def test_returned_without_handoff_has_audited_closure_and_preserves_checkpoint(
+    monkeypatch, checkpoint, status
+):
+    """`--status blocked` is the same recovery for a lane that DID produce work.
+
+    A lane that returned with receipts and closed leases but only a checkpointed
+    handoff could previously be closed `failed` only, which reads as no work
+    done. Both statuses keep the identical operator_recovery stamp, the reason
+    requirement, and every checkpointed field.
+    """
     old = {'id': 2, 'agent_id': 'HUNT-1', 'agent_role': 'code-vuln-hunter',
            'handoff_status': 'checkpointed', 'handoff_version': 4,
            'summary': 'Acme boundary checked; caller path unfinished.',
@@ -59,10 +70,10 @@ def test_failed_return_has_audited_closure_and_preserves_checkpoint(monkeypatch,
            'extras': {'checkpoint_note': 'Acme exact bytes'}} if checkpoint else None
     client = RecoveryClient(old)
     monkeypatch.setattr(agent.dispatch, '_client_for', lambda _: (client, None))
-    agent._close(args())
-    assert client.row['status'] == 'failed'
+    agent._close(args(status=status))
+    assert client.row['status'] == status
     assert client.handoff['handoff_status'] == 'blocked'
-    assert client.handoff['closed_dispatch_status'] == 'failed'
+    assert client.handoff['closed_dispatch_status'] == status
     recovery = client.handoff['extras']['operator_recovery']
     assert recovery['reason'] == args().reason
     assert recovery['actor'] == 'operator'
@@ -73,7 +84,43 @@ def test_failed_return_has_audited_closure_and_preserves_checkpoint(monkeypatch,
     decision = client.writes[-1][1]
     assert decision['kind'] == 'dispatch_closed_from_handoff'
     assert decision['payload']['reason'] == args().reason
+    assert decision['payload']['closed_dispatch_status'] == status
     assert decision['payload']['handoff_version'] == client.handoff['handoff_version']
+
+
+def test_close_unions_the_dispatch_input_scope_with_the_handoff_slugs(monkeypatch):
+    """`agent start --finding-slugs` records the input/related scope.
+
+    The close used to pass the handoff's list alone into a PATCH that replaces
+    the column, so closing a dispatch dropped every slug the handoff author
+    omitted — while the renderer deliberately unions the same two lists.
+    """
+    client = RecoveryClient({'id': 2, 'agent_id': 'HUNT-1', 'agent_role': 'code-vuln-hunter',
+                             'handoff_status': 'ready', 'handoff_version': 2,
+                             'summary': 'Acme variant produced VA-002.',
+                             'finding_slugs': ['VA-002']})
+    client.row['finding_slugs'] = ['VA-001']
+    monkeypatch.setattr(agent.dispatch, '_client_for', lambda _: (client, None))
+
+    agent._close(SimpleNamespace(extra=['HUNT-1'], agent_id=None, completed_at=None,
+                                 close_status=None, reason='ready handoff reviewed'))
+
+    patch = next(body for kind, body in client.writes if kind == 'dispatch')
+    assert patch['finding_slugs'] == ['VA-001', 'VA-002']
+
+
+def test_close_does_not_patch_finding_slugs_the_row_already_carries(monkeypatch):
+    client = RecoveryClient({'id': 2, 'agent_id': 'HUNT-1', 'agent_role': 'code-vuln-hunter',
+                             'handoff_status': 'ready', 'handoff_version': 2,
+                             'summary': 'Acme done.', 'finding_slugs': ['VA-001']})
+    client.row['finding_slugs'] = ['VA-001']
+    monkeypatch.setattr(agent.dispatch, '_client_for', lambda _: (client, None))
+
+    agent._close(SimpleNamespace(extra=['HUNT-1'], agent_id=None, completed_at=None,
+                                 close_status=None, reason='ready handoff reviewed'))
+
+    patch = next(body for kind, body in client.writes if kind == 'dispatch')
+    assert 'finding_slugs' not in patch
 
 
 @pytest.mark.parametrize('reason', ['', '   ', 'x' * 8193])

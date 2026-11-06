@@ -8,6 +8,7 @@ The operator-facing surface routes here through ``vigil assess agent``.
 """
 from __future__ import annotations
 
+import difflib
 import json
 import sys
 import uuid
@@ -23,9 +24,11 @@ from assess.lib.contracts import (
 )
 
 from assess.commands.dispatch._shared import (
+    ARTIFACT_PRESENT,
     _utcnow_iso,
     _split_csv,
     _load_json_arg,
+    resolve_engagement_artifact_path,
 )
 
 
@@ -58,8 +61,27 @@ _HANDOFF_PATCHABLE_FIELDS = frozenset(
         "handoff_status",
         "closed_dispatch_status",
         "extras",
+        # Mirrors backend HandoffUpdate: the caller's read-version guard. Without
+        # it in this tuple an authored guard was dropped and the write proceeded
+        # unguarded, which is the opposite of what the author asked for.
+        "expected_handoff_version",
     }
 )
+# `agent_role` is immutable once the row exists and `agent_id` is URL-bound, so
+# both are create-only; everything else round-trips through either write.
+_HANDOFF_PAYLOAD_FIELDS = frozenset({"agent_id", "agent_role"}) | _HANDOFF_PATCHABLE_FIELDS
+# Keys a specialist plausibly copies back out of `agent get` / a prior row. The
+# backend owns every one of them, so name the owner instead of the bare key.
+_HANDOFF_BACKEND_OWNED_HINTS = {
+    "handoff_version": (
+        "handoff_version (backend-managed; pass expected_handoff_version to guard "
+        "the write against a concurrent one)"
+    ),
+    "last_checkpoint_at": "last_checkpoint_at (backend-managed write timestamp)",
+    "created_at": "created_at (backend-managed)",
+    "id": "id (backend-managed; --agent-id addresses the row)",
+    "engagement_id": "engagement_id (resolved from the engagement, never sent)",
+}
 _OVERLAP_PAGE_SIZE = 1000
 _OVERLAP_MAX_PAGES = 1000
 _OVERLAP_DISPLAY_LIMIT = 5
@@ -109,14 +131,28 @@ def _build_register_payload(args) -> dict:
     json_no_target_traffic = payload.pop("no_target_traffic", None)
     json_prompt_context = payload.pop("prompt_context", None)
     if json_prompt_context is not None:
-        if getattr(args, "prompt_context_json", None):
+        if not isinstance(json_prompt_context, dict):
             print(
-                "agent start: prompt context must come from either --from-json or "
-                "--prompt-context-json, not both",
+                "agent start --from-json: prompt_context must be a JSON object",
                 file=sys.stderr,
             )
             sys.exit(1)
-        args.prompt_context = json_prompt_context
+        # Shallow-merge rather than refuse: shared wave boilerplate (target,
+        # prior_state, coverage, cleanup, oob) is authored once in --from-json
+        # and overridden per lane by --prompt-context-json, under the same
+        # "CLI flags override / supplement the JSON payload" rule as above.
+        # `_validate_prompt_context` then runs on the merged dict unchanged.
+        merged = dict(json_prompt_context)
+        if getattr(args, "prompt_context_json", None):
+            overlay = _load_json_arg(args.prompt_context_json)
+            if not isinstance(overlay, dict):
+                print(
+                    "agent start: --prompt-context-json must provide a JSON object",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            merged.update(overlay)
+        args.prompt_context = merged
     if not payload.get("agent_role"):
         print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
         sys.exit(1)
@@ -197,6 +233,16 @@ def _build_register_payload(args) -> dict:
             print('agent start: code-only roles require assessment_mode=code', file=sys.stderr)
             sys.exit(1)
         payload['assessment_mode'] = 'code'
+    non_canonical = _non_canonical_vuln_classes(payload.get("vuln_classes"))
+    if non_canonical:
+        print(
+            "agent start: --vuln-classes must name canonical vuln classes: "
+            + "; ".join(non_canonical)
+            + ". List them with `vigil assess list-skills --json` or read "
+            "agent/references/runtime-guides/vuln-taxonomy.md.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     errors, warnings = validate_specialist_dispatch_contract(payload)
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)
@@ -208,6 +254,36 @@ def _build_register_payload(args) -> dict:
     if isinstance(skills_value, list):
         payload["skills"] = ",".join(str(skill).strip() for skill in skills_value)
     return payload
+
+
+def _non_canonical_vuln_classes(value: Any) -> list[str]:
+    """Every supplied class token the taxonomy does not know, with its neighbour.
+
+    ``vuln_classes`` is the dispatch's own declaration and the depth ledger never
+    trusts it for coverage, but it is read by humans and by every class-keyed
+    view, so a token no reader can resolve is a typo worth catching at the
+    keyboard instead of storing. The vocabulary stays in its canonical owner
+    (``assess.lib.vuln_taxonomy``); nothing is re-listed here, and the stored
+    text is the operator's own — only its tokens are checked.
+    """
+    if not value:
+        return []
+    from assess.lib.vuln_taxonomy import (
+        VULN_CLASSES,
+        is_valid_class,
+        parse_vuln_class_field,
+    )
+
+    problems: list[str] = []
+    for token in parse_vuln_class_field(value):
+        if is_valid_class(token):
+            continue
+        nearest = difflib.get_close_matches(token, sorted(VULN_CLASSES), n=1, cutoff=0.6)
+        problems.append(
+            f"{token!r} is not a canonical class"
+            + (f" (nearest: {nearest[0]})" if nearest else "")
+        )
+    return problems
 
 
 def _register_dispatch(args) -> None:
@@ -402,9 +478,7 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
     elif getattr(args, "completed_at", None):
         patch["completed_at"] = args.completed_at
     finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
-    if finding_slugs:
-        patch["finding_slugs"] = finding_slugs
-    if not patch:
+    if not patch and not finding_slugs:
         print(
             "agent done: pass at least one of --status, --completed-at, --finding-slugs",
             file=sys.stderr,
@@ -416,7 +490,17 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
     try:
         for agent_id in ids:
             try:
-                rows.append(client.update_dispatch(agent_id, patch))
+                row_patch = dict(patch)
+                if finding_slugs:
+                    # The contract says --finding-slugs is "appended additively to
+                    # the row, not replaced", and the backend PATCH replaces the
+                    # column wholesale. Union here, where both lists are known, so
+                    # an operator who adds one produced slug does not delete the
+                    # input scope `agent start --finding-slugs` recorded.
+                    row_patch["finding_slugs"] = _union_dispatch_finding_slugs(
+                        client, agent_id, finding_slugs
+                    )
+                rows.append(client.update_dispatch(agent_id, row_patch))
             except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
                 failed += 1
                 print(f"agent done: {agent_id} failed: {exc}", file=sys.stderr)
@@ -430,6 +514,23 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
         print(f"[agent done] updated {len(rows)} dispatch(es); {failed} failed.", file=sys.stderr)
     if failed:
         sys.exit(1)
+
+
+def _union_dispatch_finding_slugs(
+    client: AssessmentClient, agent_id: str, added: list[str]
+) -> list[str]:
+    """Stable union of the dispatch row's current slugs with the supplied ones.
+
+    Same rule as ``handoff_renderer``: both lists are independently useful audit
+    surfaces, so neither silently loses the other's entries. A failed read must
+    stop the dependent PATCH: sending only the added list would replace scope
+    whose contents this invocation never learned.
+    """
+    from assess.commands.dispatch.handoff_renderer import _normalise_finding_slugs
+
+    row = client.get_dispatch(agent_id)
+    existing = _normalise_finding_slugs((row or {}).get("finding_slugs"))
+    return list(dict.fromkeys(existing + added))
 
 
 def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
@@ -530,43 +631,42 @@ def _record_decision(args) -> None:
     if not kind:
         print("agent decision: --kind is required", file=sys.stderr)
         sys.exit(1)
+    payload: dict[str, Any] = {}
     payload_json = getattr(args, "payload_json", None)
     if payload_json:
         loaded = _load_json_arg(payload_json)
         if not isinstance(loaded, dict):
             print("agent decision --payload-json: must produce a JSON object", file=sys.stderr)
             sys.exit(1)
-        payload = dict(loaded)
-    else:
-        # Build payload from friendly flags. The fields we collect depend on
-        # the kind, but we do not enforce strict per-kind shape — the backend
-        # accepts any dict. Operators can always fall back to --payload-json.
-        payload = {}
-        host = getattr(args, "decision_host", None)
-        vendor = getattr(args, "decision_vendor", None)
-        choice = getattr(args, "decision_choice", None)
-        note = getattr(args, "decision_note", None)
-        reason = getattr(args, "reason", None)
-        phase = getattr(args, "decision_phase", None)
-        if host:
-            payload["host"] = host
-        if vendor:
-            payload["vendor"] = vendor
-        if choice:
-            payload["choice"] = choice
-        if note:
-            payload["note"] = note
-        if reason:
-            payload["reason"] = reason
-        if phase:
-            payload["phase"] = phase
-        if not payload:
-            print(
-                "agent decision: pass --payload-json or at least one of "
-                "--host/--vendor/--choice/--note/--reason/--phase",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+        payload.update(loaded)
+    # CLI flags override / supplement the JSON payload — the same rule `agent
+    # start --from-json` and `host-exec --from-json` already apply. The flags
+    # used to be read only when --payload-json was absent, so
+    # `--payload-json '{"choice":"in_scope"}' --host acme.example` recorded a
+    # scope decision with no host at exit 0 and no warning, while
+    # --surfaced-to-user applied on both paths.
+    #
+    # The fields collected depend on the kind, but no strict per-kind shape is
+    # enforced here — the backend accepts any dict, and kind-aware models
+    # validate the kinds that gate behaviour.
+    flag_fields = (
+        ("host", getattr(args, "decision_host", None)),
+        ("vendor", getattr(args, "decision_vendor", None)),
+        ("choice", getattr(args, "decision_choice", None)),
+        ("note", getattr(args, "decision_note", None)),
+        ("reason", getattr(args, "reason", None)),
+        ("phase", getattr(args, "decision_phase", None)),
+    )
+    for key, value in flag_fields:
+        if value:
+            payload[key] = value
+    if not payload:
+        print(
+            "agent decision: pass --payload-json or at least one of "
+            "--host/--vendor/--choice/--note/--reason/--phase",
+            file=sys.stderr,
+        )
+        sys.exit(1)
     body = {
         "kind": kind,
         "payload": payload,
@@ -590,13 +690,44 @@ def _build_handoff_payload(args) -> dict:
         print("agent handoff --from-json: file must contain a JSON object", file=sys.stderr)
         sys.exit(1)
     if not str(loaded.get("agent_id") or "").strip():
-        print("agent handoff --from-json: agent_id is required", file=sys.stderr)
+        print(
+            "agent handoff --from-json: agent_id is required in the payload and must "
+            "equal --agent-id; the match is what stops a sibling lane's handoff file "
+            "from being re-sent, so the key cannot be filled in from the flag",
+            file=sys.stderr,
+        )
         sys.exit(1)
     expected = getattr(args, "agent_id", None)
     if loaded["agent_id"] != expected:
         print(
             f"agent handoff: payload agent_id {loaded['agent_id']!r} does not match --agent-id {expected!r}; "
             "write your own handoff file rather than re-sending another dispatch's",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    # Every create payload and every partial-update patch passes through here,
+    # so one check covers both writes. The create model is extra="forbid", so a
+    # misspelled key 422s there; the patch path used to filter it out silently
+    # and print a success receipt. Reject by name on both, mirroring the
+    # prompt-context rejection in `agent start`.
+    unknown = sorted(set(loaded) - _HANDOFF_PAYLOAD_FIELDS)
+    if unknown:
+        print(
+            "agent handoff --from-json: unknown handoff keys: "
+            + ", ".join(_HANDOFF_BACKEND_OWNED_HINTS.get(key, key) for key in unknown)
+            + ". Read `vigil assess contract agent handoff` or "
+            "agent/references/runtime-guides/handoff-schema.md for the field set.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    expected_version = loaded.get("expected_handoff_version")
+    if expected_version is not None and (
+        type(expected_version) is not int or expected_version < 1
+    ):
+        print(
+            "agent handoff --from-json: expected_handoff_version must be the integer "
+            "handoff_version you read (>= 1); it guards this write against a "
+            "concurrent one and is never a string",
             file=sys.stderr,
         )
         sys.exit(1)
@@ -618,10 +749,11 @@ def _build_handoff_payload(args) -> dict:
 
 def _record_handoff(args) -> None:
     payload = _build_handoff_payload(args)
-    client, _ = _client_for(args)
+    client, cfg = _client_for(args)
     try:
         agent_id = str(payload.get("agent_id") or "")
-        if payload.get("agent_role") and payload.get("summary"):
+        guarded = payload.get("expected_handoff_version") is not None
+        if not guarded and payload.get("agent_role") and payload.get("summary"):
             # Full checkpoints are idempotent: POST on the first write and
             # transparently PATCH on a duplicate agent_id.
             row = client.record_handoff(payload, upsert=True)
@@ -631,6 +763,14 @@ def _record_handoff(args) -> None:
             # authored record just to change handoff_status.
             existing = client.get_handoff(agent_id)
             if existing is None:
+                if guarded:
+                    print(
+                        "agent handoff --from-json: expected_handoff_version guards an "
+                        f"existing handoff row and {agent_id!r} has none yet; write the "
+                        "first handoff without the guard",
+                        file=sys.stderr,
+                    )
+                    sys.exit(1)
                 print(
                     "agent handoff --from-json: agent_role and summary are required "
                     f"keys when creating new handoff {agent_id!r}",
@@ -651,6 +791,7 @@ def _record_handoff(args) -> None:
             row = client.update_handoff(agent_id, patch)
     finally:
         client.close()
+    artifact_states = _handoff_artifact_states(cfg.engagement_dir, row, payload)
     # `handoff_id` names the namespace (assessment_dispatch_handoffs) so it cannot
     # be confused with the `dispatch_id` that `agent start` prints — see the note there.
     print(json.dumps({
@@ -659,4 +800,82 @@ def _record_handoff(args) -> None:
         "handoff_version": row.get("handoff_version"),
         "last_checkpoint_at": row.get("last_checkpoint_at"),
         "summary_characters": len(row.get("summary") or payload.get("summary") or ""),
+        # The claim meets the filesystem here or nowhere: the backend already
+        # computes this while registering each path and throws it away, and the
+        # renderer only reports it to whoever reads the handoff LATER.
+        "working_artifacts": [
+            {"path": path, "state": state} for path, state in artifact_states
+        ],
     }, ensure_ascii=False))
+    _report_handoff_artifact_states(
+        artifact_states,
+        handoff_status=str(row.get("handoff_status") or payload.get("handoff_status") or ""),
+        handoff_version=row.get("handoff_version"),
+    )
+
+
+def _handoff_artifact_states(
+    engagement_dir: str, row: dict, payload: dict
+) -> list[tuple[str, str]]:
+    """Stat every artifact the stored handoff now claims, in recorded order.
+
+    Prefer the row the backend returned: a lifecycle promotion patch carries no
+    ``working_artifacts`` of its own, yet the row it promotes to ``ready`` still
+    asserts every artifact an earlier checkpoint recorded.
+    """
+    claimed = row.get("working_artifacts")
+    if not isinstance(claimed, list):
+        claimed = payload.get("working_artifacts")
+    if not isinstance(claimed, list):
+        return []
+    states: list[tuple[str, str]] = []
+    for entry in claimed:
+        if not isinstance(entry, dict):
+            continue
+        raw_path = str(entry.get("path") or "").strip()
+        if not raw_path:
+            continue
+        _resolved, state = resolve_engagement_artifact_path(engagement_dir, raw_path)
+        states.append((raw_path, state))
+    return states
+
+
+def _report_handoff_artifact_states(
+    artifact_states: list[tuple[str, str]],
+    *,
+    handoff_status: str,
+    handoff_version: object,
+) -> None:
+    """Warn per unverifiable artifact; refuse a `ready` handoff that claims one.
+
+    ``checkpointed`` and ``blocked`` legitimately name an artifact whose write
+    was aborted, so those stay warnings. ``ready`` asserts a finished result, so
+    a file it did not write is the fabrication case and the command exits
+    non-zero — AFTER the write, because discarding the specialist's authored
+    summary over a path typo would destroy the durable state the handoff exists
+    to hold.
+    """
+    unverifiable = [(path, state) for path, state in artifact_states if state != ARTIFACT_PRESENT]
+    if not unverifiable:
+        return
+    for path, state in unverifiable:
+        print(
+            f"WARN agent handoff: working artifact {path!r} is {state}; no artifact row "
+            "exists for it and `agent render-handoff` will show the next dispatch the "
+            "same state. Write the file, or drop the entry from working_artifacts.",
+            file=sys.stderr,
+        )
+    if handoff_status != "ready":
+        return
+    print(
+        f"agent handoff: REFUSED to confirm this ready handoff: it claims "
+        f"{len(unverifiable)} working artifact(s) that are not present in the "
+        "engagement ("
+        + ", ".join(f"{path} [{state}]" for path, state in unverifiable)
+        + f"). The handoff row WAS persisted (handoff_version={handoff_version}) — this "
+        "non-zero exit reports an unsubstantiated artifact claim, not a failed write. "
+        "Write the files or remove the entries, then re-run the same command; a ready "
+        "handoff asserting a file it never wrote is a fabricated result.",
+        file=sys.stderr,
+    )
+    sys.exit(1)

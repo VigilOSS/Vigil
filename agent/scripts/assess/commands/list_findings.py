@@ -251,7 +251,7 @@ def _print_root_cause_group(group: dict, root_slug: str) -> None:
     for sibling in group.get("siblings", []):
         order = sibling.get("sibling_order")
         prefix = f"{order}. " if order is not None else "- "
-        effect = sibling.get("root_cause_effect", "eliminates_finding")
+        effect = sibling.get("root_cause_effect", "eliminates_attack_path")
         residual = " residual path" if effect == "eliminates_attack_path" else ""
         print(
             f"{prefix}{sibling.get('slug', '')} [{sibling.get('severity', 'info')}]"

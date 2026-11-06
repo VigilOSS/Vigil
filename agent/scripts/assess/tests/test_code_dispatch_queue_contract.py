@@ -63,7 +63,7 @@ def test_code_dispatch_queue_posts_explicit_initial_mode(
         def __exit__(self, *_exc):
             return False
 
-        def post(self, endpoint: str, payload: dict[str, object]):
+        def post(self, endpoint: str, payload: dict[str, object], **_options):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
             return {
@@ -186,7 +186,7 @@ def test_code_dispatch_queue_posts_bounded_batches_and_caps_response_snapshots(
         def __exit__(self, *_exc):
             return False
 
-        def post(self, endpoint: str, payload: dict[str, object]):
+        def post(self, endpoint: str, payload: dict[str, object], **_options):
             assert endpoint == "code/analysis-queue"
             batch = payload["items"]
             assert isinstance(batch, list)
@@ -236,7 +236,7 @@ def test_code_dispatch_reanalyze_requires_reason_and_posts_auditable_mode(
         def __exit__(self, *_exc):
             return False
 
-        def post(self, endpoint: str, payload: dict[str, object]):
+        def post(self, endpoint: str, payload: dict[str, object], **_options):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
             return {
@@ -303,7 +303,7 @@ def test_code_dispatch_reanalyze_continues_after_a_batch_conflict(
         def __exit__(self, *_exc):
             return False
 
-        def post(self, _endpoint, payload):
+        def post(self, _endpoint, payload, **_options):
             posted_sizes.append(len(payload["items"]))
             conflict = 1 if len(posted_sizes) == 1 else 0
             reanalysis = len(payload["items"]) - conflict
@@ -573,6 +573,12 @@ def test_code_dispatch_empty_fetch_explains_why_no_claim_was_returned(
         def __exit__(self, *_exc):
             return False
 
+        def get(self, _endpoint: str):
+            return {
+                "total": 0, "offset": 0, "count": 0, "has_more": False,
+                "item_ids": [], "items": [],
+            }
+
         def post(self, _endpoint: str, _payload: dict[str, object]):
             return []
 
@@ -588,10 +594,7 @@ def test_code_dispatch_empty_fetch_explains_why_no_claim_was_returned(
 
     captured = capsys.readouterr()
     assert json.loads(captured.out) == []
-    assert (
-        "No current pending code-analysis queue items matched the claim filters"
-        in captured.err
-    )
+    assert "No current-generation queue row lies under this scope" in captured.err
     assert "classification=critical" in captured.err
 
 
@@ -650,3 +653,274 @@ def test_code_dispatch_heartbeat_rejects_non_positive_single_item_id(
 
     assert excinfo.value.code == 1
     assert "item-id must be one positive integer" in capsys.readouterr().err
+
+
+# --- B8 OPEN-1/OPEN-2: the selector the operator actually holds -------------
+
+
+class _QueueListingClient:
+    """Answers the queue listing and records every submitted payload."""
+
+    rows: list[dict] = []
+    posts: list[tuple[str, dict]] = []
+    reads: list[str] = []
+
+    def __init__(self, *_args) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_exc):
+        return False
+
+    def get(self, endpoint: str):
+        type(self).reads.append(endpoint)
+        rows = type(self).rows
+        return {
+            "total": len(rows), "offset": 0, "count": len(rows),
+            "has_more": False, "item_ids": [row["id"] for row in rows],
+            "items": rows,
+        }
+
+    def post(self, endpoint: str, payload: dict, **_kwargs):
+        type(self).posts.append((endpoint, payload))
+        count = len(payload.get("items", []))
+        reanalysis = payload.get("mode") == "reanalysis"
+        return {
+            "mode": payload.get("mode", "initial"),
+            "inserted": 0 if reanalysis else count,
+            "updated": 0, "already_active": 0, "conflicts": 0,
+            "reanalysis": count if reanalysis else 0,
+            "total": count,
+            "outcomes": type(self).outcomes_for(payload),
+        }
+
+    @staticmethod
+    def outcomes_for(payload: dict) -> list[dict]:
+        reanalysis = payload.get("mode") == "reanalysis"
+        return [
+            {
+                "file_id": item["file_id"],
+                "file_path": f"src/{item['file_id']}.py",
+                "outcome": "reanalysis" if reanalysis else "inserted",
+                "queue_item_id": 900 + index,
+                "status": "pending",
+                **({"supersedes": 100 + index} if reanalysis else {}),
+                "detail": "created explicit reanalysis queue item",
+            }
+            for index, item in enumerate(payload.get("items", []))
+        ]
+
+
+@pytest.fixture
+def queue_listing_client(monkeypatch, tmp_path):
+    _QueueListingClient.rows = []
+    _QueueListingClient.posts = []
+    _QueueListingClient.reads = []
+    _install_snapshot_stub(monkeypatch, tmp_path)
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _QueueListingClient)
+    return _QueueListingClient
+
+
+def test_reanalyze_accepts_the_queue_item_id_the_operator_holds(
+    queue_listing_client, tmp_path
+):
+    """`list`/`fetch` hand back a queue item id; reanalyze must take it."""
+    queue_listing_client.rows = [
+        {"id": 41, "file_id": 7, "file_path": "src/a.py", "status": "done"},
+        {"id": 42, "file_id": 8, "file_path": "src/b.py", "status": "done"},
+    ]
+    queue_path = tmp_path / "reanalyze.json"
+    queue_path.write_text(
+        json.dumps([{"queue_item_id": 42, "batch_theme": "reread"}]), encoding="utf-8"
+    )
+
+    code_dispatch._queue(
+        _config(tmp_path), str(queue_path), mode="reanalysis", reason="Independent reread"
+    )
+
+    assert queue_listing_client.posts[0][1]["items"] == [
+        {"file_id": 8, "batch_theme": "reread", "slot_types": [],
+         "guidance_hypotheses": []}
+    ]
+    assert any(read.startswith("code/analysis-queue?") for read in queue_listing_client.reads)
+
+
+def test_reanalyze_rejects_queue_item_id_beside_file_id(queue_listing_client, tmp_path, capsys):
+    queue_path = tmp_path / "reanalyze.json"
+    queue_path.write_text(
+        json.dumps([{"queue_item_id": 42, "file_id": 8}]), encoding="utf-8"
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        code_dispatch._queue(
+            _config(tmp_path), str(queue_path), mode="reanalysis", reason="reread"
+        )
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "queue_item_id" in err and "file_id" in err
+    assert "exactly one selector" in err
+
+
+def test_reanalyze_names_an_unknown_queue_item_id(queue_listing_client, tmp_path, capsys):
+    queue_listing_client.rows = [{"id": 41, "file_id": 7, "file_path": "src/a.py"}]
+    queue_path = tmp_path / "reanalyze.json"
+    queue_path.write_text(json.dumps([{"queue_item_id": 99}]), encoding="utf-8")
+
+    with pytest.raises(SystemExit) as excinfo:
+        code_dispatch._queue(
+            _config(tmp_path), str(queue_path), mode="reanalysis", reason="reread"
+        )
+
+    assert excinfo.value.code == 1
+    assert "99" in capsys.readouterr().err
+
+
+def test_a_bare_id_array_names_the_accepted_leaf_keys(tmp_path, capsys):
+    """`[41, 42]` was refused with "must be JSON objects" and no shape hint."""
+    with pytest.raises(SystemExit) as excinfo:
+        code_dispatch._flatten_queue_specs(41)
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "queue_item_id" in err
+    assert "file_id" in err
+    assert "file_path" in err
+
+
+# --- B9: reanalyze must say the predecessor's credit is suspended -----------
+
+
+def test_reanalyze_says_each_predecessor_loses_its_coverage_credit(
+    queue_listing_client, tmp_path, capsys
+):
+    """A new attempt withdraws the old receipt's credit until it closes.
+
+    By design (one canonical attempt per file), so the verb must state it per
+    file instead of letting an unexplained coverage regression appear later.
+    """
+    queue_path = tmp_path / "reanalyze.json"
+    queue_path.write_text(
+        json.dumps([{"file_id": 7}, {"file_id": 8}]), encoding="utf-8"
+    )
+
+    code_dispatch._queue(
+        _config(tmp_path), str(queue_path), mode="reanalysis", reason="Independent reread"
+    )
+
+    out = capsys.readouterr().out
+    assert "coverage credit" in out
+    assert "src/7.py" in out and "src/8.py" in out
+    assert "queue item 100" in out
+    assert "queue item 101" in out
+
+
+def test_the_suspension_notice_survives_an_outcome_without_a_predecessor_id(
+    queue_listing_client, monkeypatch, tmp_path, capsys
+):
+    """The notice is about the invariant, not about one optional response key."""
+    monkeypatch.setattr(
+        _QueueListingClient,
+        "outcomes_for",
+        staticmethod(
+            lambda payload: [
+                {
+                    "file_id": item["file_id"],
+                    "queue_item_id": 900,
+                    "outcome": "reanalysis",
+                    "status": "pending",
+                    "detail": "created explicit reanalysis queue item",
+                }
+                for item in payload.get("items", [])
+            ]
+        ),
+    )
+    queue_path = tmp_path / "reanalyze.json"
+    queue_path.write_text(json.dumps([{"file_id": 7}]), encoding="utf-8")
+
+    code_dispatch._queue(
+        _config(tmp_path), str(queue_path), mode="reanalysis", reason="reread"
+    )
+
+    out = capsys.readouterr().out
+    assert "coverage credit" in out
+    assert "file 7" in out
+
+
+def test_an_initial_queue_submission_claims_no_suspension(
+    queue_listing_client, tmp_path, capsys
+):
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(
+        json.dumps([{"file_id": 7, "priority": 90}]), encoding="utf-8"
+    )
+
+    code_dispatch._queue(_config(tmp_path), str(queue_path))
+
+    assert "coverage credit" not in capsys.readouterr().out
+
+
+# --- AD3: queue submission must not run on the unscaled 10s budget ---------
+
+
+def test_queue_submission_scales_its_response_budget_per_batch(
+    monkeypatch, tmp_path
+):
+    queue_path = tmp_path / "queue-many.json"
+    queue_path.write_text(
+        json.dumps([{"file_id": file_id, "priority": 90} for file_id in range(1, 202)]),
+        encoding="utf-8",
+    )
+    _install_snapshot_stub(monkeypatch, tmp_path)
+    budgets: list[tuple[int, float | None]] = []
+
+    class FakeClient:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def post(self, _endpoint, payload, **options):
+            budgets.append((len(payload["items"]), options.get("read_timeout")))
+            return {
+                "mode": "initial", "inserted": len(payload["items"]), "updated": 0,
+                "already_active": 0, "conflicts": 0, "reanalysis": 0,
+                "total": len(payload["items"]), "outcomes": [],
+            }
+
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", FakeClient)
+    code_dispatch._queue(_config(tmp_path), str(queue_path))
+
+    assert [size for size, _budget in budgets] == [
+        code_dispatch._QUEUE_SUBMISSION_BATCH_SIZE, 1
+    ]
+    full_batch_budget = budgets[0][1]
+    assert full_batch_budget is not None
+    assert full_batch_budget > 10.0
+    # A single-row batch fits the default budget and is sent unchanged.
+    assert budgets[1][1] is None
+
+
+def test_an_initial_submission_cannot_select_by_queue_item_id(
+    queue_listing_client, tmp_path, capsys
+):
+    """The id names an attempt that already exists, so it is a reanalyze selector."""
+    queue_path = tmp_path / "queue.json"
+    queue_path.write_text(
+        json.dumps([{"queue_item_id": 42, "priority": 90}]), encoding="utf-8"
+    )
+
+    with pytest.raises(SystemExit) as excinfo:
+        code_dispatch._queue(_config(tmp_path), str(queue_path))
+
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "queue_item_id" in err
+    assert "code-dispatch reanalyze" in err
+    assert queue_listing_client.posts == []

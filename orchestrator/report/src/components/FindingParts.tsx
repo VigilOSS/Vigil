@@ -7,8 +7,13 @@ import { useState } from "react";
 import { Check, Copy } from "lucide-react";
 
 import type { ReportFinding } from "../types";
-import { referenceLink } from "../lib/format";
+import { formatDateTime, referenceLink } from "../lib/format";
 import { findingToMarkdown } from "../lib/findingMarkdown";
+import {
+  asOperatorAuthority,
+  operatorAuthorityLabel,
+  operatorAuthoritySentence,
+} from "../lib/operatorAuthority";
 
 /**
  * Copy the whole finding as structured markdown.
@@ -50,6 +55,56 @@ export function CopyMarkdownButton({ finding }: { finding: ReportFinding }) {
       {copied ? <Check size={13} /> : <Copy size={13} />}
       {copied ? "Copied" : "Copy as Markdown"}
     </button>
+  );
+}
+
+/**
+ * The verdict chip's qualifier: this one was not reached by a proof receipt.
+ *
+ * Sits beside `verification_status` wherever that renders, because the status
+ * word is identical either way — a reader seeing `Verified` has no other way
+ * to tell an operator attestation from a dispatch-verified proof, and ADR 0043
+ * makes rendering the two as equivalent the one presentation not available.
+ * Returns null for the ordinary receipt-backed verdict.
+ */
+export function OperatorAuthorityTag({ finding }: { finding: ReportFinding }) {
+  const stamp = asOperatorAuthority(finding.operator_authority);
+  if (!stamp) return null;
+  return (
+    <span className="rpt-chip rpt-chip-attested" title={operatorAuthoritySentence(stamp)}>
+      {operatorAuthorityLabel(stamp)}
+    </span>
+  );
+}
+
+/**
+ * The attestation itself: what the operator relied on, and what they say it
+ * settles.
+ *
+ * The chip states that a waiver stands; this states its content, so a reader
+ * who distrusts the verdict can go and read the intel record the operator
+ * relied on and reach their own conclusion — which is the whole reason ADR 0043
+ * requires a resolvable intel id and not just a reason string.
+ *
+ * The reason is the operator's own words about target-influenced evidence, so it
+ * renders verbatim and NOT through Markdown: markdown rewrites exactly the
+ * characters that carry meaning in a quoted configuration line, and this
+ * sentence is the only statement of what the out-of-snapshot evidence settles.
+ * Presentation is clamped by CSS (it wraps and never overflows); the record is
+ * not (ADR 0019, ADR 0018).
+ */
+export function OperatorAuthorityAttestation({ finding }: { finding: ReportFinding }) {
+  const stamp = asOperatorAuthority(finding.operator_authority);
+  if (!stamp) return null;
+  return (
+    <section className="rpt-attestation" aria-label="Operator-attested verdict">
+      <h4 className="rpt-attestation-title">{operatorAuthorityLabel(stamp)}</h4>
+      <p className="rpt-attestation-lede">
+        {operatorAuthoritySentence(stamp)}
+        {stamp.at && ` Recorded ${formatDateTime(stamp.at)}.`}
+      </p>
+      {stamp.reason && <p className="rpt-attestation-reason">{stamp.reason}</p>}
+    </section>
   );
 }
 

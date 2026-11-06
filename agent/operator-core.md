@@ -207,7 +207,7 @@ After engagement initialization completes, repeat until all attack paths exhaust
 8. **RECORD FINDINGS IMMEDIATELY** — Structured finding state must land in the orchestrator backend before the next dispatch. Use `vigil assess finding record` to write findings to the backend. The backend is the sole store.
    **Exception — OSINT CVE matches:** Version-matched CVEs from osint-analyst are intelligence, not confirmed findings. Record them via `vigil assess intel record cve <cve-json-file>` (intel_cves table), NOT `finding record`. Dispatch exploit-developer to validate before any CVE becomes a durable finding. This reconciles "record immediately" with "no theoretical findings."
    **Exception — theoretical holding area:** A strong-but-unproven finding (static/code evidence solid, runtime PoC still owed — e.g. a boolean/time-based/OOB-confirmed SQLi differential whose byte-by-byte extraction is unfinished) may be held rather than dropped: record it with `evidence_type=theoretical` + `details.chain_required=true` and verify it `pending_runtime_proof` with the specialist's next-test plan (`--next-test-file`; `vigil assess contract finding verify`). It is excluded from exploit-candidates and from both report projections, and it **blocks** report-readiness with a `finding_verification_status` blocker until an exploit-developer runtime pass re-verifies it `confirmed`/`downgraded` — parking defers the proof, it does not let the engagement close around the finding. Surface the holding area with `vigil assess finding list --holding`.
-   **Phase 5 root-cause grouping pass:** after verification has produced stable findings, query `vigil assess fetch findings` and group intentional root/sibling relationships with `vigil assess finding link`. Pick the root as the finding that describes the broadest attacker-controllable cause or missing control. Link downstream outcomes as siblings because developers and executives need to see blast radius without receiving duplicate tickets. Use `--effect eliminates_finding` when fixing the root resolves the sibling entirely; use `--effect eliminates_attack_path` when the sibling remains a standalone remediation item after the root is fixed. Grouping keeps every verdict and is audited on each sibling; `eliminates_finding` also raises a claim review on a verified sibling, because it now claims the root fix retires it, so settle that with an independent `claim_equivalence` decision before the report. Confirm with `vigil assess finding list --root-cause <root-slug>` and `vigil assess check-phase-readiness --phase report`.
+   **Phase 5 root-cause grouping pass:** after verification has produced stable findings, query `vigil assess fetch findings` and group intentional root/sibling relationships with `vigil assess finding link`. Pick the root as the finding that describes the broadest attacker-controllable cause or missing control. Link downstream outcomes as siblings because developers and executives need to see blast radius without receiving duplicate tickets. `--effect` defaults to `eliminates_attack_path` — the sibling remains a standalone remediation item after the root is fixed — so a pure grouping pass costs nothing and never disturbs a verdict. Pass `--effect eliminates_finding` only when you mean that fixing the root retires the sibling entirely: that claim raises a claim review on a confirmed or downgraded sibling plus a `finding_claim_review_pending` report blocker, so settle it with an independent `claim_equivalence` decision before the report. Grouping itself keeps every verdict and is audited on each sibling. Confirm with `vigil assess finding list --root-cause <root-slug>` and `vigil assess check-phase-readiness --phase report`.
 9. **RECORD SURFACES IMMEDIATELY** — If recon/source output `#### Surface Candidates`, record them via `vigil assess record-surface` so the backend stays current. The backend is the sole store — there is no local surfaces file to verify.
    If surface recording fails with a connection error, verify the orchestrator backend is running on the configured base URL (default `http://127.0.0.1:18000`; override via `ORCHESTRATOR_BASE_URL` env var, `vigil config set orchestrator_base_url ...`, or per-engagement `.orchestrator.env`) and that the engagement key is correct.
 10. **THINK IN CHAINS** — Turn low-signal observations into hypotheses about privilege, trust boundaries, internal services, pivots, and realistic exploitation paths.
@@ -376,7 +376,7 @@ Required fields per dispatch:
 
 | Field | Values |
 |---|---|
-| `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` |
+| `role` | `recon-specialist` / `source-analyzer` / `surface-collector` / `vulnerability-analyst` / `exploit-developer` / `fuzzer` / `osint-analyst` / `report-writer` / `code-architect` / `code-vuln-hunter` / `code-variant-hunter` / `code-vuln-verifier` / `code-fuzz-engineer` / `general` |
 | `assessment_mode` / `proof_route` | Explicit `code` or `web` method for a mixed-role specialist. Proof work supplies its backend-selected route; source attachments do not select it. |
 | `dispatch_mode` | `hypothesis-driven` / `item-iterating` / `deep-manual` / `variant-rotation` / `swarm` (see "Iteration-mode (dispatch_mode) Declaration" below) |
 | `skills` | The skill context the specialist loaded, recorded on the dispatch row so it is a truthful audit rather than a guess. Format, discovery, the operator exemption, and what omitting it does: `vigil assess contract agent start`. |
@@ -418,7 +418,7 @@ vigil assess agent start \
 `source-analyzer`). Proof-work launches receive the authoritative mode from their
 backend-selected `proof_route`; ordinary dispatches must supply it explicitly.
 
-`agent start` also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates supplied context and scoped assignment input before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
+`agent start` refuses an unregistered `--role` and a non-canonical `--vuln-classes` token outright, naming the nearest match and the registered set, so a typo cannot produce a valid-looking dispatch row whose launch envelope points at a role prompt that does not exist. It also lints `--task` for a prescriptive technique cage, runs a default-on duplicate-overlap advisory, and validates supplied context and scoped assignment input before the write. `vigil assess contract agent` and `vigil assess contract agent start` own all three; hand the specialist an open objective plus the measured coverage picture (`vigil assess coverage --host <h> --for-dispatch`) rather than a recipe.
 For a code lane selected in a generated file, set `prompt_context.lane_file` so the emitted prompt carries the checked file/LOC manifest; `agent/references/runtime-guides/dispatch-template.md` owns the field shape.
 
 On return, bind an exposed client handle and inspect the durable handoff with
@@ -429,11 +429,16 @@ or stop active execution through its canonical controls. For proof work also run
 timestamp does not establish that detached commands stopped.
 
 Only after observing the native worker return and confirming its actual work is terminal,
-close a `ready`/`blocked` handoff with `vigil assess agent close <agent-id>`. If the worker
-returned without a final handoff (including a checkpoint-only return), use
-`vigil assess agent close <agent-id> --status failed --reason "<observed return and execution state>"`.
-This records an operator-authored blocked recovery handoff, preserves checkpoint evidence,
-and closes the dispatch as failed; it does not claim the investigation succeeded.
+close a `ready`/`blocked` handoff with `vigil assess agent close <agent-id>`. For a wide wave,
+`vigil assess agent close --all-ready` closes every in-progress dispatch whose handoff is already
+`ready` or `blocked`, with no age threshold and no explicit ids — which is the only practical route
+once the wave is larger than the 10 closable rows `resume-brief` will list. Add `--quiet` to drop
+the per-dispatch JSON and keep the stderr tally.
+If the worker returned without a final handoff (including a checkpoint-only return), use
+`vigil assess agent close <agent-id> --status failed --reason "<observed return and execution state>"`
+when there is no usable output, or `--status blocked --reason "..."` when the lane did durable work
+on incomplete scope. Either records an operator-authored recovery handoff and preserves checkpoint
+evidence; neither claims the investigation succeeded.
 Ordinary work can then use `agent continue`. Recover a proof owner with execution checks,
 terminal dispatch closure, `proof-work release <id> --reason <text>`, then a fresh claim;
 proof ownership never transfers through ordinary continuation.
@@ -461,6 +466,7 @@ If the operator omits the mode, the agent falls back to its role's own default. 
 - `code-variant-hunter` → `hypothesis-driven`
 - `code-vuln-verifier` → `deep-manual`
 - `code-fuzz-engineer` → `deep-manual`
+- `general` → `deep-manual`
 
 (`swarm` has no per-role default — it is operator-chosen for corpus workloads.)
 
@@ -724,6 +730,8 @@ interpretation.
 Command reference for the RECORD FINDINGS / RECORD SURFACES steps in the Core Loop (steps 8-9) — read alongside those, not instead of them; they own the timing and the recording exceptions, this owns the exact commands and schema pointers.
 
 Use `vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>` for findings (`--agent-id` is the recording agent's dispatch id, without which no finding can ever reach a terminal verification status — finding IDs, severity↔CVSS validation, and the payload schema are owned by `vigil assess contract finding record`; dedup rules live in `agent/shared-constraints.md` §4). For the canonical field list and examples, run `vigil assess contract finding record`. Use the lifecycle helpers — `finding verify --status <status>` for verification outcomes (terminal outcomes require independent proof receipts; `false_positive` also requires a completed structured counter-check), `finding update --status draft` to reopen a previously confirmed or false-positive finding, and `finding update` for non-verification metadata — instead of raw `post` / `patch`.
+
+**Operator-authority terminal verdict.** When the fact that settles a finding lies outside the sealed snapshot by design — a deployment configuration, a vendor statement — record the verdict on your own evidence: `vigil assess finding verify <slug> --status <terminal> --operator-authority --intel-id <id> --reason "<what the out-of-snapshot evidence establishes>"`. It needs an intel row that resolves in this engagement plus a non-blank reason, records no proof receipts, and stamps `provenance.operator_authority` so the verdict renders as operator-authority everywhere instead of dispatch-verified. ADR 0019 lets the operator weaken their own gate, and the visible stamp is the price. It moves no bar for a dispatch: a specialist still owes a receipt from its own independent run and never reaches for this flag.
 
 Use `vigil assess intel record <type> <json-file>` for `#### Intelligence` rows (intel types and dedup keys in §13). report-writer uses `vigil assess finding report --mode <final|draft> --json`, which returns grouped root-cause findings with sequential `001~N` report IDs.
 

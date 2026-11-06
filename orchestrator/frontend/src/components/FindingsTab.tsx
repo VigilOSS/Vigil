@@ -14,6 +14,7 @@ import type {
   FindingVerificationEffect,
   AssessmentVerificationAudit,
   FindingDetails,
+  FindingOperatorAuthority,
   FindingPocRequest,
   FindingPocResponse,
   FindingProvenance,
@@ -253,7 +254,7 @@ import { findingToMarkdown } from "../lib/findingMarkdown";
 import { FindingRemediation } from "./FindingRemediation";
 import { RecordBody, RecordCopyButton, RecordCopyLinkButton, RecordTabs, RecordView, useResultsScrollMemory } from "./record/RecordView";
 import { FindingRecordHeader } from "./FindingRecordHeader";
-import { AWAITING_VERIFICATION } from "../lib/findingWorkflow";
+import { AWAITING_VERIFICATION, operatorAuthorityIntelRef, operatorAuthorityLabel, operatorAuthorityOf, operatorAuthoritySentence } from "../lib/findingWorkflow";
 import { listNavigation } from "./record/recordNavigation";
 
 // ── Types & helpers ───────────────────────────────────────────────────
@@ -602,6 +603,16 @@ export type Derived = {
   // derived
   details: FindingDetails;
   provenance: FindingProvenance | null;
+  /**
+   * The waiver behind a terminal verdict reached WITHOUT a decision receipt.
+   *
+   * Derived here rather than read field-by-field at each render site, because
+   * the two carriers have different reach: the point read stamps it on
+   * `verification_audit`, while `provenance.operator_authority` is on every
+   * ledger row — so a grid row and a drawer must not disagree about whether a
+   * verdict was dispatch-verified.
+   */
+  operatorAuthority: FindingOperatorAuthority | null;
   links: DerivedLink[];
   root_cause_role?: "root" | "sibling";
   root_cause_slug?: string;
@@ -976,7 +987,7 @@ export function FindingsTab({
         map.set(sibling.slug, {
           root_cause_slug: sibling.root_cause_slug || rootSlug,
           root_cause_note: sibling.root_cause_note || "",
-          root_cause_effect: sibling.root_cause_effect || "eliminates_finding",
+          root_cause_effect: sibling.root_cause_effect || "eliminates_attack_path",
           sibling_order: sibling.sibling_order ?? null,
         });
       }
@@ -1103,6 +1114,12 @@ export function FindingsTab({
         verification_audit: isDetail(f) ? f.verification_audit : undefined,
         details,
         provenance,
+        // Built from the already-guarded `provenance` rather than the raw row,
+        // so a malformed provenance column cannot reach the stamp reader.
+        operatorAuthority: operatorAuthorityOf({
+          provenance,
+          verification_audit: isDetail(f) ? f.verification_audit : undefined,
+        }),
         links,
         root_cause_role: rootMeta ? "sibling" : rootMetrics ? "root" : undefined,
         root_cause_slug: rootMeta?.root_cause_slug,
@@ -2352,6 +2369,10 @@ function Drawer({
         workflow={d.workflow_status}
         verification={d.verificationKey}
         submission={d.submission_status}
+        // The point read is fuller than the ledger row it replaced (the row
+        // carries provenance but no verification audit), so prefer it once it
+        // lands and never fall back to "no waiver" while it is in flight.
+        operatorAuthority={operatorAuthorityOf(reviewFinding) ?? d.operatorAuthority}
         workspace="findings"
         section={tab}
         copyIdLabel="Copy slug"
@@ -2524,7 +2545,18 @@ function OverviewPane({ engagementKey, d, receipts, receiptsLoading, proseMode, 
       <section className="section finding-current-proof">
         <h3>Current verification evidence</h3>
         <p className="section-hint">Receipts supporting the current {d.verificationLabel.toLowerCase()} state. Earlier decisions remain in History.</p>
-        {receiptsLoading && receipts === undefined ? <p className="finding-gap" role="status">Loading current proof receipts…</p> : receipts === undefined ? <p className="finding-gap">Current proof receipts unavailable.</p> : receipts.length === 0 ? <p className="finding-gap">No proof receipts support the current verification state.</p> : (
+        {/* An operator-authority verdict has no receipts BY CONSTRUCTION, so
+            the empty-list line below would read as missing evidence rather
+            than as a waiver the operator signed. Name the authority first. */}
+        {d.operatorAuthority && (
+          <div className="submission-blockers operator-authority-notice" role="status" aria-label="Operator-authority evidence">
+            <strong>{operatorAuthorityLabel(d.operatorAuthority, d.verificationKey)}</strong>
+            <span>{operatorAuthoritySentence(d.operatorAuthority, d.verificationKey)}</span>
+            {d.operatorAuthority.reason && <p className="operator-authority-reason">{d.operatorAuthority.reason}</p>}
+            {d.operatorAuthority.at && <p className="meta-text">Waived <TimeStamp value={d.operatorAuthority.at} /></p>}
+          </div>
+        )}
+        {receiptsLoading && receipts === undefined ? <p className="finding-gap" role="status">Loading current proof receipts…</p> : receipts === undefined ? <p className="finding-gap">Current proof receipts unavailable.</p> : receipts.length === 0 ? <p className="finding-gap">{d.operatorAuthority && ["confirmed", "downgraded", "false_positive"].includes(d.verificationKey) ? "No proof receipts: the verdict above rests on the operator's authority." : "No proof receipts support the current verification state."}</p> : (
           <ul className="finding-receipts">
             {receipts.map((receipt) => (
               <li key={receipt.id}>
@@ -2724,7 +2756,22 @@ export function SubmissionPane({
                   <div className="section">
                     <p className="section-title">
                       Payload
-                      {d.poc_language && <span className="count">{d.poc_language}</span>}
+                      {/* Raw, unlike the clipboard twin. `poc_language` is
+                          registered as FREE TEXT a specialist writes while
+                          reading target output (ADR 0018), and the twin filters
+                          it because a backtick or newline in a fence INFO
+                          STRING un-fences the payload under it. A DOM text node
+                          holds no fence and interprets nothing, so there is no
+                          escape to prevent here — and filtering anyway would
+                          hide an ordinary `python 3` or `shell script` from the
+                          one surface that shows the hint at all, which ADR 0019
+                          forbids. Length is handled by the clamp, not a cut. */}
+                      {d.poc_language && (
+                        // Whole in the DOM text and on hover, clamped in the
+                        // layout: the chip is a label, not a place to truncate
+                        // the operator's record.
+                        <span className="count poc-language-chip" title={d.poc_language}>{d.poc_language}</span>
+                      )}
                       {pocCodeIsCurl && <span className="count">curl</span>}
                     </p>
                     <CodeBlock text={d.poc_code} onCopied={() => toast("Copied", "success")} />
@@ -3195,7 +3242,11 @@ function isTransitionSummary(t: HistoryListItem): t is AssessmentFindingTransiti
 function hasVerificationAudit(audit: AssessmentVerificationAudit | undefined): boolean {
   return Boolean(
     audit &&
-    (audit.proof_receipt_total || audit.counter_check_total || audit.severity_variance_total),
+    (audit.proof_receipt_total || audit.counter_check_total || audit.severity_variance_total ||
+      // A waiver is the whole audit record for a verdict reached without one
+      // of the three above. Counting only those left the row un-expandable,
+      // so the one event that most needs reading had no way to open.
+      audit.operator_authority),
   );
 }
 
@@ -3233,6 +3284,28 @@ function parseChangePolicy(metadataJson: string): FindingChangePolicy | null {
       return typeof axis === "string" && isVerificationEffect(effect) ? [{ axis, effect }] : [];
     });
     return { version: Number(policy.version) || 0, effect: policy.effect, outcome: policy.outcome, axes };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The waiver this history EVENT was taken under, from its transition metadata.
+ *
+ * The per-transition verification audit carries receipts, counter-checks and
+ * variances but not the stamp (only the finding's point read does), so the
+ * history reads it from `metadata_json` — where `finding verify` writes it
+ * beside `confirm_check` for exactly this reason. Without it, the one event in
+ * the ledger that recorded a gate being weakened looked like every other
+ * verification.
+ */
+function parseOperatorAuthority(metadataJson: string): FindingOperatorAuthority | null {
+  try {
+    const metadata: unknown = JSON.parse(metadataJson);
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return null;
+    const value = (metadata as Record<string, unknown>).operator_authority;
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    return value as FindingOperatorAuthority;
   } catch {
     return null;
   }
@@ -3292,11 +3365,13 @@ function HistoryRow({
     : [transition.details_before_json, transition.details_after_json, transition.notes_before_json, transition.notes_after_json].some(Boolean);
   const confirmCheck = detail ? parseConfirmCheck(detail.metadata_json) : null;
   const changePolicy = detail ? parseChangePolicy(detail.metadata_json) : null;
+  const operatorAuthority = detail ? parseOperatorAuthority(detail.metadata_json)
+    : isTransitionSummary(transition) ? transition.operator_authority ?? null : null;
   // The compact projection deliberately omits verification-audit bodies and
   // counts. Keep every summary row drill-downable so an audit-only transition
   // cannot disappear merely because it has no narrative or content snapshot.
   const canExpand = isTransitionSummary(transition) || Boolean(
-    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck || changePolicy,
+    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck || changePolicy || operatorAuthority,
   );
 
   const loadDetail = (open: boolean) => {
@@ -3350,6 +3425,18 @@ function HistoryRow({
             <StatusPill domain="finding-verification" value={transition.from_verification_status} size="sm" />
             <span className="transition-arrow"> → </span>
             <StatusPill domain="finding-verification" value={transition.to_verification_status} size="sm" />
+            {/* On the verdict change itself, not in the disclosure: a reader
+                scrolling the ledger must not have to open each event to find
+                out which verdict was taken on a waiver. */}
+            {operatorAuthority && (
+              <StatusPill
+                value="operator-authority"
+                tone="warning"
+                size="sm"
+                label={operatorAuthorityLabel(operatorAuthority)}
+                title={operatorAuthoritySentence(operatorAuthority)}
+              />
+            )}
           </span>
         )}
       </div>
@@ -3367,6 +3454,9 @@ function HistoryRow({
             {!detail && !loading && !error && !engagementKey && !isTransitionSummary(transition) && (
               <Prose text={transition.reason_text} mode="rendered" />
             )}
+            {/* From the transition's own metadata: the per-transition audit
+                projection carries receipts but not the waiver. */}
+            {detail && operatorAuthority && <OperatorAuthorityRecord stamp={operatorAuthority} />}
             {detail?.verification_audit && <VerificationAudit audit={detail.verification_audit} />}
             {confirmCheck && <ConfirmCheckAudit check={confirmCheck} />}
             {changePolicy && <ChangePolicyAudit policy={changePolicy} />}
@@ -3463,10 +3553,12 @@ function VerificationAudit({ audit }: { audit: AssessmentVerificationAudit }) {
   if (
     !audit.proof_receipt_ids.length &&
     !audit.counter_checks.length &&
-    !audit.severity_variances.length
+    !audit.severity_variances.length &&
+    !audit.operator_authority
   ) return null;
   return (
     <div className="tl-audit">
+      {audit.operator_authority && <OperatorAuthorityRecord stamp={audit.operator_authority} />}
       {!!audit.proof_receipt_ids.length && (
         <div className="tl-audit-record">
           <div className="tl-audit-title">Decision proof receipts</div>
@@ -3498,6 +3590,36 @@ function VerificationAudit({ audit }: { audit: AssessmentVerificationAudit }) {
           </dl>
         </div>
       ))}
+    </div>
+  );
+}
+
+/**
+ * The waiver behind a verdict, in the same `tl-audit-record` shape as the
+ * counter-checks and severity variances it stands in for.
+ *
+ * It reads as a RECORD rather than a warning here because that is what it is in
+ * the ledger: the authority this decision was taken under. The reason is the
+ * operator's own words and goes in verbatim — a summarised one would leave the
+ * audit trail asserting a verdict whose stated grounds nobody can check.
+ *
+ * The cited row is named table-then-id, the way `intel get` takes it: this is
+ * the one field in the pane a reader checking the verdict would follow, and the
+ * ten intel tables number independently, so an id on its own would send them to
+ * whichever row occupies it in the table they guessed.
+ */
+function OperatorAuthorityRecord({ stamp }: { stamp: FindingOperatorAuthority }) {
+  const intelRef = operatorAuthorityIntelRef(stamp);
+  return (
+    <div className="tl-audit-record operator-authority-record">
+      <div className="tl-audit-title">{operatorAuthorityLabel(stamp)}</div>
+      <p>{operatorAuthoritySentence(stamp)}</p>
+      <dl>
+        {stamp.kind && <><dt>Evidence</dt><dd>{String(stamp.kind).replace(/_/g, " ")}</dd></>}
+        {intelRef && <><dt>Cited intel</dt><dd>{intelRef}</dd></>}
+        {stamp.at && <><dt>Waived</dt><dd><TimeStamp value={stamp.at} /></dd></>}
+        {stamp.reason && <><dt>Reason</dt><dd className="operator-authority-reason">{stamp.reason}</dd></>}
+      </dl>
     </div>
   );
 }

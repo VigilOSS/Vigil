@@ -1383,9 +1383,15 @@ def run(args) -> None:
                 + "\n".join(message for _position, message in sorted(errors))
             )
         if degraded:
+            # Marked a warning like `code-ingest` and `code-index sync` mark
+            # theirs. A bare `code-index:` prefix put this line in the same
+            # voice as the progress lines it sits between, so the one notice
+            # that says signal was lost read like the ones that say work
+            # happened.
             print(
                 invalid_artifact_notice(
-                    "code-index", [message for _position, message in sorted(degraded)]
+                    "code-index: WARNING",
+                    [message for _position, message in sorted(degraded)],
                 ),
                 file=sys.stderr,
             )
@@ -1505,6 +1511,28 @@ def run(args) -> None:
     )
     print(f"Source digest: {source_digest}", file=sys.stderr)
     print(f"Indexed files: {len(files_manifest)}", file=sys.stderr)
+    # Read off the published manifest, not the build's own counters: an
+    # identical rebuild reuses the existing generation, and the summary
+    # describes what is published rather than what this process measured.
+    degraded_files = int(manifest["degraded_files"])
+    truncated_files = int(manifest["artifact_truncated_files"])
+    print(f"Degraded files: {degraded_files}", file=sys.stderr)
+    print(f"Truncated artifacts: {truncated_files}", file=sys.stderr)
     print(f"Per-repo manifest: {manifest_path}", file=sys.stderr)
     print(f"Aggregate manifest: {aggregate}", file=sys.stderr)
+    if degraded_files or truncated_files:
+        # A degraded or truncated publication succeeds, so the exit status stays
+        # 0 — a nonzero exit means nothing was published at all, and overloading
+        # it would make a usable index indistinguishable from no index. The
+        # screen therefore carries the loss: without this line the summary of a
+        # partly-blind index was byte-identical to a fully successful one.
+        print(
+            f"\ncode-index: WARNING — this index is incomplete: {degraded_files} file(s) "
+            f"published degraded and {truncated_files} published truncated. The dimensions "
+            "they could not measure are declared unavailable or truncated, so they carry "
+            "reduced structural signal and their coverage can fall to whole-file source "
+            "review. They are named under degraded_file_paths and "
+            f"artifact_truncated_file_paths in {manifest_path}.",
+            file=sys.stderr,
+        )
     print("\nRun 'code-index sync' to push structural metadata to the backend.", file=sys.stderr)

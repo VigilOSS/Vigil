@@ -463,6 +463,87 @@ def test_readiness_advises_on_steps_with_no_repro_runs(client, isolate_settings)
         b.get("kind") == "finding_repro_runs_missing" for b in body["blockers"]
     )
     assert body["ready"] is True, body["blockers"]
+    # The ITEM carries its own gating class. Lanes that copied kind+detail into a
+    # handoff, or grepped it out of a log, lost the blockers/advisories split that
+    # produced it and escalated this advisory as a report blocker. Both the
+    # machine-readable class and the prose now travel with the item.
+    assert advisories[0]["severity"] == "advisory"
+    detail = advisories[0]["detail"].lower()
+    assert "advisory" in detail and "blocker" in detail, advisories[0]["detail"]
+
+
+def test_readiness_items_carry_their_own_gating_class(client, isolate_settings):
+    """Every readiness item names whether it gates, including the near-homonyms.
+
+    ``missing_cited_markdown_artifact`` (advisory) and the
+    ``finding_evidence_*`` family (blockers) both describe a cited artifact that
+    is absent; with no class on the item the only way to tell them apart was to
+    know which bucket produced it.
+    """
+    _seed(client, isolate_settings)
+    engagement_root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
+    # An ungraded reportable finding whose evidence_ref is not in the artifact
+    # index: blockers, one of them an evidence-citation homonym.
+    unindexed = _finding("VA-070", "Ungraded reportable finding")
+    unindexed["evidence_ref"] = "evidence/va-070-capture.txt"
+    _record_finding(client, unindexed)
+    # A durable note citing a markdown file that is absent: the advisory homonym.
+    (engagement_root / "RESUME.md").write_text(
+        "Deferred work is tracked in `OOB-CALLBACKS.md`.", encoding="utf-8"
+    )
+    registered = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/artifacts",
+        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
+    )
+    assert registered.status_code == 201, registered.text
+
+    body = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness"
+    ).json()
+
+    assert body["blockers"], body
+    assert body["advisories"], body
+    assert {item["severity"] for item in body["blockers"]} == {"block"}
+    assert {item["severity"] for item in body["advisories"]} == {"advisory"}
+    by_kind = {
+        item["kind"]: item["severity"]
+        for item in (*body["blockers"], *body["advisories"])
+    }
+    assert by_kind["missing_cited_markdown_artifact"] == "advisory"
+    assert by_kind["finding_evidence_missing_artifact"] == "block"
+
+
+def test_unreviewed_findings_blocker_keeps_the_finding_band_beside_its_class(
+    client, isolate_settings
+):
+    """The gating class owns ``severity``; the finding's band is its own field."""
+    _write_engagement(
+        isolate_settings["engagements_dir"], current_phase="report"
+    )
+    (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY / "scope.json").write_text(
+        json.dumps(
+            {
+                "hostname": "acme.example",
+                "engagement_type": "web",
+                "scope_mode": "host_only",
+                "scope_hosts": ["acme.example"],
+                "scope": ["acme.example"],
+                "status": "in_progress",
+                "current_phase": "report",
+            }
+        ),
+        encoding="utf-8",
+    )
+    assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+    _record_finding(client, _finding("VA-071", "Ungraded high finding"))
+
+    body = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-readiness"
+    ).json()
+
+    item = next(b for b in body["blockers"] if b["kind"] == "unreviewed_findings")
+    assert item["severity"] == "block"
+    assert item["finding_severity"] == "high"
 
 
 def test_report_export_final_mode_blocked_when_not_ready(
@@ -721,7 +802,7 @@ def test_report_payload_carries_only_the_fields_the_template_renders(
     # disk, not only from the decoded key set.
     payload_in["notes"] = "TRIAGE-NOTE-MARKER: client contact thinks this is wontfix"
     payload_in["details"]["attack_scenario"] = "DETAILS-SCRATCH-MARKER: internal pivot analysis"
-    payload_in["provenance"]["tooling"] = "PROVENANCE-MARKER"
+    payload_in["provenance"]["evidence_quote"] = "PROVENANCE-MARKER"
     _add_finding(client, payload_in)
 
     response = client.post(
@@ -1029,3 +1110,95 @@ def test_report_summary_keeps_the_engagement_rollups_that_are_not_triage_state(
     operator = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/summary").json()
     for field in report_export._SUMMARY_FIELDS:
         assert summary[field] == operator[field]
+
+
+# ── The delivered report must distinguish an operator-authority verdict ──────
+#
+# `verification_status` alone cannot: an operator-authority `downgraded` and a
+# dispatch-verified `downgraded` are the same string. ADR 0043 names this
+# exported HTML as one of the surfaces the waiver must reach, because shipping
+# it to the recipient as indistinguishable from proof is the laundering ADR 0019
+# does not permit.
+
+
+def _intel_note(client, title: str) -> int:
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/intel/notes",
+        json={
+            "title": title,
+            "body_markdown": "Deployment config read outside the sealed snapshot.",
+        },
+    )
+    assert response.status_code == 201, response.text
+    return int(response.json()["id"])
+
+
+_OPERATOR_REASON = "The deployment config disables the affected route in production."
+
+
+def _operator_authority_downgrade(client, slug: str) -> int:
+    intel_id = _intel_note(client, f"Acme deployment config settles {slug}")
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/{slug}/verify",
+        json={
+            "verification_status": "downgraded",
+            "reason_code": "operator_authority",
+            "reason_text": _OPERATOR_REASON,
+            "source_name": "operator",
+            "new_severity": "low",
+            "operator_authority": True,
+            "operator_authority_intel_id": intel_id,
+        },
+    )
+    assert response.status_code == 200, response.text
+    return intel_id
+
+
+def test_the_delivered_report_carries_the_operator_authority_stamp_whole(
+    client, isolate_settings, fake_template
+):
+    _seed(client, isolate_settings)
+    waived = _finding("VA-080", "Downgraded on the operator's own evidence")
+    _record_finding(client, waived)
+    intel_id = _operator_authority_downgrade(client, "VA-080")
+    proven = _finding("VA-081", "Confirmed by an independent dispatch")
+    _record_finding(client, proven)
+    _verify_finding(client, "VA-081")
+
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
+    )
+    assert response.status_code == 200, response.text
+    payload = _injected_payload(isolate_settings, response.json()["relative_path"])
+    records = {
+        record["slug"]: record for record in payload["finding_groups"]["standalone"]
+    }
+
+    # Copied verbatim or dropped outright — never reduced to a flag, because the
+    # intel row and the reason are what make the verdict legible to a reader.
+    stamp = records["VA-080"]["operator_authority"]
+    assert stamp["kind"] == "out_of_snapshot"
+    assert stamp["intel_id"] == intel_id
+    assert stamp["reason"] == _OPERATOR_REASON
+    assert stamp["at"]
+    # Both verdicts read `downgraded`/`confirmed`; only the stamp separates them.
+    assert records["VA-080"]["verification_status"] == "downgraded"
+    assert records["VA-081"]["operator_authority"] is None
+    assert "operator_authority" in report_export._FINDING_FIELDS
+
+
+def test_the_operator_projection_also_carries_the_operator_authority_stamp(
+    client, isolate_settings
+):
+    """``report-findings`` backs the report-writer, who must see it too."""
+    _seed(client, isolate_settings)
+    _record_finding(client, _finding("VA-082", "Downgraded on operator authority"))
+    intel_id = _operator_authority_downgrade(client, "VA-082")
+
+    resp = client.get(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-findings?mode=draft"
+    )
+    assert resp.status_code == 200, resp.text
+    record = next(r for r in resp.json()["standalone"] if r["slug"] == "VA-082")
+
+    assert record["operator_authority"]["intel_id"] == intel_id

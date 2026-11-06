@@ -280,11 +280,20 @@ def test_generic_finding_patch_rejects_reserved_code_snapshot_binding() -> None:
 
 
 def test_non_reserved_patch_provenance_remains_compatible() -> None:
+    """A non-reserved key still patches; only ``code_snapshot`` is reserved here.
+
+    ``provenance`` is now one CLOSED vocabulary on every write door, so this
+    checks a registered non-reserved key rather than an arbitrary one.
+    ``reviewed_by`` is the ledger's audited-actor fallback.
+    """
     request = FindingPatchRequest.model_validate(
         {"provenance": {"reviewed_by": "operator"}}
     )
 
-    assert request.provenance == {"reviewed_by": "operator"}
+    assert request.provenance is not None
+    assert request.provenance.model_dump(exclude_none=True) == {
+        "reviewed_by": "operator"
+    }
 
 
 def test_non_file_finding_remains_compatible_without_code_snapshot(

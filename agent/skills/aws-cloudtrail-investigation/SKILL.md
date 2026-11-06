@@ -628,33 +628,42 @@ L2 dispatch closes with a handoff JSON at
 
 ```json
 {
-  "from_agent": "<agent-name>",
-  "to_role": "incident-verifier",
-  "finding_slug": "<finding-slug>",
-  "platform": "aws",
-  "aws_account_id": "<12-digit>",
-  "principal_arn": "<arn>",
-  "disposition_recommendation": "confirmed|false_positive|downgraded|disputed",
+  "agent_id": "<runtime-agent-id>",
+  "agent_role": "investigator",
+  "phase": "investigate",
+  "summary": "<what the CloudTrail / Athena / GuardDuty pulls establish for principal <arn> in account <id>, and what the recommendation rests on>",
   "confidence": "low|medium|high",
-  "confidence_rationale": "<one-line>",
-  "mitre_techniques": ["T1078.004", "..."],
-  "time_window_utc": ["<iso>", "<iso>"],
-  "evidence_refs": [
-    {"artifact_id": "<id>", "kind": "ir_log", "produced_by": "Step 1"},
-    {"artifact_id": "<id>", "kind": "ir_log", "produced_by": "Step 2"},
-    {"artifact_id": "<id>", "kind": "ir_evidence", "produced_by": "Step 4"}
-  ],
+  "handoff_status": "ready",
+  "finding_slugs": ["<finding-slug>"],
+  "recommended_next_agent": "incident-verifier",
   "coverage_gaps": [
-    "S3 data events not enabled on bucket <name>; Step 5 fell back to s3_access_logs",
-    "Detective not licensed; Step 7 GuardDuty-only"
+    {"area": "S3 data events on bucket <name>", "reason": "data events not enabled on the trail", "recommended_followup": "Step 5 fell back to s3_access_logs; record the gap in the tenant ref"},
+    {"area": "Detective graph correlation", "reason": "Detective not licensed in this account", "recommended_followup": "Step 7 ran GuardDuty-only; re-run if Detective is enabled"}
   ],
-  "tenant_ref_proposals": [
-    {"register": "external_account_trusted", "entry": {"...": "..."}}
+  "next_steps": [
+    {"action": "pull the IdP-side sign-in records for the federated source", "target": "<entra-tenant>", "recommended_agent": "investigator", "rationale": "federated source resolves to Entra; m365-signin-investigation owns that pull"}
   ],
-  "downstream_dispatches": [
-    {"to_role": "platform-specialist", "skill": "m365-signin-investigation", "reason": "federated source resolves to Entra; need IdP-side pull"}
+  "working_artifacts": [
+    {"path": "ir/evidence/<finding>_timeline.md", "description": "Cross-source timeline", "kind": "evidence"}
   ],
-  "cross_source_timeline_path": "$ENGAGEMENT_DIR/ir/evidence/<finding>_timeline.md"
+  "extras": {
+    "platform": "aws",
+    "aws_account_id": "<12-digit>",
+    "principal_arn": "<arn>",
+    "disposition_recommendation": "confirmed|false_positive|downgraded|disputed",
+    "confidence_rationale": "<one-line>",
+    "mitre_techniques": ["T1078.004", "..."],
+    "time_window_utc": ["<iso>", "<iso>"],
+    "evidence_refs": [
+      {"artifact_id": "<id>", "kind": "ir_log", "produced_by": "Step 1"},
+      {"artifact_id": "<id>", "kind": "ir_log", "produced_by": "Step 2"},
+      {"artifact_id": "<id>", "kind": "ir_evidence", "produced_by": "Step 4"}
+    ],
+    "tenant_ref_proposals": [
+      {"register": "external_account_trusted", "entry": {"...": "..."}}
+    ],
+    "cross_source_timeline_path": "$ENGAGEMENT_DIR/ir/evidence/<finding>_timeline.md"
+  }
 }
 ```
 

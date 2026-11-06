@@ -30,7 +30,8 @@ def activity_runtime(tmp_path):
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Sink)
-    thread = Thread(target=server.serve_forever, daemon=True)
+    # The default 0.5s polling interval becomes an idle teardown wait per case.
+    thread = Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     workspace = tmp_path / "workspace"
     workspace.mkdir()

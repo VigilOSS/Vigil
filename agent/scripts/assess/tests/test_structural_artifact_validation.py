@@ -228,6 +228,46 @@ def test_build_publishes_every_invalid_artifact_degraded(index_project, monkeypa
         assert artifact["degradation_reason"] == "invalid_structural_artifact"
 
 
+def test_build_summary_states_the_degradation_it_published(index_project, monkeypatch, capsys) -> None:
+    """The summary an operator reads must not look like a fully successful build.
+
+    Publishing a per-file degraded fallback instead of refusing the whole
+    repository is the deliberate behaviour, and the build keeps exit status 0
+    because the artifacts ARE published and `code-index sync` must follow —
+    a nonzero exit already means nothing was published. That only holds while
+    the screen says what was lost: the counts live in the manifest, so the
+    summary states them and the per-file notice is marked a warning instead of
+    reading like the ordinary `code-index:` progress lines around it.
+    """
+    args, _repo, _client = index_project
+
+    def invalid_index(_path, _language, source, **_kwargs):
+        artifact = _artifact(source)
+        artifact["functions"][0]["qualified_name"] = " f "
+        return artifact
+
+    monkeypatch.setattr(code_index, "index_file", invalid_index)
+    code_index.run(args)
+
+    notice, summary = capsys.readouterr().err.split("=== Structural Index Summary ===", 1)
+    assert "WARNING" in notice, notice
+    assert "Degraded files: 2" in summary, summary
+    assert "Truncated artifacts: 0" in summary, summary
+    assert "WARNING" in summary, summary
+
+
+def test_a_build_that_degraded_nothing_says_so(index_project, capsys) -> None:
+    """The counts are unconditional, and the warning is not: a clean build
+    reports zero rather than leaving the operator to infer it from silence."""
+    args, _repo, _client = index_project
+    code_index.run(args)
+
+    _notice, summary = capsys.readouterr().err.split("=== Structural Index Summary ===", 1)
+    assert "Degraded files: 0" in summary, summary
+    assert "Truncated artifacts: 0" in summary, summary
+    assert "WARNING" not in summary, summary
+
+
 def test_sync_publishes_every_invalid_artifact_degraded(index_project, monkeypatch, capsys) -> None:
     args, _repo, client_type = index_project
     code_index.run(args)
@@ -584,3 +624,83 @@ def test_structural_indexer_inputs_declare_every_assess_module_their_libraries_i
                 candidate = f"{package}/{alias.name}.py"
                 imported.add(candidate if (assess_root / candidate).is_file() else f"{package}.py")
     assert imported <= set(STRUCTURAL_INDEXER_INPUTS)
+
+
+# --- A11 ask3: one round trip per bad file was three round trips for sixteen -
+
+
+def _bindable(paths: dict[str, str]) -> tuple[list[dict], dict[str, dict]]:
+    """Build matching source/backend inventories whose languages are `paths`."""
+    source = [
+        {"file_path": path, "source_sha256": f"{index:064d}"}
+        for index, path in enumerate(sorted(paths), start=1)
+    ]
+    backend = {
+        item["file_path"]: {
+            "id": index,
+            "repo_id": 7,
+            "file_hash": item["source_sha256"],
+            "language": paths[item["file_path"]],
+        }
+        for index, item in enumerate(source, start=1)
+    }
+    return source, backend
+
+
+def test_binding_reports_every_unbindable_path_not_just_the_first() -> None:
+    """`code-index build`/`sync` must name the whole repair set in one message.
+
+    Sixteen offenders meant sixteen runs, because the binder raised on the first
+    sorted path and the callers print one line and exit.
+    """
+    source, backend = _bindable(
+        {
+            "a.prisma": "prisma",
+            "b.graphql": "graphql",
+            "c.py": "python",
+            "d.tf": "terraform",
+        }
+    )
+
+    with pytest.raises(ValueError) as excinfo:
+        bind_structural_inputs(source, backend, repo_id=7)
+
+    message = str(excinfo.value)
+    for path in ("a.prisma", "b.graphql", "d.tf"):
+        assert path in message
+    assert "3" in message
+    # The one bindable file is not reported as a problem.
+    assert "c.py" not in message
+
+
+def test_a_single_unbindable_path_still_names_it_and_the_reason() -> None:
+    source, backend = _bindable({"a.prisma": "prisma", "c.py": "python"})
+
+    with pytest.raises(ValueError) as excinfo:
+        bind_structural_inputs(source, backend, repo_id=7)
+
+    message = str(excinfo.value)
+    assert "a.prisma" in message
+    assert "prisma" in message
+    assert "repo 7" in message
+
+
+def test_the_reported_path_list_is_capped_and_names_the_total() -> None:
+    paths = {f"file{index:03d}.prisma": "prisma" for index in range(40)}
+    source, backend = _bindable(paths)
+
+    with pytest.raises(ValueError) as excinfo:
+        bind_structural_inputs(source, backend, repo_id=7)
+
+    message = str(excinfo.value)
+    assert "40" in message
+    assert message.count("file") <= 40
+
+
+def test_a_fully_bindable_inventory_still_binds() -> None:
+    source, backend = _bindable({"a.py": "python", "b.ts": "typescript"})
+
+    bound = bind_structural_inputs(source, backend, repo_id=7)
+
+    assert sorted(bound) == ["a.py", "b.ts"]
+    assert bound["b.ts"]["language"] == "typescript"

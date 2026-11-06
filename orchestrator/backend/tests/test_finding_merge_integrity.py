@@ -849,3 +849,370 @@ def test_a_clean_merge_reports_no_warnings(client, isolate_settings):
 
     assert response.status_code == 200, response.text
     assert response.json()["warnings"] == []
+
+
+def _create_finding_fields(
+    client, slug: str, *, severity: str, summary: str, evidence_ref: str,
+    source_name: str, details: dict | None = None,
+) -> dict:
+    """A finding whose displaceable narrative fields are all distinguishable."""
+    response = client.post(
+        f"{ASSESSMENT_BASE}/findings",
+        json={
+            "slug": slug,
+            "title": f"Finding {slug}",
+            "severity": severity,
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "defect_family": "merge-integrity",
+            "auth_context": "anonymous",
+            "canonical_location": f"https://merge.example/{slug.lower()}",
+            "summary": summary,
+            "evidence_ref": evidence_ref,
+            "source_name": source_name,
+            "details": details if details is not None else {"evidence": "proof", "impact": "impact"},
+            "provenance": {"agent_name": "test-agent", "agent_id": "test-agent"},
+            "links": [],
+        },
+    )
+    assert response.status_code == 201, response.text
+    return response.json()["finding"]
+
+
+def test_a_merge_that_takes_the_source_pointer_names_what_it_displaced(
+    client, isolate_settings
+):
+    """The warnings named only values the merge LEFT on the source.
+
+    A merge whose source outranks the target REPLACES the target's evidence_ref,
+    summary and source_name — the canonical record's own evidence pointer — and
+    reported ``warnings: []``, so the displaced value was unrecoverable from the
+    response that destroyed it.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding_fields(
+        client, "CV-911", severity="medium",
+        summary="Target narrative the operator wrote.",
+        evidence_ref="evidence/target-transcript.json",
+        source_name="target-analyst",
+    )
+    _create_finding_fields(
+        client, "CV-912", severity="high",
+        summary="Source narrative from the duplicate.",
+        evidence_ref="evidence/source-transcript.json",
+        source_name="source-analyst",
+    )
+
+    response = _merge(client, "CV-912", "CV-911")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    target = body["target"]
+    assert target["evidence_ref"] == "evidence/source-transcript.json"
+    taken = {
+        field: [warning for warning in body["warnings"] if field in warning]
+        for field in ("evidence_ref", "summary", "source_name")
+    }
+    for field, warnings in taken.items():
+        assert len(warnings) == 1, (field, body["warnings"])
+    assert "evidence/target-transcript.json" in taken["evidence_ref"][0]
+    assert "evidence/source-transcript.json" in taken["evidence_ref"][0]
+    assert "Target narrative the operator wrote." in taken["summary"][0]
+    assert "target-analyst" in taken["source_name"][0]
+    assert "vigil assess finding update CV-911" in taken["evidence_ref"][0]
+
+
+def test_a_merge_that_fills_an_empty_target_pointer_warns_about_nothing(
+    client, isolate_settings
+):
+    """Filling a gap displaces nothing, so there is nothing to restore."""
+    _seed_engagement(client, isolate_settings)
+    _create_finding_fields(
+        client, "CV-913", severity="high",
+        summary="Target narrative.", evidence_ref="", source_name="target-analyst",
+    )
+    _create_finding_fields(
+        client, "CV-914", severity="low",
+        summary="Source narrative.",
+        evidence_ref="evidence/source-transcript.json",
+        source_name="source-analyst",
+    )
+
+    response = _merge(client, "CV-914", "CV-913")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["target"]["evidence_ref"] == "evidence/source-transcript.json"
+    assert [w for w in body["warnings"] if "evidence_ref" in w] == []
+
+
+def test_merging_a_variant_child_into_its_own_parent_consolidates_it(
+    client, isolate_settings
+):
+    """The canonical dedup move: the variant IS the parent, so fold it in.
+
+    The link-copy loop used to re-point the child's ``variant_of`` at the merge
+    target itself, which the self-link guard refused — rolling the whole merge
+    back over an edge the ``merged_from`` link already records.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-915")
+    _create_finding(client, "CV-916")
+    linked = client.post(
+        f"{ASSESSMENT_BASE}/findings/CV-916/links",
+        json={"link_kind": "variant_of", "target_kind": "finding", "target_ref": "CV-915"},
+    )
+    assert linked.status_code == 200, linked.text
+
+    response = _merge(client, "CV-916", "CV-915")
+
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["source"]["workflow_status"] == "merged"
+    assert body["link"]["link_kind"] == "merged_from"
+    parent = client.get(f"{ASSESSMENT_BASE}/findings/CV-915")
+    assert parent.status_code == 200, parent.text
+    outbound = parent.json()["links"]
+    assert [link for link in outbound if link["link_kind"] == "merged_from"]
+    # No self-edge survived the copy.
+    assert [
+        link for link in outbound
+        if link["target_kind"] == "finding" and link["target_ref"] == "CV-915"
+    ] == []
+
+
+def test_the_merge_copy_path_cannot_mint_a_self_referential_link(
+    client, isolate_settings
+):
+    """``create_finding_link``/``update_finding_link`` both refuse a self-link;
+    the merge copy reached the upsert directly and had no such guard."""
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-917")
+    _create_finding(client, "CV-918")
+    related = client.post(
+        f"{ASSESSMENT_BASE}/findings/CV-918/links",
+        json={"link_kind": "related", "target_kind": "finding", "target_ref": "CV-917"},
+    )
+    assert related.status_code == 200, related.text
+
+    response = _merge(client, "CV-918", "CV-917")
+
+    assert response.status_code == 200, response.text
+    survivor = client.get(f"{ASSESSMENT_BASE}/findings/CV-917").json()
+    assert [
+        link for link in survivor["links"]
+        if link["link_kind"] == "related" and link["target_ref"] == "CV-917"
+    ] == []
+
+
+def test_a_merge_that_inherits_a_proof_run_association_records_it(
+    client, isolate_settings
+):
+    """The survivor can then verify on a receipt from a run it never ran.
+
+    The single-use rule only catches a receipt that already backed a
+    verification of THIS finding, so an absorbed association is invisible unless
+    the merge says so.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-919")
+    _create_finding(client, "CV-920")
+    run = client.post(
+        f"{ASSESSMENT_BASE}/assessment-runs",
+        json={
+            "run_uuid": "merge-inherited-run",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "test-agent",
+        },
+    )
+    assert run.status_code == 201, run.text
+    linked = client.post(
+        f"{ASSESSMENT_BASE}/findings/CV-920/links",
+        json={
+            "link_kind": "proof_run", "target_kind": "assessment_run",
+            "target_id": run.json()["id"],
+        },
+    )
+    assert linked.status_code == 200, linked.text
+
+    response = _merge(client, "CV-920", "CV-919")
+
+    assert response.status_code == 200, response.text
+    inherited = [
+        warning for warning in response.json()["warnings"] if "proof_run" in warning
+    ]
+    assert len(inherited) == 1, response.json()["warnings"]
+    assert "CV-920" in inherited[0]
+    assert str(run.json()["id"]) in inherited[0]
+    run_detail = client.get(f"{ASSESSMENT_BASE}/assessment-runs/{run.json()['id']}")
+    assert run_detail.status_code == 200, run_detail.text
+    assert "CV-919" in run_detail.json()["associated_finding_slugs"]
+
+
+def test_an_association_the_target_already_held_is_not_reported_as_inherited(
+    client, isolate_settings
+):
+    """Both duplicates cited the same run, so nothing moved onto the survivor."""
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-921")
+    _create_finding(client, "CV-922")
+    run = client.post(
+        f"{ASSESSMENT_BASE}/assessment-runs",
+        json={
+            "run_uuid": "merge-shared-run",
+            "run_kind": "shared",
+            "producer_dispatch_agent_id": "test-agent",
+        },
+    )
+    assert run.status_code == 201, run.text
+    for slug in ("CV-921", "CV-922"):
+        linked = client.post(
+            f"{ASSESSMENT_BASE}/findings/{slug}/links",
+            json={
+                "link_kind": "proof_run", "target_kind": "assessment_run",
+                "target_id": run.json()["id"],
+            },
+        )
+        assert linked.status_code == 200, linked.text
+
+    response = _merge(client, "CV-922", "CV-921")
+
+    assert response.status_code == 200, response.text
+    assert [w for w in response.json()["warnings"] if "proof_run" in w] == []
+
+
+_OPERATOR_AUTHORITY_KEYS = ("operator_authority", "superseded_operator_authority")
+
+
+def _stamp_provenance(slug: str, key: str, stamp: object) -> None:
+    """Put one service-stamped record on a stored finding.
+
+    Written straight to the row because none of these keys is authorable through
+    any route — which is the point of the keys, and the reason a merge test has
+    to seed them rather than record them.
+    """
+    with db_module.get_connection() as connection:
+        stored = json.loads(
+            connection.execute(
+                "SELECT provenance_json FROM assessment_findings WHERE slug = ?",
+                (slug,),
+            ).fetchone()[0]
+        )
+        stored[key] = stamp
+        connection.execute(
+            "UPDATE assessment_findings SET provenance_json = ? WHERE slug = ?",
+            (json.dumps(stored), slug),
+        )
+
+
+@pytest.mark.parametrize("key", _OPERATOR_AUTHORITY_KEYS)
+def test_a_merge_does_not_carry_the_source_operator_authority_record(
+    client, isolate_settings, key: str
+):
+    """The waiver was recorded against the SOURCE's verdict, so it cannot travel.
+
+    The live stamp is the authority behind a verdict the target never reached;
+    the superseded record is the history of a waiver the target was never
+    granted. Either one riding through the merge tells a later reader that this
+    finding's verdict rested on out-of-snapshot evidence nobody cited for it.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-923")
+    _create_finding(client, "CV-924")
+    _stamp_provenance(
+        "CV-924",
+        key,
+        {
+            "kind": "out_of_snapshot",
+            "intel_id": 7,
+            "intel_type": "note",
+            "at": "2026-01-01T00:00:00Z",
+            "reason": "The duplicate's own out-of-snapshot evidence.",
+        },
+    )
+
+    response = _merge(client, "CV-924", "CV-923")
+
+    assert response.status_code == 200, response.text
+    assert key not in response.json()["target"]["provenance"]
+
+
+@pytest.mark.parametrize("key", _OPERATOR_AUTHORITY_KEYS)
+def test_a_merge_keeps_the_targets_own_operator_authority_record(
+    client, isolate_settings, key: str
+):
+    """Dropping the source's record must not take the target's with it.
+
+    The target is the canonical record and the survivor's verdict is its own, so
+    the authority behind that verdict has to outlive the consolidation.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-925")
+    _create_finding(client, "CV-926")
+    target_stamp = {
+        "kind": "out_of_snapshot",
+        "intel_id": 11,
+        "intel_type": "note",
+        "at": "2026-02-02T00:00:00Z",
+        "reason": "The survivor's own out-of-snapshot evidence.",
+    }
+    _stamp_provenance("CV-925", key, target_stamp)
+    _stamp_provenance(
+        "CV-926",
+        key,
+        {
+            "kind": "out_of_snapshot",
+            "intel_id": 7,
+            "intel_type": "note",
+            "at": "2026-01-01T00:00:00Z",
+            "reason": "The duplicate's own out-of-snapshot evidence.",
+        },
+    )
+
+    response = _merge(client, "CV-926", "CV-925")
+
+    assert response.status_code == 200, response.text
+    assert response.json()["target"]["provenance"][key] == target_stamp
+
+
+def test_a_merge_does_not_carry_the_source_as_authored_location(
+    client, isolate_settings
+):
+    """The as-authored location belongs to the finding whose author wrote it.
+
+    ``original_canonical_location`` is stamped when a normalisation or an audited
+    relocation moves a finding, and it is the record of what that finding's author
+    actually wrote. Carried onto the survivor it reads as the location THIS
+    finding was filed at — a fabricated as-authored location, in the one field
+    kept so the audit trail is not rewritten.
+    """
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-927")
+    _create_finding(client, "CV-928")
+    _stamp_provenance(
+        "CV-928", "original_canonical_location", "file:src/elsewhere.c:1"
+    )
+
+    response = _merge(client, "CV-928", "CV-927")
+
+    assert response.status_code == 200, response.text
+    assert "original_canonical_location" not in response.json()["target"]["provenance"]
+
+
+def test_a_merge_keeps_the_targets_own_as_authored_location(
+    client, isolate_settings
+):
+    """Dropping the source's record must not take the survivor's with it."""
+    _seed_engagement(client, isolate_settings)
+    _create_finding(client, "CV-929")
+    _create_finding(client, "CV-930")
+    _stamp_provenance("CV-929", "original_canonical_location", "file:src/survivor.c:9")
+    _stamp_provenance("CV-930", "original_canonical_location", "file:src/dupe.c:3")
+
+    response = _merge(client, "CV-930", "CV-929")
+
+    assert response.status_code == 200, response.text
+    assert (
+        response.json()["target"]["provenance"]["original_canonical_location"]
+        == "file:src/survivor.c:9"
+    )

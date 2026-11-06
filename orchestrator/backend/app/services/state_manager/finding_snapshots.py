@@ -240,6 +240,20 @@ def _code_snapshot_binding(
     }
 
 
+def code_snapshot_binding(
+    finding: dict[str, Any] | sqlite3.Row,
+) -> dict[str, Any] | None:
+    """The sealed generation a finding's stored provenance binds, or ``None``.
+
+    The read-path counterpart to :func:`_require_current_code_snapshot`: a
+    malformed or absent binding yields ``None`` instead of refusing, so a
+    projection can ask which generation a finding's citations belong to without
+    deciding whether the finding is writable.
+    """
+
+    return _code_snapshot_binding(_finding_provenance(dict(finding)), strict=False)
+
+
 def _resolve_dispatch_id(
     connection: sqlite3.Connection,
     engagement_id: int,

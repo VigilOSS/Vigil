@@ -67,11 +67,16 @@ Loop `openssl s_client` across the in-scope host list, extract each cert's SAN s
 count how many hosts share each SAN entry:
 
 ```bash
-for h in $HOSTS; do
-  echo | timeout 10 openssl s_client -connect "$h:443" -servername "$h" 2>/dev/null \
-    | openssl x509 -noout -ext subjectAltName \
-    | grep -oE 'DNS:[^,]+' | sort -u
-done | sort | uniq -c | sort -rn
+vigil assess kali exec --technique RECON \
+  --intent "cross-host SAN collision detection — flags shared multi-tenant certs" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
+  HOSTS_FILE="/engagements/$ENGAGEMENT_KEY/scans/in_scope_hosts.txt"
+  for h in $(cat "$HOSTS_FILE"); do
+    echo | timeout 10 openssl s_client -connect "$h:443" -servername "$h" 2>/dev/null \
+      | openssl x509 -noout -ext subjectAltName \
+      | grep -oE "DNS:[^,]+" | sort -u
+  done | sort | uniq -c | sort -rn
+'
 ```
 
 A SAN that appears in two or more hosts' certs indicates a shared multi-tenant cert (one

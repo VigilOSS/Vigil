@@ -1238,22 +1238,61 @@ def engagement_mode_state(install_root: Path, engagement_dir: Path, *, client: s
     }
 
 
+def _sealed_snapshot_identity(snapshot_root: Path) -> dict[str, Any]:
+    """Report one retained snapshot from its own manifest, without reading its bytes.
+
+    This is a display projection, so it reads the manifest's self-checks and not the
+    per-file walk: ``validate_snapshot(..., deep=False)`` performs the seal, schema,
+    path-binding and content-address checks and stops before opening any sealed file.
+    Those are O(manifest); the walk is O(sealed bytes). Keeping the self-checks here
+    matters because a manifest whose own content address does not match must never be
+    reported as ``sealed`` -- that is the one wrong answer this projection could give.
+
+    The byte attestation belongs to the commands that read those bytes: ``code-index``,
+    ``code-index sync``, ``code-history`` and ``code-dependencies`` each call
+    ``validate_snapshot`` at the moment of use, so sealed-byte drift is still refused by
+    the step that would otherwise act on it.
+    """
+
+    from assess.lib.code_snapshot import (  # type: ignore[import-not-found]
+        validate_snapshot,
+    )
+
+    manifest = validate_snapshot(snapshot_root, deep=False)
+    files = manifest.get("files")
+    return {
+        "path": str(snapshot_root / "source"),
+        "repo_key": str(manifest.get("repo_key") or ""),
+        "snapshot_digest": str(manifest.get("snapshot_digest") or snapshot_root.name),
+        "file_count": len(files) if isinstance(files, list) else 0,
+    }
+
 def engagement_source_state(engagement_dir: Path) -> dict[str, Any]:
-    """Separate original-source availability from validated retained audit copies."""
+    """Separate original-source availability from retained audit copies.
+
+    This is a projection, not an attestation. It runs on ``vigil engagement
+    start``, on every ``vigil engagement mode`` — which the code operator core
+    runs at session start, on resume, and after every compaction — and on the
+    creation footer, to render a source path, a one-word state and a retained
+    inventory. Re-reading every sealed byte of every retained generation there
+    costs one full pass over the audit copies (roughly a fifth of a millisecond
+    per sealed file, multiplied by every generation the engagement kept) on the
+    critical path between the operator and the client exec, and reports nothing
+    the commands that read those bytes do not establish for themselves. So each
+    retained snapshot is reported from its own content-addressed manifest; see
+    ``_sealed_snapshot_identity`` for the exact boundary.
+    """
     state = _original_source_state(engagement_dir)
     snapshots = engagement_dir / "tools" / "analysis-state" / "code-snapshots"
     if not snapshots.exists():
         return state
     from .paths import add_assess_import_path
     add_assess_import_path(engagement_dir)
-    from assess.lib.code_snapshot import validate_snapshot  # type: ignore[import-not-found]
     valid = []
     errors = []
     for manifest in sorted(snapshots.glob("*/*/manifest.json")):
         try:
-            snapshot = validate_snapshot(manifest.parent)
-            valid.append({"path": str(manifest.parent / "source"), "repo_key": snapshot["repo_key"],
-                          "snapshot_digest": snapshot["snapshot_digest"], "file_count": len(snapshot["files"])})
+            valid.append(_sealed_snapshot_identity(manifest.parent))
         except (OSError, ValueError) as exc:
             errors.append(str(exc))
     if errors:
@@ -1263,7 +1302,7 @@ def engagement_source_state(engagement_dir: Path) -> dict[str, Any]:
         state["sealed_sources"] = valid
         if not state["original_source_available"]:
             state["state"] = "sealed"
-            state["detail"] = "Validated sealed source is available for resume; refresh requires the original source and trust confirmation."
+            state["detail"] = "Retained sealed source is available for resume; refresh requires the original source and trust confirmation."
     return state
 
 
@@ -2285,7 +2324,7 @@ def _render_finding_report(record: dict, *, group: dict | None = None) -> str:
         sibling_count = group.get("sibling_count", len(group.get("siblings", [])))
         lines.append(f"Root of a root-cause group with {sibling_count} sibling finding(s):")
         for sibling in group.get("siblings", []):
-            effect = sibling.get("root_cause_effect", "eliminates_finding")
+            effect = sibling.get("root_cause_effect", "eliminates_attack_path")
             marker = "residual attack path" if effect == "eliminates_attack_path" else "resolved by fixing this root"
             lines.append(
                 f"- `{sibling.get('slug', '')}` [{str(sibling.get('severity', 'info')).upper()}] "

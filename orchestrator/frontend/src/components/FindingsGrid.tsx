@@ -23,6 +23,7 @@ import { compareSeverity, type Derived, type TableColumnSort } from "./FindingsT
 import { TimeStamp } from "./formatting";
 import { SeverityTag, StatusPill, compareStatus, type SortKind, type StatusDomain } from "./ui";
 import { gridTimeComparator } from "../lib/serverTime";
+import { operatorAuthorityLabel, operatorAuthoritySentence } from "../lib/findingWorkflow";
 import type { FindingsSort } from "../lib/findingRecency";
 
 registerAgGrid();
@@ -114,7 +115,25 @@ function SubmissionCell({ data }: ICellRendererParams<Derived>) {
 
 function VerificationCell({ data }: ICellRendererParams<Derived>) {
   if (!data) return null;
-  return <StatusPill domain="finding-verification" value={data.verificationKey} size="sm" />;
+  return (
+    <>
+      <StatusPill domain="finding-verification" value={data.verificationKey} size="sm" />
+      {/* A verdict the operator took on their own out-of-snapshot evidence,
+          with no decision receipt behind it. The ledger is where a reviewer
+          decides which findings to open, so it cannot be the one view that
+          shows such a verdict as an ordinary verified one (ADR 0019 permits
+          the waiver; it does not permit hiding it). */}
+      {data.operatorAuthority && (
+        <StatusPill
+          value="operator-authority"
+          tone="warning"
+          size="sm"
+          label={operatorAuthorityLabel(data.operatorAuthority, data.verificationKey)}
+          title={operatorAuthoritySentence(data.operatorAuthority, data.verificationKey)}
+        />
+      )}
+    </>
+  );
 }
 
 // Titles wrap to at most two lines so one long title cannot make a row tower

@@ -111,7 +111,11 @@ target at the alleged time?
 
 **Process:**
 
-1. Read the finding's `details.actor` and `time_window_utc`.
+1. Get the actor and the UTC window from the L1 triage handoff
+   (`vigil assess agent render-handoff <l1-agent-id>`); the activity window is
+   also on `vigil assess log --metadata-inline`. On the finding itself the
+   observed principal lives in `details.iocs`, an identity row goes through
+   `vigil assess intel record`, and the window is `details.network_window_utc`.
 2. From the investigator's registered artifacts, locate the sign-in
    evidence for that actor during that window. Standard sources:
    - GWS Admin Reports `login` feed
@@ -486,16 +490,16 @@ vigil assess finding verify <slug> \
   --proof-receipt-id <proof-receipt-id-2> \
   --confirm-check-file confirm-check.json \
   --details-inline '{
-    "five_check": {
-      "check_1": "PASS",
-      "check_2": "PASS",
-      "check_3": "PASS",
-      "check_4": "PASS",
-      "check_5": "PASS"
-    },
+    "checks": [
+      {"check": 1, "result": "PASS", "evidence_ref": <id-1>},
+      {"check": 2, "result": "PASS", "evidence_ref": <id-2>},
+      {"check": 3, "result": "PASS", "evidence_ref": <id-2>},
+      {"check": 4, "result": "PASS", "evidence_ref": <id-3>},
+      {"check": 5, "result": "PASS", "evidence_ref": <id-3>}
+    ],
     "evidence_refs": [<id-1>, <id-2>, <id-3>],
     "confidence": "high",
-    "confidence_rationale": "Three independent telemetry streams corroborate; legitimate-actor hypotheses ruled out per artifact <id-3>"
+    "severity_rationale": "Three independent telemetry streams corroborate; legitimate-actor hypotheses ruled out per artifact <id-3>"
   }'
 ```
 
@@ -506,10 +510,21 @@ vigil assess finding verify <slug> --status false_positive \
   --reason "DA hypothesis confirmed: delegated mailbox owner" \
   --counter-check-file counter-check.json \
   --details-inline '{
+    "kill_reason": "Check 2 KILL: the actor is the mailbox delegate per the delegate list in artifact <id-delegate-list>, so the access is authorized",
+    "kill_check": 2,
     "evidence_refs": [<id-delegate-list>, <id-tenant-ref>],
-    "da_hypothesis_confirmed": "delegated_mailbox_owner"
+    "devils_advocate": [
+      {"hypothesis": "delegated_mailbox_owner", "counter_evidence_ref": <id-delegate-list>, "discharged": false}
+    ]
   }'
 ```
+
+`kill_reason` and `kill_check` (the numbered check that falsified the claim, 1-5) are both
+required: the write is refused without them, which leaves the finding `unreviewed` and still a
+report candidate. `discharged: false` on the devil's-advocate entry is what records that the
+benign hypothesis held. When the structured counter-check cannot be completed at all, `disputed`
+is the cheap withdrawal — only `--reason` is required, and it survives a later sweep the same way
+`false_positive` does.
 
 `counter-check.json` contains `method`, `expected_result`, `observed_result`,
 `falsified_claim`, `completed: true`, and `proof_receipt_ids`. If the check is
@@ -528,12 +543,16 @@ vigil assess finding verify <slug> \
   --proof-receipt-id <proof-receipt-id-1> \
   --confirm-check-file confirm-check.json \
   --details-inline '{
-    "original_severity": "high",
-    "new_severity": "medium",
     "severity_rationale": "Sign-in from unfamiliar IP confirmed (Check 1 PASS) but no subsequent OAuth grant or mailbox-rule activity in session (Check 4 DOWNGRADE)",
-    "five_check": { ... }
+    "checks": [
+      {"check": 1, "result": "PASS", "evidence_ref": <id-1>},
+      {"check": 4, "result": "DOWNGRADE", "evidence_ref": <id-2>, "rationale": "no OAuth grant or mailbox rule in the session window"}
+    ]
   }'
 ```
+
+`--new-severity medium` is what records the new band, and the transition record keeps the band it
+came from, so neither belongs in `details`.
 
 `disputed`:
 
@@ -542,12 +561,12 @@ vigil assess finding verify <slug> \
   --status disputed \
   --reason "Check 5 ESCALATE: travel-approval ticket exists but covers different window" \
   --details-inline '{
-    "voting_summary": {
+    "respond_review": {
       "FOR": "Sign-in IP outside ASN baseline; post-signin mailbox-rule unexplained",
       "AGAINST": "Travel-approval ticket #4521 covers 2026-05-15 to 2026-05-22; sign-in IP geo-resolves to listed destination city",
-      "BLOCKER": "Travel-approval window ends 2026-05-22T17:00Z; alert sign-in at 2026-05-22T22:14Z — 5h after ticket end. Need user confirmation of late return."
-    },
-    "next_action": "Out-of-band user confirmation of travel return time"
+      "BLOCKER": "Travel-approval window ends 2026-05-22T17:00Z; alert sign-in at 2026-05-22T22:14Z — 5h after ticket end. Need user confirmation of late return.",
+      "next_action": "Out-of-band user confirmation of travel return time"
+    }
   }'
 ```
 

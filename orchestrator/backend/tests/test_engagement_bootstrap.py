@@ -125,7 +125,9 @@ def _stub_backend_on_localhost(install_root_value: str):
     handler.install_root_value = install_root_value
     handler.sync_calls = []
     server = HTTPServer(("127.0.0.1", 0), handler)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
     thread.start()
     try:
         host, port = server.server_address[0], server.server_address[1]

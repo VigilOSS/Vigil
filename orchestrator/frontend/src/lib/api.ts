@@ -95,6 +95,28 @@ export type FindingPocResponse = {
 
 export type FindingReference = string | { url?: string; title?: string; id?: string };
 
+/**
+ * The operator's own authority behind a terminal verdict, in place of a proof
+ * receipt.
+ *
+ * `finding verify --operator-authority --intel-id <id>` stamps it. ADR 0019
+ * lets the operator weaken a gate over their own engagement, but the verdict
+ * it produced rests on evidence that is NOT in the engagement snapshot and has
+ * no decision receipt behind it — so every view that renders a verdict has to
+ * say so. `reason` is operator-authored free text, and `intel_id` with
+ * `intel_type` together name the intel row the waiver cited: `intel get` takes
+ * the type as a required positional over ten entity types whose ids are
+ * allocated independently, so the id alone resolves to a different row in each
+ * of them.
+ */
+export type FindingOperatorAuthority = {
+  kind?: string;
+  intel_id?: number;
+  intel_type?: string;
+  at?: string;
+  reason?: string;
+};
+
 export type FindingProvenance = {
   agent_name?: string;
   artifact_ref?: string;
@@ -105,6 +127,16 @@ export type FindingProvenance = {
     repo_generation: number;
     source_manifest_digest: string;
   };
+  // The authority behind the CURRENT verdict. Present on list rows as well as
+  // point reads, which is why it — not `verification_audit` — is what the grid
+  // and the clipboard can read.
+  operator_authority?: FindingOperatorAuthority | null;
+  // Where the stamp MOVES when a later dispatch-verified verdict replaces it
+  // (the superseded-code-snapshot precedent). Declared so a reader cannot
+  // mistake it for the live key: a superseded waiver is history, and showing it
+  // as the current verdict's authority would be the inverse of the laundering
+  // this stamp exists to prevent.
+  superseded_operator_authority?: FindingOperatorAuthority | null;
   [key: string]: unknown;
 };
 
@@ -357,6 +389,11 @@ export type AssessmentVerificationAudit = {
   claim_digest_version?: number;
   record_limit: number;
   truncated: boolean;
+  // Stamped beside the receipts by the point read, because an operator-authority
+  // verdict has NO receipts at all — and an empty receipt list must not read as
+  // "nobody recorded the evidence". Absent on the per-transition projection,
+  // whose authority travels in `metadata_json.operator_authority` instead.
+  operator_authority?: FindingOperatorAuthority | null;
 };
 
 /** What a finding write did to its verdict; the backend change policy owns it. */
@@ -435,6 +472,7 @@ export type AssessmentFindingTransitionSummary = Pick<
   reason_word_count: number;
   reason_truncated: boolean;
   has_snapshot: boolean;
+  operator_authority?: FindingOperatorAuthority | null;
 };
 
 export type AssessmentFindingLink = {
@@ -465,12 +503,26 @@ export type AssessmentFindingGroup = {
   highest_severity: string;
 };
 
-export type ReportReadinessBlocker = {
+/**
+ * One report-readiness item.
+ *
+ * `severity` is the gating class the backend stamps on every item as it leaves
+ * `report_readiness` — `block` refuses a final export, `advisory` never does.
+ * The payload also separates `blockers` from `advisories`, but the ITEM is what
+ * gets copied into a handoff or grepped out of a log, and it arrives at its
+ * reader with the split long gone: `missing_cited_markdown_artifact` never
+ * gates while `finding_evidence_missing_artifact` always does, and both
+ * describe a cited artifact that is absent.
+ */
+export type ReportReadinessItem = {
   kind: string;
   slug?: string;
   slugs?: string[];
   detail?: string;
+  severity?: "block" | "advisory";
 };
+
+export type ReportReadinessBlocker = ReportReadinessItem;
 
 export type PerHostOutcome = {
   met: boolean;
@@ -516,6 +568,12 @@ export type ReportReadiness = {
   ready: boolean;
   blocker_count: number;
   blockers: ReportReadinessBlocker[];
+  // Never gating, and never empty just because the gate passes: an advisory
+  // quotes QA doubt about the engagement's own evidence. Declared so the
+  // Overview panel can say how many stand rather than leaving the operator to
+  // find them in the CLI.
+  advisory_count?: number;
+  advisories?: ReportReadinessItem[];
   coverage?: ReportReadinessCoverage;
   // C58 — backend embeds the C40 per-host coverage projection here so the
   // Readiness panel renders both Definition-of-Done gates and per-host
@@ -1200,7 +1258,10 @@ export type SurfaceRequestVariantLink = {
 };
 
 export function listSurfaceRequestVariantLinks(engagementKey: string, surfaceId: number) {
-  return request<SurfaceRequestVariantLink[]>(
+  // Bounded bare list (default 1000). The Surfaces record renders the returned
+  // array's own length as the surface's durable-variant count, so a capped
+  // response would not merely hide rows — it would state a wrong total.
+  return listAllPages<SurfaceRequestVariantLink>(
     `/engagements/${engagementKey}/assessment/surface-request-variant-links/by-surface/${surfaceId}`,
   );
 }
@@ -1306,7 +1367,14 @@ export function getAssessmentFindingTransition(
 }
 
 export function listAssessmentFindingLinks(engagementKey: string) {
-  return request<AssessmentFindingLink[]>(`/engagements/${engagementKey}/assessment/finding-links`);
+  // Bounded bare list. Its default page is the route ceiling precisely because
+  // the findings view reads it whole — but a ceiling is still a cap, and this
+  // response carries no total, so an engagement past it would quietly lose
+  // relationships from every finding record and under-report the per-surface
+  // finding counts in Surfaces. Walk it instead of trusting one page.
+  return listAllPages<AssessmentFindingLink>(
+    `/engagements/${engagementKey}/assessment/finding-links`,
+  );
 }
 
 export function listAssessmentFindingGroups(engagementKey: string) {
@@ -2224,25 +2292,39 @@ export function getIntelReadiness(engagementKey: string) {
   return request<IntelReadiness>(`/engagements/${engagementKey}/intel/readiness`);
 }
 
-const INTEL_LIST_PAGE_SIZE = 500;
+const LIST_PAGE_SIZE = 500;
 
-async function listAllIntelPages<T>(
+/**
+ * Walk every page of a bounded BARE-LIST route and return the whole list.
+ *
+ * These routes answer with a JSON array and no envelope, so a capped response
+ * is indistinguishable from a complete one: there is no `total` and no
+ * `has_more` for a caller to check. A view that renders such a response
+ * directly shows a silently short list — and, where it renders `.length`, a
+ * confidently wrong count. Traversing to a short page is the only way to tell,
+ * which is why every reader of one goes through here.
+ *
+ * Pages are taken over the service's own stable ordering, so a row cannot be
+ * skipped between requests the way an unordered window would allow.
+ */
+async function listAllPages<T>(
   path: string,
   baseQuery: URLSearchParams = new URLSearchParams(),
+  pageSize: number = LIST_PAGE_SIZE,
 ): Promise<T[]> {
   const items: T[] = [];
   let offset = 0;
 
   while (true) {
     const query = new URLSearchParams(baseQuery);
-    query.set("limit", String(INTEL_LIST_PAGE_SIZE));
+    query.set("limit", String(pageSize));
     query.set("offset", String(offset));
     const page = await request<unknown>(`${path}?${query.toString()}`);
     if (!Array.isArray(page)) {
       throw new Error(`Expected ${path} to return a JSON array`);
     }
     items.push(...(page as T[]));
-    if (page.length < INTEL_LIST_PAGE_SIZE) return items;
+    if (page.length < pageSize) return items;
     offset += page.length;
   }
 }
@@ -2254,7 +2336,7 @@ export async function listIntel(
   const path = intelEntityPath(entityType);
   // Reader endpoints return bounded bare lists (see api/intel.py). Traverse
   // every page before publishing an exact total to the Intel cache.
-  const items = await listAllIntelPages<IntelRecord>(
+  const items = await listAllPages<IntelRecord>(
     `/engagements/${engagementKey}/intel/${path}`,
   );
   return { entity_type: entityType, total: items.length, items };
@@ -2263,7 +2345,7 @@ export async function listIntel(
 export function listIntelCredentials(engagementKey: string) {
   // Credentials are a thin alias over assessment_credentials; shape is
   // "list of dict" at the contract layer — keep it loose.
-  return listAllIntelPages<Record<string, unknown>>(
+  return listAllPages<Record<string, unknown>>(
     `/engagements/${engagementKey}/intel/credentials`,
   );
 }
@@ -2280,7 +2362,7 @@ export function searchIntel(
   const qs = query.toString();
   const path = `/engagements/${engagementKey}/intel/search`;
   if (params.limit == null && params.offset == null) {
-    return listAllIntelPages<IntelSearchHit>(path, query);
+    return listAllPages<IntelSearchHit>(path, query);
   }
   return request<IntelSearchHit[]>(
     `${path}${qs ? `?${qs}` : ""}`,

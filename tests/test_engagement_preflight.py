@@ -569,3 +569,101 @@ def test_the_assess_passthrough_does_not_warn_about_a_stale_install(
     assert execed["path"] == str(assess), "the passthrough must still exec"
     assert captured.err == ""
     assert captured.out == ""
+
+
+# ── the ctags cross-reference index has a `vigil doctor` row ─────────────────
+#
+# `agent/shared-constraints-code.md` ranks the generation-bound ctags symbol
+# index FIRST in the cross-reference priority order — ahead of ripgrep — and
+# `code-ingest` builds it only from Universal Ctags, probed as
+# `ctags --options=NONE`. But ctags is in no dependency manifest and no runtime
+# image, and unlike ripgrep it had no doctor row at all: the only signal an
+# operator got was one `ctags: unavailable` stderr line during ingest, after
+# which every cross-reference in the whole engagement was silently a grep.
+
+
+def _doctor_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **tools: object):
+    """`collect_doctor_checks` with the host binary probe under test control."""
+    import subprocess
+
+    from vigil_cli import status as status_module
+    from vigil_cli.docker import DockerResult
+
+    present: dict[str, bool] = {name: bool(value) for name, value in tools.items()}
+
+    monkeypatch.setattr(
+        status_module.shutil,
+        "which",
+        lambda command: None if present.get(command) is False else f"/usr/bin/{command}",
+    )
+
+    def fake_run(argv, **_kwargs):
+        command = str(argv[0]).rsplit("/", 1)[-1]
+        behaviour = tools.get(command)
+        if behaviour is False:
+            raise FileNotFoundError(2, "No such file or directory", command)
+        if behaviour == "bsd":
+            # BSD ctags rejects every long option, including `--version`.
+            return subprocess.CompletedProcess(argv, 1, "", "ctags: illegal option -- -")
+        if command == "ctags":
+            return subprocess.CompletedProcess(
+                argv, 0, "Universal Ctags 6.1.0, Copyright (C) 2015-2024\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "ok", "")
+
+    monkeypatch.setattr(status_module.subprocess, "run", fake_run)
+
+    checks = status_module.collect_doctor_checks(
+        tmp_path, runner=lambda argv, **_: DockerResult(0, "ok", "")
+    )
+    return {check.name: check for check in checks}
+
+
+def _doctor_would_exit_non_zero(check) -> bool:
+    """The exact predicate `vigil doctor` exits non-zero on (main.py)."""
+    return check.status == "FAIL" or (check.required and check.status != "OK")
+
+
+def test_doctor_reports_a_missing_ctags_as_a_named_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checks = _doctor_checks(tmp_path, monkeypatch, ctags=False)
+
+    ctags = checks["ctags"]
+    assert ctags.status != "OK"
+    detail = ctags.detail.lower()
+    assert "universal" in detail
+    assert "universal-ctags" in detail, "the row must name the install route"
+    assert "cross-reference" in detail
+
+
+def test_doctor_reports_bsd_ctags_as_warn_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """macOS ships BSD ctags: present on PATH, and not the tool ingest trusts."""
+    checks = _doctor_checks(tmp_path, monkeypatch, ctags="bsd")
+
+    ctags = checks["ctags"]
+    assert ctags.status == "WARN"
+    assert "universal" in ctags.detail.lower()
+
+
+def test_doctor_accepts_universal_ctags(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    checks = _doctor_checks(tmp_path, monkeypatch, ctags=True)
+
+    assert checks["ctags"].status == "OK"
+
+
+@pytest.mark.parametrize("behaviour", [False, "bsd"])
+def test_the_ctags_row_never_fails_the_doctor(
+    behaviour: object, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Advisory, exactly like `rg`: the index is a quality signal, not a
+    prerequisite, and a web engagement never reaches a cross-reference."""
+    checks = _doctor_checks(tmp_path, monkeypatch, ctags=behaviour)
+
+    ctags = checks["ctags"]
+    assert ctags.required is False
+    assert _doctor_would_exit_non_zero(ctags) is False

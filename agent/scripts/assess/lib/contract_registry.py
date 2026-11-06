@@ -80,6 +80,58 @@ MAX_VARIANT_RECEIPT_PAGE = 500
 # test_code_lead_binding_page_cap_mirrors_backend.
 MAX_LEAD_BINDING_PAGE = 500
 
+# How the RAW route — `PATCH /dispatches/{agent_id}` — lands a supplied
+# `finding_slugs` list, as state_manager.dispatches.update_dispatch actually does
+# it: "replace" overwrites the stored list, "union" merges into it. This is the
+# BACKEND fact, not the verb's behaviour: `agent done` and `agent close` read the
+# row and PATCH the stable union themselves, so the merge is client-side and a
+# caller who bypasses the verbs inherits the raw semantics. The --finding-slugs
+# helper-default line is rendered from this value rather than asserting one,
+# because the line shipped claiming a merge nothing performed — an operator
+# following it to ADD one slug deleted every other slug the dispatch produced.
+# Pinned against the live backend by test_dispatch_finding_slugs_write_semantics.
+DISPATCH_FINDING_SLUGS_WRITE: str = "replace"
+
+_DISPATCH_FINDING_SLUGS_HELP: dict[str, str] = {
+    "replace": (
+        "unioned into the row's existing slug list BY THE CLI: the verb reads the "
+        "dispatch row, merges your slugs in after the stored ones (stable, "
+        "de-duplicated) and PATCHes the whole set, so passing one slug adds it and "
+        "keeps the others. `agent close` merges the handoff's own slug list the "
+        "same way. The RAW route does not merge — `PATCH /dispatches/{agent_id}` "
+        "overwrites `finding_slugs` wholesale — so a caller bypassing these verbs "
+        "must send the complete set itself. ONE EXCEPTION: a code-variant-hunter "
+        "dispatch's slug list is its immutable parent-finding scope, and the route "
+        "409s ANY `finding_slugs` on that role — even the identical set — so omit "
+        "the flag there and record produced findings on the handoff"
+    ),
+    "union": (
+        "unioned into the row's existing slug list, by the CLI and by "
+        "`PATCH /dispatches/{agent_id}` alike, so passing one slug adds it and "
+        "keeps the others"
+    ),
+}
+
+
+def dispatch_finding_slugs_help() -> str:
+    """The `agent done --finding-slugs` helper-default line, from the live semantics."""
+    return _DISPATCH_FINDING_SLUGS_HELP[DISPATCH_FINDING_SLUGS_WRITE]
+
+
+# MIRRORS app.services.code_analysis.SKIP_REASONS, the one standard vocabulary a
+# skip is accounted under. Two doors now write it — `code-dispatch done
+# --skip-reason` at closeout and `code-record classify` at classification time —
+# so the set is named once here instead of spelled out per contract. Agent code
+# cannot import the backend; pinned in sync by
+# test_the_cli_and_api_agree_on_one_closeout_vocabulary.
+CODE_SKIP_REASONS: tuple[str, ...] = (
+    "test-fixture",
+    "generated-code",
+    "minified",
+    "out-of-scope-language",
+    "vendored-dependency",
+)
+
 
 SPECIALIST_DISPATCH_MODES: tuple[str, ...] = (
     "hypothesis-driven",
@@ -259,12 +311,10 @@ FINDING_CHANGE_EFFECTS: tuple[tuple[str, str], ...] = (
     ("details.asan_report.removed", "invalidate"),
     ("details.crash_input.removed", "invalidate"),
     ("details.evidence.removed", "invalidate"),
-    ("details.exploitability.removed", "invalidate"),
     ("details.impact.removed", "invalidate"),
     ("details.poc_code.removed", "invalidate"),
     ("details.poc_request.removed", "invalidate"),
     ("details.poc_response.removed", "invalidate"),
-    ("details.proof.removed", "invalidate"),
     ("details.repro_runs.removed", "invalidate"),
     ("details.steps_to_reproduce.removed", "invalidate"),
     ("cvss.impact", "claim_review"),
@@ -442,6 +492,7 @@ _DISPATCH_MODE_BY_ROLE: dict[str, str] = {
     "code-variant-hunter": "hypothesis-driven",
     "code-vuln-verifier": "deep-manual",
     "code-fuzz-engineer": "deep-manual",
+    "general": "deep-manual",
 }
 
 _DEFAULT_DISPATCH_MODE = "hypothesis-driven"
@@ -838,9 +889,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         summary="Group findings by root cause, attach intel, or record a generic typed finding link (incl. the unblock path for blocked findings).",
         schema_name="backend RootCauseLinkRequest / FindingLinkRequest",
         preferred_invocations=(
-            "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_finding",
+            "vigil assess finding link <sibling-slug> --root-cause <root-slug>",
             "vigil assess finding link <sib1> <sib2> <sib3> --root-cause <root-slug>",
             "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_attack_path --reason 'Root removes this exploit chain; residual XXE remains.'",
+            "vigil assess finding link <sibling-slug> --root-cause <root-slug> --effect eliminates_finding --reason 'The root fix retires this finding entirely.'",
             "vigil assess finding link <sibling-slug> --clear-root-cause",
             "vigil assess finding link <blocked-slug> --link-kind unblocked_by --target-kind finding --target-ref <unblocking-slug>",
             "vigil assess finding link <slug> --link-id 123 --target-ref <corrected-slug>",
@@ -861,13 +913,14 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("sibling_order", "next available order when omitted"),
             ("provenance", "{}"),
             ("link_kind", "related (generic mode)"),
+            ("--effect", "eliminates_attack_path — the non-invalidating effect, so grouping alone keeps every sibling's verdict; eliminates_finding is explicit-only"),
         ),
         notes=(
             "Batch: list several sibling slugs positionally to attach them all to one --root-cause (or apply the same --intel / generic / --clear-root-cause op to each) in a resilient loop with a per-slug failure tally.",
-            "Root-cause mode (--root-cause): group after verification. A set, retarget or clear keeps every verdict and is audited as a relationship_recorded transition; --effect eliminates_finding (the default) raises a claim review on a confirmed or downgraded sibling because it says the root fix retires that finding. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
+            "Root-cause mode (--root-cause): group after verification. A set, retarget or clear keeps every verdict and is audited as a relationship_recorded transition. `--effect` defaults to `eliminates_attack_path`, which KEEPS every sibling's verdict — so a pure grouping pass is free. `--effect eliminates_finding` is the explicit claim that the root fix retires the sibling, and it raises a claim review on each confirmed or downgraded one (plus a finding_claim_review_pending report blocker), so ask for it only when you mean it. Records intentional grouping without touching root_cause_key, so dedup and human grouping stay separate.",
             "Each finding has at most one active root-cause link. Reissuing --root-cause updates that row in place, preserving its id, note, and order unless replacements are supplied; --clear-root-cause retires it without deleting evidence.",
             "Root-cause and sibling groupings cannot be nested, and merged/false-positive findings cannot appear on either end.",
-            "Use --effect eliminates_attack_path when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; use eliminates_finding when the root fix retires the sibling entirely.",
+            "Use --effect eliminates_attack_path — the default — when fixing the root removes only the demonstrated chain and the sibling still needs standalone remediation; pass --effect eliminates_finding only when the root fix retires the sibling entirely, because that claim costs a fresh review on every verified sibling in the group.",
             "Generic mode (--link-kind + --target-kind + --target-id/--target-ref): records an arbitrary typed link (POST /findings/{slug}/links). link_kind=root_cause is refused here — use --root-cause.",
             "A proof_run link requires target_kind=assessment_run and a run id in this engagement. At least one linked completed verifier run must own a terminal decision proof receipt.",
             "A variant_of link names an explicit child finding with target_kind=finding and the existing parent slug in target_ref. Use related for independent same-class findings; details.variant_of is informational. New ancestry cycles are refused. Historical ambiguous links are preserved and marked for review, never silently normalized.",
@@ -1059,13 +1112,13 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("lens", '"" (part of the probe key: a different lens is a distinct probe)'),
         ),
         notes=(
-            "One verb for every probe outcome (it absorbed the former record-attempt). Covering (tested|signal) advances the coverage map and REQUIRES --evidence-ref; non-covering (attempted|blocked|no-signal|error) records that the target was TOUCHED under a --lens without counting as coverage, so the resume-brief Attempts ledger surfaces it and the next dispatch does not re-run a dead end (evidence optional).",
+            "One verb for every probe outcome, covering and non-covering alike. Covering (tested|signal) advances the coverage map and REQUIRES --evidence-ref; non-covering (attempted|blocked|no-signal|error) records that the target was TOUCHED under a --lens without counting as coverage, so the resume-brief Attempts ledger surfaces it and the next dispatch does not re-run a dead end (evidence optional).",
             "`--evidence-ref` on a covering probe is mandatory: a covering verdict with no evidence is exactly the self-attested signal the doctrine forbids, and the depth ledger only counts covering probes with a real result.",
             "A `signal` result also requires --outcome-assertion. Without a body/application-level marker, the backend demotes it to non-covering `attempted`; status code and response size alone can never manufacture a positive verdict.",
             "1b default cascade: a COVERING probe carrying --coverage-item-id drains the work-items FK-linked to that coverage item (marked `done` in the SAME transaction), and one carrying --request-variant-id advances the discovered surface(s) FK-linked to that variant to `partially-covered` — no extra verbs, so `vigil assess work-buffer stats` and the surface ledger stop disagreeing with the probe-derived coverage. It is covering-gated (a non-covering attempt never auto-cascades), never auto-promotes coverage_items.status to `covered`, and never regresses a human surface verdict.",
             "Override/suppress the cascade: --work-item-ids <id...> narrows the drain to explicit ids (unknown ids skipped, not an error); --resolve-surface <id> advances exactly that surface; --no-drain suppresses the whole cascade. Both overrides fire regardless of the covering gate.",
             "The same target under a DIFFERENT --lens is a distinct probe (lens is hashed into the probe key), not a dedup collision. Name the specific input as `--input-slot slot:name` (e.g. `header:X-Forwarded-Host`, `query:uid`, `body:form.username`, `body:json.username`) so per-input coverage stays queryable; a bare slot is fine for whole-slot probes.",
-            "--finding <slug> backfills the probe→finding link (finding_id); COALESCE-backfilled on a re-run of the same probe. An out-of-vocab --attack-family WARNs but is stored verbatim. Replaces the old raw `post probe-runs <json>` (that raw POST is disabled — the `post` guard points here).",
+            "--finding <slug> backfills the probe→finding link (finding_id); COALESCE-backfilled on a re-run of the same probe. An out-of-vocab --attack-family WARNs but is stored verbatim. This verb is the only way to record a probe run: `vigil assess post probe-runs <json>` is refused, because the raw POST surface serves only the endpoints that have a durable response contract and tells you to use the typed command instead.",
             "`--evidence-ref` shape is checked exactly as `finding record` checks it and WARNs without blocking: a URL, a composite (\"scans/a.out; scans/b.out\"), or prose (\"command-runs 56052/56054\") records the probe but mints NO artifact row, so the pointer can never resolve at report time. Losing a recorded probe costs more than a malformed pointer, so this never blocks.",
             "Verdict → status (there is NO `refuted` status — a runtime-refuted hypothesis is `no-signal`): confirmed vuln → `tested|signal` (evidence); the probe fired but proved nothing → `attempted`; a WAF/auth/egress wall stopped it → `blocked`; hypothesis disproven / nothing distinguishing the response → `no-signal`; the probe itself errored → `error`. A durable technique-level wall on a target belongs in `vigil assess block-technique`, not a single `blocked` probe. Vocabulary source: coverage.py:PROBE_RESULT_STATUSES.",
         ),
@@ -1215,6 +1268,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             "vigil assess proof-run start verify-va-047 --kind web --agent-id VERIFY-1 --for-finding VA-047",
             "vigil assess proof-run start scan-2026-09-09 --kind code --agent-id HUNT-1 --purpose scan --target-identity-file target.json --source-generations-file generations.json --exclusions-file exclusions.json",
+            "vigil assess proof-run start verify-va-047-resume --kind web --agent-id VERIFY-1 --for-finding VA-047 --resume-from <terminal-run-id>",
             "vigil assess proof-run begin <id>",
             "vigil assess proof-run finish <id> --status completed",
             "vigil assess proof-run finish <id> --status partial --reason \"time box ended before the second handler\"",
@@ -1225,17 +1279,18 @@ _CONTRACTS: dict[str, CommandContract] = {
         author_supplied_fields=(
             "subcommand: start | begin | finish | list | get",
             "start: <run_uuid> --kind <code|web|blue|shared> --agent-id <dispatch-agent-id> [--purpose <proof|scan>] [--for-finding <slug> ...]",
-            "scan identity: --target-identity-file / --source-generations-file / --exclusions-file / --resume-from; each source generation supplies target_key, generation, manifest_digest, inventory_commitment_version, inventory_count, and inventory_digest",
+            "scan identity: --target-identity-file / --source-generations-file / --exclusions-file; each source generation supplies target_key, generation, manifest_digest, inventory_commitment_version, inventory_count, and inventory_digest",
+            "recovery: --resume-from <terminal-run-id> starts a NEW run that inherits that run's identity, sources, source reads and healthy receipt bindings. It is the way out of a sealed partial/failed run; see the note below. Supply no identity files with it, or exactly the parent's — a different target identity, source generation set or exclusion set is refused, and so is a parent whose kind or purpose differs, or that is not yet terminal",
             "begin: <run_id> (queued -> running)",
             "finish: <run_id> --status <completed|partial|failed|interrupted|canceled> [--reason <text>]",
             "list: --limit / --offset / --paginate",
             "get: <run_id>",
         ),
         notes=(
-            "Proof runs start running. Scan runs start queued: use begin before accounting writes, then finish for the explicit terminal outcome; a terminal run cannot be rewritten to a different status.",
+            "Proof runs start running. Scan runs start queued: use begin before accounting writes, then finish for the explicit terminal outcome; a terminal run cannot be rewritten to a different status. THREE STATES, THREE ANSWERS, and a 409 on an accounting or receipt write is one of them: `queued` needs `vigil assess proof-run begin <id>` (a replacement run would only be queued as well); `running` needs nothing — write to it; a terminal `partial`/`failed`/`interrupted`/`canceled` run is SEALED and needs `proof-run start <new-uuid> --resume-from <id>`, never a begin. Read the state off `proof-run get <id>` before choosing.",
             "Before starting a scan, compute each target's exact v1 source-inventory count and digest with run-audit sources commitment and include those values in the source-generations file. Completion reconciles the committed inventory against durable rows.",
             "A proof run's completed request is refused with HTTP 409 while any blocker remains, and the run stays running. The refusal names unread imported sources first, with their count and obligation ids, then other blockers. Read each source with run-audit source-read record, release one you will not read with run-audit obligation release, or finish --status partial for the truthful outcome. A scan derives its outcome: a completed request with blockers seals partial, and finish warns on stderr. --reason is recorded in the run's lifecycle history. Run counts report unread_sources and released_sources.",
-            "Only receipts from a completed run can support terminal finding verification. Partial, failed, interrupted, and canceled runs remain durable audit history.",
+            "Only receipts from a completed run can support terminal finding verification. Partial, failed, interrupted, and canceled runs remain durable audit history. A terminal run is also SEALED: it cannot be reopened, it accepts no further source-read or receipt writes, and nothing in it becomes usable later. THE WAY FORWARD IS A RESUMED RUN, not a reopened one. `proof-run start <new-uuid> --kind <same> --purpose <same> --agent-id <dispatch> --resume-from <terminal-run-id>` creates a child that inherits the parent's target identity, imported sources, observed source reads, obligations and candidates, so the bytes already delivered do not have to be read again — a receipt in the child may bind a source_read from anywhere in the lineage. Then re-bind the receipts you still owe to those inherited reads, pass `--for-finding <slug>` (or `finding link`) again because the association does NOT carry across, and finish the child `completed`. A run that imported 15 sources and read 11 recovers this way; the alternative is to release the four you will not read with `run-audit obligation release` BEFORE finishing, which keeps the original run completable.",
             "--for-finding <slug> (repeatable) checks that the verifier dispatch differs from the stored author dispatch before target traffic and persists a typed proof_run association after creating the run. This establishes dispatch separation, not distinct human identity. A terminal finding decision requires at least one healthy receipt from an associated completed run. Exploratory runs created before a finding exists can be associated later with `finding link <slug> --link-kind proof_run --target-kind assessment_run --target-id <run-id>`. A failed association reports the created run id for recovery. get/finish report findings associated with this run itself as associated_finding_slugs; finding_slugs lists only findings whose verification already cites the run lineage's receipts. A resumed run needs its own --for-finding or link before its receipts can support that finding.",
             "List reads one bounded page by default and reports an exact or lower-bound total plus a continuation command; --paginate is the explicit all-page opt-in.",
         ),
@@ -1251,6 +1306,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             (
                 "starting a proof run from the dispatch that authored the finding",
                 "verification needs a separate dispatch from the author; pass --for-finding <slug> so the run is refused before it spends any target traffic",
+            ),
+            (
+                "treating a sealed partial run as the end of the road",
+                "a terminal run never reopens, but `proof-run start <new-uuid> --resume-from <that-run-id>` inherits its sources, reads and healthy receipt bindings; re-bind the receipts, re-pass --for-finding, and finish the child completed",
             ),
             (
                 "retrying a start/finish after a malformed success response",
@@ -1306,6 +1365,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Discovery-pass records healthy evidence attributable to its named dispatch and a server-computed immutable candidate delta. A frontier digest or terminal label does not prove model comprehension or exhaustion independently of its receipts; code-scan completion requires the latest pass to end frontier_exhausted or no_new_candidates, while cap_reached preserves unresolved work.",
             "Code-receipt links existing variant/fuzz truth to one exact obligation only when repository generation, manifest, file/target identity, candidates, signals, and healthy artifact proof matching the receipt evidence path/digest all agree; it does not copy or replace the owning receipt.",
             "Sources commitment is a local canonical calculation: merge each returned target/version/count/digest into the matching source-generations entry before proof-run start. Source import sends bounded batches of 1,000 rows, and completion stays partial until every committed identity is present exactly once.",
+            "`accepted_gap` IS IRREVERSIBLE, and for every hard kind except source_read it is also final. It is simultaneously a LIVE status — a hard obligation sitting in it blocks the run's completed transition, which seals partial — and a CLOSED one, which obligation update refuses to move off with 409 'closed obligation status is immutable'. Obligation release is the only escape and it accepts source_read obligations ONLY. So a hard `manual_enumeration` or `missing_dependency` obligation — or any other kind you record yourself, including the code-receipt kinds a variant or fuzz receipt links to — recorded `accepted_gap` pins its run partial PERMANENTLY, even if the specialist later does the work: there is no transition from accepted_gap to resolved, and completion's refusal says exactly that ('an accepted gap is closed and cannot be resolved; retain a partial run'). Record `accepted_gap` only when you are stating for the record that the gap will never be closed. While the work might still happen, leave the obligation `open`, `blocked` or `deferred` — all three are live, all three keep the run truthfully incomplete, and all three can still move to `resolved` with recorded receipts. Note that `resolved` on a HARD obligation requires proof receipts; a free-text resolution alone is refused, which is what makes `accepted_gap` tempting and permanent.",
             "Importing an included source creates a hard source_read obligation, and sources import says so on stderr. It closes only through complete observed byte coverage from source-read record, or on a running proof run through obligation release by the run's producer dispatch with a nonblank reason. Obligation record and update refuse resolved or accepted_gap for source_read; a scan cannot release, so an unread source keeps it partial. A release also closes a hard source_read whose status is accepted_gap; every other closed status stays immutable. A release sets the immutable status released, records the reason, the status it left, and the actor dispatch in the obligation history, counts toward released_sources rather than open_hard_obligations, and carries into a resumed run.",
             "Source-read record resolves the source id from bounded inventory pages, opens beneath the declared root without following symlinks, streams the file to verify its recorded SHA-256 and size, emits only the requested bytes, and records the derived byte/line range after delivery succeeds.",
             "Without --output, source-read writes decoded source text to stdout and its receipt to stderr. --output creates a new file with exact bytes and leaves stdout for the JSON receipt; binary sources require --output.",
@@ -1315,6 +1375,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             (
                 "posting caller-authored source-read ranges",
                 "use source-read record so the trusted local reader derives the delivered range",
+            ),
+            (
+                "recording accepted_gap on a hard obligation the work might still close",
+                "accepted_gap is live AND immutable for every kind but source_read, so it pins the run partial forever; leave it open/blocked/deferred until you can resolve it with receipts",
             ),
             (
                 "retrying a malformed write response",
@@ -1349,6 +1413,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Start the owning proof run first. Artifact-backed receipts bind to the backend artifact identity and current SHA-256. Source observations bind to an exact trusted source-read record; HTTP, browser, and OOB observations require a registered artifact. Caller-authored prose alone is not proof.",
+            "A receipt records only while its run is RUNNING, and the three run states have three different answers — they are not interchangeable, and treating them as one is what makes an operator open a replacement run that cannot record either. QUEUED: a `--purpose scan` run is CREATED queued and records nothing yet, so run `vigil assess proof-run begin <run-id>` and record the receipt against the same run; a replacement would only be queued as well. RUNNING: record now — nothing is owed. TERMINAL (completed, partial, failed, interrupted, canceled): the run is SEALED and never reopens, so open a child with `vigil assess proof-run start <new-run-uuid> --resume-from <run-id>` and record there — the child inherits the parent's sources and source reads, and a receipt in it may cite a source read from anywhere in the lineage. The 409 names which of the three you are in.",
             "Receipt evidence remains exact and immutable. Historical derivative rows expose migration provenance without reintroducing a derivative-creation control.",
             "Command receipts must reference an actual terminal command-run row from the same engagement; free-text command claims are not execution proof.",
             "--evidence-health healthy is a REQUEST, not a stored value: the backend measures the cited command output or artifact snapshot and stores what it found, so the response can legitimately come back missing or stale. The CLI prints that as a WARN, because only a healthy receipt can carry a terminal `finding verify`; re-capture the evidence rather than re-sending the flag. A caller-DECLARED degradation is stored verbatim and must come back unchanged.",
@@ -1360,6 +1425,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             (
                 "using a receipt from a running or same-author proof run",
                 "finish an independent verifier's proof run as completed before finding verify",
+            ),
+            (
+                "starting a replacement run when a receipt is refused",
+                "read the 409: a QUEUED run needs `proof-run begin <id>` on the same run, and only a TERMINAL one needs `proof-run start <new-uuid> --resume-from <id>`; a fresh scan run would be queued too",
             ),
             (
                 "retrying create after a malformed success response",
@@ -1460,7 +1529,9 @@ _CONTRACTS: dict[str, CommandContract] = {
         preferred_invocations=(
             'vigil assess finding verify <slug> --status confirmed --reason "..." --agent-id <your-dispatch-agent-id> --proof-receipt-id <id> --confirm-check-file confirm-check.json',
             'vigil assess finding verify <slug> --status downgraded --reason "..." --agent-id <your-dispatch-agent-id> --new-severity low --proof-receipt-id <id> --confirm-check-file confirm-check.json',
+            'vigil assess finding verify <slug> --status confirmed --reason "Reachability re-measured; impact is one tenant, not all" --agent-id <your-dispatch-agent-id> --new-severity medium --proof-receipt-id <id> --confirm-check-file confirm-check.json',
             'vigil assess finding verify <slug> --status false_positive --reason "..." --agent-id <your-dispatch-agent-id> --counter-check-file counter-check.json',
+            'vigil assess finding verify <slug> --status downgraded --new-severity low --operator-authority --intel-id <intel-id> --reason "Deployment config outside the sealed snapshot disables the affected handler" --agent-id <your-dispatch-agent-id>',
             'vigil assess finding verify <slug> --status pending_runtime_proof --reason "Source evidence accepted; runtime proof owed" --agent-id <your-dispatch-agent-id> --next-test-file next-test.json',
             'vigil assess finding verify <slug> --status confirmed --reason "Re-reviewed current sealed source" --agent-id <your-dispatch-agent-id> --source-name code-vuln-verifier --proof-receipt-id <id> --confirm-check-file confirm-check.json',
             "vigil assess finding verify <slug> --payload-file verify.json",
@@ -1475,16 +1546,22 @@ _CONTRACTS: dict[str, CommandContract] = {
             "confirm_check for confirmed/downgraded",
             "next_test for pending_runtime_proof (via --next-test-file)",
             "severity_variance when chosen severity differs from the CVSS band",
+            "--new-severity with any terminal status to re-band in the same attested write",
+            "--operator-authority --intel-id <id> instead of a decision receipt, for a fact that settles the finding from outside the sealed snapshot",
         ),
         notes=(
             "Use for these verification outcomes: " + ", ".join(VERIFICATION_TRANSITION_STATUSES) + ". `unreviewed` is the recorded starting state, not a transition target.",
             "Confirmed and downgraded decisions require --proof-receipt-id from a completed verifier run under a dispatch distinct from the author's and --confirm-check-file with method, attempted_falsification, expected_result, observed_result, completed=true, and proof_receipt_ids drawn from the decision receipts, including one from an active finding-linked proof_run. The completed check is stored on the verification transition. This checks dispatch separation, not distinct human identity. False_positive requires --counter-check-file with method, expected_result, observed_result, falsified_claim, completed=true, and proof_receipt_ids.",
             "If chosen severity differs from its CVSS band, also pass --severity-variance-file with a JSON object {normal_band, chosen_severity, actor, reason, proof_receipt_id}. The proof_receipt_id must also be passed with --proof-receipt-id. The backend rejects a terminal decision lacking this attributed variance event.",
             "If a counter-check could not run, record blocked or pending_runtime_proof; free-text kill_reason/kill_check are not decision evidence.",
+            "`falsified_claim` belongs on a COUNTER check (false_positive) and nowhere else: the confirm-check model forbids it, so sending it with a confirmed/downgraded verdict is a 422. A falsified SUB-claim on a finding that still stands — the part of the original claim the verification disproved while the finding survives — belongs in `details.honest_bounds`, with the mechanism you did establish in `details.mechanism_verdict`. Both are writable detail keys; use them instead of weakening the confirm check.",
+            "`--new-severity` is accepted with ANY terminal status, not only `downgraded`, and re-bands the finding in the SAME attested write — so one fresh verification both re-bands and re-attests, where `finding update --severity` would invalidate the verdict and demand another proof run. `downgraded` still means the band actually moved and must be strictly lower; a re-band that raises or holds the band rides on `confirmed` (or `false_positive`) instead.",
+            "OPERATOR AUTHORITY — `--operator-authority --intel-id <id>` is the FOURTH terminal route, for a fact that settles the finding but lies OUTSIDE the sealed snapshot: a deployment config, a vendor statement, a platform response. It waives exactly ONE requirement — the decision receipt — and nothing else: the status must still be terminal, `--reason` must still be non-blank and must state what the out-of-snapshot evidence settles, and `--intel-id` must resolve to an intel row in this engagement (record it with `vigil assess intel record note <file.json>` first and cite the id it returns). It carries NO proof receipt and NO structured check, so it cannot be combined with --proof-receipt-id, --confirm-check-file, --counter-check-file or --severity-variance-file; a band that departs from its CVSS score records no variance row here and rests on the stamp's reason instead. The verdict is stamped `provenance.operator_authority = {kind: \"out_of_snapshot\", intel_id, intel_type, at, reason}` (the type is the service's resolution of which of the ten independently-numbered intel tables the id belongs to, since the id alone does not identify a row), the backend reads that stamp back from STORED provenance rather than trusting the request, and every surface that shows the verdict shows it as operator-authority — never as dispatch-verified. This is the OPERATOR deliberately weakening a gate over their own engagement (ADR 0019); it is legible by design, not a shortcut, and a specialist never records one on the operator's behalf.",
             "pending_runtime_proof REQUIRES --next-test-file: a JSON object (API field next_test, unknown keys refused) with "
             + "; ".join(f"{name} ({domain}) — {meaning}" for name, domain, meaning in NEXT_TEST_FIELDS)
             + ". Every other status REFUSES a next_test. The plan is stored on the verification transition, returned as `next_test` by `finding get`/`finding list`/`proof-work list|get` while the finding stays pending_runtime_proof (null for a finding parked without one), and kept per event in `finding history`. Re-verifying pending_runtime_proof with a revised plan records a new event. It is your hypothesis, stored verbatim: route_hint=live admits no host and approves nothing.",
-            "False_positive also requires details.kill_reason (rationale) and details.kill_check (integer 1-5 naming the verification check). These annotations accompany the structured counter_check; they do not replace its evidence.",
+            "False_positive also requires details.kill_reason (rationale) and details.kill_check (integer 1-5 naming the verification check) — those exact key names, under `details`. They accompany the structured counter_check; they do not replace its evidence.",
+            "THE SETTLING-TEST RULE: a kill_reason that says the experiment could not be RUN (\"could not\", \"no test account\", \"unable to provision\", \"not testable\", \"unavailable\", \"lacked\", ...) is REFUSED as false_positive, because an unrun experiment is not a disproof. Either re-verify `--status blocked --details-inline '{\"block_reason\": \"...\"}'`, which holds the finding out of the report honestly, or name the test that WOULD settle it in `details.required_followup` (a non-empty list of strings) and the kill is accepted as a bounded one.",
             "Use explicit flags for ordinary transitions. --payload-file is for a final, complete verification-transition document: it is sent verbatim (no derived binding, no --agent-id), it is mutually exclusive with request-content flags, and --narrative may accompany it.",
             "--agent-id <your dispatch agent_id> is what makes a code verification attest to anything. The backend resolves it into the finding's stored code_snapshot_attestation; without it that attestation names no dispatch and the finding reads code_snapshot_attestation_status=unattested — a binding indistinguishable from one copied off another finding. It does NOT rebind the finding's immutable author, which stays the recording dispatch.",
             "Verifying a file: finding carries provenance.code_snapshot for the CURRENT verified snapshot, every time — the binding the AUTHOR recorded attests that the author read those bytes, never that you did. The CLI derives it from the finding's own repository, so there is nothing to copy; --provenance-inline still wins when you supply one, and the 400 (\"file findings require provenance.code_snapshot bound to the current verified repository snapshot\") is unchanged for a binding that is not current.",
@@ -1564,7 +1641,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "--agent-id records dispatch_agent_id as the editing actor without changing the immutable original author. Before a terminal verdict, write reproduction and evidence details. Afterward, only the same canonical verifier (resolved through the latest verdict's receipt and run producer) can append to steps_to_reproduce or repro_runs while retaining their existing ordered content without a claim review. Any other claim-review or invalidating axis, missing or foreign attribution, and existing claim-review debt keep their normal path. Each proof receipt supports only one verification event.",
-            "Use explicit flags for small patches. --payload-file accepts a partial writable patch for exactly one slug, is mutually exclusive with request-content flags, and must contain expected_row_version.",
+            "Use explicit flags for small patches. --payload-file accepts a partial writable patch for exactly one slug and is mutually exclusive with request-content flags. It must contain expected_row_version as a positive integer, with ONE exemption: a patch whose only mutation is a notes APPEND — a non-empty `notes` with `notes_mode` written out as \"append\" — may leave the token out entirely. An append commutes, so there is nothing to guard: the concatenation is resolved server-side inside the same serialized transaction that reads the stored notes, checks the compare-and-swap and writes the row, so two appends serialize and neither is lost. The exemption is NARROW. It needs the token absent — one you did write must still be a usable positive integer — and the whole payload must be the append plus, at most, source_name and the control keys (notes_mode, details_mode, reason_code, reason_text, artifact_ref, dispatch_agent_id). Any scalar field, any `details` or `provenance` object, or details_mode='replace' brings the requirement straight back, because each of those is blind-overwritten from whatever you read into the file.",
             "A successful update returns the next row_version. Refresh the staging file yourself before reusing it; Vigil reads but never rewrites that file.",
             "When a payload file contains notes, it must set notes_mode to replace for a cumulative working document, append for a deliberate checkpoint, or rotate to replace the note while archiving the previous bytes in note_history.",
             "The `details` VOCABULARY is shared with `finding record` and is deliberately not repeated here: run `vigil assess contract finding record` for the allowed sub-keys, their types and their meanings. This verb validates `details` client-side against that same schema (finding-record.schema.json properties.details) before sending, so a key it rejects there is a key it rejects here. What is specific to a patch is how the object LANDS: see details_mode in the field list above and the merge/replace notes below.",
@@ -1731,11 +1808,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--followup-condition (surface only, REQUIRED for --status partially-covered; maximum 4096 characters)",
         ),
         notes=(
-            "One verb, a target-kind positional (it absorbed resolve-surface + resolve-coverage-item). Each kind keeps its OWN status vocabulary; --source-name / --evidence-ref / --followup-condition are surface-only (rejected on a coverage-item).",
+            "One verb, with the target kind as a positional: `resolve surface <id>` or `resolve coverage-item <id>`. Each kind keeps its OWN status vocabulary; --source-name / --evidence-ref / --followup-condition are surface-only (rejected on a coverage-item).",
             "Batch: list several ids positionally to resolve them all with the SAME --status/--rationale (resilient loop with a per-id failure tally). --rationale is appended to the existing rationale (surface) / notes (coverage-item), so the audit trail accumulates.",
             "surface: resolve a discovered surface after triage. `discovered` is the seed state and not a resolution; --followup-condition names what the next coverage pass must satisfy for `partially-covered`. Post-1b, recording a covering probe already advances a linked surface to `partially-covered` by default — use `resolve surface ... --status covered` to record the deliberate, rationale-bearing human `covered` verdict (never auto-attested).",
             "coverage-item: seeded `pending` at ingest — one per implied vuln-class on a surface. Resolve every implied class, not just the cluster winner (a surface's `covered` on one class does NOT cover its siblings); the depth ledger's signal_classes_uncovered stays open otherwise. --rationale is required for EVERY status; the backend additionally rejects an empty rationale for `covered` / `not_applicable`. Coverage-item status is a HUMAN verdict — recording a probe never auto-promotes it to `covered`.",
-            "Replaces the old raw `patch coverage-items/<id> <json>` (now redirected here).",
         ),
         common_mistakes=(
             ("resolve surface --status discovered", "discovered is the seed state; resolve to covered, not_applicable, deferred, or partially-covered"),
@@ -1823,6 +1899,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-dispatch adopt-lease <item-id> <new-agent-id> --from-agent <dead-agent> --from-lease <dead-lease-token> --reason <why-it-is-dead> [--stale-minutes 10]",
             "vigil assess code-dispatch heartbeat <item-id> <agent-id> <lease-token>",
             "vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]",
+            "vigil assess code-dispatch release <item-id> <agent-id> <lease-token> --reason \"<why this lane is not the one to review it>\"",
+            "vigil assess code-dispatch reset-stale <minutes>",
+            "vigil assess code-dispatch reset-stale <minutes> --repo-id <id> --batch-theme <theme> --queue-mode <mode> --path-prefix src/billing",
             "vigil assess code-dispatch list-triggers [status]",
             "vigil assess code-dispatch resolve-triggers <triggers-json-file> <resolution-status> <note>",
             "vigil assess code-dispatch requeue-triggers <triggers-json-file>",
@@ -1837,7 +1916,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             "priority required for initial queueing; optional compare-and-swap against current analysis_priority on reanalysis",
             "optional atomic fetch filters: repo_id, classification, batch_theme, queue_mode, item_ids, and repeatable path_prefix / path_glob",
             "optional list filters: status, repo_id, classification, batch_theme, queue_mode, stale_minutes, repeatable path_prefix / path_glob, limit, offset",
+            "optional reset-stale filters, the same set `list`/`fetch` take: repo_id, batch_theme, queue_mode, and repeatable path_prefix / path_glob",
             "for adopt-lease: the exact dead identity (--from-agent, --from-lease) copied from the list row, the replacement dispatch agent id, a --reason, and the --stale-minutes window you assert the lease is dead over",
+            "for release: the item id plus the exact agent_id and lease_token you hold, and a --reason recorded on the row",
+            "each queue/reanalyze item names exactly one file, by file_id, file_path (alias `path`), a `glob` resolved against code/files, or — on reanalyze — queue_item_id; a bare id array is not an item",
             "exactly one selector per requeue-triggers input: file_id, trigger_id/id, or file_path/target_file_path (+repo_id)",
             "the fetched agent_name + lease_token for heartbeat, results, and closeouts; <agent-id> and agent_name are the dispatch agent_id from `agent start`, never the role name",
             "bare JSON array for cwe_coverage when completing a queue item",
@@ -1855,11 +1937,14 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "Initial queue submission is transactionally idempotent per file and active repository generation. A retry inserts missing rows, updates only an unleased pending initial row, reports identical pending/processing work as already_active, and reports conflicts without mutating live leases or terminal evidence.",
+            "The `queue`/`reanalyze` input file is a JSON ARRAY of items, or one object that wraps them. A bare id array (`[412, 413]`) is refused: every item is an OBJECT that names one file. Accepted leaf keys: `file_id`, `file_path` (alias `path`), `glob` (an fnmatch pattern resolved client-side against code/files, so `*` crosses `/`), and on `reanalyze` `queue_item_id` — the id the operator is actually holding, which the backend resolves to that row's file and predecessor. Accepted wrappers: `items`, `batches`, `files` (strings or objects), and `file_paths` (strings). `priority`, `batch_theme`, `slot_types`, `guidance_hypotheses` and `repo_id` set on a wrapper are INHERITED by every leaf under it and overridden per leaf, so a shared theme is written once. See the example payloads below.",
             "Use `reanalyze` only for deliberate added depth after a completed queue item. The backend derives the predecessor when `supersedes` is omitted; an explicit stale value produces a per-file conflict outcome while other items continue. Error and needs-context rows use their dedicated retry verbs instead.",
             "Initial queue items require priority equal to current code_files.analysis_priority. Reanalysis derives that priority; an explicit value is checked for drift. The backend rejects a drifting batch before mutation. File, repository, queue-item, and trigger identifiers are strict positive JSON integers: booleans, floats, and numeric strings are rejected rather than coerced.",
             "`list` is read-only and claims nothing: it pages current-generation queue rows in the same order `fetch` claims them (priority DESC, id ASC), filtered by status, repo_id, classification, batch_theme, queue_mode, and path scope. Its JSON output is a page object containing `items`, `item_ids` and pagination metadata; `fetch` returns a claim array, and diagnostics go to stderr. Its `item_ids` array — under `--json`, or alone under `--ids-only` — is the ids-file contract `fetch --ids-file` consumes verbatim, so exact-ID batching never depends on scraping insertion output that truncates at 200 rows.",
-            "Every `list` row carries item-level ownership truth: `status`, `agent_name`, `lease_token`, `lease_activity_at` (last heartbeat, else the claim), `heartbeat_age_seconds` on the database clock, `current_result_count` (receipts already recorded against the row), `repo_role`, and `adopted_leases`. `list` drops nothing: a row whose `repo_role` is `reference` is unclaimable but still listed, because this is where an operator recovers its exact id. `--stale-minutes N` narrows the page to processing rows that have not proved life inside that window — the same abandonment measure `reset-stale N` and `adopt-lease --stale-minutes N` apply, so it previews them; both of those additionally refuse a row that is not the sole canonical latest attempt, which `stats` reports as `invalid_active_history`. A high `current_result_count` on a stale row is the signal to adopt rather than reset.",
+            "Every `list` row carries item-level ownership truth: `status`, `agent_name`, `lease_token`, `lease_activity_at` (last heartbeat, else the claim), `heartbeat_age_seconds` on the database clock, `current_result_count` (receipts already recorded against the row), `repo_role`, and `adopted_leases`. `list` drops nothing: a row whose `repo_role` is `reference` is unclaimable but still listed, because this is where an operator recovers its exact id. `--stale-minutes N` narrows the page to processing rows that have not proved life inside that window — the same abandonment measure `reset-stale N` and `adopt-lease --stale-minutes N` apply, so it previews them; both of those additionally refuse a row that is not the sole canonical latest attempt, which `stats` reports as `invalid_active_history`. A high `current_result_count` on a stale row is the signal to adopt rather than reset. The default table omits `lease_token`; `--show-tokens` adds it as a LEASE column, which is how a lane that lost its own token — compaction, a client restart, a subagent that never persisted it — reads it back and resumes heartbeat/record/done on the SAME attempt instead of discarding the work. `progress <item-id>` prints it for one row, and `--json` carries it unconditionally. --show-tokens is RENDER-ONLY: it is refused beside `--json` or `--ids-only` (in either order — those already carry every row value), and it is stored under a key held outside the filter roster the query string is built from, so it can never reach the backend as a filter.",
             "`adopt-lease` moves one abandoned processing lease to a replacement agent and is the only recovery that KEEPS the attempt: status, priority, theme, guidance, triggers, notes, coverage and every recorded receipt survive, the adopted identity is retained so its receipts still satisfy closeout, and only the owner and heartbeat change. `reset-stale` makes the opposite trade — it returns the row to pending and supersedes its receipts — so reset an attempt that recorded nothing worth keeping and adopt one that did.",
+            "`release <item-id> <agent-id> <lease-token> --reason TEXT` hands a lease you hold back to unleased `pending` WITHOUT rendering a verdict. Use it when this lane is not the one to review the file — another lane already owns it, or the claim was a mis-scoped grab. It is NOT a disposition: it records no clean/finding/suspicious/skipped result, it earns NO coverage credit and closes no accounting obligation, and the file stays owed exactly as if it had never been claimed. It uses the same per-row compare-and-swap `reset-stale` does, supersedes the attempt's receipts the same way, and appends the reason to analysis_notes. So release only after `progress <item-id>` shows nothing worth keeping; when the attempt DID record receipts and another agent should continue it, `adopt-lease` moves the work and keeps them. Never use release to abandon work you simply did not finish: `error` and `needs-context` are the honest closes for a lane that looked, and `done` is the one for a lane that reached a verdict.",
+            "`reset-stale <minutes>` takes the same lane filters `list` and `fetch` do — `--repo-id`, `--batch-theme`, `--queue-mode`, and repeatable `--path-prefix` / `--path-glob` — applied through the one path-scope owner, so a sweep can be confined to the lane that abandoned its work instead of reaping every stale row in the engagement. Unfiltered it still means the whole current-generation queue. Preview the exact set first with `list --stale-minutes N` plus the same filters: the two read one definition of abandonment, so what the preview shows is what the reset takes.",
             "Adoption is an audited compare-and-swap that refuses a live lease. `--from-agent`/`--from-lease` pin the exact identity the listing showed, and the swap also re-checks the row's status and its last proof of life inside the same serialized transaction; a lease that heartbeats between your read and the write keeps the row and the call fails with 409. `--stale-minutes` (default 10, max 1440) is your explicit assertion of death, measured from `COALESCE(last_heartbeat_at, consumed_at)` on the database clock — the same expression `reset-stale` uses. A lease whose proof of life falls inside that window is LIVE and is never adopted. Stdout is the claim record, exactly as `fetch` returns one: a fetch-shaped `item` (new `lease_token`, `file`, `repo`, `applicable_vuln_classes`, `path_suggested_vuln_classes`, fresh `scratch_dir`) plus `preserved_result_count`, the retained `adopted_leases`, and `previous_scratch_dir` — the dead lease's own scratch directory, where its intermediate files still are. The human summary is a stderr diagnostic.",
             "`progress <item-id>` reads back one attempt so receipts can be recorded cluster by cluster instead of only at end-of-lane: current receipts with their dispositions, evidence presence, anchor counts and authoring lease; `recorded_cwe_families`; `missing_cwe_families` still owed at closeout; the advisory `path_suggested_vuln_classes`; the lease identity chain; and the live `coverage_integrity` projection. Record each cluster as you finish it and this is how you (or whoever adopts the lease) verify what is already durable.",
             "Trigger requeue takes exactly one selector per input (file_id, trigger_id/id, or file_path/target_file_path with repo_id) and rejects scalars and selector-less objects before any write, so a `list-triggers` row passes straight through. It rejects unclassified targets, derives priority from the current file, preserves the target's existing batch theme, keeps trigger provenance in queue_mode=trigger, and transactionally merges distinct trigger context into one unleased pending row. Trigger-origin rows are protected from ordinary initial retries; new context is never written into a live processing lease.",
@@ -1869,7 +1954,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--path-prefix PATH` and `--path-glob GLOB` scope `list` and `fetch` to a source subtree on the server. A prefix matches whole path segments and is case-sensitive: `src/auth` covers `src/auth` and everything under `src/auth/`, never `src/auth_extra` or `SRC/auth`. A glob uses the case-sensitive fnmatch dialect `queue` resolves file globs with, so `*` crosses `/`. Both flags repeat: values of one flag are alternatives, and the path scope must match together with every other filter, including `--ids-file`. The CLI refuses an empty value before sending a request, and the backend answers an empty or absolute (`/`-leading) value with HTTP 400. `total` and `has_more` count the scoped set, so a scoped `--ids-only` page warns about truncation exactly as an unscoped one does.",
             "Fetch filters and the active repository generation are applied inside the same serialized SQL claim that changes pending rows to processing. Fetch never rewrites a stale row's generation. The returned agent_name, lease_token, repo_generation, and engagement-contained scratch_dir identify the owned dispatch context; reuse the agent and lease on heartbeat, result, and closeout writes.",
             "Write temporary files under the fetched item's scratch_dir, in preference to any scratch location the client harness offers: it is created per lease, contained in the engagement, and private to this lane, so nothing lands outside the engagement and no second lane can overwrite it. Where work must share a directory with other lanes of the same client, give every filename a lane-unique prefix (the queue item id or agent_name) so concurrent hunters cannot clobber each other's intermediate state.",
-            "An empty fetch prints why no current pending row matched and names the filters used; inspect `code-dispatch stats` and the code-files queue join before retrying rather than treating `[]` as unexplained lost work.",
+            "An empty fetch says WHICH kind of empty it was, because the two have different next verbs. The claim re-reads the SAME scope with the status filter dropped, so the diagnostic cannot disagree with the claim query: if no current-generation row lies under the scope at all, it names the filters used and tells you to check the path against `vigil assess code-coverage --by-path` and then `code-dispatch queue` the admitted files the lane owns — nothing was lost, nothing was ever queued there. If rows DO match but none is claimable now, it prints the total and the status breakdown, names each `processing` row with its holder and how long that lease has been silent, and points at `code-dispatch adopt-lease` (keeps the dead lease's receipts) or `code-dispatch reset-stale <minutes>` (discards them); a terminal row needs `code-dispatch reanalyze`. Never read `[]` as unexplained lost work.",
             "Every claimed item carries `applicable_vuln_classes`: the families `done` requires, each as a `cwe_coverage` entry with an effort score or `disposition=not_applicable`, and the families the effort gate holds critical and high files to. The backend derives them from slot types, language and the classifier's role label, so a transactional role (`refund_service`, `payment_webhook`, `otp_verifier`) requires race-condition and business-logic, or rate-limit. `path_suggested_vuln_classes` lists the workflow families that only a whole word of the file's path names (`app/Billing/RefundController.php`); consider them while reading. They are hints: `done` accepts a result that omits them, the effort gate ignores them, and readiness never names them. Covering every required family is a good sign and still leaves the rest of the file's behaviour yours to read.",
             "Every claimed item (from `fetch` and from `adopt-lease`) carries `prior_art_leads`: the unanswered prior-art leads bound to that file, each with its note id, prior-art reference, line range and whether the binding is `current` or `stale` for this generation. Read them before starting — that is the research the engagement already did on this exact file. Bind and manage them with `vigil assess code-lead`.",
             "Queue every file admitted by the active generation of an ANALYSIS repository. Classification and priority order claims; they never remove a file from accounting. A skip-tier row closes only through disposition=skipped with a structured reason. A reference repository owes no queue rows and the backend rejects the whole batch before any write if one is named. The role is re-read on every claim, so re-ingesting a repository with `--role reference` stops `fetch` handing out the rows it already holds — without deleting them — and re-ingesting with `--role analysis` makes them claimable again.",
@@ -1887,8 +1972,10 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("filtering a fetched batch client-side", "pass repo/classification/theme/id/path filters to fetch so unrelated rows are never claimed"),
             ("closing finding/suspicious before recording evidence", "record the same-disposition result with evidence or evidence_ref under the active lease first"),
             ("closing clean without notes", "summarize the reviewed paths and guards in non-empty closeout notes"),
-            ("closing skipped without a standard --skip-reason", "pass test-fixture, generated-code, minified, out-of-scope-language or vendored-dependency; a medium, high or critical file cannot be skipped, so review it and close it clean, finding or suspicious"),
+            ("closing skipped without a standard --skip-reason", "pass " + ", ".join(CODE_SKIP_REASONS) + "; a medium, high or critical file cannot be skipped, so review it and close it clean, finding or suspicious"),
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
+            ("bare id array in a queue/reanalyze file", "`[412, 413]` is refused with \"Queue items must be JSON objects\"; every item is an object naming one file — `[{\"file_id\": 412, \"priority\": 95}]`, or on reanalyze `[{\"queue_item_id\": 1187}]`"),
+            ("releasing a lease instead of closing it", "`release` is not a disposition and earns no coverage credit; only use it when another lane owns the file, and close work you actually did with `done`, `error` or `needs-context`"),
             ("analysis_priority", "queue payloads require explicit `priority`; copy the file's current `analysis_priority` exactly because the backend rejects any mismatch transactionally."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),
             ("using resolve-triggers for pending source that exists", "use requeue-triggers when the target file is available and needs analysis"),
@@ -1907,6 +1994,41 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
             {
                 "command": "vigil assess code-dispatch retry-error 42 'transient parser crash, retrying'",
+            },
+            {
+                "command": "vigil assess code-dispatch release 42 HUNT-1 <lease-token> --reason 'app/Billing/RefundController.php is already leased to the refund lane'",
+            },
+            # The queue-input shapes, which a bare id array is not. Each payload
+            # below is a whole `<queue-items-json-file>`: one object wrapping its
+            # items, which the CLI accepts exactly as it accepts a top-level
+            # array of the same leaves.
+            {
+                "command": "vigil assess code-dispatch queue billing-refund.json  # the file is the next example",
+            },
+            {
+                "batch_theme": "billing-refund-path",
+                "slot_types": ["URL-COMPONENT"],
+                "guidance_hypotheses": [
+                    "the refund amount is recomputed from the request instead of the stored order",
+                ],
+                "items": [
+                    {"file_id": 412, "priority": 95},
+                    {"file_id": 413, "priority": 82},
+                ],
+            },
+            {
+                "command": "vigil assess code-dispatch reanalyze refund-deep-pass.json 'second pass against the authz boundary the first pass assumed'  # the file is the next example",
+            },
+            # Reanalysis derives each file's priority and predecessor, so a path,
+            # a glob and a held queue_item_id are all complete selectors here.
+            {
+                "repo_id": 3,
+                "batch_theme": "refund-deep-pass",
+                "items": [
+                    {"file_path": "app/Billing/RefundController.php"},
+                    {"glob": "app/Billing/Webhooks/*.php"},
+                    {"queue_item_id": 1187},
+                ],
             },
         ),
     ),
@@ -1976,8 +2098,9 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Git never runs a program the ingested repository configures: every Git call uses a private metadata directory whose config Vigil writes, reading the repository's objects, index, refs, worktree HEADs, shallow boundary and info/ files as data. Filter and diff drivers, fsmonitor, hooks, pagers, signature verifiers, transports, credential helpers and include files from the repository's or a submodule's config never take effect, and a partial clone's missing object fails the read instead of fetching. Dirty state covers every checked-out submodule's worktree, inspected the same way.",
             "The sealed code-source-manifest/v3 is authoritative: its content address authenticates repository identity, Git provenance, every copied file, and the complete excluded_entries inventory used at refresh commit. New snapshots derive logical LOC and headers from BOM-aware UTF-8/16/32 decoding without changing source bytes; historical v2 snapshots remain independently verified under their recorded format semantics.",
             "The skipped-artifacts file is an optional, atomically published audit projection of those authenticated exclusions, bound to repo ID, generation, backend source-manifest digest, and snapshot digest. --include-minified, --include-skipped, and --include-path <glob> (repeatable) opt specific artifacts back in, capped by --max-included-skipped-bytes.",
-            "The default skip policy excludes a vendor/ directory in any casing only when it holds autoload.php, modules.txt, vendor.json, composer/, bundle/ or a github.com/, golang.org/ or gopkg.in/ import-path tree, an env/ directory only when it holds pyvenv.cfg, bin/activate or Scripts/activate, .phps source-display copies, and minified JavaScript/CSS: .min.*/.bundle.* names, content-hashed *.chunk.js/*.chunk.css, and any .js/.mjs/.cjs/.css file whose line shape is minified (long average line, with long lines dominating or only a banner of short ones). A copy of another project unpacked into the tree is admitted as source; leave it out with --exclude-path '<dir>'. Re-admit a skipped directory with --include-path '<dir>/**' and minified files with --include-minified. code-index build warns once for each excluded directory a PHP include reaches, except package-manager vendor/.",
+            "The default skip policy excludes a vendor/ directory in any casing only when it holds what a package manager wrote there: composer/, autoload.php or a <vendor>/<package>/composer.json; bundle/, cache/<gem>.gem or gems/<gem>/<name>.gemspec; modules.txt, vendor.json, or an import-path tree under a module host (any lowercase dotted host, github.com through google.golang.org, with Go source beneath it). It excludes an env/ directory only when it holds bin/activate, Scripts/activate, conda-meta/, pyvenv.cfg or a site-packages/ library root. A marker counts wherever it sits inside the directory rather than only at its root, because the generated file that names the tool is the one a repository most often gitignored while committing the installed packages. It also excludes .phps source-display copies, and minified JavaScript/CSS: .min.*/.bundle.* names, content-hashed *.chunk.js/*.chunk.css, and any .js/.mjs/.cjs/.css file whose line shape is minified (long average line, with long lines dominating or only a banner of short ones). A copy of another project unpacked into the tree is admitted as source, and so is a vendor/ or env/ directory holding no tool output — when such a directory is a quarter or more of the admitted set, the summary names it and the --exclude-path that drops it. Leave a directory out with --exclude-path '<dir>'. Re-admit a skipped directory with --include-path '<dir>/**' and minified files with --include-minified. code-index build warns once for each excluded directory a PHP include reaches, except package-manager vendor/.",
             "The summary prints `repo_id: <id>` and the exact `code-index build --repo-id <id> <sealed-source>` and `code-index sync --repo-id <id>` follow-up commands.",
+            "`vigil assess fetch code/repos` is the repository listing: every PUBLISHED repository (`active_generation > 0`) with its `id`, `repo_key`, `repo_role`, `active_generation`, `source_manifest_digest`, `snapshot_digest` and `git_churn`, newest-updated first; `fetch code/repos/<repo-id>` is the single record. That is how an operator resuming an engagement recovers the repo_id every later code verb is keyed by (`--repo-id`, `--code-repo-id`), and how a role is checked before dispatch, instead of re-ingesting to be told it again. A staged ingest that never promoted has no active generation and does not appear.",
             "Derived repo keys normalize unsafe repository-name characters. Explicit --repo-key values must be at most 255 filesystem-encoded bytes and one safe path component: no slash, backslash, exact '.' or '..' value, or ASCII control character.",
             "--language sets only the repo's primary language; use --default-language-for-unknown to stamp a language on unrecognized-extension files (use sparingly — a wrong stamp pollutes coverage math and structural indexing).",
             "--role picks the obligation axis: " + ", ".join(CODE_REPO_ROLES) + ". An `analysis` repository is the reviewed subject — every admitted file owes a queue row, terminal accounting, variant coverage and phase readiness. A `reference` repository (the host framework a plugin extends) is sealed, indexed, searchable and citable with the same structured source identity, but is excluded from queue population, receipts, variants, coverage and readiness. Ingest the host framework as reference so reviewing a plugin does not silently buy coverage over a second codebase.",
@@ -2231,21 +2354,26 @@ _CONTRACTS: dict[str, CommandContract] = {
             "role",
             "slot_types",
             "analysis_priority",
+            "skip_reason when classification is `skip`, from the standard set: " + ", ".join(CODE_SKIP_REASONS),
         ),
         helper_defaults=(
             ("file_path", "resolved client-side to file_id before posting"),
             ("repo_id", "optional disambiguator for duplicate file_path values"),
+            ("skip_reason", "unset; REQUIRED when classification is `skip` and REFUSED on any other classification, so it never travels with a file that is still owed a review"),
         ),
         notes=(
             "analysis_priority is required and must be an integer in the classification's band: critical 80-100, high 50-79, medium 20-49, low 5-19, skip 0. Bulk classify and partial file PATCHes validate the resulting pair without coercion or clamping.",
             "Initial and reanalysis queue submissions must copy the file's current analysis_priority exactly. Trigger requeue derives priority server-side and accepts an optional supplied value only when it is exactly equal.",
             "Valid slot types include EXEC-POLICY for configuration that controls command execution, plugin loading, crypto parameters, or access/session policy.",
+            "`classification: \"skip\"` REQUIRES `skip_reason`, validated against the same standard set `code-dispatch done --skip-reason` uses — " + ", ".join(CODE_SKIP_REASONS) + " — so the classifier states WHY at the moment it decides, instead of leaving the queue row to carry an unexplained zero-priority file. Classifying a file `skip` is not the same act as closing a claimed queue row `skipped`: both record a standard reason, and both leave the file accounted only because that reason is present. A reason outside the set is a 400 naming the allowed values, and so is a reason supplied on any classification OTHER than `skip`; anything genuinely outside the set is not a skip — classify the file and review it. A partial file PATCH applies the same rule against the resulting classification, so flipping a file off `skip` clears the reason with it.",
             "Read `vigil assess contract code-record classify` before authoring the file.",
         ),
         common_mistakes=(
             ("priority", "use analysis_priority in code-record classify payloads"),
             ("slot_types_json", "use slot_types"),
             ("repo_id without file_path", "repo_id only disambiguates file_path lookup; file_id can stand alone"),
+            ("classification skip with a prose reason", "skip_reason is a closed vocabulary, not free text: pass " + ", ".join(CODE_SKIP_REASONS) + " and put the detail in the review notes"),
+            ("classification skip with no skip_reason", "an unexplained skip is the one classification that removes a file from review without accounting for it; name the standard reason"),
         ),
         examples=(
             {
@@ -2254,6 +2382,14 @@ _CONTRACTS: dict[str, CommandContract] = {
                 "role": "parser",
                 "slot_types": ["NETWORK-INPUT"],
                 "analysis_priority": 95,
+            },
+            {
+                "file_id": 907,
+                "classification": "skip",
+                "role": "test-fixture",
+                "slot_types": [],
+                "analysis_priority": 0,
+                "skip_reason": "test-fixture",
             },
         ),
     ),
@@ -2619,13 +2755,15 @@ _CONTRACTS: dict[str, CommandContract] = {
             "vigil assess code-coverage --repo-id <repo-id> --cwe-matrix --require-gate-pass",
             "vigil assess code-coverage --by-path",
             "vigil assess code-coverage --by-path --depth 3 --path-prefix src/billing --json",
+            "vigil assess code-coverage --repo-id <repo-id> --inherited-from <generation>",
         ),
         author_supplied_fields=(
             "--repo-id to scope one repo",
             "--cwe-matrix / --require-gate-pass for review quality",
             "--require-transition-ready <target-phase> for structural/lifecycle readiness",
             "--debt-paths to list all structural debt paths",
-            "--by-path with optional --depth, repeatable --path-prefix, --limit, --offset and --json for the per-directory breakdown",
+            "--by-path with optional --depth, repeatable --path-prefix, --limit, --offset and --json for the per-directory breakdown; --inherited-from takes the same repeatable --path-prefix, --limit, --offset and --json",
+            "`--inherited-from <generation>` to see which currently-pending files already carry a terminal result from that earlier generation on identical bytes",
         ),
         helper_defaults=(
             ("--repo-id", "unset (aggregate across all repos)"),
@@ -2633,6 +2771,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--require-gate-pass", "off (on exits non-zero unless the self-reported review-quality gate passes)"),
             ("--require-transition-ready", "off (on fetches target-specific backend readiness and exits non-zero when hard blockers remain)"),
             ("--by-path", "off (on reads code/coverage/by-path: --depth 2, --limit 50, --offset 0)"),
+            ("--inherited-from", "unset (no inheritance view; coverage reports only current-generation results). When set, it reads code/coverage/inherited: --limit 2000, --offset 0"),
         ),
         notes=(
             "The code Core-Loop coverage check — read it each iteration to see which files and vuln classes are under-tested before dispatching more hunt work.",
@@ -2642,6 +2781,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--require-transition-ready consumes backend readiness for classify-map, hunt, verify-variant, fuzz, or complete. Identity/incomplete-index blockers are always non-overrideable; unreviewed degraded/unsupported/truncated files are counted quality warnings during Classify/Hunt and become non-overrideable at Verify + Variant until each has a durable analyzed/done specialist review receipt. Effort warnings remain a separate quality signal.",
             "--by-path reads `code/coverage/by-path` and prints one row per directory of an analysis repository, grouped by the first --depth directory segments (counted from the repository root; files at the root group under `.`). Each row carries files, LOC, analyzed/total per classification, the summary's analysis-status buckets, unreviewed structural debt (degraded/unsupported/truncated, the readiness debt predicate) and accounted skips, so the rows sum to the summary and the debt column sums to readiness `structural_debt_count`. Rows sort by uncovered critical+high files, most first, then path. --path-prefix matches whole segments, case-sensitively, exactly as `code-dispatch list` does. Reference repositories owe nothing and never appear. It is a separate view: it refuses --cwe-matrix, --require-gate-pass, --require-transition-ready and --debt-paths.",
             "An `Open Analysis Leases` block names every claimed queue attempt that never reached closeout — the file, the holding agent and lease token, how long that lease has been silent, and how many receipts it already recorded. It is the item-level form of the \"queue items still pending or processing\" gate reason: clear each with `code-dispatch adopt-lease` when receipts are stranded there, or `code-dispatch reset-stale` when nothing is.",
+            "`--inherited-from <generation>` is a READ, and ONLY a read. A new source generation stamps every queue row, result and trigger superseded repo-wide, so a re-ingest for an unrelated change drops a reviewed file's coverage to zero even though its bytes never moved. This view joins each currently-pending file to its most recent TERMINAL result from the named generation where the file's recorded hash is unchanged, and labels it `inherited` together with the generation it came from. That label is PRIOR WORK ON IDENTICAL BYTES — it is NOT a currency claim: an inherited result stays superseded, counts nowhere in the coverage numbers, satisfies no coverage gate and clears no transition blocker, and `code-dispatch fetch` will still hand the file out. Use it to decide where to spend the re-review budget first (and to recover the receipt ids with `code-dispatch progress`), never as evidence the file is covered. Making it current would need an explicit inheritance binding on the row; the honest cheap move is to re-queue the file and record a result that cites the prior one. It is its own view: it narrows by --repo-id and repeatable --path-prefix and pages with --limit/--offset/--json, exactly as `code/coverage/inherited` accepts them, and it refuses --by-path, --depth, --cwe-matrix, --require-gate-pass, --require-transition-ready and --debt-paths, because one output carrying both a prior-generation verdict and a current-generation number IS the currency claim it must never make.",
         ),
     ),
     "code-size-summary": CommandContract(
@@ -2888,7 +3028,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         notes=(
             "Recipient-specific bodies use --body consistently at preparation and publication; exact captured bytes are shared by triage-packet and immutable export. --guidance is captured as presentation-only target-derived data and cannot waive verification, approvals, or review. Changed captured guidance invalidates package review. --prepare permits review before publication without weakening final-render gates.",
             "ghsa form fields are structured details.ghsa: ecosystem, package_name, affected_versions, patched_versions, cwe_ids, vulnerable_functions, request_cve. The first three and an explicit boolean request_cve are required. Credits belong to maintainers; unknown patched versions must not be invented. The submission context exposes the field block even when --body selects a recipient-specific description.",
-            "The submission-first replacement for the retired red/code report.md path. Final requires a verified confirmed/downgraded report candidate; authored Summary, Steps to Reproduce, Evidence, Impact, and Remediation; complete platform fields; a contained evidence_ref artifact linked to that finding, indexed, and present on disk now; and no target-specific report-readiness blocker or hygiene warning. Inline PoC remains supporting content, not durable proof.",
+            "Submission-first: this verb is how a finding reaches a recipient, and the submission package is the deliverable. Final requires a verified confirmed/downgraded report candidate; authored Summary, Steps to Reproduce, Evidence, Impact, and Remediation; complete platform fields; a contained evidence_ref artifact linked to that finding, indexed, and present on disk now; and no target-specific report-readiness blocker or hygiene warning. Inline PoC remains supporting content, not durable proof.",
             "Command evidence comes ONLY from explicit finding-links (target_kind=command_run) plus evidence_ref/poc_* — no fuzzy command search. Run a targeted `command-run list --q <url/param>` to find and link the reproducing command first.",
             "details.repro_runs (the command-run ids behind steps_to_reproduce, in step order) renders as a separate 'Reproduction runs' block under OPERATOR DETAILS with each row's REAL argv. The local render advises on absent or unresolved ids and a draft marks an absent set with [NEEDS: details.repro_runs]. A finding whose reproduction_basis is source (a file finding whose current verification receipts are all source_observation) owes no runs: the render names its proof receipts instead, with no advisory or marker, and its rehearsal uses proof_mode source. New authored ids are validated when recorded; final publication requires a current independent reproduction decision covering the authored ids. Unresolved ids appear in the render, stderr, and context JSON as repro_runs_unresolved.",
             "Final output must stay inside the engagement and artifact registration must succeed. The backend stages, fsyncs, hashes, verifies, and atomically publishes a numbered immutable version; identical retries reuse the reservation. With attachments it emits a deterministic ZIP and manifest; otherwise the version bytes are exactly the external submission body, excluding local OPERATOR DETAILS. `--recover` reconciles interrupted reservations without rendering. The export never sets submission_status or submits externally.",
@@ -3002,10 +3142,10 @@ _CONTRACTS: dict[str, CommandContract] = {
         author_supplied_fields=(),
         notes=(
             "Read-only. Filters: --severity, --workflow-status/--status, --verification-status, --source-name, --slug, --root-cause <slug> (root plus linked siblings), --search/--q, --holding. With --root-cause, the other filters select which siblings are listed; the root always heads the group.",
-            "--verification-status takes one of " + ", ".join(VERIFICATION_STATUSES) + ". The confirmed-finding set is "
-            "--verification-status confirmed; the retired two-axis value `verified` does not exist. An unknown value is a 400 from "
-            "the backend, never an empty list.",
-            "--limit / --offset page the bounded result set. Each listing reports an exact or lower-bound total and an actionable continuation on stderr; the removed unbounded --all spelling returns a replacement hint.",
+            "--verification-status takes one of " + ", ".join(VERIFICATION_STATUSES) + " — that list is the whole vocabulary, and "
+            "anything outside it is a 400 from the backend, never an empty list. The confirmed-finding set is "
+            "--verification-status confirmed.",
+            "--limit / --offset page the bounded result set. Each listing reports an exact or lower-bound total and an actionable continuation on stderr. The listing is always bounded: `--all` is rejected with a pointer to --limit/--offset and `finding get <slug>` for complete rows.",
             "--json stdout is one bounded page (default 100) and its paging metadata goes to stderr; raise --limit (maximum 5000) for a complete basis instead of concatenating pages or discarding stderr.",
             "--json emits compact index rows with a `_point_read` command instead of embedding potentially large details/notes/provenance. Use `vigil assess finding get <slug>` for the complete stored row.",
             "--holding is broader than the runtime-proof-owed set: it is `evidence_type=theoretical` OR verification_status in (pending_runtime_proof, blocked), so it also sweeps permanently blocked rows and theoretical evidence at any status. The findings actually owed runtime proof are the pending_runtime_proof findings that are not merged; `vigil assess proof-work list` and `vigil assess exploit review` (under `Runtime proof owed`) render that set. A merged finding keeps its verification status as history.",
@@ -3073,7 +3213,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         name="intel list",
         goals=("recon",),
         summary="List intel records per-type or via full-text search.",
-        schema_name="GET /assessment/intel (+ /intel/search)",
+        schema_name="GET /intel/summary, /intel/{type-plural}, /intel/search",
         preferred_invocations=(
             "vigil assess intel list",
             "vigil assess intel list tech-component",
@@ -3507,6 +3647,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         ),
         notes=(
             "`review` is READ-ONLY — it prints current_phase, exploit_policy, review_state, the backend exploit candidates, and a second `Runtime proof owed` section. `approve` is the WRITE: it updates scope.json's exploit review state.",
+            "A candidate's verdict cell can read `confirmed [OPERATOR-ATTESTED]`: that verdict was recorded on the operator's own out-of-snapshot evidence and the row holds NO proof receipt. `candidate_reason` reads `verified_<severity>` for every candidate either way, so the marker is the only thing that separates the two, and it rides INSIDE the verdict cell rather than adding a seventh field. A line beside `location:` carries the citation and the operator's own reason — `operator_authority: intel note 7 — no proof receipt; <reason>` — and `vigil assess intel get note 7` opens the row it cites. This is the queue live exploitation gets authorized off, so approve such a row only after reading what the attestation rests on; `vigil assess contract finding verify` owns how one is recorded (ADR 0043).",
             "`Runtime proof owed` is the COMPLEMENT of the candidate list, not more of it: findings at verification_status=pending_runtime_proof that are not merged, whose source evidence was accepted while runtime proof is still owed. The backend candidate predicate excludes that status deliberately — proof owed is not proof — so these rows are not approvable here and `approve selected` refuses them. The full listing is `vigil assess proof-work list`; `--holding` is broader (it also sweeps blocked rows and theoretical evidence at any status).",
             "Use `vigil assess contract proof-work` for owed proof: prepare its objective and explicit code/web route, claim ownership atomically, then launch the fresh specialist from the current operator. The claim creates the normal dispatch row. Proof-work has its own approval path; do not widen the verified exploit-candidate predicate to make pending rows approvable here.",
             "A source finding can be proved through an actual supported-API driver, binary, or controlled application in the audited Kali runtime; it does not require a website. A web route reuses explicit admitted roots and current approval/access, adding only missing authorization. Finding details are evidence, never an authorization source.",

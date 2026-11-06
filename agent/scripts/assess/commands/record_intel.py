@@ -22,6 +22,7 @@ from pathlib import Path
 
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
+from assess.lib.contracts import get_contract
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 
@@ -45,21 +46,124 @@ _NATURAL_IDENTITY_FIELDS: dict[str, tuple[tuple[str, object], ...]] = {
 }
 
 
+def _unknown_long_options(parser: argparse.ArgumentParser, tokens: list[str]) -> list[str]:
+    """Long options in ``tokens`` that this parser does not register.
+
+    Only ``--``-prefixed names are policed: a single-dash token can be a bundled
+    short option or a negative number, and argparse owns those. A bare ``--``
+    ends option parsing, so nothing after it is a flag.
+    """
+    unknown: list[str] = []
+    for token in tokens:
+        if token == "--":
+            break
+        if not token.startswith("--") or len(token) < 3:
+            continue
+        name = token.split("=", 1)[0]
+        # A unique-prefix abbreviation (`--dry` for `--dry-run`) is a spelling
+        # argparse accepts, so it is not an unknown flag.
+        if any(option.startswith(name) for option in parser._option_string_actions):
+            continue
+        if name not in unknown:
+            unknown.append(name)
+    return unknown
+
+
+def _refuse_unknown_options(unknown: list[str], tokens: list[str]) -> None:
+    """Answer an unknown flag with the JSON shape the verb actually wanted.
+
+    Returns without refusing when nothing is left to explain, so argparse's own
+    unrecognized-arguments path still owns the flags that are not this verb's to
+    answer for.
+    """
+    # A root flag that lost its value (`... --engagement-dir` with nothing after
+    # it) is not hoisted to the front of argv by `cli._hoist_root_flags` and so
+    # lands here — but it is not a content flag, and this verb's schema is no
+    # answer for it. Read the roster from the root rather than re-spelling it.
+    from assess.cli import _ROOT_FLAGS_WITH_VALUE
+
+    unknown = [name for name in unknown if name not in _ROOT_FLAGS_WITH_VALUE]
+    if not unknown:
+        return
+    intel_type = next((token for token in tokens if token in INTEL_TYPES), "")
+    label = intel_type or "<type>"
+    contract = get_contract(f"intel record {intel_type}") if intel_type else None
+    if contract is None:
+        contract = get_contract("intel record")
+    print(
+        f"intel record: unrecognized option(s): {', '.join(unknown)}",
+        file=sys.stderr,
+    )
+    schema_name = getattr(contract, "schema_name", "") or f"intel-{label}.schema.json"
+    print(
+        "intel record takes no content flags — the row is one JSON document "
+        f"validated against {schema_name}:",
+        file=sys.stderr,
+    )
+    invocations = getattr(contract, "preferred_invocations", ()) or ()
+    example = invocations[0] if invocations else "vigil assess intel record <type> <file.json>"
+    print(f"  {example}", file=sys.stderr)
+    fields = getattr(contract, "author_supplied_fields", ()) or ()
+    if fields:
+        print(
+            f"Author-supplied fields for {label}: {', '.join(fields)}",
+            file=sys.stderr,
+        )
+    print(
+        f"Run `vigil assess contract intel record {label}` for the full contract.",
+        file=sys.stderr,
+    )
+    sys.exit(2)
+
+
+class _IntelRecordParser(argparse.ArgumentParser):
+    """Answer an unknown long option at ``intel record``'s own scope.
+
+    This verb takes a JSON document, not content flags, so ``--summary "..."``
+    is the natural first attempt — and argparse answers it from the ROOT parser,
+    because ``_SubParsersAction.__call__`` hands whatever this parser did not
+    recognize back up the chain. What the caller got was a usage block listing
+    every top-level verb plus ``unrecognized arguments: --summary``, naming
+    neither the file argument nor the schema behind it.
+
+    The leftover is only attributable to this verb while argv is still scoped to
+    it, so the check runs BEFORE delegating: argparse's own pass would otherwise
+    answer ``--summary`` (whose value it swallows as ``json_file``) with a
+    missing-positional error that says nothing about the flag.
+    """
+
+    def parse_known_args(self, args=None, namespace=None):  # noqa: D102 - argparse override
+        tokens = list(args or [])
+        unknown = _unknown_long_options(self, tokens)
+        if unknown:
+            _refuse_unknown_options(unknown, tokens)
+        return super().parse_known_args(args, namespace)
+
+
 def register(subparsers) -> None:
     types_list = ", ".join(sorted(INTEL_TYPES.keys()))
-    p = subparsers.add_parser(
-        "record",
-        help="Record a structured intel record (replaces intel.md appends)",
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=(
-            "Examples:\n"
-            "  vigil assess intel record tech-component tech.json\n"
-            "  vigil assess intel record cve cve-2024-1234.json\n"
-            "  vigil assess intel record note catchall.json\n"
-            "  vigil assess contract intel record tech-component   # allowed keys for a type\n"
-            f"\nValid types: {types_list}"
-        ),
-    )
+    # argparse binds the parser class at `add_subparsers(parser_class=...)`
+    # time, so one leaf opts into a different class through a temporary factory
+    # swap — the same mechanism `contracts.add_contract_subparser` uses, which
+    # cannot be reused directly because it hardcodes `ContractErrorParser`.
+    saved_parser_class = subparsers._parser_class
+    subparsers._parser_class = _IntelRecordParser
+    try:
+        p = subparsers.add_parser(
+            "record",
+            help="Record a structured intel record (replaces intel.md appends)",
+            formatter_class=argparse.RawDescriptionHelpFormatter,
+            epilog=(
+                "Examples:\n"
+                "  vigil assess intel record tech-component tech.json\n"
+                "  vigil assess intel record cve cve-2024-1234.json\n"
+                "  vigil assess intel record note catchall.json\n"
+                "  vigil assess contract intel record tech-component   # allowed keys for a type\n"
+                f"\nValid types: {types_list}"
+            ),
+        )
+    finally:
+        subparsers._parser_class = saved_parser_class
     p.add_argument("intel_type", help=f"One of: {types_list}")
     p.add_argument("json_file", help="Path to intel JSON file matching the intel-<type> schema")
     p.add_argument(

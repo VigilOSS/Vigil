@@ -103,12 +103,19 @@ DEFAULT_DETAIL_EFFECT = CLAIM_REVIEW
 
 # Detail keys the verdict's proof depends on. Rewording one is claim review;
 # removing it (or, for ``repro_runs``, dropping a recorded run) invalidates.
+#
+# Every key here must be a key a finding can actually hold: the set generates a
+# ``details.<key>.removed`` axis, and ``effect_table()`` is rendered verbatim
+# into the contract of every finding write verb, so a key outside
+# ``FINDING_DETAIL_PROPERTIES`` publishes a rule that can never fire. The proof
+# prose is ``evidence`` and exploitability is carried by
+# ``precondition_analysis`` / ``self_obtainability_verdict``; both spellings are
+# routed there by ``FINDING_DETAIL_KEY_ALIASES`` instead of being vocabulary of
+# their own. Pinned by test_finding_detail_effect_axis_vocabulary.
 PROOF_DEPENDENCY_DETAIL_KEYS = frozenset(
     {
         "evidence",
         "impact",
-        "proof",
-        "exploitability",
         "steps_to_reproduce",
         "repro_runs",
         "poc_request",

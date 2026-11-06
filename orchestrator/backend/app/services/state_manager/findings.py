@@ -56,7 +56,11 @@ from .links import (
     finding_link_state,
 )
 from .proofs import (
+    OPERATOR_AUTHORITY_KIND,
+    OPERATOR_AUTHORITY_PROVENANCE_KEY,
+    SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY,
     TERMINAL_VERIFICATION_STATUSES,
+    operator_authority_stamp,
     proof_receipts_for_finding,
     record_finding_verification_evidence,
     verification_audit_by_transition,
@@ -241,6 +245,10 @@ def _canonical_location_endpoint(location: str) -> str:
 
 
 ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY = "original_canonical_location"
+# The caller's citation of the audited run this write was performed under. Not a
+# service stamp — the author asserts it — but a pointer, so it resolves at the
+# door like the ``details`` run citations do.
+COMMAND_RUN_PROVENANCE_KEY = "command_run_id"
 
 
 def _normalize_file_location(
@@ -437,12 +445,20 @@ def _find_killed_remint_collision(
     auth_context: str,
     canonical_location: str,
 ) -> dict[str, Any] | None:
-    """Return a KILLED finding this net-new record would silently re-mint, or None.
+    """Return a WITHDRAWN finding this net-new record would silently re-mint, or None.
 
-    Broader than the exact dedup tuple: matches an existing ``false_positive``
-    finding that shares the same (non-empty) ``defect_family`` AND either the exact
-    tuple OR a shared endpoint/canonical-location signal. Same ``defect_family`` is
-    REQUIRED so a genuinely-different vuln class at the same endpoint is NOT caught.
+    Broader than the exact dedup tuple: matches an existing withdrawn finding that
+    shares the same (non-empty) ``defect_family`` AND either the exact tuple OR a
+    shared endpoint/canonical-location signal. Same ``defect_family`` is REQUIRED
+    so a genuinely-different vuln class at the same endpoint is NOT caught.
+
+    Two states count as withdrawn. ``false_positive`` is the evidence-backed kill:
+    a completed counter-check and a decision receipt. ``disputed`` is the cheap
+    one — it needs only a reason, and already leaves both the unreviewed queue and
+    the report — and it is what an author reaches for when their own claim does not
+    hold up. Without it here, a refuted finding fell back to ``unreviewed`` with no
+    mark on it, which is indistinguishable from never having been looked at, so the
+    next sweep re-filed the claim its own author had withdrawn.
     """
     family = (defect_family or "").strip()
     if not family:
@@ -455,7 +471,7 @@ def _find_killed_remint_collision(
         SELECT *
         FROM assessment_findings
         WHERE engagement_id = ?
-          AND status = 'false_positive'
+          AND (status = 'false_positive' OR verification_status = 'disputed')
         ORDER BY id ASC
         """,
         (engagement_id,),
@@ -487,18 +503,34 @@ def _raise_killed_remint_conflict(
 ) -> None:
     killed_slug = str(killed.get("slug", ""))
     killed_location = str(killed.get("canonical_location", ""))
+    # The two withdrawals have different recovery routes. A kill is a suppressed
+    # workflow, so it is REOPENED. A dispute is a live finding whose claim was
+    # withdrawn, so `--status draft` would say nothing about the dispute — the
+    # route is to re-record onto the same slug, or to settle the dispute with a
+    # fresh verification.
+    if _row_workflow_status(killed) == "false_positive":
+        state = "killed (false_positive)"
+        recovery = (
+            f"If the earlier kill was WRONG and this should re-open, run `vigil assess "
+            f"finding update {killed_slug} --status draft --reason \"...\"`."
+        )
+    else:
+        state = "withdrawn (disputed)"
+        recovery = (
+            f"If this is the same defect, re-record onto it with `vigil assess finding "
+            f"record --update {killed_slug} ...`, or settle the dispute with `vigil "
+            f"assess finding verify {killed_slug} --status <disposition> --reason \"...\"`."
+        )
     raise HTTPException(
         status_code=status.HTTP_409_CONFLICT,
         detail=(
-            f"Refusing to re-mint disproven finding '{killed_slug}': it was killed "
-            f"(false_positive) for defect_family={defect_family!r} at canonical_location "
+            f"Refusing to re-mint withdrawn finding '{killed_slug}': it was {state} "
+            f"for defect_family={defect_family!r} at canonical_location "
             f"{killed_location!r}, and this net-new record targets the SAME technique + "
             f"endpoint at {canonical_location!r} under a different location/slug — minting it "
-            f"would silently resurrect a disproven finding as a fresh duplicate. If the earlier "
-            f"kill was WRONG and this should re-open, run `vigil assess finding update "
-            f"{killed_slug} --status draft --reason \"...\"`. If this is a genuinely "
-            f"NEW finding that only coincidentally shares the endpoint + technique, re-record "
-            f"with --allow-remint (a.k.a. --force) to override."
+            f"would silently resurrect a withdrawn finding as a fresh duplicate. {recovery} "
+            f"If this is a genuinely NEW finding that only coincidentally shares the "
+            f"endpoint + technique, re-record with --allow-remint (a.k.a. --force) to override."
         ),
     )
 
@@ -639,29 +671,298 @@ def _same_verifier_enrichment(
     return len(rows) == 1 and rows[0]['agent_id'] == dispatch_agent_id
 
 
-def _validate_authored_repro_runs(
+# Detail keys whose values are command-run ids in this engagement. ``repro_runs``
+# names the runs behind the authored reproduction steps; ``replay_commands`` names
+# the subset a reader is told to re-execute. Both are citations, so both resolve at
+# write time: an id that names nothing points at a transcript nobody can fetch.
+_COMMAND_RUN_CITATION_DETAIL_KEYS = ("repro_runs", "replay_commands")
+
+
+def _validate_authored_command_run_citations(
     connection, engagement_id: int, authored_details: dict[str, Any]
 ) -> None:
-    if "repro_runs" not in authored_details:
+    for key in _COMMAND_RUN_CITATION_DETAIL_KEYS:
+        if key not in authored_details:
+            continue
+        for entry in authored_details[key]:
+            if type(entry) is int:
+                run_id = entry
+            elif isinstance(entry, str) and entry.strip().isdigit():
+                run_id = int(entry.strip())
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"details.{key} entry {entry!r} is not a command-run id",
+                )
+            if run_id < 1 or connection.execute(
+                "SELECT 1 FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+                (engagement_id, run_id),
+            ).fetchone() is None:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"details.{key} command-run id {run_id} does not belong to this "
+                        "engagement; list the engagement's runs with "
+                        "`vigil assess command-run list`"
+                    ),
+                )
+
+
+def _superseded_operator_authority_provenance(
+    provenance_json: str, *, supersede: bool
+) -> str:
+    """Move an operator-authority stamp aside once a proof-backed verdict lands.
+
+    Deleting it would erase how the earlier verdict was reached; leaving it where
+    it was would read as the authority behind the NEW one. Same treatment a
+    superseded code-snapshot binding gets, for the same reason.
+    """
+
+    if not supersede:
+        return provenance_json
+    stamp = operator_authority_stamp(provenance_json)
+    if stamp is None:
+        return provenance_json
+    merged = _json_object(provenance_json)
+    merged.pop(OPERATOR_AUTHORITY_PROVENANCE_KEY, None)
+    merged[SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY] = stamp
+    return _json_text(merged)
+
+
+_OPERATOR_AUTHORITY_REMEDY = (
+    "record a waiver with `vigil assess finding verify <slug> "
+    "--operator-authority --intel-id <id>` instead of authoring either key"
+)
+
+# The provenance blocks the SERVICE stamps, and what a caller should do instead.
+# Canonical owner of the rule: the guard below reads this mapping, the merge path
+# reads the untransferable set derived from it, and ``FindingProvenance`` declares
+# every key so a STORED row validates against the same vocabulary. Declared is not
+# authorable — the request schema cannot forbid what a stored record carries, so
+# the service is the only place the distinction can live.
+_SERVICE_STAMPED_PROVENANCE_REMEDIES: dict[str, str] = {
+    OPERATOR_AUTHORITY_PROVENANCE_KEY: (
+        "is stamped by the verification that resolves the cited intel row; "
+        + _OPERATOR_AUTHORITY_REMEDY
+    ),
+    SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY: (
+        "is stamped by the proof-backed verdict that replaces an earlier waiver, "
+        "so an authored one fabricates a waiver nobody granted; "
+        + _OPERATOR_AUTHORITY_REMEDY
+    ),
+    CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY: (
+        "is stamped by the write that asserts provenance.code_snapshot, and "
+        "records who asserted that binding under which audited run; send the "
+        "binding and the service stamps its own attestation over it"
+    ),
+    SUPERSEDED_CODE_SNAPSHOT_PROVENANCE_KEY: (
+        "is stamped by an audited relocation out of `file:`, which reserves the "
+        "binding whose bytes were reviewed; move the finding with `vigil assess "
+        "finding relocate <slug> --canonical-location <location>` instead of "
+        "authoring the record of a review that did not happen"
+    ),
+    ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY: (
+        "is stamped when a normalisation or an audited relocation moves the "
+        "location, and is the record of what the author actually wrote; an "
+        "authored one plants an as-authored location nobody wrote. Record the "
+        "finding at the location you reviewed"
+    ),
+}
+
+
+# The subset a merge must not carry from the source onto the surviving target:
+# each is a record ABOUT the finding it was stamped on, so the source's copy
+# asserts history the target never had. ``code_snapshot_attestation`` is absent
+# because it travels with the binding it attests — the merge drops it exactly
+# when the target has a binding of its own. ``superseded_code_snapshot`` is
+# absent because it names its own slug and is the only record of which bytes a
+# relocated finding reviewed; dropping it would delete reviewed-source history.
+_UNTRANSFERABLE_SERVICE_PROVENANCE_KEYS = (
+    OPERATOR_AUTHORITY_PROVENANCE_KEY,
+    SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY,
+    ORIGINAL_CANONICAL_LOCATION_PROVENANCE_KEY,
+)
+
+
+def _refuse_authored_service_provenance(
+    provenance: dict[str, Any] | None,
+    *,
+    own_verification: bool = False,
+    restamps_attestation: bool = False,
+) -> None:
+    """Refuse a caller-authored service stamp on a provenance door.
+
+    Every key here is written by the service and none is authorable. Each is also
+    load-bearing for a reader who cannot re-derive it:
+
+    * The operator-authority stamp is the record that an intel row resolved and a
+      reason was given, so an authored one makes the waiver forgeable by anybody
+      who can write provenance. Its superseded twin grants no authority at all,
+      which is precisely why it matters: a forged one fabricates HISTORY, telling
+      every later reader that a waiver was granted and replaced when neither
+      happened.
+    * The code-snapshot attestation is the record of WHO asserted the binding and
+      under which audited work — the block ``code_snapshot_attestation_status``
+      reads to call a binding attested, unattested or copied, and report
+      readiness blocks on the last two.
+    * The superseded binding asserts which bytes were reviewed before an audited
+      relocation out of ``file:``.
+    * The original canonical location is the location as AUTHORED, kept so a
+      normalisation cannot rewrite the audit trail; authoring one plants a
+      fabricated as-authored location.
+
+    Every route that merges caller provenance onto a finding owes this refusal,
+    not just the record/patch funnel: a guard on one door and not another is not
+    a guard. Two exceptions, both narrow:
+
+    ``own_verification`` — the verification that resolves the cited intel row is
+    the one write that authors the live operator-authority stamp. Nothing authors
+    the superseded record.
+
+    ``restamps_attestation`` plus an incoming ``provenance.code_snapshot`` — that
+    is the copied-binding case the detection exists for. The record funnel
+    restamps the attestation on every write that asserts a binding and reads the
+    incoming one only to record ``copied_from_finding_slug``, so nothing authored
+    survives there; refusing it would delete the detection instead of hardening
+    it. Both halves are required: without a binding nothing restamps, and a door
+    that does not restamp at all (the relocation) would store the authored block
+    verbatim.
+    """
+
+    payload = provenance or {}
+    authored = [
+        key
+        for key in _SERVICE_STAMPED_PROVENANCE_REMEDIES
+        if key in payload
+        and not (key == OPERATOR_AUTHORITY_PROVENANCE_KEY and own_verification)
+        and not (
+            key == CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY
+            and restamps_attestation
+            and CODE_SNAPSHOT_PROVENANCE_KEY in payload
+        )
+    ]
+    if not authored:
         return
-    for entry in authored_details["repro_runs"]:
-        if type(entry) is int:
-            run_id = entry
-        elif isinstance(entry, str) and entry.strip().isdigit():
-            run_id = int(entry.strip())
-        else:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"details.repro_runs entry {entry!r} is not a command-run id",
-            )
-        if run_id < 1 or connection.execute(
-            "SELECT 1 FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
-            (engagement_id, run_id),
-        ).fetchone() is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"details.repro_runs command-run id {run_id} does not belong to this engagement",
-            )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail="; ".join(
+            f"provenance.{key} {_SERVICE_STAMPED_PROVENANCE_REMEDIES[key]}"
+            for key in authored
+        ),
+    )
+
+
+def _validate_authored_command_run_provenance(
+    connection, engagement_id: int, provenance: dict[str, Any] | None
+) -> None:
+    """Resolve ``provenance.command_run_id``, or refuse it.
+
+    The same rule the ``details`` run citations get: the id names the audited run
+    this write was performed under, and one that names nothing points at a
+    transcript nobody can fetch. It is additionally folded into the code-snapshot
+    attestation, which resolves it against a real row — so an unresolvable id
+    stored on the record is a run id a reader is invited to follow and cannot.
+
+    Typed stricter than the ``details`` citations on purpose: the attestation
+    reads an ``int``, so a digit STRING would be stored on the record and
+    silently ignored by the one consumer that resolves it. ``None`` is the
+    field's own default — the API doors drop it before the call, and a direct
+    caller that spells it out is not citing a run.
+    """
+
+    run_id = (provenance or {}).get(COMMAND_RUN_PROVENANCE_KEY)
+    if run_id is None:
+        return
+    if type(run_id) is not int:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"provenance.{COMMAND_RUN_PROVENANCE_KEY} {run_id!r} is not a "
+                "command-run id"
+            ),
+        )
+    if run_id < 1 or connection.execute(
+        "SELECT 1 FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
+        (engagement_id, run_id),
+    ).fetchone() is None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"provenance.{COMMAND_RUN_PROVENANCE_KEY} command-run id {run_id} "
+                "does not belong to this engagement; list the engagement's runs "
+                "with `vigil assess command-run list`"
+            ),
+        )
+
+
+def _require_resolvable_intel_row(
+    connection, engagement_id: int, intel_id: int
+) -> str | None:
+    """Resolve an operator-authority citation, or refuse it.
+
+    Intel tables allocate ids independently, so ``intel_search_index`` is the
+    engagement's canonical id space — the same rows ``intel.resolve_intel_ids``
+    reads. One numeric id can legitimately name several entity types, and an
+    index row can outlive the record it points at, so neither "it is in the
+    index" nor "some table has that id" is enough. A citation that resolves to
+    nothing, or to several things, names no evidence, and the stamp would assert
+    an authority no reader can follow.
+
+    Returns the resolved row's CLI/API type (``note``, ``tech-component``, …),
+    which the stamp carries: ``intel get`` takes the type as a required
+    positional over ten independently numbered tables, so an id with no type
+    names no table and every surface that prints a read command would have to
+    guess one. ``None`` only when the index names a type this backend no longer
+    maps, in which case the stamp states the id alone rather than a spelling the
+    CLI cannot take.
+    """
+
+    from ..intel import _ENTITY_TO_TABLE, _INTEL_FTS_ENTITY_TYPE
+
+    indexed = connection.execute(
+        """
+        SELECT entity_type FROM intel_search_index
+        WHERE engagement_id = ? AND source_id = ?
+        ORDER BY entity_type
+        """,
+        (engagement_id, intel_id),
+    ).fetchall()
+    live: list[str] = []
+    for row in indexed:
+        entity_type = str(row["entity_type"])
+        table = _ENTITY_TO_TABLE.get(entity_type)
+        if table is None:
+            continue
+        if connection.execute(
+            f"SELECT 1 FROM {table} WHERE engagement_id = ? AND id = ?",
+            (engagement_id, intel_id),
+        ).fetchone() is not None:
+            live.append(entity_type)
+    if len(live) == 1:
+        # Inverted from intel's own forward map so the two cannot disagree about
+        # how a type is spelled on the command line.
+        return {
+            entity: cli_type
+            for cli_type, entity in _INTEL_FTS_ENTITY_TYPE.items()
+        }.get(live[0])
+    if not live:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"operator authority cites intel id {intel_id}, which resolves to no "
+                "live intel row in this engagement; record the out-of-snapshot "
+                "evidence with `vigil assess intel record note <file.json>` and cite "
+                "the id it returns"
+            ),
+        )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            f"operator authority cites intel id {intel_id}, which resolves to "
+            f"several intel rows ({', '.join(live)}); intel tables allocate ids "
+            "independently, so cite an id that names exactly one row"
+        ),
+    )
 
 
 def _current_claim_decisions(
@@ -1414,6 +1715,7 @@ def create_finding(
     verification_severity_variance: dict[str, Any] | None = None,
     verification_normal_severity_band: str | None = None,
     verification_next_test: dict[str, Any] | None = None,
+    verification_operator_authority: bool = False,
     run_candidate: dict[str, Any] | None = None,
     change_operation: str | None = None,
 ) -> dict[str, Any]:
@@ -1433,7 +1735,36 @@ def create_finding(
     # explicitly set it — otherwise preserve the stored value so a re-record /
     # an unrelated workflow patch never clobbers external submission tracking.
     incoming_submission_status = _normalize_submission_status(submission_status)
+    # Decided from the arguments alone, so the stored provenance can be resolved
+    # in the same statement that writes it.
+    verification_evidence_requested = any(
+        (
+            verification_proof_receipt_ids,
+            verification_counter_check is not None,
+            verification_confirm_check is not None,
+            verification_severity_variance is not None,
+            # An operator-authority verdict carries no receipt and no structured
+            # check, so without it the terminal-verification gate below would
+            # refuse the one write that is allowed to replace them.
+            verification_operator_authority,
+        )
+    )
+    # A dispatch-verified verdict replaces any operator-authority waiver the
+    # finding was carrying: left in place, the stamp would read as the authority
+    # behind THIS verdict.
+    supersede_operator_authority = (
+        verification_evidence_requested and not verification_operator_authority
+    )
     promoted_run_candidate: dict[str, Any] | None = None
+    # Read the CALLER's payload, before the funnel below lays the service's own
+    # stamps over it: the normalisation stamp writes
+    # ``original_canonical_location`` into this same object a few lines down, so a
+    # refusal placed after it would be judging the service's own write.
+    _refuse_authored_service_provenance(
+        provenance,
+        own_verification=verification_operator_authority,
+        restamps_attestation=True,
+    )
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         if dispatch_agent_id is not None:
@@ -1533,6 +1864,7 @@ def create_finding(
             )
             if existing is None:
                 provenance = {**(provenance or {}), "agent_id": record_author}
+        _validate_authored_command_run_provenance(connection, engagement.id, provenance)
         provenance_for_storage = dict(provenance or {})
         if existing is not None:
             # ``provenance.agent_id`` names the finding's original author for
@@ -1695,7 +2027,7 @@ def create_finding(
             existing_details=existing_details,
             effective_details=effective_details,
         )
-        _validate_authored_repro_runs(connection, engagement.id, authored_details)
+        _validate_authored_command_run_citations(connection, engagement.id, authored_details)
         if (
             existing is not None
             and existing_details.get("replies") != effective_details.get("replies")
@@ -1860,8 +2192,11 @@ def create_finding(
                     # require details to be present when replace is requested, so
                     # this won't silently null an unspecified payload.
                     _resolved_details(existing["details_json"], details, details_mode),
-                    _merge_object_text(
-                        existing["provenance_json"], provenance_for_storage
+                    _superseded_operator_authority_provenance(
+                        _merge_object_text(
+                            existing["provenance_json"], provenance_for_storage
+                        ),
+                        supersede=supersede_operator_authority,
                     ),
                     evidence_type,
                     # None => COALESCE preserves the stored submission_status; a
@@ -1918,14 +2253,6 @@ def create_finding(
                 "code_snapshot_status_before": code_snapshot_status_before,
                 "code_snapshot_status_after": code_snapshot_status,
             }
-        verification_evidence_requested = any(
-            (
-                verification_proof_receipt_ids,
-                verification_counter_check is not None,
-                verification_confirm_check is not None,
-                verification_severity_variance is not None,
-            )
-        )
         duplicate_advisories = _duplicate_advisories(
             connection,
             engagement.id,
@@ -2176,6 +2503,7 @@ def create_finding(
             "proof_receipts": [],
             "counter_check": None,
             "severity_variance": None,
+            "operator_authority": None,
         }
         if verification_evidence_requested:
             assert transition is not None
@@ -2190,10 +2518,16 @@ def create_finding(
                 confirm_check=verification_confirm_check,
                 severity_variance=verification_severity_variance,
                 normal_severity_band=verification_normal_severity_band,
+                operator_authority=verification_operator_authority,
             )
         else:
             verification_evidence["proof_receipts"] = proof_receipts_for_finding(
                 connection, engagement.id, int(finding["id"])
+            )
+            # The authority behind the verdict this write left standing, so the
+            # envelope reads the same whether or not the write touched it.
+            verification_evidence["operator_authority"] = operator_authority_stamp(
+                finding["provenance_json"]
             )
         if run_candidate is not None:
             promoted_run_candidate = run_accounting.promote_run_candidate_with_connection(
@@ -2382,6 +2716,7 @@ def patch_finding(
     verification_severity_variance: dict[str, Any] | None = None,
     verification_normal_severity_band: str | None = None,
     verification_next_test: dict[str, Any] | None = None,
+    verification_operator_authority: bool = False,
 ) -> dict[str, Any]:
     if canonical_location is not None:
         canonical_location = str(canonical_location).strip()
@@ -2524,6 +2859,7 @@ def patch_finding(
         verification_severity_variance=verification_severity_variance,
         verification_normal_severity_band=verification_normal_severity_band,
         verification_next_test=verification_next_test,
+        verification_operator_authority=verification_operator_authority,
         change_operation=change_operation,
     )
     result["finding"]["verification_invalidated"] = bool(result.get("verification_invalidated"))
@@ -2730,6 +3066,8 @@ def verify_finding(
     confirm_check: dict[str, Any] | None = None,
     severity_variance: dict[str, Any] | None = None,
     next_test: dict[str, Any] | None = None,
+    operator_authority: bool = False,
+    operator_authority_intel_id: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     normalized_verification_status = _normalize_verification_status(verification_status)
@@ -2738,17 +3076,50 @@ def verify_finding(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="verification endpoint cannot set status to unreviewed",
         )
-    if new_severity and normalized_verification_status != "downgraded":
-        # ``new_severity`` is only ever consumed by the downgraded branch. Any
-        # other disposition silently dropped it, so a verifier who believed they
-        # had re-banded the finding got a 200 and the OLD severity. Verification
-        # is not the severity-editing verb; ``patch_finding`` owns that axis.
+    if operator_authority:
+        if normalized_verification_status not in TERMINAL_VERIFICATION_STATUSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "operator authority records a terminal verdict (confirmed, "
+                    f"downgraded, false_positive); got '{verification_status}'"
+                ),
+            )
+        if not str(reason_text or "").strip():
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "operator authority requires a reason_text stating what the "
+                    "out-of-snapshot evidence settles"
+                ),
+            )
+        if operator_authority_intel_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "operator authority requires operator_authority_intel_id naming "
+                    "the intel row that holds the out-of-snapshot evidence"
+                ),
+            )
+    elif operator_authority_intel_id is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="operator_authority_intel_id is only accepted with operator_authority",
+        )
+    if new_severity and normalized_verification_status not in TERMINAL_VERIFICATION_STATUSES:
+        # A terminal verdict carries its own band: the receipt that attests the
+        # claim attests the rating recorded with it, so one fresh verification
+        # both re-bands and re-attests. A non-terminal status records no fresh
+        # attestation, so a band moved there would be unproven — and
+        # ``patch_finding``'s severity axis invalidates the verdict, which is why
+        # the refusal names it rather than leaving the caller to guess.
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"new_severity applies only to verification_status='downgraded' (got "
-                f"'{verification_status}'); change the band with "
-                f"`vigil assess finding update {slug} --severity {new_severity}`"
+                "new_severity applies only to a terminal verification "
+                f"(confirmed, downgraded, false_positive; got '{verification_status}'); "
+                f"change the band with `vigil assess finding update {slug} "
+                f"--severity {new_severity}`, which invalidates the verdict"
             ),
         )
     if normalized_verification_status == PENDING_RUNTIME_PROOF and next_test is None:
@@ -2780,6 +3151,15 @@ def verify_finding(
             """,
             (engagement.id, int(existing["id"])),
         ).fetchall()
+        if operator_authority:
+            # Resolved BEFORE the write: the stamp is the durable record of which
+            # out-of-snapshot evidence the waiver rests on, so a citation that
+            # names nothing must never reach provenance. The resolution also
+            # yields the TABLE, which the stamp has to carry: ids are per-table,
+            # so the type is half the citation.
+            operator_authority_intel_type = _require_resolvable_intel_row(
+                connection, engagement.id, int(operator_authority_intel_id)
+            )
 
     expected_row_version = int(existing["row_version"])
     existing_workflow = _row_workflow_status(existing)
@@ -2791,6 +3171,26 @@ def verify_finding(
     transition_metadata: dict[str, Any] = {}
     if confirm_check is not None:
         transition_metadata["confirm_check"] = confirm_check
+    verification_provenance = dict(provenance or {})
+    if operator_authority:
+        # Stamped on BOTH the durable provenance (the authority behind the
+        # current verdict) and this transition's metadata (the authority behind
+        # this event), so neither the point read nor the history can show the
+        # verdict without the waiver that produced it.
+        operator_stamp = {
+            "kind": OPERATOR_AUTHORITY_KIND,
+            "intel_id": int(operator_authority_intel_id),
+            # The intel table the id belongs to. Every surface that sends a
+            # reader to the cited row needs it: `intel get` takes the type as a
+            # required positional, and the ten tables number independently, so an
+            # id with no type resolves against whichever table the surface
+            # guessed — a different row, or none.
+            "intel_type": operator_authority_intel_type,
+            "at": _common._utcnow_iso_dispatch(),
+            "reason": str(reason_text).strip(),
+        }
+        verification_provenance[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_stamp
+        transition_metadata[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_stamp
     details_payload = dict(details or {})
 
     if normalized_verification_status == "downgraded":
@@ -2822,7 +3222,15 @@ def verify_finding(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=(
                     "new_severity must be lower than the current severity unless "
-                    "a prior severity-lowering transition proves it was pre-lowered"
+                    "a prior severity-lowering transition proves it was pre-lowered: "
+                    "'downgraded' records a band that MOVED. To correct the rating "
+                    "inside the band, run `vigil assess finding update "
+                    f"{slug} --details-inline "
+                    "'{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'` and then "
+                    f"`vigil assess finding verify {slug} --status confirmed "
+                    "--proof-receipt-id <id> --confirm-check-file <file>` — in that "
+                    "order, because the correction raises a claim review that the "
+                    "fresh verification is what settles"
                 ),
             )
         target_severity = normalized_new_severity
@@ -2878,6 +3286,49 @@ def verify_finding(
     else:
         transition_action = "verification_disputed"
 
+    if new_severity and normalized_verification_status != "downgraded":
+        # Every other terminal disposition re-bands through the same door, so a
+        # program calibration is one attested write instead of a severity patch
+        # that invalidates the verdict it is calibrating. The band that moved is
+        # named on the ledger row exactly as the downgraded branch names it.
+        normalized_new_severity = _normalize_severity(new_severity)
+        current_severity = _normalize_severity(str(existing["severity"]))
+        if (
+            normalized_verification_status != "false_positive"
+            and SEVERITY_RANK[normalized_new_severity] < SEVERITY_RANK[current_severity]
+        ):
+            # The direction is the disposition. ``downgraded`` refuses an upward
+            # move above for exactly this reason, and the inverse is the same
+            # rule: a band that moved DOWN on a finding that stays alive is the
+            # downgraded verdict, and writing it as 'confirmed' reaches the lower
+            # band while the ledger records ``verified_confirmed`` — no
+            # ``verified_downgraded`` row, so nothing that reads the history for
+            # band movements, or asks whether the move was pre-lowered, can see
+            # it. The CVSS-band variance gate does not cover this: ``cvss_score``
+            # is optional at record time, so an unscored finding has no band to
+            # depart from and the lowering would land unattributed.
+            #
+            # A kill is the exception: ``false_positive`` takes the finding out
+            # of the report entirely, so its band carries no verdict, and the
+            # change policy refuses `finding update --severity` on a killed
+            # finding — this route is the only way to correct the band a refuted
+            # finding is left at.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"new_severity '{normalized_new_severity}' is below the current "
+                    f"'{current_severity}', which is the 'downgraded' verdict: record "
+                    f"it with `vigil assess finding verify {slug} --status downgraded "
+                    f"--new-severity {normalized_new_severity}` and the same evidence, "
+                    "so the band that moved is named on a verified_downgraded "
+                    f"transition. '{normalized_verification_status}' carries a band "
+                    "at or above the current one."
+                ),
+            )
+        target_severity = normalized_new_severity
+        if normalized_new_severity != current_severity:
+            transition_metadata["previous_severity"] = current_severity
+
     effective_details = _json_object(
         _resolved_details(existing["details_json"], details_payload, "merge")
     )
@@ -2896,7 +3347,7 @@ def verify_finding(
         notes=notes,
         source_name=source_name or None,
         details=details_payload,
-        provenance=provenance,
+        provenance=verification_provenance,
         transition_action=transition_action,
         transition_reason_code=reason_code,
         transition_reason_text=reason_text,
@@ -2910,6 +3361,7 @@ def verify_finding(
         verification_severity_variance=severity_variance,
         verification_normal_severity_band=normal_severity_band,
         verification_next_test=next_test,
+        verification_operator_authority=operator_authority,
     )
     if artifact_ref:
         _common._register_artifact_reference(
@@ -2953,6 +3405,13 @@ def relocate_finding(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="relocation requires a reason_text",
         )
+    # This route merges caller provenance onto the stored object and writes it,
+    # so it is a provenance door and owes the same refusal the record funnel
+    # makes. It already guards the author rebind below; a waiver nobody granted
+    # is the same forgery one field over. Read before the stamps this route
+    # writes itself: it reserves the superseded binding and records the location
+    # as authored, so both keys are the service's below this line.
+    _refuse_authored_service_provenance(provenance)
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
@@ -2962,6 +3421,7 @@ def relocate_finding(
         ).fetchone()
         if int(existing["row_version"]) != expected_row_version:
             _raise_stale_finding_conflict()
+        _validate_authored_command_run_provenance(connection, engagement.id, provenance)
         incoming_provenance = _provenance_update_preserving_author(
             existing["provenance_json"], provenance, reject_rebind=True
         )
@@ -3267,6 +3727,60 @@ def _merge_technical_warnings(
     return warnings
 
 
+def _link_points_at_finding(connection, engagement_id: int, link, finding) -> bool:
+    """True when ``link`` resolves to ``finding`` itself."""
+
+    if str(link["target_kind"]) != "finding":
+        return False
+    target_ref = str(link["target_ref"] or "")
+    if target_ref:
+        resolved = connection.execute(
+            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+            (engagement_id, target_ref),
+        ).fetchone()
+        if resolved is not None and int(resolved["id"]) == int(finding["id"]):
+            return True
+    return link["target_id"] is not None and int(link["target_id"]) == int(
+        finding["id"]
+    )
+
+
+def _merge_displacement_warnings(
+    target_slug: str,
+    source_slug: str,
+    *,
+    displaced: tuple[tuple[str, str, str], ...],
+) -> list[str]:
+    """Name each canonical value the merge REPLACED with the source's.
+
+    ``_merge_technical_warnings`` names what the merge left behind. The mirror
+    case is louder: when the source outranks the target, the merge takes the
+    source's evidence pointer, narrative and attribution over the canonical
+    record's own — so the displaced value has to be in the response that
+    destroyed it, or it cannot be restored. A FILL displaces nothing and is
+    silent, which is also how the change policy reads it.
+    """
+
+    warnings: list[str] = []
+    for field, before, after in displaced:
+        if not before or before == after:
+            continue
+        remedy = (
+            f"To restore the canonical value, run `vigil assess finding update "
+            f"{target_slug} --{field.replace('_', '-')} '{before}'`."
+            if field in {"evidence_ref", "summary"}
+            # Discovery attribution is immutable on patch, so the displaced value
+            # is recoverable only from here and from the transition ledger.
+            else "Discovery attribution is immutable on patch, so this warning and "
+            "the merge transition are where the displaced value is recorded."
+        )
+        warnings.append(
+            f"merge replaced {target_slug}'s {field} ({before}) with {source_slug}'s "
+            f"({after}) because the source carries the stronger record. {remedy}"
+        )
+    return warnings
+
+
 def merge_findings(
     engagement_id: int,
     *,
@@ -3505,6 +4019,19 @@ def merge_findings(
         )
         if CODE_SNAPSHOT_PROVENANCE_KEY in target_provenance:
             merged_provenance_payload.pop(CODE_SNAPSHOT_ATTESTATION_PROVENANCE_KEY, None)
+        # An authority is as untransferable as an attestation: the source's
+        # operator-authority waiver was recorded against the SOURCE's verdict, and
+        # the target keeps its own (or keeps none). Both waiver keys, for the same
+        # reason — the superseded record is the history of a waiver the TARGET was
+        # never granted, and carrying it tells every later reader that this
+        # finding's verdict once rested on evidence nobody cited for it. The
+        # as-authored location is the third: it is what the SOURCE's author wrote
+        # before a normalisation moved it, and on the survivor it reads as the
+        # location this finding was filed at. Dropped BEFORE the target's own
+        # provenance is laid over the top, so the survivor keeps whichever record
+        # it earned itself.
+        for key in _UNTRANSFERABLE_SERVICE_PROVENANCE_KEYS:
+            merged_provenance_payload.pop(key, None)
         merged_provenance_payload.update(target_provenance)
         merged_provenance_payload["merge"] = {
             "source_slug": source_slug,
@@ -3530,6 +4057,17 @@ def merge_findings(
             source_stronger and str(source["evidence_ref"])
         ):
             merged_evidence_ref = str(source["evidence_ref"])
+        merge_warnings.extend(
+            _merge_displacement_warnings(
+                target_slug,
+                source_slug,
+                displaced=(
+                    ("evidence_ref", str(target["evidence_ref"]), merged_evidence_ref),
+                    ("summary", str(target["summary"]), merged_summary),
+                    ("source_name", str(target["source_name"]), merged_source_name),
+                ),
+            )
+        )
 
         source_links = connection.execute(
             "SELECT * FROM assessment_finding_links "
@@ -3589,6 +4127,25 @@ def merge_findings(
         for row in source_links:
             if _is_root_cause_link(row):
                 continue
+            if _link_points_at_finding(connection, engagement.id, row, target):
+                # Consolidating a variant into its own parent is the canonical
+                # dedup move, and the source's `variant_of -> target` edge becomes
+                # a self-link on the target. Copying it has no purpose: the
+                # `merged_from` link written below already records that exact
+                # relationship. Refusing it rolled the whole merge back.
+                continue
+            inherits_proof_run = str(row["link_kind"]) == "proof_run" and (
+                _active_finding_link(
+                    connection,
+                    engagement.id,
+                    finding_id=int(target["id"]),
+                    link_kind=str(row["link_kind"]),
+                    target_kind=str(row["target_kind"]),
+                    target_id=row["target_id"],
+                    target_ref=str(row["target_ref"] or ""),
+                )
+                is None
+            )
             _upsert_finding_link(
                 connection,
                 engagement.id,
@@ -3600,6 +4157,21 @@ def merge_findings(
                 notes=row["notes"],
                 provenance=_json_object(row["provenance_json"]),
             )
+            if inherits_proof_run:
+                # The survivor legitimately owns the duplicate's evidence, and
+                # absorbing the association is what keeps the run readable from
+                # the record that survived. But the survivor can now verify on a
+                # receipt from a run that never backed a verification of IT, and
+                # the single-use rule cannot see that, so the absorption is
+                # audited rather than silent.
+                merge_warnings.append(
+                    f"merge moved {source_slug}'s proof_run association (run "
+                    f"{row['target_id']}) onto {target_slug}; a decision receipt from "
+                    f"that run has not backed any verification of {target_slug}. "
+                    f"Confirm the run covers {target_slug}'s claim before citing its "
+                    "receipts, or retire the link with `vigil assess finding link "
+                    f"{target_slug} --link-id <id> --retire --reason \"...\"`."
+                )
         connection.execute(
             """
             UPDATE assessment_finding_links
@@ -3973,6 +4545,13 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
             candidate_reason = f"verified_{severity}"
         record["candidate_reason"] = candidate_reason
         record["chain_required"] = chain_required
+        # ``candidate_reason`` reads "verified_<severity>" for every candidate,
+        # including one whose verdict rests on the operator's out-of-snapshot
+        # evidence rather than a decision receipt. The authority travels with the
+        # candidate so the approval gate never reads that as proof.
+        record[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_authority_stamp(
+            record.get("provenance")
+        )
         candidates.append(record)
 
     return sorted(
@@ -3996,6 +4575,7 @@ _TRANSITION_SUMMARY_COLUMNS = """
     from_severity, to_severity,
     from_canonical_location, to_canonical_location,
     reason_code, reason_text, created_at,
+    json_extract(metadata_json, '$.operator_authority') AS operator_authority_json,
     CASE WHEN details_before_json IS NOT NULL
            OR details_after_json IS NOT NULL
            OR notes_before_json IS NOT NULL
@@ -4019,6 +4599,11 @@ def _serialize_transition_summary(row: sqlite3.Row) -> dict[str, Any]:
     record["reason_preview"] = preview
     record["reason_word_count"] = word_count
     record["reason_truncated"] = word_count > 100
+    authority = _json_object(record.pop("operator_authority_json", None))
+    record["operator_authority"] = (
+        {key: authority[key] for key in ("kind", "intel_id", "intel_type") if key in authority}
+        if authority else None
+    )
     return record
 
 

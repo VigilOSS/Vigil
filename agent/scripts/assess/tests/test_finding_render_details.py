@@ -75,3 +75,107 @@ def test_malformed_details_are_reported(details, capsys) -> None:
 def test_projection_without_details_does_not_warn(capsys) -> None:
     assert details_object({"slug": "VA-001"}) == {}
     assert capsys.readouterr().err == ""
+
+
+# ── An operator-authority verdict is marked wherever the verdict renders ─────
+#
+# ``findings.md`` is the report the operator hands over, and the markdown-tree
+# ``draft.md`` is the per-finding review document. A terminal verdict reached on
+# the operator's own out-of-snapshot evidence names no proof receipt, so
+# rendering the bare status word presents it as dispatch-verified (ADR 0043).
+
+_WAIVER = {
+    "kind": "out_of_snapshot",
+    "intel_id": 7,
+    "intel_type": "note",
+    "at": "2026-11-07T10:00:00Z",
+    "reason": "The Acme deployment config disables the affected route.",
+}
+
+
+def _attested(**overrides) -> dict:
+    finding = {
+        "slug": "VA-001",
+        "title": "Order lookup trusts the caller id",
+        "verification_status": "downgraded",
+        "details": {"evidence": "proof"},
+        "provenance": {"agent_id": "HUNT-1", "operator_authority": _WAIVER},
+    }
+    finding.update(overrides)
+    return finding
+
+
+def test_render_marks_a_verdict_that_rests_on_operator_authority() -> None:
+    rendered = render_finding(_attested())
+
+    verification = next(
+        line for line in rendered.splitlines() if line.startswith("- **Verification**:")
+    )
+    assert "downgraded" in verification
+    assert "operator attested" in verification.lower()
+    assert "intel note 7" in verification
+    assert "no proof receipt" in verification
+    # The operator's own statement of what the evidence settles, verbatim.
+    assert f"- **Operator Attestation**: {_WAIVER['reason']}" in rendered
+
+
+def test_render_reads_the_stamp_from_the_point_read_envelope() -> None:
+    """The point read carries it in ``verification_audit``; the list in ``provenance``.
+
+    ``export findings`` renders list rows and the markdown tree renders the same
+    block, so the renderer has to find the stamp in whichever envelope its
+    caller fetched.
+    """
+    rendered = render_finding(
+        _attested(
+            provenance={"agent_id": "HUNT-1"},
+            verification_audit={"proof_receipt_ids": [], "operator_authority": _WAIVER},
+        )
+    )
+
+    assert "intel note 7" in rendered
+    assert _WAIVER["reason"] in rendered
+
+
+def test_render_names_the_citation_without_a_type_when_none_was_recorded() -> None:
+    """The id alone is still a citation; the table is simply not asserted."""
+    typeless = {key: value for key, value in _WAIVER.items() if key != "intel_type"}
+    rendered = render_finding(_attested(provenance={"operator_authority": typeless}))
+
+    assert "intel 7" in rendered
+    assert "operator attested" in rendered.lower()
+
+
+def test_a_receipt_backed_verdict_renders_the_plain_verification_bullet() -> None:
+    rendered = render_finding(
+        {
+            "slug": "VA-002",
+            "title": "Order lookup trusts the caller id",
+            "verification_status": "confirmed",
+            "details": {"evidence": "proof"},
+            "provenance": {"agent_id": "HUNT-1"},
+        }
+    )
+
+    assert "- **Verification**: confirmed" in rendered.splitlines()
+    assert "Operator Attestation" not in rendered
+
+
+def test_an_attested_reason_cannot_forge_markdown_structure() -> None:
+    """The reason is authored text landing in a document a client reads.
+
+    Nothing is escaped or dropped — ADR 0019 rules that out and the attestation
+    is the only statement of what the evidence settles — so the continuation is
+    indented inside its own list item instead, exactly as the shared containment
+    helper does for every other persisted string this tree renders.
+    """
+    hostile = "Config disables it.\n## [VA-999] A finding nobody recorded"
+    rendered = render_finding(
+        _attested(provenance={"operator_authority": {**_WAIVER, "reason": hostile}})
+    )
+
+    assert "Config disables it." in rendered
+    assert "## [VA-999] A finding nobody recorded" in rendered
+    assert "\n## [VA-999]" not in rendered
+    headings = [line for line in rendered.splitlines() if line.startswith("## ")]
+    assert headings == ["## [VA-001] Order lookup trusts the caller id"]

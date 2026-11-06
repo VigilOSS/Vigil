@@ -15,6 +15,7 @@ lives in the backend (`app.services.code_analysis`), imported normally.
 """
 from __future__ import annotations
 
+import ast
 import sys
 from pathlib import Path
 
@@ -24,7 +25,16 @@ _SCRIPTS_ROOT = _REPO_ROOT / "agent" / "scripts"
 if str(_SCRIPTS_ROOT) not in sys.path:
     sys.path.insert(0, str(_SCRIPTS_ROOT))
 
-from assess.lib import audit_enums, classify_buckets, surfaces, vuln_taxonomy  # noqa: E402
+from assess.lib import (  # noqa: E402
+    audit_enums,
+    classify_buckets,
+    surfaces,
+    treesitter_catalogues,
+    treesitter_index,
+    treesitter_lightweight,
+    treesitter_streaming,
+    vuln_taxonomy,
+)
 from app.services import code_analysis  # noqa: E402
 
 
@@ -101,6 +111,157 @@ def test_code_families_subset_of_canonical():
     assert not non_canonical, (
         "code_analysis declares classes not in VULN_CLASSES (the code track "
         "must align by inclusion):\n  " + "\n  ".join(non_canonical)
+    )
+
+
+# Classes the structural indexer attaches to a sink that are deliberately NOT
+# reachable as a required code-track family.
+#
+# `_applicable_families_for_file` computes what `done` demands and what the
+# effort gate holds, from slot types, language and the architect's role label.
+# A class the indexer emits but that map can never produce is a signal that
+# points at nothing: the hunter reads it off the index and no closeout ever
+# asks about it. Each entry below is therefore a DECISION with a stated reason,
+# never silence — mirroring `TECHNIQUE_EXEMPT_CLASSES`. If the code track CAN
+# honestly demand the class, it belongs in a `SLOT_VULN_CLASSES`,
+# `ROLE_CONTEXT_VULN_CLASSES` or `WORKFLOW_CONTEXT_VULN_CLASSES` row instead.
+CODE_FAMILY_EXEMPT_INDEXER_CLASSES: dict[str, str] = {
+    # Refinements of a coarse code-track rollup the map already requires: the
+    # indexer names the specific sink, closeout asks about the family.
+    "sqli": "refines the `injection` / `web-app-injection` families the slot map already requires",
+    "ssti": "refines the `injection` / `web-app-injection` families the slot map already requires",
+    "xss": "refines the `web-app-injection` family the managed slot rows already require",
+    "mass-assignment": "refines the `web-app-injection` family the managed slot rows already require",
+    "lfi": "refines the `path-traversal` family every file-reading slot row already requires",
+    "rfi": "refines the `path-traversal` family every file-reading slot row already requires",
+    "secrets-exposure": "a literal in source, not a taint path: proven by reading the sink the index already names, and reported as a finding rather than reviewed as a family",
+    "clickjacking": "a response-header and framing posture of a rendered page, not a property of the source file the hunter reviews",
+    # The infrastructure family, for the same reason its skill allowlist entry
+    # above records: Vigil has no build-hardening or deployment-review skill,
+    # so there is no reviewer to hold to the family.
+    "privilege-escalation": "build/deploy hardening read out of a Dockerfile or shell script; Vigil has no build-hardening skill to own the review",
+    "network-exposure": "a declared port in a Dockerfile or compose file; Vigil has no deployment-review skill to own the review",
+    "supply-chain": "build-time provenance read out of a Dockerfile or CI config; Vigil has no build-hardening skill to own the review",
+}
+
+
+def _string_list(node: ast.AST) -> list[str] | None:
+    if not isinstance(node, (ast.List, ast.Tuple)):
+        return None
+    values: list[str] = []
+    for element in node.elts:
+        if not isinstance(element, ast.Constant) or not isinstance(element.value, str):
+            return None
+        values.append(element.value)
+    return values
+
+
+def indexer_emitted_vuln_classes() -> set[str]:
+    """Every vuln class the structural indexer can attach to a sink.
+
+    The sink catalogue and the two pattern tables are read at runtime. The
+    Dockerfile, shell, markup and template readers build their sinks inline, so
+    their classes live in function bodies rather than a table and are swept out
+    of the module source instead — a literal `"vuln_classes": [...]` entry, or
+    the third argument of a local `flag(kind, line, classes)` helper.
+    """
+    emitted: set[str] = set()
+    for definition in treesitter_catalogues._SINK_DEFINITIONS:
+        emitted.update(definition["vuln_classes"])
+    for _kind, _pattern, classes in treesitter_lightweight._PS_SINK_PATTERNS:
+        emitted.update(classes)
+    for patterns in treesitter_streaming._STREAM_EXTRA_SINK_PATTERNS.values():
+        for _kind, _pattern, classes in patterns:
+            emitted.update(classes)
+    emitted.update(treesitter_catalogues._PHP_FILE_INCLUSION_VULN_CLASSES)
+    emitted.update(treesitter_lightweight._FREEMARKER_URL_VULN_CLASSES)
+    for module in (
+        treesitter_catalogues,
+        treesitter_index,
+        treesitter_lightweight,
+        treesitter_streaming,
+    ):
+        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Dict):
+                for key, value in zip(node.keys, node.values):
+                    if (
+                        isinstance(key, ast.Constant)
+                        and key.value == "vuln_classes"
+                        and (values := _string_list(value)) is not None
+                    ):
+                        emitted.update(values)
+            elif (
+                isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Name)
+                and node.func.id == "flag"
+                and len(node.args) == 3
+                and (values := _string_list(node.args[2])) is not None
+            ):
+                emitted.update(values)
+    return emitted
+
+
+def code_track_required_families() -> set[str]:
+    """Every class `_applicable_families_for_file` can ever require."""
+    families: set[str] = set()
+    for groups in code_analysis.SLOT_VULN_CLASSES.values():
+        for group_families in groups.values():
+            families.update(group_families)
+    for _keywords, groups in (
+        *code_analysis.ROLE_CONTEXT_VULN_CLASSES,
+        *code_analysis.WORKFLOW_CONTEXT_VULN_CLASSES,
+    ):
+        for group_families in groups.values():
+            families.update(group_families)
+    return families
+
+
+def test_every_indexer_emitted_class_is_required_or_exempt_with_a_reason():
+    """REVERSE drift guard, mirroring the bidirectional technique guard.
+
+    `test_code_families_subset_of_canonical` proves the families the code track
+    REQUIRES are canonical. Without this direction the indexer can keep emitting
+    a class that no slot, role or workflow row can ever turn into a required
+    family: the hunter reads it off the structural index, closeout never asks
+    about it, and the class silently means nothing on the code track.
+    """
+    emitted = indexer_emitted_vuln_classes()
+    assert len(emitted) > 15, (
+        "the indexer-class sweep found almost nothing — the sink tables moved "
+        "or the inline literals changed shape, so this guard is no longer "
+        "measuring anything"
+    )
+    required = code_track_required_families()
+    unreachable = sorted(emitted - required - set(CODE_FAMILY_EXEMPT_INDEXER_CLASSES))
+    assert not unreachable, (
+        "the structural indexer emits classes that no code-track row can turn "
+        "into a required family, so closeout can never ask about them. Add a "
+        "row to SLOT_VULN_CLASSES / ROLE_CONTEXT_VULN_CLASSES / "
+        "WORKFLOW_CONTEXT_VULN_CLASSES in app/services/code_analysis.py, or add "
+        "the class to CODE_FAMILY_EXEMPT_INDEXER_CLASSES in this file with a "
+        "one-line reason:\n  " + "\n  ".join(unreachable)
+    )
+
+
+def test_code_family_exemptions_stay_an_honest_ledger():
+    """The exemption list must not rot: an entry that is no longer emitted, or
+    that a later row DID make required, has to leave."""
+    canonical = vuln_taxonomy.all_classes()
+    emitted = indexer_emitted_vuln_classes()
+    required = code_track_required_families()
+    stale: list[str] = []
+    for cls, reason in sorted(CODE_FAMILY_EXEMPT_INDEXER_CLASSES.items()):
+        if not reason.strip():
+            stale.append(f"{cls} (exempt with no stated reason)")
+        if cls not in canonical:
+            stale.append(f"{cls} (not a canonical class)")
+        elif cls not in emitted:
+            stale.append(f"{cls} (the indexer no longer emits it — drop the entry)")
+        elif cls in required:
+            stale.append(f"{cls} (now a required code-track family — drop the entry)")
+    assert not stale, (
+        "Stale CODE_FAMILY_EXEMPT_INDEXER_CLASSES entries:\n  " + "\n  ".join(stale)
     )
 
 
@@ -525,3 +686,59 @@ def test_reference_mirror_bucket_table_matches_the_bucket_definitions():
         f"  only in doc:    {sorted(set(rows.items()) - set(expected.items()))}\n"
         f"  only in module: {sorted(set(expected.items()) - set(rows.items()))}"
     )
+
+
+def test_code_coverage_and_trigger_vocabularies_are_the_canonical_one():
+    """The two durable code-track writes speak the canonical vocabulary.
+
+    `cwe_coverage[].family` is rendered as a real column by `code-coverage
+    --cwe-matrix`, so a non-canonical family is phantom coverage in the
+    operator's primary effort view. `cross_file_triggers[].vuln_class` becomes a
+    durable obligation that no canonical required-family set can ever match. Both
+    normalizers therefore validate membership here rather than only non-emptiness.
+    """
+    import pytest
+    from fastapi import HTTPException
+
+    canonical = vuln_taxonomy.all_classes()
+    assert "sqli" in canonical and "typo-class" not in canonical
+
+    accepted = code_analysis._normalize_cwe_coverage(
+        [
+            {"family": "sqli", "effort": 10},
+            {"family": code_analysis.NOT_APPLICABLE_COVERAGE_FAMILY, "effort": 0},
+        ]
+    )
+    assert [entry["family"] for entry in accepted] == [
+        "sqli",
+        code_analysis.NOT_APPLICABLE_COVERAGE_FAMILY,
+    ]
+
+    with pytest.raises(HTTPException) as coverage_error:
+        code_analysis._normalize_cwe_coverage([{"family": "sqlii", "effort": 10}])
+    assert coverage_error.value.status_code == 400
+    assert "sqli" in coverage_error.value.detail
+
+    accepted_triggers = code_analysis._normalize_cross_file_triggers(
+        [{"file_path": "src/a.py", "vuln_class": "path-traversal", "reason": "shared"}]
+    )
+    assert [row["vuln_class"] for row in accepted_triggers] == ["path-traversal"]
+
+    with pytest.raises(HTTPException) as trigger_error:
+        code_analysis._normalize_cross_file_triggers(
+            [{"file_path": "src/a.py", "vuln_class": "path-traversl", "reason": "shared"}]
+        )
+    assert trigger_error.value.status_code == 400
+    assert "path-traversal" in trigger_error.value.detail
+    # `not_applicable` marks an inspected-and-ruled-out coverage entry; a
+    # trigger is an obligation and has no such marker.
+    with pytest.raises(HTTPException):
+        code_analysis._normalize_cross_file_triggers(
+            [
+                {
+                    "file_path": "src/a.py",
+                    "vuln_class": code_analysis.NOT_APPLICABLE_COVERAGE_FAMILY,
+                    "reason": "shared",
+                }
+            ]
+        )

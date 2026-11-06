@@ -40,7 +40,7 @@ instructions: |2
   - [ ] `vigil assess fetch "code/threat-model/<repo-id>"` reports `current: true` for the identity block's generation and digest
   - [ ] Call graph readable at `tools/analysis-state/call-graph.json`
   - [ ] Memory-safety findings fetched via `vigil assess fetch findings` (or summary provided by operator)
-  - [ ] File classifications fetched via `vigil assess fetch "code/files?repo_id=<id>&limit=5000"` (or summary provided)
+  - [ ] File classifications fetched via `vigil assess fetch "code/files?repo_id=<id>" --paginate` (or summary provided) — `--paginate` is the complete read; a hand-written `limit` returns one bounded page
   - [ ] Existing fuzzer inventory checked with the mandatory skill's Stage 1 searches — confirms whether this target already has libFuzzer/OSS-Fuzz coverage before you write a new harness
   - [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed through an
         audited Kali runtime check; no compiler or repository-built binary runs on the host

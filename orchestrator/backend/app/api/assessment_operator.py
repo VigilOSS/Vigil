@@ -322,9 +322,11 @@ class CoverageDeferralPayload(BaseModel):
 class ContainmentProposalPayload(BaseModel):
     """Strict shape for ``kind='containment_proposal'`` decision rows.
 
-    Mirrors ``agent/schemas/containment-proposal.schema.json`` so the JSONL
-    writer (``vigil assess record-proposal``) and the backend dispatch-decisions
-    row written by ``vigil blue propose-contain`` enforce the same contract.
+    Mirrors ``agent/schemas/containment-proposal.schema.json`` so the schema a
+    specialist writes against and the dispatch-decisions row the backend stores
+    enforce the same contract. ``vigil blue propose-contain`` is the only writer;
+    it records that row by running
+    ``vigil assess agent decision --kind containment_proposal``, which POSTs here.
     Without this, a malformed proposal still records a row but is unsafe to
     approve+execute later (e.g. ``vigil assess approve-proposal`` flips
     ``resolved=true``, then ``vigil blue contain`` reads garbage from the
@@ -486,8 +488,10 @@ class DecisionCreate(BaseModel):
                 ContainmentProposalPayload.model_validate(self.payload)
             except Exception as exc:
                 # Surface as 422 with the underlying detail so operators see
-                # which field is invalid (matches the JSONL-side error from
-                # ``vigil assess record-proposal``).
+                # which field is invalid. `vigil blue propose-contain` writes
+                # this row through `vigil assess agent decision`, which relays
+                # the detail to stderr and exits non-zero, so the operator is
+                # told which field to fix rather than handed a proposal id.
                 raise HTTPException(
                     status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                     detail=f"containment_proposal payload invalid: {exc}",

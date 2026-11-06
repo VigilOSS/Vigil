@@ -4,9 +4,29 @@ from __future__ import annotations
 import sys
 from typing import Any
 
-from assess.lib.client import AssessError
+from assess.lib.client import DEFAULT_READ_TIMEOUT_SECONDS, AssessError
 
 DEFAULT_BULK_WRITE_SIZE = 500
+
+# A full request-observation chunk carries every row's request and response
+# body, so one chunk is routinely multi-megabyte and the backend writes a
+# request variant plus an observation per row inside a single transaction.
+# Coverage items are small flat rows with no bodies attached, so they need less.
+_OBSERVATION_SECONDS_PER_ROW = 0.05
+_COVERAGE_ITEM_SECONDS_PER_ROW = 0.03
+
+
+def _scaled_write_budget(seconds_per_row: float, rows: int) -> dict[str, float]:
+    """``client.post`` keyword arguments widening the budget for one chunk.
+
+    A write whose server-side cost scales with its size outruns the flat 10 s
+    default long before it commits, and a timeout on a write is not a cheap
+    retry: the rows may already be durable, so the caller can only report the
+    batch as uncertain. Only a chunk that plausibly needs longer asks for
+    longer, the same way the code-repository refresh commit does.
+    """
+    budget = seconds_per_row * rows
+    return {"read_timeout": budget} if budget > DEFAULT_READ_TIMEOUT_SECONDS else {}
 
 
 def _positive_id(value: object) -> bool:
@@ -139,7 +159,13 @@ def post_request_observations_bulk(
     if not observations:
         return []
     try:
-        response = client.post("request-observations/bulk", {"items": observations})
+        response = client.post(
+            "request-observations/bulk",
+            {"items": observations},
+            **_scaled_write_budget(
+                _OBSERVATION_SECONDS_PER_ROW, len(observations)
+            ),
+        )
     except AssessError as exc:
         should_retry_individually = bulk_endpoint_missing(exc) or (
             fallback_individual and _bulk_payload_error(exc)
@@ -188,7 +214,13 @@ def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix
         return
     for chunk in _chunks(items, DEFAULT_BULK_WRITE_SIZE):
         try:
-            response = client.post("coverage-items/bulk", {"items": chunk})
+            response = client.post(
+                "coverage-items/bulk",
+                {"items": chunk},
+                **_scaled_write_budget(
+                    _COVERAGE_ITEM_SECONDS_PER_ROW, len(chunk)
+                ),
+            )
         except AssessError as exc:
             if not (bulk_endpoint_missing(exc) or _bulk_payload_error(exc)):
                 print(

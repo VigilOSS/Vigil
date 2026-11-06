@@ -105,9 +105,11 @@ consume:
 | `time_window_utc` | `["2026-05-17T03:22:14Z", "2026-05-17T03:24:58Z"]` | UTC ISO-8601, ALWAYS. Convert from any timezone the SIEM emitted before storing. The earliest plausible trigger anchors the look-back window (rule 6). |
 | `source_signal` | rule name + rule ID + severity hint + detection control name | Whatever the alert source emitted as its rule identity. Preserves provenance for the verifier's Check 2. |
 
-Write this normalization into the finding's parsed `details` as a top-level
-`alert_normalized` object so downstream agents (verifier, report-writer)
-read the same parse you did.
+Write this normalization into the finding's `details` as one `alert_normalized`
+object so downstream agents (verifier, report-writer) read the same parse you
+did. The fields above live inside it; on the finding itself the observed
+principals go in `details.iocs`, the window in `details.network_window_utc`,
+and the rule identity in `details.source_signal`.
 
 ### Step 3 — Classify
 
@@ -197,40 +199,34 @@ register after the verifier confirms it.
 
 ### Step 5 — Draft the finding skeleton
 
+`vigil assess contract finding record` owns the payload — every required top-level
+field, the supported `details` keys, and the validation the write applies. Read it
+before the first write; a template copied into a skill drifts from the schema and
+the write is then refused.
+
 ```bash
+vigil assess contract finding record
 vigil assess finding record alert-triage-specialist /tmp/finding.json --agent-id <your-agent_id>
 ```
 
-With `/tmp/finding.json` shaped:
+L1 writes `workflow_status: "draft"` (L2 promotes it to `active`) and
+`verification_status: "unreviewed"`, and recomputes `severity` from Step 3 instead of
+copying the alert's `severity_hint`.
 
-```json
-{
-  "title": "<one-line headline derived from rule name + actor>",
-  "summary": "<two-sentence description: what fired, against whom, when>",
-  "severity": "<recomputed from Step 3>",
-  "workflow_status": "active",
-  "verification_status": "unreviewed",
-  "details": {
-    "platform": "gws|m365|aws|okta|edr|network|other",
-    "actor": "<from Step 2>",
-    "target": "<from Step 2>",
-    "time_window_utc": ["<start>", "<end>"],
-    "alert_normalized": { ... full Step 2 normalization ... },
-    "mitre_techniques": ["T1078.004", "T1098.001"],
-    "severity_rationale": "<one sentence: why this severity, not the SIEM's>",
-    "confidence": "low|medium|high",
-    "confidence_rationale": "<one sentence>",
-    "source_signal": {
-      "rule_name": "...",
-      "rule_id": "...",
-      "detection_control": "...",
-      "severity_hint": "..."
-    },
-    "alert_external_id": "<SIEM alert UUID or operator-assigned slug>",
-    "tenant_ref_paths_consulted": ["agent/references/tenants/<customer>-<tenant-suffix>.md"]
-  }
-}
-```
+The blue-specific `details` keys this skill fills:
+
+| `details` key | Value |
+|---|---|
+| `platform` | `gws|m365|aws|okta|edr|network|other` |
+| `alert_normalized` | the full Step 2 normalization, including its `actor` / `target` / `action` / `time_window_utc` fields |
+| `alert_external_id` | SIEM alert UUID, or the operator-assigned slug |
+| `source_signal` | `{rule_name, rule_id, detection_control, severity_hint}` |
+| `tenant_ref_paths_consulted` | the tenant refs this dispatch actually loaded |
+| `iocs` | the Step 2 actor and target, plus any IP / domain / hash / URL the alert carried |
+| `network_window_utc` | the Step 2 `time_window_utc` pair |
+| `mitre_techniques` | the L1 guess; L2 confirms and L3 verifies |
+| `confidence` | `low` at L1 (see below) |
+| `severity_rationale` | one sentence on why this severity rather than the SIEM's, and what holds confidence at its stated level |
 
 Capture the returned finding slug for the handoff (Step 6) and the activity
 entry (Step 7).
@@ -311,7 +307,7 @@ Run all four in order:
    record it:
 
    ```bash
-   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff.json
+   vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-<agent-id>.json
    ```
 
 4. **One-screen TSV summary** to stdout for the operator (see Output
@@ -342,33 +338,34 @@ verifier rejects it on intake and reopens the finding.
   "agent_id": "<runtime-agent-id from dispatch banner>",
   "agent_role": "alert-triage-specialist",
   "phase": "triage",
-  "handoff_status": "ready",
-  "finding_slug": "<from Step 5>",
-  "skill_to_load": "google-workspaces",
-  "platform": "gws",
-  "alert_external_id": "<from Step 2>",
-  "actor": "<from Step 2>",
-  "target": "<from Step 2>",
-  "time_window_utc": ["<start>", "<end>"],
-  "mitre_techniques": ["T1078.004", "T1098.001"],
-  "severity": "high",
+  "summary": "<what fired, against whom, in which UTC window, the recomputed severity, and the mechanical-FP outcome>",
   "confidence": "low",
-  "confidence_rationale": "Single-signal; L1 has no audit pull yet.",
-  "mechanical_fp_checked": true,
-  "mechanical_fp_outcome": "miss",
-  "tenant_ref_paths_consulted": [
-    "agent/references/tenants/acme-gws.md"
-  ],
-  "evidence_refs": [<artifact-id-of-alert-intake>],
-  "next_specialist": "investigator",
-  "next_steps": [
-    "Pull Admin Reports login feed for actor over time_window_utc ± 30d",
-    "Cross-check IP against user's 30-day ASN baseline",
-    "Search for sibling OAuth grant / mailbox-rule events in same actor session"
-  ],
+  "handoff_status": "ready",
+  "finding_slugs": ["<from Step 5>"],
+  "recommended_next_agent": "investigator",
   "coverage_gaps": [],
-  "cross_platform_correlation_notes": "",
-  "rationale": "<one paragraph: why dispatch to this skill, what L2 should look for first>"
+  "next_steps": [
+    {"action": "Pull the Admin Reports login feed for the actor over time_window_utc +/- 30d", "target": "<actor>", "recommended_agent": "investigator", "rationale": "L1 is single-signal; the baseline decides whether this sign-in is anomalous"},
+    {"action": "Cross-check the sign-in IP against the user's 30-day ASN baseline", "target": "<actor>", "recommended_agent": "investigator", "rationale": "an in-baseline ASN downgrades the alert"},
+    {"action": "Search for sibling OAuth-grant / mailbox-rule events in the same actor session", "target": "<actor>", "recommended_agent": "investigator", "rationale": "a second signal in the window is what lifts confidence above low"}
+  ],
+  "extras": {
+    "skill_to_load": "google-workspaces",
+    "platform": "gws",
+    "alert_external_id": "<from Step 2>",
+    "actor": "<from Step 2>",
+    "target": "<from Step 2>",
+    "time_window_utc": ["<start>", "<end>"],
+    "mitre_techniques": ["T1078.004", "T1098.001"],
+    "severity": "high",
+    "confidence_rationale": "Single-signal; L1 has no audit pull yet.",
+    "mechanical_fp_checked": true,
+    "mechanical_fp_outcome": "miss",
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-gws.md"],
+    "evidence_refs": [<artifact-id-of-alert-intake>],
+    "cross_platform_correlation_notes": "",
+    "rationale": "<one paragraph: why dispatch to this skill, what L2 should look for first>"
+  }
 }
 ```
 
@@ -377,16 +374,24 @@ changes:
 
 ```json
 {
+  "agent_id": "<runtime-agent-id from dispatch banner>",
+  "agent_role": "alert-triage-specialist",
+  "phase": "triage",
+  "summary": "Mechanical false-positive proposal: all five screen conditions hold against tenant-ref pattern <pattern-id>; L3 owns the structured counter-check.",
+  "confidence": "low",
   "handoff_status": "ready",
-  "finding_slug": "<proposed-fp slug>",
-  "skill_to_load": "alert-fp-verification",
-  "next_specialist": "incident-verifier",
-  "disposition": "false_positive",
-  "rationale": "Mechanical FP proposal — matches tenant-ref pattern <pattern-id>",
-  "mechanical_fp_checked": true,
-  "mechanical_fp_outcome": "hit",
-  "tenant_ref_paths_consulted": ["..."],
-  "evidence_refs": [<artifact-id>]
+  "finding_slugs": ["<proposed-fp slug>"],
+  "recommended_next_agent": "incident-verifier",
+  "coverage_gaps": [],
+  "extras": {
+    "skill_to_load": "alert-fp-verification",
+    "disposition": "false_positive_proposed",
+    "rationale": "Mechanical FP proposal — matches tenant-ref pattern <pattern-id>",
+    "mechanical_fp_checked": true,
+    "mechanical_fp_outcome": "hit",
+    "tenant_ref_paths_consulted": ["agent/references/tenants/acme-gws.md"],
+    "evidence_refs": [<artifact-id>]
+  }
 }
 ```
 

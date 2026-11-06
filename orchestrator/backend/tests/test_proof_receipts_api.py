@@ -1774,3 +1774,43 @@ def test_role_attributed_command_receipt_names_attribution_and_recovery(
     assert f"command run {command.json()['id']}" in detail
     assert "'code-vuln-verifier'" in detail
     assert "`--agent-id VERIFY-1` and no `--agent-name`" in detail
+
+
+def test_a_queued_scan_run_is_told_to_begin_not_mistaken_for_sealed(
+    client, isolate_settings
+) -> None:
+    """A scan-purpose run starts QUEUED, which is not sealed.
+
+    Calling it sealed routes the agent at the documented escape for a terminal
+    run — starting a replacement, which is also queued — so the same call fails
+    the same way forever. The remedy is the verb that begins the run.
+    """
+    engagement_dir = _seed(client, isolate_settings)
+    artifact = _artifact(client, engagement_dir, "evidence/queued.txt", "scan evidence")
+    run = client.post(
+        f"{BASE}/assessment-runs",
+        json={
+            "run_uuid": "queued-scan",
+            "run_kind": "code",
+            "run_purpose": "scan",
+            "producer_dispatch_agent_id": "VERIFY-1",
+        },
+    )
+    assert run.status_code == 201, run.text
+    assert run.json()["status"] == "queued"
+
+    receipt = client.post(
+        f"{BASE}/proof-receipts",
+        json={
+            "run_id": run.json()["id"],
+            "evidence_kind": "source_observation",
+            "artifact_id": artifact["id"],
+            "observed_result": "a queued run records nothing yet",
+        },
+    )
+
+    assert receipt.status_code == 409, receipt.text
+    detail = receipt.json()["detail"]
+    assert "queued" in detail
+    assert "sealed" not in detail
+    assert f"vigil assess proof-run begin {run.json()['id']}" in detail

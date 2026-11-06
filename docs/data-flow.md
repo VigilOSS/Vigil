@@ -39,12 +39,10 @@ decision (ADR 0001, calibrated by ADR 0012 for the decisive-unit exception).
 |---|---|---|---|
 | **Backend ledger** (SQLite via FastAPI) | Durable canonical state: targets/services/request-variants/observations, coverage-items, probes, surfaces, findings, chains, intel, host-liveness, command-runs, **and the work-buffer queue** (`assessment_work_items`) — engagement-scoped via a real `engagement_id` FK, priority-scored + gf-classified *at insert*. | Ingest verbs (via `/request-observations[/bulk]`, which carries a `work_item` derivation block the backend persists server-side in the same transaction — ADR 0013) + `ingest arjun`/out-of-scope-skip rows via `/work-items/bulk` directly + the record/resolve CLI verbs + the machine auto-emit path. | Everything downstream: coverage, depth gate, resume-brief, phase gates, report readiness, frontend, **and** work-buffer triage (`work-buffer clusters`, `fetch-by-priority`) → specialist dispatch routing. |
 
-Before ADR 0013, the work-item row lived in a separate per-engagement SQLite file (`cases.db`) written
-by a second, decoupled step after the observation POST, so its backend FKs
-(`request_variant_id`/`service_id`/`coverage_item_id`) could transiently lag the observation that
-produced them. The backend now derives the work-item row in the **same transaction** as the
-observation/coverage-item write, so that lag window no longer exists. `dns-discovery` still leaves data
-on disk with no exporter — that is orthogonal to the work-buffer fold.
+The backend derives the work-item row in the **same transaction** as the observation/coverage-item
+write (ADR 0013), so its FKs (`request_variant_id`/`service_id`/`coverage_item_id`) always resolve to
+the observation that produced them. `dns-discovery` leaves data on disk with no exporter — that is
+orthogonal to the work-buffer fold.
 
 ### Operator API/CLI contract pointers
 
@@ -54,7 +52,7 @@ CLI contract and the named request model/service for payload and persistence tru
 | Operator action | CLI owner | API/model owner | Storage/service owner |
 |---|---|---|---|
 | Dispatch start, validation-only dry run, and identity attribution | `agent/scripts/assess/commands/agent.py`; `lib/instruction_identity.py` | `api/assessment.py:DispatchCreate` | `services/state_manager/dispatches.py`; `assessment_dispatches` |
-| Finding create/update/verify and author repair | `commands/record_finding.py`, `update_finding.py`, `verify_finding.py`, `repair_finding_author.py` | `api/assessment.py` finding request models | `services/state_manager/findings.py`; `assessment_findings` and audit events |
+| Finding create/update/verify and author repair | `commands/record_finding.py`, `update_finding.py`, `verify_finding.py`, `bind_finding_author.py` | `api/assessment.py` finding request models | `services/state_manager/findings.py`; `assessment_findings` and audit events |
 | Intel record, create/update outcome, filtering, and point reads | `commands/record_intel.py`, `list_intel.py`, `get_intel.py` | `api/intel_schemas.py`; `api/intel.py` | `services/intel.py`; `intel_*` tables and search index |
 | Artifact register, targeted refresh, search, and finding unlink | `commands/artifact.py` | `api/artifact_index.py` | `services/artifact_index.py`; `assessment_artifacts` (proof receipts remain independent and immutable) |
 | Resume orientation and count/truncation truth | `commands/resume_brief.py` | `api/assessment.py` resume route | `services/assessment_memory.py` projections over canonical backend tables |
@@ -70,7 +68,7 @@ CLI contract and the named request model/service for payload and persistence tru
 | `ingest candidates` (curated JSONL) | `/request-observations/bulk` + `/surface-request-variant-links` | same + `SurfaceRequestVariantLinkRequest` | same + `surface_request_variant_links` | **populated** *if the JSONL supplies `headers`* (`_coerce_header_params`) — no automated producer feeds it |
 | `ingest spec` (OpenAPI import) | `/request-observations/bulk` | same | same | **populated** from `in: header` params (`ingest_spec.py:469-518`) |
 | `ingest httpx` (host liveness) | `/host-liveness` | `HostLivenessUpsertRequest` | `assessment_host_liveness` | n/a (host-level, no request) |
-| **mitmproxy** `proxy_addon.py` (derived observation) | `/request-observations` | `RequestObservationIngestRequest` | request-variants/observations/coverage-items + `assessment_work_items` (derived server-side, ADR 0013 — the addon no longer opens a local SQLite connection) | **populated** into `header_schema` from the `dict(req.headers)` the proxy already holds (`:1013`); full headers also still dumped into an opaque `raw_payload` blob |
+| **mitmproxy** `proxy_addon.py` (derived observation) | `/request-observations` | `RequestObservationIngestRequest` | request-variants/observations/coverage-items + `assessment_work_items` (derived server-side, ADR 0013; the addon holds no database connection of its own) | **populated** into `header_schema` from the `dict(req.headers)` the proxy already holds (`:1013`); full headers also still dumped into an opaque `raw_payload` blob |
 | mitmproxy (full-flow capture) | `/http-flows` | `HttpFlowIngestRequest` | `assessment_http_flows` | **full headers** — but **opt-in** (off by default) and orthogonal to coverage |
 | `dns-discovery` | — | — | local files only | n/a |
 | `web-discovery` | `/host-liveness` + delegates to `ingest endpoints` | — | host-liveness + (delegated) | **populated** (inherits `ingest endpoints`'s capture; katana run `-or -ob`) |
@@ -82,8 +80,8 @@ CLI contract and the named request model/service for payload and persistence tru
 | `finding record` / `intel record` / `record-chain` / `block-technique` / kali `command-runs` | resp. endpoints | resp. models | outcome tables | n/a (outcome writes) |
 
 **Header takeaway:** capture now spans OpenAPI-spec import, hand-authored candidate JSONL, the bulk
-endpoint-ingest path, and the live proxy — the two previously-dropping, highest-volume paths now populate
-`header_schema` from data they already hold. Per-header-NAME coverage-items are still not emitted by any
+endpoint-ingest path, and the live proxy — the two highest-volume paths populate `header_schema`
+from data they already hold. Per-header-NAME coverage-items are still not emitted by any
 path. See §6.
 
 ---
@@ -181,17 +179,16 @@ override decision):
 - **Report readiness** (separate) blocks report export finalize (409) and the `report` transition.
 
 `check-phase-readiness`'s `--strict`/`--strict-deep` are a *different* command's exit codes and do
-**not** drive the `transition_phase` gates. `signal_classes_uncovered` (the per-class refinement) now
-renders in the **default** `check-phase-readiness` text (`_render_depth_ledger`), not only `--json` —
-and, for decisive/high-confidence units, it is no longer purely advisory: an uncovered `BLOCK_HIGH`
-class feeds the one hard gate above (ADR 0012). It stays advisory-only for every other unit.
+**not** drive the `transition_phase` gates. `signal_classes_uncovered` (the per-class refinement)
+renders in the **default** `check-phase-readiness` text (`_render_depth_ledger`) as well as `--json`.
+For decisive and high-confidence units it is not advisory: an uncovered `BLOCK_HIGH` class feeds the
+one hard gate above (ADR 0012). It stays advisory-only for every other unit.
 
-**Preview, not a cold block (fixed by ADR 0012).** `_DEPTH_PHASES` (`check_phase_readiness.py:104`) now
+**Preview, not a cold block (ADR 0012).** `_DEPTH_PHASES` (`check_phase_readiness.py:104`) now
 includes `report` alongside `consume`/`verify`, so `check-phase-readiness --phase report` renders the
 depth ledger — and specifically the would-block set — as a **preview** before the actual transition,
-with the `depth_deferral` escape named inline. This closes the previous gap, where `terminal_depth_block`
-(firing at `report`/`complete`) could not be previewed from the readiness surface at all and surfaced
-only at the live `transition-phase report/complete` call. See
+with the `depth_deferral` escape named inline. `terminal_depth_block` fires at `report`/`complete`,
+and the readiness surface is where an operator sees the would-block set before reaching it. See
 `docs/adr/0012-coverage-grain-selective-load-bearing-depth.md` for the root-cause framing (the fix is a
 *continuous, legible* deferred-terminal obligation, not a reworded "advisory" label).
 

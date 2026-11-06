@@ -39,6 +39,23 @@ It does not deny tools, filter destinations, disable research, or weaken web-eng
 `denied_tools`, required headers, evidence isolation, and the untrusted-target-text boundary retain
 their existing owners and behavior.
 
+### Runtime Identity authority fields
+
+A Runtime Identity field is an authority grant, not context. The packet's own Authority block
+tells you to establish unspecified packet fields before the affected action; that covers missing
+CONTEXT (an unknown target, credential, or coverage note you can read out of backend state). It
+does not cover Runtime Identity. Nothing you can read tells you what phase the operator authorized
+this dispatch for, so when `authorized_phase` reads `MISSING (malformed dispatch)` — or is absent
+altogether — do not derive it from the engagement's current phase, from the role you were given,
+or from which authority fields happen to be present.
+
+Stop before reading source, name the missing field, and request a corrected packet. Specifically do
+not resolve it by running the branch that needs the fewest fields: on every role whose mode is
+selected by phase, that branch is the one that records no receipts, so the dispatch reads as a
+normal return while the queue still shows its files unreviewed. `agent start` stamps the phase from
+`scope.json` when the operator omits it and echoes what it stamped, so a packet that still carries
+the marker is one where even scope state could not answer.
+
 ### Code Source Identity
 
 Every code dispatch carries this block immediately after Runtime Identity at the top of the
@@ -92,6 +109,15 @@ Open `structural_index_manifest_path` from the Code Source Identity block, confi
 the repo-relative file path through `path_to_index`. Read that referenced JSON; do not guess
 hashed filenames or scan for a basename collision. Phase 0 owns the generation-scoped layout,
 while this is the canonical consumer lookup rule for every code specialist.
+
+Join each `path_to_index` value to the `structural-index/` ROOT, not to the manifest's own
+directory. The manifest sits six levels below that root
+(`structural-index/<repo_id>/<generation>/<path_version>/<source_manifest_digest>/<indexer_digest>/<structural_input_digest>/manifest.json`)
+and every value is root-relative, so joining one to the manifest's directory reads nothing.
+Equivalently, and easier by hand: every value ends in `files/<hashed-basename>`, so
+`<manifest-dir>/files/<basename of the path_to_index value>` is the same artifact. A "no such file"
+on a path that is present in `path_to_index` is this join, never a missing index.
+
 The artifact is compact JSON, one top-level key or array record per line, with `call_sites` last.
 A `call_sites` record names `caller`, `callee`, and `line`. A PHP call site adds `receiver` when it
 has one; other languages keep it in `callee`. Any call site adds `passes_caller_params: true` only
@@ -215,7 +241,10 @@ file and analyzed function; an empty query, truncated index, failed tool, or abs
 is not proof of absence. Before you write that a caller, guard, sink, registration, or file is
 absent, rerun the same search (same root, flags, and filters) for something you know is present,
 such as the symbol's own definition, and cite both commands; an empty result counts only when that
-control matches.
+control matches. A count is not an absence and carries the same receipt. Before you write how many
+call sites, callers, or guard sites exist, run the `-l`/`-c` enumeration over the whole write path
+and paste it; an eyeballed "invoked only at one site" suppresses the other callers that reach the
+same sink.
 
 Before recording or escalating a finding, prove the applicable shipped product path, exact taint
 trace or supported operation/state/lifetime sequence, failed invariant, feasible preconditions,
@@ -306,12 +335,42 @@ non-callable or was read:
 
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
-- `clean` -- No vulnerabilities found in current analysis
+- `clean` -- No vulnerabilities found in current analysis. The trailing `<notes>` positional is
+  required here; `done` refuses a `clean` close without it
+- `skipped` -- Material deliberately excluded from review, not material you reviewed and
+  cleared. It needs `--skip-reason` naming one of `test-fixture`, `generated-code`, `minified`,
+  `out-of-scope-language`, `vendored-dependency`; any other string is refused. `done` also
+  refuses `skipped` outright for a `medium`, `high` or `critical` file -- the classification
+  already says that file is attack-relevant, so review it and close it `clean`, `finding` or
+  `suspicious`. A skip records intentionally unreviewed material and cannot clear coverage debt,
+  so reach for it only when the file is genuinely outside what you were asked to review
 
 If analysis is blocked by genuinely unavailable code or context, do not submit a
 disposition for that item yet. Close its lease with `vigil assess code-dispatch
 needs-context <item-id> <agent-id> <lease-token> [expansion-json-file]`, naming
 the missing dependency so the queue can route the expansion.
+
+If the analysis itself failed for a tooling reason — the index was unreadable, a
+command the review depended on crashed, the file would not decode — close the
+lease with `vigil assess code-dispatch error <item-id> <agent-id> <lease-token>
+[notes]` and say in the notes what failed. That is a distinct queue status from
+`needs-context`: the context was there and the tooling was not, so the operator's
+route back is `code-dispatch retry-error` rather than supplying an expansion.
+Filing a tooling failure as `needs-context` sends the operator looking for
+context that already existed.
+
+If you are holding a file you cannot review at all — another lane owns it, your
+lane is being retired, the scope moved — hand the lease back with `vigil assess
+code-dispatch release <item-id> <agent-id> <lease-token> --reason "<why>"`. This
+is the lease close that fits when every disposition would be false: `clean` and
+`skipped` each assert something about the file, and `needs-context` claims you
+looked and needed more. `release` returns the row to unleased `pending` with your
+reason on its notes, so the next lane finds the work and the operator sees why it
+moved. It supersedes the attempt's receipts exactly as `reset-stale` does, so read
+`code-dispatch progress <item-id>` first: when the attempt holds receipts worth
+keeping, ask the operator for `adopt-lease` to move the work to its new owner
+instead. Never just abandon the lease — an abandoned row falls to the stale sweep,
+which discards its receipts with no reason recorded anywhere.
 
 Coverage must be structurally attributable, but write-up depth can be proportional:
 - Attack-facing, sink-bearing, stateful, or ambiguous functions need full reasoning.
@@ -414,8 +473,13 @@ Use the helper contracts as the canonical shape source before authoring durable 
 aligned with backend validation instead of relying on copied prompt snippets.
 `finding record` fills the initial lifecycle defaults (`workflow_status=active`, `verification_status=unreviewed`) when omitted — use those rather than setting lifecycle fields manually.
 For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
-`finding verify` for confirm/downgrade/dispute decisions (`--status false_positive` with a completed
-structured counter-check for a false-positive verification), `finding update --status draft` to reopen a
+`finding verify` for confirm/downgrade/dispute decisions (`--status false_positive` needs a completed
+structured counter-check AND `--details-inline '{"kill_reason": "...", "kill_check": N}'` naming the
+check that falsified the claim, an integer 1-5; the write is refused without both, and a kill_reason
+saying the test could not be RUN is `blocked` unless `details.required_followup` names the settling
+test), `--status disputed` as the cheap withdrawal when you cannot meet that bar (it needs only
+`--reason` and still survives a later sweep, so a claim you no longer stand behind does not come
+back as `unreviewed`), `finding update --status draft` to reopen a
 previously verified or false-positive finding, and `finding update` for non-verification metadata
 or workflow updates. Reopening clears prior verification but deliberately leaves workflow status
 `draft`; verification does not promote it. Before fuzz/complete, every retained draft must be
@@ -433,6 +497,12 @@ supplied as an optional consistency check. Renew long-running claims with
 the operator's stale-reset window (the standard 10-minute window means heartbeat every 5 minutes
 or less); results and closeouts using a reclaimed lease are rejected. `<agent-id>` is the fetched
 `agent_name`: your dispatch `agent_id` from Runtime Identity, never the role name.
+A lost lease token is recoverable, so do not abandon the item or invent one:
+`vigil assess code-dispatch progress <item-id>` prints the live holder and token for that item, and
+`vigil assess code-dispatch list --show-tokens` prints them for a whole lane. Both read current
+queue state, so the token they print is the one `code-record analysis` and `done` will accept — and
+if they show the item held by another `agent_name`, the lease was reclaimed and your results for it
+will be rejected whatever token you supply.
 For `finding` and `suspicious`, record inline `evidence` or an engagement-owned `evidence_ref` on
 the current same-disposition result before closeout. A `clean` closeout carries non-empty family
 coverage and review notes. These disposition-specific gates preserve evidence-backed queue state

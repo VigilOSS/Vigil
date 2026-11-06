@@ -145,6 +145,9 @@ from assess.lib.finding_render import (
     details_object,
     engagement_relative as _engagement_relative,
     hygiene_warnings as _hygiene_warnings,
+    operator_authority_citation,
+    operator_authority_reason,
+    operator_authority_stamp,
     poc_lines as _poc_lines,
     prose_advisories,
     repro_rehearsal_advisories,
@@ -704,17 +707,22 @@ def _repro_runs(client, finding: dict) -> tuple[list[dict], list[str]]:
 def _repro_rehearsal_decisions(client) -> tuple[list[dict], str]:
     """The engagement's ``kind='repro_rehearsal'`` decision rows, or a reason.
 
-    ONE filtered read — the same shape ``transition_phase._blind_triage_blockers``
-    uses for ``blind_triage_verdict``: the kind is filtered SERVER-side and the
-    page size is the endpoint's maximum, so a long engagement cannot push an older
-    rehearsal behind the default ``limit=100``. Per-slug filtering is left to
-    :func:`repro_rehearsal_advisories` because the endpoint has no slug parameter
-    (the finding slug lives inside the row's JSON payload).
+    Paged to completion at the endpoint's maximum, the same shape
+    ``transition_phase._blind_triage_blockers`` uses for ``blind_triage_verdict``:
+    the kind is filtered SERVER-side, so one page is almost always the whole
+    answer, and a long engagement cannot push an older rehearsal behind the
+    bound. Per-slug filtering is left to :func:`repro_rehearsal_advisories`
+    because the endpoint has no slug parameter (the finding slug lives inside the
+    row's JSON payload).
 
-    The cost is deliberately kept to one round trip because export runs REPEATEDLY
-    — it is the report-writer's author -> write-back -> re-render loop, not a
-    once-per-finding command — and it is skipped entirely for a finding with no
-    authored steps (see the call site), where there is no reproduction to rehearse.
+    It pages rather than sending one request at the ceiling because the per-slug
+    filter runs over whatever this returns: a row dropped by a bounded page reads
+    as "no rehearsal on record", which is the one wrong answer this function must
+    not give. Export runs REPEATEDLY — it is the report-writer's author ->
+    write-back -> re-render loop, not a once-per-finding command — so the walk
+    stays cheap by filtering server-side first, and it is skipped entirely for a
+    finding with no authored steps (see the call site), where there is no
+    reproduction to rehearse.
 
     FAILS SOFT, returning ``([], reason)``. An unreachable backend says nothing
     about whether the rehearsal happened, and the two outcomes it would otherwise
@@ -724,7 +732,9 @@ def _repro_rehearsal_decisions(client) -> tuple[list[dict], str]:
     finding.
     """
     try:
-        rows = client.get(f"dispatch-decisions?kind={_REHEARSAL_DECISION_KIND}&limit=1000")
+        rows = client.get_all_pages(
+            f"dispatch-decisions?kind={_REHEARSAL_DECISION_KIND}", page_size=1000
+        )
     except AssessError as exc:
         return [], f"repro-rehearsal decisions unavailable: {exc}"
     if not isinstance(rows, list):
@@ -844,6 +854,21 @@ def _finding_record_lines(finding: dict) -> list[str]:
         value = _nonempty(finding.get(key))
         if value:
             ver.append(f"- {label}: {value}")
+    # A terminal verdict the operator reached on their own out-of-snapshot
+    # evidence names no proof receipt, so the status word by itself reads here
+    # exactly like a dispatch-verified one — in the document a bug-bounty triager
+    # reads. ADR 0043 names that as the one presentation not available, so the
+    # authority is stated beside the verdict and the operator's reason with it:
+    # the report-writer is about to describe how this finding was settled.
+    authority = operator_authority_stamp(finding)
+    if authority:
+        ver.append(
+            f"- Operator authority: {operator_authority_citation(authority)}"
+            " — no proof receipt; operator-attested out-of-snapshot evidence"
+        )
+        attestation = operator_authority_reason(authority)
+        if attestation:
+            ver.append(f"- Operator attestation: {attestation}")
     discovered = _nonempty(d.get("discovered_by")) or _nonempty(finding.get("source_name"))
     if discovered:
         ver.append(f"- Discovered by: {discovered}")

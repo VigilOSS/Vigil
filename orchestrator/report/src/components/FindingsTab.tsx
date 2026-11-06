@@ -5,7 +5,13 @@ import { flattenFindings, formatLabel, SEVERITY_ORDER, SEVERITY_RANK } from "../
 import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "../lib/poc";
 import { reproRunIds, stepsText } from "../lib/steps";
 import { Markdown } from "./Markdown";
-import { CopyMarkdownButton, ReferenceList, ReproRunProvenance } from "./FindingParts";
+import {
+  CopyMarkdownButton,
+  OperatorAuthorityAttestation,
+  OperatorAuthorityTag,
+  ReferenceList,
+  ReproRunProvenance,
+} from "./FindingParts";
 
 interface Props {
   data: ReportData;
@@ -18,7 +24,12 @@ function severityRank(finding: ReportFinding): number {
   return SEVERITY_RANK[finding.severity ?? "info"] ?? 0;
 }
 
-function FindingDetail({ finding, draft }: { finding: ReportFinding; draft: boolean }) {
+/**
+ * The expanded per-finding pane. Exported so its content can be pinned without
+ * driving the table's open/closed state, mirroring the operator SPA's
+ * `SubmissionPane`.
+ */
+export function FindingDetail({ finding, draft }: { finding: ReportFinding; draft: boolean }) {
   const curl = pocCurl(asPocRequest(finding.poc_request));
   const responseText = pocResponseText(asPocResponse(finding.poc_response));
   return (
@@ -26,6 +37,9 @@ function FindingDetail({ finding, draft }: { finding: ReportFinding; draft: bool
       <div className="rpt-finding-detail-actions no-print">
         <CopyMarkdownButton finding={finding} />
       </div>
+      {/* Ahead of the finding's own claims: how the verdict was reached
+          qualifies every section below it. */}
+      <OperatorAuthorityAttestation finding={finding} />
       {finding.summary && (
         <section>
           <h4>Summary</h4>
@@ -132,7 +146,11 @@ function FindingDetail({ finding, draft }: { finding: ReportFinding; draft: bool
         {finding.verification_status && (
           <div>
             <dt>Verification</dt>
-            <dd>{formatLabel(finding.verification_status)}</dd>
+            {/* The tag sits in the same <dd> as the status, so the two cannot be
+                read apart — a verdict and its authority are one fact. */}
+            <dd>
+              {formatLabel(finding.verification_status)} <OperatorAuthorityTag finding={finding} />
+            </dd>
           </div>
         )}
         {finding.source_name && (

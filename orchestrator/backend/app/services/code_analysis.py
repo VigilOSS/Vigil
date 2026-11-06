@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import hashlib
 import json
 import re
@@ -88,6 +89,7 @@ from .code_analysis_support import (
     _normalize_variant_evidence_ref,
     _normalized_variant_language,
     _now_iso,
+    _QUEUE_ACTIVE_STATUSES,
     _reject_unknown_fields,
     _require_current_reportable_root_file_finding,
     _require_queue_generation,
@@ -121,6 +123,7 @@ from .state_manager.findings import (
     is_file_finding,
     load_code_repo_snapshot_states,
 )
+from .state_manager.taxonomy_bridge import vuln_taxonomy
 from .state_manager import run_accounting
 from .variant_scopes import (
     MAX_VARIANT_PARENT_FINDINGS,
@@ -285,6 +288,19 @@ def stage_code_repo_refresh_files(
         if str(repo.get("pending_refresh_token", "")) != refresh_token:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="repo refresh token is stale")
         for file_record in files:
+            # The staged record IS the repository manifest, and `code-index
+            # sync` binds the structural index from every file's language at
+            # once, so one non-canonical value here refuses the WHOLE
+            # repository later. The staged record is also attested
+            # byte-for-byte against the sealed manifest at commit
+            # (`VerifiedSnapshotAttestation.assert_staged_inventory`), so the
+            # exact spelling the snapshot sealed is what has to be canonical:
+            # folding one into shape would only move the refusal to the commit
+            # door and report it there as metadata drift.
+            _require_canonical_language(
+                str(file_record.get("language", "") or ""),
+                file_label=str(file_record["file_path"]),
+            )
             connection.execute(
                 """
                 INSERT INTO code_ingest_staging (
@@ -1416,6 +1432,22 @@ def publish_code_repo_lsp_config(
 # =========================================================================
 
 
+# The columns `code/files` may order by, mapped to their SQL. Closed on purpose:
+# the sort reaches the ORDER BY as text, and a caller-supplied column name is
+# the one place a listing could grow an injection or a silent no-op.
+CODE_FILE_SORT_COLUMNS: dict[str, str] = {
+    "analysis_priority": "files.analysis_priority",
+    "file_path": "files.file_path",
+    "loc": "files.loc",
+    "git_churn_score": "files.git_churn_score",
+    "id": "files.id",
+}
+CODE_FILE_SORT_ORDERS: tuple[str, ...] = ("asc", "desc")
+# What a caller that names no sort has always received.
+DEFAULT_CODE_FILE_SORT = "analysis_priority"
+DEFAULT_CODE_FILE_ORDER = "desc"
+
+
 def list_code_files(
     engagement_id: int,
     *,
@@ -1424,11 +1456,39 @@ def list_code_files(
     classification: str | None = None,
     analysis_status: str | None = None,
     search: str | None = None,
+    path_prefix: list[str] | None = None,
+    path_glob: list[str] | None = None,
+    sort: str | None = None,
+    order: str | None = None,
     limit: int | None = None,
     offset: int = 0,
     include_header_snippet: bool = False,
 ) -> dict[str, Any]:
+    """Page the admitted file inventory.
+
+    `path_prefix` / `path_glob` scope the page, `total` and `has_more` through
+    `_file_path_scope_sql` — the same owner `fetch` claims with and
+    `coverage --by-path` groups with, so a subtree wave plan read here and the
+    claim that executes it cannot disagree about what the subtree holds.
+    `search` stays a substring match on the whole path, which is a different
+    question and keeps answering it.
+    """
     engagement = _engagement_or_404(engagement_id)
+    sort_key = sort or DEFAULT_CODE_FILE_SORT
+    order_key = (order or DEFAULT_CODE_FILE_ORDER).lower()
+    if sort_key not in CODE_FILE_SORT_COLUMNS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                "sort must be one of: "
+                + ", ".join(sorted(CODE_FILE_SORT_COLUMNS))
+            ),
+        )
+    if order_key not in CODE_FILE_SORT_ORDERS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="order must be one of: " + ", ".join(CODE_FILE_SORT_ORDERS),
+        )
     clauses = [
         "files.engagement_id = ?",
         "files.retired_at IS NULL",
@@ -1450,22 +1510,29 @@ def list_code_files(
     if search is not None:
         clauses.append("files.file_path LIKE ? ESCAPE '\\'")
         params.append(like_contains(search))
+    path_scope, path_params = _file_path_scope_sql("files", path_prefix, path_glob)
+    if path_scope:
+        clauses.append(path_scope)
+        params.extend(path_params)
     from_where = f"""
         FROM code_files AS files
         JOIN code_repos AS repos
           ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
         WHERE {' AND '.join(clauses)}
     """
+    # `files.id ASC` stays the tiebreaker on every sort so a page is stable and
+    # an offset cannot skip or repeat a row.
     query = f"""
         SELECT files.*
         {from_where}
-        ORDER BY files.analysis_priority DESC, files.id ASC
+        ORDER BY {CODE_FILE_SORT_COLUMNS[sort_key]} {order_key.upper()}, files.id ASC
     """
     if limit is not None:
         query += f" LIMIT {int(limit)}"
         if offset > 0:
             query += f" OFFSET {int(offset)}"
     with get_connection() as connection:
+        register_path_scope_functions(connection)
         total = int(
             connection.execute(
                 f"SELECT COUNT(*) {from_where}", tuple(params)
@@ -1579,6 +1646,26 @@ CLASSIFICATION_PRIORITY_BANDS = {
     "low": (5, 19),
     "skip": (0, 0),
 }
+# Per-family effort each reviewed tier is measured against. `done` already
+# demands one `cwe_coverage` entry per applicable family at every tier, but an
+# `effort: 0` entry satisfies that, so a tier absent from this map could close
+# with a token number and nothing would say so. `low` is absent on purpose:
+# build and test infrastructure is admitted and accounted, not held to a
+# review-depth floor.
+EFFORT_THRESHOLDS = {"critical": 70, "high": 50, "medium": 30}
+# Which of those tiers the coverage gate actually REFUSES on. `effort` is a
+# number the reviewing agent writes into its own `cwe_coverage` entry and
+# nothing but a float parse stands behind it, so ADR 0001 decision 3 (left
+# standing by ADR 0012) bars it from carrying a gate on its own: under pressure
+# a hard block on self-attested signal gets gamed, forced or mass-deferred into
+# false confidence. Critical and high keep refusing because that scope is what
+# the dispatch contract promises and what the operator reads as the depth floor;
+# every other measured tier is reported through `effort_warnings` — the harness
+# channel that reaches readiness `quality_gate.warnings` and every review-quality
+# rendering — and never withholds `gate.passed`. The terminal structural blocks
+# (an untouched, undeferred high-value unit; `uncovered_high_risk_files`) are
+# unaffected.
+_BLOCKING_EFFORT_TIERS = frozenset({"critical", "high"})
 _VALID_CLASSIFICATIONS = frozenset(CLASSIFICATION_PRIORITY_BANDS)
 _VALID_SLOT_TYPES = frozenset({
     "NETWORK-INPUT",
@@ -1627,17 +1714,11 @@ def _require_classification_priority(
     return priority
 
 
-def _synchronize_pending_queue_priority(
-    connection,
-    engagement_id: int,
-    file_id: int,
-    *,
-    current_priority: int,
-    new_priority: int,
-) -> None:
-    if current_priority == new_priority:
-        return
-    current_rows = [
+def _current_file_queue_attempts(
+    connection, engagement_id: int, file_id: int
+) -> list[dict[str, Any]]:
+    """One file's current-generation queue attempts, oldest first."""
+    return [
         dict(row)
         for row in connection.execute(
         """
@@ -1657,6 +1738,82 @@ def _synchronize_pending_queue_priority(
         (engagement_id, file_id),
         ).fetchall()
     ]
+
+
+def _require_no_live_lease(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    *,
+    action: str,
+    current_rows: list[dict[str, Any]] | None = None,
+) -> None:
+    """Refuse a metadata write that would discharge work an agent still holds.
+
+    `_reopen_file_metadata_review` closes every current queue row `done` /
+    `superseded` and supersedes every receipt on the file. That is right for an
+    unclaimed row and catastrophic for a live one: the holder's next heartbeat
+    and every receipt it already wrote come back as "not processing" and
+    "current status is done", which is exactly what a reclaim looks like. So
+    every door that can reopen a review — `analysis_priority` on one side,
+    the review identity (classification / role / slot_types / language) on the
+    other — asks this first, and the refusal names the holder with the same
+    identity `_queue_lease_mismatch` prints so the operator can find the agent
+    that owns the work.
+
+    A processing row with no recorded owner is named too: it is unclaimable and
+    equally unsafe to discharge silently. Only an ACTIVE attempt can hold a live
+    lease: a terminal row keeps the identity that closed it as its audit trail,
+    and retiring that row is what a reopen is for.
+    """
+    rows = (
+        _current_file_queue_attempts(connection, engagement_id, file_id)
+        if current_rows is None
+        else current_rows
+    )
+    held: list[str] = []
+    for row in rows:
+        if str(row["status"]) not in _QUEUE_ACTIVE_STATUSES:
+            continue
+        holder = str(row["assigned_agent"] or "")
+        token = str(row["lease_token"] or "")
+        if str(row["status"]) != "processing" and not holder and not token:
+            continue
+        if holder or token:
+            held.append(
+                f"queue item {int(row['id'])} is {row['status']} and held by "
+                f"agent {holder!r} under lease {token!r}"
+            )
+        else:
+            held.append(
+                f"queue item {int(row['id'])} is processing with no recorded lease owner"
+            )
+    if not held:
+        return
+    raise HTTPException(
+        status_code=status.HTTP_409_CONFLICT,
+        detail=(
+            f"file {file_id} has live or inconsistently leased queue work: "
+            + "; ".join(held)
+            + ". Close it with `code-dispatch done`, `error` or `needs-context`, "
+            "hand it to a replacement with `code-dispatch adopt-lease`, return it "
+            "unclaimed with `code-dispatch release`, or discard it with "
+            f"`code-dispatch reset-stale` before {action}"
+        ),
+    )
+
+
+def _synchronize_pending_queue_priority(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    *,
+    current_priority: int,
+    new_priority: int,
+) -> None:
+    if current_priority == new_priority:
+        return
+    current_rows = _current_file_queue_attempts(connection, engagement_id, file_id)
     _, active_row, active_issue = _canonical_queue_attempt_state(current_rows)
     if active_issue is not None:
         raise HTTPException(
@@ -1669,16 +1826,13 @@ def _synchronize_pending_queue_priority(
     if active_row is None:
         return
     row = active_row
-    queue_status = str(row["status"])
-    is_leased = bool(str(row["assigned_agent"] or "") or str(row["lease_token"] or ""))
-    if queue_status == "processing" or is_leased:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"file {file_id} has live or inconsistently leased queue work; "
-                "finish or recover it before changing analysis_priority"
-            ),
-        )
+    _require_no_live_lease(
+        connection,
+        engagement_id,
+        file_id,
+        action="changing analysis_priority",
+        current_rows=current_rows,
+    )
     cursor = connection.execute(
         """
         UPDATE code_analysis_queue
@@ -1728,6 +1882,63 @@ def _normalize_slot_types(value: Any, *, field_name: str) -> list[str]:
             ),
         )
     return normalized
+
+
+def _require_canonical_language(value: str, *, file_label: str) -> str:
+    """Hold a classify-time language to the set the structural index can bind.
+
+    `canonical_structural_language` runs over every file in a repository from
+    `structural_input_identity_digest`, so one non-canonical value makes
+    `code-index sync` refuse the WHOLE repository, unbind its structural index
+    and then block every new dispatch — a failure that surfaces long after the
+    classify call that caused it. Validating at the write door turns that into
+    one 400 naming the file. The accepted spelling is returned unchanged rather
+    than folded (`c++` stays `c++`): the alias is canonical for the index and
+    the code-track family maps carry both spellings.
+    """
+    try:
+        canonical_structural_language(value)
+    except HTTPException as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{file_label}: {exc.detail}. Allowed values: "
+                + ", ".join(sorted(_CANONICAL_STRUCTURAL_LANGUAGES - {""}))
+            ),
+        ) from exc
+    return value
+
+
+def _require_classification_skip_reason(
+    classification: str, skip_reason: str, *, field_name: str
+) -> str:
+    """A `skip` is an exclusion decision, so it owes one of the standard reasons.
+
+    The close path has demanded this since C50 and accounting only admits a skip
+    that carries a reason (`code_analysis_support._CURRENT_ACCOUNTED_FILE_EXISTS_SQL`).
+    Classifying a file `skip` is the same decision taken earlier, so an
+    unexplained one is the same unaccounted file.
+    """
+    if classification != "skip":
+        if skip_reason:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{field_name} only describes classification='skip'; "
+                    f"got {skip_reason!r} on a {classification} classification"
+                ),
+            )
+        return ""
+    if skip_reason not in SKIP_REASONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{field_name} is required when classification='skip', one of: "
+                + ", ".join(SKIP_REASONS)
+                + (f"; got {skip_reason!r}" if skip_reason else "")
+            ),
+        )
+    return skip_reason
 
 
 def _require_slot_types_for_classification(classification: str, slot_types: list[str], *, field_name: str) -> None:
@@ -1784,6 +1995,7 @@ def bulk_classify_code_files(
         )
         affected_module_ids: set[int] = set()
         structurally_invalidated_repo_ids: set[int] = set()
+        language_changes: list[dict[str, Any]] = []
         for idx, c in enumerate(classifications):
             file_id = submitted_file_ids[idx]
             classification = str(c.get("classification", "")).strip()
@@ -1806,11 +2018,19 @@ def bulk_classify_code_files(
             )
             role = str(c.get("role", "")).strip()
             current_file = file_rows[file_id]
+            skip_reason = _require_classification_skip_reason(
+                classification,
+                str(c.get("skip_reason", "") or "").strip(),
+                field_name=f"classifications[{idx}].skip_reason",
+            )
             language = c.get("language")
             normalized_language = (
                 str(current_file.get("language", ""))
                 if language is None
-                else str(language).strip()
+                else _require_canonical_language(
+                    str(language).strip(),
+                    file_label=str(current_file["file_path"]),
+                )
             )
             priority = _require_classification_priority(
                 classification,
@@ -1824,6 +2044,16 @@ def bulk_classify_code_files(
                 or slot_types != _json_decode(current_file.get("slot_types_json"), [])
                 or language_changed
             )
+            if review_identity_changed:
+                _require_no_live_lease(
+                    connection,
+                    engagement.id,
+                    file_id,
+                    action=(
+                        f"re-classifying classifications[{idx}] "
+                        f"({current_file['file_path']})"
+                    ),
+                )
             review_reopened = review_identity_changed and _has_current_file_analysis_activity(
                 connection,
                 engagement.id,
@@ -1838,6 +2068,14 @@ def bulk_classify_code_files(
             )
             if language_changed:
                 structurally_invalidated_repo_ids.add(int(current_file["repo_id"]))
+                language_changes.append(
+                    {
+                        "file_id": file_id,
+                        "file_path": str(current_file["file_path"]),
+                        "previous_language": str(current_file.get("language", "")),
+                        "language": normalized_language,
+                    }
+                )
             if review_reopened:
                 if current_file.get("module_id") is not None:
                     affected_module_ids.add(int(current_file["module_id"]))
@@ -1855,6 +2093,7 @@ def bulk_classify_code_files(
                     slot_types_json = ?,
                     language = ?,
                     analysis_priority = ?,
+                    skip_reason = ?,
                     analysis_status = 'classified',
                     updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ?
@@ -1865,6 +2104,7 @@ def bulk_classify_code_files(
                     _json_list_text(slot_types),
                     normalized_language,
                     priority,
+                    skip_reason,
                     engagement.id,
                     file_id,
                 ),
@@ -1902,13 +2142,23 @@ def bulk_classify_code_files(
             _invalidate_repo_structural_index(connection, engagement.id, repo_id)
         for module_id in affected_module_ids:
             _sync_module_rollup(connection, engagement.id, module_id)
-    return {"updated": updated, "total": len(classifications)}
+    # A language correction discards the whole repository's parser-derived
+    # facts, and nothing else in this response says so — which is why the
+    # client's `code-index build` + `sync --repo-id` repair hint could never
+    # fire. Reported per repository and per file so the operator can see which
+    # correction cost which index.
+    return {
+        "updated": updated,
+        "total": len(classifications),
+        "structural_index_invalidated_repo_ids": sorted(structurally_invalidated_repo_ids),
+        "language_changes": language_changes,
+    }
 
 
 _CODE_FILE_ALLOWED_FIELDS = frozenset({
     "classification", "role", "analysis_priority",
     "analysis_depth", "module_id",
-    "notes", "slot_types_json", "language",
+    "notes", "slot_types_json", "language", "skip_reason",
 })
 
 
@@ -1933,7 +2183,10 @@ def update_code_file(
 
         normalized_kwargs = dict(kwargs)
         if "language" in normalized_kwargs:
-            normalized_kwargs["language"] = str(normalized_kwargs["language"]).strip()
+            normalized_kwargs["language"] = _require_canonical_language(
+                str(normalized_kwargs["language"]).strip(),
+                file_label=str(file_row["file_path"]),
+            )
         if "role" in normalized_kwargs:
             normalized_kwargs["role"] = str(normalized_kwargs["role"]).strip()
         language_changed = (
@@ -2013,6 +2266,31 @@ def update_code_file(
             effective_slot_types,
             field_name="slot_types_json",
         )
+        # A reason only describes a skip, so a patch that leaves the file off
+        # `skip` drops the reason rather than leaving a `low` file explaining
+        # why it was never reviewed. The rule is applied to the EFFECTIVE reason
+        # the row is left holding, exactly as the bulk door applies it to the
+        # payload it stores: a patch that does not name a reason keeps the row's
+        # own, so correcting a skipped file's priority is not also a demand to
+        # restate why it was skipped, but a patch that leaves the file `skip`
+        # with no reason at all is the same unaccounted file bulk classify
+        # refuses. A patch that NAMES a reason is held to the standard
+        # vocabulary either way.
+        patched_skip_reason = str(normalized_kwargs.get("skip_reason", "") or "").strip()
+        effective_skip_reason = (
+            patched_skip_reason
+            if "skip_reason" in normalized_kwargs
+            else str(file_row.get("skip_reason", "") or "").strip()
+        )
+        if effective_classification == "skip":
+            normalized_kwargs["skip_reason"] = _require_classification_skip_reason(
+                "skip", effective_skip_reason, field_name="skip_reason"
+            )
+        else:
+            _require_classification_skip_reason(
+                effective_classification, patched_skip_reason, field_name="skip_reason"
+            )
+            normalized_kwargs["skip_reason"] = ""
         review_identity_changed = (
             (
                 "classification" in normalized_kwargs
@@ -2030,6 +2308,13 @@ def update_code_file(
             )
             or language_changed
         )
+        if review_identity_changed:
+            _require_no_live_lease(
+                connection,
+                engagement.id,
+                file_id,
+                action=f"changing the review identity of {file_row['file_path']}",
+            )
         review_reopened = review_identity_changed and _has_current_file_analysis_activity(
             connection,
             engagement.id,
@@ -2730,10 +3015,23 @@ def _queue_outcome(
     outcome: str,
     status_value: str,
     detail: str,
+    file_path: str = "",
+    supersedes: int | None = None,
 ) -> dict[str, Any]:
+    """One per-item verdict from a queue submission.
+
+    `file_path` and `supersedes` carry the two facts a per-file warning needs
+    and could not reach: which file the outcome is about without a second
+    lookup, and — on a reanalysis — WHICH predecessor attempt the new one
+    suspends. A reanalysis withdraws the predecessor's verdict and coverage
+    credit until it closes, so naming only the new attempt leaves out the half
+    of the message the operator acts on.
+    """
     return {
         "file_id": file_id,
+        "file_path": file_path,
         "queue_item_id": queue_item_id,
+        "supersedes": supersedes,
         "outcome": outcome,
         "status": status_value,
         "detail": detail,
@@ -2854,6 +3152,7 @@ def bulk_create_queue_items(
             zip(items, submitted_priorities, strict=True)
         ):
             file_id = submitted_file_ids[idx]
+            file_path = str(file_rows[file_id]["file_path"])
             expected_priority = int(file_rows[file_id]["analysis_priority"])
             repo_generation = int(
                 repo_rows[int(file_rows[file_id]["repo_id"])]["active_generation"]
@@ -2887,6 +3186,7 @@ def bulk_create_queue_items(
                 outcomes.append(
                     _queue_outcome(
                         file_id=file_id,
+                        file_path=file_path,
                         queue_item_id=(
                             None if active is None else int(active["id"])
                         ),
@@ -2917,6 +3217,7 @@ def bulk_create_queue_items(
                     outcomes.append(
                         _queue_outcome(
                             file_id=file_id,
+                            file_path=file_path,
                             queue_item_id=(
                                 None
                                 if expected_predecessor is None
@@ -2958,6 +3259,7 @@ def bulk_create_queue_items(
                         outcomes.append(
                             _queue_outcome(
                                 file_id=file_id,
+                                file_path=file_path,
                                 queue_item_id=int(active["id"]),
                                 outcome="already_active",
                                 status_value=active_status,
@@ -2996,6 +3298,7 @@ def bulk_create_queue_items(
                         outcomes.append(
                             _queue_outcome(
                                 file_id=file_id,
+                                file_path=file_path,
                                 queue_item_id=int(active["id"]),
                                 outcome="updated",
                                 status_value="pending",
@@ -3011,6 +3314,7 @@ def bulk_create_queue_items(
                     outcomes.append(
                         _queue_outcome(
                             file_id=file_id,
+                            file_path=file_path,
                             queue_item_id=int(active["id"]),
                             outcome="already_active",
                             status_value=active_status,
@@ -3023,6 +3327,7 @@ def bulk_create_queue_items(
                 outcomes.append(
                     _queue_outcome(
                         file_id=file_id,
+                        file_path=file_path,
                         queue_item_id=int(active["id"]),
                         outcome="conflict",
                         status_value=active_status,
@@ -3036,6 +3341,7 @@ def bulk_create_queue_items(
                 outcomes.append(
                     _queue_outcome(
                         file_id=file_id,
+                        file_path=file_path,
                         queue_item_id=int(latest["id"]),
                         outcome="conflict",
                         status_value=str(latest["status"]),
@@ -3055,6 +3361,7 @@ def bulk_create_queue_items(
                 outcomes.append(
                     _queue_outcome(
                         file_id=file_id,
+                        file_path=file_path,
                         queue_item_id=None if latest is None else int(latest["id"]),
                         outcome="conflict",
                         status_value=latest_status,
@@ -3096,7 +3403,11 @@ def bulk_create_queue_items(
             outcomes.append(
                 _queue_outcome(
                     file_id=file_id,
+                    file_path=file_path,
                     queue_item_id=int(cursor.lastrowid),
+                    # The attempt this one suspends: its verdict and coverage
+                    # credit are withdrawn until the new attempt closes.
+                    supersedes=predecessor_id,
                     outcome=outcome_name,
                     status_value="pending",
                     detail=(
@@ -3619,6 +3930,12 @@ def _hydrate_claimed_queue_item(
     """
     item = dict(row)
     item["agent_name"] = str(item.pop("assigned_agent", ""))
+    # `id` is the column name; `queue_item_id` is what every write that spends
+    # this lease asks for (`AnalysisResultRecord.queue_item_id`, the `done` /
+    # `error` / `needs-context` item_ids, the prompts' "include the fetched
+    # queue_item_id"). Both are published so neither vocabulary has to be
+    # translated by the caller.
+    item["queue_item_id"] = int(row["id"])
     item["batch_theme"] = item.get("batch_theme", "")
     item["slot_types"] = _json_decode(item.get("slot_types_json"), [])
     item["guidance_hypotheses"] = _json_decode(item.get("guidance_hypotheses_json"), [])
@@ -3646,6 +3963,57 @@ def _hydrate_claimed_queue_item(
     return item
 
 
+# The one coverage family that is not a vulnerability class: the marker some
+# lanes write in place of the `not_applicable` flag to say a family was
+# inspected and ruled out. A trigger is an obligation and carries no such
+# marker, so it is admitted for coverage entries only.
+NOT_APPLICABLE_COVERAGE_FAMILY = "not_applicable"
+
+
+def _require_canonical_vuln_class(
+    value: str, *, field_name: str, extra: frozenset[str] = frozenset()
+) -> str:
+    """Hold a durable code-track class name to the one cross-track vocabulary.
+
+    A `cwe_coverage` family is rendered as a real column by `code-coverage
+    --cwe-matrix`, so a non-canonical one is phantom coverage in the operator's
+    primary effort view: a column nobody can satisfy and no required-family set
+    ever asked for. A `cross_file_triggers` vuln_class becomes a durable
+    obligation that can never match a canonical family, so it can never be
+    discharged. Required families were already membership-checked at closeout
+    (`_validate_completion_coverage`); this closes the EXTRA-entry door.
+
+    In a backend-only deployment the agent tree — and therefore the canonical
+    taxonomy — is absent. Validation is then skipped rather than failing closed,
+    the same way the depth ledger treats an unavailable taxonomy.
+    """
+    if vuln_taxonomy is None:
+        return value
+    allowed = frozenset(vuln_taxonomy.VULN_CLASSES) | extra
+    if value in allowed:
+        return value
+    # The hint folds case before matching and keeps difflib's own cutoff, so a
+    # class typed in the wrong case resolves to the spelling that exists
+    # (`SQLI` -> `sqli`) instead of to whatever sorts nearest at cutoff 0.0.
+    # When nothing is plausibly close the roster is named instead, the way
+    # `_require_canonical_language` names its own.
+    canonical_by_folded = {candidate.casefold(): candidate for candidate in allowed}
+    nearest = difflib.get_close_matches(
+        value.casefold(), sorted(canonical_by_folded), n=1, cutoff=0.6
+    )
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=(
+            f"{field_name} '{value}' is not a canonical vulnerability class"
+            + (
+                f"; nearest canonical class: '{canonical_by_folded[nearest[0]]}'"
+                if nearest
+                else ". Allowed values: " + ", ".join(sorted(allowed))
+            )
+        ),
+    )
+
+
 def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     if not isinstance(cwe_coverage, list) or not cwe_coverage:
         raise HTTPException(
@@ -3666,6 +4034,11 @@ def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[d
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"cwe_coverage entry {idx} is missing family",
             )
+        _require_canonical_vuln_class(
+            family,
+            field_name=f"cwe_coverage entry {idx} family",
+            extra=frozenset({NOT_APPLICABLE_COVERAGE_FAMILY}),
+        )
         if family in seen_families:
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
@@ -3678,7 +4051,52 @@ def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[d
     return normalized
 
 
-def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[dict[str, Any]]) -> None:
+def _completion_coverage_basis(
+    file_row: dict[str, Any],
+    queue_row: dict[str, Any],
+    applicable: list[str],
+) -> str:
+    """Say where the required family set came from and how to re-read it.
+
+    The required set is derived from the FILE's review identity — the
+    architect's classification slot types, role and language — and never from
+    the queue row's own ``slot_types``, which is batch metadata the operator
+    typed at submission time. Both travel on the same claim, under names a
+    reader can easily swap, so a refusal that names only the missing families
+    leaves the obvious field (``slot_types``) contradicting the rule. Naming
+    the basis — and the queue row's narrower list when it differs — is what
+    makes one refusal the last one.
+    """
+    slot_types = _json_decode(file_row.get("slot_types_json"), [])
+    language = str(file_row.get("language", ""))
+    role = str(file_row.get("role", ""))
+    basis = (
+        f"The required set for this file is: {', '.join(applicable) or 'none'}. "
+        "It is derived from the file's own review identity — classification "
+        f"slot_types [{', '.join(slot_types) or 'none'}], role "
+        f"{role or '(unset)'!r}, language {language or '(unset)'!r}"
+    )
+    item_slot_types = _json_decode(queue_row.get("slot_types_json"), [])
+    if sorted(item_slot_types) != sorted(slot_types):
+        basis += (
+            f" — and not from queue item {int(queue_row['id'])}'s own slot_types "
+            f"[{', '.join(item_slot_types) or 'none'}], which is submission batch "
+            "metadata and never the review surface"
+        )
+    basis += (
+        f". Read the authoritative list back with `code-dispatch progress "
+        f"{int(queue_row['id'])}`; it also ships on every claim as "
+        "`applicable_vuln_classes`"
+    )
+    return basis
+
+
+def _validate_completion_coverage(
+    file_row: dict[str, Any],
+    cwe_coverage: list[dict[str, Any]],
+    *,
+    queue_row: dict[str, Any],
+) -> None:
     classification = str(file_row.get("classification", ""))
     slot_types = _json_decode(file_row.get("slot_types_json"), [])
     language = str(file_row.get("language", ""))
@@ -3711,6 +4129,8 @@ def _validate_completion_coverage(file_row: dict[str, Any], cwe_coverage: list[d
             detail=(
                 f"Missing cwe_coverage families for {file_row['file_path']}: "
                 + ", ".join(missing)
+                + ". "
+                + _completion_coverage_basis(file_row, queue_row, applicable)
             ),
         )
 
@@ -3833,46 +4253,90 @@ def _trigger_repository_path(value: Any) -> str:
     return path
 
 
+# Keys a hunter plausibly writes in place of a canonical trigger key. Naming
+# the near miss is what turns "entry 0 is missing file_path" on a payload that
+# plainly carries a path into a one-read fix. These are reported, never
+# accepted: a second accepted spelling would be a second vocabulary for the
+# same durable obligation.
+_CROSS_FILE_TRIGGER_KEY_ALIASES: dict[str, tuple[str, ...]] = {
+    "file_path": ("target_path", "target_file_path", "path", "target", "file"),
+    "vuln_class": ("vuln", "vulnerability_class", "class", "cwe", "family"),
+    "reason": ("why", "rationale", "note", "notes", "description"),
+}
+
+
+def _trigger_key_alias_hint(trigger: dict[str, Any], canonical: str) -> str:
+    present = [
+        alias
+        for alias in _CROSS_FILE_TRIGGER_KEY_ALIASES[canonical]
+        if alias in trigger
+    ]
+    if not present:
+        return ""
+    return (
+        f" (the entry carries {', '.join(repr(alias) for alias in present)}; "
+        f"{canonical!r} is the one accepted spelling)"
+    )
+
+
 def _normalize_cross_file_triggers(
     cross_file_triggers: list[dict[str, Any]] | None,
 ) -> list[dict[str, Any]]:
+    """Validate every entry and every required key in one pass.
+
+    Failing on the first problem charged one refused round trip per missing key
+    per entry, and nothing about the payload changes between those calls — so
+    every defect is knowable on the first read. The refusal names each one
+    against its entry index.
+    """
     if not cross_file_triggers:
         return []
     normalized_by_key: dict[tuple[str, str, str], dict[str, Any]] = {}
+    problems: list[str] = []
     for idx, trigger in enumerate(cross_file_triggers):
         if not isinstance(trigger, dict):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cross_file_triggers entry {idx} must be an object",
-            )
+            problems.append(f"cross_file_triggers entry {idx} must be an object")
+            continue
         file_path = _trigger_repository_path(trigger.get("file_path", ""))
         vuln_class = str(trigger.get("vuln_class", "")).strip()
         reason = str(trigger.get("reason", "")).strip()
         if not file_path:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cross_file_triggers entry {idx} is missing file_path",
+            problems.append(
+                f"cross_file_triggers entry {idx} is missing file_path"
+                + _trigger_key_alias_hint(trigger, "file_path")
             )
         if not vuln_class:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cross_file_triggers entry {idx} is missing vuln_class",
+            problems.append(
+                f"cross_file_triggers entry {idx} is missing vuln_class"
+                + _trigger_key_alias_hint(trigger, "vuln_class")
             )
+        else:
+            try:
+                _require_canonical_vuln_class(
+                    vuln_class, field_name=f"cross_file_triggers entry {idx} vuln_class"
+                )
+            except HTTPException as exc:
+                problems.append(str(exc.detail))
         if not reason:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cross_file_triggers entry {idx} is missing reason",
+            problems.append(
+                f"cross_file_triggers entry {idx} is missing reason"
+                + _trigger_key_alias_hint(trigger, "reason")
             )
         if "outside_snapshot" in trigger and type(trigger["outside_snapshot"]) is not bool:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cross_file_triggers entry {idx} outside_snapshot must be a boolean",
+            problems.append(
+                f"cross_file_triggers entry {idx} outside_snapshot must be a boolean"
             )
-        normalized = dict(trigger)
-        normalized["file_path"] = file_path
-        normalized["vuln_class"] = vuln_class
-        normalized["reason"] = reason
-        normalized_by_key[(file_path, vuln_class, reason)] = normalized
+        if file_path and vuln_class and reason:
+            normalized = dict(trigger)
+            normalized["file_path"] = file_path
+            normalized["vuln_class"] = vuln_class
+            normalized["reason"] = reason
+            normalized_by_key[(file_path, vuln_class, reason)] = normalized
+    if problems:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="; ".join(problems),
+        )
     return list(normalized_by_key.values())
 
 
@@ -4073,10 +4537,92 @@ def _record_cross_file_triggers(
 
 
 _VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "skipped"})
+_VALID_DISPOSITION_PLACEHOLDERS = ", ".join("?" for _ in _VALID_DISPOSITIONS)
 SKIP_REASONS = (
     "test-fixture", "generated-code", "minified", "out-of-scope-language", "vendored-dependency",
 )
 _VALID_ANALYSIS_RESULT_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context", "skipped"})
+_UNSKIPPABLE_CLASSIFICATIONS = frozenset({"critical", "high", "medium"})
+
+
+def _require_skippable_classification(file_row: dict[str, Any]) -> None:
+    if str(file_row["classification"]) in _UNSKIPPABLE_CLASSIFICATIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{file_row['file_path']} is {file_row['classification']}; "
+                "review it and close it clean, finding or suspicious"
+            ),
+        )
+
+
+def _require_correctable_completion(
+    queue_row: dict[str, Any],
+    file_row: dict[str, Any],
+    *,
+    disposition: str,
+    result: dict[str, Any],
+) -> None:
+    """Hold a correction to the gates that produced the row it rewrites.
+
+    A correction is the only write that rewrites `code_analysis_queue` on a row
+    already `status='done'`, and it arrives in the WIDER receipt vocabulary
+    (`_VALID_ANALYSIS_RESULT_DISPOSITIONS`) rather than the column's own
+    (`_VALID_DISPOSITIONS`). Without these checks a completed row could end up
+    carrying `needs_context` — a state no verb can produce — or `skipped` on a
+    file no verb may skip, or `finding`/`suspicious` with nothing evidenced.
+    `_successful_terminal_review_row_sql` re-derives all of it from the row plus
+    its receipts, so the damage is never false credit: it is a row-level
+    projection that contradicts its own receipt and an unexplained coverage
+    regression. Every check runs before the insert, so a refusal leaves both
+    the receipt chain and the lease exactly as they were.
+    """
+    item_id = int(queue_row["id"])
+    if disposition not in _VALID_DISPOSITIONS:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot correct completed queue item {item_id} to disposition "
+                f"'{disposition}'; a completed row carries one of: "
+                f"{', '.join(sorted(_VALID_DISPOSITIONS))}. Open a fresh attempt "
+                "with `code-dispatch reanalyze` to record anything else"
+            ),
+        )
+    if disposition == "skipped":
+        # The correction payload carries no skip_reason, so the row's own reason
+        # is the only one available and `done`'s rule still applies to it.
+        if str(queue_row.get("skip_reason") or "") not in SKIP_REASONS:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"Cannot correct completed queue item {item_id} to "
+                    "disposition='skipped': the completed row carries no standard "
+                    f"skip_reason ({', '.join(SKIP_REASONS)}). Close a fresh "
+                    "`code-dispatch reanalyze` attempt with --skip-reason instead"
+                ),
+            )
+        _require_skippable_classification(file_row)
+    if disposition == "clean" and not str(queue_row.get("analysis_notes") or "").strip():
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"Cannot correct completed queue item {item_id} to "
+                "disposition='clean': the completed row carries no analysis_notes, "
+                "which a clean review requires. Close a fresh `code-dispatch "
+                "reanalyze` attempt with --notes instead"
+            ),
+        )
+    if disposition in {"finding", "suspicious"} and not (
+        str(result.get("evidence", "")).strip()
+        or str(result.get("evidence_ref", "")).strip()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"disposition='{disposition}' requires a current analysis result "
+                "with evidence or evidence_ref"
+            ),
+        )
 
 
 def complete_queue_items(
@@ -4174,14 +4720,8 @@ def complete_queue_items(
                     f"'{candidate_dispositions[0]}'; cannot complete as '{disposition}'"
                 ),
             )
-        if disposition == "skipped" and file_row["classification"] in {"critical", "high", "medium"}:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"{file_row['file_path']} is {file_row['classification']}; "
-                    "review it and close it clean, finding or suspicious"
-                ),
-            )
+        if disposition == "skipped":
+            _require_skippable_classification(file_row)
         if disposition == "finding":
             finding_results = connection.execute(
                 f"""
@@ -4289,18 +4829,35 @@ def complete_queue_items(
                 ),
             ).fetchone()
             if source_receipt is None:
+                # The likeliest cause is that the preceding `code-record
+                # analysis` never landed — a receipt refused on validation
+                # leaves exactly this state — so the refusal names the file,
+                # the attempt and the identity it searched under rather than
+                # restating the rule. Without them this reads as a lease fault
+                # on an unnamed file and sends the reader looking at the wrong
+                # verb.
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail=(
-                        "review requires a current source-level receipt "
-                        "with a matching disposition, bound to this file and lease"
+                        f"review of {file_row['file_path']} requires a current "
+                        "source-level receipt with a matching disposition, bound "
+                        f"to this file and lease: no receipt on queue item "
+                        f"{int(queue_row['id'])} carries disposition="
+                        f"'{disposition}' under agent {agent_name!r} with a "
+                        f"structural reference into {file_row['file_path']}. "
+                        f"Read what the attempt holds with `code-dispatch "
+                        f"progress {int(queue_row['id'])}`; if it holds nothing, "
+                        "the preceding `code-record analysis` did not land — "
+                        "record it and close again"
                     ),
                 )
         # Skipped items bypass the cwe-coverage completeness check — by
         # definition the analyst did not analyze the file. Other dispositions
         # still enforce the existing coverage rule.
         if disposition != "skipped":
-            _validate_completion_coverage(file_row, normalized_cwe_coverage)
+            _validate_completion_coverage(
+                file_row, normalized_cwe_coverage, queue_row=queue_row
+            )
         next_status = "done"
         cursor = connection.execute(
             f"""
@@ -4426,9 +4983,60 @@ def needs_context_queue_items(
 def reset_stale_queue_items(
     engagement_id: int,
     minutes: int,
+    *,
+    repo_id: int | None = None,
+    batch_theme: str | None = None,
+    queue_mode: str | None = None,
+    path_prefix: list[str] | None = None,
+    path_glob: list[str] | None = None,
 ) -> dict[str, Any]:
+    """Discard every abandoned lease inside one lane.
+
+    The sweep is destructive: it clears ownership and supersedes every receipt
+    the dead lease wrote. A single global window therefore collides with a lane
+    that legitimately runs longer than another — a ten-minute sweep aimed at a
+    stalled triage lane also discards a deep-analysis lane's accumulated work.
+    So the destructive verb takes the same predicates its read-only preview
+    takes (`list --stale-minutes N`, down to the one `_file_path_scope_sql`
+    owner), and what the preview showed is exactly what the sweep takes.
+
+    A row whose lease left receipts behind is deliberately NOT exempt: keeping
+    those receipts is what `adopt-lease` is for, and exempting them here would
+    make the sweep unable to recover the rows it exists to recover.
+    """
     engagement = _engagement_or_404(engagement_id)
+    clauses = [
+        "queue.engagement_id = ?",
+        "queue.status = 'processing'",
+        "queue.repo_generation = repos.active_generation",
+        "queue.source_superseded_at IS NULL",
+        f"({_latest_current_queue_attempt_sql('queue', 'repos')})",
+        f"({_no_superseded_active_attempt_sql('queue', 'repos')})",
+        f"({_lease_activity_sql('queue')} IS NULL"
+        f" OR datetime({_lease_activity_sql('queue')})"
+        " < datetime('now', ? || ' minutes'))",
+    ]
+    params: list[Any] = [engagement.id, f"-{minutes}"]
+    if repo_id is not None:
+        clauses.append("files.repo_id = ?")
+        params.append(_coerce_int(repo_id, field_name="repo_id"))
+    if batch_theme is not None:
+        clauses.append("queue.batch_theme = ?")
+        params.append(batch_theme)
+    if queue_mode is not None:
+        if queue_mode not in _QUEUE_MODES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"invalid queue mode: {queue_mode}",
+            )
+        clauses.append("queue.queue_mode = ?")
+        params.append(queue_mode)
+    path_scope, path_params = _file_path_scope_sql("files", path_prefix, path_glob)
+    if path_scope:
+        clauses.append(path_scope)
+        params.extend(path_params)
     with get_connection() as connection:
+        register_path_scope_functions(connection)
         # Serialize stale selection with heartbeat writers. The per-row CAS
         # below is defense in depth for connections whose transaction mode is
         # changed by an embedding caller.
@@ -4445,17 +5053,9 @@ def reset_stale_queue_items(
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
              AND repos.active_generation > 0
-            WHERE queue.engagement_id = ?
-              AND queue.status = 'processing'
-              AND queue.repo_generation = repos.active_generation
-              AND queue.source_superseded_at IS NULL
-              AND ({_latest_current_queue_attempt_sql("queue", "repos")})
-              AND ({_no_superseded_active_attempt_sql("queue", "repos")})
-              AND ({_lease_activity_sql("queue")} IS NULL
-                   OR datetime({_lease_activity_sql("queue")})
-                      < datetime('now', ? || ' minutes'))
+            WHERE {' AND '.join(clauses)}
             """,
-            (engagement.id, f"-{minutes}"),
+            tuple(params),
         ).fetchall()
         reset_count = 0
         for row in stale_rows:
@@ -4527,6 +5127,13 @@ def heartbeat_queue_item(
         if cursor.rowcount != 1:
             _require_queue_lease(
                 connection, queue_rows, agent_name=agent_name, lease_token=lease_token, action="heartbeat"
+            )
+            # The lease matched, so only the status can be wrong. Name it: an
+            # owner that reads "not processing" cannot tell a closed row from a
+            # reclaimed one, and `_require_queue_status` already names the
+            # status everywhere else.
+            _require_queue_status(
+                queue_rows, expected_status="processing", action="heartbeat"
             )
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -4706,6 +5313,131 @@ def adopt_queue_lease(
         "preserved_result_count": preserved_result_count,
         "adopted_leases": adopted_leases,
         "item": item,
+    }
+
+
+def release_queue_lease(
+    engagement_id: int,
+    *,
+    item_id: int,
+    agent_name: str,
+    lease_token: str,
+    reason: str,
+) -> dict[str, Any]:
+    """Hand one claimed row back to the pending rotation without a verdict.
+
+    The terminal verbs are `done`, `error` and `needs-context`, and all three
+    assert something about the file: a disposition, a failure, or an outstanding
+    context request. A lane that claimed files another lane turns out to own has
+    none of those to assert — `clean` and `skipped` would be false and
+    `needs-context` would claim context is owed — so standing down forced a
+    mislabel. This is the honest exit, and it deliberately adds no sixth
+    disposition: a disposition is a verdict and is consumed as one by
+    `_successful_terminal_review_row_sql`, `_CURRENT_ACCOUNTED_FILE_EXISTS_SQL`,
+    coverage, readiness, the Code view and the report.
+
+    Mechanically it is `reset-stale` for one row, authorized by the lease
+    instead of by a staleness window: the holder presents the identity it was
+    given, the row returns to unleased `pending` under the same per-row
+    compare-and-swap on the lease plus its last proof of life, every receipt the
+    attempt accumulated is superseded, and the reason is appended to
+    `analysis_notes` exactly as `retry-error` appends its own.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    reason_text = (reason or "").strip()
+    note_suffix = f"\n[released: {reason_text}]" if reason_text else "\n[released]"
+    with get_connection() as connection:
+        # Serialize against heartbeat and stale-reset writers for the whole
+        # read-check-swap, exactly as `reset_stale_queue_items` does.
+        connection.execute("BEGIN IMMEDIATE")
+        queue_rows = _get_queue_rows(connection, engagement.id, {item_id})
+        _require_queue_status(
+            queue_rows, expected_status="processing", action="release the lease on"
+        )
+        _require_queue_lease(
+            connection,
+            queue_rows,
+            agent_name=agent_name,
+            lease_token=lease_token,
+            action="release the lease",
+        )
+        _require_queue_generation(
+            connection, engagement.id, queue_rows, action="release the lease"
+        )
+        queue_row = queue_rows[item_id]
+        file_id = int(queue_row["file_id"])
+        file_row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
+        lease_activity_at = str(
+            connection.execute(
+                f"""
+                SELECT COALESCE({_lease_activity_sql("queue")}, '')
+                FROM code_analysis_queue AS queue
+                WHERE queue.engagement_id = ? AND queue.id = ?
+                """,
+                (engagement.id, item_id),
+            ).fetchone()[0]
+        )
+        cursor = connection.execute(
+            f"""
+            UPDATE code_analysis_queue
+            SET status = 'pending', assigned_agent = '', lease_token = '',
+                adopted_leases_json = '[]',
+                consumed_at = NULL, last_heartbeat_at = NULL,
+                priority = CASE
+                    WHEN queue_mode = ? THEN priority
+                    ELSE COALESCE((
+                        SELECT files.analysis_priority
+                        FROM code_files AS files
+                        WHERE files.engagement_id = code_analysis_queue.engagement_id
+                          AND files.id = code_analysis_queue.file_id
+                    ), priority)
+                END,
+                analysis_notes = analysis_notes || ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = 'processing'
+              AND assigned_agent = ? AND lease_token = ?
+              AND COALESCE({_lease_activity_sql("code_analysis_queue")}, '') = ?
+            """,
+            (
+                _METADATA_REFRESH_REVIEW_MODE,
+                note_suffix,
+                engagement.id,
+                item_id,
+                agent_name,
+                lease_token,
+                lease_activity_at,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "queue lease changed before release; re-read "
+                    "`code-dispatch list` and retry"
+                ),
+            )
+        # Every current receipt on this attempt, not just the last owner's: an
+        # adopted attempt carries receipts written under the leases it
+        # inherited, and a release that left those current would hand them to
+        # whoever claims the row next. Identical to `reset-stale`.
+        discarded = connection.execute(
+            """
+            UPDATE code_analysis_results SET superseded_at = ?
+            WHERE queue_item_id = ? AND superseded_at IS NULL
+            """,
+            (_now_iso(), item_id),
+        ).rowcount
+        _sync_file_analysis_status(connection, engagement.id, file_id)
+        _sync_trigger_status_for_file(connection, engagement.id, file_id)
+    return {
+        "item_id": item_id,
+        "file_id": file_id,
+        "file_path": str(file_row["file_path"]),
+        "reason": reason_text,
+        "previous_agent_name": agent_name,
+        "previous_lease_token": lease_token,
+        "previous_lease_activity_at": lease_activity_at or None,
+        "discarded_result_count": int(discarded or 0),
     }
 
 
@@ -5135,6 +5867,13 @@ def create_analysis_result(
             source_file_row=file_row,
             cross_file_triggers=normalized_cross_file_triggers,
         )
+        if correction_mode:
+            _require_correctable_completion(
+                queue_row,
+                file_row,
+                disposition=disposition,
+                result=result,
+            )
         receipt_kind = str(result.get("receipt_kind") or "file")
         has_source_anchors = bool(
             result.get("callable_refs") or result.get("reviewed_spans")
@@ -5519,19 +6258,27 @@ def create_analysis_result(
             if corrected_coverage:
                 corrected_coverage = _normalize_cwe_coverage(corrected_coverage)
                 if disposition != "skipped":
-                    _validate_completion_coverage(file_row, corrected_coverage)
+                    _validate_completion_coverage(
+                        file_row, corrected_coverage, queue_row=queue_row
+                    )
             else:
                 corrected_coverage = _json_decode(queue_row.get("cwe_coverage_json"), [])
             queue_update = connection.execute(
                 """
                 UPDATE code_analysis_queue
-                SET disposition = ?, cwe_coverage_json = ?, updated_at = CURRENT_TIMESTAMP
+                SET disposition = ?, cwe_coverage_json = ?, skip_reason = ?,
+                    updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ? AND status = 'done'
                   AND assigned_agent = ? AND lease_token = ?
                 """,
                 (
                     disposition,
                     _json_list_text(corrected_coverage),
+                    # A corrected verdict that is no longer a skip must not keep
+                    # the skip's reason: `skip_reason` is what the accounting
+                    # query reads to admit a skip, and a `finding` row carrying
+                    # `vendored-dependency` contradicts its own receipt.
+                    str(queue_row.get("skip_reason") or "") if disposition == "skipped" else "",
                     engagement.id,
                     int(queue_item_id),
                     agent_name,
@@ -7228,10 +7975,26 @@ def code_coverage_summary(
             f"Unprocessed cross-file triggers: {trigger_counts[_TRIGGER_STATUS_PENDING]}"
         )
 
-    # -- Effort-threshold gate (blocking for critical/high files) --
+    # -- Effort-threshold harness --
     effort_warnings: list[str] = []
+
+    def record_effort_gap(classification: str, message: str) -> None:
+        """Report one measured effort gap under its tier's gating class.
+
+        Every gap reaches `effort_warnings` whatever the tier, because that is
+        the instrument the operator reads (readiness `quality_gate.warnings`,
+        the CWE matrix, the review-quality panel). Only a tier in
+        `_BLOCKING_EFFORT_TIERS` also becomes a reason the gate refuses on, so
+        the blocking scope has exactly one owner and a new call site here cannot
+        quietly widen it.
+        """
+
+        effort_warnings.append(message)
+        if classification in _BLOCKING_EFFORT_TIERS:
+            gate_reasons.append(message)
+
     # W3b structural-verification accumulators (populated alongside the effort
-    # gate so the uncovered-high-risk-file sub-gate reuses the same merge pass).
+    # harness so the uncovered-high-risk-file sub-gate reuses the same merge pass).
     file_applicable: dict[int, list[str]] = {}
     uncovered_high_risk_files: list[dict[str, Any]] = []
     with get_connection() as connection:
@@ -7258,7 +8021,7 @@ def code_coverage_summary(
              AND ({_no_superseded_active_attempt_sql("q", "effort_repos")})
              AND ({successful_queue_review})
             WHERE files.engagement_id = ?
-              AND files.classification IN ('critical', 'high'){repo_clause}
+              AND files.classification IN ('critical', 'high', 'medium'){repo_clause}
             """,
             (engagement.id, *repo_params),
         ).fetchall()
@@ -7325,16 +8088,24 @@ def code_coverage_summary(
                     _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
 
         for fid, meta in file_meta.items():
-            threshold = 70 if meta["classification"] == "critical" else 50
+            classification = str(meta["classification"])
+            threshold = EFFORT_THRESHOLDS[classification]
             slot_types = meta["slot_types"]
+            # Classification metadata completeness is a critical/high
+            # obligation: `_require_slot_types_for_classification` only demands
+            # slot types on those tiers, so flagging a medium file for not
+            # carrying them would make the harness noise on every medium file it
+            # measures. A medium file still has applicable families from its
+            # language and role baseline, and those are still measured.
+            metadata_is_required = classification in {"critical", "high"}
             if not slot_types:
-                msg = (
-                    f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                    "missing slot_types"
-                )
-                gate_reasons.append(msg)
-                effort_warnings.append(msg)
-                continue
+                if metadata_is_required:
+                    record_effort_gap(
+                        classification,
+                        f"{classification.capitalize()} file {meta['file_path']}: "
+                        "missing slot_types",
+                    )
+                    continue
 
             applicable = _applicable_families_for_file(
                 slot_types,
@@ -7342,12 +8113,12 @@ def code_coverage_summary(
                 role=meta.get("role", ""),
             )
             if not applicable:
-                msg = (
-                    f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                    "no applicable vulnerability families"
-                )
-                gate_reasons.append(msg)
-                effort_warnings.append(msg)
+                if metadata_is_required:
+                    record_effort_gap(
+                        classification,
+                        f"{classification.capitalize()} file {meta['file_path']}: "
+                        "no applicable vulnerability families",
+                    )
                 continue
 
             # Remember the applicable family set for the W3b structural sub-gate
@@ -7361,24 +8132,22 @@ def code_coverage_summary(
                     continue
                 if not meta["review_completed"] and not meta["has_coverage_record"]:
                     continue
-                msg = (
-                    f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                    "analyzed but missing CWE coverage data"
+                record_effort_gap(
+                    classification,
+                    f"{classification.capitalize()} file {meta['file_path']}: "
+                    "analyzed but missing CWE coverage data",
                 )
-                gate_reasons.append(msg)
-                effort_warnings.append(msg)
                 continue
 
             for family in applicable:
                 if family in not_applicable:
                     continue
                 if efforts.get(family, 0) < threshold:
-                    msg = (
-                        f"{meta['classification'].capitalize()} file {meta['file_path']}: "
-                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
+                    record_effort_gap(
+                        classification,
+                        f"{classification.capitalize()} file {meta['file_path']}: "
+                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}",
                     )
-                    gate_reasons.append(msg)
-                    effort_warnings.append(msg)
 
     gate_passed = len(gate_reasons) == 0
 
@@ -7605,6 +8374,200 @@ def code_coverage_summary(
     }
 
 
+MAX_INHERITED_COVERAGE_PAGE = 2000
+
+
+def code_coverage_inherited(
+    engagement_id: int,
+    *,
+    generation: int,
+    repo_id: int | None = None,
+    path_prefix: list[str] | None = None,
+    limit: int = MAX_INHERITED_COVERAGE_PAGE,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """Which uncovered current files already have a byte-identical verdict.
+
+    A new source generation supersedes every queue row, receipt and trigger for
+    the repository, so re-ingesting at a new commit takes a reviewed repository
+    back to zero analyzed — including for files whose bytes never moved. That is
+    the correct CURRENCY rule (a verdict attests to the bytes its author read,
+    and `_record_source_generation` cannot know which files moved until the new
+    roster lands), but it leaves the operator unable to tell "never reviewed"
+    from "reviewed against identical bytes last generation".
+
+    This is the read that tells them apart, and nothing more. Each row is
+    labelled ``inherited`` and carries its origin generation; no row is made
+    current, counted by `code_coverage_summary`, admitted by
+    `_CURRENT_ACCOUNTED_FILE_EXISTS_SQL`, or allowed to satisfy the coverage
+    gate — a current row would claim a currency it does not have. The predicate
+    is the hash-keyed carry-forward `_rebase_lead_bindings` already applies to a
+    lead's file binding, read off `code_source_generation_files.file_hash`.
+
+    Only files that owe review now are candidates: once a file carries a current
+    accounted terminal attempt it is covered, not inherited.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    origin_generation = _require_strict_positive_id(
+        generation, field_name="generation"
+    )
+    clauses = [
+        "files.engagement_id = ?",
+        "files.retired_at IS NULL",
+        "repos.active_generation > generation_files.repo_generation",
+        f"NOT ({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})",
+    ]
+    params: list[Any] = [engagement.id]
+    if repo_id is not None:
+        clauses.append("files.repo_id = ?")
+        params.append(_coerce_int(repo_id, field_name="repo_id"))
+    path_scope, path_params = _file_path_scope_sql("files", path_prefix)
+    if path_scope:
+        clauses.append(path_scope)
+        params.extend(path_params)
+    with get_connection() as connection:
+        register_path_scope_functions(connection)
+        if repo_id is not None:
+            _get_published_repo_row(connection, engagement.id, int(repo_id))
+        repo_clause = "" if repo_id is None else "AND generations.repo_id = ?"
+        repo_params = () if repo_id is None else (int(repo_id),)
+        recorded = [
+            int(row["repo_generation"])
+            for row in connection.execute(
+                f"""
+                SELECT DISTINCT generations.repo_generation
+                FROM code_source_generations AS generations
+                JOIN code_repos AS repos
+                  ON repos.id = generations.repo_id
+                 AND repos.engagement_id = generations.engagement_id
+                 AND repos.active_generation > generations.repo_generation
+                 AND {_analysis_repo_sql("repos")}
+                WHERE generations.engagement_id = ?
+                  {repo_clause}
+                ORDER BY generations.repo_generation
+                """,
+                (engagement.id, *repo_params),
+            ).fetchall()
+        ]
+        if origin_generation not in recorded:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"generation {origin_generation} is not a superseded source "
+                    "generation of an analysis repository in scope. Superseded "
+                    "generations available to inherit from: "
+                    + (", ".join(str(value) for value in recorded) or "none")
+                ),
+            )
+        # The generation each listed file now owes an attempt against. Repository
+        # counters are independent, so with several in scope a single value
+        # exists only where they agree; each row carries its own either way.
+        # Read off the repositories in scope so that an empty page still names
+        # the generation the work is owed against.
+        scoped_active_generations = {
+            int(row["active_generation"])
+            for row in connection.execute(
+                f"""
+                SELECT DISTINCT repos.active_generation
+                FROM code_repos AS repos
+                WHERE repos.engagement_id = ?
+                  AND repos.active_generation > 0
+                  AND {_analysis_repo_sql("repos")}
+                  {"" if repo_id is None else "AND repos.id = ?"}
+                """,
+                (engagement.id, *repo_params),
+            ).fetchall()
+        }
+        rows = connection.execute(
+            f"""
+            SELECT files.id AS file_id, files.file_path, files.classification,
+                   files.repo_id, files.file_hash, repos.repo_key,
+                   repos.active_generation AS current_generation,
+                   inherited.id AS inherited_queue_item_id,
+                   inherited.disposition, inherited.skip_reason,
+                   inherited.analysis_notes, inherited.cwe_coverage_json,
+                   inherited.assigned_agent, inherited.completed_at
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id
+             AND repos.engagement_id = files.engagement_id
+             AND repos.active_generation > 0
+             AND {_analysis_repo_sql("repos")}
+            JOIN code_source_generation_files AS generation_files
+              ON generation_files.engagement_id = files.engagement_id
+             AND generation_files.repo_id = files.repo_id
+             AND generation_files.repo_generation = ?
+             AND generation_files.file_id = files.id
+             AND generation_files.file_hash = files.file_hash
+            JOIN code_analysis_queue AS inherited
+              ON inherited.id = (
+                  SELECT MAX(candidate.id)
+                  FROM code_analysis_queue AS candidate
+                  WHERE candidate.engagement_id = files.engagement_id
+                    AND candidate.file_id = files.id
+                    AND candidate.repo_generation = generation_files.repo_generation
+                    AND candidate.status = 'done'
+                    AND candidate.disposition IN ({_VALID_DISPOSITION_PLACEHOLDERS})
+              )
+            WHERE {' AND '.join(clauses)}
+            ORDER BY files.analysis_priority DESC, files.id ASC
+            """,
+            (origin_generation, *sorted(_VALID_DISPOSITIONS), *params),
+        ).fetchall()
+    total = len(rows)
+    page = rows[offset : offset + limit]
+    # Narrow to the repositories this answer actually spans: a page drawn from
+    # one repository has a single active generation even where the engagement
+    # holds several that disagree.
+    active_generations = {
+        int(row["current_generation"]) for row in rows
+    } or scoped_active_generations
+    by_disposition: dict[str, int] = {}
+    for row in rows:
+        disposition = str(row["disposition"])
+        by_disposition[disposition] = by_disposition.get(disposition, 0) + 1
+    return {
+        "repo_id": repo_id,
+        "origin_generation": origin_generation,
+        "active_generation": (
+            next(iter(active_generations)) if len(active_generations) == 1 else None
+        ),
+        "path_prefix": sorted(set(path_prefix or [])),
+        "total": total,
+        "offset": offset,
+        "count": len(page),
+        "has_more": offset + len(page) < total,
+        "by_disposition": by_disposition,
+        "files": [
+            {
+                "file_id": int(row["file_id"]),
+                "file_path": str(row["file_path"]),
+                "classification": str(row["classification"] or ""),
+                "repo_id": int(row["repo_id"]),
+                "repo_key": str(row["repo_key"]),
+                "file_hash": str(row["file_hash"] or ""),
+                # The two labels that make the row safe to read: the verdict
+                # comes from an earlier generation, and it is offered only
+                # because the bytes it attests to never moved. Neither is a
+                # current `analysis_status` value, so no reader can compare one
+                # against a current one by accident.
+                "inherited": True,
+                "file_hash_unchanged": True,
+                "origin_generation": origin_generation,
+                "current_generation": int(row["current_generation"]),
+                "inherited_queue_item_id": int(row["inherited_queue_item_id"]),
+                "disposition": str(row["disposition"] or ""),
+                "skip_reason": str(row["skip_reason"] or ""),
+                "analysis_notes": str(row["analysis_notes"] or ""),
+                "cwe_coverage": _json_decode(row["cwe_coverage_json"], []),
+                "agent_name": str(row["assigned_agent"] or ""),
+                "recorded_at": row["completed_at"],
+            }
+            for row in page
+        ],
+    }
+
+
 DEFAULT_COVERAGE_PATH_DEPTH = 2
 MAX_COVERAGE_PATH_DEPTH = 32
 DEFAULT_COVERAGE_PATH_PAGE = 50
@@ -7634,10 +8597,12 @@ def code_coverage_by_path(
     (`_current_analysis_status_sql`), analyzed-by-classification
     (`_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL`), unreviewed structural debt
     (`_structural_debt_sql`) and accounted skips (`_CURRENT_ACCOUNTED_FILE_EXISTS_SQL`
-    without a successful review). Reference repositories owe nothing and are
-    left out, as in the summary. Rows sort by uncovered critical+high files,
-    most first, then by path, so the directory owing the most high-risk review
-    leads.
+    without a successful review). The terminal-verdict split reads the same
+    current attempt under the same accounting guard, so a directory can never
+    report a verdict for a file its own status column calls unreviewed.
+    Reference repositories owe nothing and are left out, as in the summary.
+    Rows sort by uncovered critical+high files, most first, then by path, so
+    the directory owing the most high-risk review leads.
     """
     engagement = _engagement_or_404(engagement_id)
     if not 1 <= depth <= MAX_COVERAGE_PATH_DEPTH:
@@ -7666,7 +8631,25 @@ def code_coverage_by_path(
                    ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}) AS analyzed,
                    {_structural_debt_sql()} AS structural_debt,
                    (({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
-                    AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})) AS accounted_skip
+                    AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})) AS accounted_skip,
+                   (
+                       SELECT terminal.disposition
+                       FROM code_analysis_queue AS terminal
+                       WHERE terminal.engagement_id = files.engagement_id
+                         AND terminal.file_id = files.id
+                         AND terminal.status = 'done'
+                         AND terminal.repo_generation = repos.active_generation
+                         AND terminal.source_superseded_at IS NULL
+                         AND ({_latest_current_queue_attempt_sql("terminal", "repos")})
+                         AND ({_no_superseded_active_attempt_sql("terminal", "repos")})
+                         -- The verdict is drawn from the same population
+                         -- `analyzed` and `accounted_skip` are: this is the one
+                         -- row all three read, so without the accounting guard
+                         -- a `done` row that never proved a claimed attempt
+                         -- would report a verdict beside a status that says the
+                         -- file was never reviewed.
+                         AND ({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
+                   ) AS latest_disposition
             FROM code_files AS files
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
@@ -7690,6 +8673,7 @@ def code_coverage_by_path(
                 "files": 0,
                 "loc": 0,
                 "by_classification": {},
+                "by_disposition": {},
                 "uncovered_critical_high": 0,
                 "by_status": dict.fromkeys(CURRENT_ANALYSIS_STATUSES, 0),
                 "structural_debt": {
@@ -7718,6 +8702,11 @@ def code_coverage_by_path(
             if row["structural_artifact_truncated"]:
                 debt["truncated"] += 1
         entry["accounted_skips"] += int(bool(row["accounted_skip"]))
+        disposition = str(row["latest_disposition"] or "")
+        if disposition in _VALID_DISPOSITIONS:
+            entry["by_disposition"][disposition] = (
+                entry["by_disposition"].get(disposition, 0) + 1
+            )
 
     ordered = sorted(
         directories.values(),
@@ -8600,7 +9589,9 @@ def code_readiness(
                             (
                                 f"Repository has {len(note_ids)} unanswered prior-art "
                                 f"lead(s) bound to its source ({lead_sample}); record a "
-                                "resolved or ruled_out disposition on each."
+                                "resolved or ruled_out disposition on each with "
+                                "`vigil assess intel update note <id> --inline "
+                                "'{\"lead_status\": \"resolved\"}'`."
                                 f"{stale_detail}"
                             ),
                             repo_id=repo_id,
@@ -8645,10 +9636,15 @@ def code_readiness(
                         overrideable=True,
                     )
                 )
-            active_queue = _scalar_row(
+            # Counted apart because they clear apart: `reset-stale` sweeps
+            # `processing` rows only, so an `error` row survives every recovery
+            # verb except `retry-error`. Rolled into one number, the operator's
+            # only visible escape was `--force`, which drops those files'
+            # coverage silently.
+            queue_item_ids = _scalar_rows_by_status(
                 connection,
                 f"""
-                SELECT COUNT(*)
+                SELECT queue.status, COUNT(*) AS items
                 FROM code_analysis_queue AS queue
                 JOIN code_files AS files
                   ON files.id = queue.file_id
@@ -8663,6 +9659,7 @@ def code_readiness(
                   AND queue.source_superseded_at IS NULL
                   AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
                   AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
+                GROUP BY queue.status
                 """,
                 (engagement.id, repo_id),
             )
@@ -8677,12 +9674,47 @@ def code_readiness(
                 """,
                 (engagement.id, repo_id),
             )
-            active_queue += invalid_active_history
+            errored_queue = queue_item_ids.get("error", 0)
+            open_queue = (
+                queue_item_ids.get("pending", 0)
+                + queue_item_ids.get("processing", 0)
+                + invalid_active_history
+            )
+            active_queue = open_queue + errored_queue
             if active_queue:
+                # The leading number stays the TOTAL: the Code view reads the
+                # first number in the message as the outstanding-item count
+                # (`codeLabels.blockerCount`). The split follows it so the
+                # operator can see which remedy applies to how many.
+                if open_queue and errored_queue:
+                    kinds = (
+                        f"active or errored analysis queue item(s) "
+                        f"({open_queue} active, {errored_queue} errored)"
+                    )
+                elif errored_queue:
+                    kinds = "errored analysis queue item(s)"
+                else:
+                    kinds = "active analysis queue item(s)"
+                remedies = []
+                if open_queue:
+                    remedies.append(
+                        "close each active item with `code-dispatch done`, `error` or "
+                        "`needs-context`, return it unclaimed with `code-dispatch "
+                        "release`, or discard an abandoned lease with `code-dispatch "
+                        "reset-stale`"
+                    )
+                if errored_queue:
+                    remedies.append(
+                        "recover each errored item with `code-dispatch retry-error "
+                        "<ids> <reason>` — `reset-stale` sweeps processing rows only "
+                        "and cannot touch an errored one"
+                    )
                 blockers.append(
                     _readiness_blocker(
                         "analysis_queue_active",
-                        f"Repository has {active_queue} active or errored analysis queue item(s).",
+                        f"Repository has {active_queue} {kinds}; "
+                        + "; ".join(remedies)
+                        + ".",
                         repo_id=repo_id,
                         overrideable=True,
                     )
@@ -9074,6 +10106,15 @@ STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
 ROLE_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
     (("crypto", "cipher", "tls", "ssl", "digest", "hmac", "jwt", "x509"), {"all": ["crypto-misuse"]}),
     (("auth", "oauth", "session", "login", "signin", "permission", "rbac", "acl", "sso"), {"all": ["auth-bypass", "web-app-auth"]}),
+    # A credential or session token presented to the server is only as strong
+    # as the limit on guessing it, so the entry point that accepts one owes
+    # brute-force and credential-stuffing review — the cheapest attacks on
+    # exactly that file. Split from the row above rather than added to it: an
+    # authorization policy point (`permission`, `rbac`, `acl`) decides on an
+    # already-authenticated principal and presents nothing to guess, so
+    # demanding throttling review there would be noise. The one-time-code
+    # workflow row covers the OTP spellings separately.
+    (("auth", "oauth", "session", "login", "signin", "sso"), {"all": ["rate-limit"]}),
     (("error", "exception", "fallback", "retry", "recovery"), {"all": ["error-handling"], "native": ["null-dereference"]}),
     (("allocator", "allocation", "memory", "arena", "pool"), {"native": ["uninitialized-memory"], "all": ["algorithmic-dos"]}),
     (("parser", "decoder", "deserializer", "deserialize", "serializer", "serialization", "codec", "marshal", "unmarshal", "regex", "regexp"), {"all": ["algorithmic-dos"]}),
@@ -9194,10 +10235,11 @@ def _applicable_families_for_file(
 ) -> list[str]:
     """Compute canonical applicable vulnerability classes for a classified file.
 
-    These are required: `done` refuses a result that omits one and the
-    coverage gate holds each to its effort threshold. Recomputed on every
-    read, never stored, so a row added here applies to every open engagement
-    at once.
+    These are required: `done` refuses a result that omits one, and the
+    coverage harness measures each against its tier's effort threshold —
+    refusing the gate for the tiers in `_BLOCKING_EFFORT_TIERS` and reporting
+    the rest as advisories. Recomputed on every read, never stored, so a row
+    added here applies to every open engagement at once.
     """
     lang_lower = language.lower().strip()
     is_native = lang_lower in NATIVE_LANGUAGES
@@ -9268,6 +10310,16 @@ def _applicable_families_for_slots(slot_types: list[str], language: str = "") ->
 # =========================================================================
 # Requeue triggered files
 # =========================================================================
+
+def _scalar_rows_by_status(
+    connection, query: str, params: tuple[Any, ...]
+) -> dict[str, int]:
+    """One grouped COUNT(*) read back as ``{status: count}``."""
+    return {
+        str(row["status"]): int(row["items"])
+        for row in connection.execute(query, params).fetchall()
+    }
+
 
 def _merge_unique_values(existing: list[Any], additions: list[Any]) -> list[Any]:
     merged = list(existing)
@@ -9376,8 +10428,7 @@ def _resolve_requeue_target(
         trigger = connection.execute(
             """
             SELECT triggers.target_file_id, triggers.target_file_path,
-                   source_files.repo_id AS source_repo_id,
-                   source_repos.active_generation AS source_repo_generation
+                   source_files.repo_id AS source_repo_id
             FROM code_analysis_triggers AS triggers
             JOIN code_files AS source_files
               ON source_files.id = triggers.source_file_id
@@ -9401,27 +10452,37 @@ def _resolve_requeue_target(
             return (row, "resolved", "") if row is not None else (None, "not_found", label)
         # An unbound trigger names its target by path inside the source repo,
         # which is the same repository the requeue insert must land in.
-        selector = {
-            "file_path": str(trigger["target_file_path"]),
-            "repo_id": int(trigger["source_repo_id"]),
-        }
-        row, outcome, _label = _resolve_requeue_target(
-            connection, engagement_id, selector
+        row, outcome, problem = _requeue_target_by_path(
+            connection,
+            engagement_id,
+            str(trigger["target_file_path"]),
+            int(trigger["source_repo_id"]),
         )
-        if outcome == "not_found":
-            _row, problem = snapshot_location_problem(
-                connection,
-                engagement_id,
-                int(trigger["source_repo_id"]),
-                int(trigger["source_repo_generation"]),
-                selector["file_path"],
-            )
-            if problem:
-                label += f": {problem}"
+        if problem:
+            label += f": {problem}"
         return row, outcome, label
 
     file_path = str(selector["file_path"])
-    repo_id = selector.get("repo_id")
+    row, outcome, problem = _requeue_target_by_path(
+        connection, engagement_id, file_path, selector.get("repo_id")
+    )
+    if outcome == "resolved":
+        return row, outcome, ""
+    return row, outcome, f"{file_path}: {problem}" if problem else file_path
+
+
+def _requeue_target_by_path(
+    connection, engagement_id: int, file_path: str, repo_id: Any
+) -> tuple[Any, str, str]:
+    """Resolve one repository path to its current file row, with a diagnosis.
+
+    Returns ``(row, outcome, problem)``. ``problem`` is the sealed-roster reason
+    the path did not resolve — "not a file in generation N of repository M" plus
+    the closest admitted spelling — and is only derivable when a repository is
+    named, because without one there is no single generation to search. Shared
+    by the `file_path` selector and the unbound-`trigger_id` selector so neither
+    can diagnose a miss the other cannot.
+    """
     rows = connection.execute(
         (
             f"""
@@ -9452,9 +10513,19 @@ def _resolve_requeue_target(
         else (engagement_id, int(repo_id), file_path),
     ).fetchall()
     if not rows:
-        return None, "not_found", file_path
+        if repo_id is None:
+            return None, "not_found", ""
+        repo_row = _get_published_repo_row(connection, engagement_id, int(repo_id))
+        _row, problem = snapshot_location_problem(
+            connection,
+            engagement_id,
+            int(repo_id),
+            int(repo_row["active_generation"]),
+            file_path,
+        )
+        return None, "not_found", problem
     if len(rows) > 1:
-        return None, "ambiguous", file_path
+        return None, "ambiguous", ""
     return rows[0], "resolved", ""
 
 

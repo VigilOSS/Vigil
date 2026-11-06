@@ -12,7 +12,7 @@ origin: Vigil
   `≥ high` (or the operator has explicitly authorized containment on a
   `downgraded` finding — by default downgrades do NOT trigger
   containment).
-- The verifier's handoff names `next_specialist: ir-lead` and the
+- The verifier's handoff names `recommended_next_agent: ir-lead` and the
   evidence_refs include reproducible adversarial activity.
 - The operator dispatches the L4 `ir-lead` role to author containment
   proposals, await per-action approval, then execute via `vigil blue contain`.
@@ -319,19 +319,25 @@ dispatch (if a follow-on finding lands).
 
    `metadata_json` carries `tier: L4`, `containment_action: <verb>`,
    `target: <value>`, `blast_radius: <category>`, `proposal_id: <id>`,
-   `finding_slug: <slug>`.
+   `finding_slug: <slug>`. One row per executed proposal, so these rows are the
+   per-proposal history; the finding carries only the current state.
 
-3. **Update the finding workflow status:**
+3. **Update the finding workflow status**, once per executed proposal:
 
    ```bash
    vigil assess finding update <finding-slug> \
      --workflow-status contained \
      --details-inline '{
-       "containment_actions": [
-         {"proposal_id": <id>, "action": "revoke_session", "target": "...", "executed_utc": "...", "proof_artifact_id": <id>}
-       ]
+       "containment_status": "contained",
+       "containment_action": "revoke_session",
+       "containment_command_run_id": <command-run-id>
      }'
    ```
+
+   `containment_action` is one verb, not a list: `details` holds the current
+   containment state and the activity rows from step 2 hold the per-proposal
+   sequence. Pass `containment_command_run_id: null` when the proof is a
+   registered artifact rather than an audited command run.
 
    Subsequent workflow transitions: `contained → eradicated` after
    persistence removal lands; `eradicated → recovered` after the
@@ -344,17 +350,27 @@ dispatch (if a follow-on finding lands).
      "agent_id": "<runtime-agent-id>",
      "agent_role": "ir-lead",
      "phase": "respond",
+     "summary": "Operator approved <n> proposals against <finding-slug>; <n> executed with containment proofs registered; eradication next and recovery pending.",
+     "confidence": "high",
      "handoff_status": "ready",
-     "finding_slug": "<slug>",
-     "evidence_refs": [<containment-proof-artifact-ids>],
-     "containment_actions_executed": [
-       {"proposal_id": <id>, "action": "revoke_session", "target": "user@acme.example", "blast_radius": "single-user", "rollback_window_utc": "2026-05-19T18:00:00Z"}
-     ],
-     "eradication_actions_executed": [...],
-     "recovery_actions_pending": [...],
-     "next_specialist": "report-writer",
+     "finding_slugs": ["<slug>"],
+     "recommended_next_agent": "report-writer",
      "coverage_gaps": [],
-     "rationale": "Containment landed; eradication next; recovery pending out-of-band user confirmation."
+     "next_steps": [
+       {"action": "confirm recovery out of band with the account owner", "target": "user@acme.example", "recommended_agent": "ir-lead", "rationale": "recovery cannot be verified from platform telemetry alone"}
+     ],
+     "extras": {
+       "disposition": null,
+       "evidence_refs": [<containment-proof-artifact-ids>],
+       "proposal_ids": [<id>],
+       "containment_actions_executed": [
+         {"proposal_id": <id>, "action": "revoke_session", "target": "user@acme.example", "blast_radius": "single-user", "rollback_window_utc": "2026-05-19T18:00:00Z"}
+       ],
+       "eradication_actions_executed": [],
+       "recovery_actions_pending": [],
+       "tenant_ref_paths_consulted": ["agent/references/tenants/<customer>-m365.md"],
+       "rationale": "Containment landed; eradication next; recovery pending out-of-band user confirmation."
+     }
    }
    ```
 

@@ -2101,7 +2101,21 @@ def transition_assessment_run(
                 detail=f"assessment run id={run_id} is sealed with status={current!r}",
             )
         if current == "queued" and requested not in {"running", "failed", "interrupted", "canceled"}:
-            raise HTTPException(status_code=409, detail="queued run must start before completion")
+            # Name the verb that actually moves the run, not the lifecycle word.
+            # A scan run is created ``queued``, so ``proof-run start`` has
+            # already run and "must start" reads as a contradiction; ``begin``
+            # is the transition. This run is NOT sealed either, so none of the
+            # terminal-run recovery (``start --resume-from``) applies yet.
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    f"assessment run id={run_id} is status='queued'; a scan run is "
+                    f"created queued and must be moved to running with "
+                    f"`vigil assess proof-run begin {run_id}` before it can "
+                    f"complete. Accounting writes and the {requested!r} outcome "
+                    "both require a running run."
+                ),
+            )
 
         effective = requested
         seal: dict[str, Any] | None = None

@@ -3977,3 +3977,50 @@ def test_run_accounting_migration_rolls_back_on_interruption(
             "SELECT status FROM assessment_runs WHERE run_uuid = 'phase2-existing'"
         ).fetchone()[0] == "started"
         assert backup.execute("PRAGMA quick_check").fetchone()[0] == "ok"
+
+
+def test_a_queued_scan_runs_completion_refusal_names_the_verb_that_starts_it(
+    client, isolate_settings
+) -> None:
+    """A scan run starts ``queued``, and ``proof-run start`` already ran.
+
+    The verb that moves ``queued`` -> ``running`` is ``proof-run begin``. Saying
+    the run "must start" names the verb the caller just used, so the refusal
+    read as a contradiction and the only documented escape from a run that
+    cannot complete (``--resume-from``) applies to a TERMINAL run, not this one.
+    """
+    _seed(client, isolate_settings)
+    run = _create_scan(client, run_uuid="queued-refusal")
+    assert run["status"] == "queued"
+
+    refused = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
+    )
+
+    assert refused.status_code == 409, refused.text
+    detail = refused.json()["detail"]
+    assert f"vigil assess proof-run begin {run['id']}" in detail
+    assert "queued" in detail
+    # It is not sealed: the resume path belongs to a terminal run.
+    assert "sealed" not in detail
+    assert "--resume-from" not in detail
+    # And the verb it names must parse. A refusal naming a spelling the CLI does
+    # not register sends the reader to an argparse error instead of the fix.
+    import argparse
+    import re
+    import shlex
+
+    from assess.commands import proof_run
+
+    parser = argparse.ArgumentParser(prog="vigil assess")
+    proof_run.register(parser.add_subparsers(dest="command"))
+    [printed] = re.findall(r"`vigil assess ([^`]+)`", detail)
+    parsed = parser.parse_args(shlex.split(printed))
+    assert parsed.command == "proof-run"
+    assert parsed.proof_run_action == "begin"
+    assert parsed.run_id == run["id"]
+
+    begun = client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
+    )
+    assert begun.status_code == 200, begun.text

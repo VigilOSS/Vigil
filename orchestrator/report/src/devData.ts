@@ -143,6 +143,19 @@ const standalone = [
     slug: "VA-005",
     title: "Verbose server banner discloses framework version",
     severity: "low",
+    verification_status: "downgraded",
+    // A verdict reached on the operator's own out-of-snapshot evidence rather
+    // than a proof receipt (ADR 0043). In the fixture so the dev view renders
+    // the attestation path at all: every other finding here is receipt-backed,
+    // and a surface nobody looks at is where this distinction goes missing.
+    operator_authority: {
+      kind: "out_of_snapshot",
+      intel_id: 17,
+      intel_type: "tech-component",
+      at: "2026-06-03T09:14:00Z",
+      reason:
+        "The edge proxy configuration (intel tech-component 17) strips the Server header before any response leaves the perimeter, so the banner is not reachable from outside the network.",
+    },
     canonical_location: "https://acme.example/",
     summary: "The `Server` header reveals the exact framework and patch level.",
     impact: "Aids an attacker in fingerprinting and targeting known CVEs.",
@@ -184,7 +197,7 @@ export const devData: ReportData = {
     finding_count: 6,
     finding_severities: { critical: 1, high: 2, medium: 1, low: 1, info: 1 },
     finding_workflow_statuses: { exploited: 2, active: 4 },
-    finding_verification_statuses: { confirmed: 5, unreviewed: 1 },
+    finding_verification_statuses: { confirmed: 4, downgraded: 1, unreviewed: 1 },
     attack_chain_count: 2,
     open_surface_count: 11,
     credential_count: 3,

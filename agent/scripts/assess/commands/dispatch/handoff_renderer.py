@@ -16,9 +16,14 @@ before any fixed sections drop.
 from __future__ import annotations
 
 import json
-import os
 import sys
 
+from assess.commands.dispatch._shared import (
+    ARTIFACT_PRESENT,
+    LEASE_BEARING_ROLES,
+    lane_coverage_basis,
+    resolve_engagement_artifact_path,
+)
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
 from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE
@@ -119,6 +124,17 @@ def _render_handoff(args, extra: list[str]) -> None:
         extras_payload = handoff.get("extras") or {}
         summary = str(handoff.get("summary") or "")
         confidence = str(handoff.get("confidence") or "")
+        # The phase the lane says it actually ran at. The dispatch packet carries
+        # the phase the operator AUTHORIZED, and the two diverging is how a lane
+        # quietly downgrades itself to a less privileged branch — so both are
+        # read, and neither was being rendered at all.
+        handoff_phase = str(handoff.get("phase") or "")
+        packet_context = _dispatch_packet_context(client, agent_id)
+        authorized_phase = str(packet_context.get("authorized_phase") or "")
+        # No queue lease means no `code-record analysis` receipt was reachable
+        # for any file the lane read, whatever its findings say.
+        coverage_basis = lane_coverage_basis(packet_context)
+        skills_recorded = _handoff_recorded_skills(extras_payload)
 
         # Handoff-row provenance. Every specialist's closing sequence is "write
         # the handoff, then render it as a self-check". A REJECTED write (e.g.
@@ -171,18 +187,19 @@ def _render_handoff(args, extra: list[str]) -> None:
         if isinstance(creds, list):
             credential_rows = [c for c in creds if isinstance(c, dict)]
 
-    # Local-disk presence check for working artifacts. The new payload uses
-    # objects with a 'path' key; tolerate plain strings for forward-compat.
+    # Local-disk presence check for working artifacts. One shared resolver with
+    # the handoff WRITE path, so the state the author was told at write time is
+    # the state the next dispatch reads here — including the containment rule
+    # the backend applies when it registers each path.
     artifact_states: list[tuple[str, str]] = []
     for entry in working_artifacts_payload:
-        if isinstance(entry, dict):
-            raw_path = str(entry.get("path") or "").strip()
-        else:
-            raw_path = str(entry).strip()
+        if not isinstance(entry, dict):
+            continue
+        raw_path = str(entry.get("path") or "").strip()
         if not raw_path:
             continue
-        full = raw_path if os.path.isabs(raw_path) else os.path.join(cfg.engagement_dir, raw_path)
-        artifact_states.append((raw_path, "present" if os.path.exists(full) else "missing"))
+        _resolved, state = resolve_engagement_artifact_path(cfg.engagement_dir, raw_path)
+        artifact_states.append((raw_path, state))
 
     blob = _render_handoff_blob(
         agent_id=agent_id,
@@ -192,6 +209,11 @@ def _render_handoff(args, extra: list[str]) -> None:
         dispatched_at=dispatched_at,
         status=dispatch_status,
         skills=skills,
+        skills_recorded=skills_recorded,
+        handoff_phase=handoff_phase,
+        authorized_phase=authorized_phase,
+        coverage_basis=coverage_basis,
+        packet_available=bool(packet_context),
         handoff_status=handoff_status,
         handoff_version=handoff_version,
         handoff_written_at=handoff_written_at,
@@ -229,6 +251,11 @@ def _render_handoff_blob(
     dispatched_at: str,
     status: str,
     skills: str,
+    skills_recorded: str = "",
+    handoff_phase: str = "",
+    authorized_phase: str = "",
+    coverage_basis: str = "",
+    packet_available: bool = False,
     handoff_status: str = "",
     handoff_version: object = None,
     handoff_written_at: str = "",
@@ -266,16 +293,26 @@ def _render_handoff_blob(
         f"- **Application unit:** {application_unit_id or '(none recorded)'}",
         f"- **Dispatched at:** {dispatched_at or '(unknown)'} (status: {status or 'unknown'})",
         _handoff_provenance_line(handoff_status, handoff_version, handoff_written_at),
+        _handoff_phase_line(handoff_phase, authorized_phase, packet_available=packet_available),
     ]
+    head.extend(_lane_basis_lines(role, coverage_basis, packet_available=packet_available))
     # Skills loaded by the prior dispatch are part of the audit surface — the
     # next dispatch should know which procedure context the previous agent
     # carried so it can either continue with the same skills or change loadout
-    # deliberately. Operators are exempt from declaring skills, so an empty
-    # value is rendered as a clear marker rather than dropped silently.
-    if skills:
-        head.append(f"- **Skills loaded:** {skills}")
+    # deliberately. `skills` on the dispatch row is only the operator's REQUEST,
+    # and omitting it is the normal case: the packet then tells the specialist to
+    # "record the loaded skill names in the handoff", where `extras` is the only
+    # key the payload accepts for them. Reading the dispatch row alone therefore
+    # reported "(not recorded)" for exactly the dispatches that self-selected,
+    # which is every dispatch the field was added for.
+    declared = ", ".join(part for part in (skills, skills_recorded) if part)
+    if declared:
+        head.append(f"- **Skills loaded:** {declared}")
     elif role and role != "operator":
-        head.append("- **Skills loaded:** (not recorded)")
+        head.append(
+            "- **Skills loaded:** (not recorded — neither the dispatch request nor "
+            "the handoff's `extras.skills_loaded` named any)"
+        )
 
     summary_lines = _summary_section(summary, confidence)
     finding_lines = (
@@ -347,8 +384,9 @@ def _render_handoff_blob(
         _compose(findings_kept, findings_dropped, [], runtime_kept, runtime_dropped, len(artifact_states))
     )
     artifacts_budget = max(0, max_lines - overhead_no_artifacts)
-    artifacts_kept = artifact_states[:artifacts_budget]
-    artifacts_dropped = max(0, len(artifact_states) - artifacts_budget)
+    artifacts_kept, artifacts_dropped = _artifacts_within_budget(
+        artifact_states, artifacts_budget
+    )
     composed = _compose(
         findings_kept,
         findings_dropped,
@@ -358,6 +396,35 @@ def _render_handoff_blob(
         artifacts_dropped,
     )
     return _join_with_hard_cap(composed, max_lines)
+
+
+def _artifacts_within_budget(
+    artifact_states: list[tuple[str, str]], budget: int
+) -> tuple[list[tuple[str, str]], int]:
+    """Keep every unverifiable artifact first, then fill with present ones.
+
+    The artifact tail is the last thing the budget drops, which is exactly where
+    a `missing` entry became invisible — in the capped blob the operator pastes
+    into the next dispatch. A missing or out-of-engagement path is the one the
+    next dispatch must not chase, so it outranks a file that is really there.
+    Recorded order is preserved within whatever survives.
+    """
+    if budget >= len(artifact_states):
+        return list(artifact_states), 0
+    if budget <= 0:
+        return [], len(artifact_states)
+    keep = [
+        index
+        for index, (_path, state) in enumerate(artifact_states)
+        if state != ARTIFACT_PRESENT
+    ][:budget]
+    for index, (_path, state) in enumerate(artifact_states):
+        if len(keep) >= budget:
+            break
+        if state == ARTIFACT_PRESENT:
+            keep.append(index)
+    kept = [artifact_states[index] for index in sorted(keep)]
+    return kept, len(artifact_states) - len(kept)
 
 
 def _join_with_hard_cap(lines: list[str], max_lines: int) -> str:
@@ -373,6 +440,97 @@ def _join_with_hard_cap(lines: list[str], max_lines: int) -> str:
     if max_lines == 1:
         return marker
     return "\n".join([*physical_lines[: max_lines - 1], marker])
+
+
+#: The one `extras` key the dispatch packet asks a self-selecting specialist to
+#: record its loaded skills under. `extras` is the only part of the handoff
+#: payload that accepts a role-specific name, so this is where "record the loaded
+#: skill names in the handoff" can land; the renderer and the packet must agree
+#: on the spelling or the field is silently always empty.
+HANDOFF_SKILLS_KEY = "skills_loaded"
+
+
+def _handoff_recorded_skills(extras: object) -> str:
+    """The skills the lane itself says it loaded, from ``extras.skills_loaded``."""
+    if not isinstance(extras, dict):
+        return ""
+    value = extras.get(HANDOFF_SKILLS_KEY)
+    if isinstance(value, str):
+        names = [part.strip() for part in value.split(",") if part.strip()]
+    elif isinstance(value, (list, tuple)):
+        names = [str(part).strip() for part in value if str(part).strip()]
+    else:
+        return ""
+    return ", ".join(dict.fromkeys(names))
+
+
+def _dispatch_packet_context(client, agent_id: str) -> dict:
+    """The dispatch's captured packet context, or an empty dict.
+
+    Tolerant by design: a handoff can outlive a dispatch row, a pre-packet
+    dispatch has nothing captured, and the renderer's job is to show what the
+    lane ran at — not to fail because the grant cannot be read back.
+    """
+    try:
+        packet = client.get(f"dispatches/{agent_id}/prompt-packet")
+    except AssessError:
+        return {}
+    if not isinstance(packet, dict):
+        return {}
+    context = packet.get("context")
+    return context if isinstance(context, dict) else {}
+
+
+def _handoff_phase_line(
+    handoff_phase: str, authorized_phase: str, *, packet_available: bool
+) -> str:
+    """What phase the lane ran at, beside the phase it was authorized for.
+
+    Neither value was rendered, so a dispatch that silently ran a different
+    (usually strictly less privileged) branch than it was granted produced
+    output indistinguishable from one that ran as dispatched — and the branch it
+    fell back to is the one that writes no receipts. The handoff's own ``phase``
+    is the lane's account of itself; ``authorized_phase`` from the immutable
+    packet is the operator's grant. A divergence is named, never reconciled.
+    """
+    ran = handoff_phase or "(not recorded in the handoff)"
+    if not packet_available:
+        granted = "(no captured packet)"
+    else:
+        granted = authorized_phase or "(not recorded in the packet)"
+    line = f"- **Phase:** ran at {ran}; authorized_phase {granted}"
+    if handoff_phase and authorized_phase and handoff_phase != authorized_phase:
+        line += (
+            " — the phase this lane ran at differs from the phase it was "
+            "authorized for; treat its coverage claims as scoped to the phase it "
+            "actually ran"
+        )
+    return line
+
+
+def _lane_basis_lines(role: str, coverage_basis: str, *, packet_available: bool) -> list[str]:
+    """What this lane's file coverage was anchored to, for lease-bearing roles.
+
+    A hunter dispatched with no queue items and no lane file holds no lease, so
+    ``code-record analysis`` was unreachable for every file it read: the handoff
+    reads normally while ``code-coverage`` still reports those files unreviewed
+    and the next wave re-reads them. The handoff has to carry that fact, because
+    it is the only thing the next dispatch reads.
+    """
+    if role not in LEASE_BEARING_ROLES:
+        return []
+    if not packet_available:
+        return [
+            "- **Lane basis:** (no captured packet — confirm with `code-coverage` "
+            "whether this lane's files carry receipts)"
+        ]
+    if coverage_basis:
+        return [f"- **Lane basis:** {coverage_basis}"]
+    return [
+        "- **Lane basis:** no queue lease (no queue_item_ids, no lane_file) — this "
+        "dispatch was non-covering: it could record no `code-record analysis` "
+        "receipt, so every file it read is still unreviewed in `code-coverage`"
+    ]
 
 
 def _handoff_provenance_line(

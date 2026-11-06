@@ -29,8 +29,17 @@ from .findings import (
     is_file_finding,
     load_code_repo_snapshot_states,
 )
+from .finding_snapshots import (
+    closest_snapshot_path,
+    code_snapshot_binding,
+    snapshot_location_problem,
+)
 from .links import _root_cause_link_metadata
-from .proofs import proof_evidence_health_issues_for_finding
+from .proofs import (
+    TERMINAL_VERIFICATION_STATUSES,
+    operator_authority_stamp,
+    proof_evidence_health_issues_for_finding,
+)
 from .repro_currentness import reproduction_basis
 
 _MARKDOWN_PATH_REFERENCE_RE = re.compile(
@@ -39,6 +48,237 @@ _MARKDOWN_PATH_REFERENCE_RE = re.compile(
     r"(?![A-Za-z0-9_.-])",
     re.IGNORECASE,
 )
+
+# The free-text ``details`` keys whose own schema descriptions TEACH the
+# ``<path>:<line>`` convention — ``details.sink``'s description is literally
+# ``"memcpy(buf, scheme, schemelen) at lib/urlapi.c:342"`` — so authors write
+# citations here, and nothing read them. Every STRUCTURED citation a finding
+# carries already resolves against the generation its binding seals; these did
+# not, so a finding could cite a line that does not exist and survive until a
+# verifier opened it.
+_CITED_CODE_DETAIL_KEYS = (
+    "entry_point",
+    "sink",
+    "taint_path",
+    "guards_evaluated",
+    "evidence",
+    "remediation",
+)
+
+# A path-shaped token followed by a cited line (or line range). The lookbehind
+# and lookahead keep the match off the inside of a longer token, so a URL
+# authority (``https://host:8443/x``), a dotted version (``CVSS:3.1/AV:N``), a
+# clock time (``12:30:05``) and an ISO timestamp never match; a cited line is
+# REQUIRED, because a bare file name in prose is a reference, not a claim about
+# where something lives.
+_DETAIL_CODE_REFERENCE_RE = re.compile(
+    r"(?<![A-Za-z0-9_:/.-])"
+    r"(?P<path>[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*)"
+    r":(?P<line>[0-9]{1,7})(?:-(?P<end>[0-9]{1,7}))?"
+    r"(?![A-Za-z0-9_/-])"
+)
+_PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9_+]{0,8}$")
+
+
+def _gated(item: dict[str, Any], severity: str) -> dict[str, Any]:
+    """Stamp one readiness item with the gating class that produced it.
+
+    The payload separates ``blockers`` from ``advisories``, but the ITEM — kind
+    plus detail — is what gets copied into a handoff or grepped out of a log,
+    and it arrives at its reader with the split long gone. Two near-homonyms
+    make that costly: ``missing_cited_markdown_artifact`` never gates while
+    ``finding_evidence_missing_artifact`` always does, and both describe a cited
+    artifact that is absent. Stamping here, at the one point both buckets pass
+    through, means a new append cannot forget it. ``block`` refuses the final
+    report; ``advisory`` never does. Mirrors the ``severity`` key
+    ``transition-phase`` already stamps on its own precondition items.
+    """
+
+    return {**item, "severity": severity}
+
+
+def _is_path_shaped(path: str) -> bool:
+    """A token that claims to name a file, not a word, a version or a time."""
+
+    if ".." in path or path.endswith("/"):
+        return False
+    return "/" in path or bool(_PATH_EXTENSION_RE.search(path))
+
+
+def _cited_code_locations(value: Any) -> Iterable[tuple[str, int, int | None]]:
+    """Yield each ``<path>:<line>[-<end>]`` citation in one details value.
+
+    ``taint_path`` is declared as a string OR an array of strings, so a list is
+    walked element by element rather than skipped.
+    """
+
+    if isinstance(value, (list, tuple)):
+        for item in value:
+            yield from _cited_code_locations(item)
+        return
+    if not isinstance(value, str):
+        return
+    for match in _DETAIL_CODE_REFERENCE_RE.finditer(value):
+        line = int(match.group("line"))
+        if line < 1:
+            continue
+        path = match.group("path")
+        if not _is_path_shaped(path):
+            continue
+        end = match.group("end")
+        yield path, line, int(end) if end is not None else None
+
+
+def _outside_snapshot_paths(
+    connection, engagement_id: int, repo_id: int
+) -> set[str]:
+    """Paths this engagement already declared outside the repository's snapshot.
+
+    A cross-file trigger target the snapshot genuinely cannot hold (a binary, a
+    dependency outside the checkout, a file in another repository) is recorded
+    with no file id. Prose naming such a target is not a defective citation.
+    """
+
+    return {
+        str(row["target_file_path"])
+        for row in connection.execute(
+            """
+            SELECT DISTINCT target_file_path
+            FROM code_analysis_triggers
+            WHERE engagement_id = ? AND repo_id = ? AND target_file_id IS NULL
+              AND target_file_path != ''
+            """,
+            (engagement_id, repo_id),
+        ).fetchall()
+    }
+
+
+def _details_citation_blockers(
+    connection, engagement_id: int, candidates: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Resolve each reportable finding's free-text code citations.
+
+    Refusing the WRITE would be the wrong instrument: a remediation legitimately
+    names a vendor file, a build output, or a libc call the sealed tree never
+    held, and a hunter must be able to say so. So this is a report-time gate,
+    and it fires only where the sealed generation can be shown to CONTRADICT the
+    citation:
+
+    * the cited path is a file in the generation and the cited line lies past
+      its end — the citation names bytes that do not exist; or
+    * the cited path is not in the generation while the generation holds a file
+      of the same NAME under another directory — the wrong directory, not an
+      external reference.
+
+    Everything else stays silent: a path with no admitted namesake (vendor
+    prose), a path already declared ``outside_snapshot``, a citation with no
+    directory component (a file name alone omits the location rather than
+    claiming a wrong one), and any finding with no sealed binding to resolve
+    against. Symbol names are deliberately NOT refused: ``details.sink``'s own
+    taught examples name ``memcpy`` and ``sqlite3_exec``, which the sealed tree
+    does not define, so absence from the structural index is no defect.
+    """
+
+    blockers: list[dict[str, Any]] = []
+    rosters: dict[tuple[int, int], bool] = {}
+    outside_by_repo: dict[int, set[str]] = {}
+    for row in candidates:
+        binding = code_snapshot_binding(row)
+        if binding is None:
+            continue
+        repo_id = binding["repo_id"]
+        generation = binding["repo_generation"]
+        roster_key = (repo_id, generation)
+        if roster_key not in rosters:
+            rosters[roster_key] = (
+                connection.execute(
+                    """
+                    SELECT 1 FROM code_source_generation_files
+                    WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+                    LIMIT 1
+                    """,
+                    (engagement_id, repo_id, generation),
+                ).fetchone()
+                is not None
+            )
+        if not rosters[roster_key]:
+            # An empty roster cannot answer any citation; the unattested and
+            # stale-snapshot blockers own that failure.
+            continue
+        if repo_id not in outside_by_repo:
+            outside_by_repo[repo_id] = _outside_snapshot_paths(
+                connection, engagement_id, repo_id
+            )
+        details = _json_object(row.get("details"))
+        slug = str(row.get("slug", ""))
+        seen: set[tuple[str, str, int, int | None]] = set()
+        for key in _CITED_CODE_DETAIL_KEYS:
+            for path, line, end_line in _cited_code_locations(details.get(key)):
+                if (key, path, line, end_line) in seen:
+                    continue
+                seen.add((key, path, line, end_line))
+                if path in outside_by_repo[repo_id]:
+                    continue
+                file_row, problem = snapshot_location_problem(
+                    connection, engagement_id, repo_id, generation, path, line,
+                    end_line=end_line,
+                )
+                if not problem:
+                    continue
+                closest = (
+                    path
+                    if file_row is not None
+                    else closest_snapshot_path(
+                        connection, engagement_id, repo_id, generation, path
+                    )
+                )
+                if file_row is None and (
+                    "/" not in path
+                    or closest is None
+                    or closest.rsplit("/", 1)[-1] != path.rsplit("/", 1)[-1]
+                ):
+                    continue
+                blockers.append(
+                    {
+                        "kind": "finding_details_citation_unresolved",
+                        "slug": slug,
+                        "title": row.get("title", ""),
+                        "detail_key": key,
+                        "path": path,
+                        "line": line,
+                        "closest_admitted_path": closest,
+                        "detail": (
+                            f"finding {slug} cites {path}:{line} in details.{key}, "
+                            f"but {problem}. The sealed generation is what a "
+                            "verifier opens, so correct the citation to the "
+                            f"admitted location ({closest}) with "
+                            f"`vigil assess finding update {slug} --details-inline "
+                            f"'{{\"{key}\": \"...\"}}'`, or re-review the finding "
+                            "against the current source if the code moved."
+                        ),
+                    }
+                )
+    return blockers
+
+
+def _source_bound_evidence(record: dict[str, Any], snapshot_status: str) -> bool:
+    """True when the finding's evidence IS the sealed source it cites.
+
+    A source-derived code finding's ``canonical_location`` names a file and a
+    line inside the generation its binding seals, and its proof receipts are
+    source observations over those exact bytes — there is no separate engagement
+    artifact to write, index, or repoint. The ``finding_repro_runs_missing``
+    advisory already exempts this shape for the same reason, and ``finding
+    record`` carries the matching warning-side exemption, so both ends read one
+    predicate: ``file:`` form AND a binding that is current for the repository.
+    A stale or unbound file finding does NOT qualify — it cites bytes nothing
+    seals, so its citation is not evidence.
+    """
+
+    return (
+        is_file_finding(str(record.get("canonical_location", "") or ""))
+        and snapshot_status == "current"
+    )
 
 
 def _is_durable_markdown_path(path: str) -> bool:
@@ -316,7 +556,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         if row.get("workflow_status") in reportable_statuses
     ]
 
-    draft_snapshot_statuses: dict[str, str] = {}
+    # Classified once per candidate and read by three gates: the stale/unbound
+    # blockers below, the draft disposition item, and the source-bound evidence
+    # exemption, which is only paid for by a CURRENT binding.
+    snapshot_statuses: dict[str, str] = {}
     with _common.get_connection() as connection:
         repo_states = load_code_repo_snapshot_states(connection, engagement.id)
         for row in candidate_records:
@@ -326,8 +569,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 row,
                 repo_states=repo_states,
             )
-            if row.get("workflow_status") == "draft":
-                draft_snapshot_statuses[str(row.get("slug", ""))] = snapshot_status
+            snapshot_statuses[str(row.get("slug", ""))] = snapshot_status
             if row.get("workflow_status") not in reportable_statuses:
                 continue
             # Legacy rows predate attestation and remain readable. A new
@@ -369,6 +611,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     ),
                 }
             )
+        blockers.extend(
+            _details_citation_blockers(connection, engagement.id, candidates)
+        )
 
     # Import lazily: code_analysis imports the finding snapshot helpers from this
     # package, so a module-level import would create a package initialization
@@ -468,7 +713,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         if row.get("workflow_status") != "draft":
             continue
         slug = str(row.get("slug", ""))
-        snapshot_status = draft_snapshot_statuses.get(slug, "not_applicable")
+        snapshot_status = snapshot_statuses.get(slug, "not_applicable")
         destination = (
             blockers
             if is_file_finding(str(row.get("canonical_location", "") or ""))
@@ -564,6 +809,77 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 }
             )
 
+    # A terminal verdict reached on the operator's OWN out-of-snapshot evidence
+    # cites no proof receipt, so every receipt-shaped check below passes it in
+    # silence and the verdict reads exactly like a dispatch-verified one. ADR
+    # 0019 lets the operator weaken a gate over their own engagement; what it
+    # does not permit is doing so invisibly, so readiness names the finding and
+    # the intel row the waiver rests on. ADVISORY, never a blocker: the waiver
+    # is legitimate, and gating it would take back the authority ADR 0019
+    # grants. Read across every non-merged finding, not just the reportable
+    # candidates, because an operator-authority ``false_positive`` leaves the
+    # report entirely and is the most consequential waiver of the three.
+    with _common.get_connection() as connection:
+        authority_rows = connection.execute(
+            """
+            SELECT slug, title, verification_status, provenance_json
+            FROM assessment_findings
+            WHERE engagement_id = ?
+              AND verification_status IN ({placeholders})
+              AND merged_into_finding_id IS NULL
+            ORDER BY id ASC
+            """.format(
+                placeholders=", ".join("?" for _ in TERMINAL_VERIFICATION_STATUSES)
+            ),
+            (engagement_id, *sorted(TERMINAL_VERIFICATION_STATUSES)),
+        ).fetchall()
+    for row in authority_rows:
+        stamp = operator_authority_stamp(row["provenance_json"])
+        if stamp is None:
+            continue
+        slug = str(row["slug"] or "")
+        verification_status = str(row["verification_status"] or "")
+        intel_id = stamp.get("intel_id")
+        raw_type = stamp.get("intel_type")
+        intel_type = raw_type if isinstance(raw_type, str) and raw_type else None
+        # `intel get` takes the type as a required positional, and the ten intel
+        # tables allocate ids independently, so the type is half the citation.
+        # The verification resolves it and the stamp carries it; a stamp that
+        # names no table gets the type-independent listing rather than a guess,
+        # because a command naming the wrong table opens an unrelated row and
+        # presents it as the evidence behind a terminal verdict — the exact
+        # misreading this item exists to prevent.
+        citation = f"intel {intel_type} {intel_id}" if intel_type else f"intel {intel_id}"
+        read_clause = (
+            f"`vigil assess intel get {intel_type} {intel_id}`"
+            if intel_type
+            else (
+                "`vigil assess intel list` — this stamp records no intel type, and "
+                f"the intel tables number independently, so find id {intel_id} "
+                "among the types it counts"
+            )
+        )
+        advisories.append(
+            {
+                "kind": "finding_operator_authority_verdict",
+                "slug": slug,
+                "title": str(row["title"] or ""),
+                "verification_status": verification_status,
+                "intel_id": intel_id,
+                "intel_type": intel_type,
+                "authority_kind": stamp.get("kind"),
+                "detail": (
+                    f"finding {slug} is verification_status='{verification_status}' on "
+                    f"the operator's own out-of-snapshot evidence ({citation}), "
+                    "not on a dispatch-verified proof receipt. Advisory, not a report "
+                    f"blocker: {stamp.get('reason') or 'no reason recorded'}. Read the "
+                    f"evidence with {read_clause}, and "
+                    "describe the verdict as operator-attested wherever the report "
+                    "states how it was reached."
+                ),
+            }
+        )
+
     with _common.get_connection() as connection:
         for row in candidates:
             if row.get("verification_status") not in {"confirmed", "downgraded"}:
@@ -646,6 +962,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "slug": slug,
                     "title": title,
                     "detail": (
+                        "advisory, not a report blocker: "
                         f"finding {slug} has authored steps_to_reproduce but no "
                         "details.repro_runs, so no command run stands behind the steps and "
                         "nobody can diff them against what was actually executed. Find the "
@@ -713,18 +1030,27 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     and str(variance["normal_band"]) == expected
                     and str(variance["chosen_severity"]) == severity
                 )
+                authority = (
+                    operator_authority_stamp(row.get("provenance"))
+                    if str(row.get("verification_status")) in TERMINAL_VERIFICATION_STATUSES
+                    else None
+                )
                 detail = (
                     f"severity={severity} but cvss_score={score} expects {expected}"
                 )
-                if approved:
+                if approved or authority:
+                    attribution = (
+                        f"operator authority: {authority.get('reason') or 'no reason recorded'}"
+                        if authority
+                        else f"structured variance approved by {variance['actor']}: {variance['reason']}"
+                    )
                     advisories.append(
                         {
                             "kind": "severity_cvss_band_divergence",
                             "slug": slug,
                             "title": title,
                             "detail": (
-                                f"{detail}; structured variance approved by "
-                                f"{variance['actor']}: {variance['reason']}"
+                                f"{detail}; {attribution}"
                             ),
                         }
                     )
@@ -896,6 +1222,14 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             evidence_ref = str(row.get("evidence_ref", "") or "").strip()
             evidence_artifact_id = row.get("evidence_artifact_id")
             linked_evidence_artifact = None
+            # A source-derived code finding's evidence IS the sealed source its
+            # location cites, so there is no artifact to index and nothing a
+            # repoint could aim at. The two obligations below are exempt; the
+            # indexed-but-absent and mismatch blockers still apply, because a
+            # finding that DOES name an engagement artifact must name a real one.
+            source_bound = _source_bound_evidence(
+                row, snapshot_statuses.get(slug, "not_applicable")
+            )
 
             if evidence_artifact_id is not None:
                 linked_evidence_artifact = artifact_rows_by_id.get(int(evidence_artifact_id))
@@ -925,6 +1259,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     )
                     continue
 
+            if not evidence_ref and source_bound:
+                continue
             if not evidence_ref:
                 blockers.append(
                     {
@@ -946,6 +1282,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 if indexed_artifact_id is not None
                 else None
             )
+            if artifact is None and source_bound:
+                continue
             if artifact is None:
                 blockers.append(
                     {
@@ -1146,7 +1484,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     "kind": "unreviewed_findings",
                     "slug": slug,
                     "title": str(row["title"] or ""),
-                    "severity": str(row["severity"] or ""),
+                    # ``severity`` on a readiness item names its gating class, so
+                    # the finding's own band travels under its own key.
+                    "finding_severity": str(row["severity"] or ""),
                     "auth_context": str(row["auth_context"] or ""),
                     "detail": (
                         f"finding {slug} (severity={row['severity']}) is verification_status="
@@ -1271,8 +1611,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
     return {
         "ready": len(blockers) == 0,
         "blocker_count": len(blockers),
-        "blockers": blockers,
-        "advisories": advisories,
+        "blockers": [_gated(item, "block") for item in blockers],
+        "advisories": [_gated(item, "advisory") for item in advisories],
         "advisory_count": len(advisories),
         "coverage": coverage,
     }
@@ -1297,6 +1637,15 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     item = dict(record)
     details = _json_object(item.get("details"))
     item["report_id"] = report_id
+    # The waiver behind the verdict, projected to the top level beside
+    # ``verification_status`` because that field alone cannot tell a
+    # dispatch-verified `downgraded` from one the operator reached on their own
+    # out-of-snapshot evidence. ADR 0019 lets the operator weaken a gate over
+    # their own engagement; delivering the result as indistinguishable from
+    # proof is the laundering that permission does not extend to. The WHOLE
+    # stamp travels — ``intel_id`` and ``reason`` are what make the verdict
+    # legible — and ``None`` is the ordinary case.
+    item["operator_authority"] = operator_authority_stamp(item.get("provenance"))
     item["cvss_vector"] = details.get("cvss_vector", "")
     item["cvss_score"] = details.get("cvss_score")
     item["remediation"] = details.get("remediation", "")

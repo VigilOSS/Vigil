@@ -2762,7 +2762,7 @@ def update_surface(
 ) -> dict[str, Any]:
     """Patch an assessment_surfaces row by id.
 
-    Operators reach this through ``vigil assess resolve-surface`` to mark
+    Operators reach this through ``vigil assess resolve surface`` to mark
     discovered surfaces ``covered``, ``not_applicable``, ``deferred``, or
     ``partially-covered``. Unspecified fields stay untouched, but at least
     one mutable field must be supplied so the call records something

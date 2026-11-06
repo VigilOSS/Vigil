@@ -50,7 +50,25 @@ def register(subparsers) -> None:
     start.add_argument("--target-identity-file")
     start.add_argument("--source-generations-file")
     start.add_argument("--exclusions-file")
-    start.add_argument("--resume-from", type=int)
+    start.add_argument(
+        "--resume-from",
+        type=int,
+        metavar="RUN_ID",
+        help="Continue a TERMINAL run as a new child run — the only way forward "
+             "from a run sealed partial by sources it never read, since a "
+             "terminal run refuses further source reads and new receipts, and "
+             "only a completed run's receipts can carry a terminal finding "
+             "decision. The child inherits the parent's sources, its source "
+             "reads, its obligations and candidates, and every receipt binding "
+             "still healthy at resume time; a new proof receipt may cite a "
+             "source read from anywhere in the run lineage, so re-bind receipts "
+             "to the bytes the parent already delivered and finish this run "
+             "completed instead of re-reading them. The parent fixes the "
+             "identity: kind, purpose, target identity, source generations, and "
+             "exclusions must match. Finding associations do NOT carry over — "
+             "pass --for-finding again (or `finding link`) before this run's "
+             "receipts can support a verdict.",
+    )
     start.set_defaults(func=_run_start)
 
     begin = actions.add_parser(

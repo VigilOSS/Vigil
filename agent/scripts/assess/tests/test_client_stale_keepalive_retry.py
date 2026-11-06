@@ -165,7 +165,10 @@ def test_connect_and_read_each_get_their_own_timeout(monkeypatch):
             pass
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    thread = threading.Thread(
+        target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True
+    )
+    thread.start()
     try:
         with AssessmentClient(f"http://127.0.0.1:{server.server_address[1]}", "eng") as client:
             client._request_raw("POST", "/fast", body=b"{}", read_timeout=0.3, max_retries=1)
@@ -179,3 +182,4 @@ def test_connect_and_read_each_get_their_own_timeout(monkeypatch):
     finally:
         server.shutdown()
         server.server_close()
+        thread.join(timeout=2)

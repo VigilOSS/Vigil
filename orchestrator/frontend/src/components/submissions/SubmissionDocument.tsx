@@ -25,6 +25,7 @@ import { MarkdownBlock } from "../Markdown";
 import { Skeleton, SlowLoadHint } from "../Skeletons";
 import { EmptyState, StatusPill } from "../ui";
 import { FindingRecordHeader } from "../FindingRecordHeader";
+import { operatorAuthorityOf } from "../../lib/findingWorkflow";
 import { AttachmentPicker, type AttachmentMeta } from "./AttachmentPicker";
 import {
   nextVersionNumber,
@@ -580,6 +581,10 @@ export function SubmissionDocument({
           titleId="submission-finding-title" severity={severity}
           workflow={row?.workflow_status ?? detail?.finding.workflow_status}
           verification={row?.verification_status ?? detail?.finding.verification_status}
+          // The disclosure package is the handoff to an external program, so
+          // this is the last place a verdict taken on the operator's own
+          // authority may look dispatch-verified.
+          operatorAuthority={operatorAuthorityOf(detail?.finding)}
           submission={submissionStatus} workspace="submissions" section={tab}
           actions={<div className="subm-card-action">
             <PrimaryAction

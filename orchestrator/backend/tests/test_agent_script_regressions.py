@@ -321,6 +321,574 @@ def test_fetch_respects_explicit_pagination_query(capsys) -> None:
     assert capsys.readouterr().err == ""
 
 
+def _backend_limit_bounds(endpoint) -> tuple[Any, int]:
+    """The ``(default, maximum)`` a backend list route declares for ``limit``.
+
+    ``fetch``'s paging tables mirror these ceilings, and a mirrored number that
+    drifts is worse than no number at all: ``--paginate`` either asks for a page
+    the backend answers with 422, or stops one page short of the rows. Reading
+    the route's own ``Query()`` is what keeps the mirror honest.
+    """
+    import inspect
+
+    query = inspect.signature(endpoint).parameters["limit"].default
+    maximum = next(
+        int(constraint.le)
+        for constraint in query.metadata
+        if getattr(constraint, "le", None) is not None
+    )
+    return query.default, maximum
+
+
+def _code_file_page(
+    rows: list[dict[str, Any]], *, offset: int, total: int
+) -> dict[str, Any]:
+    """The backend's ``code/files`` pagination envelope for one page."""
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(rows),
+        "has_more": offset + len(rows) < total,
+        "items": rows,
+    }
+
+
+def test_fetch_pages_the_code_file_envelope_to_completion(capsys) -> None:
+    """``--paginate`` was a silent no-op on ``code/files``.
+
+    The route was absent from the paging tables, so ``_fetch_assessment_endpoint``
+    returned the backend's bounded first page before ``paginate`` was ever read:
+    one HTTP call, ``has_more: true`` on stdout, exit 0, nothing on stderr — a
+    repo-wide read that stopped at the first page of a 28k-file inventory and
+    said nothing, after being verified on a result set that fit in one page.
+    Registering it as an ARRAY route would have broken it instead, because the
+    array loop requires a JSON array, so the envelope keeps its own branch and
+    ``parse_code_file_page`` stays its validator.
+    """
+    import app.api.code_analysis as code_analysis_api
+
+    module = _load_script_module(
+        "test_fetch_module_code_file_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    default_limit, page_cap = _backend_limit_bounds(code_analysis_api.list_files)
+    assert module._PAGED_ASSESSMENT_ENVELOPE_ENDPOINTS["code/files"] == (
+        "items",
+        page_cap,
+    )
+    assert default_limit < page_cap
+    total = page_cap + 3
+    calls: list[str] = []
+
+    class FakeClient:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            query = parse_qs(endpoint.partition("?")[2])
+            offset = int(query["offset"][0])
+            limit = int(query["limit"][0])
+            rows = [
+                {"id": index, "file_path": f"src/module{index}.py"}
+                for index in range(offset, min(offset + limit, total))
+            ]
+            return _code_file_page(rows, offset=offset, total=total)
+
+        def get_all_pages(self, *_args, **_kwargs):
+            raise AssertionError("code/files is an envelope, not a JSON array")
+
+    result = module._fetch_assessment_endpoint(
+        FakeClient(), "code/files?repo_id=4", paginate=True
+    )
+
+    assert calls == [
+        f"code/files?repo_id=4&limit={page_cap}&offset=0",
+        f"code/files?repo_id=4&limit={page_cap}&offset={page_cap}",
+    ]
+    assert result["total"] == total
+    assert result["count"] == total
+    assert result["offset"] == 0
+    assert result["has_more"] is False
+    assert [row["id"] for row in result["items"]] == list(range(total))
+    assert (
+        f"auto-paging code/files with page_size={page_cap}"
+        in capsys.readouterr().err
+    )
+
+
+def test_fetch_defaults_to_one_bounded_code_file_page(capsys) -> None:
+    """Without ``--paginate`` the envelope route answers like every other one.
+
+    The catalog promises that a route marked ``[--paginate]`` returns one
+    bounded page by default, and the whole defect was that ``code/files``
+    looked unmarked while being bounded by the backend anyway.
+    """
+    module = _load_script_module(
+        "test_fetch_module_code_file_bounded",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            rows = [{"id": index} for index in range(module._DEFAULT_PAGE_SIZE)]
+            return _code_file_page(rows, offset=0, total=4096)
+
+    result = module._fetch_assessment_endpoint(FakeClient(), "code/files")
+
+    assert calls == [f"code/files?limit={module._DEFAULT_PAGE_SIZE}&offset=0"]
+    assert result["has_more"] is True
+    assert result["count"] == module._DEFAULT_PAGE_SIZE
+    err = capsys.readouterr().err
+    assert "bounded page" in err
+    assert "--paginate" in err
+
+
+def test_fetch_refuses_a_code_file_page_whose_total_shifted() -> None:
+    """Paging a moving inventory silently drops or duplicates rows.
+
+    ``fetch_backend_file_inventory`` already refuses a walk whose ``total``
+    changed underneath it, and the merged ``fetch`` read reuses that check:
+    a combined envelope nobody can trust is worse than a bounded page the
+    operator knows is bounded.
+    """
+    module = _load_script_module(
+        "test_fetch_module_code_file_total_shift",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+
+    class FakeClient:
+        def get(self, endpoint: str):
+            query = parse_qs(endpoint.partition("?")[2])
+            offset = int(query["offset"][0])
+            total = 8 if offset == 0 else 12
+            rows = [{"id": offset + index} for index in range(4)]
+            return _code_file_page(rows, offset=offset, total=total)
+
+    with pytest.raises(module.AssessError) as exc:
+        module._fetch_assessment_endpoint(
+            FakeClient(), "code/files?limit=4", paginate=True
+        )
+
+    assert "total" in str(exc.value)
+
+
+def test_fetch_pages_the_attempts_envelope_to_completion(capsys) -> None:
+    """``attempts`` is the catalog's other object-wrapped list route.
+
+    It answers ``{"attempts": [...], "count": N}`` with no ``total`` and no
+    ``has_more``, so it can only stop on a short page — but it defaulted to 250
+    of up to 5000 recorded attempts with no notice at all, which is exactly the
+    "already walled, do not re-run this probe" read a specialist trusts.
+    """
+    import app.api.assessment as assessment_api
+
+    module = _load_script_module(
+        "test_fetch_module_attempt_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    _default, page_cap = _backend_limit_bounds(assessment_api.get_attempts)
+    assert module._PAGED_ASSESSMENT_ENVELOPE_ENDPOINTS["attempts"] == (
+        "attempts",
+        page_cap,
+    )
+    calls: list[str] = []
+
+    class FakeClient:
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            query = parse_qs(endpoint.partition("?")[2])
+            offset = int(query["offset"][0])
+            rows = [{"id": offset + index} for index in range(3 if offset else 4)]
+            return {"attempts": rows, "count": len(rows)}
+
+    result = module._fetch_assessment_endpoint(
+        FakeClient(), "attempts?limit=4&finding=acme-idor", paginate=True
+    )
+
+    assert calls == [
+        "attempts?finding=acme-idor&limit=4&offset=0",
+        "attempts?finding=acme-idor&limit=4&offset=4",
+    ]
+    assert result["count"] == 7
+    assert [row["id"] for row in result["attempts"]] == [0, 1, 2, 3, 4, 5, 6]
+    assert "fetched 7 attempts row(s) across all pages" in capsys.readouterr().err
+
+
+def test_fetch_auto_pages_http_flows_at_the_backend_maximum(capsys) -> None:
+    """One of the thirteen array routes that returned a short page in silence.
+
+    ``http-flows`` serves 250 of up to 5000 captured flows by default, and the
+    unregistered short-circuit ran BEFORE the bounded-page notice, so the
+    operator was told nothing while the catalog said unmarked routes are
+    unbounded.
+    """
+    import app.api.assessment as assessment_api
+
+    module = _load_script_module(
+        "test_fetch_module_http_flow_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    default_limit, page_cap = _backend_limit_bounds(assessment_api.get_http_flows)
+    assert module._PAGED_ASSESSMENT_ENDPOINTS["http-flows"] == page_cap
+    assert default_limit < page_cap
+    calls: list[tuple[str, int]] = []
+
+    class FakeClient:
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            calls.append((endpoint, page_size))
+            return [{"id": index} for index in range(3)]
+
+    rows = module._fetch_assessment_endpoint(
+        FakeClient(), "http-flows", paginate=True
+    )
+
+    assert rows == [{"id": 0}, {"id": 1}, {"id": 2}]
+    assert calls == [("http-flows", page_cap)]
+    assert "fetched 3 http-flows row(s) across all pages" in capsys.readouterr().err
+
+
+def test_fetch_auto_pages_dispatch_decisions_at_the_backend_maximum(capsys) -> None:
+    """The unregistered route with the worst consequence.
+
+    ``dispatch-decisions`` was in neither paging table NOR the catalog, so
+    ``--paginate`` fell through to a single raw GET of the backend's 100-row
+    default. At the respond -> report gate the ir-lead prompt enumerates
+    containment proposals from this route in a sentence asserting that every
+    recorded proposal surfaces; past 100 decision rows it surfaced the newest
+    page and said nothing. The server-side ``kind``/``resolved`` filters the
+    prompt relies on have to survive the walk, or paging would widen the read
+    and lose the predicate at the same time.
+    """
+    import app.api.assessment_operator as operator_api
+
+    module = _load_script_module(
+        "test_fetch_module_decision_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    default_limit, page_cap = _backend_limit_bounds(operator_api.get_decisions)
+    assert module._PAGED_ASSESSMENT_ENDPOINTS["dispatch-decisions"] == page_cap
+    assert default_limit < page_cap
+    calls: list[tuple[str, int]] = []
+
+    class FakeClient:
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            calls.append((endpoint, page_size))
+            return [{"id": index, "kind": "containment_proposal"} for index in range(2)]
+
+    rows = module._fetch_assessment_endpoint(
+        FakeClient(),
+        "dispatch-decisions?kind=containment_proposal&resolved=false",
+        paginate=True,
+    )
+
+    assert [row["id"] for row in rows] == [0, 1]
+    assert calls == [
+        ("dispatch-decisions?kind=containment_proposal&resolved=false", page_cap)
+    ]
+    assert (
+        "fetched 2 dispatch-decisions row(s) across all pages"
+        in capsys.readouterr().err
+    )
+
+
+def test_fetch_pages_the_typed_work_item_queue_in_priority_order() -> None:
+    """The typed read is the one filter that could not be walked.
+
+    ``work-items?type=`` is served by a pending-row preview, and the route used
+    to accept an ``offset`` it then dropped: every page came back as the same
+    first rows, so a pager either truncated silently or looped for ever. The
+    window now rides the queue's own total order — priority, cluster key, then
+    ``id`` as the tie-break — which is what makes the walk stable AND keeps the
+    read a work queue instead of an id dump. The ``type`` filter has to reach
+    every page, or paging would widen the read and lose the predicate.
+    """
+    import app.api.assessment as assessment_api
+
+    module = _load_script_module(
+        "test_fetch_module_work_item_type_pages",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    _default, page_cap = _backend_limit_bounds(assessment_api.get_work_items)
+    assert module._PAGED_ASSESSMENT_ENDPOINTS["work-items"] == page_cap
+    calls: list[tuple[str, int]] = []
+    queue = [
+        {"id": 7, "type": "endpoint", "priority_score": 9},
+        {"id": 3, "type": "endpoint", "priority_score": 5},
+        {"id": 4, "type": "endpoint", "priority_score": 5},
+    ]
+
+    class FakeClient:
+        def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
+            calls.append((endpoint, page_size))
+            return queue
+
+    rows = module._fetch_assessment_endpoint(
+        FakeClient(), "work-items?type=endpoint", paginate=True
+    )
+
+    assert calls == [("work-items?type=endpoint", page_cap)]
+    assert [row["id"] for row in rows] == [7, 3, 4]
+
+
+def test_fetch_fails_when_an_unregistered_envelope_page_is_incomplete(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The catch-all for the NEXT unregistered envelope route.
+
+    ``code/files`` is fixed by name; the shape of the defect is not. Any
+    backend envelope ``fetch`` cannot traverse still prints a truncated page, so
+    a ``has_more`` the command did not act on becomes a stderr line naming the
+    offset to resume from, plus a non-zero exit when the operator asked for
+    every page. An array page carries no such marker, so this catches
+    envelopes only.
+    """
+    module = _load_script_module(
+        "test_fetch_module_unregistered_envelope",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            return {
+                "total": 9,
+                "offset": 0,
+                "count": 4,
+                "has_more": True,
+                "items": [{"id": index} for index in range(4)],
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    def _args(paginate: bool) -> SimpleNamespace:
+        return SimpleNamespace(
+            endpoint="code/analysis-queue/stats",
+            list_routes=False,
+            engagement_dir=tmp_path,
+            compact=True,
+            paginate=paginate,
+            jq="",
+        )
+
+    module.run(_args(False))
+
+    warned = capsys.readouterr()
+    assert json.loads(warned.out)["has_more"] is True
+    assert "offset=4" in warned.err
+
+    with pytest.raises(SystemExit) as exc:
+        module.run(_args(True))
+
+    assert exc.value.code == 1
+    refused = capsys.readouterr()
+    assert json.loads(refused.out)["count"] == 4
+    assert "offset=4" in refused.err
+
+
+def test_fetch_names_the_resume_offset_on_a_bounded_code_file_page(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The exact operator-visible path that used to exit 0 on a partial answer.
+
+    ``has_more: true`` on stdout with nothing on stderr is what let a repo-wide
+    rank be computed from the first page. A pageable route now says it is
+    partial, names the offset to resume from and names the flag that finishes
+    the job, and still exits 0 because the operator did not ask for every page.
+    """
+    module = _load_script_module(
+        "test_fetch_module_bounded_notice",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            rows = [{"id": index} for index in range(module._DEFAULT_PAGE_SIZE)]
+            return _code_file_page(rows, offset=0, total=28_152)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+
+    module.run(
+        SimpleNamespace(
+            endpoint="code/files",
+            list_routes=False,
+            engagement_dir=tmp_path,
+            compact=True,
+            paginate=False,
+            jq="",
+        )
+    )
+
+    captured = capsys.readouterr()
+    assert json.loads(captured.out)["total"] == 28_152
+    assert f"?offset={module._DEFAULT_PAGE_SIZE}" in captured.err
+    assert "--paginate" in captured.err
+    assert "cannot traverse" not in captured.err
+
+
+def test_every_handoff_update_field_survives_the_client_patch_filter() -> None:
+    """A field the backend accepts but the client filters out is dropped silently.
+
+    ``record_handoff(upsert=True)`` re-issues its 409 as a PATCH carrying only
+    the fields in ``_HANDOFF_PATCHABLE_FIELDS``. ``expected_handoff_version`` was
+    missing from that tuple, so a caller asking for a GUARDED handoff write had
+    the guard stripped and the write proceeded unguarded — the one outcome the
+    field exists to prevent. ``HandoffUpdate`` is the authority on what the
+    PATCH door accepts, so the filter mirrors it exactly.
+    """
+    from app.api.assessment_operator import HandoffUpdate
+
+    _load_script_module(
+        "test_handoff_patch_filter_imports_client",
+        "agent/scripts/assess/commands/fetch.py",
+    )
+    client_module = importlib.import_module("assess.lib.client")
+    patchable = client_module.AssessmentClient._HANDOFF_PATCHABLE_FIELDS
+
+    assert len(patchable) == len(set(patchable))
+    assert set(patchable) == set(HandoffUpdate.model_fields)
+
+
+def test_code_index_sync_scales_its_structural_write_budget(
+    monkeypatch, tmp_path: Path, capsys
+) -> None:
+    """The scaled budget at the structural sync write, made executable.
+
+    A 26k-file repository syncs in ONE all-or-none backend transaction, and the
+    flat 10 s response budget expires long before it commits — leaving the
+    caller unable to say whether the generation-bound metadata landed. The two
+    sibling scaled writes are pinned; this one was not, because every fake that
+    intercepts ``post`` discards its keyword arguments.
+    """
+    module = _load_script_module(
+        "test_code_index_sync_write_budget",
+        "agent/scripts/assess/commands/code_index_sync.py",
+    )
+    client_module = importlib.import_module("assess.lib.client")
+    big, small = 26_000, 1
+
+    def _payload(count: int) -> dict[str, Any]:
+        return {
+            "repo_id": 7,
+            "repo_generation": 3,
+            "source_manifest_digest": "d" * 64,
+            "structural_input_digest": "e" * 64,
+            "structural_index_schema": module.STRUCTURAL_INDEX_SCHEMA,
+            "structural_index_manifest_path": str(tmp_path / "manifest.json"),
+            "updates": [{"file_id": index} for index in range(count)],
+        }
+
+    payloads = [_payload(big), _payload(small)]
+    read_timeouts: list[float | None] = []
+
+    class FakeClient:
+        def __init__(self, *args):
+            pass
+
+        def get(self, endpoint: str):
+            assert endpoint == "code/repos"
+            return [{"id": 7, "repo_key": "acme-api"}]
+
+        def post(self, endpoint: str, payload: dict, *, read_timeout=None):
+            assert endpoint == "code/files/bulk-structural-metadata"
+            read_timeouts.append(read_timeout)
+            return {
+                "repo_id": payload["repo_id"],
+                "repo_generation": payload["repo_generation"],
+                "source_manifest_digest": payload["source_manifest_digest"],
+                "structural_input_digest": payload["structural_input_digest"],
+                "structural_index_schema": payload["structural_index_schema"],
+                "updated": len(payload["updates"]),
+            }
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+    monkeypatch.setattr(module, "AssessmentClient", FakeClient)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda engagement_dir: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng",
+            engagement_dir=str(tmp_path),
+        ),
+    )
+    monkeypatch.setattr(module, "_load_manifest", lambda _path: {"repos": {}})
+    monkeypatch.setattr(
+        module,
+        "_resolve_per_repo_manifests",
+        lambda *_args, **_kwargs: [
+            ("acme-api", {"repo_id": 7}),
+            ("acme-web", {"repo_id": 7}),
+        ],
+    )
+    monkeypatch.setattr(
+        module, "_find_backend_repo", lambda repos, *, repo_id: repos[0]
+    )
+    monkeypatch.setattr(
+        module,
+        "_prepare_repo_payload",
+        lambda *_args, **_kwargs: payloads.pop(0),
+    )
+    manifest_path = tmp_path / "structural-index-manifest.json"
+    manifest_path.write_text("{}", encoding="utf-8")
+
+    module.run(
+        SimpleNamespace(
+            manifest=str(manifest_path),
+            index_dir=None,
+            repo_id=None,
+            repo_key=None,
+            engagement_dir=str(tmp_path),
+        )
+    )
+    capsys.readouterr()
+
+    assert read_timeouts == [
+        module._BULK_SYNC_SECONDS_PER_FILE * big,
+        client_module.DEFAULT_READ_TIMEOUT_SECONDS,
+    ]
+    assert read_timeouts[0] > client_module.DEFAULT_READ_TIMEOUT_SECONDS * 10
+
+
 def test_assessment_client_get_all_pages_fetches_every_page() -> None:
     _load_script_module(
         "test_fetch_module_imports_client",

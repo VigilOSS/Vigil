@@ -5,7 +5,7 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
-## [Unreleased]
+## [2.5.0] - 2026-11-07
 
 After upgrading, re-ingest each code repository, then run `code-index build` and `code-index sync`.
 Re-ingesting admits first-party `vendor/`, `env/` and `*-main/`/`*-master/` directories, legacy
@@ -29,6 +29,31 @@ the family `not_applicable`.
   path, including invokable controllers.
 - Outbound HTTP hints for Java `openStream` and chained `HttpClient` calls, C# JSON and string
   fetches, and Go `Do` on any client-named or `http.Client`-bound receiver.
+- `finding verify --operator-authority --intel-id <id> --reason <text>` records a terminal
+  verdict on evidence the operator holds outside the sealed snapshot, with no proof receipt.
+  The waiver stamps the finding and the transition, cites a live intel row, and is labelled as
+  operator attestation wherever a verdict renders — the finding read, report readiness, the
+  exploit-approval queue, the operator frontend, the exported report, `findings.md` and
+  `submission.md` — and names the intel row's own type, because intel tables allocate ids
+  independently
+  ([ADR 0043](docs/adr/0043-operator-authority-records-an-out-of-snapshot-verdict.md)).
+- `blue verify --confirm-check-file` reads a confirm check from a file for a `verified` or
+  `downgraded` disposition. It is refused on `false_positive`, which is disproved by
+  `--counter-check-file` with `--kill-reason` or `--kill-check`.
+- Blue-track finding details take their own twenty keys, so `blue tier`, `blue verify` and
+  `blue contain` record alert normalization, containment and incident annotations.
+- `code-dispatch release` gives up a claimed lane without a close, and `code-dispatch fetch`
+  says whether an empty claim means the scope matched no row or only unclaimable ones.
+- `vigil doctor` reports Universal Ctags with the other optional host recon tools.
+- `code-dispatch list --show-tokens` renders the lease token for a lane that lost its own, and
+  `code-dispatch progress` prints the token and the cwe families closeout will require.
+- A dispatch packet that omits `authorized_phase` is stamped with the engagement's own track
+  phase and told so; one that cannot be resolved is marked as a malformed dispatch, which the
+  code role gates stop on. The launch receipt carries the phase.
+- `agent render-handoff` reports the phase the lane ran at beside the phase it was authorized
+  for, the queue lease it held, and the skills it recorded loading.
+- A dispatch packet and `resume-brief` state the backend finding total at dispatch time, and a
+  prior state claiming a different count is flagged.
 
 ### Changed
 
@@ -38,8 +63,13 @@ the family `not_applicable`.
   and `call_sites` last. A call site carries `receiver` and `passes_caller_params` only when set.
 - Source that is not valid UTF-8 is parsed with replacement; only a UTF-16 or UTF-32 byte order
   mark falls back ([ADR 0042](docs/adr/0042-non-utf8-source-is-parsed-with-replacement.md)).
-- `vendor/` and `env/` are skipped only when they hold package-manager or virtualenv output, and a
-  PHP include into an excluded directory is reported once per directory.
+- Per-family review effort is measured at medium as well as critical and high, and a medium file
+  under its threshold is reported in review quality, readiness advisories and the resume brief
+  without refusing the coverage gate. Critical and high still refuse it
+  ([ADR 0001](docs/adr/0001-coverage-as-harness-not-gate.md)).
+- `vendor/` and `env/` are skipped only when they hold package-manager or virtualenv output, found
+  anywhere inside them, and ingest names a `vendor/` or `env/` directory that is a quarter or more
+  of the admitted set. A PHP include into an excluded directory is reported once per directory.
 - A file with no callable or segment owes a whole-file reviewed span unless it is signal-free CSS
   or HTML, and an HTML page or template with an inline script or Blade PHP owes one too.
 - A `skipped` close is refused for critical, high and medium files and needs a standard reason.
@@ -47,10 +77,47 @@ the family `not_applicable`.
   deserialization, and managed NETWORK-INPUT files file-upload. The effort gate names every family
   under its threshold.
 - Workflow-family path hints apply to every path the index reads as code.
+- A root-cause link defaults to `eliminates_attack_path` for every client — `finding link
+  --effect`, the API and the operator UI — which keeps a confirmed verdict; `eliminates_finding`
+  raises a claim review on every confirmed finding it touches.
 - When a list passes the signal limit, each kind keeps its earliest records in turn.
+- `agent done --finding-slugs` and `agent close` merge your slugs into the dispatch row's
+  existing list instead of replacing it, so a second write cannot drop the first one's scope.
+- Re-classifying a file's role, slot types, classification or language is refused while any
+  lease on it is live, as changing its analysis priority already was.
+- `agent decision` composes `--payload-json` with the individual flags, and a flag wins over the
+  same key in the payload.
+- Every paged assessment route is registered with its row ceiling, so `fetch --paginate` walks
+  a read to completion instead of stopping at the backend's default page.
 
 ### Fixed
 
+- Classification validates duplicate file identities before submitting any batch, and a failed
+  dispatch-scope read leaves its finding associations intact for a retry.
+- Reanalysis locates queue rows beyond diagnostic page windows. Operator-authority decisions
+  keep their current evidence distinct from historical receipts, and readiness accepts their
+  attributed severity-band calibration while retaining CVSS arithmetic checks.
+- Finding views distinguish current and prior operator authority, including collapsed history.
+  Code-verifier preparation reads report readiness for its assigned findings.
+- Test HTTP fixtures stop promptly between cases while preserving real transport coverage,
+  and the root and assessment CLI CI suites use two workers.
+- Every provenance door refuses a caller-authored service stamp. The five keys the service owns
+  — the two operator-authority records, the code-snapshot attestation, the superseded snapshot
+  and the original canonical location — are refused with the route that writes each one, on the
+  record, update, patch, verify and relocate doors alike, and a merge does not carry them onto
+  the survivor. A `provenance.command_run_id` must name a run in this engagement.
+- A `confirmed` or `downgraded` verdict that lowers a finding's band is refused unless it is
+  recorded as `downgraded`, so the band drop leaves a `verified_downgraded` row that a reader
+  walking the history can see. A `false_positive` still re-bands as it kills, because a refuted
+  finding leaves the report and `finding update --severity` is closed to it.
+- `fetch --paginate` refuses a backend that stops advancing instead of paging for ever, and names
+  the `?limit=N&offset=M` window to resume from.
+- `fetch` says so when a caller's own `?limit=` truncated the response, and names the offset to
+  continue from.
+- `code-dispatch fetch` and `reanalyze` say when a queue-row lookup stopped before reaching an id,
+  instead of reporting the row as absent.
+- `code-coverage --inherited-from` narrows by `--path-prefix` and pages with `--limit`/`--offset`,
+  as the per-directory view already did.
 - `code-ingest` confirms a refresh commit whose response was lost and finishes the post-commit
   steps, and a pooled connection applies each request's read timeout.
 - `code-index build` and `sync` publish a file whose artifact fails validation as a degraded
@@ -61,9 +128,65 @@ the family `not_applicable`.
 - Index line numbers break only at CR, LF and CRLF, matching the sealed snapshot.
 - A line is commentary only when the grammar puts all of its text in comments, so a C dereference,
   a continued operator or PHP after a `?>`-closed comment is read.
-- A bare-CR script or stylesheet is no longer taken for a minified bundle.
+- A bare-CR script or stylesheet reads as ordinary source rather than a minified bundle.
 - The streaming fallback matches JavaScript `Function(` by its case, so `function(` is not eval.
 - PHP sinks on non-ASCII identifiers match on both readers.
+- The streaming fallback reads block comments and docblocks as comments, and reads PHP code that
+  follows a tag-closed line comment, so a commented-out call is a sink to neither reader and a
+  live one is a sink to both.
+- A degraded artifact declares a signal dimension unavailable when the fallback measured nothing
+  for it, so an empty sink list states that nothing was measured rather than that a file is clean.
+- `blue tier`, `blue verify` and `blue contain` complete, sending details the finding vocabulary
+  admits.
+- A blue specialist handoff is accepted on every lane and tier; role fields now go where the
+  handoff contract reads them, under declared roles and with the identity it requires.
+- A `false_positive` verdict's required kill annotations are named in every prompt that gives a
+  kill invocation.
+- A classify pass that fails partway says how many chunks committed, how many rows they
+  classified and which submitted items the failing chunk held, and still prints the
+  structural-index repair command for any repo an already-committed chunk invalidated.
+- `export submission` reads the whole reproduction-rehearsal record, so a rehearsal past the
+  first page still counts.
+- `engagement start` and `engagement mode` report retained source snapshots from their manifests,
+  so the client launches promptly however much source an engagement retains. Sealed
+  bytes are still attested where they are read, by `code-index`, `code-index sync`, `code-history`
+  and `code-dependencies`.
+- `code-dispatch error` and `retry-error` are named where they are needed, so a dispatch that
+  cannot reach `complete` has a documented route out.
+- A bulk classify request must carry at least one item and no more than the shared bulk-write
+  ceiling, so an unchunked caller is refused instead of opening a transaction nobody can wait out.
+- A hunter lane dispatched with no queue lease is named as such, and the handoff states that it
+  recorded no review receipts, so its files still read as unreviewed in `code-coverage`.
+- `agent start --vuln-classes` points at the reference that exists when it refuses a class.
+- An unrecognized flag on `intel record` names the flag and points at the row's JSON document and
+  its author-supplied fields, instead of printing the whole `vigil assess` verb roster.
+- A mistaken action on `finding`, `intel`, `export` or `command-run` names the action it meant —
+  `finding show` offers `finding get` — instead of listing every action with no hint.
+- `finding link --notes` is accepted alongside `--reason` for the note the link stores.
+- `finding update --payload-file` needs `expected_row_version` only when the patch can lose a
+  concurrent write. A payload whose only mutation is a notes append commutes, so it may omit one.
+- A closeout refused for missing cwe coverage states the required family set and that it comes
+  from the file's own classification, role and language — never from the queue item's own slot
+  types, which are submission metadata.
+- A lease-token refusal names where to read the token back, on every lease-authenticated verb.
+- Report readiness raises `finding_details_citation_unresolved` when a free-text `details`
+  citation names a path or line the sealed generation does not hold.
+- `code-dispatch fetch` and `adopt-lease` write their audit snapshot before anything is printed,
+  so a claim the backend has already granted keeps its lease tokens on disk even when the output
+  goes to a closed consumer and the command cannot finish.
+- `code-dispatch retry-needs-context` records an audit snapshot, as `retry-error` already did,
+  so a reconstruction of what ran has no hole where one retry verb's writes went.
+- A `vigil assess` command whose reader has gone away exits 141 quietly instead of reporting an
+  unrelated status with an interpreter traceback. The refusal that reached stderr still stands
+  beside it, and an output failure that is not a departed reader keeps the command's own status.
+- A closeout refused for a missing source receipt names the file, the queue item, the disposition
+  and the identity it looked for, and says that the preceding `code-record analysis` did not land.
+- `code-record analysis` validates the whole submission in one pass: every malformed entry, every
+  missing key and every malformed anchor, across every collection and every item of a grouped
+  array, and it names a near-miss spelling when the payload carries one.
+- `code-dispatch done` refuses an invocation missing required notes or a skip reason before it
+  parses the coverage file, and states the skip-reason vocabulary in its help. `--dry-run` renders
+  the payload and marks what would be refused instead of refusing.
 
 ## [2.4.0] - 2026-11-05
 

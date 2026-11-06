@@ -283,7 +283,7 @@ _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
     "service_inventory": (
         f"dispatch {_HINT_RECON_SPECIALIST} (records assessment_services / "
         "assessment_surfaces) or ingest endpoints via `vigil assess "
-        "ingest-endpoints`, OR record a coverage_deferral for the host"
+        "ingest endpoints <source>`, OR record a coverage_deferral for the host"
     ),
     "directory_fuzz": (
         f"dispatch {_HINT_RECON_SPECIALIST} with skill directory-fuzzing "

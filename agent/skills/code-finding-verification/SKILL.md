@@ -65,7 +65,11 @@ caller search silently kills valid library/framework, CLI, and plugin defects.
 
 **Process:**
 1. Verify the current threat model's per-module product surface against sealed build targets,
-   package/export manifests, installed headers, registration code, and documentation.
+   package/export manifests, installed headers, registration code, and documentation. Its
+   trusted-inputs set is advisory and never a KILL on its own: PASS/KILL symmetry requires reading
+   the writer in source, and a source stays attacker-influenced when the code shows a less-trusted
+   writer or the entry carries no cited reason. A wrong trusted-input entry hides a real finding
+   with no visible counter-evidence.
 2. Start at the vulnerable function, independently confirm the described defect, and enumerate its
    callers/exports/registrations with grep/ctags.
 3. For an application/service, trace callers to a runtime route, protocol handler, job/event
@@ -530,11 +534,28 @@ Examples:
   rejection. The `ENSURE_SIZE` macro at parser.c:89 expands to a bounds check, and every applicable
   shipped product caller reaches that macro before the vulnerable arithmetic."
 
+A check can falsify ONE sub-claim while the finding still stands. That is not a kill and does not
+belong on the confirm check — `confirm_check.falsified_claim` is refused, because `falsified_claim`
+is a counter-check field and a counter check is what establishes `false_positive`. Write the
+falsified sub-claim into `details.honest_bounds` instead: what this finding does NOT establish,
+stated by you so a reader cannot over-read the claim. When adjudication changes what the mechanism
+actually is, record the settled reading in `details.mechanism_verdict`.
+
+The band rides on the verification. `--new-severity` applies to any terminal `--status`, so a
+re-band re-attests in the same write; `finding update --severity` beforehand invalidates the verdict
+being recorded. `downgraded` still requires a strictly lower band, so a correction upward goes out as
+`--status confirmed --new-severity <band>`.
+
 When you persist a false positive, write `counter-check.json` with `method`,
 `expected_result`, `observed_result`, `falsified_claim`, `completed: true`, and
 `proof_receipt_ids`, then use `vigil assess finding verify <slug> --status false_positive
---counter-check-file counter-check.json --reason "<rationale>"`. If the counter-check
-could not run, record `blocked` or `pending_runtime_proof`, never `false_positive`.
+--counter-check-file counter-check.json --reason "<rationale>" --details-inline
+'{"kill_reason": "<which check falsified the claim and why>", "kill_check": <1-5>}'`. The write is
+refused without `kill_reason` and `kill_check`, so a kill with no recorded check number leaves the
+finding `unreviewed` and still in the report-candidate set. If the counter-check
+could not run, record `blocked` or `pending_runtime_proof`, never `false_positive`. When you simply
+cannot meet the counter-check bar but no longer stand behind the claim, `--status disputed
+--reason "<why>"` is the cheap withdrawal: it needs nothing else and still survives a later sweep.
 Use `finding verify --status <verdict> --reason "<rationale>"` for other flows;
 terminal decisions include `--proof-receipt-id`. Use `finding update <slug> --status
 draft ...` when new evidence disproves a prior decision so the audited invalidation

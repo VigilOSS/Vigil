@@ -194,10 +194,17 @@ test("a fence info string that would un-fence the block is dropped", () => {
   //
   // A language hint is presentation, not evidence: dropping it loses a syntax
   // colour, not a byte of what the target did, so ADR 0019 is not engaged.
-  for (const safe of ["", "sh", "http", "blade", "c++", "c#", "objective-c", "json5"]) {
+  // A space is safe and kept: a renderer takes the first word of the info
+  // string as the language and ignores the rest, so `python 3` fences exactly
+  // as `python` does. Only what would un-fence the block is refused — a
+  // backtick, and either line ending.
+  for (const safe of [
+    "", "sh", "http", "blade", "c++", "c#", "objective-c", "json5",
+    "js x", "python 3", "shell script", "PowerShell Core",
+  ]) {
     assert.equal(fenceInfo(safe), safe);
   }
-  for (const hostile of ["js`x`", "`", "sh\n```", "sh\n## Injected", "js x", "sh\r"]) {
+  for (const hostile of ["js`x`", "`", "sh\n```", "sh\n## Injected", "sh\r"]) {
     assert.equal(fenceInfo(hostile), "", JSON.stringify(hostile));
   }
 });
@@ -216,4 +223,45 @@ test("every fence the projection emits carries a renderer-safe info string", () 
   const infos = fencedBlocks(md).map((block) => block.info);
   assert.deepEqual(infos, ["", "sh", "http", ""]);
   for (const info of infos) assert.equal(fenceInfo(info), info, JSON.stringify(info));
+});
+
+test("a copied finding says when its verdict rests on operator attestation", () => {
+  // This copy leaves the report and lands in a submission form or a ticket,
+  // where the attestation block on the page is gone. The status word alone
+  // would then present an operator attestation as a dispatch-verified proof —
+  // the laundering ADR 0043's visibility obligation exists to stop — so the
+  // waiver rides on the status line and the operator's grounds ride verbatim.
+  const md = findingToMarkdown({
+    slug: "VA-005",
+    title: "Verbose server banner discloses framework version",
+    severity: "low",
+    workflow_status: "active",
+    verification_status: "downgraded",
+    operator_authority: {
+      kind: "out_of_snapshot",
+      intel_id: 17,
+      intel_type: "tech-component",
+      at: "2026-06-03T09:14:00Z",
+      reason: "The edge proxy strips the header before it leaves the perimeter.",
+    },
+  });
+
+  const status = md.split("\n").find((line) => line.includes("**Verification:**"))!;
+  assert.match(status, /\*\*Operator attested · intel tech-component 17\*\* \(no proof receipt\)/);
+  assert.ok(
+    md.includes("**Operator attestation:** The edge proxy strips the header before it leaves the perimeter."),
+    md,
+  );
+});
+
+test("a receipt-backed finding's copy claims no attestation", () => {
+  const md = findingToMarkdown({
+    slug: "VA-001",
+    title: "Missing authorization",
+    severity: "critical",
+    verification_status: "confirmed",
+    operator_authority: null,
+  });
+  assert.ok(md.includes("**Verification:** confirmed"), md);
+  assert.doesNotMatch(md, /Operator attest/);
 });

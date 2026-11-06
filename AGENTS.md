@@ -3,7 +3,8 @@
 This file guides development of Vigil. Engagement prompts under `agent/` are separate
 runtime instructions; do not treat this maintainer guide as an engagement prompt.
 
-Read [CODE-MAP.md](CODE-MAP.md) before changing a contract or subsystem boundary.
+Read [CODE-MAP.md](CODE-MAP.md) before changing a contract, a mirror, or a registration, and
+[docs/subsystem-boundaries.md](docs/subsystem-boundaries.md) before changing what a subsystem owns.
 Use [CONTRIBUTING.md](CONTRIBUTING.md) for setup, [README.md](README.md) for installation
 and runtime usage, and [maintainer recipes](docs/maintainer-guide.md) for the applicable
 extension, freshness, or report-template procedure.

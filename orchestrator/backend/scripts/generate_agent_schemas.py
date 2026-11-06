@@ -41,9 +41,13 @@ from app.services.state_manager._common import (  # noqa: E402 - import path is 
 # every write; this generator renders the same dict into the agent-side schema so
 # the CLI validator and the server cannot disagree about what a detail key is.
 from app.services.state_manager.finding_details import (  # noqa: E402
+    FINDING_DETAIL_KEY_ALIASES as _FINDING_DETAIL_KEY_ALIASES,
     FINDING_DETAIL_PROPERTIES as _FINDING_DETAIL_PROPERTIES,
 )
-from app.services.code_analysis import CLASSIFICATION_PRIORITY_BANDS  # noqa: E402
+from app.services.code_analysis import (  # noqa: E402
+    CLASSIFICATION_PRIORITY_BANDS,
+    SKIP_REASONS,
+)
 from assess.lib.contracts import get_contract  # noqa: E402 - import path is bootstrapped above
 
 # Sourced from the canonical backend StrEnum so the agent-side overlay can never
@@ -488,6 +492,11 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "details": {
                         "type": "object",
                         "additionalProperties": False,
+                        # Projected from the backend's own alias table so the CLI
+                        # door (`assess.lib.schema_validation`) routes a refused
+                        # key to the same canonical home the server names,
+                        # instead of keeping a second list that can drift.
+                        "x-vigil-field-aliases": dict(_FINDING_DETAIL_KEY_ALIASES),
                         "required": [
                             "evidence",
                             "impact",
@@ -508,26 +517,29 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         ],
                         "properties": _FINDING_DETAIL_PROPERTIES,
                     },
+                    # ``FindingProvenance`` is a closed model with its own
+                    # descriptions, so the generated node carries the wire
+                    # vocabulary. It is NOT the whole server rule: the model also
+                    # declares the five service-stamped keys so it can validate a
+                    # STORED row, and which of those a caller may assert is decided
+                    # in state_manager/findings.py
+                    # (``_SERVICE_STAMPED_PROVENANCE_REMEDIES``), not here. Read the
+                    # generated node as "what the field is called", and that function
+                    # as "who may write it". The agent-side addition below is the
+                    # author-identity note, which belongs to the CLI's record flow
+                    # (``--agent-id``) rather than to the wire type.
                     "provenance": {
-                        "type": "object",
-                        "additionalProperties": False,
                         "properties": {
-                            # The finding's durable author identity. The backend
-                            # requires it on a true insert and resolves it to an
-                            # engagement-local dispatch. Re-records preserve the
-                            # immutable stored author when the field is omitted.
                             "agent_id": {
-                                "type": "string",
-                                "maxLength": 256,
-                                "description": "Dispatch agent_id of the agent that AUTHORED this finding (e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity block — a dispatch id, not the role name in agent_name. A true insert requires it and resolves it in the engagement. Re-recording a valid authored finding may omit it because the immutable original is preserved. Historical authorless rows require the one-time finding bind-author repair.",
-                            },
-                            "agent_name": {
-                                "type": "string",
-                                "description": "Agent that produced this finding (e.g. 'vulnerability-analyst'). Mirror of source_name.",
-                            },
-                            "artifact": {
-                                "type": "string",
-                                "description": "Path or ID of the artifact this finding was derived from.",
+                                "description": (
+                                    "Dispatch agent_id of the agent that AUTHORED this finding "
+                                    "(e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity "
+                                    "block — a dispatch id, not the role name in agent_name. A true "
+                                    "insert requires it and resolves it in the engagement. "
+                                    "Re-recording a valid authored finding may omit it because the "
+                                    "immutable original is preserved. Historical authorless rows "
+                                    "require the one-time finding bind-author repair."
+                                ),
                             },
                         },
                     },
@@ -662,6 +674,17 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     },
                     "analysis_priority": {
                         "description": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
+                    },
+                    # Projected from the backend's own vocabulary
+                    # (``app.services.code_analysis.SKIP_REASONS``, the set
+                    # `_require_classification_skip_reason` enforces) so the
+                    # schema an agent reads names the closed set instead of
+                    # declaring any 512-character string a skip reason.
+                    # ``code_classify`` prefers this enum over its agent-side
+                    # mirror, and without it ran on the fallback.
+                    "skip_reason": {
+                        "enum": list(SKIP_REASONS),
+                        "description": "Why this file is excluded from review. Required on `classification: \"skip\"`, refused on every other classification — omit it there, and the stored value is the empty default.",
                     },
                 },
             },

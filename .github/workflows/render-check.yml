@@ -1,7 +1,9 @@
 name: render-check
 
-# Verify that AGENTS.md / CLAUDE.md / .claude/agents/ / .codex/agents/ are
-# in sync with their source (agent/operator-core.md + agent/agents/*.md).
+# Verify that every rendered prompt tree — AGENTS.md / AGENTS-blue.md /
+# CLAUDE.md and the .claude/ .codex/ .goose/ .opencode/ .zcode/ client trees —
+# is in sync with its source (agent/operator-core*.md + agent/agents/*.md +
+# agent/commands/*.md).
 #
 # This catches the kind of drift that fired in May 2026: the publish-step
 # fix landed in operator-core.md but AGENTS.md was not re-rendered, so
@@ -15,6 +17,9 @@ name: render-check
 
 on:
   pull_request:
+    # Every render input the script digests (source_stamp_sha) and every tree
+    # its `check` mode diffs. A render output left off this list merges with the
+    # gate never having run, then breaks the push: main build instead.
     paths:
       - "agent/operator-core.md"
       - "agent/operator-core-blue.md"
@@ -31,6 +36,11 @@ on:
       - "agent/.codex/skills/**"
       - "agent/.goose/**"
       - "agent/.opencode/**"
+      - "agent/.zcode/**"
+      # Spelled out because these two manifests sit behind a dot-prefixed
+      # directory, which a trailing ** is not guaranteed to expand across.
+      - "agent/.zcode/.zcode-plugin/**"
+      - "agent/.zcode/assessment/.zcode-plugin/**"
       - "agent/rules/**"
   push:
     branches: [main]

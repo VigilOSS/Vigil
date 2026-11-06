@@ -351,6 +351,28 @@ class _ReaderContext:
         return start
 
 
+# Reader-level note naming the upstream artifact a lockfile says a component
+# was fetched from. Not prefixed `unverified_`: these notes are the build file's
+# own words, and `dependency_picture` owns the vocabulary that reads as a Vigil
+# observation. The URL is quoted exactly as the file stated it — the snapshot
+# excludes package-manager output, so this is the only in-repo route from a pin
+# back to the library's own source, and nothing here fetches it.
+ARTIFACT_URL_NOTE_PREFIX = "artifact_url:"
+
+
+def _artifact_url_notes(value: object) -> tuple[str, ...]:
+    """One note per stated upstream artifact URL, or none at all.
+
+    A lockfile key that is absent, empty or not a string states nothing, and an
+    absent URL must never be reported as a different URL or as a claim that the
+    component has none.
+    """
+    if not isinstance(value, str):
+        return ()
+    url = value.strip()
+    return (f"{ARTIFACT_URL_NOTE_PREFIX}{url}",) if url else ()
+
+
 def _quote(text: str) -> str:
     """Collapse whitespace; quote everything else verbatim.
 
@@ -1434,6 +1456,7 @@ def _read_npm_lock(context: _ReaderContext) -> ManifestParse:
                     # The install path IS the transitive story: the same package
                     # nested under two parents is two different copies.
                     evidence=(context.evidence(line, f"{key}: {json.dumps(entry, sort_keys=True)}"),),
+                    qualifiers=_artifact_url_notes(entry.get("resolved")),
                 )
             )
         return context.parse(dependencies=tuple(dependencies))
@@ -1456,6 +1479,7 @@ def _read_npm_lock(context: _ReaderContext) -> ManifestParse:
                     declared_scope=_npm_lock_scope(entry),
                     declaration="resolved" if len(path) == 1 else "transitive",
                     evidence=(context.evidence(line, "node_modules/" + "/node_modules/".join(path)),),
+                    qualifiers=_artifact_url_notes(entry.get("resolved")),
                 )
             )
             nested = entry.get("dependencies")
@@ -1470,6 +1494,7 @@ def _read_npm_lock(context: _ReaderContext) -> ManifestParse:
 
 _YARN_BERRY_MARKER = "__metadata:"
 _YARN_VERSION_RE = re.compile(r"^\s+version[:\s]+\"?([^\"\s]+)\"?")
+_YARN_RESOLVED_RE = re.compile(r"^\s+resolved[:\s]+\"?([^\"\s]+)\"?")
 
 
 def _read_yarn_lock(context: _ReaderContext) -> ManifestParse:
@@ -1505,6 +1530,10 @@ def _read_yarn_lock(context: _ReaderContext) -> ManifestParse:
         version_match = _YARN_VERSION_RE.match(line)
         if version_match is None or not header_names:
             continue
+        # `resolved` follows `version` inside the same indented block, so it is
+        # read by looking ahead to the end of that block rather than by waiting
+        # for a later line the entry has already been emitted from.
+        url_notes = _yarn_resolved_url(context.lines, offset + 1)
         for name in header_names:
             dependencies.append(
                 _dependency(
@@ -1518,10 +1547,24 @@ def _read_yarn_lock(context: _ReaderContext) -> ManifestParse:
                             header_line, context.lines[header_line - 1] if header_line else name
                         ),
                     ),
+                    qualifiers=url_notes,
                 )
             )
         header_names = []
     return context.parse(dependencies=tuple(dependencies))
+
+
+def _yarn_resolved_url(lines: list[str], start: int) -> tuple[str, ...]:
+    """The `resolved` URL in the indented block starting at `start`, if stated."""
+    for line in lines[start:]:
+        if not line.strip():
+            continue
+        if not line[0].isspace():
+            return ()
+        match = _YARN_RESOLVED_RE.match(line)
+        if match is not None:
+            return _artifact_url_notes(match.group(1))
+    return ()
 
 
 # --------------------------------------------------------------------------- #
@@ -2186,7 +2229,17 @@ def _read_python_poetry_lock(context: _ReaderContext) -> ManifestParse:
                 declared_scope=scope,
                 declaration="resolved",
                 evidence=(context.evidence_at(span[0] if span else 0, name),),
-                qualifiers=("optional",) if entry.get("optional") else (),
+                qualifiers=(
+                    (("optional",) if entry.get("optional") else ())
+                    # A poetry entry resolved from a URL or git source states it
+                    # in `[package.source]`; a registry entry states a name, not
+                    # a URL, and must not be reported as having stated one.
+                    + _artifact_url_notes(
+                        entry["source"].get("url")
+                        if isinstance(entry.get("source"), dict)
+                        else None
+                    )
+                ),
             )
         )
     return context.parse(dependencies=tuple(dependencies))
@@ -2214,6 +2267,9 @@ def _read_python_pipfile_lock(context: _ReaderContext) -> ManifestParse:
                     declared_scope=block,
                     declaration="resolved",
                     evidence=(context.evidence_at(line, str(name)),),
+                    qualifiers=_artifact_url_notes(
+                        entry.get("file") if isinstance(entry, dict) else None
+                    ),
                 )
             )
     return context.parse(dependencies=tuple(dependencies))

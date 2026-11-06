@@ -154,14 +154,23 @@ existed at completion. The backend refuses a proof run's completion while any bl
 and the run stays running. Each included source you import into the run becomes a hard read
 obligation: read it with `vigil assess run-audit source-read record`, or, when you will not read
 it, release it with `vigil assess run-audit obligation release` from the run's producer dispatch
-with a reason naming why. Otherwise finish `--status partial`.
+with a reason naming why. Otherwise finish `--status partial`. A `partial` seal is terminal and
+rejects later receipts, so the way out is a child run: add `--resume-from <terminal-run-id>` to a
+fresh `vigil assess proof-run start`, which inherits the parent's sources, source reads, and healthy
+receipt bindings and so lets the child bind new receipts to bytes already delivered and reach
+`completed`. Give the child its own `--for-finding <slug>`; the parent's associations do not carry
+over.
 Inspect durable state with `vigil assess proof-run get|list` and
 `vigil assess proof-receipt get|list`, then cite the completed independent run's receipt IDs in
 `vigil assess finding verify`. Proof receipts identify the exact captured bytes; presentation
 never rewrites their evidence.
 
 When the dispatch assigns a source-accounted scan, also read
-`vigil assess contract run-audit`. Start the owning `proof-run` with `--purpose scan`, import its
+`vigil assess contract run-audit`. Start the owning `proof-run` with `--purpose scan`, which creates
+it `queued` rather than `running`: move it with `vigil assess proof-run begin <id>` before any
+accounting write, because a `queued` run refuses receipts and source reads. A refusal naming
+`queued` is asking for `begin`, never for a replacement run — a fresh `--purpose scan` run arrives
+`queued` too. Then import its
 declared source inventory in bounded batches, and use `run-audit` for delivered source reads,
 obligations, candidates, and bounded audit reads. Before the run starts, compute the canonical
 per-target inventory commitments with `run-audit sources commitment` and include them in the run's
@@ -283,12 +292,29 @@ receipts are the same kind of checkpoint and carry the same rule: write each
 one as its unit of work finishes, not at end-of-lane. Why: a dispatch that halts before the final closing call
 (e.g. context exhaustion) makes its most recent checkpoint the canonical
 resume point — skip a checkpoint and whatever you did since the last one is
-invisible to the operator and to whoever resumes. Use the exact `agent_id`,
-`agent_role`, and `phase` values from the **Runtime Identity block** the
-operator placed at the top of your dispatch prompt; the handoff row is keyed
-on `agent_id`, and a mismatched value creates an orphaned row the operator
-cannot render. Schema: `agent/references/runtime-guides/handoff-schema.md`
-"Checkpointing".
+invisible to the operator and to whoever resumes. Use the exact `agent_id` and
+`agent_role` values from the **Runtime Identity block** the operator placed at
+the top of your dispatch prompt; the handoff row is keyed on `agent_id`, and a
+mismatched value creates an orphaned row the operator cannot render. Schema:
+`agent/references/runtime-guides/handoff-schema.md` "Checkpointing".
+
+Only the Schema table's own names are top-level handoff keys; `agent handoff`
+refuses an unknown top-level name by name before the request, so every
+role-specific field goes under `extras`. When your dispatch prompt left `skills`
+self-selected, the skills you actually loaded go under `extras.skills_loaded` —
+that exact key, because it is the one `render-handoff` reads; any other spelling
+leaves the rendered field empty for the next dispatch. Set `phase` to the phase
+you ACTUALLY ran at — your own account of what you did, not a copy of the grant.
+Normally that is your Runtime Identity `authorized_phase`, and then the two
+agree. When you ran a narrower or less privileged branch than you were granted,
+record the phase you ran: `render-handoff` prints both and names the divergence,
+and that flag is the only way the operator learns a lane downgraded itself to a
+branch that writes different receipts. Copying `authorized_phase` across
+regardless makes the field a duplicate of the immutable packet and hides exactly
+that case. List in `working_artifacts` only the
+paths you actually wrote: the write resolves each one and reports `present`,
+`missing`, or `out-of-engagement`, and a `handoff_status: ready` handoff claiming
+an artifact the resolver cannot find stores the row and then exits non-zero.
 
 On long runs, at each handoff checkpoint — and also whenever the working
 context grows long mid-task, even between checkpoints — re-emit a compact

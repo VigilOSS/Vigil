@@ -177,8 +177,8 @@ record the operator's assertion; they do not authenticate a separate human princ
 
 A write to a verified finding has a fixed effect on its verdict. Presentation edits (title, notes,
 workflow, remediation, references, filling an empty evidence reference) and a root-cause link with
-`--effect eliminates_attack_path` keep it; the default `eliminates_finding` link raises a claim
-review on the verified sibling. Claim wording (summary, impact, evidence or step wording, a replaced
+`--effect eliminates_attack_path` — the default — keep it; an explicit
+`--effect eliminates_finding` link raises a claim review on the verified sibling. Claim wording (summary, impact, evidence or step wording, a replaced
 evidence reference) keeps a confirmed verdict but needs an independent claim-equivalence review
 before the report. Technical changes (severity, CWE, defect family, root-cause key, authentication
 context, location, CVSS exploitability, a removed proof dependency, a retraction or a reopen) return

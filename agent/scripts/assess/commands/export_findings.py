@@ -1,4 +1,4 @@
-"""vigil assess export-findings — generate the single findings.md report doc from backend state.
+"""vigil assess export findings — generate the single findings.md report doc from backend state.
 
 This produces ONE consolidated report document (one ``## [slug] title`` section
 per REPORT-DURABLE finding, severity-sorted, with root-cause grouping inline).
@@ -105,7 +105,7 @@ def run(args) -> None:
                     {
                         "root_cause_role": "sibling",
                         "root_cause_slug": sibling.get("root_cause_slug", ""),
-                        "root_cause_effect": sibling.get("root_cause_effect", "eliminates_finding"),
+                        "root_cause_effect": sibling.get("root_cause_effect", "eliminates_attack_path"),
                         "root_cause_note": sibling.get("root_cause_note", ""),
                         "sibling_order": sibling.get("sibling_order"),
                     }

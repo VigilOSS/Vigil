@@ -653,3 +653,99 @@ def test_repro_run_ids_resent_as_strings_keep_the_verdict(client, isolate_settin
     )
     assert appended.status_code == 200, appended.text
     assert "details.repro_runs.removed" not in appended.json()["changed_axes"]
+
+
+# --- the cheap withdrawal survives a sweep --------------------------------------
+#
+# A finding recorded `critical` and then refuted lands at `severity=info,
+# verification_status=unreviewed` — indistinguishable from never looked at — and a
+# later sweep re-files it. Only the evidence-backed kill (`false_positive`,
+# which needs a completed counter-check and a receipt) used to survive the
+# re-mint guard. `disputed` needs only a reason and already leaves both the
+# unreviewed queue and the report, so it is the cheap withdrawal; what it lacked
+# was surviving the sweep.
+
+
+def _withdrawn_ssrf(client, slug: str) -> dict:
+    finding = _record(
+        client,
+        slug,
+        defect_family="ssrf",
+        root_cause_key="unvalidated-fetch",
+        canonical_location="https://example.test/api/fetch?url=http://169.254.169.254",
+        title="SSRF via the fetch url parameter",
+    )
+    disputed = client.post(
+        f"{BASE}/findings/{slug}/verify",
+        json={
+            "verification_status": "disputed",
+            "reason_text": "Withdrawn: the egress path cannot reach the metadata service.",
+        },
+    )
+    assert disputed.status_code == 200, disputed.text
+    assert disputed.json()["finding"]["verification_status"] == "disputed"
+    return finding
+
+
+def test_a_disputed_finding_survives_a_later_sweep(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _withdrawn_ssrf(client, "VA-720")
+
+    resweep = client.post(
+        f"{BASE}/findings",
+        json=_finding_payload(
+            "VA-721",
+            defect_family="ssrf",
+            root_cause_key="ssrf-source-line",
+            canonical_location="https://example.test/api/fetch",
+            title="SSRF reachable at the fetch endpoint",
+        ),
+    )
+
+    assert resweep.status_code == 409, resweep.text
+    detail = resweep.json()["detail"]
+    assert "VA-720" in detail
+    assert "disputed" in detail
+    assert "--allow-remint" in detail
+    assert {row["slug"] for row in client.get(f"{BASE}/findings").json()} == {"VA-720"}
+
+
+def test_a_genuinely_new_finding_still_forces_through(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _withdrawn_ssrf(client, "VA-722")
+
+    payload = _finding_payload(
+        "VA-723",
+        defect_family="ssrf",
+        root_cause_key="ssrf-source-line",
+        canonical_location="https://example.test/api/fetch",
+        title="SSRF reachable at the fetch endpoint",
+    )
+    payload["allow_remint"] = True
+    forced = client.post(f"{BASE}/findings", json=payload)
+
+    assert forced.status_code == 201, forced.text
+    assert forced.json()["finding"]["slug"] == "VA-723"
+
+
+def test_the_disputed_withdrawal_keeps_its_own_recovery_route(
+    client, isolate_settings
+) -> None:
+    """A disputed finding is still live, so the kill's reopen command is wrong for it."""
+    _seed(client, isolate_settings)
+    _withdrawn_ssrf(client, "VA-724")
+
+    resweep = client.post(
+        f"{BASE}/findings",
+        json=_finding_payload(
+            "VA-725",
+            defect_family="ssrf",
+            root_cause_key="ssrf-source-line",
+            canonical_location="https://example.test/api/fetch",
+            title="SSRF reachable at the fetch endpoint",
+        ),
+    )
+
+    detail = resweep.json()["detail"]
+    assert "finding record --update VA-724" in detail
+    assert "--status draft" not in detail

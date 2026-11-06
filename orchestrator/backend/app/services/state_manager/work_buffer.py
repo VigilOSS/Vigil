@@ -620,8 +620,20 @@ def work_buffer_stats(
     return {"by": by, "rows": []}
 
 
-def peek_work_items(engagement_id: int, *, type_val: str, limit: int) -> list[dict[str, Any]]:
-    """Read-only preview of pending items of a type (leaves them pending)."""
+def peek_work_items(
+    engagement_id: int, *, type_val: str, limit: int, offset: int = 0
+) -> list[dict[str, Any]]:
+    """Read-only preview of pending items of a type (leaves them pending).
+
+    Offset-paginated, so the typed read can be walked to completion like every
+    other list route. It took ``limit`` alone, and the route it serves accepted
+    an ``offset`` it then dropped — so every page came back as the same first
+    rows, and a pager over it either truncated silently or looped forever.
+
+    The window rides the existing total order (priority first, ``id`` as the
+    tie-break), which is what makes the typed read a work queue rather than an
+    id dump: paging it keeps that order instead of re-sorting.
+    """
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         return _fetch_all(
@@ -630,9 +642,9 @@ def peek_work_items(engagement_id: int, *, type_val: str, limit: int) -> list[di
             SELECT * FROM assessment_work_items
             WHERE engagement_id = ? AND status = 'pending' AND type = ?
             ORDER BY priority_score DESC, cluster_key, id
-            LIMIT ?
+            LIMIT ? OFFSET ?
             """,
-            (engagement.id, type_val, int(limit)),
+            (engagement.id, type_val, int(limit), int(offset)),
         )
 
 
