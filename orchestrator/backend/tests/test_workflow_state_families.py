@@ -7,8 +7,8 @@ classifier's role label makes them required: the architect read the file and
 named what it moves. The file's own path only suggests them, because a
 directory word such as `Checkout` or `credits` names whole trees of value
 objects, events and helpers that never touch the workflow. Both read whole
-words, so `load_balancer` is not a balance and a refund policy document or a
-locale file is pointed at nothing.
+words, so `load_balancer` is not a balance and a refund policy document is
+pointed at nothing.
 """
 from __future__ import annotations
 
@@ -74,6 +74,16 @@ def test_transactional_roles_require_race_and_business_logic_review(role):
         ("src/main/java/com/acme/entitlement/Grants.java", "java"),
         ("includes/payment.inc", "php"),
         ("modules/acme_checkout/acme_checkout.module", "php"),
+        ("src/locale/refund.py", "python"),
+        ("src/i18n/checkout.ts", "typescript"),
+        ("db/migrations/0042_add_wallet.py", "python"),
+        ("tests/test_refund.py", "python"),
+        ("spec/payments/charge.rb", "ruby"),
+        ("src/__tests__/checkout.js", "javascript"),
+        ("fixtures/booking.py", "python"),
+        ("src/refund/refund_test.go", "go"),
+        ("src/billing/test_refund.py", "python"),
+        ("app/design/frontend/checkout/cart.phtml", "php"),
     ],
 )
 def test_transactional_paths_suggest_race_and_business_logic_review(file_path, language):
@@ -142,22 +152,12 @@ def test_reset_paths_suggest_rate_limit_review():
         ("stakeholder_report", "src/reports/stakeholder.py", "python"),
         ("", "docs/refund-policy.md", "markdown"),
         ("", "config/locales/refund.en.yml", "yaml"),
-        ("", "src/locale/refund.py", "python"),
-        ("", "src/i18n/checkout.ts", "typescript"),
-        ("", "db/migrations/0042_add_wallet.py", "python"),
-        ("", "tests/test_refund.py", "python"),
-        ("", "spec/payments/charge.rb", "ruby"),
-        ("", "src/__tests__/checkout.js", "javascript"),
-        ("", "fixtures/booking.py", "python"),
-        ("", "src/refund/refund_test.go", "go"),
-        ("", "src/billing/test_refund.py", "python"),
         ("", "templates/checkout.html", "html"),
         ("", "static/wallet.css", "css"),
         ("", "deploy/payments/Dockerfile", "dockerfile"),
         ("", "templates/emails/refund.ftl", "freemarker"),
         ("", "resources/views/checkout.blade.php", "blade"),
         ("", "templates/checkout.html.twig", "twig"),
-        ("", "app/design/frontend/checkout/cart.phtml", "php"),
     ],
 )
 def test_words_that_merely_contain_a_token_and_non_source_paths_point_at_nothing(

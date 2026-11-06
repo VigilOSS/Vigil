@@ -266,11 +266,9 @@ holds value objects, events and views that do none of that.
 
 The backend reads the same words from the file's directories and name as hints. A path match lists
 the families in `path_suggested_vuln_classes` for the hunter to consider and never makes them
-required. Hints come only from languages the structural index analyzes, and skip paths under a
-`test`, `tests`, `spec`, `__tests__`, `fixtures`, `docs`, `locale`, `locales`, `i18n`,
-`translations` or `migrations` directory; test-named files (`test_*`, `*_test`, `*_spec`, `*.test`,
-`*.spec`); HTML, CSS, Dockerfile, Blade, Twig and FreeMarker files; and `.phtml` files. If ingestion
-guessed the language wrong, emit a `language` correction in the classification record.
+required. Hints come only from languages the structural index analyzes, except HTML, CSS,
+Dockerfile, Blade, Twig and FreeMarker files. If ingestion guessed the language wrong, emit a
+`language` correction in the classification record.
 
 ## Classification Decision Framework
 

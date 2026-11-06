@@ -9111,21 +9111,11 @@ WORKFLOW_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]
     ),
 )
 
-# Path words come only from production source the index reads as code. Markup,
-# style and template languages name pages, and these directories hold tests,
-# documentation, translations and schema history rather than request handling.
+# Path words come only from source the index reads as code. Markup, style and
+# template languages name pages rather than request handling.
 _WORKFLOW_PATH_SKIPPED_LANGUAGES = frozenset(
     {"html", "css", "dockerfile", "freemarker", "blade", "twig"}
 )
-_WORKFLOW_PATH_SKIPPED_SEGMENTS = frozenset(
-    {
-        "test", "tests", "spec", "__tests__", "docs", "fixtures", "locale",
-        "locales", "i18n", "translations", "migrations",
-    }
-)
-# PHP the index reads as `php` that is still a page template, skipped like the
-# template languages.
-_WORKFLOW_PATH_SKIPPED_SUFFIXES = (".phtml",)
 _WORD_PATTERN = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z0-9]+|[A-Z]+")
 
 
@@ -9144,14 +9134,7 @@ def _workflow_path_words(file_path: str, language: str) -> list[str]:
     if not segments:
         return []
     directories, name = segments[:-1], segments[-1]
-    if any(segment.lower() in _WORKFLOW_PATH_SKIPPED_SEGMENTS for segment in directories):
-        return []
-    if name.lower().endswith(_WORKFLOW_PATH_SKIPPED_SUFFIXES):
-        return []
     stem = name.rsplit(".", 1)[0] if "." in name.lstrip(".") else name
-    lowered = stem.lower()
-    if lowered.startswith("test_") or lowered.endswith(("_test", "_spec", ".test", ".spec")):
-        return []
     return [word for segment in (*directories, stem) for word in _context_words(segment)]
 
 

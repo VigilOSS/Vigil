@@ -2648,7 +2648,7 @@ _CONTRACTS: dict[str, CommandContract] = {
         name="code-size-summary",
         goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
-        summary="Summarize backend-indexed code_files: counts, LOC buckets, ownership splits, and large-file candidates.",
+        summary="Summarize backend-indexed code_files: counts, LOC buckets, and large-file candidates.",
         schema_name="backend code/files projection (read-only aggregate)",
         preferred_invocations=(
             "vigil assess code-size-summary",
@@ -2667,7 +2667,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--json", "off (text summary; on emits the structured summary object)"),
         ),
         notes=(
-            "Sizing view for the ingest/classify pass: shows LOC buckets, language and analysis-status splits, and app-owned vs generated vs vendor ownership so classification effort lands on app-owned surface, not vendored/generated bulk.",
+            "Sizing view for the ingest/classify pass: shows LOC buckets and classification, language and analysis-status splits.",
             "large_candidates lists only critical/high-classified files at or above --large-threshold LOC — the oversized attack surface worth splitting into focused hunt dispatches.",
         ),
     ),

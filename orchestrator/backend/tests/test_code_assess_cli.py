@@ -554,7 +554,6 @@ def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
                     "analysis_status": "skipped",
                     "language": "javascript",
                     "loc": 300,
-                    "skip_reason": "vendor",
                 },
                 {
                     "id": 3,
@@ -589,10 +588,7 @@ def test_code_size_summary_uses_backend_code_files(monkeypatch, capsys):
 
     output = capsys.readouterr().out
     assert "total_files: 3" in output
-    assert "app_owned|files=1|loc=1500" in output
-    assert "vendor|files=1|loc=300" in output
-    assert "generated|files=1|loc=800" in output
-    assert "1500|critical|app_owned|analyzed|src/auth/session.py" in output
+    assert "1500|critical|analyzed|src/auth/session.py" in output
 
 
 def test_code_ingest_repo_key_uses_name_and_canonical_path_hash():
