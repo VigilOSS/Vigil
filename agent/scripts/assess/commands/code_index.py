@@ -47,6 +47,8 @@ from assess.lib.code_structural_identity import (
     structural_input_digest,
 )
 from assess.lib.code_structural_metadata import (
+    INVALID_ARTIFACT_REASON,
+    invalid_artifact_notice,
     validated_callable_records,
     validated_structural_metadata,
 )
@@ -62,6 +64,7 @@ from assess.lib.treesitter_index import (
     SUPPORTED_LANGUAGES,
     PhpIncludeResolver,
     StreamingSecurityScanner,
+    _fallback_from_bytes,
     language_for_file,
 )
 
@@ -1028,9 +1031,10 @@ def _validate_analysis_artifact(
     *,
     rel_path: str,
     source_size: int,
+    loc: int | None = None,
 ) -> None:
     validated_structural_metadata(indexed, rel_path=rel_path, source_size=source_size)
-    validated_callable_records(indexed, rel_path=rel_path)
+    validated_callable_records(indexed, rel_path=rel_path, loc=loc)
 
 
 def _raise(exc: Exception) -> dict[str, Any]:
@@ -1190,6 +1194,7 @@ def run(args) -> None:
     truncated_file_paths: list[str] = []
     analysis_status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
     errors: list[tuple[int, str]] = []
+    degraded: list[tuple[int, str]] = []
     include_resolver = PhpIncludeResolver(
         {str(entry["file_path"]): str(entry["language"]) for entry in selected},
         excluded_paths=(
@@ -1265,11 +1270,23 @@ def run(args) -> None:
                 raise ValueError(f"structural parser language differs for {rel_path}")
             if language == "php":
                 include_resolver.resolve(indexed, rel_path=rel_path)
-            _validate_analysis_artifact(
-                indexed,
-                rel_path=rel_path,
-                source_size=captured.size,
-            )
+            try:
+                _validate_analysis_artifact(
+                    indexed, rel_path=rel_path, source_size=captured.size, loc=captured.loc,
+                )
+            except ValueError as exc:
+                if captured.materialized is None:
+                    raise
+                degraded.append((position, str(exc)))
+                indexed = _fallback_from_bytes(
+                    rel_path, language, captured.materialized,
+                    degradation_reason=INVALID_ARTIFACT_REASON,
+                )
+                if language == "php":
+                    include_resolver.resolve(indexed, rel_path=rel_path)
+                _validate_analysis_artifact(
+                    indexed, rel_path=rel_path, source_size=captured.size, loc=captured.loc,
+                )
             signal_counts = indexed["signal_counts"]
             indexed["total_entry_points"] = int(signal_counts["entry_points"])
             indexed["total_security_sinks"] = int(signal_counts["security_sinks"])
@@ -1379,6 +1396,13 @@ def run(args) -> None:
             raise ValueError(
                 "invalid structural artifacts:\n"
                 + "\n".join(message for _position, message in sorted(errors))
+            )
+        if degraded:
+            print(
+                invalid_artifact_notice(
+                    "code-index", [message for _position, message in sorted(degraded)]
+                ),
+                file=sys.stderr,
             )
 
         print(

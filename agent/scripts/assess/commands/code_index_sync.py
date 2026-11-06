@@ -31,10 +31,14 @@ from assess.lib.code_structural_identity import (
     structural_input_digest,
 )
 from assess.lib.config import load_config
+from assess.commands.code_index import _unsupported_index
 from assess.lib.code_structural_metadata import (
+    INVALID_ARTIFACT_REASON,
+    invalid_artifact_notice,
     validated_callable_records,
     validated_structural_metadata,
 )
+from assess.lib.treesitter_streaming import StreamingSecurityScanner
 
 # The bulk write is one all-or-none transaction per repo, so its server-side
 # cost scales with the file count; widen the response budget past the 10s
@@ -176,6 +180,55 @@ def _backend_files(client: AssessmentClient, repo_id: int) -> dict[str, dict]:
     return fetch_backend_file_inventory(client, repo_id)
 
 
+def _invalid_artifact_fallback(
+    source_tree: RootedSourceTree, rel_path: str, language: str, source_sha: str
+) -> dict[str, Any]:
+    """An all-byte streaming scan of the sealed source, for a file whose artifact is unpublishable."""
+    scanner = StreamingSecurityScanner(rel_path, language)
+    captured = source_tree.capture(rel_path, retain_spool=False, chunk_consumer=scanner.feed)
+    if captured.sha256 != source_sha:
+        raise ValueError(f"sealed source hash differs for {rel_path}")
+    return scanner.finish(degradation_reason=INVALID_ARTIFACT_REASON)
+
+
+def _bound_artifact(
+    index_root: Path, manifest_path: Path, binding: dict[str, Any], expected: dict[str, Any]
+) -> dict[str, Any]:
+    """The file's artifact, read at its identity path and bound to its manifest entry."""
+    rel_path = expected["file_path"]
+    index_path = _under(
+        index_root,
+        index_root / str(binding.get("index_path") or ""),
+        label="file index",
+    )
+    if index_path.parent != manifest_path.parent / "files":
+        raise ValueError(f"structural index path differs from its identity for {rel_path}")
+    indexed = _read_index(index_path, expected_sha256=str(binding.get("index_sha256")))
+    for field, value in expected.items():
+        if indexed.get(field) != value:
+            raise ValueError(f"structural index {field} differs for {rel_path}")
+    for field in ("analysis_status", "analysis_mode", "artifact_truncated"):
+        if binding.get(field) != indexed.get(field):
+            raise ValueError(f"structural binding {field} mismatch for {rel_path}")
+    return indexed
+
+
+def _debt_summary(files: list[tuple[str, Any, Any]]) -> dict[str, Any]:
+    """Coverage-debt totals over `(path, analysis status, artifact truncated)`."""
+    counts = {"complete": 0, "degraded": 0, "unsupported": 0}
+    for _path, status, _truncated in files:
+        counts[str(status)] = counts.get(str(status), 0) + 1
+    degraded = sorted(path for path, status, _truncated in files if status == "degraded")
+    truncated = sorted(path for path, _status, flag in files if flag is True)
+    return {
+        "degraded_files": len(degraded),
+        "degraded_file_paths": degraded,
+        "artifact_truncated_files": len(truncated),
+        "artifact_truncated_file_paths": truncated,
+        "analysis_status_counts": counts,
+    }
+
+
 def _prepare_repo_payload(
     client: AssessmentClient,
     backend_repo: dict,
@@ -278,9 +331,9 @@ def _prepare_repo_payload(
             file=sys.stderr,
         )
     updates: list[dict[str, Any]] = []
-    degraded_paths: list[str] = []
-    truncated_paths: list[str] = []
-    status_counts = {"complete": 0, "degraded": 0, "unsupported": 0}
+    built: list[tuple[str, Any, Any]] = []
+    published: list[tuple[str, Any, Any]] = []
+    invalid: list[str] = []
     errors: list[str] = []
     with RootedSourceTree(source) as source_tree:
         for rel_path in sorted(files_manifest):
@@ -310,53 +363,50 @@ def _prepare_repo_payload(
                 captured_source = source_tree.capture(rel_path, retain_spool=False)
                 if captured_source.sha256 != source_sha:
                     raise ValueError(f"repo {repo_id} sealed source hash differs for {rel_path}")
-                index_path = _under(
-                    index_root,
-                    index_root / str(binding.get("index_path") or ""),
-                    label=f"repo {repo_id} file index",
-                )
-                if index_path.parent != manifest_path.parent / "files":
-                    raise ValueError(
-                        f"repo {repo_id} structural index path differs from its identity for {rel_path}"
-                    )
-                indexed = _read_index(index_path, expected_sha256=index_sha)
-                expected_binding = {
-                    "file_path": rel_path,
-                    "repo_id": repo_id,
-                    "repo_generation": generation,
-                    "source_manifest_digest": digest,
-                    "structural_input_digest": expected_input_digest,
-                    "source_sha256": source_sha,
-                }
-                for field, expected in expected_binding.items():
-                    if indexed.get(field) != expected:
-                        raise ValueError(f"repo {repo_id} structural index {field} mismatch for {rel_path}")
-                if indexed.get("language") != expected_language:
-                    raise ValueError(
-                        f"repo {repo_id} structural index language differs from the backend for "
-                        f"{rel_path}"
-                    )
-                source_size = int(source_by_path[rel_path].get("size") or 0)
-                structural_metadata = validated_structural_metadata(
-                    indexed,
-                    rel_path=rel_path,
-                    source_size=source_size,
-                )
-                for field in ("analysis_status", "analysis_mode", "artifact_truncated"):
-                    if binding.get(field) != indexed.get(field):
-                        raise ValueError(
-                            f"repo {repo_id} structural binding {field} mismatch for {rel_path}"
-                        )
-                status = str(indexed["analysis_status"])
-                status_counts[status] += 1
-                if status == "degraded":
-                    degraded_paths.append(rel_path)
-                if indexed["artifact_truncated"]:
-                    truncated_paths.append(rel_path)
                 file_id = int(backend_file.get("id") or 0)
                 if file_id < 1:
                     raise ValueError(f"repo {repo_id} backend file has no ID for {rel_path}")
-                callable_records = validated_callable_records(indexed, rel_path=rel_path)
+                built.append(
+                    (rel_path, binding.get("analysis_status"), binding.get("artifact_truncated"))
+                )
+                source_size = int(source_by_path[rel_path].get("size") or 0)
+                indexed = _bound_artifact(
+                    index_root,
+                    manifest_path,
+                    binding,
+                    {
+                        "file_path": rel_path,
+                        "repo_id": repo_id,
+                        "repo_generation": generation,
+                        "source_manifest_digest": digest,
+                        "structural_input_digest": expected_input_digest,
+                        "source_sha256": source_sha,
+                        "language": expected_language,
+                    },
+                )
+                try:
+                    structural_metadata = validated_structural_metadata(
+                        indexed, rel_path=rel_path, source_size=source_size
+                    )
+                    callable_records = validated_callable_records(
+                        indexed, rel_path=rel_path, loc=captured_source.loc
+                    )
+                except ValueError as exc:
+                    invalid.append(str(exc))
+                    indexed = (
+                        _unsupported_index(rel_path, expected_language, source_size=source_size)
+                        if indexed.get("analysis_status") == "unsupported"
+                        else _invalid_artifact_fallback(
+                            source_tree, rel_path, expected_language, source_sha
+                        )
+                    )
+                    structural_metadata = validated_structural_metadata(
+                        indexed, rel_path=rel_path, source_size=source_size
+                    )
+                    callable_records = []
+                published.append(
+                    (rel_path, indexed["analysis_status"], indexed["artifact_truncated"])
+                )
                 updates.append(
                     {
                         "file_id": file_id,
@@ -378,17 +428,10 @@ def _prepare_repo_payload(
         source_tree.verify_root_identity()
     if errors:
         raise ValueError("invalid structural artifacts:\n" + "\n".join(errors))
-
-    expected_degraded = sorted(degraded_paths)
-    expected_truncated = sorted(truncated_paths)
-    if (
-        manifest.get("degraded_files") != len(expected_degraded)
-        or manifest.get("degraded_file_paths") != expected_degraded
-        or manifest.get("artifact_truncated_files") != len(expected_truncated)
-        or manifest.get("artifact_truncated_file_paths") != expected_truncated
-        or manifest.get("analysis_status_counts") != status_counts
-    ):
+    if any(manifest.get(field) != value for field, value in _debt_summary(built).items()):
         raise ValueError(f"repo {repo_id} structural coverage-debt summary differs from files")
+    if invalid:
+        print(invalid_artifact_notice(f"code-index sync: repo {repo_id}", invalid), file=sys.stderr)
 
     return {
         "repo_id": repo_id,
@@ -397,11 +440,7 @@ def _prepare_repo_payload(
         "structural_index_schema": STRUCTURAL_INDEX_SCHEMA,
         "structural_input_digest": expected_input_digest,
         "structural_index_manifest_path": str(manifest_path),
-        "degraded_files": len(expected_degraded),
-        "degraded_file_paths": expected_degraded,
-        "artifact_truncated_files": len(expected_truncated),
-        "artifact_truncated_file_paths": expected_truncated,
-        "analysis_status_counts": status_counts,
+        **_debt_summary(published),
         "updates": updates,
     }
 

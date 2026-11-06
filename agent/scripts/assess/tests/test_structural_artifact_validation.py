@@ -205,7 +205,7 @@ def index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     snapshot.source_path.parent.chmod(0o700)
 
 
-def test_build_reports_all_invalid_files_without_publishing(index_project, monkeypatch, capsys) -> None:
+def test_build_publishes_every_invalid_artifact_degraded(index_project, monkeypatch, capsys) -> None:
     args, _repo, _client = index_project
 
     def invalid_index(_path, _language, source, **_kwargs):
@@ -214,17 +214,22 @@ def test_build_reports_all_invalid_files_without_publishing(index_project, monke
         return artifact
 
     monkeypatch.setattr(code_index, "index_file", invalid_index)
-    with pytest.raises(SystemExit) as exc:
-        code_index.run(args)
-    assert exc.value.code == 1
+    code_index.run(args)
+
     error = capsys.readouterr().err
-    assert "a.py" in error and "b.py" in error
-    assert not (Path(args.output_dir) / "structural-index-manifest.json").exists()
-    assert not list(Path(args.output_dir).rglob("manifest.json"))
+    assert error.count("a.py") == 1 and error.count("b.py") == 1
+    manifest = json.loads(_current_manifest(args).read_text())
+    assert manifest["degraded_file_paths"] == ["a.py", "b.py"]
+    for binding in manifest["files"].values():
+        artifact = json.loads(
+            (Path(args.output_dir) / "structural-index" / binding["index_path"]).read_text()
+        )
+        assert artifact["analysis_mode"] == "streaming_security_fallback"
+        assert artifact["degradation_reason"] == "invalid_structural_artifact"
 
 
-def test_sync_reports_all_invalid_artifacts_before_post(index_project, capsys) -> None:
-    args, _repo, _client = index_project
+def test_sync_publishes_every_invalid_artifact_degraded(index_project, monkeypatch, capsys) -> None:
+    args, _repo, client_type = index_project
     code_index.run(args)
     output = Path(args.output_dir)
     top_path = output / "structural-index-manifest.json"
@@ -241,10 +246,13 @@ def test_sync_reports_all_invalid_artifacts_before_post(index_project, capsys) -
         binding["index_sha256"] = hashlib.sha256(raw).hexdigest()
     manifest_path.chmod(0o600)
     manifest_path.write_text(json.dumps(manifest))
-    with pytest.raises(SystemExit) as exc:
-        code_index_sync.run(SimpleNamespace(manifest=str(top_path), index_dir=None,
-                                           repo_id=None, repo_key=None, engagement_dir=args.engagement_dir))
-    assert exc.value.code == 1
+    (payload,) = _sync_posts(args, client_type, monkeypatch)
+    assert payload["degraded_file_paths"] == ["a.py", "b.py"]
+    assert {
+        (update["structural_analysis_status"], update["structural_degradation_reason"])
+        for update in payload["updates"]
+    } == {("degraded", "invalid_structural_artifact")}
+    assert all(update["callables"] == [] for update in payload["updates"])
     error = capsys.readouterr().err
     assert "a.py" in error and "b.py" in error
 
@@ -437,9 +445,7 @@ def test_build_activity_counts_processed_errors_without_claiming_indexed_artifac
 
     def invalid_index(_path, _language, source, **_kwargs):
         clock[0] += 31.0
-        artifact = _artifact(source)
-        artifact["functions"][0]["qualified_name"] = " f "
-        return artifact
+        return _artifact(source) | {"language": "ruby"}
 
     monkeypatch.setattr(code_index, "index_file", invalid_index)
     with pytest.raises(SystemExit) as exc:

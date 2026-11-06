@@ -6,6 +6,8 @@ from typing import Any
 from assess.lib.treesitter_index import (
     PHP_INCLUDE_STATUSES,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
+    STRUCTURAL_CALLABLE_NAME_LIMIT,
+    STRUCTURAL_QUALIFIED_NAME_LIMIT,
     UNSCANNED_SCOPE_DEGRADATION_REASON,
 )
 
@@ -13,6 +15,9 @@ from assess.lib.treesitter_index import (
 # indexer publishes beside `functions`; `total_functions` never counts them.
 # `orchestrator/backend/app/services/code_analysis_support.py` mirrors it.
 TOP_LEVEL_CALLABLE_NAME = "<top-level>"
+# Build and sync publish a file whose artifact fails validation as an all-byte
+# streaming fallback with this reason, so one file never blocks a repository.
+INVALID_ARTIFACT_REASON = "invalid_structural_artifact"
 STRUCTURAL_DIMENSIONS = {
     "call_sites",
     "classes",
@@ -217,7 +222,19 @@ def validated_structural_metadata(
     }
 
 
-def validated_callable_records(indexed: dict[str, Any], *, rel_path: str) -> list[dict[str, Any]]:
+def invalid_artifact_notice(scope: str, messages: list[str]) -> str:
+    """One line per degraded file; each validation message names its file."""
+    return (
+        f"{scope}: {len(messages)} file(s) published degraded as {INVALID_ARTIFACT_REASON}, "
+        "each owing a whole-file reviewed span:\n  "
+        + "\n  ".join(messages[:20])
+        + (f"\n  ... and {len(messages) - 20} more" if len(messages) > 20 else "")
+    )
+
+
+def validated_callable_records(
+    indexed: dict[str, Any], *, rel_path: str, loc: int | None = None
+) -> list[dict[str, Any]]:
     callable_records: list[dict[str, Any]] = []
     callable_identities: set[tuple[str, int, int]] = set()
     for callable_record in indexed.get("functions", []):
@@ -233,9 +250,11 @@ def validated_callable_records(indexed: dict[str, Any], *, rel_path: str) -> lis
             not isinstance(name, str)
             or not name
             or name != name.strip()
+            or len(name) > STRUCTURAL_CALLABLE_NAME_LIMIT
             or not isinstance(qualified_name, str)
             or not qualified_name
             or qualified_name != qualified_name.strip()
+            or len(qualified_name) > STRUCTURAL_QUALIFIED_NAME_LIMIT
             or type(start_line) is not int
             or type(end_line) is not int
             or start_line < 1
@@ -276,4 +295,6 @@ def validated_callable_records(indexed: dict[str, Any], *, rel_path: str) -> lis
                 "end_line": end_line,
             }
         )
+    if loc is not None and any(record["end_line"] > loc for record in callable_records):
+        raise ValueError(f"structural callable ends past the sealed file's last line for {rel_path}")
     return callable_records

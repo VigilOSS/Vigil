@@ -4030,6 +4030,248 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
             os.chmod(source, 0o555)
 
 
+class _IndexedRepo:
+    """One repository ingested, built and synced through the in-process backend."""
+
+    def __init__(self, client, isolate_settings, monkeypatch, tmp_path: Path, files: dict[str, bytes]):
+        from app import db as db_module
+        from assess.lib.client import AssessmentClient
+        from tests.test_engagements_api import write_engagement
+
+        ingest = _load_command("code_ingest.py", "test_indexed_repo_ingest")
+        build = _load_command("code_index.py", "test_indexed_repo_build")
+        self._sync = _load_command("code_index_sync.py", "test_indexed_repo_sync")
+        key = "2026-11-05-120000-indexed-repo"
+        write_engagement(isolate_settings["engagements_dir"], key)
+        assert client.get("/engagements").status_code == 200
+        with db_module.get_connection() as connection:
+            self.engagement = Path(connection.execute(
+                "SELECT engagement_root FROM engagements WHERE key = ?", (key,)
+            ).fetchone()["engagement_root"]).resolve()
+        repo = tmp_path / "acme-repo"
+        for rel_path, raw in files.items():
+            (repo / rel_path).parent.mkdir(parents=True, exist_ok=True)
+            (repo / rel_path).write_bytes(raw)
+        config = SimpleNamespace(
+            base_url="http://example.test", engagement_key=key, engagement_dir=str(self.engagement),
+        )
+        self.requests: list[tuple[str, str, bytes]] = []
+        requests = self.requests
+
+        class BackendClient(AssessmentClient):
+            def _get_conn(self, connect_timeout: float = 2.0):
+                if self._conn is None:
+                    self._conn = _BackendConnection(
+                        client,
+                        lambda path, body, headers: client.post(path, content=body, headers=headers),
+                        requests,
+                    )
+                return self._conn
+
+        for module in (ingest, build, self._sync):
+            monkeypatch.setattr(module, "load_config", lambda *_: config)
+            monkeypatch.setattr(module, "AssessmentClient", BackendClient)
+        monkeypatch.setattr(ingest, "_setup_ctags", lambda *_args, **kwargs: {"available": False, **kwargs})
+        ingest.run(_ingest_args(repo, self.engagement))
+        self._client = client
+        self.base = f"/engagements/{key}/assessment/code"
+        (self.repo_row,) = client.get(f"{self.base}/repos").json()
+        build.run(SimpleNamespace(
+            repo_path=self.repo_row["repo_path"], repo_id=self.repo_row["id"], repo_key=None,
+            repo_name=None, output_dir=None, file_list=None, jobs=1,
+            engagement_dir=str(self.engagement),
+            max_tree_sitter_bytes=build.DEFAULT_MAX_TREE_SITTER_BYTES,
+        ))
+        state = self.engagement / "tools" / "analysis-state"
+        aggregate = json.loads((state / "structural-index-manifest.json").read_text(encoding="utf-8"))
+        self.manifest_path = state / aggregate["repos"][str(self.repo_row["id"])]["manifest_path"]
+        self.index_root = state / "structural-index"
+
+    def rewrite(self, rel_path: str, change, *, rehash: bool = True) -> None:
+        """Apply *change(artifact, binding)* to one built artifact and its manifest binding."""
+        manifest = json.loads(self.manifest_path.read_text(encoding="utf-8"))
+        binding = manifest["files"][rel_path]
+        artifact_path = self.index_root / binding["index_path"]
+        artifact = json.loads(artifact_path.read_text(encoding="utf-8"))
+        change(artifact, binding)
+        raw = json.dumps(artifact).encode()
+        artifact_path.chmod(0o600)
+        artifact_path.write_bytes(raw)
+        if rehash:
+            binding["index_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.manifest_path.chmod(0o600)
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    def restore(self, artifacts: dict[Path, bytes], manifest: bytes) -> None:
+        for path, raw in [*artifacts.items(), (self.manifest_path, manifest)]:
+            path.chmod(0o600)
+            path.write_bytes(raw)
+
+    def artifacts(self) -> dict[Path, bytes]:
+        return {path: path.read_bytes() for path in (self.manifest_path.parent / "files").iterdir()}
+
+    def sync(self) -> None:
+        self._sync.run(SimpleNamespace(
+            manifest=None, index_dir=None, repo_id=None, repo_key=None,
+            engagement_dir=str(self.engagement),
+        ))
+
+    def rows(self) -> dict[str, dict]:
+        return {
+            row["file_path"]: self._client.get(f"{self.base}/files/{row['id']}").json()
+            for row in self._client.get(
+                f"{self.base}/files?repo_id={self.repo_row['id']}"
+            ).json()["items"]
+        }
+
+    def callables(self) -> list[tuple[str, str]]:
+        from app import db as db_module
+
+        with db_module.get_connection() as connection:
+            return [
+                (row["file_path"], row["name"])
+                for row in connection.execute(
+                    "SELECT file_path, name FROM code_structural_callables AS callables"
+                    " JOIN code_files AS files ON files.id = callables.file_id"
+                    " WHERE callables.repo_id = ? ORDER BY file_path, name",
+                    (self.repo_row["id"],),
+                ).fetchall()
+            ]
+
+
+_SINK_SCRIPT = b"function render(e) {\n  document.body.innerHTML = e;\n}\n"
+
+
+def _overlong_qualified_name(artifact: dict, _binding: dict) -> None:
+    artifact["functions"][0]["qualified_name"] = "acme." * 300
+
+
+def _unpadded_name(artifact: dict, _binding: dict) -> None:
+    artifact["functions"][0]["name"] = " render "
+
+
+@pytest.mark.parametrize(
+    "defect", [_overlong_qualified_name, _unpadded_name], ids=["over-cap", "invalid"]
+)
+def test_code_index_sync_degrades_only_the_file_whose_artifact_fails_validation(
+    client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys, defect
+) -> None:
+    indexed = _IndexedRepo(client, isolate_settings, monkeypatch, tmp_path, {
+        "main.py": b"def main():\n    return 1\n", "lib/acme.js": _SINK_SCRIPT,
+    })
+    good_artifacts = indexed.artifacts()
+    good_manifest = indexed.manifest_path.read_bytes()
+    indexed.rewrite("lib/acme.js", defect)
+    capsys.readouterr()
+
+    indexed.sync()
+
+    rows = indexed.rows()
+    assert rows["main.py"]["structural_analysis_status"] == "complete"
+    assert rows["main.py"]["total_functions"] == 1
+    bad = rows["lib/acme.js"]
+    assert bad["structural_analysis_status"] == "degraded"
+    assert bad["structural_analysis_mode"] == "streaming_security_fallback"
+    assert bad["structural_degradation_reason"] == "invalid_structural_artifact"
+    assert "functions" in bad["structural_unavailable_dimensions"]
+    assert bad["total_functions"] == 0
+    assert bad["total_sinks"] == 1
+    published = client.get(f"{indexed.base}/repos/{indexed.repo_row['id']}").json()
+    assert published["structural_degraded_file_paths"] == ["lib/acme.js"]
+    assert indexed.callables() == [("main.py", "main")]
+    err = capsys.readouterr().err
+    assert err.count("lib/acme.js") == 1
+    assert "main.py" not in err
+    assert str(indexed.index_root) not in err
+
+    indexed.restore(good_artifacts, good_manifest)
+    indexed.sync()
+
+    assert indexed.rows()["lib/acme.js"]["structural_analysis_status"] == "complete"
+    assert indexed.callables() == [("lib/acme.js", "render"), ("main.py", "main")]
+
+
+def _changed_bytes(artifact: dict, _binding: dict) -> None:
+    artifact["total_exports"] = 0
+
+
+def _changed_generation(artifact: dict, _binding: dict) -> None:
+    artifact["repo_generation"] += 1
+
+
+def _changed_source(artifact: dict, _binding: dict) -> None:
+    artifact["source_sha256"] = "0" * 64
+
+
+def _changed_binding_mode(_artifact: dict, binding: dict) -> None:
+    binding["analysis_mode"] = "lightweight_regex"
+
+
+@pytest.mark.parametrize(
+    ("tamper", "rehash"),
+    [
+        (_changed_bytes, False),
+        (_changed_generation, True),
+        (_changed_source, True),
+        (_changed_binding_mode, True),
+    ],
+    ids=["bytes-without-rehash", "generation", "source-sha256", "binding-mode"],
+)
+def test_code_index_sync_refuses_a_tampered_artifact_and_publishes_nothing(
+    client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tamper, rehash
+) -> None:
+    indexed = _IndexedRepo(client, isolate_settings, monkeypatch, tmp_path, {
+        "main.py": b"def main():\n    return 1\n", "lib/acme.js": _SINK_SCRIPT,
+    })
+    indexed.rewrite("lib/acme.js", tamper, rehash=rehash)
+    before = indexed.rows()
+
+    with pytest.raises(SystemExit) as exc:
+        indexed.sync()
+
+    assert exc.value.code == 1
+    assert not any(path.endswith("/bulk-structural-metadata") for _m, path, _b in indexed.requests)
+    assert indexed.rows() == before
+    assert indexed.callables() == []
+
+
+def test_code_index_build_degrades_a_callable_past_the_sealed_line_count_and_sync_publishes_it(
+    client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`str.splitlines` breaks a form feed that the sealed line count does not."""
+    indexed = _IndexedRepo(client, isolate_settings, monkeypatch, tmp_path, {
+        "main.py": b"def main():\n    return 1\n",
+        "Dockerfile": b"FROM alpine\n#\x0cnote\nRUN echo hi\n",
+    })
+
+    indexed.sync()
+
+    rows = indexed.rows()
+    assert rows["main.py"]["structural_analysis_status"] == "complete"
+    assert rows["Dockerfile"]["structural_analysis_status"] == "degraded"
+    assert rows["Dockerfile"]["structural_degradation_reason"] == "invalid_structural_artifact"
+    assert indexed.callables() == [("main.py", "main")]
+
+
+def test_code_index_sync_keeps_an_unsupported_file_unsupported_when_its_artifact_is_invalid(
+    client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    indexed = _IndexedRepo(client, isolate_settings, monkeypatch, tmp_path, {
+        "main.py": b"def main():\n    return 1\n", "notes.md": b"# Acme\n",
+    })
+
+    def signal(artifact: dict, _binding: dict) -> None:
+        artifact["signal_counts"]["imports"] = 1
+
+    indexed.rewrite("notes.md", signal)
+
+    indexed.sync()
+
+    notes = indexed.rows()["notes.md"]
+    assert notes["structural_analysis_status"] == "unsupported"
+    assert notes["structural_degradation_reason"] == "unsupported_language"
+
+
 def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_capped(
     tmp_path: Path,
     request: pytest.FixtureRequest,

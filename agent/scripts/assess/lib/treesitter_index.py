@@ -5288,7 +5288,7 @@ def _disambiguate_qualified_names(functions: list[dict[str, Any]]) -> None:
 
 
 # `api/code_analysis.py:StructuralCallableRecord` caps both names, and
-# `code-index sync` refuses the whole repository over one callable past either.
+# `code-index` build and sync degrade a file with a callable past either.
 STRUCTURAL_CALLABLE_NAME_LIMIT = 512
 STRUCTURAL_QUALIFIED_NAME_LIMIT = 1024
 
