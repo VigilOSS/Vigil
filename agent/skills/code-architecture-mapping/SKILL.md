@@ -329,9 +329,10 @@ the hunter cannot trace multi-function vulnerability chains across file boundari
 
 Open the exact `structural_index_manifest_path` from Code Source Identity and resolve per-file
 indexes through its `path_to_index` map. Use those pre-computed function definitions and call sites
-as the starting point for call-graph construction. The index supplies exact function boundaries,
-call locations, and imports; the architect adds the trust-boundary, untrusted-flow, and
-module-crossing semantics tree-sitter cannot provide.
+as the starting point for call-graph construction. The index supplies function boundaries (exact
+when the file parsed completely), imports, and call locations, which are hints rather than a
+complete call list; the architect adds the trust-boundary, untrusted-flow, and module-crossing
+semantics tree-sitter cannot provide.
 
 Using ctags + grep (supplemented by structural index when available):
 

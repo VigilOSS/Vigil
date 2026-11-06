@@ -215,7 +215,8 @@ variants or a confident empty result.
   annotations are not; `-i` or an explicit alternation, never a single lowercase spelling.
 - **`rg` is line-oriented and `--type` is narrower than you think.** A sink split across lines by
   a formatter does not match, and `--type c` excludes `.cpp`/`.cc`/`.hpp`. When a pattern must
-  span lines or types, fall back to the structural index rather than trusting the empty result.
+  span lines or types, widen the search (`rg -U`, explicit globs) or read the files. The structural
+  index is line-based too, so a miss there is not proof either.
 
 An empty result is evidence only after you have confirmed the root, the case and the file types.
 

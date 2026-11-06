@@ -285,18 +285,16 @@ overlaps; include every overlapped function as an exact `callable_ref`. A comple
 publishes exactly `total_functions` function records plus one `<top-level>` record per
 file-scope segment.
 
-File scope is a callable too. The artifact's `top_level_segments` are the file-scope code between
-callables that runs when the file is loaded or requested. Import, namespace and `use` lines, type
-and constant declarations (a literal `define()` included), literal `class_alias()` calls,
-`defined()` direct-access guards, literal returns, literal-valued bindings, comments and closing
-punctuation open none, and an `if` over `function_exists()`-style probes owes only the code inside
-it. PHP `include`/`require`
-statements and inline HTML open one, as do bindings with computed values such as
-`const db = require('db')`, and a sink or source the index reports in file-scope code that can run.
-They are registered as `<top-level>` callables (name and qualified name `<top-level>`, one per
-segment, not counted in `total_functions`). The file owes each segment a disposition like any other
-callable: cite it as an exact `callable_ref`, or cover its lines with reviewed spans. A span may
-cover a `<top-level>` segment without citing it. Naming a function never covers the file scope.
+File scope is a callable too. The artifact's `top_level_segments` mark where file-scope code runs
+when the file is loaded or requested: PHP `include`/`require` statements, inline HTML, bindings with
+computed values such as `const db = require('db')`, and a sink or source the index reports there.
+Declarations, literal bindings and returns, literal `define()` and `class_alias()` calls and
+`defined()` guards open no segment. A segment marks where code runs, not what is safe to skip: read
+the whole file, since a literal binding can hold a hardcoded secret. Segments are registered as
+`<top-level>` callables (name and qualified name `<top-level>`, one per segment, not counted in
+`total_functions`). The file owes each segment a disposition like any other callable: cite it as an
+exact `callable_ref`, or cover its lines with reviewed spans. A span may cover a `<top-level>`
+segment without citing it. Naming a function never covers the file scope.
 
 Only a whole-file reviewed span can prove the manual source review (and it must still name every
 function it overlaps) when structural analysis is unsupported, the function dimension is truncated
