@@ -248,9 +248,11 @@ is retained as unresolved work; only evidence-backed `frontier_exhausted` or
 
 Use `code-dispatch done` with `clean`, `finding`, `suspicious`, or an explicit `skipped` plus
 `--skip-reason` -- the queue history is only useful if every admitted file receives a terminal,
-attributable disposition. An analyzed completion records a complete `cwe_coverage` array (the bare
-JSON array, not wrapped in an object) instead of a half-formed backend 422. Include one entry per
-`applicable_vuln_classes` value, with explicit zero-effort gap entries for anything unexamined.
+attributable disposition. `done` refuses `skipped` for a medium, high or critical file: review it
+and close it clean, finding or suspicious. An analyzed completion records a complete `cwe_coverage`
+array (the bare JSON array, not wrapped in an object) instead of a half-formed backend 422.
+Include one entry per `applicable_vuln_classes` value, with explicit zero-effort gap entries for
+anything unexamined.
 Record grouped file/call-chain receipts before closeout: `finding`/`suspicious` require a current result with
 inline `evidence` or an `evidence_ref`; `clean` requires non-empty family coverage and review
 notes. If the worker directly read a degraded/unsupported/truncated file to discharge Structural

@@ -81,7 +81,7 @@ Read in full if present:
 For every source file, read the first ~50 lines to capture:
 - Include/import statements (reveal dependencies and cross-module relationships)
 - Module docstrings and file-level comments (reveal purpose)
-- License headers (identify vendored/third-party code)
+- License headers (a hint at vendored/third-party code; a header alone does not make a file skippable)
 - Conditional compilation directives (`#ifdef`, `#[cfg(...)]`, `//go:build`)
 
 Store as `header_snippet` per file for later reference.
@@ -226,7 +226,9 @@ enforce a supported security invariant.
 - Examples: test harness, build scripts, example programs, benchmark code
 
 **Skip** — Generated code, test fixtures, documentation, vendored third-party code, asset files.
-- Decision: Is this file not written by the project authors or not executable code?
+- Decision: Is this file not executed by the product, or not executable code? Third-party code the
+  product loads and runs is executed by it; a license header alone does not make a file skippable.
+  Documentation and data files close as `out-of-scope-language`.
 - Examples: auto-generated protobuf stubs, test data files, vendored dependencies, images, fonts
 
 ### Step 10: Annotate Slot Types on Critical/High Files
@@ -273,8 +275,8 @@ guessed the language wrong, emit a `language` correction in the classification r
 ## Classification Decision Framework
 
 ```
-Is this file executable source code?
-  No  -> SKIP (generated, fixtures, docs, vendored)
+Does the product execute this file?
+  No  -> SKIP (generated, fixtures, docs, vendored code it never loads)
   Yes -> Does it run only at build/test time?
     Yes -> LOW (build, test infra, examples)
     No  -> Does it directly handle data from a trust boundary?

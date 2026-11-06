@@ -4564,16 +4564,6 @@ def test_review_identity_change_retires_current_semantic_receipt(
     assert replacement_claim["file"]["slot_types"] == expected_slots
     assert replacement_claim["priority"] == expected_priority
     assert replacement_claim["slot_types"] == expected_slots
-    closed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            replacement_claim,
-            item_ids=[replacement_claim["id"]],
-            disposition="skipped",
-            skip_reason="out-of-scope-language",
-        ),
-    )
-    assert closed.status_code == 200, closed.text
 
 
 def test_lsp_publish_rejects_a_stale_repository_generation(
@@ -5582,17 +5572,17 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
     assert after_unseen_review["status"] == "pending"
     assert after_unseen_review["resolved_queue_item_id"] is None
 
-    _classify_file(client, engagement_key, int(parser["id"]), "high", 79)
+    _classify_file(client, engagement_key, int(parser["id"]), "low", 10)
 
     trigger_requeue = client.post(
         f"{base}/analysis-queue/requeue",
-        json={"items": [{"file_id": parser["id"], "priority": 79}]},
+        json={"items": [{"file_id": parser["id"], "priority": 10}]},
     )
     assert trigger_requeue.status_code == 201, trigger_requeue.text
     assert trigger_requeue.json()["already_queued"] == 1
     trigger_claim_response = client.post(
         f"{base}/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "trigger-reviewer"},
+        json={"limit": 1, "agent_name": "trigger-reviewer", "path_prefix": ["src/parser.py"]},
     )
     assert trigger_claim_response.status_code == 200, trigger_claim_response.text
     trigger_claim = trigger_claim_response.json()[0]
@@ -5621,7 +5611,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
 
     final_requeue = client.post(
         f"{base}/analysis-queue/requeue",
-        json={"items": [{"file_id": parser["id"], "priority": 79}]},
+        json={"items": [{"file_id": parser["id"], "priority": 10}]},
     )
     assert final_requeue.status_code == 201, final_requeue.text
     assert final_requeue.json()["inserted"] == 1
@@ -6306,9 +6296,9 @@ def test_reanalysis_stale_predecessor_is_reported_per_item_and_batch_continues(
         if row["id"] != parser["id"]
     )
     for file_row in (parser, second_file):
-        _classify_file(client, engagement_key, int(file_row["id"]), "critical", 80)
+        _classify_file(client, engagement_key, int(file_row["id"]), "low", 10)
         claim = _claim_file_for_analysis(
-            client, engagement_key, int(file_row["id"]), priority=80,
+            client, engagement_key, int(file_row["id"]), priority=10,
             agent_name=f"review-{file_row['id']}",
         )
         closed = client.post(
@@ -8032,11 +8022,11 @@ def test_queue_done_skipped_disposition_requires_skip_reason(client, isolate_set
     repo = _create_repo(client, engagement_key, repo_key="skip-repo")
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
-    _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
+    _classify_file(client, engagement_key, int(parser_file["id"]), "low", 10)
 
     client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
+        json={"items": [{"file_id": parser_file["id"], "priority": 10}]},
     )
     queue_item = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
@@ -8072,6 +8062,77 @@ def test_queue_done_skipped_disposition_requires_skip_reason(client, isolate_set
         },
     )
     assert accepted.status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("classification", "priority", "sinks", "skip_reason", "stale_index", "accepted"),
+    [
+        ("medium", 30, 5, "test-fixture", False, False),
+        ("medium", 30, 5, "test-fixture", True, False),
+        ("medium", 30, 0, "generated-code", False, False),
+        ("skip", 0, 5, "vendored-dependency", False, True),
+        ("low", 10, 5, "test-fixture", False, True),
+        ("low", 10, 0, "x", False, False),
+    ],
+)
+def test_queue_done_skipped_requires_a_standard_reason_and_a_tier_below_medium(
+    client, isolate_settings, classification, priority, sinks, skip_reason, stale_index, accepted,
+):
+    engagement_key = "2026-11-05-code-skip-signals"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="skip-signals-repo")
+    files = _create_files(client, engagement_key, int(repo["id"]))
+    parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
+    _publish_structural_totals(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        files,
+        {int(parser_file["id"]): {"total_entry_points": 2 if sinks else 0, "total_sinks": sinks}},
+    )
+    _classify_file(client, engagement_key, int(parser_file["id"]), classification, priority)
+    base = f"/engagements/{engagement_key}/assessment/code"
+    queued = client.post(
+        f"{base}/analysis-queue",
+        json={"items": [{"file_id": parser_file["id"], "priority": priority}]},
+    )
+    assert queued.status_code == 201, queued.text
+    queue_item = client.post(
+        f"{base}/analysis-queue/fetch",
+        json={"limit": 1, "agent_name": "code-vuln-hunter"},
+    ).json()[0]
+    if stale_index:
+        helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
+        relabelled = client.post(
+            f"{base}/files/bulk-classify",
+            json={
+                "classifications": [
+                    {
+                        "file_id": helper_file["id"],
+                        "classification": "low",
+                        "role": "helper",
+                        "slot_types": [],
+                        "analysis_priority": 10,
+                        "language": "ruby",
+                    }
+                ]
+            },
+        )
+        assert relabelled.status_code == 200, relabelled.text
+        assert client.get(f"{base}/files/{parser_file['id']}").json()["total_sinks"] == 0
+
+    closed = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(queue_item, item_ids=[queue_item["id"]], disposition="skipped", skip_reason=skip_reason),
+    )
+
+    assert (closed.status_code == 200) is accepted, closed.text
+    row = next(
+        item for item in client.get(f"{base}/analysis-queue").json()["items"]
+        if item["id"] == queue_item["id"]
+    )
+    assert row["status"] == ("done" if accepted else "processing")
+    assert row["skip_reason"] == (skip_reason if accepted else "")
 
 
 def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
@@ -10886,12 +10947,16 @@ def test_verify_readiness_requires_every_file_accounted_but_skip_is_not_semantic
                 skip_reason="generated-code",
             ),
         )
-        assert skipped.status_code == 200, skipped.text
+        assert skipped.status_code == (400 if file_row is parser else 200), skipped.text
 
     after = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    after_codes = {blocker["code"] for blocker in after["blockers"]}
-    assert "admitted_files_unaccounted" not in after_codes
-    assert "critical_high_incomplete" in after_codes
+    unaccounted = next(
+        blocker
+        for blocker in after["blockers"]
+        if blocker["code"] == "admitted_files_unaccounted"
+    )
+    assert "1 admitted file(s)" in unaccounted["message"]
+    assert "critical_high_incomplete" in {blocker["code"] for blocker in after["blockers"]}
 
 
 def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
@@ -15177,17 +15242,16 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
         f"{base}/analysis-queue/fetch",
         json={"limit": 1, "agent_name": "hunter-a"},
     ).json()[0]
+    _record_fixture_source_receipt(client, engagement_key, claim)
     done = client.post(
         f"{base}/analysis-queue/done",
-        json={
-            "item_ids": [claim["id"]],
-            "agent_name": claim.get("agent_name", claim.get("assigned_agent")),
-            "lease_token": claim["lease_token"],
-            "disposition": "skipped",
-            "notes": "Reviewed and intentionally skipped.",
-            "cwe_coverage": [],
-            "skip_reason": "test-fixture",
-        },
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="Reviewed.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
+        ),
     )
     assert done.status_code == 200, done.text
 
@@ -15294,13 +15358,15 @@ def test_reanalysis_history_does_not_block_content_refresh(client, isolate_setti
     )
     base = f"/engagements/{engagement_key}/assessment/code"
     initial = _claim_file_for_analysis(client, engagement_key, int(file_row["id"]), priority=80)
+    _record_fixture_source_receipt(client, engagement_key, initial)
     completed = client.post(
         f"{base}/analysis-queue/done",
         json=_owned(
             initial,
             item_ids=[initial["id"]],
-            disposition="skipped",
-            skip_reason="test-fixture",
+            disposition="clean",
+            notes="Reviewed.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
         ),
     )
     assert completed.status_code == 200, completed.text
@@ -16636,17 +16702,10 @@ def test_suspicious_obligation_survives_nonsemantic_reanalysis_states_until_reso
             skip_reason="test-fixture",
         ),
     )
-    assert skipped.status_code == 200, skipped.text
-    assert_suspicious_obligation()  # skipped
+    assert skipped.status_code == 400, skipped.text
+    assert_suspicious_obligation()  # skip refused
 
-    resolution = _claim_file_for_reanalysis(
-        client,
-        engagement_key,
-        int(file_row["id"]),
-        reason=f"Resolve carried candidate as {resolved_disposition}.",
-        priority=80,
-        agent_name="carry-resolution-worker",
-    )
+    resolution = reanalysis
     if resolved_disposition == "finding":
         _create_code_parent_finding(
             client,
@@ -16956,7 +17015,7 @@ def test_suspicious_semantic_ordering_clean_then_suspicious_then_skip(
             skip_reason="test-fixture",
         ),
     )
-    assert skipped_done.status_code == 200, skipped_done.text
+    assert skipped_done.status_code == 400, skipped_done.text
     assert "unresolved_suspicious_analysis" in {
         blocker["code"]
         for blocker in client.get(

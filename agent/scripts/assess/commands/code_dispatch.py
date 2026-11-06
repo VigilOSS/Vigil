@@ -26,15 +26,6 @@ _QUEUE_SUBMISSION_BATCH_SIZE = 200
 _MAX_QUEUE_REPORTED_OUTCOMES = 200
 _PROCESS_DESCRIPTOR_PATH = re.compile(r"/(?:dev|proc/self)/fd/[0-9]+")
 _DONE_DISPOSITIONS = ("clean", "finding", "suspicious", "skipped")
-# C50: when disposition=skipped the operator must supply --skip-reason so
-# code-coverage can attribute the skip. Common reasons:
-_SKIP_REASONS_HINT = (
-    "test-fixture",
-    "generated-code",
-    "minified",
-    "out-of-scope-language",
-    "vendored-dependency",
-)
 
 # Mirrors the backend's QueueAdoptLeaseRequest default and QueueResetStaleRequest
 # bounds so one window definition drives both recovery verbs. Pinned by
@@ -119,8 +110,7 @@ _ACTION_HELP: dict[str, str] = {
         f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}.\n"
         "CWE coverage must be a JSON array such as "
         "[{\"family\":\"ssrf\",\"effort\":80}].\n"
-        "--skip-reason is required when disposition=skipped. Suggested values: "
-        f"{', '.join(_SKIP_REASONS_HINT)}.\n"
+        "--skip-reason is required when disposition=skipped.\n"
     ),
     "error": (
         "Usage: vigil assess code-dispatch error "
@@ -247,8 +237,7 @@ def run(args) -> None:
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
                 "CWE coverage must be a JSON array like "
                 "[{\"family\":\"ssrf\",\"effort\":80}]\n"
-                f"--skip-reason is required when disposition=skipped. "
-                f"Suggested values: {', '.join(_SKIP_REASONS_HINT)}",
+                "--skip-reason is required when disposition=skipped",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -1036,15 +1025,6 @@ def _done(
     if normalized_disposition not in _DONE_DISPOSITIONS:
         print(
             f"ERROR: invalid disposition {disposition!r}; expected one of: {', '.join(_DONE_DISPOSITIONS)}",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-    # C50: client-side check (backend also enforces) for clearer operator
-    # feedback before the round-trip.
-    if normalized_disposition == "skipped" and not skip_reason.strip():
-        print(
-            "ERROR: --skip-reason is required when disposition=skipped; "
-            f"suggested values: {', '.join(_SKIP_REASONS_HINT)}",
             file=sys.stderr,
         )
         sys.exit(1)

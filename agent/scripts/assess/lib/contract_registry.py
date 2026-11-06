@@ -1887,7 +1887,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("filtering a fetched batch client-side", "pass repo/classification/theme/id/path filters to fetch so unrelated rows are never claimed"),
             ("closing finding/suspicious before recording evidence", "record the same-disposition result with evidence or evidence_ref under the active lease first"),
             ("closing clean without notes", "summarize the reviewed paths and guards in non-empty closeout notes"),
-            ("closing skipped without --skip-reason", "provide the evidence-based reason this admitted file does not receive source analysis"),
+            ("closing skipped without a standard --skip-reason", "pass test-fixture, generated-code, minified, out-of-scope-language or vendored-dependency; a medium, high or critical file cannot be skipped, so review it and close it clean, finding or suspicious"),
             ("cwe_coverage object wrapper", "`done` requires a bare JSON array, not {'cwe_coverage': [...]}"),
             ("analysis_priority", "queue payloads require explicit `priority`; copy the file's current `analysis_priority` exactly because the backend rejects any mismatch transactionally."),
             ("missing resolution_note", "accepted trigger gaps need a durable rationale"),

@@ -4073,6 +4073,9 @@ def _record_cross_file_triggers(
 
 
 _VALID_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "skipped"})
+SKIP_REASONS = (
+    "test-fixture", "generated-code", "minified", "out-of-scope-language", "vendored-dependency",
+)
 _VALID_ANALYSIS_RESULT_DISPOSITIONS = frozenset({"finding", "suspicious", "clean", "needs_context", "skipped"})
 
 
@@ -4099,18 +4102,10 @@ def complete_queue_items(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Invalid disposition '{disposition}'. Must be one of: {', '.join(sorted(_VALID_DISPOSITIONS))}",
         )
-    # C50: when disposition='skipped', a skip_reason is mandatory so the
-    # coverage report can attribute the skip (test-fixture, generated-code,
-    # minified, out-of-scope-language). For other dispositions the field
-    # stays empty and the existing notes blob carries any free-text context.
-    if disposition == "skipped" and not (skip_reason or "").strip():
+    if disposition == "skipped" and skip_reason not in SKIP_REASONS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                "skip_reason is required when disposition='skipped'. "
-                "Standard reasons: test-fixture, generated-code, minified, "
-                "out-of-scope-language, vendored-dependency."
-            ),
+            detail=f"skip_reason is required when disposition='skipped', one of: {', '.join(SKIP_REASONS)}",
         )
     if disposition == "clean" and not notes.strip():
         raise HTTPException(
@@ -4177,6 +4172,14 @@ def complete_queue_items(
                 detail=(
                     "candidate-bearing analysis result requires queue disposition="
                     f"'{candidate_dispositions[0]}'; cannot complete as '{disposition}'"
+                ),
+            )
+        if disposition == "skipped" and file_row["classification"] in {"critical", "high", "medium"}:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"{file_row['file_path']} is {file_row['classification']}; "
+                    "review it and close it clean, finding or suspicious"
                 ),
             )
         if disposition == "finding":
