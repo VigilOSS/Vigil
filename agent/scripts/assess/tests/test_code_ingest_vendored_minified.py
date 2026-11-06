@@ -353,6 +353,23 @@ def test_a_small_one_line_script_is_not_called_minified(tmp_path):
     assert _admitted(repo, _args(repo)) == ["src/flags.js"]
 
 
+@pytest.mark.parametrize("ending", ["\r", "\r\n", "\n"], ids=["cr", "crlf", "lf"])
+@pytest.mark.parametrize("name", ["src/app.js", "src/app.mjs", "src/app.cjs", "src/app.css"])
+def test_source_is_not_minified_whatever_its_line_endings(tmp_path, name, ending):
+    repo = tmp_path / "repo"
+    _write(repo, name, "".join(f"function f{n}(a) {{ return a + {n}; }}{ending}" for n in range(400)).encode())
+
+    assert _admitted(repo, _args(repo)) == [name]
+
+
+def test_a_crlf_split_across_reads_ends_one_line():
+    shape = code_ingest._LineShape()
+    for chunk in (b"x" * 300 + b"\r", b"\n" + b"y" * 300 + b"\r", b"\n"):
+        shape.feed(chunk)
+
+    assert (shape.lines, shape.line_bytes) == (2, 600)
+
+
 def test_line_shape_applies_only_to_javascript_and_css(tmp_path):
     repo = tmp_path / "repo"
     _write(repo, "data/fixture.py", "X = '" + "a" * 60_000 + "'\n")

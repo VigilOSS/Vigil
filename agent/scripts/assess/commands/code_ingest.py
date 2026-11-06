@@ -102,6 +102,7 @@ MINIFIED_MIN_BYTES = 8 * 1024
 MINIFIED_AVERAGE_LINE_BYTES = 200
 MINIFIED_LONG_LINE_BYTES = 500
 MINIFIED_MAX_SHORT_LINE_BYTES = 2 * 1024
+_LINE_END = re.compile(rb"[\r\n]")
 
 BUILD_ARTIFACT_DIRS = frozenset({'dist', 'build', '.next', '.nuxt'})
 
@@ -650,15 +651,14 @@ class _LineShape:
         self.line_bytes = 0
 
     def feed(self, chunk: bytes) -> None:
+        # A CRLF's LF ends an empty line, which `_end_line` ignores, so a CR
+        # needs no carrying across reads.
         start = 0
-        while True:
-            newline = chunk.find(b"\n", start)
-            if newline < 0:
-                self.current += len(chunk) - start
-                return
-            self.current += newline - start
+        for line_end in _LINE_END.finditer(chunk):
+            self.current += line_end.start() - start
             self._end_line()
-            start = newline + 1
+            start = line_end.end()
+        self.current += len(chunk) - start
 
     def _end_line(self) -> None:
         length = self.current
