@@ -252,7 +252,8 @@ def test_claimed_functions_analyzed_cannot_clear_uncovered_without_result_eviden
         default_effort=80,
         overrides={fam: {"functions_analyzed": 999} for fam in (
             "web-app-injection", "web-app-auth", "ssrf",
-            "open-redirect", "path-traversal", "algorithmic-dos", "error-handling",
+            "open-redirect", "path-traversal", "deserialization", "file-upload",
+            "algorithmic-dos", "error-handling",
         )},
     )
     done = _complete(client, key, queue_item, coverage)
@@ -312,7 +313,8 @@ def test_accepted_gap_clears_uncovered(client, isolate_settings):
         default_effort=0,
         overrides={fam: {"disposition": "not_applicable", "effort": 0, "notes": "no reachable sink"} for fam in (
             "web-app-injection", "web-app-auth", "ssrf",
-            "open-redirect", "path-traversal", "algorithmic-dos", "error-handling",
+            "open-redirect", "path-traversal", "deserialization", "file-upload",
+            "algorithmic-dos", "error-handling",
         )},
     )
     done = _complete(client, key, queue_item, coverage)

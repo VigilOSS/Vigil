@@ -7379,7 +7379,6 @@ def code_coverage_summary(
                     )
                     gate_reasons.append(msg)
                     effort_warnings.append(msg)
-                    break  # One reason per file is enough
 
     gate_passed = len(gate_reasons) == 0
 
@@ -9009,9 +9008,12 @@ def code_readiness(
 
 SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
     "NETWORK-INPUT": {
-        "all": ["algorithmic-dos", "error-handling"],
+        "all": ["algorithmic-dos", "error-handling", "deserialization"],
         "native": ["buffer-overflow", "integer-overflow", "format-string"],
-        "managed": ["web-app-injection", "web-app-auth", "ssrf", "open-redirect", "path-traversal"],
+        "managed": [
+            "web-app-injection", "web-app-auth", "ssrf", "open-redirect", "path-traversal",
+            "file-upload",
+        ],
     },
     "PROTOCOL-FIELD": {
         "all": ["algorithmic-dos", "error-handling"],
@@ -9020,8 +9022,8 @@ SLOT_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
     },
     "URL-COMPONENT": {
         "all": [
-            "injection", "auth-bypass", "ssrf", "open-redirect", "web-app-auth",
-            "algorithmic-dos", "error-handling",
+            "injection", "web-app-injection", "path-traversal", "auth-bypass", "ssrf",
+            "open-redirect", "web-app-auth", "algorithmic-dos", "error-handling",
         ]
     },
     "FILE-CONTENT": {

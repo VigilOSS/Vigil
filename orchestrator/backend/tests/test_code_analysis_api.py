@@ -7596,6 +7596,22 @@ def test_untrusted_transport_slots_include_resource_and_error_handling_families(
     assert "error-handling" in families
 
 
+@pytest.mark.parametrize(
+    ("slot_type", "language", "required"),
+    [
+        ("URL-COMPONENT", "php", {"web-app-injection", "path-traversal"}),
+        ("NETWORK-INPUT", "php", {"deserialization", "file-upload"}),
+        ("NETWORK-INPUT", "c", {"deserialization"}),
+    ],
+)
+def test_request_input_slots_require_injection_traversal_upload_and_deserialization(
+    slot_type, language, required
+):
+    families = code_analysis._applicable_families_for_file([slot_type], language=language, role="controller")
+
+    assert required <= set(families)
+
+
 @pytest.mark.parametrize("slot_types", [[], ["FILE-CONTENT"]])
 def test_native_files_include_resource_and_error_handling_families_with_sparse_context(slot_types):
     families = code_analysis._applicable_families_for_file(
@@ -7672,6 +7688,8 @@ def _network_input_coverage(
         "ssrf",
         "open-redirect",
         "path-traversal",
+        "deserialization",
+        "file-upload",
         "algorithmic-dos",
         "error-handling",
     ]
@@ -9059,6 +9077,33 @@ def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
     gate = coverage_after.json()["gate"]
     assert gate["passed"] is False
     assert any("family 'ssrf' effort 10 < 70" in reason for reason in gate["reasons"])
+
+
+def test_effort_gate_names_every_family_under_the_threshold(client, isolate_settings):
+    engagement_key, repo, file_row = _seed_queue_contract_file(client, isolate_settings, "effort-all")
+    claim = _claim_file_for_analysis(client, engagement_key, int(file_row["id"]), priority=80)
+    _record_fixture_source_receipt(client, engagement_key, claim)
+    done = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json=_owned(
+            claim,
+            item_ids=[claim["id"]],
+            disposition="clean",
+            notes="Reviewed.",
+            cwe_coverage=_network_input_coverage(
+                default_effort=80,
+                overrides={"ssrf": {"effort": 10}, "file-upload": {"effort": 20}},
+            ),
+        ),
+    )
+    assert done.status_code == 200, done.text
+
+    reasons = client.get(
+        f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
+    ).json()["gate"]["reasons"]
+
+    assert any("family 'ssrf' effort 10 < 70" in reason for reason in reasons)
+    assert any("family 'file-upload' effort 20 < 70" in reason for reason in reasons)
 
 
 def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
@@ -14764,6 +14809,8 @@ def test_coverage_integrity_skips_not_applicable_entries(client, isolate_setting
         {"family": "ssrf", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
         {"family": "open-redirect", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
         {"family": "path-traversal", "effort": 70, "functions_analyzed": 2},
+        {"family": "deserialization", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "file-upload", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
         {"family": "algorithmic-dos", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
         {"family": "error-handling", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
     ]
