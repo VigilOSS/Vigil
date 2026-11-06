@@ -4606,9 +4606,9 @@ def _detect_call_sites(
 ) -> list[dict[str, Any]]:
     """Detect function calls in each callable body and in file scope.
 
-    Each call site includes a ``passes_caller_params`` boolean indicating
-    whether the call forwards any of the caller's parameter names as
-    arguments -- a lightweight signal for data-flow propagation.
+    A call site carries ``passes_caller_params: true`` when the call forwards
+    any of the caller's parameter names as arguments -- a lightweight signal
+    for data-flow propagation -- and omits it otherwise.
     """
     calls: list[dict[str, Any]] = []
     scopes = [
@@ -4657,12 +4657,10 @@ def _detect_call_sites(
                             passes_params = True
                             break
 
-                calls.append({
-                    "caller": func["name"],
-                    "callee": callee,
-                    "line": line_idx + 1,
-                    "passes_caller_params": passes_params,
-                })
+                call = {"caller": func["name"], "callee": callee, "line": line_idx + 1}
+                if passes_params:
+                    call["passes_caller_params"] = True
+                calls.append(call)
 
     return calls
 
@@ -4932,11 +4930,12 @@ def _detect_php_call_sites(
     """PHP call sites from the parse tree, and whether a withheld line held one.
 
     Each call is attributed to its innermost callable, or to `<top-level>`,
-    and kept once per line per callee. `passes_caller_params` holds when an
-    argument mentions a variable one of the caller's parameters binds. A call
-    on a declaration header line the file-scope readers withhold is not
-    recorded, because the sink readers do not read that line either; the
-    second value reports that such a call exists, so the gap is declared.
+    and kept once per line per callee. It names its `receiver` when it has one
+    and carries `passes_caller_params: true` when an argument mentions a
+    variable one of the caller's parameters binds. A call on a declaration
+    header line the file-scope readers withhold is not recorded, because the
+    sink readers do not read that line either; the second value reports that
+    such a call exists, so the gap is declared.
     """
     parser = _get_parser("php")
     if parser is None:
@@ -4995,17 +4994,20 @@ def _detect_php_call_sites(
         scope_sites = sites.setdefault(position, {})
         existing = scope_sites.get((callee, line_index))
         if existing is not None:
-            existing["passes_caller_params"] = existing["passes_caller_params"] or passes_params
+            if passes_params:
+                existing["passes_caller_params"] = True
             continue
-        scope_sites[(callee, line_index)] = {
+        site = {
             "caller": caller["name"] if caller is not None else "<top-level>",
             "callee": callee,
             "line": line_index + 1,
-            "passes_caller_params": passes_params,
-            "receiver": receiver,
-            "call_kind": call_kind,
             "_column": target.start_point[1],
         }
+        if receiver:
+            site["receiver"] = receiver
+        if passes_params:
+            site["passes_caller_params"] = True
+        scope_sites[(callee, line_index)] = site
 
     # Callers in source order and `<top-level>` last, each read top to bottom:
     # the order the line readers produce, which decides what the signal limit keeps.

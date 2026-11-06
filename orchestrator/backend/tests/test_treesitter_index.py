@@ -946,7 +946,7 @@ def process(user_input, size):
     if validate_call:
         assert validate_call["passes_caller_params"] is True
     if transform_call:
-        assert transform_call["passes_caller_params"] is False
+        assert transform_call.get("passes_caller_params", False) is False
 
 
 @needs_treesitter

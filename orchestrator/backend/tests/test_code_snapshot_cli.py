@@ -5307,7 +5307,7 @@ def test_a_built_structural_index_syncs_its_callables_to_the_backend(
         encoding="utf-8",
     )
     (repo / "web" / "render.js").write_text(
-        "function render(el, html) {\n  el.innerHTML = html;\n  log('rendered');\n"
+        "function render(el, html) {\n  el.innerHTML = html;\n  notify('rendered');\n"
         "  return format(el);\n}\n",
         encoding="utf-8",
     )
@@ -5387,6 +5387,19 @@ def test_a_built_structural_index_syncs_its_callables_to_the_backend(
                 "name", "params", "qualified_name",
             ]),
         ),
+    ]
+
+    assert [*controller["call_sites"], *render["call_sites"]] == [
+        {
+            "caller": "show",
+            "callee": "select",
+            "line": 8,
+            "receiver": "DB",
+            "passes_caller_params": True,
+        },
+        {"caller": "show", "callee": "view", "line": 9},
+        {"caller": "render", "callee": "notify", "line": 3},
+        {"caller": "render", "callee": "format", "line": 4, "passes_caller_params": True},
     ]
 
     files = {row["file_path"]: row for row in client.get(f"{base}/files").json()["items"]}

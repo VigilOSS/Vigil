@@ -486,8 +486,8 @@ acme_boot();
 
 def _calls(indexed: dict) -> list[tuple]:
     return [
-        (call["caller"], call["line"], call["callee"], call["receiver"], call["call_kind"],
-         call["passes_caller_params"])
+        (call["caller"], call["line"], call["callee"], call.get("receiver", ""),
+         call.get("passes_caller_params", False))
         for call in indexed["call_sites"]
     ]
 
@@ -496,17 +496,17 @@ def test_php_call_sites_are_read_from_the_parse_tree() -> None:
     indexed = index_file("src/AcmeRepo.php", "php", ACME_REPOSITORY)
 
     assert _calls(indexed) == [
-        ("__construct", 6, "__construct", "parent", "static", True),
-        ("purge", 10, "select", "DB", "static", False),
-        ("purge", 11, "delete", "$model", "method", False),
-        ("purge", 12, "restore", "$model", "nullsafe_method", True),
-        ("purge", 13, "Snapshot", "", "new", True),
-        ("purge", 14, "acme_log", "", "function", False),
-        ("purge", 14, "acme_audit", "", "function", True),
-        ("purge", 15, "send", "$this->mailer", "method", True),
-        ("purge", 20, "query", "$this->db", "method", True),
-        ("$format", 18, "acme_format", "", "function", True),
-        ("<top-level>", 24, "acme_boot", "", "function", False),
+        ("__construct", 6, "__construct", "parent", True),
+        ("purge", 10, "select", "DB", False),
+        ("purge", 11, "delete", "$model", False),
+        ("purge", 12, "restore", "$model", True),
+        ("purge", 13, "Snapshot", "", True),
+        ("purge", 14, "acme_log", "", False),
+        ("purge", 14, "acme_audit", "", True),
+        ("purge", 15, "send", "$this->mailer", True),
+        ("purge", 20, "query", "$this->db", True),
+        ("$format", 18, "acme_format", "", True),
+        ("<top-level>", 24, "acme_boot", "", False),
     ]
 
 

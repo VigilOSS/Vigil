@@ -92,6 +92,9 @@ Open `structural_index_manifest_path` from the Code Source Identity block, confi
 the repo-relative file path through `path_to_index`. Read that referenced JSON; do not guess
 hashed filenames or scan for a basename collision. Phase 0 owns the generation-scoped layout,
 while this is the canonical consumer lookup rule for every code specialist.
+A `call_sites` record names `caller`, `callee`, and `line`. A PHP call site adds `receiver` when it
+has one; other languages keep it in `callee`. Any call site adds `passes_caller_params: true` only
+when an argument forwards a caller parameter.
 
 Inspect each file artifact's `analysis_status`, `artifact_truncated`, and unavailable/truncated
 dimensions before using its maps. For `degraded`/`unsupported` or truncated artifacts, read the

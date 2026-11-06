@@ -272,7 +272,8 @@ def test_a_call_passes_caller_params_only_for_a_whole_parameter_name() -> None:
     indexed = index_file("acme/views.py", "python", source)
 
     assert [
-        (call["callee"], call["passes_caller_params"]) for call in indexed["call_sites"]
+        (call["callee"], call.get("passes_caller_params", False))
+        for call in indexed["call_sites"]
     ] == [("lookup", True), ("render", False), ("audit", True), ("notify", False)]
 
 

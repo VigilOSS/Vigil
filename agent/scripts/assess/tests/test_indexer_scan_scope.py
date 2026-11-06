@@ -323,7 +323,7 @@ def test_each_call_to_one_callee_is_recorded_once_per_line() -> None:
     ]
 
     assert exec_lines == [4, 6, 7]
-    assert [site["passes_caller_params"] for site in indexed["call_sites"]
+    assert [site.get("passes_caller_params", False) for site in indexed["call_sites"]
             if site["callee"] == "exec"] == [False, True, True]
 
 
