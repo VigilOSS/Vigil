@@ -480,6 +480,21 @@ def _validate_existing_generation(
     return existing
 
 
+def _artifact_bytes(indexed: dict[str, Any]) -> bytes:
+    """Compact JSON, one top-level key or array record per line, with `call_sites` last."""
+
+    def compact(value: Any) -> str:
+        return json.dumps(value, sort_keys=True, separators=(",", ":"))
+
+    members = [
+        f"{compact(key)}:[\n" + ",\n".join(map(compact, value)) + "\n]"
+        if isinstance(value, list) and value
+        else f"{compact(key)}:{compact(value)}"
+        for key, value in sorted(indexed.items(), key=lambda kv: (kv[0] == "call_sites", kv[0]))
+    ]
+    return ("{\n" + ",\n".join(members) + "\n}\n").encode("utf-8")
+
+
 def _atomic_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
@@ -1270,7 +1285,7 @@ def run(args) -> None:
             )
             filename = f"{_file_id(repo_id, generation, rel_path)}.json"
             path = files_dir / filename
-            index_bytes = (json.dumps(indexed, indent=2, sort_keys=True) + "\n").encode("utf-8")
+            index_bytes = _artifact_bytes(indexed)
             path.write_bytes(index_bytes)
             files_manifest[rel_path] = {
                 "index_path": str((final_dir / "files" / filename).relative_to(structural_root)),

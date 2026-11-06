@@ -5359,10 +5359,23 @@ def test_a_built_structural_index_syncs_its_callables_to_the_backend(
     manifest = json.loads(
         (state / aggregate["repos"][str(backend_repo["id"])]["manifest_path"]).read_text()
     )
-    artifacts = {
-        rel_path: json.loads((state / "structural-index" / index_path).read_text())
+    raw_artifacts = {
+        rel_path: (state / "structural-index" / index_path).read_bytes()
         for rel_path, index_path in manifest["path_to_index"].items()
     }
+    artifacts = {rel_path: json.loads(raw) for rel_path, raw in raw_artifacts.items()}
+    for rel_path, raw in raw_artifacts.items():
+        lines = raw.decode("utf-8").splitlines()
+        arrays = [value for value in artifacts[rel_path].values() if isinstance(value, list) and value]
+        assert lines[0] == "{" and lines[-1] == "}"
+        assert list(json.loads(raw, object_pairs_hook=lambda pairs: pairs))[-1][0] == "call_sites"
+        assert all(line == line.lstrip() for line in lines)
+        assert len(lines) == 2 + len(artifacts[rel_path]) + sum(len(value) + 1 for value in arrays)
+        assert {
+            json.dumps(record, sort_keys=True, separators=(",", ":"))
+            for value in arrays
+            for record in value
+        } <= {line.removesuffix(",") for line in lines}
     controller = artifacts["app/Http/Controllers/InvoiceController.php"]
     render = artifacts["web/render.js"]
     assert [

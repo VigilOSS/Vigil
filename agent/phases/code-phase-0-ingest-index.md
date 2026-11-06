@@ -88,8 +88,8 @@ The `code-index` command:
   several files at once (`--jobs`, default the usable performance cores within any CPU quota, up
   to 8); every job count publishes byte-identical artifacts
 - Parses the exact sealed bytes whose SHA-256 is recorded, and writes generation-scoped per-file
-  JSON containing the function map, the `<top-level>` file-scope segments (`top_level_segments`),
-  entry points, security sinks, exports, and call sites
+  JSON, one top-level key or array record per line, containing the function map, the `<top-level>`
+  file-scope segments (`top_level_segments`), entry points, security sinks, exports, and call sites
 - Marks each artifact `complete`, `degraded`, or `unsupported`, names unavailable/truncated
   dimensions, and retains full observed signal counts even when bounded artifact arrays are capped
 - Reconciles the complete sealed path/hash inventory with the current backend language inventory;
