@@ -271,3 +271,46 @@ def test_an_extract_lookalike_is_not_mass_assignment(statement: str) -> None:
 def test_the_extract_builtin_is_mass_assignment_on_both_readers(statement: str) -> None:
     assert "mass_assignment" in _kinds(statement)
     assert "mass_assignment" in _streamed_kinds(statement)
+
+
+@pytest.mark.parametrize(
+    ("statement", "kind"),
+    [
+        pytest.param("System($id);", "process_exec", id="system-title"),
+        pytest.param("SYSTEM($id);", "process_exec", id="system-upper"),
+        pytest.param("Shell_Exec($id);", "process_exec", id="shell-exec"),
+        pytest.param("Passthru($id);", "process_exec", id="passthru"),
+        pytest.param("ECHO $id;", "xss_output", id="echo"),
+        pytest.param('Header("Location: " . $id);', "redirect", id="header"),
+        pytest.param("MySQLi_Query($q, $id);", "sql_exec", id="mysqli-query"),
+        pytest.param("Unserialize($data);", "deserialization", id="unserialize"),
+        pytest.param("Eval($data);", "eval_exec", id="eval"),
+        pytest.param("File_Get_Contents($path);", "file_path", id="file-get-contents"),
+        pytest.param("Move_Uploaded_File($path, $id);", "file_path", id="move-uploaded-file"),
+    ],
+)
+def test_php_function_names_are_case_blind_on_both_readers(statement: str, kind: str) -> None:
+    assert kind in _kinds(statement)
+    assert kind in _streamed_kinds(statement)
+
+
+@pytest.mark.parametrize(
+    ("statement", "kind"),
+    [
+        pytest.param('$données->prepare("SELECT * FROM acme WHERE id = $id");', "sql_exec", id="prepare"),
+        pytest.param("Auth::vérifier($id);", "auth", id="auth-facade"),
+    ],
+)
+def test_a_non_ascii_php_identifier_is_read_on_both_readers(statement: str, kind: str) -> None:
+    assert kind in _kinds(statement)
+    assert kind in _streamed_kinds(statement)
+
+
+def test_only_ascii_letters_fold_in_a_php_function_name() -> None:
+    assert "process_exec" not in _kinds("ſystem($id);")
+
+
+def test_a_php_variable_name_stays_case_sensitive_on_both_readers() -> None:
+    assert "auth" in _kinds("$_SESSION['id'] = $id;")
+    assert "auth" not in _kinds("$_session['id'] = $id;")
+    assert "auth" not in _streamed_kinds("$_session['id'] = $id;")

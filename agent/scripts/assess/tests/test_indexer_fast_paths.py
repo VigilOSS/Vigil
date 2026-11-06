@@ -19,7 +19,12 @@ from assess.lib.treesitter_catalogues import (
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _gate_literals, _literal_gate, _required_literals
-from assess.lib.treesitter_index import _function_scoped_reader_patterns, index_file
+from assess.lib.treesitter_index import (
+    _function_scoped_reader_patterns,
+    _sink_line_gate,
+    _sink_line_readers,
+    index_file,
+)
 from assess.lib.treesitter_streaming import (
     StreamingSecurityScanner,
     _attach_bounded_security_sources,
@@ -146,6 +151,26 @@ def test_no_catalogue_match_lies_on_a_line_its_gate_rejects() -> None:
                 lowered = text.lower() if isinstance(text, bytes) else text
                 assert gate.search(lowered), (pattern.pattern, line)
                 assert any(literal in lowered for literal in literals)
+    assert checked > 500
+
+
+def test_no_sink_line_match_lies_on_a_line_its_gate_rejects() -> None:
+    # PHP's rows match case-blind and gate on lowered literals over a lowered
+    # line, which `_gate_literals` of the compiled pattern cannot express.
+    lines = _fixture_lines()
+    checked = 0
+    for language in STRUCTURAL_SUPPORTED_LANGUAGES:
+        gate = _sink_line_gate(language)
+        for _definition, patterns in _sink_line_readers(language):
+            for _pattern, compiled, literals in patterns:
+                if not literals:
+                    continue
+                for line in lines:
+                    if compiled.search(line):
+                        checked += 1
+                        probe = line.lower() if language == "php" else line
+                        assert gate.search(probe), (compiled.pattern, line)
+                        assert any(literal in probe for literal in literals)
     assert checked > 500
 
 

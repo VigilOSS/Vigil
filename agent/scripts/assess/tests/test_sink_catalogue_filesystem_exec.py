@@ -812,10 +812,10 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     # ---- sql_exec : php (treesitter_index.py:278-279) ----
     ("sql_exec", "php", r"\bmysqli_query\s*\(", "mysqli_query($mysqli, $sql)", ["sqli"]),
     ("sql_exec", "php", r"->\s*(?:exec|query)\s*\(", "$pdo->query($sql)", ["sqli"]),
-    ("sql_exec", "php", r"\$\w+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
+    ("sql_exec", "php", r"\$(?:\w|[^\x00-\x7f])+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
     ("sql_exec", "php", r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(", "$query->whereRaw(", ["sqli"]),
     ("sql_exec", "php", r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(", "DB::select(", ["sqli"]),
-    ("sql_exec", "php", r"\$wpdb->(?:get_results|get_var|get_row|get_col)\s*\(", "$wpdb->get_results(", ["sqli"]),
+    ("sql_exec", "php", r"(?-i:\$wpdb)->(?:get_results|get_var|get_row|get_col)\s*\(", "$wpdb->get_results(", ["sqli"]),
     # ---- sql_exec : csharp (treesitter_index.py:310-313) ----
     ("sql_exec", "csharp", r"\bnew\s+SqlCommand\s*\(", "new SqlCommand(sql, conn)", ["sqli"]),
     ("sql_exec", "csharp", r"\bnew\s+OleDbCommand\s*\(", "new OleDbCommand(sql, conn)", ["sqli"]),

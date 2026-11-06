@@ -38,7 +38,6 @@ from assess.lib.treesitter_catalogues import (
 )
 from assess.lib.treesitter_common import (
     _gate_literals,
-    _literal_gate,
     _php_import_record,
     _snippet,
 )
@@ -3359,6 +3358,9 @@ def _file_is_commentary_only(tree: Any, source_lines: list[str]) -> bool:
     return all(_is_comment_node(node) for node in children)
 
 
+_CASE_BLIND_SINK_LANGUAGES = frozenset({"php"})
+
+
 @lru_cache(maxsize=None)
 def _sink_line_readers(
     language: str,
@@ -3367,15 +3369,25 @@ def _sink_line_readers(
 
     Each pattern carries the literals it is gated on, one of which every match
     contains, so a line holding none -- or one the language's `_sink_line_gate`
-    rejects -- cannot match it. An ungated pattern carries none.
+    rejects -- cannot match it. An ungated pattern carries none. PHP names its
+    functions case-blind, so its rows match ASCII case-blind and their literals,
+    read off the case-sensitive pattern, are lowered for a lowered line.
     """
+    case_blind = language in _CASE_BLIND_SINK_LANGUAGES
     return tuple(
         (
             definition,
             tuple(
-                (pattern, compiled, tuple(sorted(_gate_literals(compiled) or ())))
+                (
+                    pattern,
+                    re.compile(pattern, re.IGNORECASE | re.ASCII) if case_blind else exact,
+                    tuple(sorted(
+                        literal.lower() if case_blind else literal
+                        for literal in _gate_literals(exact) or ()
+                    )),
+                )
                 for pattern in definition["patterns"].get(language, [])
-                for compiled in (re.compile(pattern),)
+                for exact in (re.compile(pattern),)
             ),
         )
         for definition in _SINK_DEFINITIONS
@@ -3394,7 +3406,16 @@ def _function_scoped_reader_patterns(language: str) -> tuple[re.Pattern[str], ..
 
 @lru_cache(maxsize=None)
 def _sink_line_gate(language: str) -> re.Pattern[str] | None:
-    return _literal_gate(_function_scoped_reader_patterns(language))
+    literals = sorted(
+        {
+            literal
+            for _definition, patterns in _sink_line_readers(language)
+            for _pattern, _compiled, pattern_literals in patterns
+            for literal in pattern_literals
+        },
+        key=lambda literal: (-len(literal), literal),
+    )
+    return re.compile("|".join(map(re.escape, literals))) if literals else None
 
 
 def _withheld_reader_signal(
@@ -4407,6 +4428,7 @@ def _detect_sinks(
     seen: set[tuple[str, str, int]] = set()
     readers = _sink_line_readers(language)
     gate = _sink_line_gate(language)
+    case_blind = language in _CASE_BLIND_SINK_LANGUAGES
 
     scopes = [
         (func, _function_scan_lines(func, source_lines))
@@ -4423,14 +4445,16 @@ def _detect_sinks(
         # Each line is filtered once, and a line holding no literal a gated
         # pattern requires is offered only to the patterns that require none.
         readable = [
-            (line_idx, line_text) for line_idx, line_text in scan_lines if source_lines[line_idx]
+            (line_idx, line_text, line_text.lower() if case_blind else line_text)
+            for line_idx, line_text in scan_lines
+            if source_lines[line_idx]
         ]
         if language == "java":
             cls = java_class_for_line.get(func.get("line_start", 0))
             if cls is not None:
                 java_fetch_receivers.update(java_class_receivers[id(cls)])
             java_fetch_receivers.update(_java_fetch_bindings(func.get("params", [])))
-            java_fetch_receivers.update(_java_fetch_bindings([line for _, line in readable]))
+            java_fetch_receivers.update(_java_fetch_bindings([line for _, line, _ in readable]))
         elif language == "csharp":
             cls = csharp_class_for_line.get(func.get("line_start", 0))
             if cls is not None:
@@ -4439,13 +4463,13 @@ def _detect_sinks(
                 func.get("params", []), csharp_fetch_receivers
             )
             csharp_fetch_receivers = _csharp_fetch_bindings(
-                [line for _, line in readable], csharp_fetch_receivers
+                [line for _, line, _ in readable], csharp_fetch_receivers
             )
         elif language == "go":
             go_fetch_receivers.update(_go_fetch_bindings(func.get("params", []), go_http_aliases))
-            go_fetch_receivers.update(_go_fetch_bindings([line for _, line in readable], go_http_aliases))
+            go_fetch_receivers.update(_go_fetch_bindings([line for _, line, _ in readable], go_http_aliases))
         admitted = readable if gate is None else [
-            (line_idx, line_text) for line_idx, line_text in readable if gate.search(line_text)
+            line for line in readable if gate.search(line[2])
         ]
         for sink_def, patterns in readers:
             for pat, compiled, literals in patterns:
@@ -4453,8 +4477,8 @@ def _detect_sinks(
                     # A variable bound to a `net/http` client fetches whatever it is named.
                     names = "|".join(re.escape(name) for name in sorted(go_fetch_receivers))
                     compiled, literals = re.compile(rf"{pat}|\b(?:{names})\.Do\s*\("), ()
-                for line_idx, line_text in admitted if literals else readable:
-                    if literals and not any(literal in line_text for literal in literals):
+                for line_idx, line_text, probe in admitted if literals else readable:
+                    if literals and not any(literal in probe for literal in literals):
                         continue
                     matches = compiled.finditer(line_text)
                     if language == "java" and sink_def["kind"] == "url_fetch":

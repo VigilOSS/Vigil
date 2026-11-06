@@ -117,6 +117,10 @@ _PHP_FILE_INCLUSION_VULN_CLASSES = ("lfi", "rfi")
 # a variable holding a callable, or a declaration of a function so named.
 _PHP_STREAM_EXTRACT = r"(?<![\w$>:])(?<!function )extract\s*\("
 
+# A PHP name may use any byte above 0x7f, which an ASCII `\w` -- the parse-tree
+# reader's and the byte scanner's -- does not cover.
+_PHP_IDENTIFIER = r"(?:\w|[^\x00-\x7f])+"
+
 _SINK_DEFINITIONS: list[SinkPattern] = [
     {
         # Registered for its classes only: no line pattern can tell an
@@ -170,10 +174,10 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             # The raw-expression escape hatches of Laravel's query builder and
             # `DB` facade, and WordPress's `$wpdb` readers.
             "php": [r"\bmysqli_query\s*\(", r"->\s*(?:exec|query)\s*\(", r"\bPDO::query\s*\(",
-                    r"\$\w+->prepare\s*\(",
+                    r"\$" + _PHP_IDENTIFIER + r"->prepare\s*\(",
                     r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(",
                     r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(",
-                    r"\$wpdb->(?:get_results|get_var|get_row|get_col)\s*\("],
+                    r"(?-i:\$wpdb)->(?:get_results|get_var|get_row|get_col)\s*\("],
             "csharp": [r"\bnew\s+SqlCommand\s*\(", r"\bnew\s+OleDbCommand\s*\(",
                        r"\.ExecuteReader\s*\(", r"\.ExecuteNonQuery\s*\(",
                        r"\.ExecuteScalar\s*\(", r"\bFromSqlRaw\s*\(",
@@ -331,8 +335,9 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\bsession\s*\["],
             # No leading `\b`: it demands a word character to the LEFT of the
             # `$`, which valid PHP never writes before a variable sigil, so the
-            # pattern could only ever match `a$_SESSION`.
-            "php": [r"\$_SESSION\b", r"\bAuth::\w+\s*\(", r"\bpassword_verify\s*\(",
+            # pattern could only ever match `a$_SESSION`. PHP rows match
+            # case-blind, and a variable name is case-sensitive.
+            "php": [r"(?-i:\$_SESSION\b)", r"\bAuth::" + _PHP_IDENTIFIER + r"\s*\(", r"\bpassword_verify\s*\(",
                     r"\bsession_start\s*\("],
             "csharp": [r"\bFormsAuthentication\b", r"\[Authorize\b",
                        r"\bHttpContext\.User\b", r"\bClaimsPrincipal\b"],
