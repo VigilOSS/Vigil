@@ -10,6 +10,10 @@ from pathlib import Path
 import pytest
 
 from assess.lib import parser_boundary, treesitter_index
+from assess.lib.code_structural_metadata import (
+    validated_callable_records,
+    validated_structural_metadata,
+)
 
 
 def _python_command(source: str) -> list[str]:
@@ -168,12 +172,49 @@ def test_invalid_worker_result_uses_explicit_fallback_debt() -> None:
     _assert_full_byte_fallback(result, source, "parser_worker_invalid_result")
 
 
-def test_invalid_utf8_source_never_receives_exact_complete_status() -> None:
-    source = b"def parse():\n    return b'" + bytes([0xFF]) + b"'\n"
+def test_invalid_utf8_source_parses_with_replacement_like_its_utf8_twin() -> None:
+    template = (
+        b"<?php\n// Caf%s\nfunction run($f) {\n    $f($_GET['x']);\n"
+        b"    system($_GET['c']);\n}\n"
+    )
+    latin1, utf8 = template % b"\xe9", template % "\u00e9".encode()
 
-    result = parser_boundary.index_file("invalid.py", "python", source=source)
+    result = parser_boundary.index_file(
+        "legacy.php", "php", source=latin1,
+        result_validator=lambda indexed: (
+            validated_structural_metadata(indexed, rel_path="legacy.php", source_size=len(latin1)),
+            validated_callable_records(indexed, rel_path="legacy.php", loc=6),
+        ),
+    )
+    twin = parser_boundary.index_file("legacy.php", "php", source=utf8)
 
-    _assert_full_byte_fallback(result, source, "invalid_utf8_source")
+    assert result["analysis_status"] == "complete"
+    assert result["analysis_mode"] == "tree_sitter"
+    assert result["total_lines"] == twin["total_lines"] == 6
+    assert [(f["qualified_name"], f["line_start"], f["line_end"]) for f in result["functions"]] == [
+        (f["qualified_name"], f["line_start"], f["line_end"]) for f in twin["functions"]
+    ] == [("run", 3, 6)]
+    assert {sink["kind"] for sink in result["security_sinks"]} == {
+        sink["kind"] for sink in twin["security_sinks"]
+    } == {"process_exec", "dynamic_invocation"}
+
+
+def test_invalid_utf8_identifier_degrades_as_a_syntax_error() -> None:
+    source = b"<?php\nfunction caf\xe9($f) {\n    system($_GET['c']);\n}\n"
+
+    result = parser_boundary.index_file("legacy.php", "php", source=source)
+
+    _assert_full_byte_fallback(result, source, "tree_sitter_syntax_error")
+    assert result["security_sinks"]
+
+
+@pytest.mark.parametrize("encoding", ["utf-16", "utf-32"])
+def test_wide_unicode_source_with_a_bom_uses_streaming_fallback(encoding: str) -> None:
+    source = "<?php\nfunction run() { system($_GET['c']); }\n".encode(encoding)
+
+    result = parser_boundary.index_file("wide.php", "php", source=source)
+
+    _assert_full_byte_fallback(result, source, "utf16_or_utf32_source")
 
 
 def test_giant_line_uses_bounded_streaming_fallback() -> None:
@@ -335,17 +376,14 @@ def test_giant_line_preflight_observes_cancellation(monkeypatch):
     assert not launches
 
 
-@pytest.mark.parametrize(("suffix", "reason"), [
-    (b"\xe2\x82\xac\n", "parser_worker_crash"),
-    (b"\xe2\x82", "invalid_utf8_source"),
-])
-def test_preflight_decodes_utf8_across_chunks_and_checks_final_sequence(suffix, reason):
+@pytest.mark.parametrize("suffix", [b"\xe2\x82\xac\n", b"\xe2\x82"])
+def test_source_reaches_the_parser_whether_its_final_utf8_sequence_is_whole_or_cut(suffix):
     source = b"#" + b"x" * (parser_boundary.STREAMING_SCAN_WINDOW_BYTES - 2) + suffix
     result = parser_boundary.index_file(
         "app.py", "python", source=source,
         worker_command=_python_command("import os; os._exit(73)"),
     )
-    _assert_full_byte_fallback(result, source, reason)
+    _assert_full_byte_fallback(result, source, "parser_worker_crash")
 
 
 def _real_worker_after(prelude: str) -> list[str]:

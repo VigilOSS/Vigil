@@ -1,6 +1,6 @@
 # ADR 0029 — Structural parsers are contained with honest fallback
 
-- Status: Accepted — implemented
+- Status: Accepted — implemented; invalid UTF-8 handling amended by [ADR 0042](0042-non-utf8-source-is-parsed-with-replacement.md)
 - Date: 2026-09-12
 
 ## Context

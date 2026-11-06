@@ -64,6 +64,9 @@ MAX_WORKER_DIAGNOSTIC_BYTES = 64 * 1024
 PARSER_CAPABILITY_DENIED_EXIT = 78
 PARSER_MEMORY_LIMIT_EXIT = 79
 _READ_SIZE = 64 * 1024
+_WIDE_UNICODE_BOMS = (
+    codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE,
+)
 
 
 class ParserBoundaryCancelled(Exception):
@@ -822,14 +825,9 @@ def index_file(
         raise ValueError("parser memory cap must be an integer of at least 16 MiB")
     if cancellation_requested is not None and cancellation_requested():
         raise ParserBoundaryCancelled("structural parser cancelled")
-    try:
-        decoder = codecs.getincrementaldecoder("utf-8")("strict")
-        for chunk in _source_chunks(source, cancellation_requested):
-            decoder.decode(chunk)
-        decoder.decode(b"", final=True)
-    except UnicodeDecodeError:
+    if source.startswith(_WIDE_UNICODE_BOMS):
         return _fallback(
-            file_path, language, source, reason="invalid_utf8_source",
+            file_path, language, source, reason="utf16_or_utf32_source",
             cancellation_requested=cancellation_requested,
         )
     if len(source) > DEFAULT_MAX_EXACT_SOURCE_BYTES:

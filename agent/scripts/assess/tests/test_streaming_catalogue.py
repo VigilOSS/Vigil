@@ -29,9 +29,8 @@ Mechanics this suite leans on (verified against the source, not assumed):
   are reachable only through a genuine degradation, which a real 2026
   target hits via `parser_boundary.py`'s `giant_line_resource_limit` /
   `exact_parser_source_limit` (a >1MB single line -- a minified CSS/JS
-  bundle, a base64-embedded installer payload -- or a >8MB file) or
-  `invalid_utf8_source` gates (`parser_boundary.py:294-303`). One test
-  below drives that real route end-to-end rather than only calling
+  bundle, a base64-embedded installer payload -- or a >8MB file) gates.
+  One test below drives that real route end-to-end rather than only calling
   `streaming_security_fallback` directly, to prove the route is genuine
   and not merely theoretical.
 * `powershell` is the one exception: `_STREAM_EXTRA_SINK_PATTERNS
