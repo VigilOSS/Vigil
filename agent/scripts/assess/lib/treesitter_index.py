@@ -745,31 +745,15 @@ def _node_character_range(node: Any, source: bytes) -> tuple[int, int, int, int]
     )
 
 
-def _public_node_span(node: Any, source: bytes) -> dict[str, int]:
-    start_line, start_column, end_line, end_column = _node_character_range(
-        node, source
-    )
-    return {
-        "start_byte": int(node.start_byte),
-        "end_byte": int(node.end_byte),
-        "start_line": start_line,
-        "start_column": start_column,
-        "end_line": end_line,
-        "end_column": end_column,
-    }
-
-
 def _attach_callable_spans(
     parsed: dict[str, Any],
     *,
     callable_node: Any,
     source: bytes,
 ) -> None:
-    parsed["source_span"] = _public_node_span(callable_node, source)
     body = callable_node.child_by_field_name("body")
     if body is None:
         return
-    parsed["body_span"] = _public_node_span(body, source)
     (
         parsed["_body_start_line"],
         parsed["_body_start_column"],
@@ -815,8 +799,6 @@ def _parse_cpp_callable(
     }
     body = container.child_by_field_name("body")
     if body is not None:
-        parsed["source_span"] = _public_node_span(container, source)
-        parsed["body_span"] = _public_node_span(body, source)
         (
             parsed["_body_start_line"],
             parsed["_body_start_column"],
@@ -1112,8 +1094,6 @@ def _extract_ruby_route_blocks(tree: Any, source: bytes) -> list[dict[str, Any]]
             "_ruby_route": True,
             "_start_byte": node.start_byte,
             "_end_byte": node.end_byte,
-            "source_span": _public_node_span(node, source),
-            "body_span": _public_node_span(block, source),
         }
         (
             parsed["_body_start_line"],
@@ -1194,7 +1174,6 @@ def _extract_c_declarations(tree: Any, language: str, source: bytes) -> list[dic
                 "is_declaration": True,
                 "_start_byte": node.start_byte,
                 "_end_byte": node.end_byte,
-                "source_span": _public_node_span(node, source),
             })
     return declarations
 

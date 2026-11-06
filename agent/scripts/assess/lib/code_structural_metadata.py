@@ -225,12 +225,10 @@ def validated_callable_records(indexed: dict[str, Any], *, rel_path: str) -> lis
             raise ValueError(
                 f"structural callable is invalid for {rel_path}"
             )
-        source_span = callable_record.get("source_span")
-        span = source_span if isinstance(source_span, dict) else callable_record
         name = callable_record.get("name")
         qualified_name = callable_record.get("qualified_name")
-        start_line = span.get("start_line", span.get("line_start"))
-        end_line = span.get("end_line", span.get("line_end"))
+        start_line = callable_record.get("line_start")
+        end_line = callable_record.get("line_end")
         if (
             not isinstance(name, str)
             or not name

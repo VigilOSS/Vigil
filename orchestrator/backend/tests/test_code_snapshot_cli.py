@@ -4876,9 +4876,11 @@ def test_javascript_index_extracts_every_common_assigned_callable_with_exact_spa
     functions = {item["qualified_name"]: item for item in indexed["functions"]}
     assert {"first", "second", "Portal.open", "Portal.render"} <= set(functions)
     assert any(name.startswith("<anonymous@4:") for name in functions)
-    for function in functions.values():
-        assert function["source_span"]["end_byte"] > function["source_span"]["start_byte"]
-        assert function["body_span"]["end_byte"] > function["body_span"]["start_byte"]
+    assert {
+        name: (function["line_start"], function["line_end"])
+        for name, function in functions.items()
+        if not name.startswith("<anonymous@")
+    } == {"first": (1, 1), "second": (1, 1), "Portal.open": (2, 2), "Portal.render": (3, 3)}
 
 
 def _minified_namespace_bundle(classes: int) -> bytes:
@@ -5275,3 +5277,143 @@ def test_structural_json_read_rejects_oversize_before_unbounded_read(
 
     with pytest.raises(ValueError, match="exceeds 32 bytes"):
         module._load_json(artifact, label="hostile aggregate")
+
+
+def test_a_built_structural_index_syncs_its_callables_to_the_backend(
+    client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from app import db as db_module
+    from assess.lib.client import AssessmentClient
+    from tests.test_engagements_api import write_engagement
+
+    ingest = _load_command("code_ingest.py", "test_terse_index_ingest")
+    build = _load_command("code_index.py", "test_terse_index_build")
+    sync = _load_command("code_index_sync.py", "test_terse_index_sync")
+    key = "2026-11-05-130000-terse-index"
+    write_engagement(isolate_settings["engagements_dir"], key)
+    assert client.get("/engagements").status_code == 200
+    with db_module.get_connection() as connection:
+        engagement = Path(connection.execute(
+            "SELECT engagement_root FROM engagements WHERE key = ?", (key,)
+        ).fetchone()["engagement_root"]).resolve()
+    repo = tmp_path / "acme-shop"
+    (repo / "app" / "Http" / "Controllers").mkdir(parents=True)
+    (repo / "web").mkdir()
+    (repo / "app" / "Http" / "Controllers" / "InvoiceController.php").write_text(
+        "<?php\nnamespace App\\Http\\Controllers;\n\nclass InvoiceController\n{\n"
+        "    public function show($id)\n    {\n"
+        "        $invoice = DB::select(\"SELECT * FROM invoices WHERE id = \" . $id);\n"
+        "        return view('invoice', ['invoice' => $invoice]);\n    }\n}\n",
+        encoding="utf-8",
+    )
+    (repo / "web" / "render.js").write_text(
+        "function render(el, html) {\n  el.innerHTML = html;\n  log('rendered');\n"
+        "  return format(el);\n}\n",
+        encoding="utf-8",
+    )
+
+    class BackendClient(AssessmentClient):
+        def _get_conn(self, connect_timeout: float = 2.0):
+            if self._conn is None:
+                self._conn = _BackendConnection(
+                    client,
+                    lambda path, body, headers: client.post(path, content=body, headers=headers),
+                    [],
+                )
+            return self._conn
+
+    config = SimpleNamespace(
+        base_url="http://example.test", engagement_key=key, engagement_dir=str(engagement),
+    )
+    for module in (ingest, build, sync):
+        monkeypatch.setattr(module, "AssessmentClient", BackendClient)
+        monkeypatch.setattr(module, "load_config", lambda *_: config)
+    monkeypatch.setattr(
+        ingest, "_setup_ctags", lambda *_args, **kwargs: {"available": False, **kwargs}
+    )
+
+    ingest.run(_ingest_args(repo, engagement))
+    base = f"/engagements/{key}/assessment/code"
+    (backend_repo,) = client.get(f"{base}/repos").json()
+    build.run(SimpleNamespace(
+        repo_path=backend_repo["repo_path"],
+        repo_id=backend_repo["id"],
+        repo_key=None,
+        repo_name=None,
+        output_dir=None,
+        file_list=None,
+        max_tree_sitter_bytes=build.DEFAULT_MAX_TREE_SITTER_BYTES,
+        jobs=1,
+        engagement_dir=str(engagement),
+    ))
+    sync.run(SimpleNamespace(
+        engagement_dir=str(engagement),
+        manifest=None,
+        index_dir=None,
+        repo_id=backend_repo["id"],
+        repo_key=None,
+    ))
+
+    state = engagement / "tools" / "analysis-state"
+    aggregate = json.loads((state / "structural-index-manifest.json").read_text())
+    manifest = json.loads(
+        (state / aggregate["repos"][str(backend_repo["id"])]["manifest_path"]).read_text()
+    )
+    artifacts = {
+        rel_path: json.loads((state / "structural-index" / index_path).read_text())
+        for rel_path, index_path in manifest["path_to_index"].items()
+    }
+    controller = artifacts["app/Http/Controllers/InvoiceController.php"]
+    render = artifacts["web/render.js"]
+    assert [
+        (function["qualified_name"], function["line_start"], function["line_end"], sorted(function))
+        for function in (*controller["functions"], *render["functions"])
+    ] == [
+        (
+            "App\\Http\\Controllers\\InvoiceController.show",
+            6,
+            10,
+            sorted([
+                "annotations", "is_entry_point", "line_end", "line_start", "modifiers",
+                "name", "params", "qualified_name",
+            ]),
+        ),
+        (
+            "render",
+            1,
+            5,
+            sorted([
+                "annotations", "is_entry_point", "line_end", "line_start", "modifiers",
+                "name", "params", "qualified_name",
+            ]),
+        ),
+    ]
+
+    files = {row["file_path"]: row for row in client.get(f"{base}/files").json()["items"]}
+    with db_module.get_connection() as connection:
+        published = {
+            path: [
+                tuple(row)
+                for row in connection.execute(
+                    "SELECT qualified_name, start_line, end_line FROM code_structural_callables "
+                    "WHERE file_id = ? ORDER BY start_line",
+                    (files[path]["id"],),
+                ).fetchall()
+            ]
+            for path in artifacts
+        }
+    for path, artifact in artifacts.items():
+        assert files[path]["structural_analysis_status"] == "complete"
+        assert published[path] == sorted(
+            [
+                *[
+                    (function["qualified_name"], function["line_start"], function["line_end"])
+                    for function in artifact["functions"]
+                ],
+                *[
+                    ("<top-level>", segment["line_start"], segment["line_end"])
+                    for segment in artifact["top_level_segments"]
+                ],
+            ],
+            key=lambda identity: identity[1],
+        )
