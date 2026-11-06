@@ -37,15 +37,23 @@ LANGUAGE_BY_EXTENSION: dict[str, str] = {
     ".rb": "ruby",
     ".php": "php",
     # PHP source under the other names the interpreter is pointed at: include
-    # fragments and templates, Drupal's module/install/theme files, and the
-    # version-suffixed scripts old servers dispatch on. A `.phpt` test case is
-    # a runner document whose sections are prose, INI and expected output, so
-    # it is not one of them.
+    # fragments and templates, CakePHP views, Drupal's module/install/theme/
+    # profile/engine files, and the version-suffixed scripts and handler
+    # aliases old servers dispatch on. A `.phpt` test case is a runner document
+    # whose sections are prose, INI and expected output, so it is not one of
+    # them.
     ".inc": "php",
     ".phtml": "php",
+    ".pht": "php",
+    ".phtm": "php",
+    ".ctp": "php",
     ".module": "php",
     ".install": "php",
     ".theme": "php",
+    ".profile": "php",
+    ".engine": "php",
+    ".php3": "php",
+    ".php4": "php",
     ".php5": "php",
     ".php7": "php",
     ".cs": "csharp",
@@ -142,13 +150,19 @@ CODE_LANGUAGE_ALIASES = {
 }
 
 # Extensions PHP shares with other formats: C, C++ and assembler `.inc`
-# fragments, packaging `.install` lists, desktop `.theme` files. A file named
-# with one is PHP only when its header opens a PHP tag, the short `<? ` form
-# included (never `<?xml`); a caller with no header gets the name's answer.
-PHP_TAG_REQUIRED_EXTENSIONS = frozenset({".inc", ".module", ".install", ".theme"})
+# fragments, packaging `.install` lists, desktop `.theme` files, shell
+# `.profile` scripts, `.engine` configuration. A file named with one is PHP only
+# when its header opens a PHP tag, the short `<? ` form included (never
+# `<?xml`); a caller with no header gets the name's answer.
+PHP_TAG_REQUIRED_EXTENSIONS = frozenset(
+    {".inc", ".module", ".install", ".theme", ".profile", ".engine"}
+)
+# Suffixes whose language the file's opening text decides.
+HEADER_DECIDED_EXTENSIONS = PHP_TAG_REQUIRED_EXTENSIONS | {".tpl"}
 _PHP_OPEN_TAG = re.compile(r"<\?(?:php(?![A-Za-z0-9_])|=|(?=\s))", re.IGNORECASE)
-# Smarty, Twig and plain HTML all name templates `.tpl`. One is Twig when its
-# header opens a `{{` or `{%` delimiter, which Smarty's `{$var}`/`{if}` never do.
+# OpenCart, Smarty, Twig and plain HTML all name templates `.tpl`. One is PHP
+# when its header opens a PHP tag, and otherwise Twig when it opens a `{{` or
+# `{%` delimiter, which Smarty's `{$var}`/`{if}` never do.
 _TWIG_DELIMITER = re.compile(r"\{[{%]")
 
 # Longest first, so a future `.foo.blade.php` cannot be decided by a shorter
@@ -182,8 +196,11 @@ def detect_language(file_path: str, header: str | None = None) -> str | None:
         and not _PHP_OPEN_TAG.search(header)
     ):
         return None
-    if suffix == ".tpl" and header is not None and _TWIG_DELIMITER.search(header):
-        return "twig"
+    if suffix == ".tpl" and header is not None:
+        if _PHP_OPEN_TAG.search(header):
+            return "php"
+        if _TWIG_DELIMITER.search(header):
+            return "twig"
     return LANGUAGE_BY_EXTENSION.get(suffix)
 
 

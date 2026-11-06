@@ -10,6 +10,7 @@ import shutil
 import stat
 import tempfile
 from dataclasses import dataclass, field
+from functools import cached_property
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable, Self
 
@@ -22,6 +23,9 @@ MAX_JSON_ARTIFACT_BYTES = 64 * 1024 * 1024
 _HEADER_MAX_LINES = 50
 _HEADER_MAX_CHARS = 8192
 _HEADER_PREFIX_BYTES = (_HEADER_MAX_CHARS * 4) + 4
+# Language detection reads further than the stored header, so a PHP open tag
+# after a long licence banner still decides the file.
+_HEAD_BYTES = 64 * 1024
 
 
 class SourceSnapshotRaceError(RuntimeError):
@@ -35,8 +39,14 @@ class CapturedSourceFile:
     loc: int
     header: str
     executable: bool
+    head_bytes: bytes = field(default=b"", repr=False)
     materialized: bytes | None = field(default=None, repr=False)
     _spool: BinaryIO | None = field(default=None, repr=False)
+
+    @cached_property
+    def head(self) -> str:
+        """The first 64 KiB as text, for a language its opening tag decides."""
+        return self.head_bytes.decode(_source_encoding(self.head_bytes), errors="replace")
 
     @property
     def spool(self) -> BinaryIO:
@@ -244,8 +254,8 @@ def _capture_open_file(
                     materialized.extend(chunk)
                 else:
                     materialized = None
-            if len(header_prefix) < _HEADER_PREFIX_BYTES:
-                remaining = _HEADER_PREFIX_BYTES - len(header_prefix)
+            if len(header_prefix) < _HEAD_BYTES:
+                remaining = _HEAD_BYTES - len(header_prefix)
                 header_prefix.extend(chunk[:remaining])
 
             line_counter.feed(chunk)
@@ -276,7 +286,8 @@ def _capture_open_file(
         sha256=digest.hexdigest(),
         size=size,
         loc=line_counter.finish(),
-        header=_header_from_bytes(bytes(header_prefix)),
+        header=_header_from_bytes(bytes(header_prefix[:_HEADER_PREFIX_BYTES])),
+        head_bytes=bytes(header_prefix),
         executable=bool(before.st_mode & 0o111),
         materialized=bytes(materialized) if materialized is not None else None,
         _spool=spool,

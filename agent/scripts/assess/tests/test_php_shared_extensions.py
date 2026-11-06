@@ -25,6 +25,10 @@ PHP_FRAGMENTS = {
     "themes/acme/acme.theme": "<?PHP\nfunction acme_preprocess_page(&$variables) {}\n",
     "views/header.inc": "<html>\n<title><?= $title ?></title>\n",
     "legacy/acme.inc": "<?\nfunction acme_legacy() { return $_GET['x']; }\n",
+    "profiles/acme/acme.profile": "<?php\nfunction acme_install_tasks() {}\n",
+    "themes/engines/acme/acme.engine": "<?php\nfunction acme_engine_init() {}\n",
+    "includes/licensed.inc": "".join(f" * Acme licence line {n}\n" for n in range(1200))
+    + "<?php\nfunction acme_licensed() { system($_GET['c']); }\n",
 }
 OTHER_FORMATS = {
     "lib/Support/Unix/Path.inc": "//===- Unix/Path.inc - Acme Unix Path Implementation -*- C++ -*-===//\n"
@@ -33,6 +37,8 @@ OTHER_FORMATS = {
     "share/themes/Acme/index.theme": "[Desktop Entry]\nName=Acme\n",
     "src/acme.module": "MODULE acme\n",
     "share/acme/acme.theme": '<?xml version="1.0"?>\n<theme name="acme"/>\n',
+    "etc/acme.profile": "export PATH=/opt/acme/bin:$PATH\n",
+    "conf/acme.engine": "[engine]\nname=acme\n",
 }
 
 
@@ -80,6 +86,49 @@ def test_ingest_reads_each_shared_extension_by_its_content(monkeypatch, tmp_path
     }
     assert {path: languages[path] for path in PHP_FRAGMENTS} == dict.fromkeys(PHP_FRAGMENTS, "php")
     assert {path: languages[path] for path in OTHER_FORMATS} == dict.fromkeys(OTHER_FORMATS, "")
+
+
+TEMPLATES = {
+    "catalog/view/theme/acme/product.tpl": ("<div><?php system($_GET['c']) ?></div>\n", "php"),
+    "catalog/view/theme/acme/price.tpl": ("<span><?= $price ?></span>\n", "php"),
+    "themes/acme/card.tpl": ("<p>{{ name }}</p>\n", "twig"),
+    "themes/acme/smarty.tpl": ("<p>{$name|escape}</p>\n", "html"),
+}
+
+
+@pytest.mark.parametrize(("path", "header", "language"), [
+    (path, header, language) for path, (header, language) in sorted(TEMPLATES.items())
+])
+def test_a_tpl_template_is_php_when_it_opens_a_php_tag(path: str, header: str, language: str) -> None:
+    assert detect_language(path, header=header) == language
+
+
+@pytest.mark.parametrize("extension", [".php3", ".php4", ".pht", ".phtm", ".ctp"])
+def test_legacy_php_extensions_are_php(extension: str) -> None:
+    assert detect_language(f"legacy/index{extension}") == "php"
+    assert structural_language_for_file(f"legacy/index{extension}") == "php"
+
+
+def test_ingest_reads_a_php_tpl_as_php_and_indexes_its_sinks(monkeypatch, tmp_path, capsys) -> None:
+    repo, engagement = _offline_ingest(monkeypatch, tmp_path)
+    for path, (content, _language) in TEMPLATES.items():
+        _write(repo, path, content)
+    _PreviewClient.payloads = []
+    monkeypatch.setattr(code_ingest, "AssessmentClient", _PreviewClient)
+
+    code_ingest.run(_args(repo, name="acme-shop", dry_run=True, engagement_dir=str(engagement)))
+    capsys.readouterr()
+
+    languages = {
+        str(record["file_path"]): str(record["language"])
+        for record in _PreviewClient.payloads[0]["files"]
+    }
+    assert {path: languages[path] for path in TEMPLATES} == {
+        path: language for path, (_content, language) in TEMPLATES.items()
+    }
+    product = "catalog/view/theme/acme/product.tpl"
+    sinks = index_file(product, "php", TEMPLATES[product][0].encode())["security_sinks"]
+    assert [sink["kind"] for sink in sinks] == ["process_exec"]
 
 
 PHPT_CASE = """--TEST--

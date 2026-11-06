@@ -469,6 +469,13 @@ def test_trusted_tool_resolution_ignores_repo_relative_and_empty_path_entries(
         ("themes/acme/template.theme", "php"),
         ("legacy/index.php5", "php"),
         ("legacy/index.php7", "php"),
+        ("legacy/index.php3", "php"),
+        ("legacy/index.php4", "php"),
+        ("legacy/index.pht", "php"),
+        ("legacy/index.phtm", "php"),
+        ("app/View/Pages/home.ctp", "php"),
+        ("profiles/acme/acme.profile", "php"),
+        ("themes/engines/acme/acme.engine", "php"),
         ("templates/base.html.twig", "twig"),
     ],
 )
@@ -1754,7 +1761,7 @@ def test_code_ingest_closes_capture_spool_on_record_build_failure(
     monkeypatch.setattr(module.RootedSourceTree, "capture", tracked_capture)
     monkeypatch.setattr(
         module,
-        "_detect_language",
+        "_captured_language",
         lambda *_args: (_ for _ in ()).throw(RuntimeError("record build failed")),
     )
 

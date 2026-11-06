@@ -22,7 +22,7 @@ from assess.lib.client import (
     DEFAULT_READ_TIMEOUT_SECONDS,
     require_write_result,
 )
-from assess.lib.code_languages import detect_language
+from assess.lib.code_languages import HEADER_DECIDED_EXTENSIONS, detect_language
 from assess.lib.code_snapshot import (
     RootedSourceTree,
     SealedSnapshot,
@@ -1117,7 +1117,7 @@ def _captured_skipped_record(
         "reason": reason,
         "size": captured.size,
         "sha256": captured.sha256,
-        "language": _detect_language(Path(rel_path).name, captured.header) or "",
+        "language": _captured_language(Path(rel_path).name, captured) or "",
     }
     record.update(_source_hints(rel_path))
     return record
@@ -1356,6 +1356,12 @@ def _detect_language(filename: str, header: str | None = None) -> str | None:
     """Compatibility wrapper around the shared code-language classifier."""
 
     return detect_language(filename, header)
+
+
+def _captured_language(filename: str, captured) -> str | None:
+    """Decode the longer head only for a suffix whose opening text decides it."""
+    decided = Path(filename).suffix.lower() in HEADER_DECIDED_EXTENSIONS
+    return detect_language(filename, captured.head if decided else captured.header)
 
 
 def _repo_key_for_path(repo_name: str, repo_path: str) -> str:
@@ -1796,7 +1802,7 @@ def run(args) -> None:
                     if rel_path in included_skip_reasons:
                         included_skipped += 1
 
-                    lang = _detect_language(filename, captured.header)
+                    lang = _captured_language(filename, captured)
                     if lang is None and getattr(args, "default_language_for_unknown", None):
                         lang = args.default_language_for_unknown
                     total_loc += captured.loc
