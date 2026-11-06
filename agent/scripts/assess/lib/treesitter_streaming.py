@@ -10,7 +10,8 @@ from assess.lib.treesitter_catalogues import (
     _PHP_CLI_INPUT_PATTERNS,
     _PHP_FILE_INCLUSION_VULN_CLASSES,
     _PHP_SERVER_ARGV,
-    _PHP_STREAM_EXTRACT,
+    _PHP_STREAM_MASS_ASSIGNMENT,
+    _PHP_STREAM_VARIABLE_VARIABLE,
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import _gate_literals, _literal_gate, _php_import_record
@@ -116,7 +117,8 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         # `$_SERVER['argv']` is read below, as process and request input both.
         # Variable names are case-sensitive, so `$_files` is a property.
         ("http_request_input",
-         r"(?-i:\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b)"),
+         r"(?-i:\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b"
+         r"|\$HTTP_(?:(?:GET|POST|COOKIE|SERVER)_VARS|POST_FILES|RAW_POST_DATA)\b)"),
         ("http_request_input", _PHP_SERVER_ARGV),
         # Idiomatic Laravel/Symfony/CodeIgniter never touches a superglobal:
         # the request arrives as an injected object, `$this->request`, or the
@@ -142,7 +144,7 @@ _STREAM_SOURCE_PATTERNS: dict[str, list[tuple[str, str]]] = {
         ("http_request_input",
          r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b"
          r"|\b(?:getallheaders|apache_request_headers)\s*\("),
-        ("process_input", r"\bgetenv\s*\("),
+        ("process_input", r"\bgetenv\s*\(|(?-i:\$_ENV\b)"),
         ("process_input", "|".join(pattern for _evidence, pattern in _PHP_CLI_INPUT_PATTERNS)),
     ],
     "csharp": [
@@ -249,7 +251,8 @@ _STREAM_EXTRA_SINK_PATTERNS: dict[str, list[tuple[str, str, list[str]]]] = {
     ],
     "php": [
         ("file_inclusion", _PHP_STREAM_INCLUDE, list(_PHP_FILE_INCLUSION_VULN_CLASSES)),
-        ("mass_assignment", _PHP_STREAM_EXTRACT, ["mass-assignment"]),
+        ("mass_assignment", _PHP_STREAM_MASS_ASSIGNMENT, ["mass-assignment"]),
+        ("mass_assignment", _PHP_STREAM_VARIABLE_VARIABLE, ["mass-assignment"]),
     ],
     "dockerfile": [
         ("remote_pipe_to_shell", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", ["supply-chain", "injection"]),

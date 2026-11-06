@@ -113,13 +113,20 @@ SinkPattern = dict[str, Any]  # {"kind", "patterns": {lang: [regex_str,...]}, "v
 # keyword off a line under the same kind and classes.
 _PHP_FILE_INCLUSION_VULN_CLASSES = ("lfi", "rfi")
 
-# The `extract()` builtin as a line can show it: not a method, a static call,
-# a variable holding a callable, or a declaration of a function so named.
-_PHP_STREAM_EXTRACT = r"(?<![\w$>:])(?<!function )extract\s*\("
+# The builtins that turn their argument into local variables, as a line can
+# show them: not a method, a static call, a variable holding a callable, or a
+# declaration of a function so named. `parse_str()` does so only when no
+# second argument receives the result.
+_PHP_STREAM_MASS_ASSIGNMENT = (
+    r"(?<![\w$>:])(?<!function )"
+    r"(?:extract\s*\(|import_request_variables\s*\(|parse_str\s*\([^,;]{0,256}\)\s*;)"
+)
 
 # A PHP name may use any byte above 0x7f, which an ASCII `\w` -- the parse-tree
 # reader's and the byte scanner's -- does not cover.
 _PHP_IDENTIFIER = r"(?:\w|[^\x00-\x7f])+"
+# A variable-variable assignment, `$$name = ...`, names its target at run time.
+_PHP_STREAM_VARIABLE_VARIABLE = r"\$\$" + _PHP_IDENTIFIER + r"\s*=(?![=>])"
 
 _SINK_DEFINITIONS: list[SinkPattern] = [
     {
@@ -173,7 +180,13 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\b\w+\.where\s*\(.*\braw\b"],
             # The raw-expression escape hatches of Laravel's query builder and
             # `DB` facade, and WordPress's `$wpdb` readers.
-            "php": [r"\bmysqli_query\s*\(", r"->\s*(?:exec|query)\s*\(", r"\bPDO::query\s*\(",
+            "php": [r"\bmysqli_query\s*\(", r"->\s*(?:exec|query|real_query)\s*\(", r"\bPDO::query\s*\(",
+                    r"\b(?:mysql_(?:db_|unbuffered_)?query|mysqli_(?:multi|real)_query"
+                    r"|pg_(?:query(?:_params)?|send_query)|odbc_exec|sqlsrv_query|mssql_query"
+                    r"|sqlite_query|oci_parse|db2_exec)\s*\(",
+                    # ADOdb's `Execute`; PDOStatement's lowercase `execute()`
+                    # runs a statement already prepared.
+                    r"(?-i:->\s*Execute\s*\()",
                     r"\$" + _PHP_IDENTIFIER + r"->prepare\s*\(",
                     r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(",
                     r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(",
@@ -208,7 +221,10 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\bOpen3\.\w+\s*\(", r"\bIO\.popen\s*\("],
             "php": [r"\bexec\s*\(", r"\bsystem\s*\(", r"\bshell_exec\s*\(",
                     r"\bpassthru\s*\(", r"\bproc_open\s*\(", r"\bpopen\s*\(",
-                    r"\bpcntl_exec\s*\("],
+                    r"\bpcntl_exec\s*\(",
+                    # Every argument after the recipient can carry a header
+                    # line, and the fifth reaches the sendmail command line.
+                    r"(?<![\w$>:])(?<!function )(?<!new )(?:mb_send_)?mail\s*\("],
             "csharp": [r"\bProcess\.Start\s*\(", r"\bnew\s+ProcessStartInfo\s*\("],
         },
     },
@@ -258,10 +274,11 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         },
     },
     {
-        # `extract()` turns array keys into local variables, so a request
-        # array overwrites whatever the scope already holds. Registered for
-        # its classes only: the parse-tree reader names the builtin call, and
-        # the streaming fallback reads `_PHP_STREAM_EXTRACT` off a line.
+        # `extract()`, a one-argument `parse_str()`, `import_request_variables()`
+        # and `$$name = ...` turn request data into local variables, so it
+        # overwrites whatever the scope already holds. Registered for its
+        # classes only: the parse-tree reader names the builtin call and the
+        # assignment, and the streaming fallback reads them off a line.
         "kind": "mass_assignment",
         "vuln_classes": ["mass-assignment"],
         "patterns": {},
@@ -352,7 +369,13 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "typescript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
             "go": [r"\btemplate\.HTML\s*\(", r"\bfmt\.Fprintf\s*\(\s*w\b"],
             "ruby": [r"\braw\s*\(", r"\.html_safe\b"],
-            "php": [r"\becho\b", r"\bprint\b", r"\bprintf\s*\("],
+            # `die`/`exit` print a string argument and only exit with a number;
+            # a lone literal message, as every direct-access guard passes,
+            # prints nothing a caller chose.
+            "php": [r"\becho\b", r"\bprint\b", r"\bprintf\s*\(", r"<\?=",
+                    r"\b(?:print_r|vprintf)\s*\(",
+                    r"(?<![\w$>:])(?:die|exit)\s*\("
+                    r"(?!\s*(?:[\d)-]|'[^'\\]*'\s*\)|\"[^\"\\$]*\"\s*\)))"],
             "csharp": [r"\bHtml\.Raw\s*\(", r"@Html\.Raw\b"],
         },
     },

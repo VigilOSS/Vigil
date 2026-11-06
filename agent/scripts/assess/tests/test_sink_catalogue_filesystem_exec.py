@@ -494,6 +494,14 @@ class ReportDao {
     public function runExec($pdo, $sql) {
         return $pdo->exec($sql);
     }
+
+    public function runLegacy($link, $sql) {
+        return pg_query($link, $sql);
+    }
+
+    public function runAdodb($db, $sql) {
+        return $db->Execute($sql);
+    }
 }
 
 class Shell {
@@ -523,6 +531,10 @@ class Shell {
 
     public function runPcntl($path, $args) {
         pcntl_exec($path, $args);
+    }
+
+    public function notify($to, $body, $headers) {
+        mail($to, "Acme", $body, $headers);
     }
 }
 
@@ -811,7 +823,11 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("sql_exec", "ruby", r"\b\w+\.execute\s*\(", "conn.execute(sql)", ["sqli"]),
     # ---- sql_exec : php (treesitter_index.py:278-279) ----
     ("sql_exec", "php", r"\bmysqli_query\s*\(", "mysqli_query($mysqli, $sql)", ["sqli"]),
-    ("sql_exec", "php", r"->\s*(?:exec|query)\s*\(", "$pdo->query($sql)", ["sqli"]),
+    ("sql_exec", "php", r"->\s*(?:exec|query|real_query)\s*\(", "$pdo->query($sql)", ["sqli"]),
+    ("sql_exec", "php", r"\b(?:mysql_(?:db_|unbuffered_)?query|mysqli_(?:multi|real)_query"
+     r"|pg_(?:query(?:_params)?|send_query)|odbc_exec|sqlsrv_query|mssql_query"
+     r"|sqlite_query|oci_parse|db2_exec)\s*\(", "pg_query($link, $sql)", ["sqli"]),
+    ("sql_exec", "php", r"(?-i:->\s*Execute\s*\()", "$db->Execute($sql)", ["sqli"]),
     ("sql_exec", "php", r"\$(?:\w|[^\x00-\x7f])+->prepare\s*\(", "$pdo->prepare($sql)", ["sqli"]),
     ("sql_exec", "php", r"->(?:(?:or)?(?:where|having)Raw|selectRaw|orderByRaw|groupByRaw)\s*\(", "$query->whereRaw(", ["sqli"]),
     ("sql_exec", "php", r"\bDB::(?:raw|statement|select|insert|update|delete|unprepared)\s*\(", "DB::select(", ["sqli"]),
@@ -867,6 +883,7 @@ CASES: list[tuple[str, str, str, str, list[str] | None]] = [
     ("process_exec", "php", r"\bproc_open\s*\(", "proc_open($cmd, [], $pipes)", ["injection"]),
     ("process_exec", "php", r"\bpopen\s*\(", 'popen($cmd, "r")', ["injection"]),
     ("process_exec", "php", r"\bpcntl_exec\s*\(", "pcntl_exec($path, $args)", ["injection"]),
+    ("process_exec", "php", r"(?<![\w$>:])(?<!function )(?<!new )(?:mb_send_)?mail\s*\(", 'mail($to, "Acme", $body, $headers)', ["injection"]),
     # ---- process_exec : csharp (treesitter_index.py:340) ----
     ("process_exec", "csharp", r"\bProcess\.Start\s*\(", "Process.Start(cmd)", ["injection"]),
     ("process_exec", "csharp", r"\bnew\s+ProcessStartInfo\s*\(", 'new ProcessStartInfo("cmd.exe", cmd)', ["injection"]),
@@ -1037,9 +1054,9 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_slice() -> None:
 
     # Hard counts. PHP inclusion is a parse-tree sink with no pattern here. Go's
     # `.Query(` excludes a `URL` receiver, so it is LIVE in the case table.
-    # file_path=44, sql_exec=32, process_exec=36 -> 112.
-    assert len(all_patterns) == 112
-    assert len(tested) == 107
+    # file_path=44, sql_exec=34, process_exec=37 -> 115.
+    assert len(all_patterns) == 115
+    assert len(tested) == 110
     assert len(excluded) == 5
 
 

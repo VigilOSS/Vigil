@@ -2,10 +2,9 @@
 
 Each statement sits on line 3 of a small Acme handler so a sink at that line
 can only come from that statement. Some shapes are only safe to read off the
-parse tree -- a backtick shell command, `mail()` with its fifth argument, a
-callable chosen at run time, a Guzzle client constructed by its imported
-short name -- and those are detected there; the rest are catalogue rows the
-streaming fallback shares.
+parse tree -- a backtick shell command, a callable chosen at run time, a
+Guzzle client constructed by its imported short name -- and those are
+detected there; the rest are catalogue rows the streaming fallback shares.
 """
 from __future__ import annotations
 
@@ -117,7 +116,6 @@ def test_a_guzzle_client_built_by_its_imported_name_is_a_fetch() -> None:
     ("statement", "kind", "prelude"),
     [
         pytest.param("$c = new Client($id);", "url_fetch", "use Acme\\Mail\\Client;\n", id="other-client"),
-        pytest.param("mail($to, 'Acme', $data, '');", "process_exec", "", id="mail-four-args"),
         pytest.param("call_user_func('acme_render', $id);", "dynamic_invocation", "", id="literal-callable"),
         pytest.param("call_user_func([$client, 'render'], $id);", "dynamic_invocation", "", id="literal-method"),
         pytest.param(
@@ -314,3 +312,101 @@ def test_a_php_variable_name_stays_case_sensitive_on_both_readers() -> None:
     assert "auth" in _kinds("$_SESSION['id'] = $id;")
     assert "auth" not in _kinds("$_session['id'] = $id;")
     assert "auth" not in _streamed_kinds("$_session['id'] = $id;")
+
+
+@pytest.mark.parametrize(
+    ("statement", "kind"),
+    [
+        pytest.param("mysql_query($q);", "sql_exec", id="mysql-query"),
+        pytest.param("mysql_db_query('acme', $q);", "sql_exec", id="mysql-db-query"),
+        pytest.param("mysql_unbuffered_query($q);", "sql_exec", id="mysql-unbuffered-query"),
+        pytest.param("pg_query($client, $q);", "sql_exec", id="pg-query"),
+        pytest.param("pg_query_params($client, $q, [$id]);", "sql_exec", id="pg-query-params"),
+        pytest.param("pg_send_query($client, $q);", "sql_exec", id="pg-send-query"),
+        pytest.param("mysqli_multi_query($client, $q);", "sql_exec", id="mysqli-multi-query"),
+        pytest.param("mysqli_real_query($client, $q);", "sql_exec", id="mysqli-real-query"),
+        pytest.param("$client->real_query($q);", "sql_exec", id="real-query-method"),
+        pytest.param("odbc_exec($client, $q);", "sql_exec", id="odbc-exec"),
+        pytest.param("sqlsrv_query($client, $q);", "sql_exec", id="sqlsrv-query"),
+        pytest.param("mssql_query($q);", "sql_exec", id="mssql-query"),
+        pytest.param("sqlite_query($client, $q);", "sql_exec", id="sqlite-query"),
+        pytest.param("oci_parse($client, $q);", "sql_exec", id="oci-parse"),
+        pytest.param("db2_exec($client, $q);", "sql_exec", id="db2-exec"),
+        pytest.param("$client->Execute($q);", "sql_exec", id="adodb-execute"),
+        pytest.param("print_r($data);", "xss_output", id="print-r"),
+        pytest.param("vprintf($q, [$id]);", "xss_output", id="vprintf"),
+        pytest.param("die($data);", "xss_output", id="die-variable"),
+        pytest.param("exit('Acme: ' . $id);", "xss_output", id="exit-string"),
+        pytest.param("parse_str($data);", "mass_assignment", id="parse-str-one-argument"),
+        pytest.param("import_request_variables('gp');", "mass_assignment", id="import-request-variables"),
+        pytest.param("$$fn = $data;", "mass_assignment", id="variable-variable"),
+        pytest.param("$$clé = $data;", "mass_assignment", id="variable-variable-non-ascii"),
+        pytest.param("mail($to, 'Acme', $data);", "process_exec", id="mail"),
+        pytest.param("mail($to, 'Acme', $data, $q);", "process_exec", id="mail-headers"),
+        pytest.param("mb_send_mail($to, 'Acme', $data, $q);", "process_exec", id="mb-send-mail"),
+    ],
+)
+def test_legacy_php_sinks_are_detected_on_both_readers(statement: str, kind: str) -> None:
+    assert kind in _kinds(statement)
+    assert kind in _streamed_kinds(statement)
+
+
+@pytest.mark.parametrize(
+    ("statement", "kind"),
+    [
+        pytest.param("$stmt->execute([$id]);", "sql_exec", id="pdo-statement-execute"),
+        pytest.param("die();", "xss_output", id="die-empty"),
+        pytest.param("exit(1);", "xss_output", id="exit-status"),
+        pytest.param("die('Acme: no direct access');", "xss_output", id="die-literal-message"),
+        pytest.param('exit("Acme: done");', "xss_output", id="exit-literal-message"),
+        pytest.param("parse_str($data, $out);", "mass_assignment", id="parse-str-into-array"),
+        pytest.param("if ($$fn == $data) {}", "mass_assignment", id="variable-variable-comparison"),
+        pytest.param("$this->mail($to);", "process_exec", id="mail-method"),
+        pytest.param("$mail($to);", "process_exec", id="mail-variable"),
+        pytest.param("$m = new Mail($id);", "process_exec", id="mail-class"),
+    ],
+)
+def test_legacy_php_lookalikes_are_not_those_sinks_on_either_reader(statement: str, kind: str) -> None:
+    assert kind not in _kinds(statement)
+    assert kind not in _streamed_kinds(statement)
+
+
+def test_a_line_of_unclosed_parse_str_calls_streams_in_linear_time() -> None:
+    import time
+
+    source = b"<?php " + b"parse_str(" * 80000 + b"\n"
+    started = time.process_time()
+    treesitter_index._fallback_from_bytes("legacy/acme.php", "php", source, degradation_reason="test")
+    assert time.process_time() - started < 5
+
+
+def test_a_short_echo_in_a_template_is_output_on_both_readers() -> None:
+    source = b"""<?php $title = 'Acme'; ?>
+<a href="<?= $_GET['u'] ?>">Acme</a>
+"""
+    indexed = index_file("views/link.php", "php", source)
+    streamed = treesitter_index._fallback_from_bytes("views/link.php", "php", source, degradation_reason="test")
+
+    for observed in (indexed, streamed):
+        assert ("xss_output", 2) in {(sink["kind"], sink["line"]) for sink in observed["security_sinks"]}
+
+
+@pytest.mark.parametrize(
+    ("line", "kind"),
+    [
+        pytest.param(b"$id = $HTTP_GET_VARS['id'];", "http_request_input", id="http-get-vars"),
+        pytest.param(b"$id = $HTTP_POST_VARS['id'];", "http_request_input", id="http-post-vars"),
+        pytest.param(b"$id = $HTTP_COOKIE_VARS['id'];", "http_request_input", id="http-cookie-vars"),
+        pytest.param(b"$f = $HTTP_POST_FILES['upload'];", "http_request_input", id="http-post-files"),
+        pytest.param(b"$ua = $HTTP_SERVER_VARS['HTTP_USER_AGENT'];", "http_request_input", id="http-server-vars"),
+        pytest.param(b"$body = $HTTP_RAW_POST_DATA;", "http_request_input", id="http-raw-post-data"),
+        pytest.param(b"$home = $_ENV['ACME_HOME'];", "process_input", id="env"),
+    ],
+)
+def test_legacy_php_input_globals_are_sources_on_both_readers(line: bytes, kind: str) -> None:
+    source = b"<?php\n" + line + b"\n"
+    for observed in (
+        index_file("legacy/acme.php", "php", source),
+        treesitter_index._fallback_from_bytes("legacy/acme.php", "php", source, degradation_reason="test"),
+    ):
+        assert [(record["kind"], record["line"]) for record in observed["security_sources"]] == [(kind, 2)]

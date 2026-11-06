@@ -4702,13 +4702,15 @@ def _php_call_shape(call: Any) -> tuple[Any, Any, Any] | None:
 
 # Sinks only the parse tree can tell from their lookalikes, so they have no
 # line pattern and the streaming fallback does not report them: a backtick
-# shell command (a backtick on a line is as often a string or a comment),
-# `mail()` given its fifth, sendmail-argument parameter, a callable or class
-# chosen at run time, and a Guzzle client built by the short name the file
-# imports it under. The `extract()` builtin is read here as well; a line can
-# only approximate it, which is what `_PHP_STREAM_EXTRACT` does.
+# shell command (a backtick on a line is as often a string or a comment), a
+# callable or class chosen at run time, and a Guzzle client built by the short
+# name the file imports it under. The mass-assignment builtins and
+# variable-variable assignments are read here as well; a line can only
+# approximate them, which is what `_PHP_STREAM_MASS_ASSIGNMENT` and
+# `_PHP_STREAM_VARIABLE_VARIABLE` do.
 _PHP_AST_SINK_QUERY = "\n".join((
     "(shell_command_expression) @shell",
+    "(assignment_expression left: (dynamic_variable_name)) @variable_variable",
     "(function_call_expression) @call",
     "(member_call_expression) @method",
     "(nullsafe_member_call_expression) @method",
@@ -4763,6 +4765,7 @@ def _php_ast_sinks(
     }
     captures = _ts_query_captures(parser.language, _PHP_AST_SINK_QUERY, tree.root_node)
     found: list[tuple[str, Any]] = [("process_exec", node) for node in captures.get("shell", [])]
+    found.extend(("mass_assignment", node) for node in captures.get("variable_variable", []))
     for call in captures.get("call", []):
         function = call.child_by_field_name("function")
         arguments = call.child_by_field_name("arguments")
@@ -4784,12 +4787,8 @@ def _php_ast_sinks(
             callable_value = values[0].named_children[0] if values[0].named_children else None
             if values[0].type != "argument" or callable_value is None or not _php_literal_callable(callable_value):
                 found.append(("dynamic_invocation", call))
-        elif name == "extract":
+        elif name in {"extract", "import_request_variables"} or (name == "parse_str" and len(values) == 1):
             found.append(("mass_assignment", call))
-        elif name == "mail" and (
-            len(values) >= 5 or any(value.type == "variadic_unpacking" for value in values)
-        ):
-            found.append(("process_exec", call))
     for method_call in captures.get("method", []):
         # `$client->$fn()`, `$client->{$fn}()`, `Acme::$fn()`: the method is a
         # value chosen at run time.

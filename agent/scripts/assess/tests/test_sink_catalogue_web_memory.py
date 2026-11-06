@@ -35,6 +35,12 @@ import pytest
 from assess.lib import treesitter_index
 from assess.lib.treesitter_index import index_file
 
+_PHP_XSS_PATTERNS = next(
+    definition["patterns"]["php"]
+    for definition in treesitter_index._SINK_DEFINITIONS
+    if definition["kind"] == "xss_output"
+)
+
 
 # ---------------------------------------------------------------------------
 # Helpers (matching the test_freemarker_extraction.py idiom)
@@ -234,8 +240,18 @@ class PageController {
         echo "<h1>" . $name . "</h1>";
         print $name;
         printf("<p>%s</p>", $name);
+        print_r($name);
+    }
+
+    public function fail($reason) {
+        die("Acme: " . $reason);
     }
 }
+"""
+
+XSS_PHP_TEMPLATE = """\
+<?php $title = 'Acme'; ?>
+<a href="<?= $_GET['u'] ?>">Acme</a>
 """
 
 # ---- redirect fixtures (vuln_classes: ["open-redirect"]) ------------------
@@ -637,6 +653,16 @@ CASES: tuple[Case, ...] = (
     Case("xss-php-printf", "xss_output", "php", r"\bprintf\s*\(",
          "PageController.php", XSS_PHP,
          'printf("<p>%s</p>", $name);', _XSS_VULN_CLASSES),
+    Case("xss-php-print-r", "xss_output", "php", r"\b(?:print_r|vprintf)\s*\(",
+         "PageController.php", XSS_PHP,
+         "print_r($name);", _XSS_VULN_CLASSES),
+    Case("xss-php-die", "xss_output", "php",
+         next(pattern for pattern in _PHP_XSS_PATTERNS if "die" in pattern),
+         "PageController.php", XSS_PHP,
+         'die("Acme: " . $reason);', _XSS_VULN_CLASSES),
+    Case("xss-php-short-echo", "xss_output", "php", r"<\?=",
+         "link.php", XSS_PHP_TEMPLATE,
+         "<?= $_GET['u'] ?>", _XSS_VULN_CLASSES),
     Case("xss-csharp-html-raw", "xss_output", "csharp", r"\bHtml\.Raw\s*\(",
          "AccountController.cs", CSHARP_SOURCE,
          "return Content(Html.Raw(content).ToString());", _XSS_VULN_CLASSES),
@@ -1207,14 +1233,15 @@ def test_case_table_covers_every_live_pattern_in_the_assigned_families() -> None
     assert not missing, f"pattern(s) in the catalogue but untracked here: {missing}"
     assert not stale, f"tracked pattern(s) no longer in the catalogue: {stale}"
 
-    # Hard counts: exactly six families, 92 patterns. The audit started at 80;
+    # Hard counts: exactly six families, 95 patterns. The audit started at 80;
     # java `xml_parse` then gained `\bXMLInputFactory\b` (StAX), closing the
     # one Java XML entry point the family had no pattern for (81). C# was then
     # added as a tree-sitter language, contributing 11 patterns across auth (4),
     # xss_output (2), redirect (2) and xml_parse (3) -- 9 LIVE (covered) and 2
-    # dead (`[Authorize` declaration attribute, `@Html.Raw` Razor syntax).
-    assert len(catalogue) == 92
-    assert len(covered) == 80
+    # dead (`[Authorize` declaration attribute, `@Html.Raw` Razor syntax). PHP
+    # `xss_output` then gained `print_r`/`vprintf`, `die`/`exit` and `<?=` (3).
+    assert len(catalogue) == 95
+    assert len(covered) == 83
     assert len(excluded) == 12
 
 

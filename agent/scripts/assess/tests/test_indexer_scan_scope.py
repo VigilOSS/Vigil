@@ -761,7 +761,7 @@ def test_an_empty_closure_does_not_hide_executable_top_level_scope() -> None:
             b"<?php\nrequire_once __DIR__ . '/bootstrap.php';\n"
             b"$report = AcmeReport::build($argv[1]);\n"
             b"mail('ops@example.com', 'Acme nightly', $report);\n",
-            ["file_inclusion"],
+            ["process_exec", "file_inclusion"],
             ["php_cli_script"],
             id="legacy-script",
         ),
