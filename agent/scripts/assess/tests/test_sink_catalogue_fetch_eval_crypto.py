@@ -1,7 +1,7 @@
 """Empirical catalogue audit: `url_fetch`, `deserialization`, `eval_exec`, `crypto`.
 
 Scope is exactly these four `_SINK_DEFINITIONS` families in
-`assess.lib.treesitter_index` (107 patterns total: 34 `url_fetch`, 19
+`assess.lib.treesitter_index` (108 patterns total: 35 `url_fetch`, 19
 `deserialization`, 23 `eval_exec`, 31 `crypto`). Every pattern was probed with
 an idiomatic, current-era (2026) fixture through the real structural indexer.
 Only the patterns that actually fire on idiomatic code get a test here; the
@@ -241,6 +241,12 @@ namespace Probe
         {
             var client = new HttpClient();
             client.GetStringAsync(url);
+        }
+
+        public void PostWithHttpClient(string url)
+        {
+            var client = new HttpClient();
+            client.PostAsync(url, null);
         }
 
         public void FetchWithWebRequest(string url)
@@ -763,8 +769,9 @@ CASES: list[tuple[str, str, str, str]] = [
     ("url_fetch", "php", r"\bfopen\s*\(.*http", 'fopen("http://" . $target, "r")'),
     ("url_fetch", "php", r"\bHttp::(?:get|post|put|patch|delete|head|send)\s*\(", "Http::get($target)"),
     ("url_fetch", "php", r"\bwp_remote_(?:get|post|request)\s*\(", "wp_remote_get($target)"),
-    # -- url_fetch: csharp (3) --
-    ("url_fetch", "csharp", r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync)\s*\(", "client.GetStringAsync(url)"),
+    # -- url_fetch: csharp (4) --
+    ("url_fetch", "csharp", r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStreamAsync)\s*\(", "client.PostAsync(url, null)"),
+    ("url_fetch", "csharp", r"\.(?:GetFromJsonAsync|PostAsJsonAsync|PutAsJsonAsync|GetStringAsync|GetByteArrayAsync)\s*(?:<[^>]*>)?\s*\(", "client.GetStringAsync(url)"),
     ("url_fetch", "csharp", r"\.(?:Download\w*|Upload\w*)\s*\(", "wc.DownloadString(url)"),
     ("url_fetch", "csharp", r"\.GetResponse(?:Async)?\s*\(", "req.GetResponse()"),
 
@@ -1033,9 +1040,9 @@ def test_case_table_covers_every_live_pattern_and_no_dead_ones() -> None:
         f"{(tested | excluded) - catalogue}"
     )
 
-    # 34 + 19 + 23 + 31 = 107 (Java response reads are outbound requests).
-    assert len(catalogue) == 107
-    assert len(tested) == 94
+    # 35 + 19 + 23 + 31 = 108 (Java response reads are outbound requests).
+    assert len(catalogue) == 108
+    assert len(tested) == 95
     assert len(excluded) == 13
 
 

@@ -230,7 +230,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                     r"\bHttp::(?:get|post|put|patch|delete|head|send)\s*\(",
                     r"\bwp_remote_(?:get|post|request)\s*\("],
             "csharp": [
-                r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStringAsync|GetByteArrayAsync|GetStreamAsync)\s*\(",
+                r"\.(?:GetAsync|PostAsync|PutAsync|DeleteAsync|SendAsync|GetStreamAsync)\s*\(",
+                r"\.(?:GetFromJsonAsync|PostAsJsonAsync|PutAsJsonAsync|GetStringAsync|GetByteArrayAsync)\s*(?:<[^>]*>)?\s*\(",
                 r"\.(?:Download\w*|Upload\w*)\s*\(",
                 r"\.GetResponse(?:Async)?\s*\(",
             ],

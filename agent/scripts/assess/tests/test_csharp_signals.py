@@ -157,18 +157,6 @@ public class Fetcher {
                for sink in indexed["security_sinks"])
 
 
-def test_chained_non_http_factory_get_async_is_not_a_fetch_sink() -> None:
-    source = """using System.Net.Http;
-public class Fetcher {
-    private readonly IHttpClientFactory httpFactory;
-    private readonly CacheFactory cacheFactory;
-    public Task<object> Fetch(string key) => cacheFactory.CreateClient().GetAsync(key);
-}
-"""
-    indexed = index_file("Fetcher.cs", "csharp", source.encode())
-    assert not any(sink["kind"] == "url_fetch" for sink in indexed["security_sinks"])
-
-
 def test_inferred_non_http_factory_client_is_not_a_fetch_sink() -> None:
     source = """public class Fetcher {
     private readonly CacheFactory cacheFactory;

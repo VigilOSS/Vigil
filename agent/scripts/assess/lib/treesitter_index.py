@@ -4231,12 +4231,19 @@ def _java_fetch_call_matches_type(
     pattern: str,
     receivers: dict[str, str],
 ) -> bool:
-    receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", line[:call_start])
+    if "openStream" in pattern:
+        return True
+    prefix = line[:call_start]
+    if "getInputStream" in pattern and re.search(
+        r"\bnew\s+URL\s*\(.*\)\s*\.\s*openConnection\s*\(\s*\)\s*$", prefix
+    ):
+        return True
+    if "send" in pattern and re.search(r"\bHttpClient\s*\.\s*newHttpClient\s*\(\s*\)\s*$", prefix):
+        return True
+    receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", prefix)
     if receiver is None:
         return False
     declared_type = receivers.get(receiver.group(1))
-    if "openStream" in pattern:
-        return declared_type == "URL"
     if "getInputStream" in pattern:
         return declared_type in {"URLConnection", "HttpURLConnection"}
     if "getResponseCode" in pattern:
@@ -4291,6 +4298,8 @@ def _csharp_fetch_bindings(
 def _csharp_fetch_call_matches_type(
     line: str, call_start: int, pattern: str, bindings: dict[str, str]
 ) -> bool:
+    if "JsonAsync" in pattern:
+        return True
     receiver = re.search(r"(?:this\.)?([A-Za-z_]\w*)\s*$", line[:call_start])
     if receiver is None:
         prefix = line[:call_start]
@@ -4299,13 +4308,8 @@ def _csharp_fetch_call_matches_type(
             rf"\bnew\s+{expected}\s*\([^)]*\)\s*$", prefix
         ):
             return True
-        factory = re.search(
-            r"(?:this\.)?([A-Za-z_]\w*)\.CreateClient\s*\([^)]*\)\s*$", prefix
-        )
-        return bool(
-            expected == "HttpClient"
-            and factory
-            and bindings.get(factory.group(1)) == "IHttpClientFactory"
+        return expected == "HttpClient" and bool(
+            re.search(r"\b(?:GetClient|CreateClient)\s*\([^)]*\)\s*$", prefix)
         )
     declared_type = bindings.get(receiver.group(1))
     if "Download" in pattern:
@@ -4433,6 +4437,10 @@ def _detect_sinks(
         ]
         for sink_def, patterns in readers:
             for pat, compiled, literals in patterns:
+                if go_fetch_receivers and sink_def["kind"] == "url_fetch" and ".Do" in pat:
+                    # A variable bound to a `net/http` client fetches whatever it is named.
+                    names = "|".join(re.escape(name) for name in sorted(go_fetch_receivers))
+                    compiled, literals = re.compile(rf"{pat}|\b(?:{names})\.Do\s*\("), ()
                 for line_idx, line_text in admitted if literals else readable:
                     if literals and not any(literal in line_text for literal in literals):
                         continue
@@ -4450,12 +4458,6 @@ def _detect_sinks(
                             if _csharp_fetch_call_matches_type(
                                 line_text, match.start(), pat, csharp_fetch_receivers
                             )
-                        )
-                    elif language == "go" and sink_def["kind"] == "url_fetch" and ".Do" in pat:
-                        matches = (
-                            match for match in matches
-                            if match.group().split(".", 1)[0] == "DefaultClient"
-                            or match.group().split(".", 1)[0] in go_fetch_receivers
                         )
                     if next(matches, None) is not None:
                         identity = (sink_def["kind"], func["name"], line_idx)

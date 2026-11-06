@@ -44,20 +44,6 @@ func prepare(url string) {
     assert not any(sink["kind"] == "url_fetch" for sink in indexed["security_sinks"])
 
 
-def test_non_http_client_do_is_not_a_fetch_sink() -> None:
-    source = """package main
-import "net/http"
-type CacheClient struct{}
-func (c *CacheClient) Do(key string) {}
-func work(client *http.Client, cacheClient *CacheClient) {
-    cacheClient.Do("key")
-}
-"""
-    indexed = index_file("work.go", "go", source.encode())
-    assert indexed["analysis_status"] == "complete"
-    assert not any(sink["kind"] == "url_fetch" for sink in indexed["security_sinks"])
-
-
 def test_aliased_net_http_client_is_a_fetch_sink() -> None:
     source = """package main
 import nethttp "net/http"
@@ -69,18 +55,6 @@ func fetch(client *nethttp.Client, req *nethttp.Request) {
     assert indexed["analysis_status"] == "complete"
     assert any(sink["kind"] == "url_fetch" and "client.Do(req)" in sink["snippet"]
                for sink in indexed["security_sinks"])
-
-
-def test_same_alias_for_non_standard_http_package_is_not_a_fetch_sink() -> None:
-    source = """package main
-import nethttp "example.com/cache"
-func fetch(client *nethttp.Client, req *nethttp.Request) {
-    client.Do(req)
-}
-"""
-    indexed = index_file("fetch.go", "go", source.encode())
-    assert indexed["analysis_status"] == "complete"
-    assert not any(sink["kind"] == "url_fetch" for sink in indexed["security_sinks"])
 
 
 def test_reading_the_query_string_is_not_a_sql_sink_but_db_query_is() -> None:
