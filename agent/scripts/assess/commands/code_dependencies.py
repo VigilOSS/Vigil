@@ -17,11 +17,7 @@ from assess.lib.code_snapshot import (
     SourceSnapshotRaceError,
     validate_snapshot,
 )
-from assess.lib.dependency_picture import (
-    IndexedFile,
-    VendoredCopy,
-    build_dependency_picture,
-)
+from assess.lib.dependency_picture import IndexedFile, build_dependency_picture
 
 PICTURE_SCHEMA = "code-dependency-picture/v1"
 
@@ -133,88 +129,37 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _read_exclusions(
-    repo: Path,
-) -> tuple[list[str], list[VendoredCopy], list[manifests.AnalysisGap]]:
-    """The excluded-file paths and vendored copies a sealed snapshot recorded.
+def _read_exclusions(repo: Path) -> tuple[list[str], list[manifests.AnalysisGap]]:
+    """The excluded-file paths a sealed snapshot recorded.
 
-    `code-ingest` keeps node_modules, vendor trees, packaged jars and vendored
-    source copies out of the sealed `source/` directory, so walking it alone
-    cannot see build output the repository ships. The snapshot manifest
-    fingerprints every one of those exclusions under the snapshot's content
-    address; it is read only after that address verifies. A tree with no
-    snapshot manifest beside it is an ordinary repository root, whose walk
-    already sees everything.
+    `code-ingest` keeps node_modules, vendor trees and packaged jars out of the
+    sealed `source/` directory, so walking it alone cannot see build output the
+    repository ships. The snapshot manifest fingerprints every one of those
+    exclusions under the snapshot's content address; it is read only after
+    that address verifies. A tree with no snapshot manifest beside it is an
+    ordinary repository root, whose walk already sees everything.
     """
     snapshot_root = repo.parent
     if repo.name != "source" or not (snapshot_root / "manifest.json").is_file():
-        return [], [], []
+        return [], []
     try:
         manifest = validate_snapshot(snapshot_root)
     except (OSError, ValueError, SourceSnapshotRaceError) as exc:
-        return [], [], [
+        return [], [
             manifests.AnalysisGap(
                 path="manifest.json",
                 gap="excluded_inventory_unverified",
                 detail=(
                     f"sealed snapshot manifest did not verify ({exc}); build output "
-                    "and vendored copies code-ingest excluded are not in this picture"
+                    "code-ingest excluded is not in this picture"
                 ),
             )
         ]
-    paths: list[str] = []
-    copies: list[VendoredCopy] = []
-    gaps: list[manifests.AnalysisGap] = []
-    for record in manifest.get("excluded_entries", []):
-        path = str(record.get("path") or "")
-        if record.get("kind") == "file":
-            paths.append(path)
-            continue
-        identity = record.get("vendored_copy")
-        if record.get("kind") != "directory" or identity is None:
-            continue
-        copy = _vendored_copy(path, identity)
-        if copy is None:
-            gaps.append(
-                manifests.AnalysisGap(
-                    path=path,
-                    gap="excluded_inventory_unverified",
-                    detail="vendored-copy record is malformed; this copy is not in the picture",
-                )
-            )
-            continue
-        copies.append(copy)
-    return paths, copies, gaps
-
-
-def _vendored_copy(path: str, identity: object) -> VendoredCopy | None:
-    if not isinstance(identity, dict):
-        return None
-    fields = ("ecosystem", "coordinate", "version", "version_source")
-    if not all(isinstance(identity.get(name), str) for name in fields):
-        return None
-    if not identity["ecosystem"] or not identity["coordinate"]:
-        return None
-    evidence: list[manifests.Evidence] = []
-    for item in identity.get("evidence") or []:
-        if not (
-            isinstance(item, dict)
-            and isinstance(item.get("path"), str)
-            and type(item.get("line")) is int
-            and isinstance(item.get("text"), str)
-        ):
-            return None
-        evidence.append(
-            manifests.Evidence(path=item["path"], line=item["line"], text=item["text"])
-        )
-    return VendoredCopy(
-        path=path,
-        ecosystem=identity["ecosystem"],
-        coordinate=identity["coordinate"],
-        version=identity["version"],
-        version_source=identity["version_source"],
-        evidence=tuple(evidence),
-    )
+    return [
+        str(record.get("path") or "")
+        for record in manifest.get("excluded_entries", [])
+        if record.get("kind") == "file"
+    ], []
 
 
 def _read_tree(
@@ -643,7 +588,7 @@ def run(args) -> None:
         print(f"code-dependencies: cannot read scan report: {exc}", file=sys.stderr)
         sys.exit(1)
     try:
-        excluded_paths, vendored_copies, exclusion_gaps = _read_exclusions(repo)
+        excluded_paths, exclusion_gaps = _read_exclusions(repo)
         parses, present_paths, walk_gaps = _read_tree(repo, excluded_paths)
     except (OSError, ValueError, SourceSnapshotRaceError) as exc:
         print(f"code-dependencies: cannot read source tree: {exc}", file=sys.stderr)
@@ -653,7 +598,6 @@ def run(args) -> None:
     picture = build_dependency_picture(
         parses=parses,
         present_paths=present_paths,
-        vendored_copies=vendored_copies,
         indexed_files=indexed_files,
         scan_rows=scan_rows,
     )

@@ -1,4 +1,4 @@
-"""`code-ingest` keeps vendored copies and minified bundles out of analysis.
+"""`code-ingest` keeps package-manager vendor trees and minified bundles out of analysis.
 
 Third-party code copied into a tree and compiled bundles carry most of a
 repository's sink volume and none of its authored logic. Each rule below keeps
@@ -83,62 +83,35 @@ def _minified_js(size: int = 40_000) -> str:
     return f"/*! Acme Player v4.1.0 | (c) Acme Corp */\n{body}\n//# sourceMappingURL=player.js.map\n"
 
 
-# --- vendored copies ---------------------------------------------------------
+# --- archive-named directories ----------------------------------------------
 
 
-@pytest.fixture
-def vendored_repo(tmp_path: Path) -> Path:
+def test_archive_named_directories_are_first_party(tmp_path):
+    """Nothing in a `<name>-main/` or `<name>-master/` directory's name or root
+    files tells the project's own code from a downloaded copy of someone else's;
+    `--exclude-path` leaves a real copy out."""
     repo = tmp_path / "repo"
-    _write(repo, "src/index.php", "<?php echo 'ok';\n")
-    _write(
-        repo,
-        "lib/AcmeMailer-master/composer.json",
-        json.dumps({"name": "acme/mailer", "description": "Acme mail transport"}, indent=4) + "\n",
-    )
-    _write(repo, "lib/AcmeMailer-master/VERSION", "5.2.7\n")
-    _write(repo, "lib/AcmeMailer-master/LICENSE", "LGPL\n")
-    _write(repo, "lib/AcmeMailer-master/class.mailer.php", "<?php class Mailer {}\n")
-    _write(repo, "lib/AcmeMailer-master/extras/ntlm.php", "<?php function ntlm() {}\n")
-    # First-party directory that merely ends in `-master`: no package manifest
-    # or licence at its root, so nothing marks it as someone else's code.
-    _write(repo, "deploy/db-master/setup.sh", "#!/bin/sh\necho primary\n")
-    return repo
+    _write(repo, "admin-main/VERSION", "2.1.0\n")
+    _write(repo, "admin-main/index.php", "<?php echo 'admin';\n")
+    _write(repo, "shop-master/LICENSE", "Proprietary\n")
+    _write(repo, "shop-master/cart.php", "<?php echo 'cart';\n")
+    _write(repo, "portal-main/composer.json", json.dumps({"name": "acme/portal"}) + "\n")
+    _write(repo, "portal-main/login.php", "<?php echo 'login';\n")
 
+    args = _args(repo)
 
-def test_a_vendored_copy_directory_is_excluded_with_its_files_fingerprinted(vendored_repo):
-    args = _args(vendored_repo)
+    assert _admitted(repo, args) == [
+        "admin-main/VERSION", "admin-main/index.php",
+        "portal-main/composer.json", "portal-main/login.php",
+        "shop-master/LICENSE", "shop-master/cart.php",
+    ]
+    assert _excluded(repo, args) == {}
+    _assert_partition_verifies(repo, args)
 
-    admitted = _admitted(vendored_repo, args)
-    excluded = _excluded(vendored_repo, args)
-
-    assert admitted == ["deploy/db-master/setup.sh", "src/index.php"]
-    assert excluded == {
-        "lib/AcmeMailer-master/LICENSE": "skipped_dir:vendored_copy",
-        "lib/AcmeMailer-master/VERSION": "skipped_dir:vendored_copy",
-        "lib/AcmeMailer-master/class.mailer.php": "skipped_dir:vendored_copy",
-        "lib/AcmeMailer-master/composer.json": "skipped_dir:vendored_copy",
-        "lib/AcmeMailer-master/extras/ntlm.php": "skipped_dir:vendored_copy",
-    }
-    _assert_partition_verifies(vendored_repo, args)
-
-
-def test_the_vendored_copy_record_carries_its_package_identity_and_evidence(vendored_repo):
-    directory = next(
-        record
-        for record in _records(vendored_repo, _args(vendored_repo))
-        if record["path"] == "lib/AcmeMailer-master"
-    )
-
-    assert directory["kind"] == "directory"
-    assert directory["reason"] == "skipped_dir:vendored_copy"
-    copy = directory["vendored_copy"]
-    assert copy["ecosystem"] == "composer"
-    assert copy["coordinate"] == "acme/mailer"
-    assert copy["version"] == "5.2.7"
-    assert copy["version_source"] == "VERSION"
-    assert {"path": "lib/AcmeMailer-master/composer.json", "line": 2,
-            "text": '"name": "acme/mailer",'} in copy["evidence"]
-    assert {"path": "lib/AcmeMailer-master/VERSION", "line": 1, "text": "5.2.7"} in copy["evidence"]
+    args = _args(repo, exclude_path=["shop-master"])
+    assert "shop-master/cart.php" not in _admitted(repo, args)
+    assert _excluded(repo, args)["shop-master/cart.php"] == "exclude_path:shop-master"
+    _assert_partition_verifies(repo, args)
 
 
 def test_an_ordinary_skipped_directory_record_keeps_its_existing_shape(tmp_path):
@@ -157,33 +130,6 @@ def test_an_ordinary_skipped_directory_record_keeps_its_existing_shape(tmp_path)
         "kind": "directory",
         "reason": "skipped_dir:node_modules",
     }
-
-
-def test_a_vendored_copy_is_re_admitted_by_an_include_path(vendored_repo):
-    args = _args(vendored_repo, include_path=["lib/AcmeMailer-master/**"])
-
-    admitted = _admitted(vendored_repo, args)
-
-    assert "lib/AcmeMailer-master/class.mailer.php" in admitted
-    assert "lib/AcmeMailer-master/extras/ntlm.php" in admitted
-    _assert_partition_verifies(vendored_repo, args)
-
-
-@pytest.mark.parametrize("dirname", ["acme-sdk-main", "AcmeSDK-master"])
-def test_archive_named_directories_need_a_package_marker(tmp_path, dirname):
-    repo = tmp_path / "repo"
-    _write(repo, f"{dirname}/package.json", json.dumps({"name": "acme-sdk", "version": "1.4.0"}) + "\n")
-    _write(repo, f"{dirname}/index.js", "module.exports = {};\n")
-    _write(repo, "plain-master/index.js", "module.exports = {};\n")
-
-    assert _admitted(repo, _args(repo)) == ["plain-master/index.js"]
-    copy = next(
-        record["vendored_copy"]
-        for record in _records(repo, _args(repo))
-        if record["path"] == dirname
-    )
-    assert (copy["ecosystem"], copy["coordinate"], copy["version"]) == ("npm", "acme-sdk", "1.4.0")
-    assert copy["version_source"] == "package.json"
 
 
 # --- vendor/ casing ----------------------------------------------------------
@@ -291,26 +237,6 @@ def test_a_first_party_vendor_domain_directory_is_admitted(tmp_path):
         "composer.json", "src/Controller/Vendor/VendorController.php", "src/Entity/Vendor.php",
     ]
     assert _excluded(repo, args) == {"vendor/autoload.php": "skipped_dir:vendor"}
-    _assert_partition_verifies(repo, args)
-
-
-def test_a_workspace_package_named_like_an_archive_is_first_party(tmp_path):
-    """A forge archive unpacks as `<name>-<branch>/` beside a manifest naming
-    `<name>`; a package whose own name ends in `-main` is the project itself."""
-    repo = tmp_path / "repo"
-    _write(repo, "package.json", json.dumps({"name": "acme", "workspaces": ["packages/*"]}) + "\n")
-    _write(
-        repo,
-        "packages/electron-main/package.json",
-        json.dumps({"name": "@acme/electron-main", "version": "1.0.0"}) + "\n",
-    )
-    _write(repo, "packages/electron-main/index.js", "module.exports = {};\n")
-
-    args = _args(repo)
-
-    assert _admitted(repo, args) == [
-        "package.json", "packages/electron-main/index.js", "packages/electron-main/package.json",
-    ]
     _assert_partition_verifies(repo, args)
 
 
@@ -437,12 +363,25 @@ def test_line_shape_applies_only_to_javascript_and_css(tmp_path):
 # --- collapsed-admission remedy ---------------------------------------------
 
 
-def test_a_collapsed_vendored_copy_admission_names_a_working_remedy(capsys):
-    code_ingest._warn_on_collapsed_admission([("skipped_dir:vendored_copy", 500)], 3)
-
-    err = capsys.readouterr().err
-    assert "vendored_copy/**" not in err
-    assert "--include-path '<vendored-copy-dir>/**'" in err
+def _offline_ingest(monkeypatch, tmp_path) -> tuple[Path, Path]:
+    repo = tmp_path / "acme reports"
+    _write(repo, "app.py", "print('ok')\n")
+    engagement = tmp_path / "engagement"
+    engagement.mkdir()
+    monkeypatch.setattr(code_ingest, "AssessmentClient", _FakeClient)
+    monkeypatch.setattr(
+        code_ingest,
+        "load_config",
+        lambda *_args: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(engagement)
+        ),
+    )
+    monkeypatch.setattr(
+        code_ingest,
+        "_setup_ctags",
+        lambda *_args, **kwargs: {"available": False, **kwargs},
+    )
+    return repo, engagement
 
 
 # --- ingest summary ------------------------------------------------------------

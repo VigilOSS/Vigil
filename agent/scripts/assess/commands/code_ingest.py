@@ -85,20 +85,6 @@ _TOOL_OUTPUT_DIR_MARKERS = {
     'env': ('pyvenv.cfg', 'bin/activate', 'Scripts/activate'),
 }
 
-# A source archive downloaded from a forge unpacks as `<project>-<branch>/`.
-# The name alone also describes first-party directories (`db-master/`), so a
-# directory is a vendored copy only when its root also carries the package
-# manifest or licence that marks it as someone else's distribution, and a
-# manifest whose own name is the directory's (`@acme/electron-main`) marks a
-# workspace package of the project.
-VENDORED_COPY_REASON = 'skipped_dir:vendored_copy'
-_VENDORED_COPY_DIR_RE = re.compile(r'^.+-(?:master|main)$', re.IGNORECASE)
-_VENDORED_COPY_MANIFESTS = (('composer.json', 'composer'), ('package.json', 'npm'))
-_VENDORED_COPY_VERSION_FILE = 'VERSION'
-_VENDORED_COPY_LICENCE_PREFIXES = ('LICENSE', 'LICENCE', 'COPYING')
-_VENDORED_COPY_READ_BYTES = 64 * 1024
-_VENDORED_COPY_VERSION_RE = re.compile(r'^v?\d[\w.+-]{0,63}$')
-
 # Bundler output named by content hash (`main.3f2a1b9c.chunk.js`). An unhashed
 # `vendors.chunk.js` is as likely to be hand-written as generated, so the hash
 # segment is required.
@@ -629,7 +615,7 @@ def _skip_file_reason(
 ) -> str | None:
     """Return the path-only skip reason for a file, or None.
 
-    Vendored-copy directories and minified content need the tree itself;
+    `vendor` and `env` directories and minified content need the tree itself;
     `_SkipPolicy.file_reason` adds those for the ingest walks.
     """
     if filename in SKIP_BASENAMES:
@@ -696,32 +682,21 @@ class _LineShape:
         )
 
 
-def _first_line_matching(text: str, pattern: re.Pattern[str]) -> tuple[int, str] | None:
-    for number, line in enumerate(text.splitlines(), 1):
-        if pattern.search(line):
-            return number, line.strip()
-    return None
-
-
-_JSON_NAME_LINE_RE = re.compile(r'^\s*"name"\s*:')
-_JSON_VERSION_LINE_RE = re.compile(r'^\s*"version"\s*:')
-
-
 class _SkipPolicy:
     """One walk's skip decisions over a pinned source tree.
 
     Admission, exclusion, the run loop and verification each build one, so the
-    tree-dependent rules (a vendored copy is recognized by its root files, a
-    minified file by its bytes) are asked the same question by every partition
-    pass. `_verify_source_inventory` re-runs both passes, so a file that changes
-    between reads fails the run instead of landing on the wrong side.
+    tree-dependent rules (a `vendor` or `env` directory is recognized by its
+    tool's output, a minified file by its bytes) are asked the same question by
+    every partition pass. `_verify_source_inventory` re-runs both passes, so a
+    file that changes between reads fails the run instead of landing on the
+    wrong side.
     """
 
     def __init__(self, source_tree: RootedSourceTree, args) -> None:
         self.tree = source_tree
         self.args = args
         self.skip_dirs = _effective_skip_dirs(args)
-        self._vendored: dict[str, dict[str, object] | None] = {}
         self._tool_output: dict[str, bool] = {}
         self._minified_by_content: set[str] = set()
 
@@ -729,12 +704,7 @@ class _SkipPolicy:
         named = _named_skip_dir_reason(dirname, self.skip_dirs)
         if named:
             return named
-        tool_output = self.tool_output_reason(rel_dir)
-        if tool_output:
-            return tool_output
-        if self.vendored_copy(rel_dir) is not None:
-            return VENDORED_COPY_REASON
-        return None
+        return self.tool_output_reason(rel_dir)
 
     def tool_output_reason(self, rel_dir: str) -> str | None:
         """The reason a `vendor` or `env` directory earns by holding its tool's output."""
@@ -759,94 +729,6 @@ class _SkipPolicy:
             rel_dir = f"{rel_dir}/{name}"
         return True
 
-    def vendored_copy(self, rel_dir: str) -> dict[str, object] | None:
-        """Package identity of a vendored copy rooted at *rel_dir*, or None."""
-        if rel_dir in self._vendored:
-            return self._vendored[rel_dir]
-        identity = None
-        if _VENDORED_COPY_DIR_RE.match(PurePosixPath(rel_dir).name):
-            identity = self._read_vendored_identity(rel_dir)
-        self._vendored[rel_dir] = identity
-        return identity
-
-    def _read_text(self, rel_path: str) -> str | None:
-        captured = self.tree.capture(
-            rel_path, retain_spool=False, materialize_limit=_VENDORED_COPY_READ_BYTES
-        )
-        try:
-            if captured.materialized is None:
-                return None
-            return captured.materialized.decode("utf-8", errors="replace")
-        finally:
-            captured.close()
-
-    def _read_vendored_identity(self, rel_dir: str) -> dict[str, object] | None:
-        listing = next(self.tree.walk(rel_dir))
-        names = set(listing.regular_files)
-        manifests = [
-            (filename, ecosystem)
-            for filename, ecosystem in _VENDORED_COPY_MANIFESTS
-            if filename in names
-        ]
-        has_marker = (
-            bool(manifests)
-            or _VENDORED_COPY_VERSION_FILE in names
-            or any(name.upper().startswith(_VENDORED_COPY_LICENCE_PREFIXES) for name in names)
-        )
-        if not has_marker:
-            return None
-        identity: dict[str, object] = {
-            "ecosystem": "unknown",
-            "coordinate": re.sub(r"-(?:master|main)$", "", PurePosixPath(rel_dir).name, flags=re.I),
-            "version": "",
-            "version_source": "",
-            "evidence": [],
-        }
-        evidence: list[dict[str, object]] = []
-        for filename, ecosystem in manifests:
-            rel_path = f"{rel_dir}/{filename}"
-            text = self._read_text(rel_path)
-            if text is None:
-                continue
-            try:
-                document = json.loads(text)
-            except json.JSONDecodeError:
-                continue
-            name = document.get("name") if isinstance(document, dict) else None
-            if not isinstance(name, str) or not name.strip():
-                continue
-            if name.strip().rsplit("/", 1)[-1].lower() == PurePosixPath(rel_dir).name.lower():
-                # An archive unpacks as `<name>-<branch>/`; a package whose
-                # own name carries the suffix is the project's own package.
-                return None
-            identity["ecosystem"] = ecosystem
-            identity["coordinate"] = name.strip()
-            located = _first_line_matching(text, _JSON_NAME_LINE_RE)
-            if located:
-                evidence.append({"path": rel_path, "line": located[0], "text": located[1]})
-            version = document.get("version")
-            if isinstance(version, str) and version.strip():
-                identity["version"] = version.strip()
-                identity["version_source"] = filename
-                located = _first_line_matching(text, _JSON_VERSION_LINE_RE)
-                if located:
-                    evidence.append({"path": rel_path, "line": located[0], "text": located[1]})
-            break
-        if _VENDORED_COPY_VERSION_FILE in names and not identity["version"]:
-            rel_path = f"{rel_dir}/{_VENDORED_COPY_VERSION_FILE}"
-            text = self._read_text(rel_path) or ""
-            for number, line in enumerate(text.splitlines(), 1):
-                stripped = line.strip()
-                if not stripped:
-                    continue
-                if _VENDORED_COPY_VERSION_RE.match(stripped):
-                    identity["version"] = stripped
-                    identity["version_source"] = _VENDORED_COPY_VERSION_FILE
-                    evidence.append({"path": rel_path, "line": number, "text": stripped})
-                break
-        identity["evidence"] = evidence
-        return identity
-
     def file_reason(self, rel_path: str, filename: str) -> str | None:
         reason = _skip_file_reason(rel_path, filename, self.skip_dirs)
         if reason:
@@ -856,8 +738,6 @@ class _SkipPolicy:
             tool_output = self.tool_output_reason("/".join(parts[:depth]))
             if tool_output:
                 return tool_output
-            if self.vendored_copy("/".join(parts[:depth])) is not None:
-                return VENDORED_COPY_REASON
         return self._content_reason(rel_path, filename)
 
     def _content_reason(self, rel_path: str, filename: str) -> str | None:
@@ -1048,9 +928,7 @@ def _warn_on_collapsed_admission(census: list[tuple[str, int]], admitted: int) -
     for reason, count in census[:3]:
         print(f"  {reason}: {count}", file=sys.stderr)
     dominant = census[0][0] if census else ""
-    if dominant == VENDORED_COPY_REASON:
-        remedy = "--include-path '<vendored-copy-dir>/**'"
-    elif dominant.startswith("skipped_dir:"):
+    if dominant.startswith("skipped_dir:"):
         directory = dominant.split(":", 1)[1]
         if directory in BUILD_ARTIFACT_DIRS:
             remedy = "--policy-preset package --include-minified"
@@ -1318,8 +1196,6 @@ def _collect_excluded_records(
                     "kind": "directory",
                     "reason": dir_reason,
                 }
-                if dir_reason == VENDORED_COPY_REASON:
-                    directory_record["vendored_copy"] = policy.vendored_copy(rel_dir)
                 records.append(directory_record)
                 records.extend(
                     _enumerate_rooted_skipped_dir(source_tree, rel_dir, dir_reason)

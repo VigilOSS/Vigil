@@ -82,13 +82,13 @@ structural index against the printed repo ID and snapshot path before driving
 classify+map → hunt → verify+variant.
 
 By default ingest leaves out a `vendor/` or `env/` directory that holds package-manager or
-virtualenv output, forge-archive copies of other projects, `.phps` display copies, and minified or
-bundled JavaScript and CSS. Each excluded file stays fingerprinted in the snapshot's exclusion
-inventory, and `code-dependencies` reports the vendored copies. Re-admit a directory with
-`--include-path '<dir>/**'` and minified files with `--include-minified`, which a repository of
-shipped or recovered bundles needs. `code-index build` warns once for each excluded directory a PHP
-include reaches, except package-manager `vendor/`. Git reads the repository's history and dirty
-state without running any program its configuration names
+virtualenv output, `.phps` display copies, and minified or bundled JavaScript and CSS. Each
+excluded file stays fingerprinted in the snapshot's exclusion inventory. A copy of another project
+unpacked into the tree is admitted as source; leave it out with `--exclude-path '<dir>'`. Re-admit
+a skipped directory with `--include-path '<dir>/**'` and minified files with `--include-minified`,
+which a repository of shipped or recovered bundles needs. `code-index build` warns once for each
+excluded directory a PHP include reaches, except package-manager `vendor/`. Git reads the
+repository's history and dirty state without running any program its configuration names
 ([ADR 0040](adr/0040-target-repositories-never-configure-git-execution.md)).
 
 Specialists read the **sealed snapshot**; the mutable origin is retained only as

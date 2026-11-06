@@ -563,9 +563,6 @@ def _sealed_with_exclusions(tmp_path: Path, request, *, ingest_args=None) -> Pat
     _write(origin, "web/src/app.js", "import lodash from 'lodash';\n")
     _write(origin, "web/node_modules/lodash/index.js", "module.exports = {};\n")
     _write(origin, "web/node_modules/left-pad/index.js", "module.exports = {};\n")
-    _write(origin, "lib/AcmeMailer-master/composer.json", '{\n    "name": "acme/mailer"\n}\n')
-    _write(origin, "lib/AcmeMailer-master/VERSION", "5.2.7\n")
-    _write(origin, "lib/AcmeMailer-master/class.mailer.php", "<?php class Mailer {}\n")
     args = SimpleNamespace(
         include_minified=False, include_skipped=False, include_path=[], exclude_path=[],
         policy_preset="application",
@@ -600,11 +597,6 @@ def test_a_sealed_snapshot_reports_what_ingest_excluded_but_the_tree_ships(
     payload = json.loads(capsys.readouterr().out)
 
     by_coordinate = {row["coordinate"]: row for row in payload["observations"]}
-    mailer = by_coordinate["acme/mailer"]
-    assert mailer["version"] == "5.2.7"
-    assert mailer["shipment_observation"] == "unverified_present_without_declaration"
-    assert mailer["detection"] == "vendored_copy_manifest"
-    assert {"path": "lib/AcmeMailer-master/VERSION", "line": 1, "text": "5.2.7"} in mailer["evidence"]
     # node_modules is excluded from the snapshot, yet its layout still says what
     # is installed: the undeclared package is reported, the declared one is not
     # duplicated.
@@ -629,7 +621,7 @@ def test_an_unverifiable_snapshot_manifest_is_a_gap_not_an_empty_exclusion_set(
     code_dependencies.run(_args(sealed, as_json=True))
     payload = json.loads(capsys.readouterr().out)
 
-    assert "acme/mailer" not in {row["coordinate"] for row in payload["observations"]}
+    assert "left-pad" not in {row["coordinate"] for row in payload["observations"]}
     assert [gap["gap"] for gap in payload["gaps"]].count("excluded_inventory_unverified") == 1
 
 
