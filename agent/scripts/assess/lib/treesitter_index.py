@@ -2403,10 +2403,18 @@ def _extract_import_records(
     return imports, _resolve_import_targets(imports, query_language)
 
 
+def _source_lines(source: bytes) -> list[str]:
+    """Split lines where the snapshot counts them: at CR, LF and CRLF only."""
+    lines = re.split(r"\r\n|\r|\n", source.decode("utf-8", errors="replace"))
+    if not lines[-1]:
+        lines.pop()
+    return lines
+
+
 def _extract_ruby_imports(source: bytes) -> list[str]:
     """Extract require/require_relative/load from Ruby source via regex."""
     imports: list[str] = []
-    for line in source.decode("utf-8", errors="replace").splitlines():
+    for line in _source_lines(source):
         stripped = line.strip()
         if stripped.startswith("#"):
             continue
@@ -5124,7 +5132,7 @@ def _export_source_lines(tree: Any, source: bytes) -> list[str]:
         visible[node.start_byte:node.end_byte] = re.sub(
             rb"[^\r\n]", b" ", source[node.start_byte:node.end_byte]
         )
-    return visible.decode("utf-8", errors="replace").splitlines()
+    return _source_lines(bytes(visible))
 
 
 def _resolve_import_targets(
@@ -5484,7 +5492,9 @@ def index_file(
             warnings.warn(f"Cannot read {file_path}: {exc}")
             return _empty_index(file_path, language)
 
-    source_lines = source.decode("utf-8", errors="replace").splitlines()
+    # Tree-sitter starts a row only at LF; the snapshot also counts a bare CR.
+    source = re.sub(rb"\r(?!\n)", b"\n", source)
+    source_lines = _source_lines(source)
     total_lines = len(source_lines)
 
     # Lightweight regex-based extractors run regardless of tree-sitter availability

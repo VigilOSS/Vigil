@@ -4245,10 +4245,19 @@ def test_code_index_sync_refuses_a_tampered_artifact_and_publishes_nothing(
 def test_code_index_build_degrades_a_callable_past_the_sealed_line_count_and_sync_publishes_it(
     client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """`str.splitlines` breaks a form feed that the sealed line count does not."""
+    parser_boundary = importlib.import_module("assess.lib.parser_boundary")
+    parse = parser_boundary.index_file
+
+    def overrun(rel_path: str, language: str, **kwargs) -> dict:
+        artifact = parse(rel_path, language, **kwargs)
+        if rel_path == "Dockerfile":
+            artifact["functions"][-1]["line_end"] = artifact["total_lines"] + 1
+        return artifact
+
+    monkeypatch.setattr(parser_boundary, "index_file", overrun)
     indexed = _IndexedRepo(client, isolate_settings, monkeypatch, tmp_path, {
         "main.py": b"def main():\n    return 1\n",
-        "Dockerfile": b"FROM alpine\n#\x0cnote\nRUN echo hi\n",
+        "Dockerfile": b"FROM alpine\nRUN echo hi\n",
     })
 
     indexed.sync()
