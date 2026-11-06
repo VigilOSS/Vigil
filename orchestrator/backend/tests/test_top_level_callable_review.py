@@ -342,37 +342,73 @@ def test_an_upgrade_that_adds_file_scope_keeps_receipts_and_surfaces_the_new_obl
     assert _uncovered_paths(_gate(client, key, repo_id)) == set()
 
 
-def test_a_literal_configuration_file_owes_no_structural_proof() -> None:
-    """A file that only returns a literal array opens no `<top-level>` segment:
-    the index read its whole file scope and found nothing that runs, so no
-    callable or span is owed. A mandatory proof needs something to prove."""
+def _indexed_obligation(file_path: str, language: str, source: bytes):
     import json
 
     from app.services.code_analysis_support import structural_review_obligation
 
+    indexed = index_file(file_path, language, source)
+    assert indexed["analysis_status"] == "complete"
+    return structural_review_obligation(
+        {
+            "loc": len(source.splitlines()),
+            "language": language,
+            "structural_analysis_status": indexed["analysis_status"],
+            "structural_analysis_mode": indexed["analysis_mode"],
+            "structural_unavailable_dimensions_json": json.dumps(indexed["unavailable_dimensions"]),
+            "structural_truncated_dimensions_json": json.dumps(indexed["truncated_dimensions"]),
+            "structural_signal_counts_json": json.dumps(indexed["signal_counts"]),
+            "total_functions": indexed["total_functions"],
+        },
+        tuple(
+            (segment["line_start"], segment["line_end"])
+            for segment in indexed.get("top_level_segments", ())
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("file_path", "language", "source"),
+    [
+        ("acme/auth.py", "python", b"class A:\n    token = fetch_token(read_env())\n"),
+        ("web/config.js", "javascript", b"class A { static cfg = loadConfig(readFlags()) }\n"),
+        ("web/widget.ts", "typescript", b"@Component({template: buildTemplate()}) class A {}\n"),
+        ("scripts/boot.lua", "lua", b"local x = 1\nprint(x)\n"),
+    ],
+)
+def test_load_time_code_outside_any_segment_owes_a_whole_file_span(
+    file_path: str, language: str, source: bytes,
+) -> None:
+    """A parsed file with no callable and no segment can still run code when it
+    loads, so having nothing to cite never means nothing to review."""
+    loc = len(source.splitlines())
+
+    requirement = _indexed_obligation(file_path, language, source).span_requirement(loc)
+
+    assert requirement is not None
+    assert requirement[0] == (1, loc)
+
+
+def test_a_literal_configuration_file_owes_one_whole_file_span() -> None:
+    """A file that only returns a literal array opens no `<top-level>` segment
+    and has no callable, so one span over the whole file is all it owes."""
     source = b"""<?php
 return [
     'name' => 'acme',
     'hosts' => ['app.example.com'],
 ];
 """
-    indexed = index_file("config/app.php", "php", source)
-    obligation = structural_review_obligation(
-        {
-            "loc": len(source.splitlines()),
-            "language": "php",
-            "structural_analysis_status": indexed["analysis_status"],
-            "structural_unavailable_dimensions_json": json.dumps(indexed["unavailable_dimensions"]),
-            "structural_truncated_dimensions_json": json.dumps(indexed["truncated_dimensions"]),
-            "total_functions": indexed["total_functions"],
-        },
-        tuple(
-            (segment["line_start"], segment["line_end"])
-            for segment in indexed["top_level_segments"]
-        ),
-    )
+    loc = len(source.splitlines())
+    obligation = _indexed_obligation("config/app.php", "php", source)
 
-    assert not obligation.owed
+    assert not obligation.owes_callable
+    assert obligation.top_level_spans == ()
+    assert obligation.proven(
+        loc=loc, function_cited=False, cited_top_level=set(), reviewed_spans=[(1, loc)]
+    )
+    assert not obligation.proven(
+        loc=loc, function_cited=False, cited_top_level=set(), reviewed_spans=[(2, 4)]
+    )
 
 
 @pytest.mark.parametrize(
@@ -387,25 +423,7 @@ def test_a_complete_stylesheet_or_markup_page_owes_nothing(
 ) -> None:
     """A stylesheet or a page of markup has no callable and no file-scope code
     the index reads, so it owes no review a span could prove."""
-    import json
-
-    from app.services.code_analysis_support import structural_review_obligation
-
-    indexed = index_file(file_path, language, source)
-    assert indexed["analysis_status"] == "complete"
-    obligation = structural_review_obligation(
-        {
-            "loc": len(source.splitlines()),
-            "language": language,
-            "structural_analysis_status": indexed["analysis_status"],
-            "structural_unavailable_dimensions_json": json.dumps(indexed["unavailable_dimensions"]),
-            "structural_truncated_dimensions_json": json.dumps(indexed["truncated_dimensions"]),
-            "total_functions": indexed["total_functions"],
-        },
-    )
-
-    assert not obligation.owed
-
+    assert not _indexed_obligation(file_path, language, source).owed
 
 
 def test_the_span_requirement_reads_segments_in_line_order() -> None:

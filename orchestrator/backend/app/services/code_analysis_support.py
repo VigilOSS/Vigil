@@ -35,8 +35,10 @@ STRUCTURAL_CALLABLE_IDENTITY_SCHEMA = "structural-callable/v1"
 # `_unscanned_scope_dimensions`, and the backend mirrors the agent tree rather
 # than importing from it (CODE-MAP.md). Keep the two lists identical.
 _INDEXED_STRUCTURAL_STATUSES = frozenset({"complete", "degraded"})
-# Signals that put a file's source on the review path. Imports only name other
-# files; a zero-callable file holding nothing else has nothing a span proves.
+# A stylesheet or HTML page with no callable and no segment owes a whole-file
+# span only when a reader reports one of these signals; imports only name other
+# files. Every other language runs code a reader can miss.
+_SIGNAL_GATED_LANGUAGES = frozenset({"css", "html"})
 _REVIEW_SIGNAL_COUNTS = ("entry_points", "security_sinks", "security_sources")
 FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
     {"call_sites", "dataflow", "security_sinks"}
@@ -517,7 +519,7 @@ class StructuralReviewObligation:
 
     *whole_file_reason* says why a whole-file span is the only span that proves
     a review: the function registry is incomplete, the index scanned no
-    function scope, or an indexed file reports signals but no callable.
+    function scope, or an indexed file has no callable to cite.
     *owes_callable* holds when the registry has functions, so a receipt must
     name one. *top_level_spans* are the file's `<top-level>` segments; each is
     discharged by an exact `callable_ref` or by reviewed spans that cover it,
@@ -606,12 +608,11 @@ def structural_review_obligation(
 
     A file whose function registry is incomplete, or whose function-scoped
     dimensions were never scanned, has nothing a partial span can be read
-    against. Every `<top-level>` segment is owed like any other callable. An
-    indexed file with no callable or segment owes a whole-file span only when
-    its readers report an entry point, sink or source: signals with nothing to
-    cite cannot mean nothing to verify. Without one, no reader found anything
-    a span would show was reviewed (a stylesheet, markup, a literal config or
-    language table), so a mandatory span would prove no review.
+    against. Every `<top-level>` segment is owed like any other callable. A
+    file with no callable or segment owes a whole-file span: class attributes,
+    static fields, decorators and line-read scripts run without opening one. A
+    stylesheet or HTML page owes one only when its readers report an entry
+    point, sink or source; without one a span would prove no review.
     """
     if _safe_int(file_row.get("loc")) <= 0:
         return StructuralReviewObligation()
@@ -628,9 +629,12 @@ def structural_review_obligation(
         analysis_status in _INDEXED_STRUCTURAL_STATUSES
         and total_functions <= 0
         and not top_level_spans
-        and _carries_review_signal(file_row)
+        and (
+            file_row.get("language") not in _SIGNAL_GATED_LANGUAGES
+            or _carries_review_signal(file_row)
+        )
     ):
-        reason = "registry holds no callable for this file's signals"
+        reason = "registry holds no callable for this file"
     return StructuralReviewObligation(
         whole_file_reason=reason,
         owes_callable=total_functions > 0,
@@ -701,7 +705,7 @@ def structural_review_gaps(
             f"""
             SELECT id, loc, total_functions, total_entry_points, total_sinks,
                    structural_signal_counts_json, structural_analysis_status,
-                   structural_unavailable_dimensions_json,
+                   language, structural_unavailable_dimensions_json,
                    structural_truncated_dimensions_json
             FROM code_files
             WHERE engagement_id = ? AND id IN ({placeholders})

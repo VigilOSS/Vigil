@@ -300,10 +300,11 @@ cover a `<top-level>` segment without citing it. Naming a function never covers 
 
 Only a whole-file reviewed span can prove the manual source review (and it must still name every
 function it overlaps) when structural analysis is unsupported, the function dimension is truncated
-or unavailable, the index scanned no function scope, or the indexed file reports an entry point,
-sink or source but holds no callable and no `<top-level>` segment. When `<top-level>` is a file's
-only callable, every reviewed span must cover the lines of every segment the receipt does not cite.
-A partial span there cannot prove that omitted source is non-callable or was read:
+or unavailable, the index scanned no function scope, or the indexed file holds no callable and no
+`<top-level>` segment (a CSS or HTML file only when it reports an entry point, sink or source).
+When `<top-level>` is a file's only callable, every reviewed span must cover the lines of every
+segment the receipt does not cite. A partial span there cannot prove that omitted source is
+non-callable or was read:
 
 - `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
 - `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
