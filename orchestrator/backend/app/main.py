@@ -13,6 +13,8 @@ from pathlib import Path
 
 from anyio import to_thread
 from fastapi import FastAPI, Request, WebSocket, WebSocketDisconnect
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
 from .api.activity import router as activity_router
@@ -30,6 +32,7 @@ from .api.remediation import router as remediation_router
 from .api.submissions import router as submissions_router
 from .config import settings
 from .db import database_readiness_flags, get_connection, init_db
+from .json_response import LosslessJSONResponse
 from .request_diagnostics import RequestDiagnostics, RequestDiagnosticsMiddleware
 from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
@@ -378,6 +381,15 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 app.add_middleware(RequestDiagnosticsMiddleware, diagnostics=request_diagnostics)
+
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error(
+    _request: Request, exc: RequestValidationError
+) -> JSONResponse:
+    return LosslessJSONResponse(
+        status_code=422, content={"detail": jsonable_encoder(exc.errors())}
+    )
 
 
 @app.exception_handler(sqlite3.OperationalError)

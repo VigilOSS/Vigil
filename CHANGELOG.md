@@ -39,7 +39,10 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   File-status projection reuses the current queue attempt instead of repeatedly validating
   its retained receipt history.
 - PHP include candidate lookup performs linear deduplication. Citation diagnostics share
-  source-path rosters and nearest-path results, and compact artifact reads project metadata.
+  source-path and basename indexes and nearest-path results; readiness avoids spelling
+  searches that cannot affect its citation blockers. Compact artifact reads project metadata.
+- Validation errors, activity responses and WebSocket notifications encode lone Unicode
+  surrogates losslessly, keeping rejection details and stored activity metadata readable.
 
 ### Changed
 

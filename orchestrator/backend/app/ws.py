@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 from collections import defaultdict
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -60,7 +61,14 @@ class EngagementBroadcaster:
         try:
             while True:
                 payload = await subscriber.pending.get()
-                await websocket.send_json(payload)
+                try:
+                    await websocket.send_json(payload)
+                except UnicodeEncodeError:
+                    # A text frame cannot encode lone surrogates; JSON escapes
+                    # preserve authored values without dropping the subscriber.
+                    await websocket.send_text(
+                        json.dumps(payload, separators=(",", ":"), ensure_ascii=True)
+                    )
         except asyncio.CancelledError:
             raise
         except Exception:

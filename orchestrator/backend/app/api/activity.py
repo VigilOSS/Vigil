@@ -14,6 +14,7 @@ import anyio
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
 
+from ..json_response import LosslessJSONResponse
 from ..services import activity as activity_service
 from ..services import activity_feed
 from ..services.engagements import get_engagement_or_404
@@ -107,11 +108,11 @@ def list_activity_feed(
     before: str = Query(default="", max_length=128),
     after: str = Query(default="", max_length=128),
     limit: int = Query(default=100, ge=1, le=500),
-) -> ActivityFeedResponse:
+) -> LosslessJSONResponse:
     """Audit-log entries merged with structured events, newest first."""
     engagement = get_engagement_or_404(engagement_key)
     categories = [part.strip() for value in category for part in value.split(",") if part.strip()]
-    return ActivityFeedResponse(
+    response = ActivityFeedResponse(
         **activity_feed.list_activity_feed(
             engagement.id,
             categories=categories or None,
@@ -124,6 +125,7 @@ def list_activity_feed(
             limit=limit,
         )
     )
+    return LosslessJSONResponse(response.model_dump(mode="json", by_alias=True))
 
 
 @router.get("/activity-entries", response_model=ListActivityEntriesResponse)
@@ -135,7 +137,7 @@ def list_activity_entries(
     until: str = Query(default="", max_length=64),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
-) -> ListActivityEntriesResponse:
+) -> LosslessJSONResponse:
     engagement = get_engagement_or_404(engagement_key)
     result = activity_service.list_activity_entries(
         engagement.id,
@@ -146,16 +148,17 @@ def list_activity_entries(
         limit=limit,
         offset=offset,
     )
-    return ListActivityEntriesResponse(
+    response = ListActivityEntriesResponse(
         total=result["total"],
         items=[ActivityEntryRecord(**item) for item in result["items"]],
     )
+    return LosslessJSONResponse(response.model_dump(mode="json", by_alias=True))
 
 
-@router.post("/activity-entries", status_code=status.HTTP_201_CREATED)
+@router.post("/activity-entries", status_code=status.HTTP_201_CREATED, response_model=dict[str, Any])
 async def create_activity_entry(
     engagement_key: str, request: ActivityEntryRecordRequest
-) -> dict[str, Any]:
+) -> LosslessJSONResponse:
     engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
     record = await anyio.to_thread.run_sync(
         functools.partial(
@@ -173,4 +176,7 @@ async def create_activity_entry(
         )
     )
     await _broadcast(engagement.key, "activity_entry", record)
-    return record
+    response = ActivityEntryRecord(**record)
+    return LosslessJSONResponse(
+        response.model_dump(mode="json", by_alias=True), status_code=status.HTTP_201_CREATED
+    )

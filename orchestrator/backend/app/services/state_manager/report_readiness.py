@@ -184,7 +184,8 @@ def _details_citation_blockers(
     rosters: dict[tuple[int, int], bool] = {}
     outside_by_repo: dict[int, set[str]] = {}
     roster_cache: dict[tuple[int, int], list[str]] = {}
-    closest_cache: dict[tuple[int, int, str], str | None] = {}
+    basename_cache: dict[tuple[int, int], dict[str, list[str]]] = {}
+    closest_cache: dict[tuple[int, int, str, bool], str | None] = {}
     for row in candidates:
         binding = code_snapshot_binding(row)
         if binding is None:
@@ -224,7 +225,8 @@ def _details_citation_blockers(
                     continue
                 file_row, problem = snapshot_location_problem(
                     connection, engagement_id, repo_id, generation, path, line,
-                    end_line=end_line, roster_cache=roster_cache, closest_cache=closest_cache,
+                    end_line=end_line, roster_cache=roster_cache, basename_cache=basename_cache,
+                    closest_cache=closest_cache, same_basename_only=True,
                 )
                 if not problem:
                     continue
@@ -233,7 +235,8 @@ def _details_citation_blockers(
                     if file_row is not None
                     else closest_snapshot_path(
                         connection, engagement_id, repo_id, generation, path,
-                        roster_cache=roster_cache, closest_cache=closest_cache,
+                        roster_cache=roster_cache, basename_cache=basename_cache,
+                        closest_cache=closest_cache, same_basename_only=True,
                     )
                 )
                 if file_row is None and (

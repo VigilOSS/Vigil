@@ -106,6 +106,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   its async facade lets HTTP summary/report readers join without occupying request workers.
 - `orchestrator/backend/app/request_diagnostics.py` owns long HTTP request tracking and independent
   all-thread stack capture; `main.py` owns its ASGI/lifespan integration.
+- `orchestrator/backend/app/json_response.py` owns lossless JSON escaping for validation errors
+  and the activity API; activity response models validate Python values before transport rendering.
 - `artifact_index.py:prepared_artifact_health` owns root-pinned evidence observations;
   `state_manager/proofs.py` prepares health before finding writes and reconciles file identities
   and database receipt ownership before commit. Nested writers retain their atomic boundary.

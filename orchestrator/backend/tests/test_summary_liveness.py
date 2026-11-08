@@ -332,7 +332,7 @@ def test_tcp_summary_recovers_after_publication_failure_and_disconnected_joiners
         record = original_lookup(eid)
         with count_lock:
             lookups += 1
-            if lookups >= 17:
+            if lookups >= 46:
                 joined.set()
         return record
 
@@ -348,6 +348,7 @@ def test_tcp_summary_recovers_after_publication_failure_and_disconnected_joiners
 
     class Server(uvicorn.Server):
         async def startup(self, sockets=None):
+            anyio.to_thread.current_default_thread_limiter().total_tokens = 16
             await super().startup(sockets=sockets)
             started.set()
 
@@ -377,11 +378,15 @@ def test_tcp_summary_recovers_after_publication_failure_and_disconnected_joiners
                 failed = await reader.get(route)
                 assert failed.status_code == 500
                 requests = [
-                    asyncio.create_task(reader.get(route, timeout=1)) for _ in range(16)
+                    asyncio.create_task(reader.get(route, timeout=1)) for _ in range(45)
                 ]
                 try:
                     assert await asyncio.to_thread(entered.wait, 2)
                     assert await asyncio.to_thread(joined.wait, 2)
+                    probe = await asyncio.wait_for(
+                        reader.get("/readyz", timeout=0.7), timeout=0.9
+                    )
+                    assert probe.status_code == 200, probe.text
                     outcomes = await asyncio.gather(*requests, return_exceptions=True)
                     assert all(
                         isinstance(value, httpx.ReadTimeout) for value in outcomes
