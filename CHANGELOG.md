@@ -32,12 +32,14 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - Transport failures after a mutation starts sending report an uncertain outcome for
   reconciliation. Idle closed connections are replaced before writes, and read retries
   retain their retry behavior.
-- Append-only finding notes retain their commutative behavior without an automatic
-  row-version read. Cap errors name stored and incoming lengths and the rotation command.
+- Implicit append-only finding notes merge with the latest row under the canonical writer,
+  while explicit version and merge-ownership checks stay enforced. Receipt health is projected after commit
+  against the captured decision. Cap errors name stored and incoming lengths and the
+  rotation command.
 - Coverage queries support large file sets without exceeding SQLite's parameter limit.
   A covering module index and per-operation rollups shorten queue writer transactions.
-  File-status projection reuses the current queue attempt instead of repeatedly validating
-  its retained receipt history.
+  File-status and aggregate review queries select current queue attempts without repeatedly
+  validating their retained history.
 - PHP include candidate lookup performs linear deduplication. Citation diagnostics share
   source-path and basename indexes and nearest-path results; readiness avoids spelling
   searches that cannot affect its citation blockers. Compact artifact reads project metadata.

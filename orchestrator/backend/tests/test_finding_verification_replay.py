@@ -14,6 +14,10 @@ from tests.test_finding_code_snapshot_provenance import (
 
 @pytest.fixture
 def verification(client, isolate_settings):
+    return _prepare_verification(client, isolate_settings)
+
+
+def _prepare_verification(client, isolate_settings):
     binding = _seed_repo(client, isolate_settings)
     _dispatch(client, "acme-hunter")
     assert _record(client, _finding_payload("VA-701", binding,

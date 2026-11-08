@@ -61,6 +61,8 @@ from .proofs import (
     OPERATOR_AUTHORITY_PROVENANCE_KEY,
     SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY,
     TERMINAL_VERIFICATION_STATUSES,
+    _apply_live_evidence_health,
+    _capture_current_proof_receipts_for_finding,
     finding_write_connection,
     operator_authority_stamp,
     proof_receipts_for_finding,
@@ -1721,6 +1723,8 @@ def create_finding(
     verification_operator_authority: bool = False,
     run_candidate: dict[str, Any] | None = None,
     change_operation: str | None = None,
+    _implicit_notes_append: bool = False,
+    _notes_append_identity: tuple[int, bool, int | None] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     canonical_location = str(canonical_location).strip()
@@ -1774,6 +1778,29 @@ def create_finding(
     )
     with finding_write_connection(engagement.id, decision_receipt_ids) as connection:
         connection.execute("BEGIN IMMEDIATE")
+        if _implicit_notes_append:
+            # patch_finding has admitted only an unguarded notes append. Its
+            # initial read is not the source of truth for inherited columns:
+            # a verifier, relocation or material edit may have committed since.
+            latest_slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
+            latest = connection.execute(
+                "SELECT * FROM assessment_findings WHERE engagement_id=? AND slug=?",
+                (engagement.id, latest_slug),
+            ).fetchone()
+            if _notes_append_identity != (
+                int(latest["id"]),
+                _row_workflow_status(latest) == "merged",
+                latest["merged_into_finding_id"],
+            ):
+                # Ordinary field edits commute with an append. A merge changes
+                # which finding owns the issue, so a caller that validated the
+                # prior source/target must reconcile that boundary explicitly.
+                _raise_stale_finding_conflict()
+            title = str(latest["title"])
+            canonical_location = str(latest["canonical_location"])
+            incoming_severity = _normalize_severity(str(latest["severity"]))
+            incoming_workflow_status = _row_workflow_status(latest)
+            incoming_verification_status = _row_verification_status(latest)
         if dispatch_agent_id is not None:
             editor = connection.execute(
                 'SELECT id FROM assessment_dispatches WHERE engagement_id=? AND agent_id=?',
@@ -1788,12 +1815,13 @@ def create_finding(
         # category guards, and the re-mint guard all key on it, so normalising
         # afterwards would leave each of them comparing a different string.
         authored_canonical_location = canonical_location
-        canonical_location = _normalize_file_location(
-            connection,
-            engagement.id,
-            canonical_location,
-            repo_id=(incoming_binding or {}).get("repo_id"),
-        )
+        if not _implicit_notes_append:
+            canonical_location = _normalize_file_location(
+                connection,
+                engagement.id,
+                canonical_location,
+                repo_id=(incoming_binding or {}).get("repo_id"),
+            )
         if canonical_location != authored_canonical_location:
             # Keep what the author wrote; the audit trail should not be rewritten
             # by a normalisation the author never saw.
@@ -2260,7 +2288,7 @@ def create_finding(
                 "code_snapshot_status_before": code_snapshot_status_before,
                 "code_snapshot_status_after": code_snapshot_status,
             }
-        duplicate_advisories = _duplicate_advisories(
+        duplicate_advisories = [] if _implicit_notes_append else _duplicate_advisories(
             connection,
             engagement.id,
             finding_id=int(finding["id"]),
@@ -2534,7 +2562,11 @@ def create_finding(
                 operator_authority=verification_operator_authority,
             )
         else:
-            verification_evidence["proof_receipts"] = proof_receipts_for_finding(
+            receipt_projection = (
+                _capture_current_proof_receipts_for_finding
+                if _implicit_notes_append else proof_receipts_for_finding
+            )
+            verification_evidence["proof_receipts"] = receipt_projection(
                 connection, engagement.id, int(finding["id"])
             )
             # The authority behind the verdict this write left standing, so the
@@ -2551,6 +2583,19 @@ def create_finding(
                 finding_slug=str(finding["slug"]),
                 reason=str(run_candidate["reason"]),
                 proof_receipt_ids=list(run_candidate["proof_receipt_ids"]),
+            )
+    if _implicit_notes_append:
+        with _common.get_connection() as connection:
+            verification_evidence["proof_receipts"] = _apply_live_evidence_health(
+                connection, engagement.id, verification_evidence["proof_receipts"]
+            )
+            duplicate_advisories = _duplicate_advisories(
+                connection, engagement.id, finding_id=int(finding["id"]),
+                canonical_location=str(finding["canonical_location"] or ""),
+                root_cause_key=str(finding["root_cause_key"] or ""),
+                defect_family=str(finding["defect_family"] or ""),
+                auth_context=str(finding["auth_context"] or ""),
+                details=_json_object(finding["details_json"]),
             )
     if evidence_ref:
         # This runs in a separate transaction from the finding INSERT/UPDATE
@@ -2754,6 +2799,24 @@ def patch_finding(
             detail="replacement modes require a positive expected_row_version",
         )
 
+    implicit_notes_append = (
+        expected_row_version is None
+        and notes_mode == "append" and isinstance(notes, str) and bool(notes)
+        and details_mode != "replace"
+        and not allow_verification_mutation and not verification_operator_authority
+        and not verification_proof_receipt_ids
+        and verification_counter_check is None and verification_confirm_check is None
+        and verification_severity_variance is None and verification_normal_severity_band is None
+        and verification_next_test is None
+        and transition_action is None and transition_reason_code != "claim_retracted"
+        and all(value is None for value in (
+            title, severity, workflow_status, verification_status, defect_family,
+            root_cause_key, auth_context, canonical_location, summary, evidence_ref,
+            details, provenance, evidence_type, submission_status, submission_platform,
+            submission_ref, submission_url,
+        ))
+    )
+
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         slug = _resolve_existing_finding_slug(connection, engagement.id, slug)
@@ -2859,6 +2922,7 @@ def patch_finding(
         transition_actor=source_name,
         dispatch_agent_id=dispatch_agent_id,
         expected_row_version=(
+            None if implicit_notes_append else
             current_row_version if expected_row_version is None else expected_row_version
         ),
         notes_mode=notes_mode,
@@ -2874,6 +2938,11 @@ def patch_finding(
         verification_next_test=verification_next_test,
         verification_operator_authority=verification_operator_authority,
         change_operation=change_operation,
+        _implicit_notes_append=implicit_notes_append,
+        _notes_append_identity=(
+            (int(existing["id"]), existing_workflow == "merged", existing["merged_into_finding_id"])
+            if implicit_notes_append else None
+        ),
     )
     result["finding"]["verification_invalidated"] = bool(result.get("verification_invalidated"))
     return result

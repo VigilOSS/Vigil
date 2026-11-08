@@ -968,6 +968,32 @@ def proof_receipts_for_findings(
     engagement_id: int,
     finding_ids: Iterable[int],
 ) -> dict[int, list[dict[str, Any]]]:
+    """Current decision receipts, always including live evidence health."""
+    result = _current_proof_receipt_records(connection, engagement_id, finding_ids)
+    _apply_live_evidence_health(
+        connection, engagement_id,
+        [record for records in result.values() for record in records],
+    )
+    return result
+
+
+def _capture_current_proof_receipts_for_finding(
+    connection: sqlite3.Connection, engagement_id: int, finding_id: int,
+) -> list[dict[str, Any]]:
+    """Writer-only capture; caller must attest these records after commit.
+
+    Capturing before releasing the writer binds the projection to that decision,
+    even if another verifier commits before its live evidence check completes.
+    These un-attested records must never be returned directly to a caller.
+    """
+    return _current_proof_receipt_records(connection, engagement_id, [finding_id])[finding_id]
+
+
+def _current_proof_receipt_records(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding_ids: Iterable[int],
+) -> dict[int, list[dict[str, Any]]]:
     """Receipts of the latest decision, including receipt-free authority events.
 
     Presentation edits do not create decisions and keep the preceding proof.
@@ -1031,7 +1057,7 @@ def proof_receipts_for_findings(
     ).fetchall()
     raw_records = [dict(row) for row in rows]
     linked_ids = [record.pop("linked_finding_id") for record in raw_records]
-    records = _serialize_receipts(connection, engagement_id, raw_records)
+    records = [_serialize_receipt(record) for record in raw_records]
     for finding_id, record in zip(linked_ids, records):
         result[int(finding_id)].append(record)
     return result

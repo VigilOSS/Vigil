@@ -2210,13 +2210,20 @@ def _successful_terminal_review_row_sql(
     """
 
 
-def _latest_current_queue_attempt_sql(queue_alias: str, repos_alias: str) -> str:
+def _latest_current_queue_attempt_sql(
+    queue_alias: str, repos_alias: str, *, files_alias: str | None = None
+) -> str:
+    # When a caller already equates the attempt to an outer file, correlate
+    # latest-id lookup with that file so SQLite evaluates it once per file,
+    # rather than once for every historical candidate attempt.
+    identity_alias = files_alias or queue_alias
+    file_column = "id" if files_alias is not None else "file_id"
     return f"""
         {queue_alias}.id = (
             SELECT MAX(latest_attempt.id)
             FROM code_analysis_queue AS latest_attempt
-            WHERE latest_attempt.engagement_id = {queue_alias}.engagement_id
-              AND latest_attempt.file_id = {queue_alias}.file_id
+            WHERE latest_attempt.engagement_id = {identity_alias}.engagement_id
+              AND latest_attempt.file_id = {identity_alias}.{file_column}
               AND latest_attempt.repo_generation = {repos_alias}.active_generation
               AND latest_attempt.source_superseded_at IS NULL
         )
@@ -2439,7 +2446,7 @@ def _current_terminal_review_exists_sql(*, allow_accounted_skip: bool) -> str:
               AND completed_review.repo_generation = completed_review_repo.active_generation
               AND completed_review.source_superseded_at IS NULL
               AND ({_latest_current_queue_attempt_sql(
-                  "completed_review", "completed_review_repo"
+                  "completed_review", "completed_review_repo", files_alias="files"
               )})
               AND ({_no_superseded_active_attempt_sql(
                   "completed_review", "completed_review_repo"
