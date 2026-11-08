@@ -348,6 +348,9 @@ def test_an_append_that_would_cross_the_cap_is_refused_loudly(client, isolate_se
     assert refused.status_code == 400, refused.text
     detail = refused.json()["detail"]
     assert "past the" in detail and "--notes-replace" in detail
+    assert "24005 of 20000" in detail
+    assert "19-character append" in detail
+    assert "--notes-rotate" in detail
 
 
 def test_a_row_already_over_the_cap_can_be_rewritten_whole(client, isolate_settings):

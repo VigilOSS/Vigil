@@ -3900,6 +3900,13 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
             )
     file_columns = _table_columns(connection, "code_files")
 
+    # Queue lifecycle updates roll up only their affected modules. Keep these
+    # reads bounded by the module, including on upgraded engagement databases.
+    connection.execute(
+        "CREATE INDEX IF NOT EXISTS idx_code_files_module_rollup "
+        "ON code_files(engagement_id, module_id, retired_at, analysis_status, classification)"
+    )
+
     if repo_columns:
         connection.execute(
             "UPDATE code_repos SET source_origin_path = repo_path WHERE source_origin_path = ''"

@@ -1456,6 +1456,7 @@ def list_code_files(
     classification: str | None = None,
     analysis_status: str | None = None,
     search: str | None = None,
+    file_paths: list[str] | None = None,
     path_prefix: list[str] | None = None,
     path_glob: list[str] | None = None,
     sort: str | None = None,
@@ -1510,6 +1511,9 @@ def list_code_files(
     if search is not None:
         clauses.append("files.file_path LIKE ? ESCAPE '\\'")
         params.append(like_contains(search))
+    if file_paths is not None:
+        clauses.append("files.file_path IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(file_paths))
     path_scope, path_params = _file_path_scope_sql("files", path_prefix, path_glob)
     if path_scope:
         clauses.append(path_scope)
@@ -3148,6 +3152,7 @@ def bulk_create_queue_items(
                     ),
                 )
 
+        affected_modules: set[int] = set()
         for idx, (item, priority) in enumerate(
             zip(items, submitted_priorities, strict=True)
         ):
@@ -3305,7 +3310,9 @@ def bulk_create_queue_items(
                                 detail="updated pending initial queue item",
                             )
                         )
-                        _sync_file_analysis_status(connection, engagement.id, file_id)
+                        _sync_file_analysis_status(
+                            connection, engagement.id, file_id, deferred_modules=affected_modules
+                        )
                         _sync_trigger_status_for_file(connection, engagement.id, file_id)
                         continue
 
@@ -3417,8 +3424,13 @@ def bulk_create_queue_items(
                     ),
                 )
             )
-            _sync_file_analysis_status(connection, engagement.id, file_id)
+            _sync_file_analysis_status(
+                connection, engagement.id, file_id, deferred_modules=affected_modules
+            )
             _sync_trigger_status_for_file(connection, engagement.id, file_id)
+
+        for module_id in sorted(affected_modules):
+            _sync_module_rollup(connection, engagement.id, module_id)
 
         return {
             "mode": normalized_mode,
@@ -3538,6 +3550,16 @@ def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
         "id": int(row["id"]),
         "file_id": int(row["file_id"]),
         "file_path": str(row["file_path"]),
+        "loc": int(row["file_loc"]),
+        "applicable_vuln_classes": _applicable_families_for_file(
+            _json_decode(row["file_slot_types_json"], []),
+            language=str(row["file_language"] or ""), role=str(row["file_role"] or ""),
+        ),
+        "path_suggested_vuln_classes": _path_suggested_families_for_file(
+            _json_decode(row["file_slot_types_json"], []),
+            language=str(row["file_language"] or ""), role=str(row["file_role"] or ""),
+            file_path=str(row["file_path"]),
+        ),
         "classification": str(row["classification"] or ""),
         "analysis_priority": int(row["analysis_priority"]),
         "repo_id": int(row["repo_id"]),
@@ -3583,6 +3605,7 @@ def list_queue_items(
     *,
     status_filter: str | None = None,
     agent_name: str | None = None,
+    item_ids: list[int] | None = None,
     repo_id: int | None = None,
     classification: str | None = None,
     batch_theme: str | None = None,
@@ -3649,6 +3672,9 @@ def list_queue_items(
     if agent_name is not None:
         clauses.append("queue.assigned_agent = ?")
         params.append(agent_name)
+    if item_ids is not None:
+        clauses.append("queue.id IN (SELECT value FROM json_each(?))")
+        params.append(json.dumps(item_ids))
     if current_only:
         statuses = sorted(_QUEUE_STATUSES)
         clauses.append(
@@ -3701,6 +3727,8 @@ def list_queue_items(
     """
     query = f"""
         SELECT queue.*, files.file_path, files.classification,
+               files.loc AS file_loc, files.language AS file_language,
+               files.role AS file_role, files.slot_types_json AS file_slot_types_json,
                files.analysis_priority, files.repo_id, repos.repo_key,
                repos.repo_role,
                {_lease_activity_sql('queue')} AS lease_activity_at,
@@ -3860,8 +3888,13 @@ def fetch_queue_items(
         file_rows = _get_file_rows(connection, engagement.id, {int(row["file_id"]) for row in rows})
         repo_rows = _get_repo_rows(connection, engagement.id, {int(file_rows[int(row["file_id"])]["repo_id"]) for row in rows})
 
+        affected_modules: set[int] = set()
         for file_id in {int(row["file_id"]) for row in rows}:
-            _sync_file_analysis_status(connection, engagement.id, file_id)
+            _sync_file_analysis_status(
+                connection, engagement.id, file_id, deferred_modules=affected_modules
+            )
+        for module_id in sorted(affected_modules):
+            _sync_module_rollup(connection, engagement.id, module_id)
         lead_bindings = _open_lead_bindings_by_file(
             connection, engagement.id, {int(row["file_id"]) for row in rows}
         )
@@ -4629,6 +4662,47 @@ def _require_correctable_completion(
         )
 
 
+def _completed_queue_retry(
+    connection,
+    engagement_id: int,
+    queue_row: dict[str, Any],
+    *,
+    agent_name: str,
+    lease_token: str,
+    disposition: str,
+    notes: str,
+    cwe_coverage: list[dict[str, Any]],
+    skip_reason: str,
+) -> dict[str, Any]:
+    """Reconcile an exact completed attempt without changing or re-auditing it."""
+    _require_queue_lease(connection, {int(queue_row["id"]): queue_row}, agent_name=agent_name,
+                         lease_token=lease_token, action="reconcile completion")
+    _require_queue_generation(connection, engagement_id, {int(queue_row["id"]): queue_row},
+                              action="reconcile completion", lock=False)
+    if (
+        str(queue_row.get("disposition") or "") != disposition
+        or str(queue_row.get("analysis_notes") or "") != notes
+        or str(queue_row.get("skip_reason") or "") != skip_reason
+        or _json_list_text(_json_decode(queue_row.get("cwe_coverage_json"), [])) != _json_list_text(cwe_coverage)
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="completed queue item differs from this closeout; inspect progress before retrying",
+        )
+    file_row = _get_file_rows(connection, engagement_id, {int(queue_row["file_id"])})[
+        int(queue_row["file_id"])
+    ]
+    return {
+        "updated": 0,
+        "total": 1,
+        "already_applied": True,
+        "coverage_integrity": _compute_coverage_integrity(
+            connection, engagement_id, int(queue_row["id"]), int(queue_row["file_id"]),
+            _safe_int(file_row.get("total_functions", 0)), cwe_coverage,
+        ),
+    }
+
+
 def complete_queue_items(
     engagement_id: int,
     item_ids: list[int],
@@ -4675,10 +4749,27 @@ def complete_queue_items(
     finding_associations: dict[str, dict[str, Any]] = {}
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        queue_row = next(iter(queue_rows.values()))
+        if str(queue_row["status"]) == "done":
+            return _completed_queue_retry(
+                connection, engagement.id, queue_row, agent_name=agent_name,
+                lease_token=lease_token, disposition=disposition, notes=notes,
+                cwe_coverage=normalized_cwe_coverage, skip_reason=skip_reason,
+            )
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
         _require_queue_lease(connection, queue_rows, agent_name=agent_name, lease_token=lease_token, action="complete")
         _require_queue_generation(connection, engagement.id, queue_rows, action="complete")
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         queue_row = next(iter(queue_rows.values()))
+        if str(queue_row["status"]) == "done":
+            return _completed_queue_retry(
+                connection, engagement.id, queue_row, agent_name=agent_name,
+                lease_token=lease_token, disposition=disposition, notes=notes,
+                cwe_coverage=normalized_cwe_coverage, skip_reason=skip_reason,
+            )
+        _require_queue_status(queue_rows, expected_status="processing", action="complete")
+        _require_queue_lease(connection, queue_rows, agent_name=agent_name,
+                             lease_token=lease_token, action="complete")
         file_row = _get_file_rows(connection, engagement.id, {int(queue_row["file_id"])})[
             int(queue_row["file_id"])
         ]
@@ -6710,9 +6801,11 @@ def _load_variant_receipt_projection(
     params: tuple[Any, ...] = (engagement_id, _VARIANT_DISPATCH_ROLE, engagement_id)
     if restrict_to_files:
         file_ids = [int(row["id"]) for row in file_rows]
-        placeholders = ",".join("?" for _ in file_ids)
-        query = query.replace("ORDER BY current_files.id", f"AND current_files.id IN ({placeholders}) ORDER BY current_files.id")
-        params += tuple(file_ids)
+        query = query.replace(
+            "ORDER BY current_files.id",
+            "AND current_files.id IN (SELECT value FROM json_each(?)) ORDER BY current_files.id",
+        )
+        params += (json.dumps(file_ids),)
     raw_receipts = connection.execute(query, params).fetchall() if file_rows else []
     for raw_row in raw_receipts:
         row = dict(raw_row)
@@ -8095,7 +8188,7 @@ def code_coverage_summary(
                 _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
 
         if file_meta:
-            placeholders = ",".join("?" for _ in file_meta)
+            file_ids_json = json.dumps(list(file_meta))
             current_result_receipt = _current_result_receipt_sql(
                 "results",
                 "result_queue",
@@ -8114,10 +8207,10 @@ def code_coverage_summary(
                 JOIN code_repos AS result_repos
                   ON result_repos.id = result_files.repo_id
                 WHERE results.engagement_id = ?
-                  AND results.file_id IN ({placeholders})
+                  AND results.file_id IN (SELECT value FROM json_each(?))
                   AND ({current_result_receipt})
                 """,
-                (engagement.id, *file_meta.keys()),
+                (engagement.id, file_ids_json),
             ).fetchall()
             for drow in direct_rows:
                 fid = int(drow["file_id"])
@@ -8199,7 +8292,7 @@ def code_coverage_summary(
     if file_meta:
         with get_connection() as connection:
             file_id_list = list(file_meta.keys())
-            placeholders = ",".join("?" for _ in file_id_list)
+            file_ids_json = json.dumps(list(file_id_list))
             current_result_receipt = _current_result_receipt_sql(
                 "results",
                 "result_queue",
@@ -8219,11 +8312,11 @@ def code_coverage_summary(
                 JOIN code_repos AS result_repos
                   ON result_repos.id = result_files.repo_id
                 WHERE results.engagement_id = ?
-                  AND results.file_id IN ({placeholders})
+                  AND results.file_id IN (SELECT value FROM json_each(?))
                   AND ({current_result_receipt})
                 GROUP BY results.file_id
                 """,
-                (engagement.id, *file_id_list),
+                (engagement.id, file_ids_json),
             ).fetchall()
             result_counts = {
                 int(r["file_id"]): {
@@ -8247,12 +8340,12 @@ def code_coverage_summary(
                 JOIN code_repos AS result_repos
                   ON result_repos.id = result_files.repo_id
                 WHERE results.engagement_id = ?
-                  AND links.file_id IN ({placeholders})
+                  AND links.file_id IN (SELECT value FROM json_each(?))
                   AND ({current_result_receipt})
                   AND ({function_callable_link_sql("links")})
                 GROUP BY links.file_id
                 """,
-                (engagement.id, *file_id_list),
+                (engagement.id, file_ids_json),
             ).fetchall()
             for row in callable_count_rows:
                 fid = int(row["file_id"])
@@ -8263,13 +8356,13 @@ def code_coverage_summary(
                     row["distinct_structural_callables"]
                 )
             file_func_rows = connection.execute(
-                f"""
+                """
                 SELECT id, loc, total_functions, structural_analysis_status,
                        structural_unavailable_dimensions_json
                 FROM code_files
-                WHERE engagement_id = ? AND id IN ({placeholders})
+                WHERE engagement_id = ? AND id IN (SELECT value FROM json_each(?))
                 """,
-                (engagement.id, *file_id_list),
+                (engagement.id, file_ids_json),
             ).fetchall()
             file_total_functions = {
                 int(r["id"]): _safe_int(r["total_functions"]) for r in file_func_rows
@@ -11309,7 +11402,7 @@ def code_coverage_cwe_detail(
         cwe_by_file: dict[int, dict[str, dict[str, Any]]] = {}  # file_id -> family -> merged entry
         result_effort_by_file: dict[int, dict[str, int]] = {}
         if file_ids:
-            placeholders = ",".join("?" for _ in file_ids)
+            file_ids_json = json.dumps(list(file_ids))
             successful_queue_review = _successful_terminal_review_row_sql("queue")
             queue_done_rows = connection.execute(
                 f"""
@@ -11322,14 +11415,14 @@ def code_coverage_cwe_detail(
                   ON queue_repos.id = queue_files.repo_id
                  AND queue_repos.engagement_id = queue_files.engagement_id
                 WHERE queue.engagement_id = ?
-                  AND queue.file_id IN ({placeholders})
+                  AND queue.file_id IN (SELECT value FROM json_each(?))
                   AND queue.repo_generation = queue_repos.active_generation
                   AND queue.source_superseded_at IS NULL
                   AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
                   AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
                   AND ({successful_queue_review})
                 """,
-                (engagement.id, *file_ids),
+                (engagement.id, file_ids_json),
             ).fetchall()
             for qr in queue_done_rows:
                 fid = int(qr["file_id"])
@@ -11354,10 +11447,10 @@ def code_coverage_cwe_detail(
                 JOIN code_repos AS result_repos
                   ON result_repos.id = result_files.repo_id
                 WHERE results.engagement_id = ?
-                  AND results.file_id IN ({placeholders})
+                  AND results.file_id IN (SELECT value FROM json_each(?))
                   AND ({current_result_receipt})
                 """,
-                (engagement.id, *file_ids),
+                (engagement.id, file_ids_json),
             ).fetchall()
             for dr in direct_rows:
                 fid = int(dr["file_id"])
@@ -11380,11 +11473,11 @@ def code_coverage_cwe_detail(
                 JOIN code_repos AS result_repos
                   ON result_repos.id = result_files.repo_id
                 WHERE results.engagement_id = ?
-                  AND results.file_id IN ({placeholders})
+                  AND results.file_id IN (SELECT value FROM json_each(?))
                   AND ({current_result_receipt})
                 GROUP BY results.file_id
                 """,
-                (engagement.id, *file_ids),
+                (engagement.id, file_ids_json),
             ).fetchall()
             result_effort_by_file = {
                 int(row["file_id"]): {
@@ -11409,12 +11502,12 @@ def code_coverage_cwe_detail(
                 JOIN code_repos AS result_repos
                   ON result_repos.id = result_files.repo_id
                 WHERE results.engagement_id = ?
-                  AND links.file_id IN ({placeholders})
+                  AND links.file_id IN (SELECT value FROM json_each(?))
                   AND ({current_result_receipt})
                   AND ({function_callable_link_sql("links")})
                 GROUP BY links.file_id
                 """,
-                (engagement.id, *file_ids),
+                (engagement.id, file_ids_json),
             ).fetchall()
             for row in callable_effort_rows:
                 fid = int(row["file_id"])

@@ -486,7 +486,7 @@ def test_ingest_language_detection_matches_structural_index(
     module = _load_command("code_ingest.py", f"test_ingest_language_{expected}_{filename}")
     from assess.lib.treesitter_index import language_for_file
 
-    assert module._detect_language(filename) == expected
+    assert module._captured_language(filename, SimpleNamespace(header="<?php\n" if expected == "php" else "", head="<?php\n" if expected == "php" else "")) == expected
     assert language_for_file(filename) == expected
 
 
@@ -499,12 +499,12 @@ def test_ingest_classifies_blade_templates_ahead_of_the_php_suffix(filename: str
     from assess.lib.code_languages import canonical_backend_language, detect_language
     from assess.lib.treesitter_index import language_for_file
 
-    assert module._detect_language(filename) == "blade"
+    assert module._captured_language(filename, SimpleNamespace(header="", head="")) == "blade"
     assert detect_language(filename) == "blade"
     assert canonical_backend_language("blade") == "blade"
     assert language_for_file(filename) == "blade"
     # The single-suffix rule still owns every other `.php` file.
-    assert module._detect_language("app/Http/Controllers/UserController.php") == "php"
+    assert module._captured_language("app/Http/Controllers/UserController.php", SimpleNamespace(header="", head="")) == "php"
 
 
 @pytest.mark.parametrize("filename", ["Inspect.ps1", "Module.PSM1", "Data.psd1"])
@@ -513,7 +513,7 @@ def test_ingest_classifies_powershell_extensions(filename: str) -> None:
     from assess.lib.code_languages import canonical_backend_language, detect_language
     from assess.lib.treesitter_index import language_for_file
 
-    assert module._detect_language(filename) == "powershell"
+    assert module._captured_language(filename, SimpleNamespace(header="", head="")) == "powershell"
     assert detect_language(filename) == "powershell"
     assert canonical_backend_language("powershell") == "powershell"
     # PowerShell now has a lightweight extractor, so ingest classification and
@@ -865,7 +865,7 @@ class _BackendConnection:
 @pytest.mark.parametrize(
     "scenario",
     [
-        "landed", "landed-then-stale", "not-landed", "never-sent",
+        "landed", "landed-then-stale", "not-landed", "never-sent", "request-start-failed",
         "pending-reingest", "taken-over", "snapshot-mismatch", "role-mismatch",
     ],
 )
@@ -873,7 +873,7 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
     client, isolate_settings, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, scenario: str
 ) -> None:
     from app import db as db_module
-    from assess.lib.client import AssessError, AssessmentClient
+    from assess.lib.client import AssessError, AssessmentClient, AssessTransportError
     from tests.test_code_analysis_api import _verified_repo_payload
     from tests.test_engagements_api import write_engagement
 
@@ -951,7 +951,8 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
         "landed": lambda *args: forward(*args) and None,
         "landed-then-stale": lambda *args: forward(*args) and forward(*args),
         "not-landed": lambda *_args: None,
-        "never-sent": refuse,
+        "never-sent": lambda *_args: None,
+        "request-start-failed": refuse,
         "pending-reingest": lambda *_args: None,
         "taken-over": take_over,
         "snapshot-mismatch": other_snapshot,
@@ -960,6 +961,18 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
     hook = [on_commit[scenario]]
 
     class BackendClient(AssessmentClient):
+        def _request_raw(self, method, path, body=None, **kwargs):
+            if scenario == "never-sent" and method == "POST" and path.endswith("/refresh/commit"):
+                # Trace the attempted operation, but fail before request() can
+                # transmit any bytes. An exception inside request() instead
+                # represents an uncertain write and must trigger reconciliation.
+                requests.append((method, path, body))
+                raise AssessTransportError(
+                    "Failed after 1 attempts: refused before transmission",
+                    request_sent=False,
+                )
+            return super()._request_raw(method, path, body=body, **kwargs)
+
         def _get_conn(self, connect_timeout: float = 2.0):
             if self._conn is None:
                 self._conn = _BackendConnection(client, lambda *args: hook[0](*args), requests)
@@ -997,6 +1010,7 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
         "not-landed": "still pending",
         "pending-reingest": "still pending",
         "never-sent": "Failed after 1 attempts",
+        "request-start-failed": "still pending",
         "taken-over": "did not land",
         "snapshot-mismatch": "did not land",
         "role-mismatch": "not the requested 'reference'",
@@ -1012,7 +1026,9 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
     after_commit = requests[commit_index + 1:]
     assert any(method == "GET" for method, _path, _body in after_commit) == (scenario != "never-sent")
     assert not any(path.endswith("/lsp-config") for _method, path, _body in after_commit)
-    assert (clock[0] >= 10) if scenario in {"not-landed", "pending-reingest"} else clock[0] == 0
+    assert (clock[0] >= 10) if scenario in {
+        "not-landed", "pending-reingest", "request-start-failed",
+    } else clock[0] == 0
     assert len(ctags_calls) == ctags_before
     if scenario in {"pending-reingest", "taken-over"}:
         (row,) = client.get(f"{base}/repos").json()
@@ -1022,7 +1038,7 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
         assert row["lsp_config"] == published["lsp_config"]
         return
     assert not skipped_root.exists()
-    if scenario in {"not-landed", "never-sent"}:
+    if scenario in {"not-landed", "never-sent", "request-start-failed"}:
         assert client.get(f"{base}/repos").json() == []
 
 

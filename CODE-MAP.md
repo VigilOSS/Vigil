@@ -94,10 +94,24 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   dropped so a renderer reaching past them is a type error. See: `docs/maintainer-guide.md` report-template section.
 - `agent/scripts/assess/lib/contract_registry.py` owns executable CLI metadata; `contracts.py`
   resolves and renders it for `contract.py` and `list_commands.py`.
+- `agent/scripts/assess/lib/config.py` checks backend engagement visibility through the
+  engagement detail read before commands; summary/readiness assembly belongs to explicit readers.
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
 - `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
 - `agent/scripts/assess/commands/agent.py` captures optional standing briefs by content digest;
   dispatch packets, launch continuations and `dispatch/handoff_renderer.py` share the immutable path and digest.
+- `code_analysis.py:list_queue_items` and `list_code_files` own exact selected-item/path reads for
+  dispatch preparation; `state_manager/findings.py:count_findings` owns the ledger's count-only read.
+- `state_manager/assessment_summary.py` owns summary cache generations and shared build ownership;
+  its async facade lets HTTP summary/report readers join without occupying request workers.
+- `orchestrator/backend/app/request_diagnostics.py` owns long HTTP request tracking and independent
+  all-thread stack capture; `main.py` owns its ASGI/lifespan integration.
+- `artifact_index.py:prepared_artifact_health` owns root-pinned evidence observations;
+  `state_manager/proofs.py` prepares health before finding writes and reconciles file identities
+  and database receipt ownership before commit. Nested writers retain their atomic boundary.
+- `state_manager/findings.py` owns verification request digests on canonical transitions;
+  `code_analysis.py` owns exact closeout reconciliation. API audit mirrors distinguish these
+  recorded replays from fresh mutations.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEY` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers and preflight consume them.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses (never mtime).

@@ -235,6 +235,14 @@ same table every code specialist loads first. `vigil assess finding record`
 allocates the next canonical slug under a lock and prints it; omit `slug` from new
 finding JSON so parallel dispatches never collide on a hand-authored slug.
 
+**Deployment and framework context.** Register relevant infrastructure/framework source as sealed
+reference repositories and include their roots in the dispatch context. Specialists may read and
+cite those roots while the assignment still names the reviewed subject and finding scope. Use
+`code-ingest --include-path` when deployment configuration belongs in the selected source corpus;
+inspect the exclusion manifest for an unexpectedly absent path. Establish deployment-dependent
+impact facts from those sealed references, or state the unresolved assumption before rating the
+finding. This lets specialists examine the configuration instead of inheriting an operator's thesis.
+
 **Operator-authority terminal verdict.** When the fact that settles a code finding lies outside the
 sealed snapshot by design — a deployment configuration, a vendor statement — record the verdict on
 your own evidence: `vigil assess finding verify <slug> --status <terminal> --operator-authority

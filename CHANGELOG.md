@@ -5,6 +5,47 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.7.0] - 2026-11-08
+
+### Added
+
+- HTTP requests active for 30 seconds capture all backend thread stacks in the orchestrator
+  log. `VIGIL_SLOW_REQUEST_SECONDS` controls this diagnostic; it does not cancel work.
+- Exact queue-item and file-path selection reads, including a body-based file lookup for
+  long paths, and a count-only finding ledger read support lane-sized packet preparation.
+
+### Fixed
+
+- Assess command preflights read engagement identity without assembling assessment summaries
+  and report readiness, keeping routine heartbeats and progress reads inexpensive.
+- Summary cache ownership clears after build or publication failures. HTTP summary and
+  report readers await shared work without occupying request workers, and cache copying,
+  mutation invalidation and WebSocket engagement lookup do not block the event loop.
+- Evidence verification and registration have finite byte budgets for changing files.
+  Verification hashes before acquiring the finding writer, then reconciles pinned source
+  identities and database ownership before commit. Artifact refresh similarly prepares
+  file facts before its writer transaction.
+- Code mutations and their activity audits share a commit. Exact completed closeout and
+  verification retries recover the recorded result; changed requests, owners, claims or
+  source generations retain their conflict checks.
+- Transport failures after a mutation starts sending report an uncertain outcome for
+  reconciliation. Idle closed connections are replaced before writes, and read retries
+  retain their retry behavior.
+- Append-only finding notes retain their commutative behavior without an automatic
+  row-version read. Cap errors name stored and incoming lengths and the rotation command.
+- Coverage queries support large file sets without exceeding SQLite's parameter limit.
+  A covering module index and per-operation rollups shorten queue writer transactions.
+- PHP include candidate lookup performs linear deduplication. Citation diagnostics share
+  source-path rosters and nearest-path results, and compact artifact reads project metadata.
+
+### Changed
+
+- Dispatch packets show supplied context, common family requirements with exact per-file
+  additions, and distinct requested versus reported skills. Lane facts use current backend
+  selections and counts rather than engagement-wide inventory reads.
+- Code guidance names clean closeout notes, explicit owned scratch cleanup and sealed
+  reference-repository reads, including infrastructure facts that bound deployment impact.
+
 ## [2.6.0] - 2026-11-08
 
 ### Added

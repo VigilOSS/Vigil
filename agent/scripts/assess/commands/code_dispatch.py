@@ -1699,7 +1699,10 @@ def _done(
         metadata={"command": "code-dispatch done", "item_ids": ids, "disposition": normalized_disposition},
     )
     updated = result.get('updated', 0) if isinstance(result, dict) else result
-    print(f"Marked done ({normalized_disposition}): {updated} item(s)")
+    if isinstance(result, dict) and result.get("already_applied"):
+        print(f"Already applied ({normalized_disposition}): {result.get('total', len(ids))} item(s)")
+    else:
+        print(f"Marked done ({normalized_disposition}): {updated} item(s)")
     print(f"Saved audit snapshot: {snapshot.name}")
     if isinstance(result, dict) and result:
         print(json.dumps(result, indent=2, ensure_ascii=False))

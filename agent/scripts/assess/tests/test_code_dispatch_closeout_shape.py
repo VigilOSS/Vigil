@@ -120,7 +120,8 @@ def test_done_names_a_skip_reason_outside_the_standard_set(
     assert "generated-code" in err
 
 
-def test_a_clean_close_with_notes_still_reaches_the_backend(monkeypatch, tmp_path):
+@pytest.mark.parametrize("already_applied", [False, True])
+def test_a_clean_close_with_notes_still_reaches_the_backend(monkeypatch, tmp_path, capsys, already_applied):
     posted: dict[str, object] = {}
 
     class _Client:
@@ -136,7 +137,8 @@ def test_a_clean_close_with_notes_still_reaches_the_backend(monkeypatch, tmp_pat
         def post(self, endpoint: str, payload: dict):
             posted["endpoint"] = endpoint
             posted["payload"] = payload
-            return {"updated": 1}
+            return {"updated": 0 if already_applied else 1, "total": 1,
+                    "already_applied": already_applied}
 
     coverage = tmp_path / "coverage.json"
     coverage.write_text(json.dumps([{"family": "ssrf", "effort": 80}]), encoding="utf-8")
@@ -152,6 +154,8 @@ def test_a_clean_close_with_notes_still_reaches_the_backend(monkeypatch, tmp_pat
 
     assert posted["endpoint"] == "code/analysis-queue/done"
     assert posted["payload"]["notes"] == "Reviewed every decode path"
+    if already_applied:
+        assert "Already applied (clean): 1 item(s)" in capsys.readouterr().out
 
 
 def test_a_dry_run_renders_the_payload_and_names_what_would_be_refused(

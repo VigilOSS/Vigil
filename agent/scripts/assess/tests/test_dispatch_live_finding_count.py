@@ -26,15 +26,8 @@ class _LedgerClient:
 
     def get(self, endpoint):
         self.endpoints.append(endpoint)
-        if endpoint.startswith("findings?"):
-            query = dict(
-                pair.split("=", 1)
-                for pair in endpoint.split("?", 1)[1].split("&")
-                if "=" in pair
-            )
-            offset = int(query.get("offset", 0))
-            limit = int(query.get("limit", 5000))
-            return self.rows[offset:offset + limit]
+        if endpoint == "findings/count":
+            return {"total": len(self.rows)}
         raise AssertionError(f"unexpected endpoint: {endpoint}")
 
 
@@ -59,7 +52,7 @@ def test_packet_quotes_the_live_finding_total_from_the_backend(tmp_path: Path):
     client = _LedgerClient(269)
     prompt = _render(tmp_path, client)
     assert "269" in prompt
-    assert any(endpoint.startswith("findings?") for endpoint in client.endpoints)
+    assert client.endpoints == ["findings/count"]
     # The live count is backend-derived state, so it belongs inside the
     # persisted prior-state block with the rest of it.
     assert prompt.index("--- BEGIN PERSISTED PRIOR-STATE DATA ---") < prompt.index("269")
@@ -114,11 +107,11 @@ def test_the_dispatch_never_fails_when_the_ledger_cannot_be_counted(tmp_path, ca
     assert "finding ledger" in capsys.readouterr().err.lower()
 
 
-def test_the_ledger_count_pages_past_one_backend_page(tmp_path):
+def test_the_ledger_count_covers_more_than_one_listing_page(tmp_path):
     client = _LedgerClient(5200)
     prompt = _render(tmp_path, client)
     assert "5200" in prompt
-    assert len([e for e in client.endpoints if e.startswith("findings?")]) == 2
+    assert client.endpoints == ["findings/count"]
 
 
 def test_the_rendered_count_is_the_one_the_advisory_compares_against(

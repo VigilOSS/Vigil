@@ -262,9 +262,9 @@ def test_payload_file_notes_append_needs_no_expected_row_version(
 
     captured = capsys.readouterr()
     assert "expected_row_version" not in captured.err
-    # The write still carries a token: the CLI reads the current row_version
-    # immediately before its PATCH, exactly as the explicit-flag path does.
-    assert fake.gets == ["findings/acme-001"]
+    # Appending commutes inside the backend transaction; it needs no preceding
+    # read that could introduce a conflict with another independent append.
+    assert fake.gets == []
     assert fake.patches == [
         (
             "findings/acme-001",
@@ -272,7 +272,6 @@ def test_payload_file_notes_append_needs_no_expected_row_version(
                 "notes": "checkpoint: replayed the chain against acme.example",
                 "notes_mode": "append",
                 "source_name": "vulnerability-analyst",
-                "expected_row_version": 7,
             },
         )
     ]

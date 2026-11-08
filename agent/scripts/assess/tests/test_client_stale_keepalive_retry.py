@@ -1,4 +1,4 @@
-"""A reaped pooled keep-alive socket must get one fresh-connection re-send.
+"""A reaped pooled keep-alive socket permits one fresh read attempt.
 
 Regression for the `code-index sync` broken-pipe failure: writes use
 ``max_retries=1``, so before this fix a server-reaped idle socket surfaced as an
@@ -74,7 +74,7 @@ def test_reused_socket_broken_pipe_is_resent_on_a_fresh_connection(monkeypatch):
         [("raise", BrokenPipeError()), ("respond", 200)],
         warm=True,
     )
-    status, _body = client._request_raw("POST", "/x", body=b"{}", max_retries=1)
+    status, _body = client._request_raw("GET", "/x", max_retries=1)
     assert status == 200
     assert len(made) == 2  # one free re-send on a fresh connection
 
@@ -85,7 +85,7 @@ def test_reused_remote_disconnected_is_resent(monkeypatch):
         [("raise", http.client.RemoteDisconnected()), ("respond", 200)],
         warm=True,
     )
-    status, _body = client._request_raw("POST", "/x", body=b"{}", max_retries=1)
+    status, _body = client._request_raw("GET", "/x", max_retries=1)
     assert status == 200
     assert len(made) == 2
 
@@ -96,8 +96,8 @@ def test_free_resend_is_bounded_to_one(monkeypatch):
         [("raise", BrokenPipeError()), ("raise", BrokenPipeError())],
         warm=True,
     )
-    with pytest.raises(AssessError, match="Failed after 1 attempts"):
-        client._request_raw("POST", "/x", body=b"{}", max_retries=1)
+    with pytest.raises(AssessError, match="Failed after 2 attempts"):
+        client._request_raw("GET", "/x", max_retries=1)
     assert len(made) == 2  # warmed drop + one fresh re-send, then give up
 
 
@@ -135,7 +135,7 @@ def test_a_sent_request_stays_sent_when_a_retry_cannot_connect(monkeypatch):
     monkeypatch.setattr("assess.lib.client.time.sleep", lambda _s: None)
 
     with pytest.raises(AssessTransportError, match="Failed after 2 attempts") as raised:
-        client._request_raw("POST", "/x", body=b"{}", max_retries=2)
+        client._request_raw("GET", "/x", max_retries=2)
     assert raised.value.request_sent
 
 

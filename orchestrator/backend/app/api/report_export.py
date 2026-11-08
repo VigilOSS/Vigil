@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote
 
+import anyio
+
 from fastapi import APIRouter, HTTPException, status
 from fastapi.responses import Response
 from pydantic import BaseModel, ConfigDict, Field
@@ -269,11 +271,12 @@ def _report_attack_chain_links(engagement_id: int) -> list[dict[str, Any]]:
     return [_project(link, _CHAIN_LINK_FIELDS) for link in links]
 
 
-def _assemble_report_payload(engagement, mode: str) -> dict[str, Any]:
+def _assemble_report_payload(engagement, mode: str, summary: dict[str, Any]) -> dict[str, Any]:
     """Build the injected report payload from existing projections only.
 
-    No new SQL — calls assessment_summary, list_report_finding_groups,
-    list_attack_chains, list_attack_chain_links, and report_readiness, then
+    The route prepares the summary before this worker assembles the report.
+    Calls list_report_finding_groups, list_attack_chains, list_attack_chain_links,
+    and report_readiness, then
     narrows each to the fields the orchestrator/report/src/types.ts ReportData
     contract declares (see the allow-lists above). The summary's finding rollups
     are the one thing not copied from a projection: they are recounted from this
@@ -295,7 +298,7 @@ def _assemble_report_payload(engagement, mode: str) -> dict[str, Any]:
             "created_at": engagement.created_at,
         },
         "summary": {
-            **_project(state_manager.assessment_summary(engagement.id), _SUMMARY_FIELDS),
+            **_project(summary, _SUMMARY_FIELDS),
             **_summary_finding_rollups(finding_groups),
         },
         "finding_groups": finding_groups,
@@ -382,16 +385,18 @@ def settings_report_template_path() -> Path:
 
 
 @router.post("/report-export")
-def export_report(engagement_key: str, request: ReportExportRequest) -> dict[str, Any]:
-    engagement = get_engagement_view_or_404(engagement_key)
-    mode = request.mode
-
-    if mode == "final":
-        readiness = state_manager.report_readiness(engagement.id)
+async def export_report(engagement_key: str, request: ReportExportRequest) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(get_engagement_view_or_404, engagement_key)
+    if request.mode == "final":
+        readiness = await anyio.to_thread.run_sync(state_manager.report_readiness, engagement.id)
         if not readiness["ready"]:
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=readiness)
+    summary = await state_manager.assessment_summary_async(engagement.id)
+    return await anyio.to_thread.run_sync(_export_report, engagement, request.mode, summary)
 
-    payload = _assemble_report_payload(engagement, mode)
+
+def _export_report(engagement, mode: str, summary: dict[str, Any]) -> dict[str, Any]:
+    payload = _assemble_report_payload(engagement, mode, summary)
     html = _render_report_html(payload)
 
     root = Path(engagement.engagement_root).resolve()

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 import sqlite3
@@ -60,6 +61,7 @@ from .proofs import (
     OPERATOR_AUTHORITY_PROVENANCE_KEY,
     SUPERSEDED_OPERATOR_AUTHORITY_PROVENANCE_KEY,
     TERMINAL_VERIFICATION_STATUSES,
+    finding_write_connection,
     operator_authority_stamp,
     proof_receipts_for_finding,
     record_finding_verification_evidence,
@@ -1766,7 +1768,11 @@ def create_finding(
         own_verification=verification_operator_authority,
         restamps_attestation=True,
     )
-    with _common.get_connection() as connection:
+    decision_receipt_ids = [] if verification_operator_authority else list(
+        verification_proof_receipt_ids
+        or (verification_counter_check or {}).get("proof_receipt_ids", [])
+    )
+    with finding_write_connection(engagement.id, decision_receipt_ids) as connection:
         connection.execute("BEGIN IMMEDIATE")
         if dispatch_agent_id is not None:
             editor = connection.execute(
@@ -2454,6 +2460,7 @@ def create_finding(
             lifecycle_changed
             or content_changed
             or verification_evidence_requested
+            or bool((transition_metadata or {}).get("verification_request_sha256"))
             # A revised plan for a finding already parked is its own event.
             or verification_next_test is not None
             # A root-cause regrouping is audited even when no column moved.
@@ -2469,6 +2476,11 @@ def create_finding(
                 or (provenance or {}).get("verified_by", "")
                 or (provenance or {}).get("reviewed_by", "")
             )
+            if (transition_metadata or {}).get("verification_request_sha256"):
+                transition_metadata = {
+                    **transition_metadata,
+                    "verification_result_row_version": int(finding["row_version"]),
+                }
             transition = _record_finding_transition(
                 connection,
                 engagement_id=engagement.id,
@@ -3046,6 +3058,88 @@ _NEXT_TEST_REQUIRED_DETAIL = (
     "test still owed, the observation that confirms the claim, and the observation "
     "that disproves it"
 )
+def _verification_replay(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding: sqlite3.Row | dict[str, Any] | None,
+    request_sha256: str,
+    evidence_ref: str,
+) -> dict[str, Any] | None:
+    """Recognize only this exact decision while its resulting row is unchanged."""
+    if finding is None:
+        return None
+    transition = connection.execute(
+        "SELECT * FROM assessment_finding_transitions "
+        "WHERE engagement_id=? AND finding_id=? ORDER BY id DESC LIMIT 1",
+        (engagement_id, int(finding["id"])),
+    ).fetchone()
+    if transition is None:
+        return None
+    metadata = _json_object(transition["metadata_json"])
+    if (
+        metadata.get("verification_request_sha256") != request_sha256
+        or metadata.get("verification_result_row_version") != int(finding["row_version"])
+        or finding_code_snapshot_status(connection, engagement_id, finding) == "stale"
+    ):
+        return None
+    record = _serialize_finding_with_code_snapshot_status(connection, engagement_id, finding)
+    audit = verification_audit_by_transition(
+        connection, engagement_id, int(finding["id"]), [int(transition["id"])]
+    )[int(transition["id"])]
+    return {
+        "already_applied": True,
+        "finding": record,
+        "transition": dict(transition),
+        "links": [dict(row) for row in connection.execute(
+            "SELECT * FROM assessment_finding_links WHERE engagement_id=? AND finding_id=? "
+            "AND link_kind='evidence' AND target_kind='evidence_artifact' "
+            "AND target_ref=? AND retired_at IS NULL",
+            (engagement_id, int(finding["id"]), evidence_ref),
+        ).fetchall()] if evidence_ref else [],
+        "proof_receipts": record["proof_receipts"],
+        "counter_check": next(iter(audit["counter_checks"]), None),
+        "severity_variance": next(iter(audit["severity_variances"]), None),
+        "operator_authority": operator_authority_stamp(finding["provenance_json"]),
+        "duplicate_advisories": _duplicate_advisories(
+            connection, engagement_id, finding_id=int(finding["id"]),
+            canonical_location=str(finding["canonical_location"] or ""),
+            root_cause_key=str(finding["root_cause_key"] or ""),
+            defect_family=str(finding["defect_family"] or ""),
+            auth_context=str(finding["auth_context"] or ""),
+            details=_json_object(finding["details_json"]),
+        ),
+        "run_candidate": None,
+    }
+
+
+def _resume_verification_artifacts(
+    engagement_id: int,
+    slug: str,
+    result: dict[str, Any],
+    evidence_ref: str,
+    artifact_ref: str,
+    source_name: str,
+) -> dict[str, Any]:
+    """Finish the original operation's idempotent post-commit artifact indexing."""
+    if evidence_ref:
+        artifact_id = _common._register_artifact_reference(
+            engagement_id, evidence_ref, kind="evidence",
+            producer_agent_role=source_name or None, related_finding_slug=slug,
+        )
+        with _common.get_connection() as connection:
+            cursor = connection.execute(
+                "UPDATE assessment_findings SET evidence_artifact_id=? "
+                "WHERE id=? AND row_version=? AND evidence_ref=?",
+                (artifact_id, result["finding"]["id"], result["finding"]["row_version"], evidence_ref),
+            )
+            if cursor.rowcount:
+                result["finding"]["evidence_artifact_id"] = artifact_id
+    if artifact_ref:
+        _common._register_artifact_reference(
+            engagement_id, artifact_ref, kind="verification-artifact",
+            producer_agent_role=source_name or None, related_finding_slug=slug,
+        )
+    return result
 
 
 def verify_finding(
@@ -3070,6 +3164,12 @@ def verify_finding(
     operator_authority: bool = False,
     operator_authority_intel_id: int | None = None,
 ) -> dict[str, Any]:
+    authored_request = dict(locals())
+    authored_request.pop("engagement_id")
+    authored_request["proof_receipt_ids"] = sorted(set(proof_receipt_ids or []))
+    request_sha256 = hashlib.sha256(
+        json.dumps(authored_request, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
     engagement = _engagement_or_404(engagement_id)
     normalized_verification_status = _normalize_verification_status(verification_status)
     if normalized_verification_status == "unreviewed":
@@ -3143,6 +3243,7 @@ def verify_finding(
             "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
             (engagement.id, slug),
         ).fetchone()
+        replay = _verification_replay(connection, engagement.id, existing, request_sha256, evidence_ref)
         severity_transitions = connection.execute(
             """
             SELECT from_severity, to_severity
@@ -3162,6 +3263,11 @@ def verify_finding(
                 connection, engagement.id, int(operator_authority_intel_id)
             )
 
+    if replay is not None:
+        return _resume_verification_artifacts(
+            engagement.id, slug, replay, evidence_ref, artifact_ref, source_name
+        )
+
     expected_row_version = int(existing["row_version"])
     existing_workflow = _row_workflow_status(existing)
     if existing_workflow == "merged":
@@ -3169,7 +3275,7 @@ def verify_finding(
     target_workflow = existing_workflow if existing_workflow not in {"false_positive", "merged"} else "active"
     target_severity = str(existing["severity"])
     transition_action = "verified_confirmed"
-    transition_metadata: dict[str, Any] = {}
+    transition_metadata: dict[str, Any] = {"verification_request_sha256": request_sha256}
     if confirm_check is not None:
         transition_metadata["confirm_check"] = confirm_check
     verification_provenance = dict(provenance or {})
@@ -3338,32 +3444,47 @@ def verify_finding(
     if isinstance(cvss_score, int | float) and not isinstance(cvss_score, bool):
         normal_severity_band = finding_change_policy.cvss_band(float(cvss_score))
 
-    result = patch_finding(
-        engagement.id,
-        slug=slug,
-        severity=target_severity,
-        workflow_status=target_workflow,
-        verification_status=normalized_verification_status,
-        evidence_ref=evidence_ref or None,
-        notes=notes,
-        source_name=source_name or None,
-        details=details_payload,
-        provenance=verification_provenance,
-        transition_action=transition_action,
-        transition_reason_code=reason_code,
-        transition_reason_text=reason_text,
-        transition_artifact_ref=artifact_ref or evidence_ref,
-        transition_metadata=transition_metadata or None,
-        allow_verification_mutation=True,
-        expected_row_version=expected_row_version,
-        verification_proof_receipt_ids=list(proof_receipt_ids or []),
-        verification_counter_check=counter_check,
-        verification_confirm_check=confirm_check,
-        verification_severity_variance=severity_variance,
-        verification_normal_severity_band=normal_severity_band,
-        verification_next_test=next_test,
-        verification_operator_authority=operator_authority,
-    )
+    try:
+        result = patch_finding(
+            engagement.id,
+            slug=slug,
+            severity=target_severity,
+            workflow_status=target_workflow,
+            verification_status=normalized_verification_status,
+            evidence_ref=evidence_ref or None,
+            notes=notes,
+            source_name=source_name or None,
+            details=details_payload,
+            provenance=verification_provenance,
+            transition_action=transition_action,
+            transition_reason_code=reason_code,
+            transition_reason_text=reason_text,
+            transition_artifact_ref=artifact_ref or evidence_ref,
+            transition_metadata=transition_metadata or None,
+            allow_verification_mutation=True,
+            expected_row_version=expected_row_version,
+            verification_proof_receipt_ids=list(proof_receipt_ids or []),
+            verification_counter_check=counter_check,
+            verification_confirm_check=confirm_check,
+            verification_severity_variance=severity_variance,
+            verification_normal_severity_band=normal_severity_band,
+            verification_next_test=next_test,
+            verification_operator_authority=operator_authority,
+        )
+    except HTTPException as exc:
+        if exc.status_code not in {400, 409}:
+            raise
+        with _common.get_connection() as connection:
+            current = connection.execute(
+                "SELECT * FROM assessment_findings WHERE engagement_id=? AND slug=?",
+                (engagement.id, slug),
+            ).fetchone()
+            replay = _verification_replay(connection, engagement.id, current, request_sha256, evidence_ref)
+        if replay is None:
+            raise
+        return _resume_verification_artifacts(
+            engagement.id, slug, replay, evidence_ref, artifact_ref, source_name
+        )
     if artifact_ref:
         _common._register_artifact_reference(
             engagement.id,
@@ -4325,6 +4446,16 @@ _LAST_TRANSITION_JOIN = """LEFT JOIN assessment_finding_transitions AS last_tran
                     WHERE ledger.engagement_id = findings.engagement_id
                       AND ledger.finding_id = findings.id
                 )"""
+
+
+def count_findings(engagement_id: int) -> int:
+    """Count the whole ledger without materializing findings or their evidence."""
+    engagement = _engagement_or_404(engagement_id)
+    with _common.get_connection() as connection:
+        return _common._scalar_row(
+            connection, "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ?",
+            (engagement.id,),
+        )
 
 
 def list_findings(

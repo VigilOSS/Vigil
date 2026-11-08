@@ -5,11 +5,11 @@ Install detail behind the README [Quick start](../README.md#quick-start).
 ## Install
 
 Install the versioned wheel from the
-[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v2.6.0), then initialize your
+[GitHub release](https://github.com/VigilOSS/Vigil/releases/tag/v2.7.0), then initialize your
 workspace:
 
 ```bash
-uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.6.0/vigil-2.6.0-py3-none-any.whl vigil
+uv tool install --from https://github.com/VigilOSS/Vigil/releases/download/v2.7.0/vigil-2.7.0-py3-none-any.whl vigil
 vigil install
 ```
 
@@ -32,7 +32,12 @@ positive deadline in seconds before starting:
 VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS=1200 vigil orchestrator start
 ```
 
-The same setting applies when engagement startup recovers the managed backend.
+An HTTP request still active after 30 seconds captures all backend thread stacks in
+the orchestrator log, once for that request. This diagnostic runs independently of the
+request workers and event loop; it does not cancel or restart work. Set
+`VIGIL_SLOW_REQUEST_SECONDS` before startup to adjust the threshold, or `0` to disable it.
+
+`VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS` also applies when engagement startup recovers the managed backend.
 
 - **From the repository:** `uv tool install git+https://github.com/VigilOSS/Vigil vigil` builds
   the frontend and report locally, so it needs Git, Node.js, and npm on `PATH`.

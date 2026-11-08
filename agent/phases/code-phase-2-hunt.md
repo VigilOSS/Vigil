@@ -198,11 +198,9 @@ one oversized mixed batch to a single agent.
   bound envelope and add a 3-8 bullet summary for orientation; do not replace the envelope with
   those bullets.
 - **Lease scratch directory** -- pass the `code-dispatch fetch` JSON as prompt-context `lane_file`
-  so the packet names each leased item's `scratch_dir`, and tell the hunter to write temporary files there in preference to any scratch
-  location its own client harness offers. The lease namespace is what keeps two hunters working the
-  same repository from overwriting each other; a client-provided scratch path is shared per session,
-  not per lease. Inside any directory the client harness also writes to, require lane-unique
-  filenames for the same reason.
+  so the packet names each leased item's `scratch_dir`. Point hunters to the owned-file naming and
+  cleanup rule in `agent/shared-specialist-core.md`; client scratch locations can be shared per
+  session and the lease namespace does not enforce OS-level isolation.
 - **Root-cause candidate capture** -- ask the hunter to put shared utilities/guards it suspects
   cause several findings in handoff `extras.root_cause_candidates`, for the Phase 4 grouping pass.
 - **CWE pattern references** -- trigger-gated, not pre-loaded: when a slot type or code pattern in
@@ -255,11 +253,13 @@ vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|findin
 
 # cwe-coverage-json is a file path, not inline JSON -- write the bare array (shape:
 # agent/skills/code-vulnerability-analysis/SKILL.md "CWE Coverage") to a temp file first:
-cat > /tmp/cwe_<item-id>.json <<'JSON'
+LEASE_SCRATCH_DIR="<scratch_dir from this item's fetch>"
+QUEUE_ITEM_ID="<item-id>"
+cat > "$LEASE_SCRATCH_DIR/$QUEUE_ITEM_ID-cwe.json" <<'JSON'
 [{"family": "buffer-overflow", "effort": 85, "functions_analyzed": 12, "entry_chains_traced": 3, "total_entry_chains": 3, "notes": "Traced all applicable parser entry chains"}]
 JSON
 
-vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> /tmp/cwe_<item-id>.json "<notes: required for clean>" [--skip-reason <reason>]
+vigil assess code-dispatch done <item-id> <agent-id> <lease-token> <clean|finding|suspicious|skipped> "$LEASE_SCRATCH_DIR/$QUEUE_ITEM_ID-cwe.json" "<notes: required for clean>" [--skip-reason <reason>]
 vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>
 vigil assess code-dispatch requeue-triggers <triggers-json>   # if analysis returned cross_file_triggers
 vigil assess code-dispatch list --stale-minutes 10   # before fetching the next batch: read first

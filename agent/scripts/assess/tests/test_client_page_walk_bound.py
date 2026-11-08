@@ -57,13 +57,7 @@ def test_a_short_page_still_ends_the_walk_normally() -> None:
 
 
 def test_agent_start_refuses_a_queue_listing_that_never_stops_advancing() -> None:
-    """`agent start`'s queue manifest has the same shape and the same bound.
-
-    Its existing guard catches a listing that returns an EMPTY page with
-    `has_more`. A backend returning a FULL page with `has_more` at every offset
-    advances for ever, and this walk runs inside `agent start`, so the failure
-    is a dispatch that never launches and reports nothing.
-    """
+    """An exact selected-ID lookup refuses an incomplete filtered page immediately."""
     import pytest as _pytest
 
     from assess.commands import agent as agent_cmd
@@ -84,4 +78,4 @@ def test_agent_start_refuses_a_queue_listing_that_never_stops_advancing() -> Non
         )
 
     assert exited.value.code == 1
-    assert client.calls == MAX_PAGE_WALK
+    assert client.calls == 1

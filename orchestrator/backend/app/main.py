@@ -30,11 +30,13 @@ from .api.remediation import router as remediation_router
 from .api.submissions import router as submissions_router
 from .config import settings
 from .db import database_readiness_flags, get_connection, init_db
+from .request_diagnostics import RequestDiagnostics, RequestDiagnosticsMiddleware
 from .services.backup import start_scheduler as start_backup_scheduler, stop_scheduler as stop_backup_scheduler
 from .services.engagements import get_engagement_or_404, maybe_sync_engagements
 from .ws import broadcaster, websocket_origin_allowed
 
 logger = logging.getLogger(__name__)
+request_diagnostics = RequestDiagnostics()
 
 _BACKEND_PROCESS_STARTED_AT = time.time()
 _BACKEND_SOURCE_ROOT = Path(__file__).resolve().parent
@@ -364,15 +366,18 @@ async def lifespan(app: FastAPI):
     init_db()
     maybe_sync_engagements(force=True)
     start_backup_scheduler()
+    request_diagnostics.start()
     if not settings.frontend_dist_dir.exists():
         logger.warning(_FRONTEND_MISSING_HELP)
     try:
         yield
     finally:
+        request_diagnostics.stop()
         stop_backup_scheduler()
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+app.add_middleware(RequestDiagnosticsMiddleware, diagnostics=request_diagnostics)
 
 
 @app.exception_handler(sqlite3.OperationalError)
@@ -439,7 +444,7 @@ async def engagement_stream(websocket: WebSocket, engagement_key: str) -> None:
     ):
         await websocket.close(code=1008, reason="untrusted websocket origin")
         return
-    get_engagement_or_404(engagement_key)
+    await to_thread.run_sync(get_engagement_or_404, engagement_key)
     await broadcaster.connect(engagement_key, websocket)
     try:
         while True:

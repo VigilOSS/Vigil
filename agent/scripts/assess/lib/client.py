@@ -6,6 +6,7 @@ import json
 import os
 import re
 import socket
+import select
 import sys
 import time
 from pathlib import Path
@@ -463,29 +464,38 @@ class AssessmentClient:
         retries = max_retries if max_retries is not None else self.MAX_RETRIES
         headers = {"Content-Type": "application/json"} if body else {}
 
-        # A pooled keep-alive socket can be reaped by the server (uvicorn's
-        # timeout_keep_alive) during a long client-side gap between requests —
-        # e.g. a bulk write whose payload takes seconds to assemble after the
-        # reads that warmed the connection. Reusing that reaped socket fails
-        # with BrokenPipe/RemoteDisconnected before the request was dispatched,
-        # so it never committed and one re-send on a fresh connection is safe
-        # even when max_retries is 1. Scoped to a *reused* socket and to
-        # connection drops (not read timeouts) so a slow-but-committed write is
-        # never re-sent.
+        # Reconnect reads after a reaped keep-alive socket. Once a mutation
+        # starts sending, even a partial-send error or lost response cannot
+        # establish whether it committed; its owner must reconcile that outcome.
+        retry_safe = method.upper() in {"GET", "HEAD", "OPTIONS"}
         last_error: Exception | None = None
         stale_conn_retry_used = False
         request_sent = False
         attempt = 0
+        attempts_made = 0
         while attempt < retries:
+            attempts_made += 1
             reused_conn = self._conn is not None
             try:
+                if (not retry_safe and self._conn is not None
+                        and isinstance(self._conn.sock, socket.socket)):
+                    # A drained idle HTTP socket has no pending application
+                    # data. Readability means EOF/close notification or an
+                    # unusable connection: replace it BEFORE sending a write.
+                    try:
+                        idle_input = bool(select.select([self._conn.sock], [], [], 0)[0])
+                    except (OSError, ValueError):
+                        idle_input = True
+                    if idle_input:
+                        self._reset_conn()
+                        reused_conn = False
                 conn = self._get_conn(connect_timeout)
                 if conn.sock is None:
                     conn.timeout = connect_timeout
                     conn.connect()
                 conn.sock.settimeout(read_timeout)
-                conn.request(method, path, body=body, headers=headers)
                 request_sent = True
+                conn.request(method, path, body=body, headers=headers)
                 resp = conn.getresponse()
                 resp_body = resp.read()
 
@@ -495,7 +505,7 @@ class AssessmentClient:
                 if accept_409 and resp.status == 409:
                     return resp.status, resp_body
 
-                if resp.status in self.RETRYABLE_STATUSES and attempt < retries - 1:
+                if retry_safe and resp.status in self.RETRYABLE_STATUSES and attempt < retries - 1:
                     self._reset_conn()
                     time.sleep(self.BACKOFF_BASE * (2 ** attempt))
                     attempt += 1
@@ -527,12 +537,11 @@ class AssessmentClient:
                     ),
                 )
                 self._reset_conn()
-                if stale_keepalive_drop and not stale_conn_retry_used:
-                    # Idle pooled socket closed before committing this request;
-                    # re-send on a fresh connection without spending a normal
-                    # retry slot.
+                if retry_safe and stale_keepalive_drop and not stale_conn_retry_used:
                     stale_conn_retry_used = True
                     continue
+                if not retry_safe and request_sent:
+                    break
                 if attempt < retries - 1:
                     time.sleep(self.BACKOFF_BASE * (2 ** attempt))
                     attempt += 1
@@ -540,8 +549,10 @@ class AssessmentClient:
                 break
 
         raise AssessTransportError(
-            f"Failed after {retries} attempts: {last_error}\n"
-            f"{self._orchestrator_hint()}",
+            f"Failed after {attempts_made} attempts: {last_error}\n"
+            + ("Write outcome uncertain; read current state before retrying.\n"
+               if not retry_safe and request_sent else "")
+            + self._orchestrator_hint(),
             request_sent=request_sent,
         )
 

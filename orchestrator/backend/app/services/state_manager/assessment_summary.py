@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import copy
+from concurrent.futures import Future
 import time
-from threading import Condition, Lock
+from threading import Lock
 from typing import Any
+
+import anyio
 
 from ... import db
 from ..events import _engagement_or_404
@@ -21,9 +25,8 @@ SummaryCacheKey = tuple[tuple[str, int, int, int], int]
 
 _SUMMARY_CACHE_TTL_SECONDS = 1.0
 _summary_cache_lock = Lock()
-_summary_cache_condition = Condition(_summary_cache_lock)
 _summary_cache: dict[SummaryCacheKey, tuple[float, dict[str, Any]]] = {}
-_summary_cache_inflight: set[SummaryCacheKey] = set()
+_summary_cache_inflight: dict[SummaryCacheKey, Future[None]] = {}
 _summary_cache_generation: dict[SummaryCacheKey, int] = {}
 _summary_cache_global_generation = 0
 
@@ -41,61 +44,104 @@ def _summary_generation(cache_key: SummaryCacheKey) -> tuple[int, int]:
 
 def clear_assessment_summary_cache(engagement_id: int | None = None) -> None:
     global _summary_cache_global_generation
-    with _summary_cache_condition:
+    current_key = _summary_cache_key(engagement_id) if engagement_id is not None else None
+    with _summary_cache_lock:
         if engagement_id is None:
             _summary_cache.clear()
             _summary_cache_global_generation += 1
-            _summary_cache_condition.notify_all()
             return
         affected_keys = {
             key
             for key in (
                 set(_summary_cache)
-                | _summary_cache_inflight
+                | set(_summary_cache_inflight)
                 | set(_summary_cache_generation)
             )
             if key[1] == engagement_id
         }
-        affected_keys.add(_summary_cache_key(engagement_id))
+        affected_keys.add(current_key)
         for key in [key for key in _summary_cache if key[1] == engagement_id]:
             _summary_cache.pop(key, None)
         for key in affected_keys:
             _summary_cache_generation[key] = _summary_cache_generation.get(key, 0) + 1
-        _summary_cache_condition.notify_all()
 
+
+def _claim_summary(
+    cache_key: SummaryCacheKey,
+) -> tuple[dict[str, Any] | None, Future[None] | None, tuple[int, int] | None]:
+    # Cached payloads are private immutable snapshots. Callers copy after
+    # releasing this lock, so allocation and traversal cannot park mutations.
+    with _summary_cache_lock:
+        cached = _summary_cache.get(cache_key)
+        if cached is not None and cached[0] > time.monotonic():
+            return cached[1], None, None
+        running = _summary_cache_inflight.get(cache_key)
+        if running is not None:
+            return None, running, None
+        running = Future()
+        claim = (None, running, _summary_generation(cache_key))
+        _summary_cache_inflight[cache_key] = running
+        return claim
+
+
+def _build_and_publish_summary(
+    engagement_id: int, cache_key: SummaryCacheKey,
+    running: Future[None], generation: tuple[int, int],
+) -> dict[str, Any]:
+    try:
+        payload = _build_assessment_summary(engagement_id)
+        snapshot = copy.deepcopy(payload)
+        with _summary_cache_lock:
+            if _summary_generation(cache_key) == generation:
+                _summary_cache[cache_key] = (
+                    time.monotonic() + _SUMMARY_CACHE_TTL_SECONDS, snapshot,
+                )
+        return payload
+    finally:
+        # Copy/publication failure must release ownership just like a failed
+        # build. Resolve outside the lock: Future callbacks may schedule callers.
+        with _summary_cache_lock:
+            if _summary_cache_inflight.get(cache_key) is running:
+                del _summary_cache_inflight[cache_key]
+        running.set_result(None)
+
+
+def _summary_step(
+    engagement_id: int, cache_key: SummaryCacheKey,
+) -> tuple[dict[str, Any] | None, Future[None] | None]:
+    cached, running, generation = _claim_summary(cache_key)
+    if cached is not None:
+        return copy.deepcopy(cached), None
+    assert running is not None
+    if generation is not None:
+        # Ownership and build are one synchronous operation. Cancellation while
+        # an async caller awaits this worker cannot abandon an acquired flight.
+        return _build_and_publish_summary(engagement_id, cache_key, running, generation), None
+    return None, running
 
 
 def assessment_summary(engagement_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     cache_key = _summary_cache_key(engagement.id)
-    with _summary_cache_condition:
-        while True:
-            now = time.monotonic()
-            cached = _summary_cache.get(cache_key)
-            if cached is not None and cached[0] > now:
-                return copy.deepcopy(cached[1])
-            if cache_key not in _summary_cache_inflight:
-                _summary_cache_inflight.add(cache_key)
-                generation = _summary_generation(cache_key)
-                break
-            _summary_cache_condition.wait()
+    while True:
+        payload, running = _summary_step(engagement.id, cache_key)
+        if running is None:
+            assert payload is not None
+            return payload
+        running.result()
 
-    try:
-        payload = _build_assessment_summary(engagement.id)
-    except BaseException:
-        with _summary_cache_condition:
-            _summary_cache_inflight.discard(cache_key)
-            _summary_cache_condition.notify_all()
-        raise
-    with _summary_cache_condition:
-        if _summary_generation(cache_key) == generation:
-            _summary_cache[cache_key] = (
-                time.monotonic() + _SUMMARY_CACHE_TTL_SECONDS,
-                copy.deepcopy(payload),
-            )
-        _summary_cache_inflight.discard(cache_key)
-        _summary_cache_condition.notify_all()
-    return payload
+
+async def assessment_summary_async(engagement_id: int) -> dict[str, Any]:
+    """Join a summary build without retaining a general request worker."""
+    engagement = await anyio.to_thread.run_sync(_engagement_or_404, engagement_id)
+    cache_key = await anyio.to_thread.run_sync(_summary_cache_key, engagement.id)
+    while True:
+        payload, running = await anyio.to_thread.run_sync(_summary_step, engagement.id, cache_key)
+        if running is None:
+            assert payload is not None
+            return payload
+        # A disconnected joiner must not cancel the shared owner's completion.
+        await asyncio.shield(asyncio.wrap_future(running))
 
 
 def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:

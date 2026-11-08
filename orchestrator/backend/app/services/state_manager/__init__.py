@@ -244,6 +244,7 @@ from .oob import (
     correlate_oob_interaction,
 )
 from .assessment_summary import (
+    assessment_summary_async,
     assessment_summary,
     clear_assessment_summary_cache,
 )
@@ -465,5 +466,6 @@ __all__ = [
     "get_oob_probe_by_nonce",
     "correlate_oob_interaction",
     "assessment_summary",
+    "assessment_summary_async",
     "clear_assessment_summary_cache",
 ]

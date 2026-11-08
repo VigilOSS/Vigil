@@ -309,23 +309,13 @@ def _render_handoff_blob(
             f"- **Captured standing brief:** {standing_brief.get('path', '(unknown)')}; "
             f"SHA-256 {standing_brief.get('sha256', '(unknown)')}"
         )
-    # Skills loaded by the prior dispatch are part of the audit surface — the
-    # next dispatch should know which procedure context the previous agent
-    # carried so it can either continue with the same skills or change loadout
-    # deliberately. `skills` on the dispatch row is only the operator's REQUEST,
-    # and omitting it is the normal case: the packet then tells the specialist to
-    # "record the loaded skill names in the handoff", where `extras` is the only
-    # key the payload accepts for them. Reading the dispatch row alone therefore
-    # reported "(not recorded)" for exactly the dispatches that self-selected,
-    # which is every dispatch the field was added for.
-    declared = ", ".join(part for part in (skills, skills_recorded) if part)
-    if declared:
-        head.append(f"- **Skills loaded:** {declared}")
+    requested = ", ".join(dict.fromkeys(name.strip() for name in skills.split(",") if name.strip()))
+    if requested:
+        head.append(f"- **Skills requested:** {requested}")
+    if skills_recorded:
+        head.append(f"- **Skills loaded:** {skills_recorded}")
     elif role and role != "operator":
-        head.append(
-            "- **Skills loaded:** (not recorded — neither the dispatch request nor "
-            "the handoff's `extras.skills_loaded` named any)"
-        )
+        head.append("- **Skills loaded:** (not recorded in the handoff)")
 
     summary_lines = _summary_section(summary, confidence)
     finding_lines = (

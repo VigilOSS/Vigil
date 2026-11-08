@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+from urllib.parse import parse_qs, urlsplit
 from pathlib import Path
 
 import pytest
@@ -13,7 +14,8 @@ def _files_page(rows, *, offset=0, total=None):
     """The bounded `code/files` envelope the shared validator requires."""
     total = len(rows) if total is None else total
     return {"total": total, "offset": offset, "count": len(rows),
-            "has_more": offset + len(rows) < total, "items": rows}
+            "has_more": offset + len(rows) < total,
+            "items": [{"repo_generation": 3, **row} for row in rows]}
 
 
 class _Client:
@@ -25,9 +27,9 @@ class _Client:
         if endpoint.startswith("code/analysis-queue/") and endpoint.endswith("/progress"):
             item_id = int(endpoint.split("/")[2])
             return dict(self.progress[item_id], item_id=item_id)
-        assert endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0"
+        assert urlsplit(endpoint).path == "code/analysis-queue"
         return {"items": [{"id": 44, "file_path": "app/auth.py", "status": "pending",
-                            "repo_generation": 3, "repo_id": 7}], "has_more": False}
+                            "repo_generation": 3, "repo_id": 7, "loc": 12, **self.progress[44]}], "has_more": False}
 
 
 def test_selected_queue_ids_render_from_backend_not_authored_file_names():
@@ -85,9 +87,9 @@ def test_dispatch_prompt_quotes_backend_queue_and_attributed_handoff(
                               no_target_traffic=True, rate_budget=None)
     class LaneClient(_Client):
         def get(self, endpoint):
-            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+            if endpoint.startswith("code/analysis-queue?"):
                 return {"items": [{"id": 44, "file_path": "src/auth/A.java", "status": "pending",
-                                    "repo_generation": 3, "repo_id": 7}], "has_more": False}
+                                    "repo_generation": 3, "repo_id": 7, "loc": 12, **_Client.progress[44]}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
                 return _files_page([{"file_path": "src/auth/A.java", "loc": 12}])
             if endpoint == "code/analysis-queue/44/progress":
@@ -101,10 +103,10 @@ def test_dispatch_prompt_quotes_backend_queue_and_attributed_handoff(
         args=args, client=LaneClient(),
     )
     assert "queue_item_id=44" in prompt
-    assert "applicable_vuln_classes=web-app-injection,error-handling" in prompt
+    assert "common_applicable_vuln_classes=web-app-injection,error-handling" in prompt
     assert "src/auth/A.java" in prompt
     assert "Backend handoff attributed to dispatch prior-1" in prompt
-    assert '"src/auth/A.java" (12 LOC; queue item 44)' in prompt
+    assert '"src/auth/A.java" (12 LOC; queue item 44;' in prompt
     assert prompt.index("Lane file manifest") < prompt.index("--- END PERSISTED PRIOR-STATE DATA ---")
     assert prompt.index("--- BEGIN PERSISTED PRIOR-STATE DATA ---") < prompt.index("Backend handoff attributed")
     assert prompt.index("Backend handoff attributed") < prompt.index("--- END PERSISTED PRIOR-STATE DATA ---")
@@ -118,10 +120,10 @@ def test_lane_file_manifest_summarizes_fetch_json(tmp_path: Path):
     ]), encoding="utf-8")
     class BackendClient:
         def get(self, endpoint):
-            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+            if endpoint.startswith("code/analysis-queue?"):
                 return {"items": [
-                    {"id": 44, "file_path": "src/auth/A.java", "repo_generation": 3, "repo_id": 7},
-                    {"id": 45, "file_path": "src/web/B.java", "repo_generation": 3, "repo_id": 7},
+                    {"id": 44, "file_path": "src/auth/A.java", "repo_generation": 3, "repo_id": 7, "loc": 12, "applicable_vuln_classes": []},
+                    {"id": 45, "file_path": "src/web/B.java", "repo_generation": 3, "repo_id": 7, "loc": 8, "applicable_vuln_classes": []},
                 ], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
                 return _files_page([
@@ -149,10 +151,10 @@ def test_lane_file_manifest_uses_backend_facts_for_fetch_json(tmp_path: Path):
 
     class BackendClient:
         def get(self, endpoint):
-            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+            if endpoint.startswith("code/analysis-queue?"):
                 return {"items": [{
                     "id": 44, "file_id": 17, "file_path": "src/auth/A.java",
-                    "repo_id": 7, "repo_generation": 3, "status": "processing",
+                    "repo_id": 7, "repo_generation": 3, "status": "processing", "loc": 12, "applicable_vuln_classes": [],
                 }], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
                 return _files_page([{"file_path": "src/auth/A.java", "loc": 12}])
@@ -176,7 +178,7 @@ def test_lane_file_manifest_rejects_stale_fetch_json(tmp_path: Path, capsys):
 
     class BackendClient:
         def get(self, endpoint):
-            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+            if endpoint.startswith("code/analysis-queue?"):
                 return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3,
                                    "repo_id": 7}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
@@ -196,7 +198,7 @@ def test_lane_file_manifest_resolves_newline_paths_against_selected_repo(tmp_pat
 
     class FileClient:
         def get(self, endpoint):
-            assert endpoint == "code/files?repo_id=7&limit=10000&offset=0"
+            assert parse_qs(urlsplit(endpoint).query)["file_path"] == ["src/auth/A.java", "src/web/B.java"]
             return _files_page([
                 {"file_path": "src/auth/A.java", "loc": 12},
                 {"file_path": "src/web/B.java", "loc": 8},
@@ -285,9 +287,9 @@ def test_lane_file_manifest_renders_leased_item_scratch_dir(tmp_path: Path):
 
     class BackendClient:
         def get(self, endpoint):
-            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+            if endpoint.startswith("code/analysis-queue?"):
                 return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3, "repo_id": 7,
-                                   "status": "processing", "lease_token": "tok-1"}], "has_more": False}
+                                   "status": "processing", "lease_token": "tok-1", "loc": 12, "applicable_vuln_classes": []}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
                 return _files_page([{"file_path": "src/a.py", "loc": 12}])
             raise AssertionError(f"unexpected endpoint: {endpoint}")
@@ -309,12 +311,12 @@ def test_backend_queue_manifest_states_the_required_vuln_class_families():
         agent._backend_queue_manifest(_Client(), [44], repo_id=7, repo_generation=3)
     )
 
-    assert "applicable_vuln_classes=web-app-injection,error-handling" in rendered
+    assert "common_applicable_vuln_classes=web-app-injection,error-handling" in rendered
     assert "path_suggested_vuln_classes=path-traversal" in rendered
-    assert "missing_cwe_families=web-app-injection" in rendered
+    assert "queue_item_id=44" in rendered
 
 
-def test_backend_queue_manifest_refuses_an_unreadable_progress_payload(capsys):
+def test_backend_queue_manifest_refuses_an_unreadable_family_payload(capsys):
     class NoFamilies(_Client):
         progress = {44: {"item_id": 44}}
 
@@ -334,9 +336,11 @@ def test_lane_file_manifest_renders_each_items_required_families(tmp_path: Path)
 
     class BackendClient:
         def get(self, endpoint):
-            if endpoint == "code/analysis-queue?repo_id=7&limit=1000&offset=0":
+            if endpoint.startswith("code/analysis-queue?"):
                 return {"items": [{"id": 44, "file_path": "src/a.py", "repo_generation": 3,
-                                   "repo_id": 7, "status": "processing"}], "has_more": False}
+                                   "repo_id": 7, "status": "processing", "loc": 12,
+                                   "applicable_vuln_classes": ["deserialization", "error-handling"],
+                                   "path_suggested_vuln_classes": ["file-upload"]}], "has_more": False}
             if endpoint == "code/files?repo_id=7&limit=10000&offset=0":
                 return _files_page([{"file_path": "src/a.py", "loc": 12}])
             raise AssertionError(f"unexpected endpoint: {endpoint}")
@@ -345,7 +349,7 @@ def test_lane_file_manifest_renders_each_items_required_families(tmp_path: Path)
         lane_file, client=BackendClient(), source_identity=["repo_id: 7", "repo_generation: 3"],
     ))
 
-    assert "applicable_vuln_classes: deserialization,error-handling" in rendered
+    assert "common_applicable_vuln_classes: deserialization,error-handling" in rendered
     assert "path_suggested_vuln_classes: file-upload" in rendered
 
 
@@ -373,7 +377,7 @@ def test_lane_file_manifest_refuses_a_code_files_total_that_shifts_while_paging(
         agent._lane_file_manifest(
             lane_file, client=ShiftingClient(), source_identity=["repo_id: 7", "repo_generation: 3"]
         )
-    assert "total" in capsys.readouterr().err
+    assert "incomplete page" in capsys.readouterr().err
 
 
 def test_shared_from_json_context_merges_with_per_lane_overrides(tmp_path: Path):

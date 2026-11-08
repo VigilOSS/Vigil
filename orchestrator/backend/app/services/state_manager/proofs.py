@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -1444,29 +1445,37 @@ def _verification_receipts(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="terminal verification requires at least one proof_receipt_id",
         )
+    rows = connection.execute(
+        """
+        SELECT receipts.*, runs.status AS run_status,
+               artifacts.present AS artifact_present,
+               artifacts.integrity_status AS artifact_integrity_status,
+               artifacts.sha256 AS artifact_current_sha256
+        FROM assessment_proof_receipts AS receipts
+        JOIN assessment_runs AS runs ON runs.id = receipts.run_id
+        LEFT JOIN assessment_artifacts AS artifacts ON artifacts.id = receipts.artifact_id
+        WHERE receipts.engagement_id = ?
+          AND receipts.id IN (SELECT value FROM json_each(?))
+        """,
+        (engagement_id, json.dumps(unique_ids)),
+    ).fetchall()
+    rows_by_id = {int(row["id"]): row for row in rows}
+    for receipt_id in unique_ids:
+        if receipt_id not in rows_by_id:
+            raise HTTPException(status_code=400,
+                                detail=f"proof_receipt_id {receipt_id} does not belong to this engagement")
+    parent_ids = {int(row["derivative_of_receipt_id"]) for row in rows
+                  if row["derivative_of_receipt_id"] is not None}
+    for parent_id in parent_ids - rows_by_id.keys():
+        rows_by_id[parent_id] = _receipt_row(connection, engagement_id, parent_id)
+    # One health projection shares each artifact/command attestation across the
+    # entire decision, including historical raw parents.
+    records = {int(record["id"]): record for record in
+               _serialize_receipts(connection, engagement_id, rows_by_id.values())}
     receipts: list[dict[str, Any]] = []
     producer_dispatch_ids: set[int] = set()
     for receipt_id in unique_ids:
-        row = connection.execute(
-            """
-            SELECT receipts.*, runs.status AS run_status,
-                   artifacts.present AS artifact_present,
-                   artifacts.integrity_status AS artifact_integrity_status,
-                   artifacts.sha256 AS artifact_current_sha256
-            FROM assessment_proof_receipts AS receipts
-            JOIN assessment_runs AS runs ON runs.id = receipts.run_id
-            LEFT JOIN assessment_artifacts AS artifacts
-              ON artifacts.id = receipts.artifact_id
-            WHERE receipts.engagement_id = ? AND receipts.id = ?
-            """,
-            (engagement_id, receipt_id),
-        ).fetchone()
-        if row is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"proof_receipt_id {receipt_id} does not belong to this engagement",
-            )
-        receipt = _serialize_receipts(connection, engagement_id, [row])[0]
+        receipt = records[receipt_id]
         run_status = str(receipt.pop("run_status") or "")
         if run_status != "completed":
             raise HTTPException(
@@ -1492,17 +1501,7 @@ def _verification_receipts(
             legacy.get("source_receipt_id") if isinstance(legacy, dict) else None
         )
         if legacy_parent_id is not None:
-            raw = _serialize_receipts(
-                connection,
-                engagement_id,
-                [
-                    _receipt_row(
-                        connection,
-                        engagement_id,
-                        int(legacy_parent_id),
-                    )
-                ],
-            )[0]
+            raw = records[int(legacy_parent_id)]
             if raw["evidence_health"] != "healthy":
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -1534,6 +1533,29 @@ def _verification_receipts(
             detail="one independent verifier dispatch must own all decision proof receipts",
         )
     return receipts, producer_dispatch_ids.pop()
+
+
+@contextmanager
+def finding_write_connection(engagement_id: int, receipt_ids: list[int]):
+    """Prepare immutable proof reads before taking the finding writer lock.
+
+    Receipt and ownership checks still run again under the writer. No durable
+    claim or verdict can depend on an observation whose pinned identity drifted.
+    A caller already in a transaction retains its existing atomic boundary.
+    """
+    with _common.get_connection() as connection:
+        already_writing = connection.in_transaction
+    if not receipt_ids or already_writing:
+        with _common.get_connection() as connection:
+            yield connection
+        return
+    with artifact_index.prepared_artifact_health() as observations:
+        with _common.get_connection() as connection:
+            _verification_receipts(connection, engagement_id, receipt_ids)
+        observations.sealed = True
+        with _common.get_connection() as connection:
+            yield connection
+            observations.verify_current()
 
 
 def record_finding_verification_evidence(

@@ -293,7 +293,9 @@ def _verify_backend(cfg: Config) -> None:
     # against a TLS port fails and the backend is wrongly reported unreachable.
     is_https = parsed.scheme == "https"
     port = parsed.port or (443 if is_https else 80)
-    path = f"{(parsed.path or '').rstrip('/')}/engagements/{cfg.engagement_key}/assessment/summary"
+    # Engagement identity confirms registry visibility without calculating coverage,
+    # report readiness or finding evidence on every assess command.
+    path = f"{(parsed.path or '').rstrip('/')}/engagements/{cfg.engagement_key}"
 
     conn: http.client.HTTPConnection | None = None
     try:

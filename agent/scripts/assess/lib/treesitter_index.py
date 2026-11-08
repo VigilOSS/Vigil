@@ -2311,13 +2311,15 @@ class PhpIncludeResolver:
                 if candidate.endswith(suffix)
             )
         candidates: list[str] = []
+        seen: set[str] = set()
         for candidate in ordered:
             if (
                 candidate is not None
                 and candidate in self.snapshot_languages
-                and candidate not in candidates
+                and candidate not in seen
             ):
                 candidates.append(candidate)
+                seen.add(candidate)
         target["status"] = "ambiguous"
         target["candidates"] = candidates[:_PHP_INCLUDE_CANDIDATE_LIMIT]
         target["candidate_count"] = len(candidates)

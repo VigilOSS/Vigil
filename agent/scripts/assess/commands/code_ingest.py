@@ -714,8 +714,6 @@ def _skip_file_reason(
         return f'skipped_basename:{filename}'
     ext = Path(filename).suffix.lower()
     if ext in SKIP_EXTENSIONS:
-        if ext in {'.min.js', '.bundle.js', '.min.css', '.bundle.css'}:
-            return 'minified_or_bundle'
         if ext == '.map':
             return 'source_map'
         return f'skipped_extension:{ext}'
@@ -1581,10 +1579,6 @@ def _write_skipped_manifest(
     return str(path)
 
 
-def _detect_language(filename: str, header: str | None = None) -> str | None:
-    """Compatibility wrapper around the shared code-language classifier."""
-
-    return detect_language(filename, header)
 
 
 def _captured_language(filename: str, captured) -> str | None:
@@ -1601,34 +1595,8 @@ def _repo_key_for_path(repo_name: str, repo_path: str) -> str:
     return validate_repo_key(f"{normalized_name}-{path_hash}")
 
 
-def _count_lines(filepath: str) -> int:
-    """Count lines in a file."""
-    try:
-        with open(filepath, 'rb') as f:
-            return sum(1 for _ in f)
-    except OSError:
-        return 0
 
 
-def _read_header(filepath: str, max_lines: int = 50, max_chars: int = 8192) -> str:
-    """Read the first N lines of a file as a bounded header snippet."""
-    lines = []
-    char_count = 0
-    try:
-        with open(filepath, 'r', encoding='utf-8', errors='replace') as f:
-            for i, line in enumerate(f):
-                if i >= max_lines or char_count >= max_chars:
-                    break
-                remaining = max_chars - char_count
-                if len(line) > remaining:
-                    lines.append(line[:remaining])
-                    char_count = max_chars
-                    break
-                lines.append(line)
-                char_count += len(line)
-    except OSError:
-        return ''
-    return ''.join(lines)
 
 
 def _git_warn(message: str) -> None:

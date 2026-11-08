@@ -1,15 +1,7 @@
-"""The code-dispatch contract declares the lease-specific scratch directory.
-
-`code-dispatch fetch` creates one scratch directory per claimed queue item and
-returns it on the item. It is the only temp location that is engagement-contained
-and lane-private, so a specialist that instead writes into the client harness's
-own scratchpad leaves evidence outside the engagement and collides with the other
-lanes sharing that directory. The contract has to name the field, say it wins over
-a client-provided location, and state the filename rule for any directory the
-harness shares.
-"""
+"""The scratch contract names the helper field; executable leases namespace files."""
 from __future__ import annotations
 
+from assess.commands import code_dispatch
 from assess.lib import contracts
 
 
@@ -26,9 +18,17 @@ def test_scratch_dir_is_a_declared_helper_supplied_field() -> None:
     assert "tools/analysis-state/code-dispatch-scratch" in defaults["scratch_dir"]
 
 
-def test_contract_prefers_the_lease_scratch_dir_over_client_scratch_locations() -> None:
-    notes = " ".join(_dispatch_contract().notes)
-
-    assert "scratch_dir" in notes
-    assert "client" in notes
-    assert "lane-unique" in notes
+def test_lease_scratch_paths_keep_attempt_files_distinct(tmp_path) -> None:
+    paths = []
+    for item_id, token in [(41, "acme-first"), (41, "acme-reclaimed"), (42, "acme-second")]:
+        relative = code_dispatch._prepare_dispatch_scratch_dir(
+            tmp_path, queue_item_id=item_id, lease_token=token,
+        )
+        destination = tmp_path / relative / f"{item_id}-handoff.json"
+        destination.write_text(token, encoding="utf-8")
+        paths.append(destination)
+    assert len(set(paths)) == 3
+    assert [path.read_text(encoding="utf-8") for path in paths] == [
+        "acme-first", "acme-reclaimed", "acme-second",
+    ]
+    assert all(path.resolve().is_relative_to(tmp_path.resolve()) for path in paths)

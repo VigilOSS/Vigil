@@ -24,6 +24,24 @@ def _by_line(indexed: dict) -> dict[int, dict]:
     return {target["line"]: target for target in _includes(indexed)}
 
 
+def test_common_include_basename_work_scales_with_candidates():
+    comparisons = []
+    class CountedPath(str):
+        __hash__ = str.__hash__
+        def __eq__(self, other):
+            comparisons.append(1)
+            return super().__eq__(other)
+    paths = [CountedPath(f"modules/acme-{index:04d}/config.php") for index in range(500)]
+    resolver = PhpIncludeResolver(dict.fromkeys(paths, "php"))
+    target = {"kind": "include", "status": "unclassified", "anchor": "include_path",
+              "path": "config.php"}
+    resolver.resolve({"import_targets": [target]}, rel_path="src/index.php")
+    assert target["status"] == "ambiguous"
+    assert target["candidate_count"] == len(paths)
+    assert target["candidates"] == paths[:20]
+    assert len(comparisons) < 10 * len(paths)
+
+
 BOOTSTRAP = b"""<?php
 define('ACME_LIB', dirname(__DIR__, 2) . '/lib');
 const ACME_VIEWS = __DIR__ . '/views';

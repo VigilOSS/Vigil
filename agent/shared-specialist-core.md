@@ -257,6 +257,14 @@ artifact mark-scratch <path>` (single) or `--under <prefix>` (bulk). A
 `check-phase-readiness --phase report` `unlinked_markdown_note` advisory names the exact fix
 per row.
 
+Keep temporary files under the lease's supplied `scratch_dir` when one exists. Prefix scratch
+filenames with the queue item ID (or dispatch agent ID outside queue work), and retain the exact
+paths you create. Cleanup uses that explicit owned-file list inside your lease directories, so a
+shared basename cannot select another lane's handoff or receipt. Shared scratch ancestors and
+pattern-based tree sweeps are not cleanup scopes; the directories are coordination boundaries,
+not separate OS users or filesystem sandboxes. Keep registered evidence and durable handoff
+references until their owning lifecycle permits removal.
+
 When the human asks you to put durable engagement state into a prose file that
 duplicates an existing structured home, say which canonical verb owns it and
 offer to record it there (for example, `vigil assess intel record note` for

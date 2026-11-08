@@ -70,7 +70,10 @@ supporting artifacts. This adds no separate authority or packet length gate.
 
 Code assignments can add `queue_item_ids`, or `lane_file` naming a queue-fetch JSON/newline path list.
 The helper resolves current backend file/status/source identity before registration, renders bounded
-manifest previews, and preserves pointers to the full selection. `prior_agent_id` loads a bounded saved
+manifest previews, and preserves pointers to the full selection. Shared required families render
+once, with per-file additions; their union is each item's complete closeout floor. Optional empty
+context fields are omitted, while identity and traffic declarations remain explicit. Model/reasoning
+requests remain dispatch provenance rather than specialist instructions. `prior_agent_id` loads a bounded saved
 handoff inside the untrusted prior-state boundary. Never regenerate source digests or paths by hand.
 Blue assignments receive validated tenant-reference loads from the owned engagement configuration.
 

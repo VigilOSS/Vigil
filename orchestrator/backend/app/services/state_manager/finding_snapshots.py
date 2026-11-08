@@ -73,25 +73,39 @@ def closest_snapshot_path(
     repo_id: int,
     repo_generation: int,
     path: str,
+    *,
+    roster_cache: dict[tuple[int, int], list[str]] | None = None,
+    closest_cache: dict[tuple[int, int, str], str | None] | None = None,
 ) -> str | None:
     """The generation's file nearest ``path``: same basename first, then spelling."""
 
-    paths = [
-        str(row["file_path"])
-        for row in connection.execute(
-            """
-            SELECT file_path FROM code_source_generation_files
-            WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
-            """,
-            (engagement_id, repo_id, repo_generation),
-        ).fetchall()
-    ]
+    key = (repo_id, repo_generation, path)
+    if closest_cache is not None and key in closest_cache:
+        return closest_cache[key]
+    roster_key = (repo_id, repo_generation)
+    paths = roster_cache.get(roster_key) if roster_cache is not None else None
+    if paths is None:
+        paths = [
+            str(row["file_path"])
+            for row in connection.execute(
+                """
+                SELECT file_path FROM code_source_generation_files
+                WHERE engagement_id = ? AND repo_id = ? AND repo_generation = ?
+                """,
+                (engagement_id, repo_id, repo_generation),
+            ).fetchall()
+        ]
+        if roster_cache is not None:
+            roster_cache[roster_key] = paths
     basename = path.rsplit("/", 1)[-1]
     same_name = [candidate for candidate in paths if candidate.rsplit("/", 1)[-1] == basename]
     closest = difflib.get_close_matches(
         path, same_name or paths, n=1, cutoff=0 if same_name else 0.6
     )
-    return closest[0] if closest else None
+    result = closest[0] if closest else None
+    if closest_cache is not None:
+        closest_cache[key] = result
+    return result
 
 
 def snapshot_location_problem(
@@ -103,6 +117,8 @@ def snapshot_location_problem(
     line: int | None = None,
     *,
     end_line: int | None = None,
+    roster_cache: dict[tuple[int, int], list[str]] | None = None,
+    closest_cache: dict[tuple[int, int, str], str | None] | None = None,
 ) -> tuple[dict[str, Any] | None, str]:
     """Look ``path`` (and its lines) up in one sealed generation's file roster.
 
@@ -136,7 +152,8 @@ def snapshot_location_problem(
             )
         reason = f"'{path}' is not a file in generation {repo_generation} of repository {repo_id}"
         closest = closest_snapshot_path(
-            connection, engagement_id, repo_id, repo_generation, path
+            connection, engagement_id, repo_id, repo_generation, path,
+            roster_cache=roster_cache, closest_cache=closest_cache,
         )
         if closest is not None:
             reason += f"; closest admitted path: {closest!r}"

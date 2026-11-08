@@ -236,3 +236,17 @@ def test_update_carries_editor_without_changing_author(tmp_path, monkeypatch):
     update_finding.run(args)
     assert fake.patches[0][1]["dispatch_agent_id"] == "VERIFY-1"
     assert "provenance" not in fake.patches[0][1]
+
+
+@pytest.mark.parametrize("version", [None, 7])
+def test_append_notes_preserves_explicit_version_without_reading_one(tmp_path, monkeypatch, version):
+    fake = _FakeClient()
+    _install(monkeypatch, tmp_path, fake)
+    def unexpected(*args):
+        raise AssertionError("A commutative append does not read a row version")
+    monkeypatch.setattr(fake, "get", unexpected)
+    argv = ["update", "VA-001", "--notes", "Acme review completed"]
+    if version is not None:
+        argv += ["--expected-row-version", str(version)]
+    update_finding.run(_parse(argv, str(tmp_path)))
+    assert fake.patches[0][1].get("expected_row_version") == version

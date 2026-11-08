@@ -425,7 +425,7 @@ def run(args) -> None:
                 if getattr(args, "notes_rotate", False)
                 else "replace"
                 if getattr(args, "notes_replace", False)
-                else None
+                else "append" if args.notes is not None else None
             ),
             "source_name": args.source_name,
             "dispatch_agent_id": getattr(args, "dispatch_agent_id", None),
@@ -583,7 +583,8 @@ def run(args) -> None:
         for slug in slugs:
             try:
                 patch_payload = dict(payload)
-                if patch_payload.get("expected_row_version") is None:
+                if (patch_payload.get("expected_row_version") is None
+                        and not _is_append_only_notes_patch(patch_payload)):
                     current = client.get(f"findings/{slug}")
                     row_version = (
                         current.get("row_version")

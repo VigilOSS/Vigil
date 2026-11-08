@@ -19,6 +19,7 @@ from ..services import assessment_memory
 from ..services import artifact_index
 from ..services import state_manager
 from ..services.state_manager._common import CommandRunStatus
+from ..services.state_manager.findings import count_findings
 from ..services.state_manager.command_run_queries import (
     COMMAND_LEDGER_FACET_DEFAULT_LIMIT,
     COMMAND_LEDGER_FACET_MAX_LIMIT,
@@ -1717,9 +1718,9 @@ async def _broadcast(engagement_key: str, record_type: str, payload: dict[str, A
     if record_type in _SUMMARY_AFFECTING_RECORD_TYPES:
         raw_engagement_id = payload.get("engagement_id")
         if isinstance(raw_engagement_id, int):
-            state_manager.clear_assessment_summary_cache(raw_engagement_id)
+            await anyio.to_thread.run_sync(state_manager.clear_assessment_summary_cache, raw_engagement_id)
         else:
-            state_manager.clear_assessment_summary_cache()
+            await anyio.to_thread.run_sync(state_manager.clear_assessment_summary_cache)
     await broadcaster.publish(
         engagement_key,
         {
@@ -1757,9 +1758,9 @@ def _audit_assessment_mutation(
 
 
 @router.get("/summary")
-def get_assessment_summary(engagement_key: str) -> dict[str, Any]:
-    engagement = get_engagement_or_404(engagement_key)
-    return state_manager.assessment_summary(engagement.id)
+async def get_assessment_summary(engagement_key: str) -> dict[str, Any]:
+    engagement = await anyio.to_thread.run_sync(get_engagement_or_404, engagement_key)
+    return await state_manager.assessment_summary_async(engagement.id)
 
 
 @router.get("/exploit-candidates")
@@ -2746,6 +2747,12 @@ def get_oob_probe(engagement_key: str, nonce: str) -> dict[str, Any]:
 
 
 _FINDING_LIST_RESPONSE = TypeAdapter(list[dict[str, Any]])
+
+
+@router.get("/findings/count")
+def get_finding_count(engagement_key: str) -> dict[str, int]:
+    engagement = get_engagement_or_404(engagement_key)
+    return {"total": count_findings(engagement.id)}
 
 
 @router.get("/findings", response_model=list[dict[str, Any]])
@@ -4869,20 +4876,21 @@ async def verify_finding(
             operator_authority_intel_id=request.operator_authority_intel_id,
         )
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="finding-verify",
-            action=f"finding={finding_slug} verification_status={request.verification_status}",
-            actor_name=request.source_name,
-            result=request.reason_code or request.reason_text or request.verification_status,
-            metadata={
-                "finding_slug": finding_slug,
-                "verification_status": request.verification_status,
-            },
+    if not record.get("already_applied"):
+        await anyio.to_thread.run_sync(
+            functools.partial(
+                _audit_assessment_mutation,
+                engagement.id,
+                title="finding-verify",
+                action=f"finding={finding_slug} verification_status={request.verification_status}",
+                actor_name=request.source_name,
+                result=request.reason_code or request.reason_text or request.verification_status,
+                metadata={
+                    "finding_slug": finding_slug,
+                    "verification_status": request.verification_status,
+                },
+            )
         )
-    )
     await _broadcast(engagement.key, "finding_verify", record)
     return record
 

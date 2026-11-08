@@ -239,12 +239,27 @@ def test_claim_without_a_recorded_plan_says_so(tmp_path, monkeypatch, capsys):
 
 
 def test_claim_records_the_requested_model_and_reasoning(tmp_path, monkeypatch, capsys):
-    sent = _claim_rendering(tmp_path, monkeypatch, capsys, _work(),
+    from assess.commands import agent
+
+    source = {'repo_id': 7, 'repo_generation': 2, 'source_manifest_digest': 'a' * 64}
+    identity = ['repo_id: 7', 'repo_generation: 2', 'source_manifest_digest: ' + 'a' * 64,
+                'snapshot_path: source/acme/sealed', 'structural_index_schema: v7',
+                'structural_index_manifest_path: indexes/acme/manifest.json']
+    monkeypatch.setattr(agent, '_code_source_identity_lines', lambda *_a, **_k: identity)
+    sent = _claim_rendering(tmp_path, monkeypatch, capsys,
+                            _work() | {'binding': {'source_binding': source}},
                             '--model', 'acme-model-1', '--reasoning', 'high')
     assert (sent['requested_model'], sent['requested_reasoning']) == ('acme-model-1', 'high')
-    rendered = sent['prompt_packet']['rendered_prompt']
-    assert 'requested_model: acme-model-1' in rendered
-    assert 'requested_reasoning: high' in rendered
+    assert (sent['agent_id'], sent['agent_role']) == ('PROOF-1', 'exploit-developer')
+    assert sent['finding_slugs'] == ['VA-050']
+    packet = sent['prompt_packet']
+    context = packet['context']
+    assert context['authorized_phase'] == 'code-verify'
+    assert context['assessment_mode'] == 'code'
+    assert context['source_identity'] == identity
+    assert packet['schema'] == 'dispatch-prompt/v1'
+    assert context['traffic_declaration'] == {'rate_budget': None, 'no_target_traffic': True}
+    assert all(line in packet['rendered_prompt'] for line in identity)
 
 
 def test_claim_records_selected_skills_and_mandatory_route_context(tmp_path, monkeypatch, capsys):

@@ -75,7 +75,11 @@ ctags_path: <generation-bound tags path, or unavailable>
 
 Derive `ctags_path` only from `active_repo.lsp_config.ctags.tags_path` when nested `available` is
 true and its `repo_generation`/`source_manifest_digest` match the active repo identity; otherwise
-set it to `unavailable`. Read and search only `snapshot_path`; `source_origin_path` is provenance,
+set it to `unavailable`. Use `snapshot_path` for the assigned analysis, and the listed sealed
+reference roots in "Other Sealed Repositories" for relevant framework, infrastructure or deployment
+context. Resolve further active reference roots and their generation/digest from
+`vigil assess fetch code/repos` when the packet preview is incomplete. Attribute reference citations to their repository and generation; finding and coverage
+ownership still follow the engagement scope and this assignment. `source_origin_path` is provenance,
 not an analysis root. Resolve structural and ctags artifacts only through this block because a
 plausible path from an older generation can contain correct-looking but stale facts. If the block
 is incomplete, its digest differs from the active repo record, or either bound artifact names
@@ -136,8 +140,9 @@ structural-review debt, even when the architect classified the file as `skip`.
 
 ## 3. Full Sealed-Source Access
 
-Source code is read directly beneath `snapshot_path` via host Bash or client file tools. Pass the
-absolute `snapshot_path` (or a path beneath it) as the search/read root in every command; a client
+Source code is read directly beneath `snapshot_path`, or a listed sealed reference root for context,
+via host Bash or client file tools. Pass that absolute sealed root (or a path beneath it) as the
+search/read root in every command; a client
 can reset the shell's working directory between calls, so a relative path or an earlier `cd` can
 silently search another tree. The mutable origin checkout is never an analysis root. This is NOT
 target-facing network work -- `vigil assess kali` is not needed for reading source files.

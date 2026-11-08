@@ -739,7 +739,9 @@ def test_agent_start_emit_prompt_injects_blue_tenant_context(
     assert str(tenant_ref) in output
     assert "rate_limit_budget: not applicable — no target traffic" in output
     assert "target: acme tenant / alert AL-1" in output
-    assert "application_unit_id: none" in output
+    assert receipt["agent_id"] == "investigator-1"
+    assert receipt["authorized_phase"] == "investigate"
+    assert receipt["packet_sha256"] == hashlib.sha256(output.encode()).hexdigest()
     assert "authorized_phase: investigate" in output
     assert "mindset lens: not applicable — alert investigation" in output
     assert "customer: acme" in output

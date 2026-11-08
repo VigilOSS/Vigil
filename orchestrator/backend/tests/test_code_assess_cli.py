@@ -609,7 +609,8 @@ def test_code_ingest_header_snippet_is_capped(tmp_path):
     css_file = tmp_path / "style.css"
     css_file.write_text("data:" + ("A" * 9000) + "\nbody { color: red; }\n", encoding="utf-8")
 
-    snippet = module._read_header(str(css_file))
+    with module.RootedSourceTree(tmp_path) as tree:
+        snippet = tree.capture("style.css", retain_spool=False).header
 
     assert len(snippet) == 8192
     assert snippet.startswith("data:")
@@ -633,8 +634,6 @@ def test_code_ingest_skips_named_pipes(monkeypatch, tmp_path):
             engagement_dir=str(tmp_path / "engagement"),
         ),
     )
-    monkeypatch.setattr(module, "_count_lines", lambda filepath: 1)
-    monkeypatch.setattr(module, "_read_header", lambda filepath: f"header:{Path(filepath).name}")
     monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
 
     captured: dict[str, object] = {}

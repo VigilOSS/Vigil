@@ -271,8 +271,9 @@ instructions: |2
 
   1. `vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>` per finding
   2. `vigil assess code-record analysis <analysis-json>` per queue item (carries grouped file/call-chain receipts, exact callable/span anchors, dispositions, CWE coverage, cross-file triggers, and the fetched queue lease) — record per cluster as each finishes, not at end-of-lane; a dispatch that dies keeps only what it already wrote. Step 2 needs the fetched lease; when this dispatch holds none, it is unreachable and "Non-covering discovery mode (no queue lease)" above replaces it — never skip it silently and never substitute a lease you did not fetch
-  3. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`, and `skills_loaded` when the dispatch left your skills self-selected — `render-handoff` reads `extras.skills_loaded`)
-  4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
+  3. Close each reviewed queue item with `vigil assess code-dispatch done` using its fetched lease. Read `vigil assess contract code-dispatch done` for the executable closeout payload; `disposition=clean` needs notes explaining the clean conclusion. Resolve recorded findings and coverage gaps honestly before closeout.
+  4. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`, and `skills_loaded` when the dispatch left your skills self-selected — `render-handoff` reads `extras.skills_loaded`)
+  5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
 
   Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 

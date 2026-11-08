@@ -661,10 +661,10 @@ def _current_top_level_spans(
     """`(callable id, start, end)` of each file's `<top-level>` segments in its active generation."""
     if not file_ids:
         return {}
-    placeholders = ",".join("?" for _ in file_ids)
+    file_ids_json = json.dumps(file_ids)
     spans: dict[int, list[tuple[int, int, int]]] = {}
     for row in connection.execute(
-        f"""
+        """
         SELECT callables.file_id, callables.id, callables.start_line, callables.end_line
         FROM code_structural_callables AS callables
         JOIN code_files AS files
@@ -673,10 +673,10 @@ def _current_top_level_spans(
           ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
          AND repos.active_generation = callables.repo_generation
         WHERE callables.engagement_id = ? AND callables.name = ?
-          AND callables.file_id IN ({placeholders})
+          AND callables.file_id IN (SELECT value FROM json_each(?))
         ORDER BY callables.file_id, callables.start_line
         """,
-        (engagement_id, TOP_LEVEL_CALLABLE_NAME, *file_ids),
+        (engagement_id, TOP_LEVEL_CALLABLE_NAME, file_ids_json),
     ).fetchall():
         spans.setdefault(int(row["file_id"]), []).append(
             (int(row["id"]), int(row["start_line"]), int(row["end_line"]))
@@ -698,19 +698,19 @@ def structural_review_gaps(
     """
     if not file_ids:
         return set(), set()
-    placeholders = ",".join("?" for _ in file_ids)
+    file_ids_json = json.dumps(file_ids)
     file_rows = {
         int(row["id"]): dict(row)
         for row in connection.execute(
-            f"""
+            """
             SELECT id, loc, total_functions, total_entry_points, total_sinks,
                    structural_signal_counts_json, structural_analysis_status,
                    language, structural_unavailable_dimensions_json,
                    structural_truncated_dimensions_json
             FROM code_files
-            WHERE engagement_id = ? AND id IN ({placeholders})
+            WHERE engagement_id = ? AND id IN (SELECT value FROM json_each(?))
             """,
-            (engagement_id, *file_ids),
+            (engagement_id, file_ids_json),
         ).fetchall()
     }
     top_level = _current_top_level_spans(connection, engagement_id, list(file_rows))
@@ -734,10 +734,10 @@ def structural_review_gaps(
           ON callables.id = links.callable_id
         {receipt_joins}
         WHERE results.engagement_id = ?
-          AND links.file_id IN ({placeholders})
+          AND links.file_id IN (SELECT value FROM json_each(?))
           AND ({current_result_receipt})
         """,
-        (engagement_id, *file_ids),
+        (engagement_id, file_ids_json),
     ).fetchall():
         file_id = int(row["file_id"])
         if str(row["name"]) == TOP_LEVEL_CALLABLE_NAME:
@@ -757,10 +757,10 @@ def structural_review_gaps(
          AND span_files.engagement_id = results.engagement_id
         {receipt_joins}
         WHERE results.engagement_id = ?
-          AND span_files.id IN ({placeholders})
+          AND span_files.id IN (SELECT value FROM json_each(?))
           AND ({current_result_receipt})
         """,
-        (engagement_id, *file_ids),
+        (engagement_id, file_ids_json),
     ).fetchall():
         reviewed.setdefault(int(row["file_id"]), []).append(
             (int(row["start_line"]), int(row["end_line"]))
@@ -1373,9 +1373,8 @@ def _get_repo_rows(connection, engagement_id: int, repo_ids: set[int]) -> dict[i
 def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[int, dict[str, Any]]:
     if not file_ids:
         return {}
-    placeholders = ",".join("?" for _ in file_ids)
     rows = connection.execute(
-        f"""
+        """
         SELECT files.*
         FROM code_files AS files
         JOIN code_repos AS repos
@@ -1383,9 +1382,9 @@ def _get_file_rows(connection, engagement_id: int, file_ids: set[int]) -> dict[i
          AND repos.engagement_id = files.engagement_id
          AND repos.active_generation > 0
         WHERE files.engagement_id = ? AND files.retired_at IS NULL
-          AND files.id IN ({placeholders})
+          AND files.id IN (SELECT value FROM json_each(?))
         """,
-        (engagement_id, *sorted(file_ids)),
+        (engagement_id, json.dumps(sorted(file_ids))),
     ).fetchall()
     found = {int(row["id"]): dict(row) for row in rows}
     if len(found) != len(file_ids):
@@ -1602,12 +1601,13 @@ def _require_queue_lease(
 
 
 def _require_queue_generation(
-    connection, engagement_id: int, queue_rows: dict[int, dict[str, Any]], *, action: str
+    connection, engagement_id: int, queue_rows: dict[int, dict[str, Any]], *, action: str,
+    lock: bool = True,
 ) -> None:
-    """Lock and reject writes outside the one canonical current attempt."""
+    """Require the canonical current attempt, locking for mutations."""
     if not queue_rows:
         return
-    if not getattr(connection, "in_transaction", False):
+    if lock and not getattr(connection, "in_transaction", False):
         connection.execute("BEGIN IMMEDIATE")
     placeholders = ",".join("?" for _ in queue_rows)
     current_rows = connection.execute(
@@ -1679,7 +1679,9 @@ def _require_queue_generation(
         )
 
 
-def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> None:
+def _sync_file_analysis_status(
+    connection, engagement_id: int, file_id: int, *, deferred_modules: set[int] | None = None
+) -> None:
     queue_row = connection.execute(
         """
         WITH current_attempts AS (
@@ -1782,7 +1784,10 @@ def _sync_file_analysis_status(connection, engagement_id: int, file_id: int) -> 
     ).fetchone()
     module_id = None if module_row is None else module_row["module_id"]
     if module_id is not None:
-        _sync_module_rollup(connection, engagement_id, int(module_id))
+        if deferred_modules is None:
+            _sync_module_rollup(connection, engagement_id, int(module_id))
+        else:
+            deferred_modules.add(int(module_id))
 
 
 def _derive_module_analysis_status(status_counts: dict[str, int]) -> str:

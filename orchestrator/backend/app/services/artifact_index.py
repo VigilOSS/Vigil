@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import datetime as dt
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
 import errno
 import hashlib
 import mimetypes
@@ -64,7 +67,7 @@ def _normalize_relative_path(root: Path, path_value: str) -> str:
     return relative.as_posix()
 
 
-def _open_registered_artifact(root: Path, relative_path: str) -> int | None:
+def _open_registered_artifact(root: Path | int, relative_path: str) -> int | None:
     """Open one registered path without following any component symlink."""
     parts = Path(relative_path).parts
     directory_flags = (
@@ -83,7 +86,7 @@ def _open_registered_artifact(root: Path, relative_path: str) -> int | None:
     try:
         if not parts:
             return os.open(root, leaf_flags)
-        current = os.open(root, directory_flags)
+        current = os.dup(root) if isinstance(root, int) else os.open(root, directory_flags)
         opened.append(current)
         for component in parts[:-1]:
             current = os.open(component, directory_flags, dir_fd=current)
@@ -150,6 +153,23 @@ def _is_textual(media_type: str, sample: bytes) -> bool:
     return b"\x00" not in sample[:1024]
 
 
+def _read_artifact_extent(descriptor: int, expected_size: int) -> Iterator[bytes]:
+    """Read one captured extent, with one byte to detect concurrent growth.
+
+    EOF is not a finite budget for a regular file a producer keeps appending to.
+    Overflow rejects the observation; it never attests a truncated digest.
+    """
+    remaining = expected_size
+    while True:
+        chunk = os.read(descriptor, min(1024 * 1024, remaining + 1))
+        if not chunk:
+            return
+        if len(chunk) > remaining:
+            raise HTTPException(status_code=409, detail="artifact content changed")
+        remaining -= len(chunk)
+        yield chunk
+
+
 def _file_payload(
     root: Path,
     relative_path: str,
@@ -196,15 +216,19 @@ def _file_payload(
         preview = bytearray()
         indexed = bytearray()
         os.lseek(descriptor, 0, os.SEEK_SET)
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
-            digest.update(chunk)
-            size += len(chunk)
-            if len(preview) < PREVIEW_BYTES:
-                preview.extend(chunk[: PREVIEW_BYTES - len(preview)])
-            indexed.extend(chunk)
+        try:
+            chunks = _read_artifact_extent(descriptor, before.st_size)
+            for chunk in chunks:
+                digest.update(chunk)
+                size += len(chunk)
+                if len(preview) < PREVIEW_BYTES:
+                    preview.extend(chunk[: PREVIEW_BYTES - len(preview)])
+                indexed.extend(chunk)
+        except HTTPException:
+            if reject_unsafe_path:
+                raise
+            return {"present": False, "size_bytes": 0, "sha256": "",
+                    "preview_text": "", "indexed_text": ""}
         after = os.fstat(descriptor)
         if (
             before.st_dev != after.st_dev
@@ -249,11 +273,11 @@ def _serialize_artifact(row, *, compact: bool = False) -> dict[str, Any]:
     for key in ("present", "scratch"):
         data[key] = bool(data.get(key))
     indexed_text = str(data.get("indexed_text") or "")
-    indexed_bytes = len(indexed_text.encode("utf-8"))
+    indexed_bytes = int(data["indexed_bytes"]) if "indexed_bytes" in data else len(indexed_text.encode("utf-8"))
     size_bytes = int(data.get("size_bytes") or 0)
     if not data["present"]:
         index_status = "missing"
-    elif indexed_text:
+    elif indexed_bytes:
         index_status = "partial" if indexed_bytes < size_bytes else "complete"
     elif size_bytes == 0:
         index_status = "complete"
@@ -777,14 +801,13 @@ def _verified_snapshot_payload(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="verified artifact identity changed",
             )
+        if before.st_size != expected_size:
+            raise HTTPException(status_code=409, detail="verified artifact content changed")
         digest = hashlib.sha256()
         size = 0
         content = bytearray()
         os.lseek(descriptor, 0, os.SEEK_SET)
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
+        for chunk in _read_artifact_extent(descriptor, expected_size):
             digest.update(chunk)
             size += len(chunk)
             if len(content) <= GET_CONTENT_BYTES:
@@ -794,6 +817,9 @@ def _verified_snapshot_payload(
         if (
             (int(after.st_dev), int(after.st_ino))
             != (int(expected_device), int(expected_inode))
+            or before.st_size != after.st_size
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
             or size != int(expected_size)
             or observed_sha != str(expected_sha256)
         ):
@@ -838,6 +864,106 @@ def verified_snapshot_evidence_health(
     return "healthy"
 
 
+def _file_identity(metadata: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (metadata.st_dev, metadata.st_ino, metadata.st_size,
+            metadata.st_mtime_ns, metadata.st_ctime_ns)
+
+
+class _PreparedArtifactHealth:
+    """Full hashes before a writer; root-pinned identity checks before commit.
+
+    File descriptors are reopened briefly, as in source snapshot attestation,
+    so concurrent decisions do not retain one handle per proof receipt.
+    """
+
+    def __init__(self) -> None:
+        self.sealed = False
+        self.observations: dict[tuple, tuple[os.stat_result, Path, str]] = {}
+        self.roots: dict[Path, tuple[int, os.stat_result]] = {}
+
+    def open(self, root: Path, relative_path: str, *, verified: bool) -> int | None:
+        if root not in self.roots:
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            descriptor = os.open(root, flags)
+            try:
+                metadata = os.fstat(descriptor)
+            except BaseException:
+                os.close(descriptor)
+                raise
+            self.roots[root] = (descriptor, metadata)
+        if verified:
+            normalized = _verified_command_output_relative_path(relative_path)
+            if Path(normalized).parts[:2] != ("scans", "command-runs"):
+                raise HTTPException(status_code=409, detail="verified artifact no longer points at the snapshot directory")
+        return _open_registered_artifact(self.roots[root][0], relative_path)
+
+    def health(self, root: Path, relative_path: str, **expected: Any) -> str:
+        key = (str(root), relative_path, expected["expected_size"], expected["expected_sha256"],
+               expected["verified_device"], expected["verified_inode"])
+        if key in self.observations:
+            self._check(self.observations[key])
+            return "healthy"
+        if self.sealed:
+            raise HTTPException(status_code=409, detail="proof evidence changed during preparation; retry verification")
+        return _registered_snapshot_health(root, relative_path, prepared=(self, key), **expected)
+
+    def _verify_roots(self) -> None:
+        for root, (descriptor, before) in self.roots.items():
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+            current = os.open(root, flags)
+            try:
+                pinned = os.fstat(descriptor)
+                lexical = os.fstat(current)
+                if ((pinned.st_dev, pinned.st_ino) != (before.st_dev, before.st_ino)
+                        or (lexical.st_dev, lexical.st_ino) != (before.st_dev, before.st_ino)):
+                    raise HTTPException(status_code=409, detail="proof evidence root changed during preparation; retry verification")
+            finally:
+                os.close(current)
+
+    def _check(self, observation: tuple[os.stat_result, Path, str]) -> None:
+        before, root, relative_path = observation
+        detail = "proof evidence changed during preparation; retry verification"
+        current = _open_registered_artifact(self.roots[root][0], relative_path)
+        if current is None:
+            raise HTTPException(status_code=409, detail=detail)
+        try:
+            if _file_identity(os.fstat(current)) != _file_identity(before):
+                raise HTTPException(status_code=409, detail=detail)
+        finally:
+            os.close(current)
+
+    def verify_current(self) -> None:
+        try:
+            self._verify_roots()
+            for observation in self.observations.values():
+                self._check(observation)
+            self._verify_roots()
+        except OSError as exc:
+            raise HTTPException(status_code=409, detail="proof evidence changed during preparation; retry verification") from exc
+
+    def close(self) -> None:
+        for descriptor, _ in self.roots.values():
+            os.close(descriptor)
+        self.roots.clear()
+        self.observations.clear()
+
+
+_PREPARED_ARTIFACT_HEALTH: ContextVar[_PreparedArtifactHealth | None] = ContextVar(
+    "prepared_artifact_health", default=None
+)
+
+
+@contextmanager
+def prepared_artifact_health() -> Iterator[_PreparedArtifactHealth]:
+    observations = _PreparedArtifactHealth()
+    token = _PREPARED_ARTIFACT_HEALTH.set(observations)
+    try:
+        yield observations
+    finally:
+        _PREPARED_ARTIFACT_HEALTH.reset(token)
+        observations.close()
+
+
 def registered_snapshot_evidence_health(
     root: Path,
     relative_path: str,
@@ -848,50 +974,55 @@ def registered_snapshot_evidence_health(
     verified_inode: int | None,
 ) -> str:
     """Read current bytes safely and compare them with one registered snapshot."""
+    expected = dict(expected_size=expected_size, expected_sha256=expected_sha256,
+                    verified_device=verified_device, verified_inode=verified_inode)
+    observations = _PREPARED_ARTIFACT_HEALTH.get()
+    if observations is not None:
+        return observations.health(root, relative_path, **expected)
+    return _registered_snapshot_health(root, relative_path, **expected)
 
-    if verified_device is not None or verified_inode is not None:
-        if verified_device is None or verified_inode is None:
-            return "stale"
-        return verified_snapshot_evidence_health(
-            root,
-            relative_path,
-            expected_device=verified_device,
-            expected_inode=verified_inode,
-            expected_size=expected_size,
-            expected_sha256=expected_sha256,
-        )
+
+def _registered_snapshot_health(
+    root: Path, relative_path: str, *, expected_size: int, expected_sha256: str,
+    verified_device: int | None, verified_inode: int | None,
+    prepared: tuple[_PreparedArtifactHealth, tuple] | None = None,
+) -> str:
+    verified = verified_device is not None or verified_inode is not None
+    if verified and (verified_device is None or verified_inode is None):
+        return "stale"
     try:
-        descriptor = _open_registered_artifact(root, relative_path)
-    except HTTPException:
+        if prepared is not None:
+            descriptor = prepared[0].open(root, relative_path, verified=verified)
+        else:
+            descriptor = _open_verified_snapshot(root, relative_path) if verified else _open_registered_artifact(root, relative_path)
+    except HTTPException as exc:
+        return "missing" if exc.detail == "verified artifact is missing" else "stale"
+    except FileNotFoundError:
+        return "missing"
+    except OSError:
         return "stale"
     if descriptor is None:
         return "missing"
     try:
         before = os.fstat(descriptor)
-        if not stat.S_ISREG(before.st_mode):
+        if (not stat.S_ISREG(before.st_mode) or before.st_size != expected_size
+                or (verified and (before.st_dev, before.st_ino) != (verified_device, verified_inode))):
             return "stale"
         digest = hashlib.sha256()
         size = 0
-        os.lseek(descriptor, 0, os.SEEK_SET)
-        while True:
-            chunk = os.read(descriptor, 1024 * 1024)
-            if not chunk:
-                break
+        for chunk in _read_artifact_extent(descriptor, expected_size):
             digest.update(chunk)
             size += len(chunk)
         after = os.fstat(descriptor)
-        if (
-            before.st_dev != after.st_dev
-            or before.st_ino != after.st_ino
-            or before.st_size != after.st_size
-            or before.st_mtime_ns != after.st_mtime_ns
-            or size != after.st_size
-        ):
+        observed_sha256 = "" if verified and size == 0 else digest.hexdigest()
+        if (_file_identity(before) != _file_identity(after) or size != expected_size
+                or observed_sha256 != expected_sha256):
             return "stale"
-        if size != expected_size or digest.hexdigest() != expected_sha256:
-            return "stale"
+        if prepared is not None:
+            observations, key = prepared
+            observations.observations[key] = (after, root, relative_path)
         return "healthy"
-    except OSError:
+    except (OSError, HTTPException):
         return "stale"
     finally:
         os.close(descriptor)
@@ -917,10 +1048,8 @@ def read_registered_artifact_bytes(
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="artifact content changed")
         digest = hashlib.sha256()
         content = bytearray()
-        while chunk := os.read(descriptor, 1024 * 1024):
+        for chunk in _read_artifact_extent(descriptor, expected_size):
             content.extend(chunk)
-            if len(content) > expected_size:
-                raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="artifact content changed")
             digest.update(chunk)
         after = os.fstat(descriptor)
         if (
@@ -928,6 +1057,7 @@ def read_registered_artifact_bytes(
             or before.st_ino != after.st_ino
             or before.st_size != after.st_size
             or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
             or len(content) != expected_size
             or digest.hexdigest() != expected_sha256
         ):
@@ -1050,15 +1180,16 @@ def refresh_artifacts(
     _engagement, root = _engagement_root(engagement_id)
     now = _utcnow_iso()
     content_changes = []
+    columns = "id, relative_path, media_type, verified_device, verified_inode, size_bytes, sha256, present, updated_at"
     with get_connection() as connection:
         if artifact_id is None:
             rows = connection.execute(
-                "SELECT * FROM assessment_artifacts WHERE engagement_id = ?",
+                f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ?",
                 (engagement_id,),
             ).fetchall()
         else:
             rows = connection.execute(
-                "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+                f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
                 (engagement_id, artifact_id),
             ).fetchall()
             if not rows:
@@ -1066,94 +1197,75 @@ def refresh_artifacts(
                     status_code=status.HTTP_404_NOT_FOUND,
                     detail=f"artifact id={artifact_id} not found",
                 )
-        present = 0
-        missing = 0
-        for row in rows:
-            relative_path = str(row["relative_path"])
-            media_type_value = _media_type(relative_path, str(row["media_type"] or ""))
-            is_verified = (
-                row["verified_device"] is not None
-                or row["verified_inode"] is not None
-            )
-            if is_verified:
-                verified_ok = False
-                if (
-                    row["verified_device"] is not None
-                    and row["verified_inode"] is not None
-                ):
-                    try:
-                        _verified_snapshot_payload(
-                            root,
-                            relative_path,
-                            expected_device=int(row["verified_device"]),
-                            expected_inode=int(row["verified_inode"]),
-                            expected_size=int(row["size_bytes"] or 0),
-                            expected_sha256=str(row["sha256"] or ""),
-                        )
-                        verified_ok = True
-                    except HTTPException:
-                        verified_ok = False
-                if verified_ok:
-                    present += 1
-                    integrity_status = "verified"
-                else:
-                    missing += 1
-                    integrity_status = "mismatch"
-                connection.execute(
-                    """
-                    UPDATE assessment_artifacts
-                    SET present = ?, integrity_status = ?, updated_at = ?,
-                        last_indexed_at = ?
-                    WHERE id = ?
-                    """,
-                    (
-                        1 if verified_ok else 0,
-                        integrity_status,
-                        now,
-                        now,
-                        int(row["id"]),
-                    ),
-                )
-                continue
+    present = 0
+    missing = 0
+    for row in rows:
+        relative_path = str(row["relative_path"])
+        media_type_value = _media_type(relative_path, str(row["media_type"] or ""))
+        is_verified = row["verified_device"] is not None or row["verified_inode"] is not None
+        verified_ok = False
+        file_data = None
+        if is_verified:
+            if row["verified_device"] is not None and row["verified_inode"] is not None:
+                try:
+                    _verified_snapshot_payload(
+                        root, relative_path, expected_device=int(row["verified_device"]),
+                        expected_inode=int(row["verified_inode"]),
+                        expected_size=int(row["size_bytes"] or 0),
+                        expected_sha256=str(row["sha256"] or ""),
+                    )
+                    verified_ok = True
+                except HTTPException:
+                    pass
+        else:
             file_data = _file_payload(root, relative_path, media_type_value)
-            if bool(file_data["present"]):
-                present += 1
-            else:
+        # Filesystem reads never hold the writer. Reconcile against the row that
+        # was observed before reading so a newer registration wins a race.
+        with get_connection() as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            current = connection.execute(
+                f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+                (engagement_id, int(row["id"])),
+            ).fetchone()
+            if current is None:
                 missing += 1
-                # The artifact row is also the durable tombstone for evidence
-                # that has disappeared from disk. Keep its last observed hash,
-                # extent, preview, and indexed text so absence never rewrites
-                # history into an empty artifact.
+                continue
+            observed_fields = ("relative_path", "sha256", "size_bytes", "verified_device", "verified_inode", "updated_at")
+            if any(current[key] != row[key] for key in observed_fields):
+                present += int(bool(current["present"]))
+                missing += int(not bool(current["present"]))
+                continue
+            if is_verified:
+                present += int(verified_ok)
+                missing += int(not verified_ok)
                 connection.execute(
-                    """
-                    UPDATE assessment_artifacts
-                    SET media_type = ?, present = 0, integrity_status = 'missing',
-                        updated_at = ?, last_indexed_at = ?
-                    WHERE id = ?
-                    """,
+                    """UPDATE assessment_artifacts
+                       SET present = ?, integrity_status = ?, updated_at = ?, last_indexed_at = ?
+                       WHERE id = ?""",
+                    (int(verified_ok), "verified" if verified_ok else "mismatch", now, now, int(row["id"])),
+                )
+            elif file_data is not None and not file_data["present"]:
+                missing += 1
+                # Missing evidence retains its last observed bytes and digest.
+                connection.execute(
+                    """UPDATE assessment_artifacts SET media_type = ?, present = 0,
+                       integrity_status = 'missing', updated_at = ?, last_indexed_at = ? WHERE id = ?""",
                     (media_type_value, now, now, int(row["id"])),
                 )
-                continue
-            refreshed = _store_artifact(
-                engagement_id,
-                relative_path=relative_path,
-                kind="",
-                media_type=media_type_value,
-                file_data=file_data,
-                producer_agent_id=None,
-                producer_agent_role=None,
-                producer_command_run_id=None,
-                related_finding_slug=None,
-                related_chain_key=None,
-                related_surface_id=None,
-                related_request_variant_id=None,
-            )
-            if "content_change" in refreshed:
-                content_changes.append({
-                    "relative_path": relative_path,
-                    "content_change": refreshed["content_change"],
-                })
-        connection.commit()
+            else:
+                assert file_data is not None
+                present += 1
+                refreshed = _store_artifact(
+                    engagement_id, relative_path=relative_path, kind="",
+                    media_type=media_type_value, file_data=file_data,
+                    producer_agent_id=None, producer_agent_role=None, producer_command_run_id=None,
+                    related_finding_slug=None, related_chain_key=None,
+                    related_surface_id=None, related_request_variant_id=None,
+                )
+                if "content_change" in refreshed:
+                    content_changes.append({"relative_path": relative_path,
+                                            "content_change": refreshed["content_change"]})
     result: dict[str, Any] = {
         "refreshed": len(rows),
         "present": present,
@@ -1308,11 +1420,16 @@ def search_artifacts(
         order_terms.append("search_rank ASC")
     order_terms.extend(["a.updated_at DESC", "a.id DESC"])
     order_sql = "ORDER BY " + ", ".join(order_terms)
-    sql = (
-        f"SELECT a.*{rank_select} FROM assessment_artifacts a {join_sql} "
-        f"WHERE {' AND '.join(where)} {order_sql} LIMIT ? OFFSET ?"
-    )
     with get_connection() as connection:
+        # Keep the compact projection complete as artifact metadata evolves,
+        # without transferring each evidence body into Python just to discard it.
+        columns = [str(row["name"]) for row in connection.execute("PRAGMA table_info(assessment_artifacts)")]
+        projection = ", ".join(f'a."{name}"' for name in columns if name != "indexed_text")
+        sql = (
+            f"SELECT {projection}, length(CAST(COALESCE(a.indexed_text, '') AS BLOB)) AS indexed_bytes"
+            f"{rank_select} FROM assessment_artifacts a {join_sql} "
+            f"WHERE {' AND '.join(where)} {order_sql} LIMIT ? OFFSET ?"
+        )
         rows = connection.execute(sql, tuple(select_params + params)).fetchall()
     return [_serialize_artifact(row, compact=True) for row in rows]
 
