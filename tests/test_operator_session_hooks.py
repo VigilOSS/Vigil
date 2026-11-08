@@ -55,6 +55,7 @@ def _run_hook(
     cwd: Path,
     env: dict[str, str] | None = None,
     stdin: str | None = None,
+    trace: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment.pop("ENGAGEMENT_DIR", None)
@@ -64,7 +65,7 @@ def _run_hook(
     if env:
         environment.update(env)
     return subprocess.run(
-        ["bash", str(script)],
+        ["bash", *(["-x"] if trace else []), str(script)],
         input=json.dumps(payload) if stdin is None else stdin,
         capture_output=True,
         text=True,
@@ -1042,16 +1043,35 @@ def test_post_tool_log_claim_is_atomic_during_delayed_seen_reads(tmp_path: Path)
         "tool_input": {"subagent_type": "reviewer", "description": "Review changes"},
     }
 
+    env = _session_end_env(bin_dir)
+
     def deliver(_: int) -> subprocess.CompletedProcess[str]:
+        # Preserve each actual delivery's trace: rerunning a race after failure
+        # cannot explain which branch the original process took.
         return _run_hook(
-            POST_TOOL_LOG, payload, cwd=engagement_dir, env=_session_end_env(bin_dir)
+            POST_TOOL_LOG, payload, cwd=engagement_dir, env=env, trace=True
         )
 
     with ThreadPoolExecutor(max_workers=2) as pool:
         results = list(pool.map(deliver, range(2)))
 
-    assert all(result.returncode == 0 for result in results)
-    assert len(_captured(capture)) == 1
+    calls = _captured(capture)
+    if any(result.returncode != 0 for result in results) or len(calls) != 1:
+        pytest.fail(json.dumps({
+            "captured_calls": calls,
+            "deliveries": [
+                {"returncode": result.returncode, "stdout": result.stdout,
+                 "stderr": result.stderr}
+                for result in results
+            ],
+            "native_claims": sorted(
+                path.name for path in engagement_dir.glob(".hook_tool_use_*")
+            ),
+            "executables": {
+                name: shutil.which(name, path=env["PATH"])
+                for name in ("bash", "jq", "mkdir", "rmdir", "shasum", "sha256sum", "vigil")
+            },
+        }, indent=2))
 
 
 def test_post_tool_log_does_not_follow_native_claim_symlink(tmp_path: Path) -> None:
