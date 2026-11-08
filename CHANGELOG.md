@@ -30,6 +30,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   independent verification obligations ([ADR 0044](docs/adr/0044-current-discovery-can-associate-a-historical-finding.md)).
 - Findings without current typed verification receipts report reproduction basis `unknown`,
   preserving the distinction between runtime proof, source observation and absent evidence.
+- Native hook activity claims use exclusive file creation so concurrent deliveries remain
+  deduplicated on hosts whose `mkdir` reports success to more than one racing caller.
 
 ## [2.5.0] - 2026-11-07
 

@@ -56,6 +56,7 @@ def _run_hook(
     env: dict[str, str] | None = None,
     stdin: str | None = None,
     trace: bool = False,
+    timeout: float = 60,
 ) -> subprocess.CompletedProcess[str]:
     environment = dict(os.environ)
     environment.pop("ENGAGEMENT_DIR", None)
@@ -71,7 +72,7 @@ def _run_hook(
         text=True,
         cwd=str(cwd),
         env=environment,
-        timeout=60,
+        timeout=timeout,
     )
 
 
@@ -1073,6 +1074,73 @@ def test_post_tool_log_claim_is_atomic_during_delayed_seen_reads(tmp_path: Path)
             },
         }, indent=2))
 
+
+
+def test_post_tool_log_claim_stays_exclusive_when_mkdir_masks_eexist(tmp_path: Path) -> None:
+    """Model uutils <=0.10 turning a lost mkdir race into exit status zero."""
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    bin_dir = tmp_path / "bin"
+    _fake_vigil(bin_dir, capture)
+    barrier = tmp_path / "mkdir-barrier"
+    barrier.mkdir()
+    mkdir = bin_dir / "mkdir"
+    mkdir.write_text(
+        "#!/usr/bin/env python3\n"
+        "import os, pathlib, sys, time\n"
+        "claim = pathlib.Path(sys.argv[-1])\n"
+        "if claim.exists(): sys.exit(1)\n"
+        f"barrier = pathlib.Path({str(barrier)!r})\n"
+        "(barrier / str(os.getpid())).touch()\n"
+        "deadline = time.monotonic() + 3\n"
+        "while len(list(barrier.iterdir())) < 2 and time.monotonic() < deadline: pass\n"
+        "try: claim.mkdir(mode=0o700)\n"
+        "except FileExistsError: pass\n",
+        encoding="utf-8",
+    )
+    mkdir.chmod(0o755)
+    payload = _native_log_payload(engagement_dir)
+    env = _session_end_env(bin_dir)
+
+    def deliver(_: int) -> subprocess.CompletedProcess[str]:
+        return _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(deliver, range(2)))
+    assert all(result.returncode == 0 for result in results)
+    assert len(_captured(capture)) == 1
+
+    repeated = _run_hook(POST_TOOL_LOG, payload, cwd=engagement_dir, env=env)
+    assert repeated.returncode == 0
+    assert len(_captured(capture)) == 1
+
+
+@pytest.mark.parametrize("kind", ["file", "directory", "fifo", "dangling_symlink"])
+def test_post_tool_log_existing_native_claim_is_a_nonblocking_noop(
+    tmp_path: Path, kind: str
+) -> None:
+    engagement_dir = _engagement(tmp_path)
+    capture = tmp_path / "capture.jsonl"
+    _fake_vigil(tmp_path / "bin", capture)
+    identity = json.dumps(["opencode", "session-1", "tu-1"], separators=(",", ":"))
+    digest = hashlib.sha256(identity.encode()).hexdigest()
+    claim = engagement_dir / f".hook_tool_use_{digest}"
+    if kind == "file":
+        claim.write_text("successful prior delivery", encoding="utf-8")
+    elif kind == "directory":
+        claim.mkdir()
+    elif kind == "fifo":
+        os.mkfifo(claim)
+    else:
+        claim.symlink_to(tmp_path / "absent")
+
+    result = _run_hook(
+        POST_TOOL_LOG, _native_log_payload(engagement_dir), cwd=engagement_dir,
+        env=_session_end_env(tmp_path / "bin"), timeout=3,
+    )
+    assert result.returncode == 0
+    assert result.stdout == result.stderr == ""
+    assert _captured(capture) == []
 
 def test_post_tool_log_does_not_follow_native_claim_symlink(tmp_path: Path) -> None:
     engagement_dir = _engagement(tmp_path)

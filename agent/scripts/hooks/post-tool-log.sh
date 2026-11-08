@@ -46,11 +46,11 @@ STATUS=$(jq -r '.status // "unknown"' "$ENG_DIR/scope.json" 2>/dev/null || echo 
 [ "$STATUS" != "in_progress" ] && exit 0
 
 # --- Deduplication ---
-# Native calls are claimed atomically by client/session/call identity. mkdir
-# neither follows a claim symlink nor overwrites an existing claim. Flat hashed
-# names avoid following an extra caller-controlled directory and keep raw IDs
-# (including slashes/newlines) out of paths. Successful claims persist; definite
-# write failures release only this process's empty directory for later retry.
+# Native calls are claimed atomically by client/session/call identity. Bash
+# noclobber uses exclusive creation without depending on mkdir utility behavior.
+# Flat hashed names keep raw IDs (including slashes/newlines) out of paths.
+# Successful claims persist; definite write failures release this process's
+# marker for later retry.
 # Calls without native identity retain the short command/time fallback.
 DEDUP_FILE="$ENG_DIR/.last_hook_log"
 TOOL_USE_ID=$(echo "$INPUT" | jq -r '.tool_use_id // empty' 2>/dev/null || true)
@@ -71,7 +71,13 @@ if [ -n "$TOOL_USE_ID" ]; then
   # Logging remains best-effort and does not fall back to command-text identity.
   if [[ "$DIGEST" =~ ^[a-f0-9]{64}$ ]]; then
     NATIVE_CLAIM="$ENG_DIR/.hook_tool_use_$DIGEST"
-    mkdir -m 700 "$NATIVE_CLAIM" 2>/dev/null || exit 0
+    # Existing directories, symlinks and nonregular objects are already claimed;
+    # do not open a FIFO/device. Concurrent hooks create only regular markers.
+    # Operator filesystem replacements are outside this protocol (ADR 0019).
+    if [ -e "$NATIVE_CLAIM" ] || [ -L "$NATIVE_CLAIM" ]; then
+      exit 0
+    fi
+    (umask 077; set -o noclobber; : > "$NATIVE_CLAIM") 2>/dev/null || exit 0
   fi
 fi
 
@@ -156,7 +162,7 @@ post_activity_entry() {
 
 release_dedup_claim() {
   if [ -n "$NATIVE_CLAIM" ]; then
-    rmdir "$NATIVE_CLAIM" 2>/dev/null || true
+    rm -f "$NATIVE_CLAIM" 2>/dev/null || true
   fi
   if [ -n "${CMD_KEY:-}" ] && [ -f "$DEDUP_FILE" ]; then
     local claimed_key
