@@ -219,3 +219,89 @@ def test_refresh_enumeration_does_not_collect_every_indexed_body(client, isolate
     assert result['refreshed'] == 2
     assert len(artifact_rows) >= 2
     assert all('indexed_text' not in columns for columns in artifact_rows[:2])
+
+
+def test_unchanged_refresh_remains_read_only_with_another_writer(client, isolate_settings):
+    _, eid = _seed_notes(client, isolate_settings)
+    with db.get_connection() as connection:
+        filename = connection.execute('PRAGMA database_list').fetchone()['file']
+        connection.execute('PRAGMA busy_timeout=0')
+        before = [tuple(row) for row in connection.execute(
+            'SELECT id, updated_at, last_indexed_at FROM assessment_artifacts ORDER BY id')]
+    writer = sqlite3.connect(filename, timeout=0)
+    writer.execute('BEGIN IMMEDIATE')
+    try:
+        result = artifact_index.refresh_artifacts(eid)
+        assert result == {'refreshed': 2, 'present': 2, 'missing': 0}
+    finally:
+        writer.rollback()
+        writer.close()
+        connection.execute(f'PRAGMA busy_timeout={db._BUSY_TIMEOUT_MS}')
+    with db.get_connection() as connection:
+        after = [tuple(row) for row in connection.execute(
+            'SELECT id, updated_at, last_indexed_at FROM assessment_artifacts ORDER BY id')]
+    assert after == before
+
+
+def test_refresh_repairs_partial_or_wrong_index_even_when_content_hash_matches(client, isolate_settings):
+    _, eid = _seed_notes(client, isolate_settings)
+    with db.get_connection() as connection:
+        connection.execute("UPDATE assessment_artifacts SET indexed_text='partial', preview_text='incorrect'")
+    result = artifact_index.refresh_artifacts(eid)
+    assert result['refreshed'] == result['present'] == 2
+    with db.get_connection() as connection:
+        rows = connection.execute('SELECT indexed_text, preview_text FROM assessment_artifacts').fetchall()
+    assert all(row['indexed_text'] == row['preview_text'] == 'Acme résumé\n' for row in rows)
+
+
+def test_changed_refresh_amortizes_writer_acquisitions_without_losing_index_bytes(client, isolate_settings):
+    root = _write_engagement(isolate_settings['engagements_dir'])
+    for number in range(20):
+        name = f'acme-{number}.txt'
+        (root / name).write_text('Acme original', encoding='utf-8')
+        _register_note(client, name)
+        (root / name).write_text(f'Acme changed {number}', encoding='utf-8')
+    with db.get_connection() as connection:
+        eid = connection.execute('SELECT id FROM engagements WHERE key=?', (ENGAGEMENT_KEY,)).fetchone()['id']
+        statements = []
+        connection.set_trace_callback(statements.append)
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    filename = connection.execute('PRAGMA database_list').fetchone()['file']
+    connection.execute('CREATE TABLE acme_refresh_pressure(value INTEGER)')
+    connection.execute('INSERT INTO acme_refresh_pressure VALUES(0)')
+    connection.commit()
+    barrier, stop, writing = threading.Barrier(7), threading.Event(), threading.Event()
+
+    def writer():
+        other = sqlite3.connect(filename, timeout=0.1)
+        try:
+            barrier.wait(timeout=5)
+            while not stop.is_set():
+                try:
+                    other.execute('UPDATE acme_refresh_pressure SET value=value+1')
+                    other.commit()
+                    writing.set()
+                except sqlite3.OperationalError:
+                    other.rollback()
+                stop.wait(0.001)
+        finally:
+            other.close()
+
+    with ThreadPoolExecutor(max_workers=6) as pool:
+        writers = [pool.submit(writer) for _ in range(6)]
+        barrier.wait(timeout=5)
+        try:
+            assert writing.wait(timeout=5)
+            result = artifact_index.refresh_artifacts(int(eid))
+        finally:
+            stop.set()
+            connection.set_trace_callback(None)
+            for worker in writers:
+                worker.result(timeout=2)
+    assert result['refreshed'] == result['present'] == 20
+    with db.get_connection() as connection:
+        rows = connection.execute('SELECT relative_path, indexed_text FROM assessment_artifacts').fetchall()
+    assert all(row['indexed_text'] == (root / row['relative_path']).read_text() for row in rows)
+    assert sum(q == 'BEGIN IMMEDIATE' for q in statements) <= 2

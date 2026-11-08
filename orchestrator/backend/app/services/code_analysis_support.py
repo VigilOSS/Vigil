@@ -1685,7 +1685,7 @@ def _sync_file_analysis_status(
     queue_row = connection.execute(
         """
         WITH current_attempts AS (
-            SELECT queue.status,
+            SELECT queue.id AS attempt_id, queue.status,
                    ROW_NUMBER() OVER (ORDER BY queue.id DESC) AS attempt_rank,
                    SUM(CASE WHEN queue.status IN ('pending', 'processing')
                             THEN 1 ELSE 0 END) OVER () AS active_count
@@ -1700,7 +1700,7 @@ def _sync_file_analysis_status(
               AND queue.repo_generation = repos.active_generation
               AND queue.source_superseded_at IS NULL
         )
-        SELECT status, active_count
+        SELECT attempt_id, status, active_count
         FROM current_attempts
         WHERE attempt_rank = 1
         """,
@@ -1721,10 +1721,14 @@ def _sync_file_analysis_status(
     error_queue = queue_counts.get("error", 0)
     queue_needs_context = queue_counts.get("needs_context", 0)
 
+    # The projection above already selected the canonical current attempt.
+    # Start from its receipts so retained history is not revalidated row by row
+    # (each validation also searches that history). Keep all currency guards.
     direct_result_counts = connection.execute(
         f"""
         SELECT results.disposition, COUNT(*) AS total
         FROM code_analysis_results AS results
+             INDEXED BY idx_code_analysis_results_queue_receipt
         JOIN code_analysis_queue AS result_queue
           ON result_queue.id = results.queue_item_id
         JOIN code_files AS files
@@ -1733,12 +1737,13 @@ def _sync_file_analysis_status(
           ON repos.id = files.repo_id
          AND repos.engagement_id = files.engagement_id
         WHERE results.engagement_id = ? AND results.file_id = ?
+          AND results.queue_item_id = ?
           AND ({_current_result_receipt_sql(
               "results", "result_queue", "files", "repos", allow_processing=True
           )})
         GROUP BY results.disposition
         """,
-        (engagement_id, file_id),
+        (engagement_id, file_id, None if queue_row is None else int(queue_row["attempt_id"])),
     ).fetchall()
     direct_counts = {str(row["disposition"]): int(row["total"]) for row in direct_result_counts}
     direct_total = sum(direct_counts.values())

@@ -24,7 +24,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
 - Evidence verification and registration have finite byte budgets for changing files.
   Verification hashes before acquiring the finding writer, then reconciles pinned source
   identities and database ownership before commit. Artifact refresh similarly prepares
-  file facts before its writer transaction.
+  file facts before writing, checks unchanged indexes without write locks, and batches
+  changed-index reconciliation.
 - Code mutations and their activity audits share a commit. Exact completed closeout and
   verification retries recover the recorded result; changed requests, owners, claims or
   source generations retain their conflict checks.
@@ -35,6 +36,8 @@ Durable design decisions live in [`docs/adr/`](docs/adr/).
   row-version read. Cap errors name stored and incoming lengths and the rotation command.
 - Coverage queries support large file sets without exceeding SQLite's parameter limit.
   A covering module index and per-operation rollups shorten queue writer transactions.
+  File-status projection reuses the current queue attempt instead of repeatedly validating
+  its retained receipt history.
 - PHP include candidate lookup performs linear deduplication. Citation diagnostics share
   source-path rosters and nearest-path results, and compact artifact reads project metadata.
 

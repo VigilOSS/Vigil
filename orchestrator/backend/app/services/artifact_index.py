@@ -1171,106 +1171,155 @@ def reserve_suppressed_command_output(
 def refresh_artifacts(
     engagement_id: int, *, artifact_id: int | None = None
 ) -> dict[str, Any]:
-    """Refresh on-disk presence/hash metadata for existing artifact rows only.
+    """Check every registered artifact; reconcile only changed index facts.
 
-    This intentionally does not walk directories or discover new files. It keeps
-    explicit registration as the only way a path enters the index while letting
-    report-readiness see deleted or restored files without per-path re-registers.
+    Full filesystem observations happen outside the writer. Identical bytes
+    and index text need no upsert: indexing timestamps record actual indexing,
+    not repeated checks. Changed observations commit in small row/byte-bounded
+    groups, preserving content history and concurrent registration ownership.
     """
     _engagement, root = _engagement_root(engagement_id)
     now = _utcnow_iso()
     content_changes = []
-    columns = "id, relative_path, media_type, verified_device, verified_inode, size_bytes, sha256, present, updated_at"
+    columns = "id, relative_path, media_type, verified_device, verified_inode, size_bytes, sha256, present, integrity_status, updated_at"
+    observed_fields = ("relative_path", "media_type", "sha256", "size_bytes",
+                       "verified_device", "verified_inode", "present", "integrity_status", "updated_at")
     with get_connection() as connection:
-        if artifact_id is None:
-            rows = connection.execute(
-                f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ?",
-                (engagement_id,),
-            ).fetchall()
-        else:
-            rows = connection.execute(
-                f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
-                (engagement_id, artifact_id),
-            ).fetchall()
-            if not rows:
-                raise HTTPException(
-                    status_code=status.HTTP_404_NOT_FOUND,
-                    detail=f"artifact id={artifact_id} not found",
-                )
+        rows = connection.execute(
+            f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ?"
+            + (" AND id = ?" if artifact_id is not None else "") + " ORDER BY id",
+            (engagement_id, artifact_id) if artifact_id is not None else (engagement_id,),
+        ).fetchall()
+        if artifact_id is not None and not rows:
+            raise HTTPException(status_code=404, detail=f"artifact id={artifact_id} not found")
+
     present = 0
     missing = 0
+    pending: list[dict[str, Any]] = []
+    pending_bytes = 0
+
+    def current_row(connection, observation):
+        data = observation["file_data"] or {}
+        # Compare the complete stored text in SQLite instead of returning its
+        # old body to Python. A matching file hash alone cannot prove a partial
+        # or corrupt extracted index is correct.
+        return connection.execute(
+            f"SELECT {columns}, indexed_text IS ? AS same_index, preview_text IS ? AS same_preview "
+            "FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+            (data.get("indexed_text", ""), data.get("preview_text", ""),
+             engagement_id, int(observation["row"]["id"])),
+        ).fetchone()
+
+    def same_observation(current, observation):
+        return current is not None and all(
+            current[key] == observation["row"][key] for key in observed_fields
+        )
+
+    def same_index(current, observation):
+        if (bool(current["present"]) != observation["present"]
+                or current["integrity_status"] != observation["integrity_status"]):
+            return False
+        if observation["verified"]:
+            return True
+        if current["media_type"] != observation["media_type"]:
+            return False
+        data = observation["file_data"]
+        return not observation["present"] or (
+            current["sha256"] == data["sha256"]
+            and int(current["size_bytes"]) == data["size_bytes"]
+            and bool(current["same_index"]) and bool(current["same_preview"])
+        )
+
+    def count_current(current):
+        nonlocal present, missing
+        exists = current is not None and bool(current["present"])
+        present += int(exists)
+        missing += int(not exists)
+
+    def reconcile_pending():
+        nonlocal present, missing, pending_bytes
+        if not pending:
+            return
+        with get_connection() as connection:
+            if not connection.in_transaction:
+                connection.execute("BEGIN IMMEDIATE")
+            for observation in pending:
+                current = current_row(connection, observation)
+                if not same_observation(current, observation) or same_index(current, observation):
+                    count_current(current)
+                    continue
+                present += int(observation["present"])
+                missing += int(not observation["present"])
+                row = observation["row"]
+                if observation["verified"]:
+                    connection.execute(
+                        """UPDATE assessment_artifacts SET present = ?, integrity_status = ?,
+                           updated_at = ?, last_indexed_at = ? WHERE id = ?""",
+                        (int(observation["present"]), observation["integrity_status"], now, now, int(row["id"])),
+                    )
+                elif not observation["present"]:
+                    # Missing evidence retains its last observed bytes/digest.
+                    connection.execute(
+                        """UPDATE assessment_artifacts SET media_type = ?, present = 0,
+                           integrity_status = 'missing', updated_at = ?, last_indexed_at = ? WHERE id = ?""",
+                        (observation["media_type"], now, now, int(row["id"])),
+                    )
+                else:
+                    refreshed = _store_artifact(
+                        engagement_id, relative_path=str(row["relative_path"]), kind="",
+                        media_type=observation["media_type"], file_data=observation["file_data"],
+                        producer_agent_id=None, producer_agent_role=None, producer_command_run_id=None,
+                        related_finding_slug=None, related_chain_key=None,
+                        related_surface_id=None, related_request_variant_id=None,
+                    )
+                    if "content_change" in refreshed:
+                        content_changes.append({"relative_path": row["relative_path"],
+                                                "content_change": refreshed["content_change"]})
+        pending.clear()
+        pending_bytes = 0
+
     for row in rows:
         relative_path = str(row["relative_path"])
-        media_type_value = _media_type(relative_path, str(row["media_type"] or ""))
-        is_verified = row["verified_device"] is not None or row["verified_inode"] is not None
-        verified_ok = False
+        media_type = _media_type(relative_path, str(row["media_type"] or ""))
+        verified = row["verified_device"] is not None or row["verified_inode"] is not None
+        healthy = False
         file_data = None
-        if is_verified:
+        if verified:
             if row["verified_device"] is not None and row["verified_inode"] is not None:
                 try:
                     _verified_snapshot_payload(
                         root, relative_path, expected_device=int(row["verified_device"]),
                         expected_inode=int(row["verified_inode"]),
-                        expected_size=int(row["size_bytes"] or 0),
-                        expected_sha256=str(row["sha256"] or ""),
+                        expected_size=int(row["size_bytes"] or 0), expected_sha256=str(row["sha256"] or ""),
                     )
-                    verified_ok = True
+                    healthy = True
                 except HTTPException:
                     pass
+            integrity_status = "verified" if healthy else "mismatch"
         else:
-            file_data = _file_payload(root, relative_path, media_type_value)
-        # Filesystem reads never hold the writer. Reconcile against the row that
-        # was observed before reading so a newer registration wins a race.
+            file_data = _file_payload(root, relative_path, media_type)
+            healthy = bool(file_data["present"])
+            integrity_status = "unverified" if healthy else "missing"
+        observation = {"row": row, "file_data": file_data, "media_type": media_type,
+                       "verified": verified, "present": healthy, "integrity_status": integrity_status}
         with get_connection() as connection:
-            if not connection.in_transaction:
-                connection.execute("BEGIN IMMEDIATE")
-            current = connection.execute(
-                f"SELECT {columns} FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
-                (engagement_id, int(row["id"])),
-            ).fetchone()
-            if current is None:
-                missing += 1
-                continue
-            observed_fields = ("relative_path", "sha256", "size_bytes", "verified_device", "verified_inode", "updated_at")
-            if any(current[key] != row[key] for key in observed_fields):
-                present += int(bool(current["present"]))
-                missing += int(not bool(current["present"]))
-                continue
-            if is_verified:
-                present += int(verified_ok)
-                missing += int(not verified_ok)
-                connection.execute(
-                    """UPDATE assessment_artifacts
-                       SET present = ?, integrity_status = ?, updated_at = ?, last_indexed_at = ?
-                       WHERE id = ?""",
-                    (int(verified_ok), "verified" if verified_ok else "mismatch", now, now, int(row["id"])),
-                )
-            elif file_data is not None and not file_data["present"]:
-                missing += 1
-                # Missing evidence retains its last observed bytes and digest.
-                connection.execute(
-                    """UPDATE assessment_artifacts SET media_type = ?, present = 0,
-                       integrity_status = 'missing', updated_at = ?, last_indexed_at = ? WHERE id = ?""",
-                    (media_type_value, now, now, int(row["id"])),
-                )
-            else:
-                assert file_data is not None
-                present += 1
-                refreshed = _store_artifact(
-                    engagement_id, relative_path=relative_path, kind="",
-                    media_type=media_type_value, file_data=file_data,
-                    producer_agent_id=None, producer_agent_role=None, producer_command_run_id=None,
-                    related_finding_slug=None, related_chain_key=None,
-                    related_surface_id=None, related_request_variant_id=None,
-                )
-                if "content_change" in refreshed:
-                    content_changes.append({"relative_path": relative_path,
-                                            "content_change": refreshed["content_change"]})
-    result: dict[str, Any] = {
-        "refreshed": len(rows),
-        "present": present,
-        "missing": missing,
-    }
+            current = current_row(connection, observation)
+        if not same_observation(current, observation) or same_index(current, observation):
+            count_current(current)
+            continue
+        payload_bytes = 0 if file_data is None else sum(
+            len(str(file_data[field]).encode("utf-8")) for field in ("indexed_text", "preview_text")
+        )
+        # The budget limits each writer's indexed payload, never admitted
+        # evidence size. One large artifact is reconciled intact on its own.
+        if pending and pending_bytes + payload_bytes > 2 * 1024 * 1024:
+            reconcile_pending()
+        pending.append(observation)
+        pending_bytes += payload_bytes
+        if len(pending) >= 32 or pending_bytes >= 2 * 1024 * 1024:
+            reconcile_pending()
+    reconcile_pending()
+    result: dict[str, Any] = {"refreshed": len(rows), "present": present, "missing": missing}
     if content_changes:
         result["content_changes"] = content_changes
     return result
