@@ -492,7 +492,7 @@ def _backend_offline_state(install_root: Path, probe: BackendProbe) -> ConsumerS
     if payload.get("state") in {"unknown", "foreign"}:
         return _backend_unknown(str(payload.get("detail") or "backend process ownership is unknown"))
     pid = payload.get("pid")
-    process_running = payload.get("state") == "running"
+    process_running = payload.get("state") in {"running", "unresponsive", "not_ready"}
     port_held = bool(payload.get("port_in_use"))
     if probe.unreachable_reason == "refused" and not process_running and not port_held:
         # Nothing accepted the connection, no pidfile claims a live process, and

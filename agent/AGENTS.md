@@ -382,6 +382,11 @@ the immutable packet path and SHA-256. Send only that envelope to the fresh nati
 the registered role selected; do not copy identity blocks into a second prompt. Read
 `agent/references/runtime-guides/dispatch-template.md` for paired assignment/launch examples.
 
+Put engagement-wide briefing in `--standing-brief-file <path>` (or shared JSON
+`prompt_context.standing_brief_file`); the helper captures it once and each packet points to its
+path and digest. Keep `--task` and `--packet-file` about this lane's surface, open question and
+specific constraints. Reference role-owned procedures instead of copying them into every lane.
+
 For proof work use its successful claim's `launch.launch_message`; never register a competing
 ordinary dispatch. Launch only on a new `launch_required=true` receipt. Exact retries restore the
 same capture with `launch_required=false`; inspect existing client/execution state before recovery.

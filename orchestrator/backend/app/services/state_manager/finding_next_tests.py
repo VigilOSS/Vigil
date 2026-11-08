@@ -24,6 +24,7 @@ read as authorization: ``route_hint`` selects nothing and admits nothing.
 """
 from __future__ import annotations
 
+import json
 import sqlite3
 from typing import Any
 
@@ -106,6 +107,29 @@ def current_next_test(
         (engagement_id, finding_id),
     ).fetchone()
     return _serialize(row) if row is not None else None
+
+
+def current_next_tests(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    findings: list[dict[str, Any]],
+) -> dict[int, dict[str, Any]]:
+    """Current parked plans for a collection, with one bounded identity query."""
+    ids = [int(row["id"]) for row in findings if owes_runtime_proof(row)]
+    if not ids:
+        return {}
+    rows = connection.execute(
+        """
+        SELECT plans.* FROM assessment_finding_next_tests AS plans
+        JOIN (
+          SELECT finding_id, MAX(id) AS id FROM assessment_finding_next_tests
+          WHERE engagement_id = ? AND finding_id IN (SELECT value FROM json_each(?))
+          GROUP BY finding_id
+        ) AS latest ON latest.id = plans.id
+        """,
+        (engagement_id, json.dumps(ids)),
+    ).fetchall()
+    return {int(row["finding_id"]): _serialize(row) for row in rows}
 
 
 def current_parking_transition_id(

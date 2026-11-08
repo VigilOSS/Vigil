@@ -39,8 +39,9 @@ from .proofs import (
     TERMINAL_VERIFICATION_STATUSES,
     operator_authority_stamp,
     proof_evidence_health_issues_for_finding,
+    proof_receipts_for_findings,
 )
-from .repro_currentness import reproduction_basis
+from .repro_currentness import reproduction_basis_for_receipts
 
 _MARKDOWN_PATH_REFERENCE_RE = re.compile(
     r"(?<![A-Za-z0-9_:/.-])"
@@ -355,7 +356,11 @@ def _artifact_rows_by_id(
     return {int(row["id"]): dict(row) for row in rows}
 
 
-def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
+def _report_candidate_records(
+    engagement_id: int,
+    *,
+    current_receipts: dict[int, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         rows = connection.execute(
@@ -368,14 +373,19 @@ def _report_candidate_records(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
+        receipts = proof_receipts_for_findings(
+            connection, engagement.id, [int(row["id"]) for row in rows]
+        )
+        if current_receipts is not None:
+            current_receipts.update(receipts)
         records = []
         for row in rows:
             record = _serialize_finding_record(row)
             record["claim_review_pending"] = _claim_review_status(
                 connection, engagement.id, row,
             )["claim_review_pending"]
-            record["reproduction_basis"] = reproduction_basis(
-                connection, engagement.id, record
+            record["reproduction_basis"] = reproduction_basis_for_receipts(
+                str(record.get("canonical_location") or ""), receipts[int(row["id"])]
             )
             records.append(record)
     # A ``blocked`` verification status (blocked-for-provisioning, hunting.md)
@@ -535,7 +545,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         )
 
     reportable_statuses = {"active", "blocked", "exploited", "contained", "eradicated", "recovered", "reported"}
-    candidate_records = _report_candidate_records(engagement_id)
+    current_receipts: dict[int, list[dict[str, Any]]] = {}
+    candidate_records = _report_candidate_records(
+        engagement_id, current_receipts=current_receipts
+    )
     # Runtime proof is durable debt regardless of whether the finding has been
     # promoted into a reportable workflow state.  The candidate projection
     # deliberately excludes drafts, so gate it before that projection rather
@@ -885,7 +898,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             if row.get("verification_status") not in {"confirmed", "downgraded"}:
                 continue
             for issue in proof_evidence_health_issues_for_finding(
-                connection, engagement.id, int(row["id"])
+                connection, engagement.id, int(row["id"]),
+                current_receipts=current_receipts[int(row["id"])],
             ):
                 evidence_health = str(issue["evidence_health"])
                 dependent_raw_id = issue.get("dependent_raw_receipt_id")

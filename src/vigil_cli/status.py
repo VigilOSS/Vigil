@@ -718,7 +718,7 @@ def collect_doctor_checks(install_root: Path, *, runner: docker.Runner = docker.
         checks.append(Check("docker-daemon", "SKIPPED", detail))
         checks.append(Check("runtime-image", "SKIPPED", detail))
         checks.append(Check("mitmproxy-image", "SKIPPED", detail))
-    if orchestrator_status(install_root) == "running":
+    if orchestrator_status(install_root) in {"running", "unresponsive", "not_ready"}:
         healthy, readiness = _orchestrator_readyz_snapshot(install_root)
         detail = ""
         if not healthy:

@@ -17,8 +17,8 @@ from fastapi import HTTPException, status
 from . import _common
 from ._common import _json_object, _serialize_finding_record, is_file_finding
 from .finding_details import validate_stored_reply_sequence_identity
-from .finding_next_tests import current_next_test
-from .proofs import proof_receipts_for_finding
+from .finding_next_tests import current_next_test, current_next_tests
+from .proofs import proof_receipts_for_finding, proof_receipts_for_findings
 from .repro_currentness import reproduction_basis_for_receipts
 
 CODE_SNAPSHOT_PROVENANCE_KEY = "code_snapshot"
@@ -529,6 +529,8 @@ def _serialize_finding_with_code_snapshot_status(
     finding: dict[str, Any] | sqlite3.Row,
     *,
     repo_states: dict[int, dict[str, Any]] | None = None,
+    current_receipts: list[dict[str, Any]] | None = None,
+    current_plans: dict[int, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     record = _serialize_finding_record(finding)
     validate_stored_reply_sequence_identity(
@@ -543,17 +545,43 @@ def _serialize_finding_with_code_snapshot_status(
     record["code_snapshot_attestation_status"] = code_snapshot_attestation_status(
         record
     )
-    record["proof_receipts"] = proof_receipts_for_finding(
-        connection, engagement_id, int(record["id"])
+    record["proof_receipts"] = (
+        proof_receipts_for_finding(connection, engagement_id, int(record["id"]))
+        if current_receipts is None else current_receipts
     )
     record["reproduction_basis"] = reproduction_basis_for_receipts(
         str(record.get("canonical_location") or ""), record["proof_receipts"]
     )
-    record["next_test"] = current_next_test(
-        connection, engagement_id, int(record["id"]), str(record["verification_status"]),
-        workflow_status=str(record["workflow_status"]),
+    record["next_test"] = (
+        current_next_test(
+            connection, engagement_id, int(record["id"]), str(record["verification_status"]),
+            workflow_status=str(record["workflow_status"]),
+        ) if current_plans is None else current_plans.get(int(record["id"]))
     )
     return record
+
+
+def _serialize_findings_with_code_snapshot_status(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    findings: list[sqlite3.Row],
+) -> list[dict[str, Any]]:
+    """Keep collection and point projections identical while sharing request work."""
+    if not findings:
+        return []
+    records = [dict(row) for row in findings]
+    repo_states = load_code_repo_snapshot_states(connection, engagement_id)
+    receipts = proof_receipts_for_findings(
+        connection, engagement_id, [int(row["id"]) for row in records]
+    )
+    plans = current_next_tests(connection, engagement_id, records)
+    return [
+        _serialize_finding_with_code_snapshot_status(
+            connection, engagement_id, row, repo_states=repo_states,
+            current_receipts=receipts[int(row["id"])], current_plans=plans,
+        )
+        for row in records
+    ]
 
 
 def _require_current_code_snapshot(

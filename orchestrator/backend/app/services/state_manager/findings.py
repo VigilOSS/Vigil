@@ -86,11 +86,12 @@ from .finding_snapshots import (
     _require_record_author_dispatch,
     _resolve_dispatch_id,
     _serialize_finding_with_code_snapshot_status,
+    _serialize_findings_with_code_snapshot_status,
     code_snapshot_attestation_status,
     finding_code_snapshot_status,
     finding_has_current_code_snapshot as finding_has_current_code_snapshot,
     is_file_finding,
-    load_code_repo_snapshot_states,
+    load_code_repo_snapshot_states as load_code_repo_snapshot_states,
     require_cited_file_location,
 )
 from ..sql_like import like_contains
@@ -4431,13 +4432,7 @@ def list_findings(
             """,
             tuple(params),
         ).fetchall()
-        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
-        return [
-            _serialize_finding_with_code_snapshot_status(
-                connection, engagement.id, row, repo_states=repo_states
-            )
-            for row in rows
-        ]
+        return _serialize_findings_with_code_snapshot_status(connection, engagement.id, rows)
 
 
 def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
@@ -4519,13 +4514,7 @@ def list_exploit_candidates(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
-        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
-        records = [
-            _serialize_finding_with_code_snapshot_status(
-                connection, engagement.id, row, repo_states=repo_states
-            )
-            for row in rows
-        ]
+        records = _serialize_findings_with_code_snapshot_status(connection, engagement.id, rows)
 
     candidates: list[dict[str, Any]] = []
     for record in records:

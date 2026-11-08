@@ -57,6 +57,17 @@ Prior-state text is losslessly contained as data, with a 16,384-character safety
 working-artifact pointers to repeated history. Size and discovery-prescription diagnostics are advisory,
 never a hard brevity gate. Preserve required environment facts and proof controls.
 
+Use `--standing-brief-file engagement-brief.md` for context shared across lanes, or set
+`prompt_context.standing_brief_file` in the shared JSON. The helper captures exact UTF-8 bytes
+once under `tools/dispatch-briefs/<sha256>.md`; packets carry that path and digest rather than
+repeating the body. Specialists read the captured brief alongside their role references.
+Keep standing engagement facts and operating context there, and leave `--task` / `--packet-file`
+for the lane's files, open question, and specific constraints. Choose briefing context appropriate
+to the assignment, including the independent perspective required for blind reviews. A new
+dispatch captures edits as a new digest; a continuation retains its original captured brief.
+Launch and continuation check the captured file, and handoffs preserve its reference with
+supporting artifacts. This adds no separate authority or packet length gate.
+
 Code assignments can add `queue_item_ids`, or `lane_file` naming a queue-fetch JSON/newline path list.
 The helper resolves current backend file/status/source identity before registration, renders bounded
 manifest previews, and preserves pointers to the full selection. `prior_agent_id` loads a bounded saved

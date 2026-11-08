@@ -5,6 +5,32 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.6.0] - 2026-11-08
+
+### Added
+
+- `agent start --standing-brief-file` captures shared engagement context once and puts its
+  immutable path and SHA-256 digest in dispatch packets. Continuations reuse the captured
+  brief, and handoffs preserve its reference. Keep lane-specific questions in the assignment.
+- `code-dispatch list --agent-id` filters queue rows by their assigned dispatch agent before
+  pagination.
+
+### Fixed
+
+- Browser notification delivery runs independently of committed HTTP writes, so a slow
+  browser cannot hold a heartbeat or closeout response open. Backlogged browsers reconnect
+  and refresh durable state.
+- Finding lists and report-readiness reads batch proof, snapshot and next-test lookups and
+  reuse artifact health checks within a request. Their complete JSON responses serialize
+  in request workers so collection rendering does not occupy the shared event loop.
+- Orchestrator status checks `/readyz` and distinguishes an unresponsive or unready owned
+  process from a running backend. Owned processes remain stoppable and restartable.
+- Current source reviews can associate an existing same-repository finding across source
+  generations without creating a duplicate. The finding retains its original provenance and
+  independent verification obligations ([ADR 0044](docs/adr/0044-current-discovery-can-associate-a-historical-finding.md)).
+- Findings without current typed verification receipts report reproduction basis `unknown`,
+  preserving the distinction between runtime proof, source observation and absent evidence.
+
 ## [2.5.0] - 2026-11-07
 
 After upgrading, re-ingest each code repository, then run `code-index build` and `code-index sync`.

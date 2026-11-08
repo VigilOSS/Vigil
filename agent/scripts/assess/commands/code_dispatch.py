@@ -64,7 +64,7 @@ _ACTION_HELP: dict[str, str] = {
         "Print current and historical analysis-queue counts.\n"
     ),
     "list": (
-        "Usage: vigil assess code-dispatch list [--status STATUS] [--repo-id ID] "
+        "Usage: vigil assess code-dispatch list [--status STATUS] [--agent-id ID] [--repo-id ID] "
         "[--classification TIER] [--batch-theme THEME] [--queue-mode MODE] "
         "[--stale-minutes N] [--path-prefix PATH]... [--path-glob GLOB]... "
         "[--limit N] [--offset N] [--show-tokens] [--json|--ids-only]\n\n"
@@ -683,6 +683,7 @@ def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
 # same filter set always produces the same endpoint regardless of typing order.
 _LIST_FILTER_OPTIONS = (
     ("--status", "status"),
+    ("--agent-id", "agent_name"),
     ("--repo-id", "repo_id"),
     ("--classification", "classification"),
     ("--batch-theme", "batch_theme"),

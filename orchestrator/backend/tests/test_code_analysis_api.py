@@ -6980,16 +6980,13 @@ def test_durable_code_classes_must_be_canonical(client, isolate_settings):
     assert accepted.status_code == 200, accepted.text
 
 
-def test_stale_finding_slug_refusal_names_the_one_write_that_rebinds_it(
-    client, isolate_settings
+@pytest.mark.parametrize(
+    "active_scan", [False, True, "unhealthy", "wrong_path"],
+    ids=["hunt", "scan-rediscovery", "scan-unhealthy-proof", "scan-other-file"],
+)
+def test_current_review_can_deduplicate_to_stale_finding_without_rebinding_it(
+    client, isolate_settings, active_scan
 ):
-    """The constraint is right (ADR 0026) but the refusal owed a way forward.
-
-    A finding bound to a superseded generation cannot back a `finding`
-    disposition, and `finding verify --provenance-inline` is the only write that
-    rebinds one — so the 409 names it instead of leaving the hunter to rediscover
-    it.
-    """
     engagement_key = "2026-11-06-code-stale-finding-slug"
     write_engagement(isolate_settings["engagements_dir"], engagement_key)
     repo = _create_repo(client, engagement_key, repo_key="stale-slug-repo")
@@ -6998,38 +6995,120 @@ def test_stale_finding_slug_refusal_names_the_one_write_that_rebinds_it(
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     base = f"/engagements/{engagement_key}/assessment/code"
+    finding_url = f"/engagements/{engagement_key}/assessment/findings/VF-901"
     _create_code_parent_finding(client, engagement_key, repo_id, slug="VF-901")
+    original = client.get(finding_url).json()
 
-    # Advancing the generation on an unrelated file strands the finding's
-    # binding on the previous one.
     _refresh_one_file_metadata(
-        client,
-        engagement_key,
-        repo_id,
-        int(helper["id"]),
+        client, engagement_key, repo_id, int(helper["id"]),
         file_hash=_source_hash("stale-slug-helper-moved"),
     )
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 95)
     queue_item = _claim_file_for_analysis(
-        client, engagement_key, int(parser["id"]), priority=95
+        client, engagement_key, int(parser["id"]), priority=95, agent_name="acme-rediscovery"
     )
-
-    refused = client.post(
+    if active_scan:
+        assessment_base = f"/engagements/{engagement_key}/assessment"
+        agent_id = "acme-rediscovery"
+        _ensure_finding_author_dispatch(client, engagement_key, agent_id)
+        current_repo = client.get(f"{base}/repos/{repo_id}").json()
+        run_response = client.post(f"{assessment_base}/assessment-runs", json={
+            "run_uuid": "acme-rediscovery-scan", "run_kind": "code", "run_purpose": "scan",
+            "producer_dispatch_agent_id": agent_id,
+            "target_identity": {"repositories": [repo["repo_key"]]},
+            "source_generations": [{"target_key": repo["repo_key"],
+                "generation": current_repo["active_generation"],
+                "manifest_digest": current_repo["source_manifest_digest"]}],
+        })
+        assert run_response.status_code == 201, run_response.text
+        run_id = run_response.json()["id"]
+        assert client.patch(f"{assessment_base}/assessment-runs/{run_id}",
+                            json={"status": "running"}).status_code == 200
+        source_response = client.post(f"{assessment_base}/assessment-runs/{run_id}/sources", json={
+            "sources": [{"target_key": repo["repo_key"], "declared_root": ".",
+                "path": "src/helpers.py" if active_scan == "wrong_path" else parser["file_path"],
+                "content_sha256": parser["file_hash"],
+                "byte_size": 1, "line_count": parser["loc"], "encoding": "utf-8",
+                "inventory_status": "included", "exclusion_reason": "",
+                "parser_status": "parsed", "parser_error": ""}],
+        })
+        assert source_response.status_code == 201, source_response.text
+        source_id = source_response.json()[0]["id"]
+        read = client.post(f"{assessment_base}/assessment-runs/{run_id}/source-reads", json={
+            "source_id": source_id, "dispatch_agent_id": agent_id, "attempt": 1,
+            "byte_start": 0, "byte_end": 1, "line_start": 1, "line_end": parser["loc"],
+        })
+        assert read.status_code == 201, read.text
+        proof = client.post(f"{assessment_base}/proof-receipts", json={
+            "run_id": run_id, "evidence_kind": "source_observation",
+            "source_read_id": read.json()["id"], "observed_result": "The old issue persists.",
+        })
+        assert proof.status_code == 201, proof.text
+        candidate = client.post(f"{assessment_base}/assessment-runs/{run_id}/candidates", json={
+            "identity_key": "acme-rediscovery", "target_key": repo["repo_key"],
+            "source_id": source_id, "source_anchor": "src/parser.py:10",
+            "vulnerability_family": "CWE-20", "hypothesis": "The old issue persists.",
+            "dispatch_agent_id": agent_id, "proof_receipt_ids": [proof.json()["id"]],
+        })
+        assert candidate.status_code == 201, candidate.text
+        duplicate = client.patch(
+            f"{assessment_base}/assessment-runs/{run_id}/candidates/{candidate.json()['id']}",
+            json={"state": "duplicate", "reason": "Current source reproduces existing VF-901.",
+                  "proof_receipt_ids": [proof.json()["id"]], "finding_slug": "VF-901"},
+        )
+        assert duplicate.status_code == 200, duplicate.text
+        if active_scan == "unhealthy":
+            with db_module.get_connection() as connection:
+                connection.execute(
+                    "UPDATE assessment_proof_receipts SET recorded_health = 'stale' WHERE id = ?",
+                    (proof.json()["id"],),
+                )
+    coverage = _network_input_coverage(default_effort=80)
+    recorded = client.post(
         f"{base}/analysis-results",
         json=_owned(
             queue_item,
             queue_item_id=queue_item["id"],
-            disposition="finding",
-            finding_slug="VF-901",
+            disposition="finding", finding_slug="VF-901",
             hypothesis="The decoded length is not bounds-checked.",
-            evidence="parse() indexes with the attacker length.",
+            evidence="Current parse() still indexes with the attacker length.",
+            cwe_coverage=coverage,
         ),
     )
-
-    assert refused.status_code == 409, refused.text
-    detail = refused.json()["detail"]
-    assert "current verified repository source generation" in detail
-    assert "vigil assess finding verify VF-901 --provenance-inline" in detail
+    if active_scan in {"unhealthy", "wrong_path"}:
+        assert recorded.status_code == 409, recorded.text
+        assert "source-proven duplicate" in recorded.json()["detail"]
+        assert client.get(f"{base}/analysis-results?file_id={parser['id']}").json() == []
+        assert client.get(finding_url).json()["provenance"] == original["provenance"]
+        return
+    assert recorded.status_code == 201, recorded.text
+    if active_scan:
+        assert recorded.json()["run_candidate"]["state"] == "duplicate"
+        assert recorded.json()["run_candidate"]["finding_slug"] == "VF-901"
+    assert recorded.json()["repo_generation"] == queue_item["repo_generation"]
+    association = recorded.json()["finding_association"]
+    assert association["finding_slug"] == "VF-901"
+    assert association["code_snapshot_status"] == "stale"
+    assert association["reverification_required"] is True
+    assert "finding verify VF-901" in association["next_action"]
+    closed = client.post(
+        f"{base}/analysis-queue/done",
+        json=_owned(queue_item, item_ids=[queue_item["id"]],
+                    disposition="finding", cwe_coverage=coverage),
+    )
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["finding_associations"] == [association]
+    current_results = client.get(f"{base}/analysis-results?file_id={parser['id']}").json()
+    assert [row["id"] for row in current_results] == [recorded.json()["id"]]
+    retained = client.get(finding_url).json()
+    assert retained["id"] == original["id"]
+    assert retained["provenance"] == original["provenance"]
+    assert retained["verification_status"] == original["verification_status"]
+    assert retained["code_snapshot_status"] == "stale"
+    findings = client.get(f"/engagements/{engagement_key}/assessment/findings").json()
+    assert [row["slug"] for row in findings] == ["VF-901"]
+    readiness = client.get(f"{base}/readiness?target_phase=complete").json()
+    assert "finding_snapshot_stale" in {row["code"] for row in readiness["blockers"]}
 
 
 def test_reanalysis_stale_predecessor_is_reported_per_item_and_batch_continues(
@@ -18438,7 +18517,7 @@ def test_suspicious_semantic_ordering_clean_then_suspicious_then_skip(
     }
 
 
-def test_finding_analysis_result_requires_current_reportable_root_file_finding(
+def test_finding_analysis_result_requires_reportable_root_file_finding(
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-finding-result-binding"
@@ -18528,7 +18607,6 @@ def test_finding_analysis_result_requires_current_reportable_root_file_finding(
     invalid_cases = [
         ("", 400, "finding_slug"),
         ("CH-999", 409, "unknown"),
-        ("CH-910", 409, "current"),
         ("CH-914", 409, "same repository"),
         ("CV-912", 409, "root"),
         ("CH-913", 409, "reportable"),

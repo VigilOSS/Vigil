@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import json
 import hashlib
+import http.client
 import math
 import shutil
 import signal
@@ -10,6 +11,7 @@ import socket
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
@@ -122,6 +124,8 @@ def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
     print(term.row("ok", "Report renderer", "ready", stream=sys.stdout), flush=True)
 
     process_state = orchestrator_status_payload(install_root, host=options.host, port=options.port, local_only=True)
+    if process_state["state"] in {"unresponsive", "not_ready"}:
+        raise SystemExit(f"Cannot reuse backend: {process_state['detail']}")
     if process_state["state"] == "running":
         pid = str(process_state["pid"])
         if options.allow_existing:
@@ -283,7 +287,7 @@ def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int 
     state = orchestrator_status_payload(install_root, host=host, port=port, local_only=True)
     if state["state"] == "stopped":
         return
-    if state["state"] != "running" or state.get("ownership") != "owned":
+    if state["state"] not in {"running", "unresponsive", "not_ready"} or state.get("ownership") != "owned":
         raise SystemExit(f"Cannot stop backend: {state.get('detail', 'process ownership is unknown')}. Inspect the owning workspace and endpoint first.")
     pid = int(str(state["pid"]))
     if _process_identity(pid) != state.get("process_identity"):
@@ -309,6 +313,23 @@ def stop_orchestrator(install_root: Path, *, host: str = "127.0.0.1", port: int 
 
 def orchestrator_status(install_root: Path) -> str:
     return str(orchestrator_status_payload(install_root)["state"])
+
+
+def _backend_responsiveness(endpoint: str) -> tuple[bool, bool, str]:
+    """Probe the database/threadpool readiness path, independently of PID ownership."""
+    url = endpoint.rstrip("/") + "/readyz"
+    try:
+        with urllib.request.urlopen(url, timeout=1.0) as response:
+            payload = json.loads(response.read())
+            ready = response.status == 200 and isinstance(payload, dict) and payload.get("status") == "ready"
+            return True, ready, "" if ready else f"{url} did not report ready"
+    except urllib.error.HTTPError as exc:
+        exc.close()
+        return True, False, f"{url} returned HTTP {exc.code}"
+    except (ValueError, UnicodeError) as exc:
+        return True, False, f"{url} returned an invalid readiness response: {exc}"
+    except (OSError, http.client.HTTPException) as exc:
+        return False, False, f"{url} is unreachable: {exc}"
 
 
 def _listener_application_matches(pid: int, install_root: Path) -> bool:
@@ -429,7 +450,18 @@ def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", 
                 detail = (f"listener at {host}:{port} has no verifiable process receipt; "
                           f"inspect its PID with `lsof -nP -iTCP:{port} -sTCP:LISTEN` or "
                           f"`ss -ltnp 'sport = :{port}'`, verify its workspace, then stop it manually if necessary")
+    responsive: bool | None = None
+    ready: bool | None = None
+    if owned:
+        responsive, ready, readiness_detail = _backend_responsiveness(endpoint)
+        if not ready:
+            state = "not_ready" if responsive else "unresponsive"
+            detail = (
+                f"Owned backend PID {pid} is alive, but {readiness_detail}. "
+                "Inspect `vigil logs orchestrator`; use `vigil orchestrator restart` to recover it."
+            )
     return {"state": state, "ownership": ownership, "owner_workspace": owner, "detail": detail,
+            "responsive": responsive, "ready": ready,
             "pid": pid if owned else None, "process_identity": identity if owned else None,
             "process_group": receipt.get("process_group") if owned else None,
             "pid_file": str(pid_file), "host": host, "port": port,

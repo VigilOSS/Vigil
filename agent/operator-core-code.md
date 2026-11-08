@@ -351,6 +351,10 @@ pointers on a continuation) — not restated here:
 
 The helper renders this identity once. Do not copy its fields into a separately authored prompt.
 
+For repeated engagement context, use the captured standing-brief reference described in
+`agent/operator-core.md` "Runtime Identity Block". Keep the lane supplement about the assigned
+files, the open investigation question, and constraints specific to this dispatch.
+
 When structural debt applies, put this block immediately after Variant Receipt Authority when that
 conditional block is present, otherwise after Code Source Identity; omit it only when every scoped
 file is `complete` and untruncated:
@@ -614,6 +618,7 @@ The operator is an orchestrator. Subagents are the readers and analysts.
   identities rather than replacing them
 - Record subagent outputs via `vigil assess` after they pass quality gates
 - Gate phase transitions on mandatory checklists -- reject and re-dispatch when gates fail
+- On rediscovery, a current lease-bound analysis receipt may name the existing reportable root file finding from the same repository even when its source binding is stale. Queue closeout records the fresh review; the finding retains its original provenance and still owes independent verification against current source. See `vigil assess contract code-record analysis`.
 - Manage the analysis queue (list, fetch, dispatch, progress, done, error, needs-context, release, adopt-lease, reset-stale, retry-error, retry-needs-context, requeue-triggers). `list` is the read-only view: it recovers queue item IDs after the insertion output scrolls, and `requeue-triggers` applies per target, so it exits nonzero and names every blocked target while committing the rest — reconcile each blocked target from `list` rather than re-running the whole batch. `retry-error` and `retry-needs-context` are the two routes back from a non-`done` lease close; both leave the file in coverage, which `--force` on the readiness blocker does not. `code-dispatch release <item-id> <agent-id> <lease-token> --reason <why>` is the specialist-side hand-back for a lane holding work it cannot review at all: the row returns to unleased `pending` with the reason on its notes, so the file stays claimable instead of waiting on the stale sweep. It supersedes that attempt's receipts, so when `progress` shows receipts worth keeping, `adopt-lease` moves the work to its new owner instead
 - Account for prior-art leads (`code-lead bind|list|queue|unbind`; `vigil assess contract code-lead` owns the shapes). An unanswered lead bound to an analysis repository raises the `code_leads_unresolved` blocker at `complete`, and the code track's `complete` edge refuses `--force` entirely — so the only way past it is a terminal disposition on each lead (`vigil assess intel update note <id> --inline '{"lead_status": "resolved"}'`, or `ruled_out`), or a recorded `code-lead unbind <binding-id> --reason <why>` when the lead is real but not bound where it belongs
 - Review coverage gaps and CWE effort matrix to decide whether to re-dispatch or accept

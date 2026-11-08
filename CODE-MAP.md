@@ -65,7 +65,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   See: `orchestrator/backend/tests/test_root_cause_effect_wire_default.py`.
 - `finding_snapshots.py:resolve_snapshot_location` owns whether a cited path and line exist in the sealed
   generation, for finding locations, lead bindings and trigger targets.
-- `repro_currentness.py:reproduction_basis` owns `source` vs `runtime` reproduction; readiness, the report,
+- `repro_currentness.py:reproduction_basis` owns `source`, `runtime`, or `unknown` reproduction; readiness, the report,
   the `repro_rehearsal` gate and the export marker read it.
 - `code_analysis_support.py:structural_review_obligation` owns the review proof a file owes (a function, each
   `<top-level>` segment or a whole-file span) for the receipt span gate and, via `structural_review_gaps`, the coverage
@@ -96,6 +96,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   resolves and renders it for `contract.py` and `list_commands.py`.
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
 - `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
+- `agent/scripts/assess/commands/agent.py` captures optional standing briefs by content digest;
+  dispatch packets, launch continuations and `dispatch/handoff_renderer.py` share the immutable path and digest.
 - `src/vigil_cli/engagements.py:CLIENT_PROVIDER_KEY` and `CLIENT_MESSAGE_FLAGS` own client launch
   identity. Generated launchers and preflight consume them.
 - `src/vigil_cli/image_freshness.py` owns the content-digest mechanism every freshness check uses (never mtime).

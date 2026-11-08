@@ -260,6 +260,12 @@ failure, different sink), pass `--allow-remint`; if the kill looks wrong given w
 so in your handoff instead of forcing the remint — the operator reopens it with `finding update
 --status draft`.
 
+When a current source review rediscovers a reportable root finding from the same repository,
+use its canonical slug in `code-record analysis`, including when its source binding is stale.
+The fresh lease-bound receipt records your review without creating a duplicate. It does not
+rebind the finding or make its prior proof current; independent verification still owes that
+review. Read `vigil assess contract code-record analysis` for the receipt requirements.
+
 ## Mandatory Closing Sequence
 
 Before your dispatch returns, run in this order:

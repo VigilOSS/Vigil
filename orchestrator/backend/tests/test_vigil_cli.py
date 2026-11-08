@@ -3526,6 +3526,7 @@ def test_orchestrator_start_builds_frontend_then_errors_when_backend_already_run
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import orchestrator as orchestrator_module
+    monkeypatch.setattr(orchestrator_module, "_backend_responsiveness", lambda _: (True, True, ""))
 
     install_root = tmp_path / "install"
     frontend_dir = install_root / "orchestrator" / "frontend"
@@ -3862,6 +3863,7 @@ def test_orchestrator_status_payload_reports_running_with_live_pid(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from vigil_cli import orchestrator as orchestrator_module
+    monkeypatch.setattr(orchestrator_module, "_backend_responsiveness", lambda _: (True, True, ""))
 
     install_root = tmp_path / "install"
     pid_file = install_root / ".runtime-data" / "pids" / "orchestrator.pid"

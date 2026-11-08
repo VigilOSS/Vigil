@@ -404,6 +404,7 @@ def _apply_artifact_snapshot_health(
         (engagement_id, *artifact_ids),
     ).fetchall()
     artifacts = {int(row["id"]): dict(row) for row in rows}
+    health_by_artifact: dict[tuple[int, str], str] = {}
     for record in records:
         artifact_id = record.get("artifact_id")
         if (
@@ -415,6 +416,10 @@ def _apply_artifact_snapshot_health(
         artifact = artifacts.get(int(artifact_id))
         if artifact is None:
             record["evidence_health"] = "stale"
+            continue
+        health_key = (int(artifact_id), str(record["evidence_sha256"]))
+        if health_key in health_by_artifact:
+            record["evidence_health"] = health_by_artifact[health_key]
             continue
         record["evidence_health"] = artifact_index.registered_snapshot_evidence_health(
             Path(str(artifact["engagement_root"])).expanduser().resolve(),
@@ -432,6 +437,7 @@ def _apply_artifact_snapshot_health(
                 else None
             ),
         )
+        health_by_artifact[health_key] = record["evidence_health"]
     return records
 
 
@@ -953,21 +959,35 @@ def proof_receipts_for_finding(
     engagement_id: int,
     finding_id: int,
 ) -> list[dict[str, Any]]:
+    return proof_receipts_for_findings(connection, engagement_id, [finding_id])[finding_id]
+
+
+def proof_receipts_for_findings(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    finding_ids: Iterable[int],
+) -> dict[int, list[dict[str, Any]]]:
     """Receipts of the latest decision, including receipt-free authority events.
 
     Presentation edits do not create decisions and keep the preceding proof.
     Historical links remain in the verification audit, not in this projection.
     """
+    ids = sorted(set(finding_ids))
+    result: dict[int, list[dict[str, Any]]] = {finding_id: [] for finding_id in ids}
+    if not ids:
+        return result
     rows = connection.execute(
         """
-        SELECT receipts.*, artifacts.present AS artifact_present,
+        SELECT links.finding_id AS linked_finding_id,
+               receipts.*, artifacts.present AS artifact_present,
                artifacts.integrity_status AS artifact_integrity_status,
                artifacts.sha256 AS artifact_current_sha256
         FROM assessment_finding_proof_receipts AS links
         JOIN assessment_proof_receipts AS receipts ON receipts.id = links.proof_receipt_id
         JOIN assessment_findings AS findings ON findings.id = links.finding_id
         LEFT JOIN assessment_artifacts AS artifacts ON artifacts.id = receipts.artifact_id
-        WHERE links.engagement_id = ? AND links.finding_id = ?
+        WHERE links.engagement_id = ?
+          AND links.finding_id IN (SELECT value FROM json_each(?))
           AND (
             links.transition_id = (
               SELECT MAX(current_transition.id)
@@ -1004,11 +1024,16 @@ def proof_receipts_for_finding(
               )
             )
           )
-        ORDER BY links.id
+        ORDER BY links.finding_id, links.id
         """,
-        (engagement_id, finding_id),
+        (engagement_id, json.dumps(ids)),
     ).fetchall()
-    return _serialize_receipts(connection, engagement_id, rows)
+    raw_records = [dict(row) for row in rows]
+    linked_ids = [record.pop("linked_finding_id") for record in raw_records]
+    records = _serialize_receipts(connection, engagement_id, raw_records)
+    for finding_id, record in zip(linked_ids, records):
+        result[int(finding_id)].append(record)
+    return result
 
 
 def _serialize_counterchecks(
@@ -1256,11 +1281,17 @@ def proof_evidence_health_issues_for_finding(
     connection: sqlite3.Connection,
     engagement_id: int,
     finding_id: int,
+    *,
+    current_receipts: list[dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     """Return only degraded evidence that a finding's decision depends on."""
 
     issues: list[dict[str, Any]] = []
-    for receipt in proof_receipts_for_finding(connection, engagement_id, finding_id):
+    receipts = (
+        proof_receipts_for_finding(connection, engagement_id, finding_id)
+        if current_receipts is None else current_receipts
+    )
+    for receipt in receipts:
         receipt_id = int(receipt["id"])
         if receipt["evidence_health"] != "healthy":
             issues.append(

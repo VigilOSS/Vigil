@@ -1322,6 +1322,7 @@ async def bulk_create_queue_items(engagement_key: str, request: QueueItemsBulkCr
 def list_queue_items(
     engagement_key: str,
     status_filter: CodeQueueStatus | None = Query(default=None, alias="status"),
+    agent_name: str | None = Query(default=None, max_length=128),
     repo_id: int | None = Query(default=None),
     classification: CodeClassification | None = Query(default=None),
     batch_theme: str | None = Query(default=None, max_length=256),
@@ -1348,6 +1349,7 @@ def list_queue_items(
     return code_analysis.list_queue_items(
         engagement.id,
         status_filter=status_filter,
+        agent_name=agent_name,
         repo_id=repo_id,
         classification=classification,
         batch_theme=batch_theme,

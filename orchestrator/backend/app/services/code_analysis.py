@@ -91,7 +91,7 @@ from .code_analysis_support import (
     _now_iso,
     _QUEUE_ACTIVE_STATUSES,
     _reject_unknown_fields,
-    _require_current_reportable_root_file_finding,
+    _require_reportable_root_file_finding,
     _require_queue_generation,
     _require_queue_lease,
     _require_queue_status,
@@ -3582,6 +3582,7 @@ def list_queue_items(
     engagement_id: int,
     *,
     status_filter: str | None = None,
+    agent_name: str | None = None,
     repo_id: int | None = None,
     classification: str | None = None,
     batch_theme: str | None = None,
@@ -3645,6 +3646,9 @@ def list_queue_items(
     if status_filter is not None:
         clauses.append("queue.status = ?")
         params.append(status_filter)
+    if agent_name is not None:
+        clauses.append("queue.assigned_agent = ?")
+        params.append(agent_name)
     if current_only:
         statuses = sorted(_QUEUE_STATUSES)
         clauses.append(
@@ -4668,6 +4672,7 @@ def complete_queue_items(
         normalized_cwe_coverage = _normalize_cwe_coverage(cwe_coverage)
     cwe_coverage_text = _json_list_text(normalized_cwe_coverage)
     placeholders = ",".join("?" for _ in item_ids)
+    finding_associations: dict[str, dict[str, Any]] = {}
     with get_connection() as connection:
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
@@ -4745,12 +4750,14 @@ def complete_queue_items(
                 ),
             ).fetchall()
             for finding_result in finding_results:
-                _require_current_reportable_root_file_finding(
+                association = _require_reportable_root_file_finding(
                     connection,
                     engagement.id,
                     file_row,
                     finding_result["finding_slug"],
                 )
+                if association is not None:
+                    finding_associations[str(finding_result["finding_slug"])] = association
         if disposition in {"finding", "suspicious"}:
             evidenced_result = connection.execute(
                 f"""
@@ -4896,6 +4903,8 @@ def complete_queue_items(
             "updated": cursor.rowcount,
             "total": len(item_ids),
             "coverage_integrity": integrity,
+            **({"finding_associations": list(finding_associations.values())}
+               if finding_associations else {}),
         }
 
 
@@ -5698,7 +5707,7 @@ def retry_needs_context_queue_items(
 # Analysis Results
 # =========================================================================
 
-def _require_promoted_run_candidate_for_finding_result(
+def _require_current_run_candidate_for_finding_result(
     connection: sqlite3.Connection,
     *,
     engagement_id: int,
@@ -5715,13 +5724,15 @@ def _require_promoted_run_candidate_for_finding_result(
     assert repository is not None
     rows = connection.execute(
         """
-        SELECT candidates.id, runs.source_generations_json,
+        SELECT candidates.id, candidates.run_id, candidates.state,
+               candidates.source_id, candidates.proof_receipt_ids_json,
+               runs.source_generations_json,
                sources.target_key, sources.path, sources.content_sha256
         FROM assessment_run_candidates AS candidates
         JOIN assessment_runs AS runs ON runs.id = candidates.run_id
         JOIN assessment_run_sources AS sources ON sources.id = candidates.source_id
         WHERE candidates.engagement_id = ?
-          AND candidates.state = 'promoted'
+          AND candidates.state IN ('promoted', 'duplicate')
           AND candidates.finding_slug = ?
           AND runs.run_kind = 'code' AND runs.run_purpose = 'scan'
           AND runs.status IN ('queued', 'running')
@@ -5755,13 +5766,40 @@ def _require_promoted_run_candidate_for_finding_result(
             and str(generation.get("manifest_digest") or "")
             == str(repository["source_manifest_digest"])
         ):
+            if row["state"] == "duplicate":
+                receipt_ids = run_accounting._json_value(row["proof_receipt_ids_json"], [])
+                run_accounting._validate_receipt_ids(
+                    connection, engagement_id, int(row["run_id"]), receipt_ids
+                )
+                if not run_accounting._proof_receipts_are_healthy(
+                    connection, engagement_id, receipt_ids
+                ):
+                    continue
+                placeholders = ",".join("?" for _ in receipt_ids)
+                source_proof = connection.execute(
+                    f"""
+                    SELECT 1 FROM assessment_proof_receipts AS receipts
+                    JOIN assessment_run_source_reads AS reads
+                      ON reads.id = receipts.source_read_id
+                    WHERE receipts.engagement_id = ? AND receipts.run_id = ?
+                      AND receipts.id IN ({placeholders})
+                      AND receipts.evidence_kind = 'source_observation'
+                      AND reads.run_id = ? AND reads.source_id = ?
+                    LIMIT 1
+                    """,
+                    (engagement_id, int(row["run_id"]), *receipt_ids,
+                     int(row["run_id"]), int(row["source_id"])),
+                ).fetchone()
+                if source_proof is None:
+                    continue
             exact_ids.append(int(row["id"]))
     if len(exact_ids) != 1:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
             detail=(
                 "finding analysis in an active code scan requires exactly one "
-                "promoted candidate bound to the current file and repository generation"
+                "promoted or source-proven duplicate candidate bound to the current file "
+                "and repository generation"
             ),
         )
     candidate = connection.execute(
@@ -5940,8 +5978,9 @@ def create_analysis_result(
                 ),
             )
         finding_run_candidate = None
+        finding_association = None
         if disposition == "finding":
-            _require_current_reportable_root_file_finding(
+            finding_association = _require_reportable_root_file_finding(
                 connection,
                 engagement.id,
                 file_row,
@@ -5949,7 +5988,7 @@ def create_analysis_result(
             )
             if active_scan is not None:
                 finding_run_candidate = (
-                    _require_promoted_run_candidate_for_finding_result(
+                    _require_current_run_candidate_for_finding_result(
                         connection,
                         engagement_id=engagement.id,
                         file_row=file_row,
@@ -6087,6 +6126,8 @@ def create_analysis_result(
             row = _analysis_result_row(connection, int(existing_result["id"]))
             assert row is not None
             hydrated = _hydrate_code_analysis_result(row)
+            if finding_association is not None:
+                hydrated["finding_association"] = finding_association
             if assessment_run_id is not None:
                 candidate = connection.execute(
                     """
@@ -6307,6 +6348,8 @@ def create_analysis_result(
         )
         _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
         hydrated = _hydrate_code_analysis_result(row)
+        if finding_association is not None:
+            hydrated["finding_association"] = finding_association
         if run_candidate is not None:
             hydrated["run_candidate"] = run_candidate
         elif finding_run_candidate is not None:

@@ -196,6 +196,7 @@ def test_create_json_preserves_committed_identity_on_sync_failure(tmp_path, monk
 
 def test_owned_orphan_listener_can_be_recovered_only_with_process_identity(tmp_path, monkeypatch):
     from vigil_cli import orchestrator
+    monkeypatch.setattr(orchestrator, '_backend_responsiveness', lambda _url: (True, True, ''))
     monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: True)
     monkeypatch.setattr(orchestrator, '_port_listener_pid', lambda *a: 4242)
     monkeypatch.setattr(orchestrator, '_process_identity', lambda *a: 'acme-birth')

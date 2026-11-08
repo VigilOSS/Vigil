@@ -162,10 +162,29 @@ def test_a_web_finding_with_only_source_receipts_keeps_the_advisory(
     assert "VA-403" in _repro_advisories(client)
 
 
-def test_an_unverified_file_finding_has_runtime_basis(client, isolate_settings):
+def test_an_unverified_file_finding_has_unknown_basis_without_source_exemption(client, isolate_settings):
     _recorded(client, isolate_settings, "VA-404")
 
-    assert client.get(f"{BASE}/findings/VA-404").json()["reproduction_basis"] == "runtime"
+    assert client.get(f"{BASE}/findings/VA-404").json()["reproduction_basis"] == "unknown"
+    refused = _rehearse_from_source(client, "VA-404")
+    assert refused.status_code == 422, refused.text
+    assert "source_observation" in refused.json()["detail"]
+
+    # Out-of-snapshot authority has no receipt either. It does not invent
+    # runtime evidence or exempt the reproduction from independent rehearsal.
+    from tests.test_report_readiness_evidence_basis import _intel_note
+
+    intel_id = _intel_note(client, "Acme deployment observation")
+    attested = _verify(client, "VA-404", {
+        "verification_status": "confirmed", "reason_text": "Deployment confirms impact.",
+        "source_name": "operator", "operator_authority": True,
+        "operator_authority_intel_id": intel_id,
+    })
+    assert attested.status_code == 200, attested.text
+    assert client.get(f"{BASE}/findings/VA-404").json()["reproduction_basis"] == "unknown"
+    assert "VA-404" in _repro_advisories(client)
+    report = client.get(f"{BASE}/report-findings?mode=draft").json()
+    assert report["standalone"][0]["reproduction_basis"] == "unknown"
 
 
 def test_the_report_payload_carries_each_finding_reproduction_basis(

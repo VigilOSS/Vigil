@@ -9,8 +9,8 @@ from pathlib import Path
 from typing import Annotated, Any, Literal
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from ..models.engagement import Engagement
 from ..retry_state import RETRY_STATES
@@ -1832,8 +1832,11 @@ def get_by_family_coverage(engagement_key: str) -> dict[str, Any]:
         return by_family_coverage(connection, engagement.id)
 
 
-@router.get("/report-readiness")
-def get_report_readiness(engagement_key: str) -> dict[str, Any]:
+_READINESS_RESPONSE = TypeAdapter(dict[str, Any])
+
+
+@router.get("/report-readiness", response_model=dict[str, Any])
+def get_report_readiness(engagement_key: str) -> Response:
     engagement = get_engagement_or_404(engagement_key)
     readiness = state_manager.report_readiness(engagement.id)
     # C58 — the Readiness panel renders per-host coverage outcomes alongside
@@ -1850,7 +1853,9 @@ def get_report_readiness(engagement_key: str) -> dict[str, Any]:
         logger.exception(
             "per-host coverage projection failed for engagement %s", engagement_key
         )
-    return readiness
+    # Render while still in this synchronous handler's worker. Large
+    # projections must not serialize on the event loop shared by all lanes.
+    return Response(_READINESS_RESPONSE.dump_json(readiness), media_type="application/json")
 
 
 @router.get("/phase-readiness")
@@ -2740,7 +2745,10 @@ def get_oob_probe(engagement_key: str, nonce: str) -> dict[str, Any]:
     return state_manager.get_oob_probe_by_nonce(engagement.id, nonce)
 
 
-@router.get("/findings")
+_FINDING_LIST_RESPONSE = TypeAdapter(list[dict[str, Any]])
+
+
+@router.get("/findings", response_model=list[dict[str, Any]])
 def get_findings(
     engagement_key: str,
     severity: str | None = None,
@@ -2755,7 +2763,7 @@ def get_findings(
     limit: int | None = Query(default=None, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
     view: Literal["full", "summary"] = "full",
-) -> list[dict[str, Any]]:
+) -> Response:
     """The finding ledger. ``view=summary`` returns the same rows without
     ``details`` and ``notes`` (most of the payload) for list views that never
     show them; ``GET /findings/{slug}`` keeps the full record."""
@@ -2775,11 +2783,11 @@ def get_findings(
         offset=offset,
     )
     if view == "summary":
-        return [
+        rows = [
             {key: value for key, value in row.items() if key not in _FINDING_SUMMARY_VIEW_OMITS}
             for row in rows
         ]
-    return rows
+    return Response(_FINDING_LIST_RESPONSE.dump_json(rows), media_type="application/json")
 
 
 _FINDING_SUMMARY_VIEW_OMITS = frozenset({"details", "notes"})

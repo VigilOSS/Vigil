@@ -797,12 +797,12 @@ def _finding_snapshot_repo_id(finding: Any) -> int | None:
     return int(binding["repo_id"])
 
 
-def _require_current_reportable_root_file_finding(
+def _require_reportable_root_file_finding(
     connection,
     engagement_id: int,
     file_row: dict[str, Any],
     finding_slug: Any,
-) -> None:
+) -> dict[str, Any] | None:
     slug = str(finding_slug or "")
     if not slug or slug != slug.strip():
         raise HTTPException(
@@ -842,17 +842,8 @@ def _require_current_reportable_root_file_finding(
                 "finding_slug must reference a file finding from the same repository"
             ),
         )
-    if finding_code_snapshot_status(connection, engagement_id, finding) != "current":
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=(
-                f"finding_slug {slug!r} must reference a finding bound to the current "
-                "verified repository source generation. Re-read the current sealed "
-                "bytes and rebind it with `vigil assess finding verify "
-                f"{slug} --provenance-inline '{{\"code_snapshot\": {{...}}}}'`, which "
-                "is the only write that rebinds a stale file finding"
-            ),
-        )
+    # This associates a current, source-bound review receipt with the canonical
+    # issue. It does not rebind that issue's provenance or verify its old proof.
     variant_link = connection.execute(
         """
         SELECT 1
@@ -868,6 +859,20 @@ def _require_current_reportable_root_file_finding(
             status_code=status.HTTP_409_CONFLICT,
             detail="finding_slug must reference a root file finding, not a variant finding",
         )
+
+    snapshot_status = finding_code_snapshot_status(connection, engagement_id, finding)
+    if snapshot_status == "current":
+        return None
+    return {
+        "finding_slug": slug,
+        "code_snapshot_status": snapshot_status,
+        "reverification_required": True,
+        "next_action": (
+            "This receipt records current source review; the finding's prior proof "
+            "remains non-current. Independently review current source, then use "
+            f"`vigil assess finding verify {slug}` with current proof and source binding."
+        ),
+    }
 
 
 def _reject_unknown_fields(payload: dict[str, Any], allowed_fields: set[str], *, entity_name: str) -> None:

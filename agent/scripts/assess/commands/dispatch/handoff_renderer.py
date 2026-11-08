@@ -200,6 +200,12 @@ def _render_handoff(args, extra: list[str]) -> None:
             continue
         _resolved, state = resolve_engagement_artifact_path(cfg.engagement_dir, raw_path)
         artifact_states.append((raw_path, state))
+    brief = packet_context.get("standing_brief")
+    if isinstance(brief, dict) and isinstance(brief.get("path"), str):
+        brief_path = brief["path"]
+        if brief_path not in {path for path, _state in artifact_states}:
+            _resolved, state = resolve_engagement_artifact_path(cfg.engagement_dir, brief_path)
+            artifact_states.append((brief_path, state))
 
     blob = _render_handoff_blob(
         agent_id=agent_id,
@@ -214,6 +220,7 @@ def _render_handoff(args, extra: list[str]) -> None:
         authorized_phase=authorized_phase,
         coverage_basis=coverage_basis,
         packet_available=bool(packet_context),
+        standing_brief=packet_context.get("standing_brief"),
         handoff_status=handoff_status,
         handoff_version=handoff_version,
         handoff_written_at=handoff_written_at,
@@ -274,6 +281,7 @@ def _render_handoff_blob(
     include_evidence: bool,
     max_lines: int,
     extras: object = None,
+    standing_brief: object = None,
 ) -> str:
     """Build the markdown handoff blob with the documented section order.
 
@@ -296,6 +304,11 @@ def _render_handoff_blob(
         _handoff_phase_line(handoff_phase, authorized_phase, packet_available=packet_available),
     ]
     head.extend(_lane_basis_lines(role, coverage_basis, packet_available=packet_available))
+    if isinstance(standing_brief, dict):
+        head.append(
+            f"- **Captured standing brief:** {standing_brief.get('path', '(unknown)')}; "
+            f"SHA-256 {standing_brief.get('sha256', '(unknown)')}"
+        )
     # Skills loaded by the prior dispatch are part of the audit surface — the
     # next dispatch should know which procedure context the previous agent
     # carried so it can either continue with the same skills or change loadout

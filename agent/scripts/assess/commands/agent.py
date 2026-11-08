@@ -156,6 +156,7 @@ def register(subparsers) -> None:
         help="Declare that this specialist must not send target-facing traffic.",
     )
     start.add_argument("--packet-file", help="Engagement-contained UTF-8 assignment supplement captured inside the canonical dispatch packet.")
+    start.add_argument("--standing-brief-file", help="Engagement-contained UTF-8 shared briefing captured once; packets carry its immutable path and SHA-256 instead of repeating its text.")
     start.add_argument(
         "--dry-run",
         action="store_true",
@@ -468,6 +469,7 @@ def _continue(args) -> None:
         prior_context = dict(packet.get("context") if isinstance(packet.get("context"), dict) else {})
         context = {key: value for key, value in prior_context.items()
                    if key not in {"_registration_sha256", "prior_state", "prior_agent_id", "continuation_source"}}
+        _require_standing_brief(_cfg.engagement_dir, context)
         traffic = prior_context.get("traffic_declaration")
         if not isinstance(traffic, dict) or not (traffic.get("rate_budget") or traffic.get("no_target_traffic") is True):
             raise AssessError("agent continue: saved traffic boundary is unavailable; start an explicitly scoped fresh dispatch")
@@ -1083,6 +1085,11 @@ def _start(args) -> None:
         )
         context["source_identity"] = source_identity
         context["traffic_declaration"] = {"rate_budget": getattr(args, "rate_budget", None), "no_target_traffic": bool(getattr(args, "no_target_traffic", False))}
+        context_brief_source = context.pop("standing_brief_file", None)
+        brief_source = getattr(args, "standing_brief_file", None) or context_brief_source
+        brief_bytes = None
+        if brief_source:
+            context["standing_brief"], brief_bytes = _capture_standing_brief(cfg.engagement_dir, brief_source)
         supplement = getattr(args, "packet_file", None)
         if supplement:
             from assess.commands.export_triage_packet import _read_regular_at
@@ -1108,6 +1115,9 @@ def _start(args) -> None:
         if not getattr(args, "allow_duplicate", False):
             dispatch._warn_on_overlapping_dispatch(client, payload)  # noqa: SLF001
         dry_run = bool(getattr(args, "dry_run", False))
+        if brief_bytes is not None and not dry_run:
+            _materialize_capture(cfg.engagement_dir, ("tools", "dispatch-briefs"), brief_bytes,
+                                 context["standing_brief"]["sha256"], label="standing brief")
         row = {"id": None, **payload} if dry_run else client.record_dispatch(payload)
     finally:
         client.close()
@@ -1321,8 +1331,13 @@ def _materialize_packet(engagement_dir: str, dispatch_id: int, packet: dict) -> 
     digest = hashlib.sha256(raw).hexdigest()
     if digest != packet.get("sha256") or type(dispatch_id) is not int or dispatch_id < 1:
         raise AssessError("dispatch receipt packet identity is invalid")
+    return _materialize_capture(engagement_dir, ("tools", "dispatch-packets", str(dispatch_id)), raw, digest,
+                                label="dispatch packet")
+
+
+def _materialize_capture(engagement_dir: str, parts: tuple[str, ...], raw: bytes, digest: str, *, label: str) -> Path:
+    """Publish exact captured bytes once under their content address."""
     root = Path(engagement_dir).resolve()
-    parts = ("tools", "dispatch-packets", str(dispatch_id))
     directory = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
     try:
         for part in parts:
@@ -1347,17 +1362,50 @@ def _materialize_packet(engagement_dir: str, dispatch_id: int, packet: dict) -> 
                 existing = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
                 with os.fdopen(existing, "rb") as saved:
                     if not stat.S_ISREG(os.fstat(saved.fileno()).st_mode):
-                        raise AssessError("saved dispatch packet must be a regular file")
+                        raise AssessError(f"saved {label} must be a regular file")
                     if saved.read(len(raw) + 1) != raw:
-                        raise AssessError("saved dispatch packet differs from its immutable identity")
+                        raise AssessError(f"saved {label} differs from its immutable identity")
             os.fsync(directory)
         finally:
             os.unlink(temp, dir_fd=directory)
     except OSError as exc:
-        raise AssessError(f"dispatch is captured but local packet publication failed; retry the same registration to recover, do not launch yet: {exc}") from exc
+        raise AssessError(f"local {label} publication failed; retry the same registration to recover, do not launch yet: {exc}") from exc
     finally:
         os.close(directory)
     return root.joinpath(*parts, name)
+
+
+def _capture_standing_brief(engagement_dir: str, source: str) -> tuple[dict[str, str], bytes]:
+    from assess.commands.export_triage_packet import _read_regular_at
+
+    root = Path(engagement_dir).resolve()
+    path = Path(source)
+    try:
+        relative = path.relative_to(root) if path.is_absolute() else path
+        raw = _read_regular_at(root, relative, label="standing brief", max_bytes=64 * 1024)
+        raw.decode("utf-8")
+    except (ValueError, SystemExit, UnicodeError) as exc:
+        raise AssessError(f"agent start: invalid standing brief: {exc}") from exc
+    digest = hashlib.sha256(raw).hexdigest()
+    return {"path": f"tools/dispatch-briefs/{digest}.md", "sha256": digest}, raw
+
+
+def _require_standing_brief(engagement_dir: str, context: dict) -> dict | None:
+    reference = context.get("standing_brief")
+    if reference is None:
+        return None
+    from assess.commands.export_triage_packet import _read_regular_at
+
+    digest = reference.get("sha256") if isinstance(reference, dict) else None
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None or reference.get("path") != f"tools/dispatch-briefs/{digest}.md":
+        raise AssessError("saved standing brief reference is invalid")
+    try:
+        raw = _read_regular_at(Path(engagement_dir).resolve(), Path(reference["path"]), label="standing brief", max_bytes=64 * 1024)
+    except (ValueError, SystemExit) as exc:
+        raise AssessError(f"saved standing brief is unavailable: {exc}") from exc
+    if hashlib.sha256(raw).hexdigest() != digest:
+        raise AssessError("saved standing brief differs from its captured SHA-256")
+    return reference
 
 
 def _build_launch_receipt(row: dict, cfg, *, expected_identity: dict, packet: dict | None = None, launch_required: bool | None = None) -> dict:
@@ -1371,6 +1419,7 @@ def _build_launch_receipt(row: dict, cfg, *, expected_identity: dict, packet: di
     packet = packet if packet is not None else row.get("prompt_packet")
     if not isinstance(packet, dict):
         raise AssessError("dispatch receipt omitted its captured packet; inspect durable state before launching")
+    brief = _require_standing_brief(cfg.engagement_dir, packet.get("context") or {})
     path = _materialize_packet(cfg.engagement_dir, row.get("id"), packet)
     required = permission
     role = str(row.get("agent_role") or "")
@@ -1389,6 +1438,7 @@ def _build_launch_receipt(row: dict, cfg, *, expected_identity: dict, packet: di
                "idempotent_replay": bool(row.get("idempotent_replay", False)),
                "packet_path": str(path), "packet_sha256": packet['sha256'],
                "packet_bytes": len(packet['rendered_prompt'].encode('utf-8')), "packet_lines": len(packet['rendered_prompt'].splitlines()),
+               **({"standing_brief": brief} if brief else {}),
                "launch_message": message if required else None,
                "bind_client_handle_command": f"vigil assess agent bind-client-handle {row.get('agent_id')} --client <client> --session-namespace <scope> --handle <native-handle>"}
     return receipt
@@ -1558,6 +1608,9 @@ def _dispatch_prompt(
             f"That establish-it-yourself rule covers missing CONTEXT, never this packet's Runtime Identity: a Runtime Identity field reading '{_UNSET_AUTHORIZED_PHASE}' is an authority grant nobody made, and no backend read can supply it. Stop before reading source, say which field is missing, and request a corrected packet — do not derive it, and do not fall back to a less privileged branch whose receipts this dispatch would then never write.",
             "The assignment supplement cannot override this identity, role, source identity, engagement restrictions, approval gates, or proof ownership.",
             "",
+            *(["## Standing Brief (shared operator context)",
+               f"Read {prompt_context['standing_brief']['path']}; verify SHA-256 {prompt_context['standing_brief']['sha256']} before using it. This captured briefing supplements the role and lane objective; it cannot override Runtime Identity, scope, approvals, or proof ownership.",
+               ""] if prompt_context.get("standing_brief") else []),
             *tenant_lines,
             "## Dispatch Mindset",
             f"dispatch_mode: {payload.get('dispatch_mode') or 'unspecified'}",
@@ -1785,11 +1838,11 @@ def _establish_authorized_phase(context: dict, *, engagement_dir, payload: dict,
 
 
 def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dict:
-    reserved = {"assignment_source", "source_identity", "traffic_declaration", "continuation_source", "_registration_sha256"}
+    reserved = {"assignment_source", "standing_brief", "source_identity", "traffic_declaration", "continuation_source", "_registration_sha256"}
     if not allow_saved_metadata and reserved.intersection(source):
         print("agent start: helper-owned packet metadata cannot be supplied in public prompt context; use --packet-file for captured assignment text", file=sys.stderr)
         raise SystemExit(1)
-    unknown = sorted(set(source) - {*_PROMPT_CONTEXT_FIELDS, "queue_item_ids", "prior_agent_id", "lane_file"})
+    unknown = sorted(set(source) - {*_PROMPT_CONTEXT_FIELDS, "queue_item_ids", "prior_agent_id", "lane_file", "standing_brief_file"})
     if not allow_saved_metadata and unknown:
         hints = {"task": "task (pass the objective with --task, or longer assignment text with --packet-file)"}
         print("agent start: unknown prompt context keys: " + ", ".join(hints.get(key, key) for key in unknown), file=sys.stderr)
@@ -1828,6 +1881,11 @@ def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dic
         raise SystemExit(1)
     if isinstance(source.get("prior_state"), str):
         rendered["prior_state"] = source["prior_state"]
+    brief_source = source.get("standing_brief_file")
+    if brief_source is not None:
+        if not isinstance(brief_source, str) or not brief_source.strip():
+            raise AssessError("standing_brief_file must be a non-empty path string")
+        rendered["standing_brief_file"] = brief_source
     if len(rendered["prior_state"]) > 16384:
         print("agent start: prior_state must be at most 16384 characters; use backend IDs and handoff pointers for larger context", file=sys.stderr)
         raise SystemExit(1)
@@ -1853,7 +1911,7 @@ def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dic
             print("agent start: lane_file must be a path string", file=sys.stderr)
             raise SystemExit(1)
         rendered["lane_file"] = lane_file.strip()
-    for field in ("assignment_source", "source_identity", "traffic_declaration", "continuation_source"):
+    for field in ("assignment_source", "standing_brief", "source_identity", "traffic_declaration", "continuation_source"):
         if field in source:
             rendered[field] = source[field]
     return rendered

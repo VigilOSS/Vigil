@@ -9,7 +9,7 @@ from typing import Any, Iterable, Literal
 from ._common import is_file_finding
 from .proofs import proof_receipts_for_finding
 
-ReproductionBasis = Literal["source", "runtime"]
+ReproductionBasis = Literal["source", "runtime", "unknown"]
 
 
 def reproduction_sha256(finding: dict[str, Any]) -> str:
@@ -37,13 +37,15 @@ def reproduction_basis_for_receipts(
     """``source`` when a file finding's current verdict rests only on source reads.
 
     A source-derived code finding is reproduced by reading the cited source, so no
-    command run stands behind its steps. Any artifact or command receipt, a
-    non-file location, or no current receipt at all makes the basis ``runtime``.
+    command run stands behind its steps. No current receipt means ``unknown``;
+    that does not qualify for source-only reproduction exemptions. Other
+    receipts and non-file locations retain the runtime reproduction requirements.
     """
     kinds = [str(receipt.get("evidence_kind") or "") for receipt in receipts]
+    if not kinds:
+        return "unknown"
     if (
         is_file_finding(canonical_location)
-        and kinds
         and all(kind == "source_observation" for kind in kinds)
     ):
         return "source"

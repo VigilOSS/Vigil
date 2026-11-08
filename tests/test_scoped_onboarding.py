@@ -204,6 +204,7 @@ def test_concurrent_backend_starts_share_one_process(tmp_path, monkeypatch):
     monkeypatch.setattr(orchestrator, "_sync_backend_environment", lambda *a, **k: None)
     monkeypatch.setattr(orchestrator, "_wait_for_health", lambda *a, **k: True)
     monkeypatch.setattr(orchestrator, "_wait_for_readiness", lambda *a, **k: True)
+    monkeypatch.setattr(orchestrator, "_backend_responsiveness", lambda _url: (True, True, ""))
     monkeypatch.setattr(orchestrator.subprocess, "Popen", lambda *a, **k: launches.append(a) or SimpleNamespace(pid=42))
 
     def port_check(*_):
