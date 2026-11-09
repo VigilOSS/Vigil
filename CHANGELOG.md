@@ -5,6 +5,21 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.7.1] - 2026-11-09
+
+### Added
+
+- Behaviour coverage for the database schema plumbing, the write paths that merge on a
+  repeated identity, the published structural record shapes, the run-audit backend row
+  validators, the assess command surface and the operator restart manifest.
+
+### Changed
+
+- Repeated assembly, validation and registration logic across the assess CLI, the
+  orchestrator backend, the operator CLI and the report UI now runs through one owner each.
+  The `vigil` and `vigil assess` command trees, the HTTP contract and the emitted database
+  schema are unchanged.
+
 ## [2.7.0] - 2026-11-08
 
 ### Added
