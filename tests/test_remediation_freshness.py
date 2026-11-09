@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+from vigil_cli import paths, status
 from vigil_cli import remediation, restart_manifest
 
 
@@ -52,8 +53,6 @@ def test_restart_warning_targets_backend_owner(tmp_path, monkeypatch, capsys, en
 
 @pytest.mark.parametrize("remote_drift", [True, False])
 def test_backend_probe_uses_engagement_endpoint_and_remote_runtime(tmp_path, monkeypatch, remote_drift):
-    from vigil_cli import paths, status
-
     engagement = tmp_path / "engagement"
     engagement.mkdir()
     (engagement / ".orchestrator.env").write_text("ORCHESTRATOR_BASE_URL=https://backend.example.com\n")

@@ -12,6 +12,7 @@ from assess.lib.client import (
     require_artifact_write_response,
     require_finding_write_response,
 )
+from assess.lib.code_record_input import fail
 from assess.lib.code_snapshot_binding import fill_binding
 from assess.lib.config import load_config
 from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, render_contract_epilog
@@ -266,11 +267,7 @@ def _require_decision_shapes(payload: dict) -> None:
             continue
         problems = decision_problems(field_name, value)
         if problems:
-            print(
-                f"finding verify: {flag}: {'; '.join(problems)}",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            fail("finding verify", f"{flag}: {'; '.join(problems)}")
 
 
 # A kill carries its own annotations beside the structured counter-check: the
@@ -399,24 +396,21 @@ def _require_next_test_pairing(payload: dict) -> None:
     parked = payload.get("verification_status") == "pending_runtime_proof"
     plan = payload.get("next_test")
     if parked and plan is None:
-        print(
-            "finding verify: pending_runtime_proof requires --next-test-file <plan.json> "
+        fail(
+            "finding verify",
+            "pending_runtime_proof requires --next-test-file <plan.json> "
             "(a next_test object {hypothesis, confirm_if, falsify_if, route_hint, "
             "prerequisites}); run `vigil assess contract finding verify` for the shape",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if not parked and plan is not None:
-        print(
-            "finding verify: --next-test-file / next_test applies only to "
+        fail(
+            "finding verify",
+            "--next-test-file / next_test applies only to "
             f"--status pending_runtime_proof (got '{payload.get('verification_status')}')",
-            file=sys.stderr,
         )
-        sys.exit(1)
     problems = next_test_problems(plan) if plan is not None else []
     if problems:
-        print(f"finding verify: {'; '.join(problems)}", file=sys.stderr)
-        sys.exit(1)
+        fail("finding verify", f"{'; '.join(problems)}")
 
 
 def _provided_content_flags(args) -> list[str]:
@@ -433,12 +427,11 @@ def run(args) -> None:
     if legacy_inline is None:
         legacy_inline = getattr(args, "inline_payload", None)
     if legacy_inline is not None:
-        print(
-            "finding verify: --inline was removed; use --status/--reason and related "
+        fail(
+            "finding verify",
+            "--inline was removed; use --status/--reason and related "
             "explicit flags, or --payload-file <path> for a final transition payload.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
     # The trailing positional payload arg was removed (it collided with a variadic
@@ -466,17 +459,15 @@ def run(args) -> None:
     payload_file = getattr(args, "payload_file", None)
     if payload_file is not None:
         if not str(payload_file).strip():
-            print("finding verify: --payload-file must not be empty", file=sys.stderr)
-            sys.exit(1)
+            fail("finding verify", "--payload-file must not be empty")
         provided_flags = _provided_content_flags(args)
         if provided_flags:
-            print(
-                "finding verify: --payload-file cannot be combined with request-content flags "
+            fail(
+                "finding verify",
+                "--payload-file cannot be combined with request-content flags "
                 f"({', '.join(provided_flags)}); put the complete transition in the file or use "
                 "explicit verification flags. --narrative may be used with either form.",
-                file=sys.stderr,
             )
-            sys.exit(1)
     raw_payload = payload_file
     if raw_payload is not None:
         if not Path(raw_payload).is_file():
@@ -562,8 +553,7 @@ def run(args) -> None:
             try:
                 structured_decisions["next_test"] = load_next_test_file(next_test_file)
             except ValueError as exc:
-                print(f"finding verify: --next-test-file: {exc}", file=sys.stderr)
-                sys.exit(1)
+                fail("finding verify", f"--next-test-file: {exc}")
         payload = {
             "verification_status": args.verification_status,
             "reason_code": args.reason_code,
@@ -612,29 +602,26 @@ def run(args) -> None:
     operator_authority = bool(payload.get("operator_authority"))
     if operator_authority:
         if payload.get("operator_authority_intel_id") is None:
-            print(
-                "finding verify: --operator-authority requires --intel-id <id> naming "
+            fail(
+                "finding verify",
+                "--operator-authority requires --intel-id <id> naming "
                 "the intel row that holds the out-of-snapshot evidence; record it with "
                 "`vigil assess intel record note <file.json>` first and cite the id it "
                 "returns",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if verification_status not in _TERMINAL_STATUSES:
-            print(
-                "finding verify: --operator-authority records a terminal verdict "
+            fail(
+                "finding verify",
+                "--operator-authority records a terminal verdict "
                 f"({' | '.join(sorted(_TERMINAL_STATUSES))}); got "
                 f"'{verification_status}'",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if not str(payload.get("reason_text") or "").strip():
-            print(
-                "finding verify: --operator-authority requires --reason stating what "
+            fail(
+                "finding verify",
+                "--operator-authority requires --reason stating what "
                 "the out-of-snapshot evidence settles",
-                file=sys.stderr,
             )
-            sys.exit(1)
         carried = [
             flag
             for field_name, flag in (
@@ -644,22 +631,20 @@ def run(args) -> None:
             if payload.get(field_name)
         ]
         if carried:
-            print(
-                "finding verify: --operator-authority records no proof receipts, so it "
+            fail(
+                "finding verify",
+                "--operator-authority records no proof receipts, so it "
                 f"cannot be combined with {', '.join(carried)}; drop the operator "
                 "authority and verify on the receipt, or record the verdict on the "
                 "operator's evidence alone",
-                file=sys.stderr,
             )
-            sys.exit(1)
     elif payload.get("operator_authority_intel_id") is not None:
-        print(
-            "finding verify: --intel-id names the evidence behind "
+        fail(
+            "finding verify",
+            "--intel-id names the evidence behind "
             "--operator-authority and means nothing without it; attach plain intel "
             "with `vigil assess finding link <slug> --intel <id>`",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if verification_status == "false_positive":
         # Printed before the counter-check refusal below, so a verifier that
         # forgot both learns both in one run. Required with or without operator

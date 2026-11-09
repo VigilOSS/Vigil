@@ -7,10 +7,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
-
 
 
 # ---------------------------------------------------------------------------
@@ -21,30 +19,23 @@ def _scripts_root() -> Path:
     return Path(__file__).resolve().parents[3] / "agent" / "scripts"
 
 
-def _load_lib():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
+def _load_script_module(module_name: str, *relative: str):
+    """Load one agent script under a caller-chosen unique module name."""
     spec = importlib.util.spec_from_file_location(
-        "payload_mutation_ut",
-        _scripts_root() / "assess" / "lib" / "payload_mutation.py",
+        module_name,
+        _scripts_root().joinpath(*relative),
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_lib():
+    return _load_script_module("payload_mutation_ut", "assess", "lib", "payload_mutation.py")
 
 
 def _load_cmd():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    spec = importlib.util.spec_from_file_location(
-        "classify_payload_cmd_ut",
-        _scripts_root() / "assess" / "commands" / "classify_payload.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_script_module("classify_payload_cmd_ut", "assess", "commands", "classify_payload.py")
 
 
 # ---------------------------------------------------------------------------
@@ -342,10 +333,6 @@ class TestMutate:
 class TestClassifyPayloadCommand:
     def setup_method(self):
         self.cmd = _load_cmd()
-        # Ensure lib is importable
-        root = str(_scripts_root())
-        if root not in sys.path:
-            sys.path.insert(0, root)
 
     def test_classify_type_only_stdout(self, capsys):
         """Without --mutations, print the type string."""

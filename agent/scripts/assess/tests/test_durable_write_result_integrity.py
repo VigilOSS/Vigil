@@ -22,20 +22,12 @@ from assess.commands import (
     record_surface,
 )
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
+from _fake_client import StubClient
 
 
-class _ContextClient:
+class _ContextClient(StubClient):
     def __init__(self, response: dict) -> None:
         self.response = response
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def close(self) -> None:
-        return None
 
 
 def _config(_engagement_dir):
@@ -89,12 +81,9 @@ def test_http_policy_set_rejects_response_that_does_not_echo_requested_state(
 def test_artifact_register_rejects_response_for_a_different_path(
     monkeypatch,
 ) -> None:
-    client = _ContextClient(
-        {"id": 7, "relative_path": "notes/other.md", "present": True}
+    _strict_record_client(
+        monkeypatch, artifact, {"id": 7, "relative_path": "notes/other.md", "present": True}
     )
-    client.post = lambda _endpoint, _payload: client.response
-    monkeypatch.setattr(artifact, "AssessmentClient", lambda *_args: client)
-    monkeypatch.setattr(artifact, "load_config", _config)
 
     with pytest.raises(AssessError, match="register artifact") as exc:
         artifact._run_register(
@@ -142,16 +131,7 @@ def test_record_finding_rejects_response_bound_to_a_different_slug(
 ):
     events: list[dict] = []
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, endpoint: str):
             if endpoint == "dispatches/FINDING-AUTHOR-1":
                 return {"agent_id": "FINDING-AUTHOR-1"}
@@ -480,10 +460,7 @@ def test_code_classify_rejects_success_object_without_result_counts(
         encoding="utf-8",
     )
 
-    client = _ContextClient({"message": "accepted"})
-    client.post = lambda _endpoint, _payload: client.response
-    monkeypatch.setattr(code_classify, "AssessmentClient", lambda *_args: client)
-    monkeypatch.setattr(code_classify, "load_config", _config)
+    _strict_record_client(monkeypatch, code_classify, {"message": "accepted"})
 
     with pytest.raises(AssessError, match="classify code files") as exc:
         code_classify.run(
@@ -582,16 +559,15 @@ def test_http_har_import_rejects_success_object_without_import_count(
 
 
 def test_record_surface_requires_canonical_row_identity(monkeypatch, tmp_path):
-    client = _ContextClient(
+    client = _strict_record_client(
+        monkeypatch,
+        record_surface,
         {
             "surface_type": "api_documentation",
             "target_descriptor": "https://target.example",
-        }
+        },
     )
-    client.post = lambda _endpoint, _payload: client.response
     client.post_event = lambda _payload: {"id": 1}
-    monkeypatch.setattr(record_surface, "AssessmentClient", lambda *_args: client)
-    monkeypatch.setattr(record_surface, "load_config", _config)
 
     with pytest.raises(AssessError, match="record surface") as exc:
         record_surface.run(
@@ -648,11 +624,8 @@ def test_code_record_modules_rejects_noncanonical_receipt(
         json.dumps([{"module_key": "auth_login", "name": "Authentication"}]),
         encoding="utf-8",
     )
-    client = _ContextClient(response)
+    client = _strict_record_client(monkeypatch, code_record_modules, response)
     client.get = lambda _endpoint: []
-    client.post = lambda _endpoint, _payload: response
-    monkeypatch.setattr(code_record_modules, "AssessmentClient", lambda *_args: client)
-    monkeypatch.setattr(code_record_modules, "load_config", _config)
 
     with pytest.raises(AssessError, match="record code modules.*may have committed") as exc:
         code_record_modules.run(

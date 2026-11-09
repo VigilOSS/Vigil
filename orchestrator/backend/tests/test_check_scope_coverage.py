@@ -135,6 +135,29 @@ def _work_item(
     return row
 
 
+def _idor_work_items() -> list[dict[str, Any]]:
+    """One pending idor work item: the dominant-cluster fixture these tests share."""
+
+    return [
+        _work_item(
+            queue_key="idor:0",
+            url="https://target.example/api/profile/0",
+            url_path="/api/profile",
+            status="pending",
+            query_params='{"user": "5"}',
+        ),
+    ]
+
+
+@pytest.fixture
+def eng(tmp_path: Path) -> Path:
+    """Return a fresh per-test engagement directory under pytest's tmp_path."""
+
+    directory = tmp_path / "engagement"
+    directory.mkdir()
+    return directory
+
+
 def _write_scope(
     engagement_dir: Path,
     *,
@@ -434,6 +457,14 @@ def _run(
     return clients[0] if clients else None
 
 
+def _run_expect_exit(monkeypatch, engagement_dir: Path, **kwargs: Any):
+    """Run the command expecting the gate to exit, and return the exit code."""
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run(monkeypatch, engagement_dir, **kwargs)
+    return excinfo.value.code
+
+
 def _flatten_and_print(captured: str, *, as_json: bool) -> None:
     """Re-emit the consolidated command's output in the legacy top-level shape.
 
@@ -468,10 +499,8 @@ def _flatten_and_print(captured: str, *, as_json: bool) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_apex_host_full_coverage(monkeypatch, eng: Path, capsys) -> None:
     """Bare host with services, a surface, and all work done → ready=true."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     work_items = [
         _work_item(queue_key="v:1", url="https://target.example/api/one", url_path="/api/one", status="done"),
@@ -509,10 +538,8 @@ def test_apex_host_full_coverage(monkeypatch, tmp_path: Path, capsys) -> None:
     assert entry["gaps"] == []
 
 
-def test_wildcard_zero_live_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_wildcard_zero_live_hosts(monkeypatch, eng: Path, capsys) -> None:
     """Wildcard with enum attempted via a surface but zero live hosts is informational."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
 
     # One surface recorded under a subdomain but the service list is empty —
@@ -534,14 +561,12 @@ def test_wildcard_zero_live_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
     assert "no-live-hosts" in entry["gaps"]
 
 
-def test_wildcard_partial_collection(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_wildcard_partial_collection(monkeypatch, eng: Path, capsys) -> None:
     """Wildcard with live hosts plus surfaces/work_items for a subset of subdomains.
 
     Collection is attempted (surfaces/work_items exist under the wildcard), so
     `--require-stage collection` passes.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
     # Work items under two of the five live subdomains.
     work_items = [
@@ -572,15 +597,13 @@ def test_wildcard_partial_collection(monkeypatch, tmp_path: Path, capsys) -> Non
     assert entry["surfaces_count"] == 2
 
 
-def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_host_explicitly_deferred(monkeypatch, eng: Path, capsys) -> None:
     """An entry with `status=deferred` in scope metadata passes consumption gate.
 
     Also exercises the fallback path where every remaining pending item carries
     terminal_reason — that's an implicit deferral that should likewise satisfy
     the consumption gate without the explicit status=deferred tag.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["skip.target.example", "target.example"],
@@ -622,10 +645,8 @@ def test_host_explicitly_deferred(monkeypatch, tmp_path: Path, capsys) -> None:
     assert by_entry["target.example"]["gaps"] == []
 
 
-def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_out_of_scope_host_excluded(monkeypatch, eng: Path, capsys) -> None:
     """Services/surfaces/work-items for out-of-scope hosts must not inflate any entry's counts."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     work_items = [
         # In-scope work
@@ -658,7 +679,7 @@ def test_out_of_scope_host_excluded(monkeypatch, tmp_path: Path, capsys) -> None
     assert entry["work_queued"]["pending"] == 0
 
 
-def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, eng: Path, capsys) -> None:
     """A host that matches an in-scope wildcard but is listed in ``out_of_scope``
     must NOT count toward that wildcard's coverage — otherwise an OOS host
     inflates live/service/surface/work tallies and can help satisfy a stage gate.
@@ -666,8 +687,6 @@ def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, 
     Regression for the QA-found gap: the coverage gate consulted only the
     in-scope allowlist (``entry_matches_host``), never the denylist.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["*.acme-telco.example"],
@@ -701,22 +720,19 @@ def test_out_of_scope_carveout_not_counted_under_in_scope_wildcard(monkeypatch, 
     assert entry["work_queued"]["pending"] == 1
 
 
-def test_require_stage_enum_fails_when_missing(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_require_stage_enum_fails_when_missing(monkeypatch, eng: Path, capsys) -> None:
     """A wildcard scope with no services, surfaces, or work items must fail the enum gate."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
 
     # Nothing — no services, no surfaces, no work_items under *.target.example.
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[],
-            surfaces=[],
-            require_stage="enum",
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[],
+        surfaces=[],
+        require_stage="enum",
+    )
+    assert exit_code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
     entry = report["entries"][0]
@@ -726,10 +742,8 @@ def test_require_stage_enum_fails_when_missing(monkeypatch, tmp_path: Path, caps
     assert any("no-enum" in msg for msg in report["overall_gaps"])
 
 
-def test_require_stage_consumption_passes_when_all_done_or_skipped(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_require_stage_consumption_passes_when_all_done_or_skipped(monkeypatch, eng: Path, capsys) -> None:
     """pending=0 with skipped items that carry terminal_reason → consumption gate passes."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     work_items = [
@@ -755,10 +769,8 @@ def test_require_stage_consumption_passes_when_all_done_or_skipped(monkeypatch, 
     assert entry["work_queued"]["skipped"] == 1
 
 
-def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatch, eng: Path, capsys) -> None:
     """A different host containing the scope host as a substring must not count as collection."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     # Service keeps enum gate satisfied for target.example itself so the test is
@@ -771,15 +783,14 @@ def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatc
         {"target_descriptor": "https://nottarget.example/path"},
     ]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=services,
-            surfaces=surfaces,
-            require_stage="collection",
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="collection",
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
@@ -789,7 +800,7 @@ def test_collection_gate_ignores_superdomain_substring_false_positive(monkeypatc
     assert "no-collection" in entry["gaps"]
 
 
-def test_unreadable_work_buffer_fails_closed_instead_of_claiming_readiness(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_unreadable_work_buffer_fails_closed_instead_of_claiming_readiness(monkeypatch, eng: Path, capsys) -> None:
     """An unreadable/malformed backend work buffer must abort the audit instead
     of silently passing.
 
@@ -801,32 +812,27 @@ def test_unreadable_work_buffer_fails_closed_instead_of_claiming_readiness(monke
     command must exit non-zero and name the failure rather than claim readiness.
     See tests/test_work_buffer_backend.py for the backend-side schema coverage.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[],
-            surfaces=[],
-            require_stage="enum",
-            work_items_error=(
-                "HTTP 500:\nfailed to read work buffer: no such column: terminal_reason"
-            ),
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[],
+        surfaces=[],
+        require_stage="enum",
+        work_items_error=(
+            "HTTP 500:\nfailed to read work buffer: no such column: terminal_reason"
+        ),
+    )
+    assert exit_code == 1
 
     captured = capsys.readouterr()
     assert "unable to read work buffer" in captured.err
     assert "terminal_reason" in captured.err
 
 
-def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, eng: Path, capsys) -> None:
     """Deferred URL entries should normalize URL form and trailing dots before lookup."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["https://api.target.example./health"],
@@ -847,10 +853,8 @@ def test_deferred_url_metadata_normalizes_trailing_dot(monkeypatch, tmp_path: Pa
     assert entry["gaps"] == []
 
 
-def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, eng: Path, capsys) -> None:
     """URL scope rows should honor deferred metadata keyed by the normalized host string."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["https://api.target.example/v1"],
@@ -871,10 +875,8 @@ def test_url_scope_entry_accepts_host_keyed_deferral(monkeypatch, tmp_path: Path
     assert entry["gaps"] == []
 
 
-def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypatch, eng: Path, capsys) -> None:
     """Bare scope rows with ports should normalize to the host for service/work matching."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["api.target.example:8443"])
     work_items = [
         _work_item(queue_key="hp:1", url="https://api.target.example/work", url_path="/work", status="pending"),
@@ -883,9 +885,8 @@ def test_bare_scope_host_with_port_matches_host_keyed_services_and_work(monkeypa
     services = [{"endpoint": "https://api.target.example:8443/health", "state": "up"}]
     surfaces = [{"target_descriptor": "https://api.target.example:8443/work"}]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
@@ -920,10 +921,8 @@ def test_scope_parser_accepts_bare_and_bracketed_ipv6_literals() -> None:
     assert scope_module.host_from_token("https://[2001:db8::4]:8443/path") == "2001:db8::4"
 
 
-def test_ipv6_scope_hosts_match_services_surfaces_and_work(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_ipv6_scope_hosts_match_services_surfaces_and_work(monkeypatch, eng: Path, capsys) -> None:
     """IPv6 scope rows should match backend services, surfaces, and queued work."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["2001:db8::1", "[2001:db8::2]"])
     work_items = [
         _work_item(
@@ -964,10 +963,8 @@ def test_ipv6_scope_hosts_match_services_surfaces_and_work(monkeypatch, tmp_path
     assert by_scope["[2001:db8::2]"]["work_queued"]["done"] == 1
 
 
-def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_host_metadata_status_beats_deferred_hosts(monkeypatch, eng: Path, capsys) -> None:
     """An explicit host_metadata status must not be overwritten by deferred_hosts fallback."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["target.example"],
@@ -981,16 +978,15 @@ def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/work"}]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=services,
-            surfaces=surfaces,
-            require_stage="consumption",
-            work_items=work_items,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="consumption",
+        work_items=work_items,
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
@@ -998,10 +994,8 @@ def test_host_metadata_status_beats_deferred_hosts(monkeypatch, tmp_path: Path, 
     assert "pending-work-remains" in entry["gaps"]
 
 
-def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkeypatch, eng: Path, capsys) -> None:
     """Wildcard scope rows with trailing dots should still match services and metadata."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["*.target.example."],
@@ -1025,10 +1019,8 @@ def test_wildcard_scope_normalizes_trailing_dot_for_metadata_and_matching(monkey
     assert entry["collection_attempted"] is True
 
 
-def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, eng: Path, capsys) -> None:
     """Wildcard metadata must not leak onto a separate bare-host scope row for the same host."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(
         eng,
         hosts=["target.example", "*.target.example"],
@@ -1047,9 +1039,8 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
         {"target_descriptor": "https://api.target.example/"},
     ]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     by_scope = {entry["scope_entry"]: entry for entry in report["entries"]}
@@ -1064,10 +1055,8 @@ def test_wildcard_and_bare_entries_keep_distinct_metadata_status(monkeypatch, tm
 # ---------------------------------------------------------------------------
 
 
-def test_surface_under_wildcard_satisfies_enum_without_services(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_surface_under_wildcard_satisfies_enum_without_services(monkeypatch, eng: Path, capsys) -> None:
     """A recorded surface under a wildcard satisfies the enum gate even with no live services."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
 
     services: list[dict[str, Any]] = []
@@ -1083,10 +1072,8 @@ def test_surface_under_wildcard_satisfies_enum_without_services(monkeypatch, tmp
     assert "no-live-hosts" in entry["gaps"]
 
 
-def test_work_item_under_wildcard_satisfies_enum_without_services(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_work_item_under_wildcard_satisfies_enum_without_services(monkeypatch, eng: Path, capsys) -> None:
     """A work_item under a wildcard subdomain satisfies the enum gate even with no live services or surfaces."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
     work_items = [
         _work_item(queue_key="we:1", url="https://api.target.example/x", url_path="/x", status="pending"),
@@ -1105,24 +1092,21 @@ def test_work_item_under_wildcard_satisfies_enum_without_services(monkeypatch, t
     assert "no-live-hosts" in entry["gaps"]
 
 
-def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, eng: Path, capsys) -> None:
     """A bare host with a live service but no surfaces/work_items fails the collection gate."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces: list[dict[str, Any]] = []
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=services,
-            surfaces=surfaces,
-            require_stage="collection",
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="collection",
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     entry = report["entries"][0]
@@ -1137,11 +1121,9 @@ def test_collection_gate_fails_when_no_surfaces_or_work_items(monkeypatch, tmp_p
 # ---------------------------------------------------------------------------
 
 
-def test_wildcard_admits_apex(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_wildcard_admits_apex(monkeypatch, eng: Path, capsys) -> None:
     """A wildcard scope entry covers the bare apex AND every subdomain
     (HackerOne / Bugcrowd / VDP convention)."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.example.test"])
     work_items = [
         _work_item(
@@ -1174,12 +1156,10 @@ def test_wildcard_admits_apex(monkeypatch, tmp_path: Path, capsys) -> None:
     assert entry["work_queued"]["pending"] == 2
 
 
-def test_explicit_apex_plus_wildcard(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_explicit_apex_plus_wildcard(monkeypatch, eng: Path, capsys) -> None:
     """Listing the apex AND the wildcard covers both apex and subdomains.
     The wildcard entry already admits the apex; the explicit apex entry still
     matches and reports its own sample."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["example.test", "*.example.test"])
     work_items = [
         _work_item(
@@ -1227,7 +1207,7 @@ def _patch_vendor_saas_suffix(monkeypatch, label: str, suffix: str) -> None:
     )
 
 
-def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeypatch, eng: Path, capsys) -> None:
     """A vendor-SaaS host that surfaced under wildcard expansion (NOT an
     explicit literal in scope.json) blocks the gate until a scope_decision
     is recorded.
@@ -1236,8 +1216,6 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
     monkeypatches the suffix table so the fixture host registers as vendor
     SaaS without putting a real vendor's domain in test fixtures.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     # Wildcard scope: the vendor-SaaS host appears under expansion, not as
     # an explicit literal — that is the genuinely ambiguous case the
     # checkpoint exists to resolve.
@@ -1280,17 +1258,16 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
 
     # Strict mode restores the phase gate when an engagement wants vendor-SaaS
     # ambiguity to block progress.
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=services,
-            surfaces=surfaces,
-            require_stage="enum",
-            strict_vendor_saas=True,
-            work_items=work_items,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=services,
+        surfaces=surfaces,
+        require_stage="enum",
+        strict_vendor_saas=True,
+        work_items=work_items,
+    )
+    assert exit_code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False, report
     assert report["strict_vendor_saas"] is True
@@ -1331,15 +1308,13 @@ def test_vendor_saas_reports_pending_under_wildcard_expansion_by_default(monkeyp
     assert report["vendor_saas_pending_decision"] == []
 
 
-def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_vendor_saas_explicit_literal_in_scope_skips_gate(monkeypatch, eng: Path, capsys) -> None:
     """A vendor-SaaS host authored as an explicit literal in scope.json is
     already the operator's in-scope decision, so the gate must not fire on
     it. The Vendor-SaaS scope checkpoint exists for the wildcard-expansion
     case where the operator did not author the host by hand; firing on a
     literal entry is theatre.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     # Explicit literal entry — the operator typed the host directly.
     _write_scope(eng, hosts=["vendor-saas-platform.example.test"])
     work_items = [
@@ -1399,10 +1374,8 @@ def _outcome(*, met: bool, evidence: list[str] | None = None, deferred: bool = F
     }
 
 
-def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, eng: Path, capsys) -> None:
     """--by-host emits per-host outcome rows and per-host_warnings list (WARN-only)."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["api.target.example"])
 
     services = [{"endpoint": "api.target.example", "state": "up"}]
@@ -1464,10 +1437,8 @@ def test_by_host_renders_outcome_table_and_warns_on_unmet(monkeypatch, tmp_path:
     assert "summary" not in client.calls
 
 
-def test_by_host_deferral_clears_warning(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_by_host_deferral_clears_warning(monkeypatch, eng: Path, capsys) -> None:
     """A coverage_deferral for an objective marks it as deferred (not unmet) in the report."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["api.target.example"])
 
     services = [{"endpoint": "api.target.example", "state": "up"}]
@@ -1519,7 +1490,7 @@ def test_by_host_deferral_clears_warning(monkeypatch, tmp_path: Path, capsys) ->
     assert report["per_host_warnings"] == []
 
 
-def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, eng: Path, capsys) -> None:
     """Contract assertion (C40): the CLI gate path NEVER hits assessment_command_runs.
 
     Captures every endpoint the CLI requests and asserts the safelist is exactly
@@ -1528,8 +1499,6 @@ def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Pat
     test confirms that the new --by-host path stays inside the outcome-table
     contract too.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     services = [{"endpoint": "target.example", "state": "up"}]
@@ -1575,14 +1544,12 @@ def test_by_host_does_not_query_command_runs_endpoint(monkeypatch, tmp_path: Pat
     assert "coverage-readiness/by-host" in client.calls
 
 
-def test_by_host_without_flag_skips_per_host_section(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_by_host_without_flag_skips_per_host_section(monkeypatch, eng: Path, capsys) -> None:
     """Without --by-host the backend per-host endpoint must not be called.
 
     Preserves the prior CLI contract: the legacy gate path is unchanged when
     operators run the command without --by-host.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     services = [{"endpoint": "target.example", "state": "up"}]
@@ -1646,11 +1613,9 @@ def test_specialist_roster_names_in_hints_have_role_files_on_disk():
 
 
 def test_by_host_default_filters_wildcard_discovered_into_summary(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """Hosts NOT authored in scope.json are folded into discovered_summary."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     # Scope.json: one literal host + one wildcard. The wildcard's expansions
     # should NOT show up in the matrix by default.
     _write_scope(eng, hosts=["api.target.example", "*.target.example"])
@@ -1727,11 +1692,9 @@ def test_by_host_default_filters_wildcard_discovered_into_summary(
 
 
 def test_by_host_include_discovered_keeps_full_matrix(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """--include-discovered restores wildcard-discovered hosts to the matrix."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["api.target.example", "*.target.example"])
 
     host_payload = _per_host_payload(
@@ -1778,7 +1741,7 @@ def test_by_host_include_discovered_keeps_full_matrix(
 
 
 def test_by_host_wildcard_only_scope_skips_filtering(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """When scope.json has no explicit literals (only wildcards), filtering is a no-op.
 
@@ -1786,8 +1749,6 @@ def test_by_host_wildcard_only_scope_skips_filtering(
     the wildcard having no enum evidence — this test is exclusively about
     the FU1 filter behavior, not the enum-evidence audit.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])  # wildcard only — no literals
 
     host_payload = _per_host_payload(
@@ -1820,11 +1781,9 @@ def test_by_host_wildcard_only_scope_skips_filtering(
 
 
 def test_by_host_no_discovered_hosts_skips_summary(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """When every backend-signal host is a scope literal, no summary block."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["api.target.example", "edge.target.example"])
 
     host_payload = _per_host_payload(
@@ -1892,23 +1851,20 @@ def _rec_for_host(report: dict[str, Any], host: str) -> dict[str, Any]:
     return matches[0]
 
 
-def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, eng: Path, capsys) -> None:
     """An enum gap emits a recon-specialist recommendation: hypothesis-driven
     mode, fixed recon skills, and source-analyzer named as the parallel role."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[],
-            surfaces=[],
-            require_stage="enum",
-            auto_redispatch=True,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[],
+        surfaces=[],
+        require_stage="enum",
+        auto_redispatch=True,
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -1929,24 +1885,21 @@ def test_auto_redispatch_enum_gap_recommends_recon(monkeypatch, tmp_path: Path, 
 
 
 def test_auto_redispatch_collection_gap_recommends_surface_collector(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """A collection gap (live service, no surfaces/work) recommends the
     surface-collector with item-iterating mode and the collection skills."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[],
-            require_stage="collection",
-            auto_redispatch=True,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[],
+        require_stage="collection",
+        auto_redispatch=True,
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -1960,10 +1913,8 @@ def test_auto_redispatch_collection_gap_recommends_surface_collector(
     assert "--dispatch-mode item-iterating" in rec["command"]
 
 
-def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_auto_redispatch_consumption_dominant_idor(monkeypatch, eng: Path, capsys) -> None:
     """A dominant IDOR gap recommends the matching role, skills, and mode."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     # Three untested pending IDOR-shaped items (the `user` param uniquely keys
     # the idor bucket; `id` would also hit the higher-weight sqli bucket).
@@ -1980,16 +1931,15 @@ def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, 
 
     # The audit fails the consumption gate -> SystemExit(1); the JSON report is
     # printed before the exit so we read it after catching.
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
     assert rec["stage"] == "consumption"
@@ -2009,43 +1959,30 @@ def test_auto_redispatch_consumption_dominant_idor(monkeypatch, tmp_path: Path, 
 
 
 def test_auto_redispatch_consumption_dominant_idor_exit_code(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """Companion to the idor test: the consumption gate still exits 1."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0",
-            url="https://target.example/api/profile/0",
-            url_path="/api/profile",
-            status="pending",
-            query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
+    assert exit_code == 1
     capsys.readouterr()
 
 
 def test_auto_redispatch_ambiguous_pending_emits_low_confidence_shortlist(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """Pending items split roughly evenly across >=3 mapped buckets yield a
     low-confidence ranked shortlist, not a single forced guess."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     # One item each in three distinct mapped buckets: idor (user), xss (name),
     # ssrf (url). No single dominant -> ambiguous.
@@ -2064,16 +2001,15 @@ def test_auto_redispatch_ambiguous_pending_emits_low_confidence_shortlist(
         ),
     ]
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/p1"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/p1"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -2087,13 +2023,11 @@ def test_auto_redispatch_ambiguous_pending_emits_low_confidence_shortlist(
 
 
 def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """When the most common pending bucket is generic/ambiguous
     (interestingparams), the recommendation is a low-confidence shortlist even
     though a smaller mapped bucket exists."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     # Three interestingparams (token) + one idor (user). Generic bucket
     # dominates -> low confidence, shortlist of the mapped buckets present.
@@ -2111,16 +2045,15 @@ def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
         )
     )
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/g0"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/g0"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -2131,18 +2064,11 @@ def test_auto_redispatch_generic_dominant_bucket_is_low_confidence(
 
 
 def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """A recommendation is suppressed on an exact active role/task duplicate."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0", url="https://target.example/api/profile/0",
-            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
     # Prior dispatch: a vulnerability-analyst already in flight against the host.
     dispatches = [
@@ -2158,17 +2084,16 @@ def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
         }
     ]
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            dispatches=dispatches,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        dispatches=dispatches,
+        work_items=work_items,
+    )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
@@ -2182,31 +2107,20 @@ def test_auto_redispatch_dedup_suppresses_when_prior_dispatch_exists(
 
 
 def test_auto_redispatch_command_does_not_pass_scope_authorization(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0",
-            url="https://target.example/api/profile/0",
-            url_path="/api/profile",
-            status="pending",
-            query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
 
     recommendation = _rec_for_host(json.loads(capsys.readouterr().out), "target.example")
     assert "--scope-host" not in recommendation["command"]
@@ -2214,7 +2128,7 @@ def test_auto_redispatch_command_does_not_pass_scope_authorization(
 
 @pytest.mark.parametrize("terminal_status", ["completed", "failed", "aborted", "blocked"])
 def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
-    monkeypatch, tmp_path: Path, capsys, terminal_status: str
+    monkeypatch, eng: Path, capsys, terminal_status: str
 ) -> None:
     """A host whose ONLY prior dispatch already TERMINATED (completed/failed/
     aborted/blocked) and still fails the gate must STILL get a retry
@@ -2227,15 +2141,8 @@ def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
     `status` filter), so a terminal-only row is never returned and never
     suppresses.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0", url="https://target.example/api/profile/0",
-            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
     # The only identical prior dispatch already terminated.
     dispatches = [
@@ -2251,17 +2158,16 @@ def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
         }
     ]
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            dispatches=dispatches,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        dispatches=dispatches,
+        work_items=work_items,
+    )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
@@ -2274,7 +2180,7 @@ def test_auto_redispatch_terminal_prior_dispatch_does_not_suppress_retry(
 
 
 def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """The dedup index falls back to the `id` field when `agent_id` is absent.
 
@@ -2284,15 +2190,8 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
     `row.get("agent_id") or row.get("id")` fallback in
     `_index_prior_dispatches`.
     """
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0", url="https://target.example/api/profile/0",
-            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
     # In-flight dispatch keyed by `id` only (no `agent_id`).
     dispatches = [
@@ -2308,17 +2207,16 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
         }
     ]
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            dispatches=dispatches,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        dispatches=dispatches,
+        work_items=work_items,
+    )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
@@ -2331,31 +2229,23 @@ def test_auto_redispatch_active_prior_dispatch_without_agent_id_suppresses(
 
 
 def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """A backend failure fetching prior dispatches must NOT crash the audit:
     recommendations are emitted un-deduped with an explanatory note."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0", url="https://target.example/api/profile/0",
-            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            dispatches_error=True,
-            work_items=work_items,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        dispatches_error=True,
+        work_items=work_items,
+    )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
@@ -2365,18 +2255,11 @@ def test_auto_redispatch_dedup_degrades_gracefully_on_backend_error(
     assert any("dedup degraded" in note for note in block["notes"])
 
 
-def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, eng: Path, capsys) -> None:
     """A recommended skill with no SKILL.md on disk is dropped (never
     recommended) and the drop is noted in the output."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
-    work_items = [
-        _work_item(
-            queue_key="idor:0", url="https://target.example/api/profile/0",
-            url_path="/api/profile", status="pending", query_params='{"user": "5"}',
-        ),
-    ]
+    work_items = _idor_work_items()
 
     module = _load_module()
     # Point idor at a real skill + a bogus one; the bogus name must be dropped.
@@ -2386,17 +2269,16 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
         {**module.cc.BUCKET_SKILLS, "idor": ("idor-testing", "does-not-exist-skill")},
     )
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-            _module=module,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+        _module=module,
+    )
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -2406,7 +2288,7 @@ def test_auto_redispatch_drops_non_resolving_skill(monkeypatch, tmp_path: Path, 
     assert any("does-not-exist-skill" in note for note in block["notes"])
 
 
-def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_auto_redispatch_no_op_without_require_stage(monkeypatch, eng: Path, capsys) -> None:
     """--auto-redispatch on a phase with NO stage gate produces no recommendations.
 
     The consolidated command always relays a --phase. On a stage-gated
@@ -2415,8 +2297,6 @@ def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path
     via the None→verify mapping) there is no scope gate at all, so there is
     nothing to recommend — the redispatch section is simply absent. This
     preserves the old "no stage gate → nothing to recommend" intent."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     work_items = [
         _work_item(
@@ -2438,24 +2318,21 @@ def test_auto_redispatch_no_op_without_require_stage(monkeypatch, tmp_path: Path
     assert "redispatch" not in report or report["redispatch"]["recommendations"] == []
 
 
-def test_auto_redispatch_respects_max_recommendations(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_auto_redispatch_respects_max_recommendations(monkeypatch, eng: Path, capsys) -> None:
     """--max-recommendations caps the surfaced list; overflow is noted."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     # Three independent wildcard entries, all with an enum gap (no evidence).
     # Wildcards (unlike bare hosts) do not satisfy the enum gate trivially.
     _write_scope(eng, hosts=["*.a.example.test", "*.b.example.test", "*.c.example.test"])
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[],
-            surfaces=[],
-            require_stage="enum",
-            auto_redispatch=True,
-            max_recommendations=2,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[],
+        surfaces=[],
+        require_stage="enum",
+        auto_redispatch=True,
+        max_recommendations=2,
+    )
 
     report = json.loads(capsys.readouterr().out)
     block = _redispatch(report)
@@ -2465,12 +2342,10 @@ def test_auto_redispatch_respects_max_recommendations(monkeypatch, tmp_path: Pat
 
 
 def test_auto_redispatch_clean_entries_emit_no_recommendations(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """A fully-covered scope with --auto-redispatch yields an empty
     recommendation list (no gaps -> nothing to recommend)."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     work_items = [
         _work_item(queue_key="d:1", url="https://target.example/a", url_path="/a", status="done"),
@@ -2532,24 +2407,21 @@ def test_bucket_skills_mapping_resolves_on_disk():
 
 
 def test_auto_redispatch_human_output_is_recommendation_only(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """Human-readable output prints the ready-to-run command + task skeleton and
     is explicitly RECOMMENDATION-ONLY (never fires a dispatch)."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["*.target.example"])
 
-    with pytest.raises(SystemExit):
-        _run(
-            monkeypatch,
-            eng,
-            services=[],
-            surfaces=[],
-            require_stage="enum",
-            auto_redispatch=True,
-            as_json=False,
-        )
+    _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[],
+        surfaces=[],
+        require_stage="enum",
+        auto_redispatch=True,
+        as_json=False,
+    )
     out = capsys.readouterr().out
     assert "RECOMMENDATION-ONLY" in out
     assert "vigil assess agent start --role recon-specialist" in out
@@ -2560,14 +2432,12 @@ def test_auto_redispatch_human_output_is_recommendation_only(
 
 
 def test_auto_redispatch_consumption_high_volume_swaps_to_fuzzer(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """A consumption gap with a high volume (>= 100) of untested pending items
     concentrated on ONE dominant mapped bucket is fuzzing-shaped: the base
     vulnerability-analyst is swapped for a fuzzer in variant-rotation mode at
     confidence=high, and the vuln-class skills stay attached."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     # 120 untested pending IDOR-shaped items under a single host (the `user`
     # param uniquely keys the idor bucket). 120 >= _FUZZER_VOLUME_THRESHOLD
@@ -2585,17 +2455,16 @@ def test_auto_redispatch_consumption_high_volume_swaps_to_fuzzer(
 
     # The audit fails the consumption gate -> SystemExit(1); the JSON report is
     # printed before the exit so we read it after catching.
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/api/profile"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -2615,14 +2484,12 @@ def test_auto_redispatch_consumption_high_volume_swaps_to_fuzzer(
 
 
 def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """A consumption gap whose pending work has no mapped vuln-class bucket
     (only generic/unbucketed params, e.g. an interestingparams token) yields a
     vulnerability-analyst recommendation with EMPTY skills at confidence=low,
     and the emitted command omits --skills entirely."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     # A `token` param classifies as the generic `interestingparams` bucket,
     # which is intentionally NOT in BUCKET_SKILLS — so nothing maps to a
@@ -2637,17 +2504,16 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
         ),
     ]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(
-            monkeypatch,
-            eng,
-            services=[{"endpoint": "target.example", "state": "up"}],
-            surfaces=[{"target_descriptor": "https://target.example/g0"}],
-            require_stage="consumption",
-            auto_redispatch=True,
-            work_items=work_items,
-        )
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(
+        monkeypatch,
+        eng,
+        services=[{"endpoint": "target.example", "state": "up"}],
+        surfaces=[{"target_descriptor": "https://target.example/g0"}],
+        require_stage="consumption",
+        auto_redispatch=True,
+        work_items=work_items,
+    )
+    assert exit_code == 1
 
     report = json.loads(capsys.readouterr().out)
     rec = _rec_for_host(report, "target.example")
@@ -2666,12 +2532,10 @@ def test_auto_redispatch_consumption_no_mapped_bucket_omits_skills(
 
 
 def test_consumption_not_satisfied_when_work_stuck_in_processing(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """S8 — a work item stuck in `processing` (claimed but never finalized) is
     NOT consumed: the consumption gate must NOT pass and must name it."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     work_items = [
@@ -2682,9 +2546,8 @@ def test_consumption_not_satisfied_when_work_stuck_in_processing(
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/a"}]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
+    assert exit_code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
     entry = report["entries"][0]
@@ -2694,11 +2557,9 @@ def test_consumption_not_satisfied_when_work_stuck_in_processing(
 
 
 def test_consumption_not_satisfied_when_work_in_error(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """S8 — an `error` row (a failed attempt) is not consumed work either."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
 
     work_items = [
@@ -2709,9 +2570,8 @@ def test_consumption_not_satisfied_when_work_in_error(
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/a"}]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption", work_items=work_items)
+    assert exit_code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
     entry = report["entries"][0]
@@ -2746,21 +2606,18 @@ def test_advisory_bucket_tally_surfaces_stuck_processing_and_error(
 
 
 def test_consumption_not_satisfied_when_buffer_missing_but_surfaces_present(
-    monkeypatch, tmp_path: Path, capsys
+    monkeypatch, eng: Path, capsys
 ) -> None:
     """S9 — a missing cases.db (empty work map) with surfaces present must NOT
     silently pass consumption: the work to consume cannot be proven gone."""
-    eng = tmp_path / "engagement"
-    eng.mkdir()
     _write_scope(eng, hosts=["target.example"])
     assert not (eng / "cases.db").exists()
 
     services = [{"endpoint": "target.example", "state": "up"}]
     surfaces = [{"target_descriptor": "https://target.example/a"}]
 
-    with pytest.raises(SystemExit) as excinfo:
-        _run(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
-    assert excinfo.value.code == 1
+    exit_code = _run_expect_exit(monkeypatch, eng, services=services, surfaces=surfaces, require_stage="consumption")
+    assert exit_code == 1
     report = json.loads(capsys.readouterr().out)
     assert report["ready"] is False
     entry = report["entries"][0]

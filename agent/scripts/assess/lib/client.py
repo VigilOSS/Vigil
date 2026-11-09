@@ -806,26 +806,24 @@ class AssessmentClient:
             path = f"{path}?{query}"
         return self._get_json(path)
 
-    def post_engagement(self, endpoint: str, payload: dict) -> dict:
-        """POST /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""
+    def _write_engagement(self, method: str, endpoint: str, payload: dict) -> dict:
+        """One engagement-scoped write: encode, request once, enforce the shape."""
         path = f"{self._engagement_prefix}/{endpoint}"
         body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        status, resp_body = self._request("POST", path, body=body, max_retries=1)
-        return self._write_json_object("POST", path, status, resp_body)
+        status, resp_body = self._request(method, path, body=body, max_retries=1)
+        return self._write_json_object(method, path, status, resp_body)
+
+    def post_engagement(self, endpoint: str, payload: dict) -> dict:
+        """POST /engagements/{key}/{endpoint} — non-assessment scoped (intel, activity)."""
+        return self._write_engagement("POST", endpoint, payload)
 
     def patch_engagement(self, endpoint: str, payload: dict) -> dict:
         """PATCH /engagements/{key}/{endpoint} with uncertain-write handling."""
-        path = f"{self._engagement_prefix}/{endpoint}"
-        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        status, resp_body = self._request("PATCH", path, body=body, max_retries=1)
-        return self._write_json_object("PATCH", path, status, resp_body)
+        return self._write_engagement("PATCH", endpoint, payload)
 
     def put_engagement(self, endpoint: str, payload: dict) -> dict:
         """PUT /engagements/{key}/{endpoint} — non-assessment scoped (credentials)."""
-        path = f"{self._engagement_prefix}/{endpoint}"
-        body = json.dumps(payload, ensure_ascii=True).encode("utf-8")
-        status, resp_body = self._request("PUT", path, body=body, max_retries=1)
-        return self._write_json_object("PUT", path, status, resp_body)
+        return self._write_engagement("PUT", endpoint, payload)
 
     def delete_engagement(self, endpoint: str) -> None:
         """DELETE /engagements/{key}/{endpoint} — non-assessment scoped (credentials)."""
@@ -848,22 +846,28 @@ class AssessmentClient:
             positive_ids=("id",),
         )
 
-    def get_dispatch(self, agent_id: str) -> dict | None:
+    def _get_row(self, endpoint: str) -> dict | None:
+        """One row object, or ``None`` when the backend answers 404."""
         try:
-            row = self.get(f"dispatches/{agent_id}")
+            row = self.get(endpoint)
         except AssessError as exc:
             if "HTTP 404" in str(exc):
                 return None
             raise
-        return _require_read_shape(
-            row, endpoint=f"dispatches/{agent_id}", expected=dict
-        )
+        return _require_read_shape(row, endpoint=endpoint, expected=dict)
 
-    def list_dispatches(self, **filters: Any) -> list[dict]:
+    def _list_rows(self, collection: str, filters: dict[str, Any]) -> list[dict]:
+        """One filtered collection read, shape-enforced as a list."""
         query = _build_query(filters)
-        endpoint = "dispatches" if not query else f"dispatches?{query}"
+        endpoint = collection if not query else f"{collection}?{query}"
         rows = self.get(endpoint)
         return _require_read_shape(rows, endpoint=endpoint, expected=list)
+
+    def get_dispatch(self, agent_id: str) -> dict | None:
+        return self._get_row(f"dispatches/{agent_id}")
+
+    def list_dispatches(self, **filters: Any) -> list[dict]:
+        return self._list_rows("dispatches", filters)
 
     # HandoffUpdate (the PATCH body) forbids `agent_id` (it's in the URL) and
     # `agent_role` (immutable once the row exists). Everything else round-trips,
@@ -896,20 +900,18 @@ class AssessmentClient:
         the existing row, so callers can checkpoint the same agent_id
         repeatedly without bookkeeping. Latest write wins.
         """
+        def post_handoff() -> dict:
+            return require_write_result(
+                self.post("dispatch-handoffs", payload),
+                operation="record handoff",
+                expected={"agent_id": payload.get("agent_id")},
+                positive_ids=("id",),
+            )
+
         if not upsert:
-            return require_write_result(
-                self.post("dispatch-handoffs", payload),
-                operation="record handoff",
-                expected={"agent_id": payload.get("agent_id")},
-                positive_ids=("id",),
-            )
+            return post_handoff()
         try:
-            return require_write_result(
-                self.post("dispatch-handoffs", payload),
-                operation="record handoff",
-                expected={"agent_id": payload.get("agent_id")},
-                positive_ids=("id",),
-            )
+            return post_handoff()
         except AssessError as exc:
             if not _is_handoff_duplicate_conflict(exc):
                 raise
@@ -936,21 +938,10 @@ class AssessmentClient:
         )
 
     def get_handoff(self, agent_id: str) -> dict | None:
-        try:
-            row = self.get(f"dispatch-handoffs/{agent_id}")
-        except AssessError as exc:
-            if "HTTP 404" in str(exc):
-                return None
-            raise
-        return _require_read_shape(
-            row, endpoint=f"dispatch-handoffs/{agent_id}", expected=dict
-        )
+        return self._get_row(f"dispatch-handoffs/{agent_id}")
 
     def list_handoffs(self, **filters: Any) -> list[dict]:
-        query = _build_query(filters)
-        endpoint = "dispatch-handoffs" if not query else f"dispatch-handoffs?{query}"
-        rows = self.get(endpoint)
-        return _require_read_shape(rows, endpoint=endpoint, expected=list)
+        return self._list_rows("dispatch-handoffs", filters)
 
     def record_decision(self, payload: dict) -> dict:
         result = require_write_result(
@@ -975,10 +966,7 @@ class AssessmentClient:
         )
 
     def list_decisions(self, **filters: Any) -> list[dict]:
-        query = _build_query(filters)
-        endpoint = "dispatch-decisions" if not query else f"dispatch-decisions?{query}"
-        rows = self.get(endpoint)
-        return _require_read_shape(rows, endpoint=endpoint, expected=list)
+        return self._list_rows("dispatch-decisions", filters)
 
     def list_all_decisions(self, **filters: Any) -> list[dict]:
         """Paginate ``/dispatch-decisions`` to return EVERY row matching the

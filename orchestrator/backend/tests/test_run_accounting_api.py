@@ -209,6 +209,88 @@ def _source(
     }
 
 
+def _excluded_source(
+    *,
+    target_key: str,
+    content_sha256: str,
+    path: str = "generated/manifest.json",
+    byte_size: int = 0,
+    line_count: int = 0,
+    encoding: str = "utf-8",
+    exclusion_reason: str = "declared generated boundary",
+) -> dict:
+    """Return an inventory row the scan declares but deliberately excludes."""
+
+    return {
+        "target_key": target_key,
+        "declared_root": ".",
+        "path": path,
+        "content_sha256": content_sha256,
+        "byte_size": byte_size,
+        "line_count": line_count,
+        "encoding": encoding,
+        "inventory_status": "excluded",
+        "exclusion_reason": exclusion_reason,
+        "parser_status": "not_applicable",
+        "parser_error": "",
+    }
+
+
+def _start_run(client, run: dict) -> None:
+    assert client.patch(
+        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
+    ).status_code == 200
+
+
+def _running_scan(
+    client,
+    *,
+    run_uuid: str = "scan-001",
+    committed_sources: list[dict] | None = None,
+) -> dict:
+    """Create a scan run and transition it to running."""
+
+    run = _create_scan(client, run_uuid=run_uuid, committed_sources=committed_sources)
+    _start_run(client, run)
+    return run
+
+
+def _add_source(client, run: dict, *, target_key: str = "service-a", **fields) -> dict:
+    """Record one inventory source on ``run`` and return the created row."""
+
+    recorded = client.post(
+        f"{BASE}/assessment-runs/{run['id']}/sources",
+        json={"sources": [_source(target_key=target_key, **fields)]},
+    )
+    assert recorded.status_code == 201, recorded.text
+    return recorded.json()[0]
+
+
+def _read_source(
+    client,
+    run: dict,
+    source: dict,
+    *,
+    attempt: int = 1,
+    receipt_id: int | None = None,
+    dispatch_agent_id: str = "HUNT-RUN-1",
+) -> dict:
+    body = {
+        "source_id": source["id"],
+        "dispatch_agent_id": dispatch_agent_id,
+        "attempt": attempt,
+        "byte_start": 0,
+        "byte_end": source["byte_size"],
+        "line_start": 1,
+        "line_end": source["line_count"],
+    }
+    if receipt_id is not None:
+        body["proof_receipt_id"] = receipt_id
+    read = client.post(f"{BASE}/assessment-runs/{run['id']}/source-reads", json=body)
+    assert read.status_code == 201, read.text
+    return read.json()
+
+
 def _record_discovery_pass(
     client,
     run: dict,
@@ -264,40 +346,13 @@ def test_code_scan_completion_requires_evidence_backed_terminal_discovery(
 ) -> None:
     _seed(client, isolate_settings)
     inventory = [
-        {
-            "target_key": "service-a",
-            "declared_root": ".",
-            "path": "generated/manifest.json",
-            "content_sha256": "f" * 64,
-            "byte_size": 0,
-            "line_count": 0,
-            "encoding": "utf-8",
-            "inventory_status": "excluded",
-            "exclusion_reason": "declared generated boundary",
-            "parser_status": "not_applicable",
-            "parser_error": "",
-        },
-        {
-            "target_key": "shared-library",
-            "declared_root": ".",
-            "path": "generated/manifest.json",
-            "content_sha256": "e" * 64,
-            "byte_size": 0,
-            "line_count": 0,
-            "encoding": "utf-8",
-            "inventory_status": "excluded",
-            "exclusion_reason": "declared generated boundary",
-            "parser_status": "not_applicable",
-            "parser_error": "",
-        },
+        _excluded_source(target_key="service-a", content_sha256="f" * 64),
+        _excluded_source(target_key="shared-library", content_sha256="e" * 64),
     ]
 
-    missing = _create_scan(
+    missing = _running_scan(
         client, run_uuid="discovery-terminal-missing", committed_sources=inventory
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{missing['id']}", json={"status": "running"}
-    ).status_code == 200
     assert client.post(
         f"{BASE}/assessment-runs/{missing['id']}/sources", json={"sources": inventory}
     ).status_code == 201
@@ -311,12 +366,9 @@ def test_code_scan_completion_requires_evidence_backed_terminal_discovery(
         for blocker in missing_terminal.json()["seal"]["blockers"]
     )
 
-    failed = _create_scan(
+    failed = _running_scan(
         client, run_uuid="discovery-terminal-failed", committed_sources=inventory
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{failed['id']}", json={"status": "running"}
-    ).status_code == 200
     assert client.post(
         f"{BASE}/assessment-runs/{failed['id']}/sources", json={"sources": inventory}
     ).status_code == 201
@@ -336,12 +388,9 @@ def test_code_scan_completion_requires_evidence_backed_terminal_discovery(
         for blocker in failed_terminal.json()["seal"]["blockers"]
     )
 
-    capped = _create_scan(
+    capped = _running_scan(
         client, run_uuid="discovery-terminal-capped", committed_sources=inventory
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{capped['id']}", json={"status": "running"}
-    ).status_code == 200
     assert client.post(
         f"{BASE}/assessment-runs/{capped['id']}/sources", json={"sources": inventory}
     ).status_code == 201
@@ -361,12 +410,9 @@ def test_code_scan_completion_requires_evidence_backed_terminal_discovery(
         for blocker in capped_terminal.json()["seal"]["blockers"]
     )
 
-    completed = _create_scan(
+    completed = _running_scan(
         client, run_uuid="discovery-terminal-complete", committed_sources=inventory
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{completed['id']}", json={"status": "running"}
-    ).status_code == 200
     assert client.post(
         f"{BASE}/assessment-runs/{completed['id']}/sources", json={"sources": inventory}
     ).status_code == 201
@@ -485,30 +531,9 @@ def test_run_dispatch_listing_includes_producer_and_linked_reader(
     )
     assert reader.status_code == 201, reader.text
 
-    run = _create_scan(client, run_uuid="linked-dispatches")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    content = b"linked dispatch\n"
-    sources = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={"sources": [_source(target_key="service-a", path="src/read.py", content=content)]},
-    )
-    assert sources.status_code == 201, sources.text
-    source_id = sources.json()[0]["id"]
-    observed = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": source_id,
-            "dispatch_agent_id": "READ-RUN-2",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": len(content),
-            "line_start": 1,
-            "line_end": 2,
-        },
-    )
-    assert observed.status_code == 201, observed.text
+    run = _running_scan(client, run_uuid="linked-dispatches")
+    source = _add_source(client, run, path="src/read.py", content=b"linked dispatch\n")
+    _read_source(client, run, source, dispatch_agent_id="READ-RUN-2")
 
     dispatches = client.get(
         f"{BASE}/assessment-runs/{run['id']}/dispatches?limit=1&offset=0"
@@ -596,19 +621,14 @@ def test_scan_lifecycle_inventory_reads_and_parser_debt_are_durable(
                     parser_status="failed",
                     parser_error="syntax error at byte 11",
                 ),
-                {
-                    "target_key": "service-a",
-                    "declared_root": ".",
-                    "path": "vendor/generated.js",
-                    "content_sha256": "e" * 64,
-                    "byte_size": 9_000_001,
-                    "line_count": 300_000,
-                    "encoding": "utf-8",
-                    "inventory_status": "excluded",
-                    "exclusion_reason": "declared vendor boundary",
-                    "parser_status": "not_applicable",
-                    "parser_error": "",
-                },
+                _excluded_source(
+                    target_key="service-a",
+                    path="vendor/generated.js",
+                    content_sha256="e" * 64,
+                    byte_size=9_000_001,
+                    line_count=300_000,
+                    exclusion_reason="declared vendor boundary",
+                ),
             ]
         },
     )
@@ -661,22 +681,8 @@ def test_source_read_ranges_cannot_claim_lines_outside_the_inventory(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="line-range")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/two-lines.py",
-                    content=b"ONE = 1\n",
-                )
-            ]
-        },
-    ).json()[0]
+    run = _running_scan(client, run_uuid="line-range")
+    source = _add_source(client, run, path="src/two-lines.py", content=b"ONE = 1\n")
     invalid = client.post(
         f"{BASE}/assessment-runs/{run['id']}/source-reads",
         json={
@@ -696,35 +702,11 @@ def test_scan_cannot_complete_when_a_declared_source_generation_has_no_inventory
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="missing-target-inventory")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/only-target.py",
-                    content=b"ONLY = True\n",
-                )
-            ]
-        },
-    ).json()[0]
-    source_read = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": source["byte_size"],
-            "line_start": 1,
-            "line_end": source["line_count"],
-        },
+    run = _running_scan(client, run_uuid="missing-target-inventory")
+    source = _add_source(
+        client, run, path="src/only-target.py", content=b"ONLY = True\n"
     )
-    assert source_read.status_code == 201, source_read.text
+    _read_source(client, run, source)
 
     terminal = client.patch(
         f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
@@ -757,34 +739,11 @@ def test_scan_cannot_complete_with_malformed_source_generation_identity(
     )
     assert created.status_code == 201, created.text
     run = created.json()
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/current.py",
-                    content=b"CURRENT = True\n",
-                )
-            ]
-        },
-    ).json()[0]
-    source_read = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": source["byte_size"],
-            "line_start": 1,
-            "line_end": source["line_count"],
-        },
+    _start_run(client, run)
+    source = _add_source(
+        client, run, path="src/current.py", content=b"CURRENT = True\n"
     )
-    assert source_read.status_code == 201, source_read.text
+    _read_source(client, run, source)
 
     terminal = client.patch(
         f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
@@ -812,46 +771,20 @@ def test_scan_completion_requires_the_exact_declared_inventory_commitment(
             path="src/omitted.py",
             content=b"OMITTED = True\n",
         ),
-        {
-            "target_key": "shared-library",
-            "declared_root": ".",
-            "path": "generated/manifest.json",
-            "content_sha256": "f" * 64,
-            "byte_size": 0,
-            "line_count": 0,
-            "encoding": "utf-8",
-            "inventory_status": "excluded",
-            "exclusion_reason": "declared generated boundary",
-            "parser_status": "not_applicable",
-            "parser_error": "",
-        },
+        _excluded_source(target_key="shared-library", content_sha256="f" * 64),
     ]
-    run = _create_scan(
+    run = _running_scan(
         client,
         run_uuid="strict-subset",
         committed_sources=expected_sources,
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
     uploaded = client.post(
         f"{BASE}/assessment-runs/{run['id']}/sources",
         json={"sources": [expected_sources[0], expected_sources[2]]},
     )
     assert uploaded.status_code == 201, uploaded.text
     included = uploaded.json()[0]
-    assert client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": included["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": included["byte_size"],
-            "line_start": 1,
-            "line_end": included["line_count"],
-        },
-    ).status_code == 201
+    _read_source(client, run, included)
 
     terminal = client.patch(
         f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
@@ -883,28 +816,13 @@ def test_interrupted_batched_inventory_preserves_rows_and_commitment_debt(
             path="src/pending.py",
             content=b"PENDING = True\n",
         ),
-        {
-            "target_key": "shared-library",
-            "declared_root": ".",
-            "path": "generated/manifest.json",
-            "content_sha256": "f" * 64,
-            "byte_size": 0,
-            "line_count": 0,
-            "encoding": "utf-8",
-            "inventory_status": "excluded",
-            "exclusion_reason": "declared generated boundary",
-            "parser_status": "not_applicable",
-            "parser_error": "",
-        },
+        _excluded_source(target_key="shared-library", content_sha256="f" * 64),
     ]
-    run = _create_scan(
+    run = _running_scan(
         client,
         run_uuid="interrupted-inventory-batches",
         committed_sources=expected_sources,
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
     first_batch = client.post(
         f"{BASE}/assessment-runs/{run['id']}/sources",
         json={"sources": [expected_sources[0], expected_sources[2]]},
@@ -936,29 +854,18 @@ def test_inventory_over_request_limit_completes_after_bounded_batch_reconciliati
 ) -> None:
     _seed(client, isolate_settings)
     sources = [
-        {
-            "target_key": "shared-library" if index == 10_000 else "service-a",
-            "declared_root": ".",
-            "path": f"excluded/generated-{index:05d}.js",
-            "content_sha256": hashlib.sha256(str(index).encode()).hexdigest(),
-            "byte_size": 0,
-            "line_count": 0,
-            "encoding": "utf-8",
-            "inventory_status": "excluded",
-            "exclusion_reason": "declared generated boundary",
-            "parser_status": "not_applicable",
-            "parser_error": "",
-        }
+        _excluded_source(
+            target_key="shared-library" if index == 10_000 else "service-a",
+            path=f"excluded/generated-{index:05d}.js",
+            content_sha256=hashlib.sha256(str(index).encode()).hexdigest(),
+        )
         for index in range(10_001)
     ]
-    run = _create_scan(
+    run = _running_scan(
         client,
         run_uuid="large-inventory",
         committed_sources=sources,
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
     for offset in range(0, len(sources), 1000):
         response = client.post(
             f"{BASE}/assessment-runs/{run['id']}/sources",
@@ -979,25 +886,15 @@ def test_completion_seals_partial_with_open_debt_and_preserves_all_records(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client)
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    inventory = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/broken.py",
-                    content=b"def broken(:\n",
-                    parser_status="failed",
-                    parser_error="syntax error",
-                )
-            ]
-        },
+    run = _running_scan(client)
+    _add_source(
+        client,
+        run,
+        path="src/broken.py",
+        content=b"def broken(:\n",
+        parser_status="failed",
+        parser_error="syntax error",
     )
-    assert inventory.status_code == 201, inventory.text
 
     terminal = client.patch(
         f"{BASE}/assessment-runs/{run['id']}", json={"status": "completed"}
@@ -1045,41 +942,17 @@ def test_promoted_candidate_cannot_complete_before_its_finding_is_verified(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="promoted-unverified")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/candidate.py",
-                    content=b"VALUE = input()\n",
-                )
-            ]
-        },
-    ).json()[0]
-    source_read = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": source["byte_size"],
-            "line_start": 1,
-            "line_end": source["line_count"],
-        },
+    run = _running_scan(client, run_uuid="promoted-unverified")
+    source = _add_source(
+        client, run, path="src/candidate.py", content=b"VALUE = input()\n"
     )
-    assert source_read.status_code == 201, source_read.text
+    source_read = _read_source(client, run, source)
     proof = client.post(
         f"{BASE}/proof-receipts",
         json={
             "run_id": run["id"],
             "evidence_kind": "source_observation",
-            "source_read_id": source_read.json()["id"],
+            "source_read_id": source_read["id"],
             "observed_result": "candidate source anchor was observed",
         },
     )
@@ -1174,41 +1047,15 @@ def test_obligation_and_candidate_retries_are_exact_and_never_similarity_merged(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client)
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/path.py",
-                    content=b"open(user_path)\n",
-                )
-            ]
-        },
-    ).json()[0]
-    source_read = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": source["byte_size"],
-            "line_start": 1,
-            "line_end": source["line_count"],
-        },
-    )
-    assert source_read.status_code == 201, source_read.text
+    run = _running_scan(client)
+    source = _add_source(client, run, path="src/path.py", content=b"open(user_path)\n")
+    source_read = _read_source(client, run, source)
     proof = client.post(
         f"{BASE}/proof-receipts",
         json={
             "run_id": run["id"],
             "evidence_kind": "source_observation",
-            "source_read_id": source_read.json()["id"],
+            "source_read_id": source_read["id"],
             "observed_result": "exact source range settles the recorded decision",
         },
     )
@@ -1374,23 +1221,9 @@ def test_typed_tool_signal_atomically_creates_one_deterministic_candidate(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="typed-signal")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
+    run = _running_scan(client, run_uuid="typed-signal")
     source_bytes = b"int main(void) { return crash(); }\n"
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/crash.c",
-                    content=source_bytes,
-                )
-            ]
-        },
-    ).json()[0]
+    source = _add_source(client, run, path="src/crash.c", content=source_bytes)
     command = client.post(
         f"{BASE}/command-runs",
         json={
@@ -1604,24 +1437,8 @@ def test_automatic_tool_candidate_identity_persists_across_equivalent_scans(
     source_bytes = b"int main(void) { return crash(); }\n"
 
     def record_signal(run_uuid: str) -> tuple[dict, str]:
-        run = _create_scan(client, run_uuid=run_uuid)
-        assert client.patch(
-            f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-        ).status_code == 200
-        source_response = client.post(
-            f"{BASE}/assessment-runs/{run['id']}/sources",
-            json={
-                "sources": [
-                    _source(
-                        target_key="service-a",
-                        path="src/crash.c",
-                        content=source_bytes,
-                    )
-                ]
-            },
-        )
-        assert source_response.status_code == 201, source_response.text
-        source = source_response.json()[0]
+        run = _running_scan(client, run_uuid=run_uuid)
+        source = _add_source(client, run, path="src/crash.c", content=source_bytes)
         command = client.post(
             f"{BASE}/command-runs",
             json={
@@ -1718,9 +1535,7 @@ def test_cross_repository_debt_and_discovery_passes_are_explicit_and_evidence_bo
     )
     assert created.status_code == 201, created.text
     run = created.json()
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
+    _start_run(client, run)
     obligations = client.get(
         f"{BASE}/assessment-runs/{run['id']}/obligations?limit=20&offset=0"
     ).json()["items"]
@@ -1912,22 +1727,10 @@ def test_finding_record_can_atomically_promote_its_underlying_run_candidate(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="atomic-promotion")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/parser.c",
-                    content=b"candidate source\n",
-                )
-            ]
-        },
-    ).json()[0]
+    run = _running_scan(client, run_uuid="atomic-promotion")
+    source = _add_source(
+        client, run, path="src/parser.c", content=b"candidate source\n"
+    )
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         engagement_id = connection.execute(
@@ -2062,23 +1865,8 @@ def test_existing_variant_receipt_resolves_its_exact_run_obligation(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="variant-accounting")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/parser.c",
-                    content=b"b",
-                )
-            ]
-        },
-    )
-    assert source.status_code == 201, source.text
+    run = _running_scan(client, run_uuid="variant-accounting")
+    _add_source(client, run, path="src/parser.c", content=b"b")
     obligation = client.post(
         f"{BASE}/assessment-runs/{run['id']}/obligations",
         json={
@@ -2351,10 +2139,7 @@ def test_hard_accepted_gap_and_unproved_candidate_closure_cannot_claim_completio
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client, run_uuid="unsupported-closure")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
+    run = _running_scan(client, run_uuid="unsupported-closure")
     content = b"value = source()\n"
     source = client.post(
         f"{BASE}/assessment-runs/{run['id']}/sources",
@@ -2426,10 +2211,7 @@ def test_read_endpoints_are_paginated_and_have_no_status_side_effects(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    run = _create_scan(client)
-    assert client.patch(
-        f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-    ).status_code == 200
+    run = _running_scan(client)
     sources = [
         _source(
             target_key="service-a",
@@ -2476,22 +2258,8 @@ def test_comparison_is_deterministic_and_conservative_under_source_drift(
         (moved, b"same", "src/renamed/path.py"),
         (drifted, b"changed", "src/path.py"),
     ):
-        assert client.patch(
-            f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
-        ).status_code == 200
-        created = client.post(
-            f"{BASE}/assessment-runs/{run['id']}/sources",
-            json={
-                "sources": [
-                    _source(
-                        target_key="service-a",
-                        path=path,
-                        content=digest,
-                    )
-                ]
-            },
-        )
-        assert created.status_code == 201, created.text
+        _start_run(client, run)
+        _add_source(client, run, path=path, content=digest)
 
     def add_candidate(run: dict, identity: str) -> None:
         source_id = client.get(
@@ -2614,10 +2382,7 @@ def test_terminal_scan_persists_one_automatic_comparison_with_exact_retry(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    baseline = _create_scan(client, run_uuid="sealed-baseline")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{baseline['id']}", json={"status": "running"}
-    ).status_code == 200
+    baseline = _running_scan(client, run_uuid="sealed-baseline")
     inventory = {
         "sources": [
             _source(
@@ -2635,10 +2400,7 @@ def test_terminal_scan_persists_one_automatic_comparison_with_exact_retry(
     )
     assert baseline_terminal.status_code == 200, baseline_terminal.text
 
-    current = _create_scan(client, run_uuid="sealed-current")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{current['id']}", json={"status": "running"}
-    ).status_code == 200
+    current = _running_scan(client, run_uuid="sealed-current")
     assert client.post(
         f"{BASE}/assessment-runs/{current['id']}/sources", json=inventory
     ).status_code == 201
@@ -2681,30 +2443,15 @@ def test_comparison_marks_absent_candidate_resolved_only_with_equivalent_clean_p
                 path="src/equivalent.py",
                 content=b"SAFE = True\n",
             ),
-            {
-                "target_key": "shared-library",
-                "declared_root": ".",
-                "path": "generated/manifest.json",
-                "content_sha256": "f" * 64,
-                "byte_size": 0,
-                "line_count": 0,
-                "encoding": "utf-8",
-                "inventory_status": "excluded",
-                "exclusion_reason": "declared generated boundary",
-                "parser_status": "not_applicable",
-                "parser_error": "",
-            },
+            _excluded_source(target_key="shared-library", content_sha256="f" * 64),
         ]
     }
 
-    baseline = _create_scan(
+    baseline = _running_scan(
         client,
         run_uuid="resolved-baseline",
         committed_sources=inventory["sources"],
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{baseline['id']}", json={"status": "running"}
-    ).status_code == 200
     baseline_source = client.post(
         f"{BASE}/assessment-runs/{baseline['id']}/sources", json=inventory
     ).json()[0]
@@ -2727,36 +2474,21 @@ def test_comparison_marks_absent_candidate_resolved_only_with_equivalent_clean_p
         f"{BASE}/assessment-runs/{baseline['id']}", json={"status": "partial"}
     ).status_code == 200
 
-    current = _create_scan(
+    current = _running_scan(
         client,
         run_uuid="resolved-current",
         committed_sources=inventory["sources"],
     )
-    assert client.patch(
-        f"{BASE}/assessment-runs/{current['id']}", json={"status": "running"}
-    ).status_code == 200
     current_source = client.post(
         f"{BASE}/assessment-runs/{current['id']}/sources", json=inventory
     ).json()[0]
-    current_read = client.post(
-        f"{BASE}/assessment-runs/{current['id']}/source-reads",
-        json={
-            "source_id": current_source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 1,
-            "byte_start": 0,
-            "byte_end": current_source["byte_size"],
-            "line_start": 1,
-            "line_end": current_source["line_count"],
-        },
-    )
-    assert current_read.status_code == 201, current_read.text
+    current_read = _read_source(client, current, current_source)
     receipt = client.post(
         f"{BASE}/proof-receipts",
         json={
             "run_id": current["id"],
             "evidence_kind": "source_observation",
-            "source_read_id": current_read.json()["id"],
+            "source_read_id": current_read["id"],
             "expected_result": "prior candidate remains reachable",
             "observed_result": "equivalent source range proves the flow is absent",
         },
@@ -2809,23 +2541,8 @@ def test_interrupted_run_is_sealed_and_resume_creates_a_linked_run_without_loss(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    original = _create_scan(client, run_uuid="interrupted-parent")
-    assert client.patch(
-        f"{BASE}/assessment-runs/{original['id']}", json={"status": "running"}
-    ).status_code == 200
-    source = client.post(
-        f"{BASE}/assessment-runs/{original['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a",
-                    path="src/kept.py",
-                    content=b"KEPT = True\n",
-                )
-            ]
-        },
-    )
-    assert source.status_code == 201, source.text
+    original = _running_scan(client, run_uuid="interrupted-parent")
+    source = _add_source(client, original, path="src/kept.py", content=b"KEPT = True\n")
     command = client.post(
         f"{BASE}/command-runs",
         json={
@@ -2858,7 +2575,7 @@ def test_interrupted_run_is_sealed_and_resume_creates_a_linked_run_without_loss(
             "signal_kind": "reproducible_crash",
             "dispatch_agent_id": "HUNT-RUN-1",
             "target_key": "service-a",
-            "source_id": source.json()[0]["id"],
+            "source_id": source["id"],
             "source_anchor": "src/kept.py:1",
             "vulnerability_family": "CWE-20",
             "hypothesis": "retained across interruption",
@@ -2901,27 +2618,12 @@ def test_interrupted_run_is_sealed_and_resume_creates_a_linked_run_without_loss(
     ).json()["items"]
     assert resumed_candidates[0]["originating_signal_id"] == signal.json()["id"]
 
-    assert client.patch(
-        f"{BASE}/assessment-runs/{resumed.json()['id']}",
-        json={"status": "running"},
-    ).status_code == 200
+    _start_run(client, resumed.json())
     resumed_source = client.get(
         f"{BASE}/assessment-runs/{resumed.json()['id']}/sources",
         params={"limit": 10, "offset": 0},
     ).json()["items"][0]
-    resumed_read = client.post(
-        f"{BASE}/assessment-runs/{resumed.json()['id']}/source-reads",
-        json={
-            "source_id": resumed_source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": 2,
-            "byte_start": 0,
-            "byte_end": resumed_source["byte_size"],
-            "line_start": 1,
-            "line_end": resumed_source["line_count"],
-        },
-    )
-    assert resumed_read.status_code == 201, resumed_read.text
+    _read_source(client, resumed.json(), resumed_source, attempt=2)
     resumed_obligations = client.get(
         f"{BASE}/assessment-runs/{resumed.json()['id']}/obligations",
         params={"limit": 10, "offset": 0},
@@ -3237,18 +2939,7 @@ def _recovery_receipt(client, run: dict, *, slug: str, observed: str) -> int:
 
 
 def _recovery_source(client, run: dict) -> dict:
-    recorded = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/sources",
-        json={
-            "sources": [
-                _source(
-                    target_key="service-a", path="src/read.py", content=b"KEPT = True\n"
-                )
-            ]
-        },
-    )
-    assert recorded.status_code == 201, recorded.text
-    return recorded.json()[0]
+    return _add_source(client, run, path="src/read.py", content=b"KEPT = True\n")
 
 
 def _decay_receipt(receipt_id: int) -> None:
@@ -3337,24 +3028,6 @@ def _resolve_obligation(client, run: dict, *, receipt_id: int) -> dict:
     )
     assert obligation.status_code == 201, obligation.text
     return obligation.json()
-
-
-def _read_source(client, run: dict, source: dict, *, attempt: int, receipt_id: int) -> dict:
-    read = client.post(
-        f"{BASE}/assessment-runs/{run['id']}/source-reads",
-        json={
-            "source_id": source["id"],
-            "dispatch_agent_id": "HUNT-RUN-1",
-            "attempt": attempt,
-            "byte_start": 0,
-            "byte_end": source["byte_size"],
-            "line_start": 1,
-            "line_end": source["line_count"],
-            "proof_receipt_id": receipt_id,
-        },
-    )
-    assert read.status_code == 201, read.text
-    return read.json()
 
 
 def _first(client, child: dict, ledger: str) -> dict:

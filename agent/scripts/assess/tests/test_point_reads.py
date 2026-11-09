@@ -13,6 +13,7 @@ from assess.commands import fetch
 from assess.lib import config, contracts
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.intel_types import INTEL_TYPES
+from _fake_client import StubClient
 
 
 def _engagement(tmp_path):
@@ -567,16 +568,10 @@ def test_fetch_keeps_valid_finding_subpath_available(monkeypatch, capsys) -> Non
     assert "UNTRUSTED DATA" in captured.err
 
 
-class _FetchClient:
+class _FetchClient(StubClient):
     def __init__(self) -> None:
         self.assessment_requests: list[str] = []
         self.engagement_requests: list[str] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc) -> bool:
-        return False
 
     def get(self, endpoint: str):
         self.assessment_requests.append(endpoint)

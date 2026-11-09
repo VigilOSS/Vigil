@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -31,9 +30,6 @@ def _scripts_root() -> Path:
 
 
 def _load(name: str, rel: str):
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
     module_path = Path(__file__).resolve().parents[3] / rel
     spec = importlib.util.spec_from_file_location(name, module_path)
     module = importlib.util.module_from_spec(spec)

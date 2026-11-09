@@ -6,24 +6,37 @@ of ``test_vigil_cli.py``.
 """
 from __future__ import annotations
 
+import argparse
+import inspect
 import json
 import os
 import shutil
 import subprocess
-import sys
 import tempfile
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+from vigil_cli import email as email_module
+from vigil_cli import main as main_module
+from vigil_cli.email import (
+    EmailMessage,
+    EmailReadError,
+    _READ_MESSAGES_JXA,
+    _address_matches,
+    _normalize_filter,
+    duration_minutes,
+    duration_seconds,
+    duration_seconds_or_zero,
+    extract_links,
+    extract_token,
+    filter_messages,
+    subaddress_aliases,
+)
+from vigil_cli.main import main
 
 
 def _msg(**kwargs):
-    from vigil_cli.email import EmailMessage
-
     defaults = dict(
         sender="Acme Bank Security <security@acme-bank.example>",
         recipients=("tester@researcher.example",),
@@ -38,8 +51,6 @@ def _msg(**kwargs):
 
 
 def test_extract_token_default_otp_pattern():
-    from vigil_cli.email import extract_token
-
     assert extract_token("Your code is 482915 now") == "482915"
     # Avoids a too-short or too-long run; 8 digits still match.
     assert extract_token("PIN: 12345678 end") == "12345678"
@@ -47,23 +58,17 @@ def test_extract_token_default_otp_pattern():
 
 
 def test_extract_token_custom_match_returns_capture_group():
-    from vigil_cli.email import extract_token
-
     body = "Click https://acme-bank.example/verify?token=abc123 to confirm."
     link = extract_token(body, pattern=r"(https://\S+)")
     assert link == "https://acme-bank.example/verify?token=abc123"
 
 
 def test_extract_token_invalid_regex_raises():
-    from vigil_cli.email import EmailReadError, extract_token
-
     with pytest.raises(EmailReadError):
         extract_token("body", pattern="(")
 
 
 def test_filter_messages_by_mailbox_and_domain_from():
-    from vigil_cli.email import filter_messages
-
     base = datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC)
     on_target = _msg(received_at=base)
     wrong_mailbox = _msg(recipients=("someone@example.com",), received_at=base)
@@ -78,8 +83,6 @@ def test_filter_messages_by_mailbox_and_domain_from():
 
 
 def test_filter_messages_can_narrow_rewritten_relay_sender_by_subject():
-    from vigil_cli.email import filter_messages
-
     acme = _msg(
         sender="Mail Forwarder <mail-forwarder@wearehackerone.com>",
         recipients=("researcher+pc1@security.example",),
@@ -101,8 +104,6 @@ def test_filter_messages_can_narrow_rewritten_relay_sender_by_subject():
 
 
 def test_filter_messages_orders_newest_first_and_respects_since():
-    from vigil_cli.email import filter_messages
-
     now = datetime(2026, 6, 22, 12, 0, 0, tzinfo=UTC)
     recent = _msg(received_at=now)
     older = _msg(received_at=now - timedelta(minutes=2))
@@ -117,8 +118,6 @@ def test_filter_messages_orders_newest_first_and_respects_since():
 
 
 def test_normalize_filter_bare_domain_is_suffix_scoped():
-    from vigil_cli.email import _address_matches, _normalize_filter
-
     needle = _normalize_filter("acme-bank.example")
     assert needle == "@acme-bank.example"
     # A bare domain must not match a localpart that merely contains it.
@@ -127,9 +126,6 @@ def test_normalize_filter_bare_domain_is_suffix_scoped():
 
 
 def test_email_cli_json_extracts_code(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     captured_since = {}
 
     def fake_read(*, since, limit, timeout_seconds):
@@ -142,18 +138,14 @@ def test_email_cli_json_extracts_code(monkeypatch, capsys):
     main(["email", "tester@researcher.example", "--from", "@acme-bank.example", "--json"])
 
     out = capsys.readouterr().out
-    import json as _json
 
-    payload = _json.loads(out)
+    payload = json.loads(out)
     assert payload["count"] == 1
     assert payload["messages"][0]["extracted"] == "482915"
     assert payload["messages"][0]["from"] == "Acme Bank Security <security@acme-bank.example>"
 
 
 def test_email_cli_no_matches_exits_nonzero(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     monkeypatch.setattr(email_module, "read_messages", lambda **_: [])
 
     with pytest.raises(SystemExit) as exc:
@@ -164,8 +156,6 @@ def test_email_cli_no_matches_exits_nonzero(monkeypatch, capsys):
 
 
 def test_filter_messages_deduplicates_aggregate_and_account_views():
-    from vigil_cli.email import filter_messages
-
     received = datetime(2026, 8, 24, 23, 41, 29, tzinfo=UTC)
     aggregate = _msg(
         sender="Acme Planner <mail-forwarder@wearehackerone.com>",
@@ -195,8 +185,6 @@ def test_filter_messages_deduplicates_aggregate_and_account_views():
 
 
 def test_extract_links_decodes_hidden_html_href_from_raw_mime_source():
-    from vigil_cli.email import extract_links
-
     raw_source = """\
 From: Acme Planner <mail-forwarder@wearehackerone.com>
 To: researcher@security.example
@@ -218,10 +206,6 @@ exports/owned-fixture.csv?token=3Dabc123">Download CSV</a>
 
 
 def test_email_cli_waits_for_delayed_message_without_moving_cutoff(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli import main as main_module
-    from vigil_cli.main import main
-
     calls = []
     expected = _msg(received_at=datetime.now(UTC))
 
@@ -251,10 +235,6 @@ def test_email_cli_waits_for_delayed_message_without_moving_cutoff(monkeypatch, 
 
 
 def test_email_cli_wait_retries_transient_mail_app_error(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli import main as main_module
-    from vigil_cli.main import main
-
     attempts = 0
 
     def fake_read(**_):
@@ -285,9 +265,6 @@ def test_email_cli_wait_retries_transient_mail_app_error(monkeypatch, capsys):
 
 
 def test_email_cli_links_reads_message_source_only_when_requested(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     captured = {}
     message = _msg(
         received_at=datetime.now(UTC),
@@ -313,9 +290,6 @@ def test_email_cli_links_reads_message_source_only_when_requested(monkeypatch, c
 
 
 def test_email_cli_passes_subject_filter(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     monkeypatch.setattr(
         email_module,
         "read_messages",
@@ -503,8 +477,6 @@ def _run_jxa_scan(
     to a relevant folder become scan sources. Message ages are whole minutes
     before _NOW; ``ids`` defaults to unique synthetic Message-IDs.
     """
-    from vigil_cli.email import _READ_MESSAGES_JXA
-
     node = shutil.which("node")
     assert node is not None  # guarded by @requires_node
 
@@ -749,7 +721,6 @@ def test_read_messages_candidate_window_is_load_bearing(monkeypatch):
     # candidate window from --limit and hands it to the JXA. The window must
     # always be at least the result limit, at least MIN_CANDIDATE_WINDOW, and
     # never above MAX_CANDIDATE_WINDOW.
-    from vigil_cli import email as email_module
 
     seen: list[dict] = []
 
@@ -778,19 +749,18 @@ def test_read_messages_candidate_window_is_load_bearing(monkeypatch):
 def test_jxa_scan_wiring_present_in_source():
     # Cheap, node-free guard on the wiring the tests above depend on, so an
     # accidental edit to the JXA is caught even where node is unavailable.
-    from vigil_cli.email import _READ_MESSAGES_JXA as jxa
 
     # The candidate window is the bound, and it can never undercut the result limit.
-    assert "const candidateLimit = Math.max(resultLimit, Number(cfg.candidate_limit || 2000));" in jxa
+    assert "const candidateLimit = Math.max(resultLimit, Number(cfg.candidate_limit || 2000));" in _READ_MESSAGES_JXA
     # Per-source direction detection, and a cutoff that skips rather than breaks.
-    assert "source.newestFirst === true" in jxa
-    assert "source.newestFirst === false" in jxa
-    assert "if (receivedDate && receivedDate < since) {" in jxa
+    assert "source.newestFirst === true" in _READ_MESSAGES_JXA
+    assert "source.newestFirst === false" in _READ_MESSAGES_JXA
+    assert "if (receivedDate && receivedDate < since) {" in _READ_MESSAGES_JXA
     # Spam/Junk/Archive are required coverage, not extras.
     for folder in ("all mail", "important", "spam", "junk", "archive"):
-        assert f'"{folder}"' in jxa
+        assert f'"{folder}"' in _READ_MESSAGES_JXA
     # The aggregate Inbox stays a flagged fallback, never a silent default.
-    assert "used_aggregate_inbox = true" in jxa
+    assert "used_aggregate_inbox = true" in _READ_MESSAGES_JXA
 
 
 # ---------------------------------------------------------------------------
@@ -815,17 +785,11 @@ def test_jxa_scan_wiring_present_in_source():
     ],
 )
 def test_duration_minutes_accepts_bare_minutes_and_suffixed_durations(value, expected_minutes):
-    from vigil_cli.email import duration_minutes
-
     assert duration_minutes(value) == expected_minutes
 
 
 @pytest.mark.parametrize("value", ["10x", "-5", "0", "", "m", "10 minutes", "1e3"])
 def test_duration_minutes_rejects_anything_else_naming_the_accepted_forms(value):
-    import argparse
-
-    from vigil_cli.email import duration_minutes
-
     with pytest.raises(argparse.ArgumentTypeError) as exc:
         duration_minutes(value)
     message = str(exc.value)
@@ -838,16 +802,10 @@ def test_duration_minutes_rejects_anything_else_naming_the_accepted_forms(value)
     [("90", 90.0), ("90s", 90.0), ("2m", 120.0), ("1h", 3600.0)],
 )
 def test_duration_seconds_accepts_bare_seconds_and_suffixed_durations(value, expected_seconds):
-    from vigil_cli.email import duration_seconds
-
     assert duration_seconds(value) == expected_seconds
 
 
 def test_duration_seconds_or_zero_allows_zero_but_still_rejects_garbage():
-    import argparse
-
-    from vigil_cli.email import duration_seconds, duration_seconds_or_zero
-
     assert duration_seconds_or_zero("0") == 0.0
     with pytest.raises(argparse.ArgumentTypeError):
         duration_seconds("0")  # a zero read timeout / poll interval is nonsense
@@ -856,9 +814,6 @@ def test_duration_seconds_or_zero_allows_zero_but_still_rejects_garbage():
 
 
 def test_email_cli_accepts_a_duration_for_within(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     monkeypatch.setattr(
         email_module, "read_messages", lambda **_: [_msg(received_at=datetime.now(UTC))]
     )
@@ -870,8 +825,6 @@ def test_email_cli_accepts_a_duration_for_within(monkeypatch, capsys):
 
 
 def test_email_cli_rejects_a_malformed_within_naming_the_accepted_forms(capsys):
-    from vigil_cli.main import main
-
     with pytest.raises(SystemExit) as exc:
         main(["email", "tester@researcher.example", "--within", "10x"])
 
@@ -883,10 +836,6 @@ def test_email_cli_rejects_a_malformed_within_naming_the_accepted_forms(capsys):
 
 def test_email_read_timeout_default_is_the_measured_generous_bound():
     """30s was a guess. Too short aborts a lane mid-flight; too long only waits."""
-    import inspect
-
-    from vigil_cli import email as email_module
-
     assert email_module.DEFAULT_READ_TIMEOUT_SECONDS == 90.0
     signature = inspect.signature(email_module.read_messages)
     assert signature.parameters["timeout_seconds"].default == 90.0
@@ -902,9 +851,6 @@ def test_email_read_timeout_default_is_the_measured_generous_bound():
 
 
 def test_email_cli_json_timeout_is_an_error_and_exits_nonzero(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     def fake_read(**_):
         raise email_module.EmailReadError(
             "osascript timed out after 90.0s", kind="timeout"
@@ -925,9 +871,6 @@ def test_email_cli_json_timeout_is_an_error_and_exits_nonzero(monkeypatch, capsy
 
 
 def test_email_cli_text_timeout_exits_nonzero_with_the_error(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     def fake_read(**_):
         raise email_module.EmailReadError("osascript timed out after 90.0s", kind="timeout")
 
@@ -941,9 +884,6 @@ def test_email_cli_text_timeout_exits_nonzero_with_the_error(monkeypatch, capsys
 
 
 def test_email_cli_json_truncated_scan_is_reported_as_truncated(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     coverage = email_module.EmailScanCoverage(
         complete=False,
         candidate_limit=2_000,
@@ -971,9 +911,6 @@ def test_email_cli_json_truncated_scan_is_reported_as_truncated(monkeypatch, cap
 
 
 def test_email_cli_json_status_is_ok_on_an_authoritative_match(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     monkeypatch.setattr(
         email_module, "read_messages", lambda **_: [_msg(received_at=datetime.now(UTC))]
     )
@@ -994,8 +931,6 @@ def test_email_cli_json_status_is_ok_on_an_authoritative_match(monkeypatch, caps
 
 
 def test_filter_messages_matches_plus_addressed_recipient():
-    from vigil_cli.email import filter_messages
-
     tagged = _msg(recipients=("tester+lane2@researcher.example",))
 
     assert filter_messages([tagged], mailbox_address="tester@researcher.example") == [tagged]
@@ -1006,8 +941,6 @@ def test_filter_messages_matches_plus_addressed_recipient():
 
 
 def test_filter_messages_plus_query_does_not_match_a_sibling_alias():
-    from vigil_cli.email import filter_messages
-
     lane1 = _msg(recipients=("tester+lane1@researcher.example",))
 
     assert filter_messages([lane1], mailbox_address="tester+lane2@researcher.example") == []
@@ -1017,8 +950,6 @@ def test_filter_messages_plus_query_does_not_match_a_sibling_alias():
 
 def test_filter_messages_mailbox_accepts_the_documented_bare_domain_form():
     """The docstring always promised `acme-bank.example`; only `@acme-bank.example` used to work."""
-    from vigil_cli.email import filter_messages
-
     message = _msg(recipients=("tester+lane1@researcher.example",))
 
     assert filter_messages([message], mailbox_address="researcher.example") == [message]
@@ -1027,8 +958,6 @@ def test_filter_messages_mailbox_accepts_the_documented_bare_domain_form():
 
 
 def test_subaddress_aliases_names_the_siblings_a_tagged_query_missed():
-    from vigil_cli.email import subaddress_aliases
-
     messages = [
         _msg(recipients=("tester+lane1@researcher.example",)),
         _msg(recipients=("tester@researcher.example", "other@researcher.example")),
@@ -1043,9 +972,6 @@ def test_subaddress_aliases_names_the_siblings_a_tagged_query_missed():
 
 
 def test_email_cli_zero_for_a_tagged_query_names_the_aliases_it_saw(monkeypatch, capsys):
-    from vigil_cli import email as email_module
-    from vigil_cli.main import main
-
     monkeypatch.setattr(
         email_module,
         "read_messages",

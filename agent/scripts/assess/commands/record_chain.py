@@ -8,6 +8,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 
 # Backend activity-event field cap (CreateEventRequest.task_name max_length at
@@ -73,13 +74,12 @@ def run(args) -> None:
         or not chain_key.strip()
         or chain_key != expected_key
     ):
-        print(
-            "record-chain: backend did not return the canonical chain key for this write; "
+        fail(
+            "record-chain",
+            "backend did not return the canonical chain key for this write; "
             "the write may have committed, so inspect `vigil assess fetch attack-chains --json` "
             "and do not retry automatically",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     # Emit event. Truncate the chain_key used in the event to the backend
     # task_name cap so a long title does not 422 the activity-feed emit (which

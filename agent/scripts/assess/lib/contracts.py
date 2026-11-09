@@ -8,6 +8,7 @@ import json
 import os
 import re
 import sys
+from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
@@ -688,11 +689,42 @@ def get_contract(name: str) -> CommandContract | None:
     return _CONTRACTS.get(name)
 
 
-def render_contract(name: str) -> str:
+def _require_contract(name: str) -> CommandContract:
+    """The contract `name` resolves to, or the refusal that names every one.
+
+    Both rendering entry points ask the same question and owe the reader the
+    same answer, so the lookup and its message live here once.
+    """
     contract = get_contract(name)
     if contract is None:
         available = ", ".join(contract_names())
         raise ValueError(f"Unknown contract '{name}'. Available contracts: {available}")
+    return contract
+
+
+def _append_section(
+    lines: list[str],
+    header: str,
+    entries: Iterable[str],
+    *,
+    always: bool = False,
+) -> None:
+    """Append one blank-line / header / entries block of a rendered contract.
+
+    A section with no entries is omitted, which is what the per-field guards
+    each of these sections used to carry did. `always` is for the two sections
+    every contract renders whether or not the tuple behind them is empty.
+    """
+    rows = list(entries)
+    if not rows and not always:
+        return
+    lines.append("")
+    lines.append(header)
+    lines.extend(rows)
+
+
+def render_contract(name: str) -> str:
+    contract = _require_contract(name)
 
     lines = [
         f"Command: {contract.name}",
@@ -703,88 +735,35 @@ def render_contract(name: str) -> str:
         lines.append(f"Goals: {', '.join(contract.goals)}")
     if contract.phase:
         lines.append(f"Phase: {', '.join(contract.phase)}")
-    lines.extend(
-        [
-            "",
-            "Preferred invocation:",
-        ]
-    )
-    lines.extend(f"  - {entry}" for entry in contract.preferred_invocations)
-    lines.extend(
-        [
-            "",
-            "Author-supplied fields:",
-        ]
-    )
-    lines.extend(f"  - {entry}" for entry in contract.author_supplied_fields)
-
-    if contract.helper_defaults:
-        lines.extend(
-            [
-                "",
-                "Helper defaults:",
-            ]
-        )
-        lines.extend(f"  - {key} = {value}" for key, value in contract.helper_defaults)
-
-    schema_properties = _schema_field_lines(
+    invocations = (f"  - {entry}" for entry in contract.preferred_invocations)
+    _append_section(lines, "Preferred invocation:", invocations, always=True)
+    author_fields = (f"  - {entry}" for entry in contract.author_supplied_fields)
+    _append_section(lines, "Author-supplied fields:", author_fields, always=True)
+    defaults = (f"  - {key} = {value}" for key, value in contract.helper_defaults)
+    _append_section(lines, "Helper defaults:", defaults)
+    _append_section(lines, "Allowed top-level fields:", _schema_field_lines(
         contract.schema_name,
         # The top level prints its own "Required top-level fields" summary, and
         # `details` gets a deeper section of its own on the verbs that write it.
         mark_required=False,
         deferred_fields=("details",) if contract.details_schema_name else (),
     ) or [
-        f"  - {name} ({domain}) — {meaning}"
-        for name, domain, meaning in contract.top_level_fields
-    ]
-    if schema_properties:
-        lines.extend(
-            [
-                "",
-                "Allowed top-level fields:",
-            ]
-        )
-        lines.extend(schema_properties)
+        f"  - {field_name} ({domain}) — {meaning}"
+        for field_name, domain, meaning in contract.top_level_fields
+    ])
 
     lines.extend(_author_required_lines(contract))
 
-    details_properties = _details_field_lines(contract.details_schema_name)
-    if details_properties:
-        lines.extend(
-            [
-                "",
-                f"Allowed details keys ({contract.details_schema_name} -> properties.details):",
-            ]
-        )
-        lines.extend(details_properties)
-
-    if contract.common_mistakes:
-        lines.extend(
-            [
-                "",
-                "Common mistakes:",
-            ]
-        )
-        lines.extend(f"  - {wrong} -> {fix}" for wrong, fix in contract.common_mistakes)
-
-    if contract.notes:
-        lines.extend(
-            [
-                "",
-                "Notes:",
-            ]
-        )
-        lines.extend(f"  - {entry}" for entry in contract.notes)
-
-    if contract.examples:
-        lines.extend(
-            [
-                "",
-                "Examples:",
-            ]
-        )
-        for example in contract.examples:
-            lines.append(json.dumps(example, indent=2, ensure_ascii=False))
+    _append_section(
+        lines,
+        f"Allowed details keys ({contract.details_schema_name} -> properties.details):",
+        _details_field_lines(contract.details_schema_name),
+    )
+    mistakes = (f"  - {wrong} -> {fix}" for wrong, fix in contract.common_mistakes)
+    _append_section(lines, "Common mistakes:", mistakes)
+    _append_section(lines, "Notes:", (f"  - {entry}" for entry in contract.notes))
+    examples = (json.dumps(e, indent=2, ensure_ascii=False) for e in contract.examples)
+    _append_section(lines, "Examples:", examples)
 
     lines.extend(["", "Assessment binding:", f"  {ENGAGEMENT_BINDING_CONTRACT}"])
 
@@ -870,10 +849,7 @@ def add_contract_subparser(subparsers, name: str, *, contract_name: str, **kwarg
 
 
 def render_contract_epilog(name: str) -> str:
-    contract = get_contract(name)
-    if contract is None:
-        available = ", ".join(contract_names())
-        raise ValueError(f"Unknown contract '{name}'. Available contracts: {available}")
+    contract = _require_contract(name)
 
     lines = ["Examples:"]
     lines.extend(f"  {entry}" for entry in contract.preferred_invocations)

@@ -16,6 +16,7 @@ from .run_accounting import (
     INVENTORY_STATUSES,
     OBLIGATION_STATUSES,
     PARSER_STATUSES,
+    _insert_row,
     _invalid,
     _json_text,
     _json_value,
@@ -61,48 +62,32 @@ def _insert_obligation(
         if str(existing["record_sha256"]) != record_sha256:
             raise HTTPException(status_code=409, detail="obligation identity already has different content")
         return _serialize_obligation(existing)
-    cursor = connection.execute(
-        """
-        INSERT INTO assessment_run_obligations (
-            engagement_id, run_id, identity_key, obligation_kind,
-            object_type, object_key, hard, status, resolution,
-            proof_receipt_ids_json, record_sha256
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            engagement_id,
-            run_id,
-            identity_key,
-            obligation_kind,
-            object_type,
-            object_key,
-            int(hard),
-            status_value,
-            resolution,
-            _json_text(proof_receipt_ids),
-            record_sha256,
-        ),
-    )
+    cursor = _insert_row(connection, "assessment_run_obligations", {
+        "engagement_id": engagement_id,
+        "run_id": run_id,
+        "identity_key": identity_key,
+        "obligation_kind": obligation_kind,
+        "object_type": object_type,
+        "object_key": object_key,
+        "hard": int(hard),
+        "status": status_value,
+        "resolution": resolution,
+        "proof_receipt_ids_json": _json_text(proof_receipt_ids),
+        "record_sha256": record_sha256,
+    })
     row = connection.execute(
         "SELECT * FROM assessment_run_obligations WHERE id = ?", (int(cursor.lastrowid),)
     ).fetchone()
     assert row is not None
-    connection.execute(
-        """
-        INSERT INTO assessment_run_obligation_events (
-            engagement_id, run_id, obligation_id, from_status,
-            to_status, resolution, proof_receipt_ids_json
-        ) VALUES (?, ?, ?, NULL, ?, ?, ?)
-        """,
-        (
-            engagement_id,
-            run_id,
-            int(row["id"]),
-            status_value,
-            resolution,
-            _json_text(proof_receipt_ids),
-        ),
-    )
+    _insert_row(connection, "assessment_run_obligation_events", {
+        "engagement_id": engagement_id,
+        "run_id": run_id,
+        "obligation_id": int(row["id"]),
+        "from_status": None,
+        "to_status": status_value,
+        "resolution": resolution,
+        "proof_receipt_ids_json": _json_text(proof_receipt_ids),
+    })
     return _serialize_obligation(row)
 
 
@@ -192,32 +177,22 @@ def record_run_sources(
                     raise HTTPException(status_code=409, detail="source inventory identity changed within run")
                 results.append(dict(existing))
                 continue
-            cursor = connection.execute(
-                """
-                INSERT INTO assessment_run_sources (
-                    engagement_id, run_id, target_key, declared_root, path,
-                    content_sha256, byte_size, line_count, encoding,
-                    inventory_status, exclusion_reason, parser_status,
-                    parser_error, identity_sha256
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    engagement.id,
-                    run_id,
-                    record["target_key"],
-                    record["declared_root"],
-                    record["path"],
-                    record["content_sha256"],
-                    record["byte_size"],
-                    record["line_count"],
-                    record["encoding"],
-                    inventory_status,
-                    record["exclusion_reason"],
-                    parser_status,
-                    record["parser_error"],
-                    identity_sha256,
-                ),
-            )
+            cursor = _insert_row(connection, "assessment_run_sources", {
+                "engagement_id": engagement.id,
+                "run_id": run_id,
+                "target_key": record["target_key"],
+                "declared_root": record["declared_root"],
+                "path": record["path"],
+                "content_sha256": record["content_sha256"],
+                "byte_size": record["byte_size"],
+                "line_count": record["line_count"],
+                "encoding": record["encoding"],
+                "inventory_status": inventory_status,
+                "exclusion_reason": record["exclusion_reason"],
+                "parser_status": parser_status,
+                "parser_error": record["parser_error"],
+                "identity_sha256": identity_sha256,
+            })
             source_id = int(cursor.lastrowid)
             object_key = f"{record['target_key']}:{record['path']}"
             if inventory_status == "included":
@@ -370,28 +345,19 @@ def record_source_read(
             (run_id, fingerprint),
         ).fetchone()
         if existing is None:
-            cursor = connection.execute(
-                """
-                INSERT INTO assessment_run_source_reads (
-                    engagement_id, run_id, source_id, dispatch_id, attempt,
-                    byte_start, byte_end, line_start, line_end,
-                    proof_receipt_id, read_fingerprint
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    engagement.id,
-                    run_id,
-                    source_id,
-                    int(dispatch["id"]),
-                    attempt,
-                    byte_start,
-                    byte_end,
-                    line_start,
-                    line_end,
-                    proof_receipt_id,
-                    fingerprint,
-                ),
-            )
+            cursor = _insert_row(connection, "assessment_run_source_reads", {
+                "engagement_id": engagement.id,
+                "run_id": run_id,
+                "source_id": source_id,
+                "dispatch_id": int(dispatch["id"]),
+                "attempt": attempt,
+                "byte_start": byte_start,
+                "byte_end": byte_end,
+                "line_start": line_start,
+                "line_end": line_end,
+                "proof_receipt_id": proof_receipt_id,
+                "read_fingerprint": fingerprint,
+            })
             existing = connection.execute(
                 "SELECT * FROM assessment_run_source_reads WHERE id = ?", (int(cursor.lastrowid),)
             ).fetchone()
@@ -439,16 +405,15 @@ def record_source_read(
                     """,
                     (_sha256(obligation_record), int(obligation["id"])),
                 )
-                connection.execute(
-                    """
-                    INSERT INTO assessment_run_obligation_events (
-                        engagement_id, run_id, obligation_id, from_status,
-                        to_status, resolution, proof_receipt_ids_json
-                    ) VALUES (?, ?, ?, ?, 'resolved',
-                              'complete observed byte coverage', '[]')
-                    """,
-                    (engagement.id, run_id, int(obligation["id"]), str(obligation["status"])),
-                )
+                _insert_row(connection, "assessment_run_obligation_events", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "obligation_id": int(obligation["id"]),
+                    "from_status": str(obligation["status"]),
+                    "to_status": "resolved",
+                    "resolution": "complete observed byte coverage",
+                    "proof_receipt_ids_json": "[]",
+                })
         record = dict(existing)
         record["source_sha256"] = str(source["content_sha256"])
         record["source_path"] = str(source["path"])
@@ -713,23 +678,15 @@ def update_run_obligation(
                 obligation_id,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO assessment_run_obligation_events (
-                engagement_id, run_id, obligation_id, from_status,
-                to_status, resolution, proof_receipt_ids_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                obligation_id,
-                existing["status"],
-                status_value,
-                resolution,
-                _json_text(receipt_ids),
-            ),
-        )
+        _insert_row(connection, "assessment_run_obligation_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "obligation_id": obligation_id,
+            "from_status": existing["status"],
+            "to_status": status_value,
+            "resolution": resolution,
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+        })
         updated = connection.execute(
             "SELECT * FROM assessment_run_obligations WHERE id = ?", (obligation_id,)
         ).fetchone()
@@ -847,23 +804,16 @@ def release_run_obligation(
                 obligation_id,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO assessment_run_obligation_events (
-                engagement_id, run_id, obligation_id, from_status,
-                to_status, resolution, proof_receipt_ids_json, actor_dispatch_id
-            ) VALUES (?, ?, ?, ?, 'released', ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                obligation_id,
-                current_status,
-                reason,
-                _json_text(receipt_ids),
-                int(dispatch["id"]),
-            ),
-        )
+        _insert_row(connection, "assessment_run_obligation_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "obligation_id": obligation_id,
+            "from_status": current_status,
+            "to_status": "released",
+            "resolution": reason,
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+            "actor_dispatch_id": int(dispatch["id"]),
+        })
         updated = connection.execute(
             "SELECT * FROM assessment_run_obligations WHERE id = ?", (obligation_id,)
         ).fetchone()

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import io
 import json
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 import pytest
 
 from vigil_cli import engagements, main as cli, remediation
+from vigil_cli import prompts
 
 
 class TerminalInput(io.StringIO):
@@ -41,8 +42,6 @@ def project(root, key="acme", *, kind="remediation", created="2026-10-19T09:00:0
 
 
 def test_remediation_start_uses_shared_fzf_picker_with_create_action(onboarding, monkeypatch):
-    from vigil_cli import prompts
-
     root, calls = onboarding
     project(root, "acme-a")
     selected, _ = project(root, "acme-b")

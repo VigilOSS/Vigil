@@ -5,8 +5,10 @@ from typing import Any
 
 from assess.lib.treesitter_index import (
     PHP_INCLUDE_STATUSES,
+    SIGNAL_DIMENSIONS,
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
     STRUCTURAL_CALLABLE_NAME_LIMIT,
+    STRUCTURAL_DIMENSIONS,
     STRUCTURAL_QUALIFIED_NAME_LIMIT,
     UNSCANNED_SCOPE_DEGRADATION_REASON,
 )
@@ -18,23 +20,6 @@ TOP_LEVEL_CALLABLE_NAME = "<top-level>"
 # Build and sync publish a file whose artifact fails validation as an all-byte
 # streaming fallback with this reason, so one file never blocks a repository.
 INVALID_ARTIFACT_REASON = "invalid_structural_artifact"
-STRUCTURAL_DIMENSIONS = {
-    "call_sites",
-    "classes",
-    "dataflow",
-    "entry_points",
-    "exports",
-    "functions",
-    "imports",
-    "security_sinks",
-    "security_sources",
-}
-SIGNAL_DIMENSIONS = (
-    "entry_points",
-    "imports",
-    "security_sinks",
-    "security_sources",
-)
 STRUCTURAL_RECORD_FIELDS = (
     "functions",
     "entry_points",

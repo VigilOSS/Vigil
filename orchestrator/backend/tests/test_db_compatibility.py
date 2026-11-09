@@ -15,15 +15,19 @@ def _write_db_with_tables(db_path: Path, sql: str) -> None:
         connection.executescript(sql)
 
 
-def test_check_is_noop_when_db_missing(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+@pytest.fixture
+def db_path(isolate_settings):
+    """The per-test database path the compatibility checks run against."""
+    return isolate_settings["data_dir"] / "orchestrator.sqlite3"
+
+
+def test_check_is_noop_when_db_missing(db_path):
     assert not db_path.exists()
     db_module._check_database_compatibility(db_path)  # no raise, no create
     assert not db_path.exists()
 
 
-def test_check_passes_on_current_schema(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_check_passes_on_current_schema(db_path):
     _write_db_with_tables(
         db_path,
         """
@@ -45,8 +49,7 @@ def test_check_passes_on_current_schema(isolate_settings):
     db_module._check_database_compatibility(db_path)  # no raise
 
 
-def test_check_raises_and_preserves_file_on_legacy_tables(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_check_raises_and_preserves_file_on_legacy_tables(db_path):
     _write_db_with_tables(
         db_path,
         """
@@ -61,8 +64,7 @@ def test_check_raises_and_preserves_file_on_legacy_tables(isolate_settings):
     assert db_path.exists(), "incompatible DB must NOT be deleted"
 
 
-def test_check_raises_on_engagement_scoped_table_missing_engagement_id(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_check_raises_on_engagement_scoped_table_missing_engagement_id(db_path):
     _write_db_with_tables(
         db_path,
         """
@@ -78,8 +80,7 @@ def test_check_raises_on_engagement_scoped_table_missing_engagement_id(isolate_s
     assert db_path.exists()
 
 
-def test_check_raises_on_known_scoped_table_missing_engagement_id(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_check_raises_on_known_scoped_table_missing_engagement_id(db_path):
     _write_db_with_tables(
         db_path,
         """
@@ -95,8 +96,7 @@ def test_check_raises_on_known_scoped_table_missing_engagement_id(isolate_settin
     assert db_path.exists()
 
 
-def test_check_raises_on_unopenable_file(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_check_raises_on_unopenable_file(db_path):
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db_path.write_bytes(b"not a sqlite database at all")
     with pytest.raises(db_module.IncompatibleDatabaseError) as exc:
@@ -105,8 +105,7 @@ def test_check_raises_on_unopenable_file(isolate_settings):
     assert db_path.exists(), "corrupt file must NOT be deleted"
 
 
-def test_init_db_propagates_incompatible_error(isolate_settings):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_init_db_propagates_incompatible_error(db_path):
     _write_db_with_tables(
         db_path,
         "CREATE TABLE projects (id INTEGER PRIMARY KEY);",
@@ -116,10 +115,9 @@ def test_init_db_propagates_incompatible_error(isolate_settings):
     assert db_path.exists()
 
 
-def test_operational_error_passthrough_not_incompatibility(monkeypatch, isolate_settings):
+def test_operational_error_passthrough_not_incompatibility(monkeypatch, db_path):
     """`database is locked` must surface as OperationalError, not a mis-framed
     IncompatibleDatabaseError telling the operator to move the DB aside."""
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     db_path.touch()
 
@@ -153,11 +151,10 @@ def test_default_busy_timeout_stays_below_agent_client_read_timeout(monkeypatch)
     assert db_module._resolve_busy_timeout_ms() == 8_000
 
 
-def test_check_accepts_future_shared_table_without_engagement_id(isolate_settings):
+def test_check_accepts_future_shared_table_without_engagement_id(db_path):
     """A future non-engagement-scoped table with an ``assessment_`` or ``code_``
     prefix must NOT trigger a false-positive refuse-to-start unless it is added
     to the known engagement-scoped table allowlist."""
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     _write_db_with_tables(
         db_path,
         """
@@ -170,11 +167,8 @@ def test_check_accepts_future_shared_table_without_engagement_id(isolate_setting
     db_module._check_database_compatibility(db_path)  # no raise
 
 
-def test_command_output_truth_migration_repairs_only_proven_preview_rows(
-    isolate_settings,
-):
+def test_command_output_truth_migration_repairs_only_proven_preview_rows(db_path):
     """Historical repair must not invent byte totals or reclassify ambiguous rows."""
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     db_module.init_db()
     with sqlite3.connect(str(db_path)) as connection:
         engagement_id = connection.execute(
@@ -305,10 +299,7 @@ CREATE TABLE code_analysis_queue (
 """
 
 
-def test_legacy_metadata_theme_is_not_elevated_to_service_owned_mode(
-    isolate_settings,
-):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_legacy_metadata_theme_is_not_elevated_to_service_owned_mode(db_path):
     _write_db_with_tables(
         db_path,
         _LEGACY_CODE_ANALYSIS_QUEUE_SQL
@@ -329,10 +320,7 @@ def test_legacy_metadata_theme_is_not_elevated_to_service_owned_mode(
 
 
 @pytest.mark.parametrize("schema_kind", ["fresh", "migrated"])
-def test_reanalysis_history_preserves_engagement_delete_parity(
-    isolate_settings, schema_kind
-):
-    db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
+def test_reanalysis_history_preserves_engagement_delete_parity(schema_kind, db_path):
     if schema_kind == "migrated":
         _write_db_with_tables(db_path, _LEGACY_CODE_ANALYSIS_QUEUE_SQL)
     db_module.init_db()

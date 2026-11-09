@@ -19,6 +19,7 @@ import pytest
 
 from assess.commands import code_classify
 from assess.lib.client import AssessError
+from _fake_client import StubClient
 
 _INVALIDATION = {
     "structural_index_invalidated_repo_ids": [42],
@@ -33,22 +34,13 @@ _INVALIDATION = {
 }
 
 
-class _ChunkClient:
+class _ChunkClient(StubClient):
     """Commits every chunk until ``fail_on``, which fails like a backend 5xx."""
 
     def __init__(self, *, fail_on: int = 0, response: dict | None = None) -> None:
         self.fail_on = fail_on
         self.response = response or {}
         self.posts: list[dict] = []
-
-    def __enter__(self) -> "_ChunkClient":
-        return self
-
-    def __exit__(self, *_exc) -> bool:
-        return False
-
-    def close(self) -> None:
-        return None
 
     def post(self, _endpoint: str, payload: dict, **_options) -> dict:
         self.posts.append(payload)

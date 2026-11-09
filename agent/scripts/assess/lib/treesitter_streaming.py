@@ -33,7 +33,9 @@ STREAMING_FALLBACK_BASELINE_UNAVAILABLE = frozenset({
     "exports",
     "functions",
 })
-_UNSUPPORTED_UNAVAILABLE_DIMENSIONS = [
+# Every dimension a structural index publishes, and the subset whose records
+# carry signal counts. `code_structural_metadata` validates against both.
+STRUCTURAL_DIMENSIONS = {
     "call_sites",
     "classes",
     "dataflow",
@@ -43,8 +45,10 @@ _UNSUPPORTED_UNAVAILABLE_DIMENSIONS = [
     "imports",
     "security_sinks",
     "security_sources",
-]
-_SIGNAL_DIMENSIONS = (
+}
+# An unsupported language reaches no reader, so every dimension is unavailable.
+_UNSUPPORTED_UNAVAILABLE_DIMENSIONS = sorted(STRUCTURAL_DIMENSIONS)
+SIGNAL_DIMENSIONS = (
     "entry_points",
     "imports",
     "security_sinks",
@@ -489,7 +493,7 @@ class StreamingSecurityScanner:
         self.import_targets: list[dict[str, Any]] = []
         self.security_sinks: list[dict[str, Any]] = []
         self.security_sources: list[dict[str, Any]] = []
-        self.signal_counts = {dimension: 0 for dimension in _SIGNAL_DIMENSIONS}
+        self.signal_counts = {dimension: 0 for dimension in SIGNAL_DIMENSIONS}
         self._kind_counts: dict[str, dict[str, int]] = {
             dimension: {} for dimension in _KINDED_SIGNAL_LISTS
         }
@@ -762,20 +766,20 @@ class StreamingSecurityScanner:
             if line.strip(b" \t\v\f") or self._block_comment:
                 self._line_comment = self._line_is_commentary(line)
             self._scan_window(line, accept_before=len(line))
-        self.total_lines += 1
-        self._line_number += 1
-        self._line_had_bytes = False
-        self._line_comment = None
-        self._line_to_end_comment = False
-        self._piece_tail = b""
-        self._line_windows = 0
+        self._reset_line()
 
     def _finish_line(self) -> None:
         if self._line_buffer:
             self._scan_window(bytes(self._line_buffer), accept_before=len(self._line_buffer))
+        self._line_buffer.clear()
+        self._reset_line()
+
+    def _reset_line(self) -> None:
+        """Advance to the next line and clear the per-line scan state. Not
+        `_line_buffer`: the short-line path never fills it, which is the whole
+        difference between the two callers."""
         self.total_lines += 1
         self._line_number += 1
-        self._line_buffer.clear()
         self._line_had_bytes = False
         self._line_comment = None
         self._line_to_end_comment = False
@@ -965,7 +969,7 @@ class StreamingSecurityScanner:
             self.unclosed_block_line = self._block_comment_line
             self._truncated.update(
                 dimension
-                for dimension in _SIGNAL_DIMENSIONS
+                for dimension in SIGNAL_DIMENSIONS
                 if self.signal_counts[dimension]
             )
         for dimension in _KINDED_SIGNAL_LISTS:
@@ -1213,4 +1217,4 @@ def _complete_index_metadata(
     return indexed
 
 
-__all__ = ['STREAMING_SCAN_WINDOW_BYTES', 'STREAMING_SCAN_OVERLAP_BYTES', 'STRUCTURAL_SIGNAL_LIMIT', 'STREAMING_FALLBACK_BASELINE_UNAVAILABLE', '_UNSUPPORTED_UNAVAILABLE_DIMENSIONS', '_SIGNAL_DIMENSIONS', '_CAPPED_INDEX_LISTS', '_STREAM_SOURCE_PATTERNS', '_STREAM_IMPORT_PATTERNS', '_STREAM_EXTRA_SINK_PATTERNS', '_STREAM_EXTRA_ENTRY_PATTERNS', '_byte_pattern', '_HASH_COMMENT_LANGUAGES', '_HASH_CODE_PREFIXES', 'StreamingSecurityScanner', 'streaming_security_fallback', '_fallback_from_bytes', '_attach_bounded_security_sources', '_complete_index_metadata']
+__all__ = ['STREAMING_SCAN_WINDOW_BYTES', 'STREAMING_SCAN_OVERLAP_BYTES', 'STRUCTURAL_SIGNAL_LIMIT', 'STREAMING_FALLBACK_BASELINE_UNAVAILABLE', 'STRUCTURAL_DIMENSIONS', '_UNSUPPORTED_UNAVAILABLE_DIMENSIONS', 'SIGNAL_DIMENSIONS', '_CAPPED_INDEX_LISTS', '_STREAM_SOURCE_PATTERNS', '_STREAM_IMPORT_PATTERNS', '_STREAM_EXTRA_SINK_PATTERNS', '_STREAM_EXTRA_ENTRY_PATTERNS', '_byte_pattern', '_HASH_COMMENT_LANGUAGES', '_HASH_CODE_PREFIXES', 'StreamingSecurityScanner', 'streaming_security_fallback', '_fallback_from_bytes', '_attach_bounded_security_sources', '_complete_index_metadata']

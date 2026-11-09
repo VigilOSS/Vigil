@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import sqlite3
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Any, Iterable, Iterator
 from urllib.parse import urlparse
 
@@ -110,6 +111,81 @@ def _row_to_dict(row: Any) -> dict[str, Any]:
     return data
 
 
+# ── Intel type registry ────────────────────────────────────
+
+
+@dataclass(frozen=True)
+class _IntelType:
+    """One intel family: its API slug, its table family and its keys.
+
+    ``table`` and ``entity_type`` are DERIVED rather than restated: every intel
+    table is ``intel_<plural>`` and the FTS shadow index's ``entity_type`` is
+    always the slug with hyphens as underscores. Declaring a family once here
+    is what keeps the UPSERT conflict key, the shadow-index entity type, the
+    PATCH table and the summary key from disagreeing with each other.
+    """
+
+    slug: str
+    plural: str
+    natural_key: tuple[str, ...]
+    title_fields: tuple[str, ...]
+
+    @property
+    def table(self) -> str:
+        return f"intel_{self.plural}"
+
+    @property
+    def entity_type(self) -> str:
+        return self.slug.replace("-", "_")
+
+    @property
+    def url_plural(self) -> str:
+        """The URL segment this family's list and record routes are mounted on."""
+
+        return self.plural.replace("_", "-")
+
+    @property
+    def rationale_column(self) -> str:
+        """The free-text column a supersede ``--rationale`` is appended to.
+
+        ``intel_notes`` stores prose in ``body_markdown``; every other intel
+        table has a dedicated ``notes`` column (targeting ``notes`` on
+        ``intel_notes`` raises "no such column: notes" -> 500).
+        """
+
+        return "body_markdown" if self.slug == "note" else "notes"
+
+
+# Natural keys mirror the per-table ``UNIQUE(engagement_id, …)`` constraint
+# declared in ``db.py`` and the ``min_length`` Field markers in
+# ``intel_schemas.py``. ``supersede_intel`` validates they are present in the
+# new payload BEFORE invoking the corresponding ``record_*`` helper — the
+# helpers declare them as required keyword arguments, so a missing key would
+# otherwise raise ``TypeError`` (HTTP 500).
+_INTEL_TYPES: tuple[_IntelType, ...] = (
+    _IntelType("tech-component", "tech_components", ("component", "version"), ("component",)),
+    _IntelType("person", "people", ("name",), ("name",)),
+    _IntelType("email", "emails", ("address",), ("address",)),
+    _IntelType("domain", "domains", ("identity", "kind"), ("identity",)),
+    _IntelType("cve", "cves", ("cve_id", "affected_component"), ("cve_id",)),
+    _IntelType("dns-record", "dns_records", ("record_type", "name", "value"), ("name",)),
+    _IntelType(
+        "social-profile",
+        "social_profiles",
+        ("subject_kind", "subject_ref", "platform", "handle"),
+        ("handle", "url"),
+    ),
+    _IntelType("breach-record", "breach_records", ("subject", "breach_name"), ("breach_name", "subject")),
+    _IntelType("org-fact", "org_facts", ("fact_key",), ("fact_key",)),
+    _IntelType("note", "notes", ("title",), ("title",)),
+)
+_INTEL_TYPE_BY_SLUG: dict[str, _IntelType] = {spec.slug: spec for spec in _INTEL_TYPES}
+# Public: ``api/intel.py`` resolves its URL plural segment to the type slug
+# through this, so the router cannot disagree with the registry about which
+# families exist or what their segments are called.
+INTEL_TYPE_BY_PLURAL: dict[str, str] = {spec.url_plural: spec.slug for spec in _INTEL_TYPES}
+
+
 # ── Shadow FTS index ───────────────────────────────────────
 
 
@@ -197,6 +273,46 @@ def _generic_upsert(
     return dict(row)
 
 
+def _record_intel_row(
+    intel_type: str,
+    engagement: Any,
+    values: dict[str, Any],
+    *,
+    key: str,
+    body_parts: tuple[Any, ...],
+    source_name: str,
+    _conn: Any | None,
+) -> dict[str, Any]:
+    """UPSERT one intel row, refresh its FTS shadow row, and return the record.
+
+    The per-type facts — table, UPSERT conflict key and shadow-index
+    ``entity_type`` — are read off ``_INTEL_TYPES`` instead of being restated
+    in every ``record_*`` helper, so a family cannot key its write one way and
+    its search index another. The caller still owns its own validation, its
+    own ``values`` dict and its own FTS ``key``/``body_parts``.
+    """
+
+    spec = _INTEL_TYPE_BY_SLUG[intel_type]
+    with _use_connection(_conn) as connection:
+        row = _generic_upsert(
+            connection,
+            table=spec.table,
+            engagement_id=engagement.id,
+            conflict_columns=list(spec.natural_key),
+            values=values,
+        )
+        _upsert_search_index(
+            connection,
+            engagement_id=engagement.id,
+            entity_type=spec.entity_type,
+            source_id=int(row["id"]),
+            key=key,
+            body=_compose_body(*body_parts),
+            source_name=source_name,
+        )
+    return _post_process_intel_row(intel_type, row)
+
+
 # ── Record helpers ─────────────────────────────────────────
 
 
@@ -229,24 +345,15 @@ def record_tech_component(
         values["first_seen_at"] = first_seen_at
     if last_seen_at:
         values["last_seen_at"] = last_seen_at
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_tech_components",
-            engagement_id=engagement.id,
-            conflict_columns=["component", "version"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="tech_component",
-            source_id=int(row["id"]),
-            key=f"{component} {version}".strip(),
-            body=_compose_body(component, version, confidence, evidence_ref, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "tech-component",
+        engagement,
+        values,
+        key=f"{component} {version}".strip(),
+        body_parts=(component, version, confidence, evidence_ref, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_person(
@@ -271,24 +378,15 @@ def record_person(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_people",
-            engagement_id=engagement.id,
-            conflict_columns=["name"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="person",
-            source_id=int(row["id"]),
-            key=name,
-            body=_compose_body(name, role, organization, email, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "person",
+        engagement,
+        values,
+        key=name,
+        body_parts=(name, role, organization, email, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_email(
@@ -311,24 +409,15 @@ def record_email(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_emails",
-            engagement_id=engagement.id,
-            conflict_columns=["address"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="email",
-            source_id=int(row["id"]),
-            key=address,
-            body=_compose_body(address, role_hint, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "email",
+        engagement,
+        values,
+        key=address,
+        body_parts=(address, role_hint, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_domain(
@@ -353,24 +442,15 @@ def record_domain(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_domains",
-            engagement_id=engagement.id,
-            conflict_columns=["identity", "kind"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="domain",
-            source_id=int(row["id"]),
-            key=identity,
-            body=_compose_body(identity, kind, value, live_status, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "domain",
+        engagement,
+        values,
+        key=identity,
+        body_parts=(identity, kind, value, live_status, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_cve(
@@ -412,35 +492,24 @@ def record_cve(
         "details_json": _json_text(details_payload),
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_cves",
-            engagement_id=engagement.id,
-            conflict_columns=["cve_id", "affected_component"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="cve",
-            source_id=int(row["id"]),
-            key=cve_id,
-            body=_compose_body(
-                cve_id,
-                affected_component,
-                affected_version_range,
-                cwe_id,
-                cvss_vector,
-                validation_status,
-                linked_finding_slug,
-                notes,
-            ),
-            source_name=source_name,
-        )
-    out = _row_to_dict(row)
-    out["poc_available"] = bool(out.get("poc_available"))
-    return out
+    return _record_intel_row(
+        "cve",
+        engagement,
+        values,
+        key=cve_id,
+        body_parts=(
+            cve_id,
+            affected_component,
+            affected_version_range,
+            cwe_id,
+            cvss_vector,
+            validation_status,
+            linked_finding_slug,
+            notes,
+        ),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_dns_record(
@@ -467,24 +536,15 @@ def record_dns_record(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_dns_records",
-            engagement_id=engagement.id,
-            conflict_columns=["record_type", "name", "value"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="dns_record",
-            source_id=int(row["id"]),
-            key=f"{record_type} {name}".strip(),
-            body=_compose_body(record_type, name, value, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "dns-record",
+        engagement,
+        values,
+        key=f"{record_type} {name}".strip(),
+        body_parts=(record_type, name, value, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_social_profile(
@@ -511,24 +571,15 @@ def record_social_profile(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_social_profiles",
-            engagement_id=engagement.id,
-            conflict_columns=["subject_kind", "subject_ref", "platform", "handle"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="social_profile",
-            source_id=int(row["id"]),
-            key=f"{platform} {handle}".strip(),
-            body=_compose_body(platform, handle, url, subject_ref, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "social-profile",
+        engagement,
+        values,
+        key=f"{platform} {handle}".strip(),
+        body_parts=(platform, handle, url, subject_ref, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_breach_record(
@@ -553,24 +604,15 @@ def record_breach_record(
         "notes": notes,
         "provenance_json": _json_text(provenance),
     }
-    with _use_connection(_conn) as connection:
-        row = _generic_upsert(
-            connection,
-            table="intel_breach_records",
-            engagement_id=engagement.id,
-            conflict_columns=["subject", "breach_name"],
-            values=values,
-        )
-        _upsert_search_index(
-            connection,
-            engagement_id=engagement.id,
-            entity_type="breach_record",
-            source_id=int(row["id"]),
-            key=f"{subject} {breach_name}".strip(),
-            body=_compose_body(subject, breach_name, breach_date, data_types, notes),
-            source_name=source_name,
-        )
-    return _row_to_dict(row)
+    return _record_intel_row(
+        "breach-record",
+        engagement,
+        values,
+        key=f"{subject} {breach_name}".strip(),
+        body_parts=(subject, breach_name, breach_date, data_types, notes,),
+        source_name=source_name,
+        _conn=_conn,
+    )
 
 
 def record_org_fact(
@@ -731,18 +773,9 @@ def record_note(
 # ── List helpers ───────────────────────────────────────────
 
 
-_LIST_TABLES: dict[str, str] = {
-    "tech_component": "intel_tech_components",
-    "person": "intel_people",
-    "email": "intel_emails",
-    "domain": "intel_domains",
-    "cve": "intel_cves",
-    "dns_record": "intel_dns_records",
-    "social_profile": "intel_social_profiles",
-    "breach_record": "intel_breach_records",
-    "org_fact": "intel_org_facts",
-    "note": "intel_notes",
-}
+# Keyed by the FTS shadow index's ``entity_type``; ``_INTEL_TABLE_BY_TYPE``
+# below answers the same question for the kebab-case API slug.
+_LIST_TABLES: dict[str, str] = {spec.entity_type: spec.table for spec in _INTEL_TYPES}
 
 
 def _list_rows(
@@ -799,28 +832,13 @@ def _list_rows(
 
 # Map intel type slug -> table name. (Updatable columns per type live
 # separately in ``_INTEL_UPDATABLE_FIELDS`` below.)
-_INTEL_TABLE_BY_TYPE: dict[str, str] = {
-    "tech-component": "intel_tech_components",
-    "person": "intel_people",
-    "email": "intel_emails",
-    "domain": "intel_domains",
-    "cve": "intel_cves",
-    "dns-record": "intel_dns_records",
-    "social-profile": "intel_social_profiles",
-    "breach-record": "intel_breach_records",
-    "org-fact": "intel_org_facts",
-    "note": "intel_notes",
-}
+_INTEL_TABLE_BY_TYPE: dict[str, str] = {spec.slug: spec.table for spec in _INTEL_TYPES}
 
 
-# The free-text column a supersede ``--rationale`` is appended to differs by
-# table: ``intel_notes`` stores prose in ``body_markdown``; every other intel
-# table has a dedicated ``notes`` column. Keyed by intel_type so the append in
-# ``supersede_intel`` targets the column that actually exists on each table
-# (targeting ``notes`` on ``intel_notes`` raises "no such column: notes" -> 500).
+# Keyed by intel_type so the append in ``supersede_intel`` targets the column
+# that actually exists on each table (see ``_IntelType.rationale_column``).
 _INTEL_RATIONALE_COLUMN: dict[str, str] = {
-    intel_type: ("body_markdown" if intel_type == "note" else "notes")
-    for intel_type in _INTEL_TABLE_BY_TYPE
+    spec.slug: spec.rationale_column for spec in _INTEL_TYPES
 }
 
 
@@ -873,37 +891,11 @@ _INTEL_UPDATABLE_FIELDS: dict[str, set[str]] = {
 }
 
 
-_INTEL_FTS_ENTITY_TYPE: dict[str, str] = {
-    "tech-component": "tech_component",
-    "person": "person",
-    "email": "email",
-    "domain": "domain",
-    "cve": "cve",
-    "dns-record": "dns_record",
-    "social-profile": "social_profile",
-    "breach-record": "breach_record",
-    "org-fact": "org_fact",
-    "note": "note",
-}
+_INTEL_FTS_ENTITY_TYPE: dict[str, str] = {spec.slug: spec.entity_type for spec in _INTEL_TYPES}
 
 
-# Natural-key fields per intel type. ``supersede_intel`` validates these are
-# present in the new payload BEFORE invoking the corresponding ``record_*``
-# helper — the helpers declare these as keyword-only required positional
-# kwargs, so a missing key would otherwise raise ``TypeError`` (HTTP 500).
-# Mirrors the per-table ``UNIQUE(engagement_id, …)`` constraint declared in
-# ``db.py`` and the ``min_length`` Field markers in ``intel_schemas.py``.
 _INTEL_NATURAL_KEY_FIELDS: dict[str, tuple[str, ...]] = {
-    "tech-component": ("component", "version"),
-    "person": ("name",),
-    "email": ("address",),
-    "domain": ("identity", "kind"),
-    "cve": ("cve_id", "affected_component"),
-    "dns-record": ("record_type", "name", "value"),
-    "social-profile": ("subject_kind", "subject_ref", "platform", "handle"),
-    "breach-record": ("subject", "breach_name"),
-    "org-fact": ("fact_key",),
-    "note": ("title",),
+    spec.slug: spec.natural_key for spec in _INTEL_TYPES
 }
 
 
@@ -1845,18 +1837,7 @@ def list_leads(
 # ── Aggregate / search ─────────────────────────────────────
 
 
-_SUMMARY_PLURAL: dict[str, str] = {
-    "tech_component": "tech_components",
-    "person": "people",
-    "email": "emails",
-    "domain": "domains",
-    "cve": "cves",
-    "dns_record": "dns_records",
-    "social_profile": "social_profiles",
-    "breach_record": "breach_records",
-    "org_fact": "org_facts",
-    "note": "notes",
-}
+_SUMMARY_PLURAL: dict[str, str] = {spec.entity_type: spec.plural for spec in _INTEL_TYPES}
 
 
 def intel_summary(engagement_id: int) -> dict[str, int]:
@@ -1980,16 +1961,7 @@ def intel_search(
 
 
 _INTEL_RESOLUTION_TITLE_FIELDS: dict[str, tuple[str, ...]] = {
-    "tech_component": ("component",),
-    "person": ("name",),
-    "email": ("address",),
-    "domain": ("identity",),
-    "cve": ("cve_id",),
-    "dns_record": ("name",),
-    "social_profile": ("handle", "url"),
-    "breach_record": ("breach_name", "subject"),
-    "org_fact": ("fact_key",),
-    "note": ("title",),
+    spec.entity_type: spec.title_fields for spec in _INTEL_TYPES
 }
 
 

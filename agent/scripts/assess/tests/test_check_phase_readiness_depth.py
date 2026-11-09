@@ -20,6 +20,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from _fake_client import StubClient
+
 from assess.commands import check_phase_readiness as cpr
 
 
@@ -197,10 +199,7 @@ def _setup_report_env(monkeypatch, tmp_path, *, backend, depth_ledger, terminal_
         json.dumps({"engagement_type": "web", "current_phase": "exploit"}),
         encoding="utf-8")
 
-    class _Client:
-        def __init__(self, *_a, **_k) -> None:
-            pass
-
+    class _Client(StubClient):
         def get(self, path: str):
             if path == "phase-readiness?phase=report":
                 return backend
@@ -212,12 +211,6 @@ def _setup_report_env(monkeypatch, tmp_path, *, backend, depth_ledger, terminal_
 
         def get_engagement(self, path: str):
             return None
-
-        def close(self) -> None:
-            return None
-
-        def __enter__(self):
-            return self
 
         def __exit__(self, *_exc):
             self.close()

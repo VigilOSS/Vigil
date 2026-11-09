@@ -118,9 +118,11 @@ until the source content is clean.
 """
 from __future__ import annotations
 
+import dataclasses
 import hashlib
 import json
 import sys
+from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -996,16 +998,29 @@ def _command_run_lines(rows: list[dict], header_label: str) -> list[str]:
     return lines
 
 
-def _operator_details_block(
-    finding: dict,
-    resolved: dict,
-    linked_runs: list[dict],
-    repro_runs: list[dict],
-    repro_unresolved: list[str],
-    hygiene_warnings: list[str],
-    advisories: list[str],
-    draft: bool,
-) -> list[str]:
+@dataclass(frozen=True)
+class _Render:
+    """Every value the submission render and its OPERATOR DETAILS block read.
+
+    One record so the three renders in :func:`run` cannot transpose a positional
+    argument, and so the hygiene scan's deliberate exclusion of the tool's own
+    warning and advisory text is expressed as a ``dataclasses.replace`` rather
+    than as two empty lists inside a ten-argument call.
+    """
+
+    finding: dict
+    resolved: dict
+    platform: str
+    linked_runs: list[dict]
+    repro_runs: list[dict]
+    repro_unresolved: list[str]
+    draft: bool
+    hygiene_warnings: list[str]
+    required_headers: dict[str, str]
+    advisories: list[str]
+
+
+def _operator_details_block(ctx: _Render) -> list[str]:
     """The single OPERATOR DETAILS reference section below the second ``---``.
 
     ONE section consolidates everything the operator never pastes and the
@@ -1028,30 +1043,30 @@ def _operator_details_block(
         "",
     ]
 
-    meta = _metadata_reference_lines(finding)
+    meta = _metadata_reference_lines(ctx.finding)
     if meta:
         lines += ["**Finding metadata** (weave into the body as needed):", "", *meta, ""]
 
     # Dedup/root-cause, chain/propagation, and verification — the full record.
-    lines += _finding_record_lines(finding)
+    lines += _finding_record_lines(ctx.finding)
 
-    if hygiene_warnings:
+    if ctx.hygiene_warnings:
         lines += ["**Hygiene warnings** (strip every one before an external submission):", ""]
-        lines += [f"- {warning}" for warning in hygiene_warnings]
+        lines += [f"- {warning}" for warning in ctx.hygiene_warnings]
         lines.append("")
 
-    if advisories:
+    if ctx.advisories:
         lines += ["**Advisories** (non-blocking — your call):", ""]
-        lines += [f"- {advisory}" for advisory in advisories]
+        lines += [f"- {advisory}" for advisory in ctx.advisories]
         lines.append("")
 
-    proof_lines = _poc_lines(finding)
-    if resolved["evidence_ref"]:
-        proof_lines += [f"- **Evidence reference:** {resolved['evidence_ref']}", ""]
+    proof_lines = _poc_lines(ctx.finding)
+    if ctx.resolved["evidence_ref"]:
+        proof_lines += [f"- **Evidence reference:** {ctx.resolved['evidence_ref']}", ""]
     # Show what the operator actually wrote when the path was normalized, so the
     # authored value is not invisible in both output files.
-    raw_ref = _nonempty(resolved["durable_evidence"].get("raw_ref"))
-    if raw_ref and raw_ref != resolved["evidence_ref"]:
+    raw_ref = _nonempty(ctx.resolved["durable_evidence"].get("raw_ref"))
+    if raw_ref and raw_ref != ctx.resolved["evidence_ref"]:
         proof_lines += [f"- **Evidence reference (as authored):** {raw_ref}", ""]
     lines += [
         "**Structured proof** (weave exact values into the Evidence section above):",
@@ -1059,51 +1074,51 @@ def _operator_details_block(
     ]
     if proof_lines:
         lines += proof_lines
-    elif draft:
+    elif ctx.draft:
         lines += [
             "[NEEDS: proof content — a reproducing request/response or PoC code]",
             "",
         ]
-    if draft and not resolved["has_durable_proof"]:
+    if ctx.draft and not ctx.resolved["has_durable_proof"]:
         lines += [
             "[NEEDS: indexed, present evidence artifact inside this engagement]",
             "",
         ]
 
-    if linked_runs:
+    if ctx.linked_runs:
         lines += [
             "**Linked command runs** (author Evidence from these; run "
             "`vigil assess command-run list` to find more):",
             "",
         ]
-        lines += _command_run_lines(linked_runs, "Run")
+        lines += _command_run_lines(ctx.linked_runs, "Run")
 
     # The reproduction's own audit trail, in the author's declared step order. It
     # is the check on Steps to Reproduce: transcribe the argv below rather than
     # paraphrasing the step, and a step with no run under it was never executed.
-    if repro_runs or repro_unresolved:
+    if ctx.repro_runs or ctx.repro_unresolved:
         lines += [
             "**Reproduction runs** (`details.repro_runs`, in step order — the argv "
             "that actually produced Steps to Reproduce; transcribe from these, do "
             "not paraphrase):",
             "",
         ]
-        lines += _command_run_lines(repro_runs, "Step run")
+        lines += _command_run_lines(ctx.repro_runs, "Step run")
         # Named here, where the missing argv would have been, rather than only in
         # the advisories block — the report-writer is reading this section to
         # transcribe a step, and needs to see that one of them has nothing under it.
-        for entry in repro_unresolved:
+        for entry in ctx.repro_unresolved:
             lines += [
                 f"- **Unresolved** — `details.repro_runs` cites {entry}. No audit "
                 "row stands behind the step attributed to it; correct the id at the "
                 "finding rather than writing that step from the prose.",
                 "",
             ]
-    elif resolved["steps"] and _source_derived(finding):
+    elif ctx.resolved["steps"] and _source_derived(ctx.finding):
         # A source-derived code finding is reproduced by reading the cited source;
         # its proof receipts stand where command runs would.
         receipt_ids = ", ".join(
-            str(receipt.get("id")) for receipt in finding.get("proof_receipts") or []
+            str(receipt.get("id")) for receipt in ctx.finding.get("proof_receipts") or []
         )
         lines += [
             f"- **Reproduction basis:** source-derived: proof receipts {receipt_ids} "
@@ -1111,7 +1126,7 @@ def _operator_details_block(
             "the steps from the cited source lines those receipts observed.",
             "",
         ]
-    elif resolved["steps"] and draft:
+    elif ctx.resolved["steps"] and ctx.draft:
         lines += [
             "[NEEDS: details.repro_runs — the command-run ids behind these steps "
             "(`vigil assess command-run list --q \"<url/param/payload>\"`), so the "
@@ -1120,7 +1135,7 @@ def _operator_details_block(
         ]
 
     # Freeform investigation notes go last — the largest reference block.
-    lines += _notes_reference_lines(finding)
+    lines += _notes_reference_lines(ctx.finding)
 
     return lines
 
@@ -1168,31 +1183,18 @@ def _operational_header_lines(finding: dict, required_headers: dict[str, str]) -
     return lines
 
 
-def _render_markdown(
-    finding: dict,
-    resolved: dict,
-    platform: str,
-    linked_runs: list[dict],
-    repro_runs: list[dict],
-    repro_unresolved: list[str],
-    draft: bool,
-    hygiene_warnings: list[str],
-    required_headers: dict[str, str],
-    advisories: list[str],
-    *,
-    include_operator_details: bool = True,
-) -> str:
+def _render_markdown(ctx: _Render, *, include_operator_details: bool = True) -> str:
     # --- header field lines (the platform copy-paste layout) ----------------
     # The slug is NOT emitted in the body (submission-format.md "No internal
     # identifiers"); it lives in the directory name + context JSON.
-    lines: list[str] = [f"**Title:** {_needs(resolved['title'], 'title')}", ""]
+    lines: list[str] = [f"**Title:** {_needs(ctx.resolved['title'], 'title')}", ""]
 
-    if platform == "bugcrowd":
-        lines += [f"**VRT:** {_needs(resolved['vrt'], 'VRT category')}", ""]
-    elif platform == "hackerone":
-        lines += [f"**Weakness:** {_needs(resolved['weakness'], 'weakness')}", ""]
-    elif platform == "ghsa":
-        ghsa = detail_value(finding, "ghsa", {})
+    if ctx.platform == "bugcrowd":
+        lines += [f"**VRT:** {_needs(ctx.resolved['vrt'], 'VRT category')}", ""]
+    elif ctx.platform == "hackerone":
+        lines += [f"**Weakness:** {_needs(ctx.resolved['weakness'], 'weakness')}", ""]
+    elif ctx.platform == "ghsa":
+        ghsa = detail_value(ctx.finding, "ghsa", {})
         ghsa = ghsa if isinstance(ghsa, dict) else {}
         for key, label in (("ecosystem", "Ecosystem"), ("package_name", "Package name"), ("affected_versions", "Affected versions"), ("patched_versions", "Patched versions"), ("cwe_ids", "CWEs"), ("vulnerable_functions", "Vulnerable functions")):
             value = ghsa.get(key)
@@ -1203,51 +1205,42 @@ def _render_markdown(
         lines += [f"**Request CVE:** {'Yes' if request is True else 'No' if request is False else '[NEEDS: ghsa.request_cve]'}", ""]
     # direct: no platform-taxonomy line (VRT / weakness dropped).
 
-    severity = resolved["severity"]
+    severity = ctx.resolved["severity"]
     lines += [f"**Severity:** {severity.upper() if severity else '[NEEDS: severity]'}", ""]
 
-    cvss = _needs(resolved["cvss_vector"], "CVSS vector")
-    if resolved["cvss_vector"] and resolved["cvss_score"] is not None:
-        cvss = f"{cvss} ({resolved['cvss_score']})"
+    cvss = _needs(ctx.resolved["cvss_vector"], "CVSS vector")
+    if ctx.resolved["cvss_vector"] and ctx.resolved["cvss_score"] is not None:
+        cvss = f"{cvss} ({ctx.resolved['cvss_score']})"
     lines += [f"**CVSS:** {cvss}", ""]
 
     # --- A2 operational overlay (rendered FROM finding fields) --------------
     # Placed in the copy-paste header, above the first ``---``, so it survives
     # ``--overwrite``. Omitted entirely when the finding carries none of its
     # backing fields.
-    lines += _operational_header_lines(finding, required_headers)
+    lines += _operational_header_lines(ctx.finding, ctx.required_headers)
 
     lines += ["---", ""]
 
     # --- stable body sections (### headers) ---------------------------------
-    lines += _section("Summary", [resolved["summary"] or "[NEEDS: summary]"])
+    lines += _section("Summary", [ctx.resolved["summary"] or "[NEEDS: summary]"])
 
-    step_body = step_lines(resolved["steps"]) or ["[NEEDS: steps to reproduce]"]
+    step_body = step_lines(ctx.resolved["steps"]) or ["[NEEDS: steps to reproduce]"]
     lines += _section("Steps to Reproduce", step_body)
 
-    lines += _section("Evidence", _evidence_body(resolved["evidence"], draft))
+    lines += _section("Evidence", _evidence_body(ctx.resolved["evidence"], ctx.draft))
 
-    attack_scenario = _nonempty(detail_value(finding, "attack_scenario", ""))
+    attack_scenario = _nonempty(detail_value(ctx.finding, "attack_scenario", ""))
     if attack_scenario:
         lines += _section("Attack Scenario", [attack_scenario])
 
-    lines += _section("Impact", [_needs(resolved["impact"], "attacker-impact statement")])
+    lines += _section("Impact", [_needs(ctx.resolved["impact"], "attacker-impact statement")])
 
-    lines += _section("Remediation", [resolved["remediation"] or "[NEEDS: remediation]"])
+    lines += _section("Remediation", [ctx.resolved["remediation"] or "[NEEDS: remediation]"])
 
     # --- single OPERATOR DETAILS reference section below the second divider --
     # (never pasted; the report-writer authors the body sections FROM it).
     if include_operator_details:
-        lines += _operator_details_block(
-            finding,
-            resolved,
-            linked_runs,
-            repro_runs,
-            repro_unresolved,
-            hygiene_warnings,
-            advisories,
-            draft,
-        )
+        lines += _operator_details_block(ctx)
 
     text = "\n".join(lines).rstrip()
     return text + "\n"
@@ -1324,21 +1317,17 @@ def _build_context(
     }
 
 
-def _restore_output(path: Path, previous: bytes | None) -> None:
-    """Undo a final-mode file write after artifact registration fails."""
-    if previous is None:
-        path.unlink(missing_ok=True)
-    else:
-        path.write_bytes(previous)
-
-
 def _restore_outputs(
     outputs: tuple[tuple[Path, bytes | None], ...],
 ) -> list[str]:
+    """Undo the final-mode file writes after artifact registration fails."""
     errors: list[str] = []
     for path, previous in outputs:
         try:
-            _restore_output(path, previous)
+            if previous is None:
+                path.unlink(missing_ok=True)
+            else:
+                path.write_bytes(previous)
         except OSError as exc:
             errors.append(f"{path}: {exc}")
     return errors
@@ -1659,18 +1648,19 @@ def run(args) -> None:
         # warning strings themselves quote the leaked value (a UUID, a `cases.db`
         # literal), so scanning a render that already contains them would flag that
         # warning text as if it were a fresh leak.
-        scan_markdown = _render_markdown(
-            render_finding,
-            resolved,
-            platform,
-            linked_runs,
-            repro_runs,
-            repro_unresolved,
-            draft,
-            [],
-            required_headers,
-            [],
+        render_ctx = _Render(
+            finding=render_finding,
+            resolved=resolved,
+            platform=platform,
+            linked_runs=linked_runs,
+            repro_runs=repro_runs,
+            repro_unresolved=repro_unresolved,
+            draft=draft,
+            hygiene_warnings=[],
+            required_headers=required_headers,
+            advisories=[],
         )
+        scan_markdown = _render_markdown(render_ctx)
         hygiene_warnings = _hygiene_warnings(
             authored_body.decode("utf-8") if authored_body is not None else scan_markdown, slug, internal_ids, engagement_dir
         )
@@ -1746,38 +1736,17 @@ def run(args) -> None:
                 "already exists; pass --overwrite to replace it."
             )
 
-        markdown = _render_markdown(
-            render_finding,
-            resolved,
-            platform,
-            linked_runs,
-            repro_runs,
-            repro_unresolved,
-            draft,
-            hygiene_warnings,
-            required_headers,
-            advisories,
+        render_ctx = dataclasses.replace(
+            render_ctx, hygiene_warnings=hygiene_warnings, advisories=advisories
         )
-        external_body = _render_markdown(
-            render_finding,
-            resolved,
-            platform,
-            linked_runs,
-            repro_runs,
-            repro_unresolved,
-            draft,
-            hygiene_warnings,
-            required_headers,
-            advisories,
-            include_operator_details=False,
-        )
+        markdown = _render_markdown(render_ctx)
+        external_body = _render_markdown(render_ctx, include_operator_details=False)
         external_bytes = external_body.encode("utf-8") if authored_body is None else authored_body
         if authored_body is not None:
             # The reference appendix stays local. The outgoing file is an exact capture.
-            markdown = authored_body.decode("utf-8") + "\n" + "\n".join(_operator_details_block(
-                render_finding, resolved, linked_runs, repro_runs, repro_unresolved,
-                hygiene_warnings, advisories, draft,
-            ))
+            markdown = authored_body.decode("utf-8") + "\n" + "\n".join(
+                _operator_details_block(render_ctx)
+            )
         submission_sha256 = hashlib.sha256(markdown.encode("utf-8")).hexdigest()
         external_body_sha256 = hashlib.sha256(external_bytes).hexdigest()
         context = _build_context(

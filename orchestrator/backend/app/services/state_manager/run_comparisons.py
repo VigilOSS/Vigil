@@ -13,6 +13,7 @@ from . import _common
 from ._common import _engagement_or_404
 from .run_accounting import (
     TERMINAL_RUN_STATUSES,
+    _insert_row,
     _json_text,
     _json_value,
     _page,
@@ -244,25 +245,16 @@ def _record_comparison(
                 detail="recorded comparison differs from current sealed run facts",
             )
         return _serialize_comparison(existing)
-    cursor = connection.execute(
-        """
-        INSERT INTO assessment_run_comparisons (
-            engagement_id, run_id, baseline_run_id, selection,
-            target_compatible, source_compatible, comparison_json,
-            comparison_sha256
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            engagement_id,
-            run_id,
-            baseline_run_id,
-            selection,
-            -1 if payload["target_compatible"] is None else int(payload["target_compatible"]),
-            -1 if payload["source_compatible"] is None else int(payload["source_compatible"]),
-            _json_text(payload),
-            comparison_sha256,
-        ),
-    )
+    cursor = _insert_row(connection, "assessment_run_comparisons", {
+        "engagement_id": engagement_id,
+        "run_id": run_id,
+        "baseline_run_id": baseline_run_id,
+        "selection": selection,
+        "target_compatible": -1 if payload["target_compatible"] is None else int(payload["target_compatible"]),
+        "source_compatible": -1 if payload["source_compatible"] is None else int(payload["source_compatible"]),
+        "comparison_json": _json_text(payload),
+        "comparison_sha256": comparison_sha256,
+    })
     created = connection.execute(
         "SELECT * FROM assessment_run_comparisons WHERE id = ?",
         (int(cursor.lastrowid),),

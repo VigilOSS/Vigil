@@ -18,6 +18,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import code_record_analysis
+from _fake_client import StubClient
 
 
 def _args(path: Path, tmp_path: Path, **overrides) -> SimpleNamespace:
@@ -240,16 +241,7 @@ def test_an_index_spelled_line_range_is_still_normalized_before_the_post(
     """The validator rewrites `line_start`/`line_end`, and `run` submits that."""
     seen: list[dict] = []
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def post(self, _endpoint: str, payload: dict):
             seen.append(payload)
             return {

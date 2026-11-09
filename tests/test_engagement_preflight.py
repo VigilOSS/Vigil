@@ -19,20 +19,23 @@ behind.
 
 from __future__ import annotations
 
+import os
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from vigil_cli import blue as blue_module  # noqa: E402
-from vigil_cli import engagements as engagements_module  # noqa: E402
-from vigil_cli import main as main_module  # noqa: E402
-from vigil_cli import preflight as preflight_module  # noqa: E402
-from vigil_cli import orchestrator as orchestrator_module  # noqa: E402
-from vigil_cli.engagements import CreatedEngagement  # noqa: E402
-from vigil_cli.main import main  # noqa: E402
+from vigil_cli import blue as blue_module
+from vigil_cli import engagements as engagements_module
+from vigil_cli import main as main_module
+from vigil_cli import orchestrator as orchestrator_module
+from vigil_cli import preflight as preflight_module
+from vigil_cli import status as status_module
+from vigil_cli.docker import DockerResult
+from vigil_cli.engagements import CreatedEngagement
+from vigil_cli.main import main
+from vigil_cli.preflight import _resolve_provider_key
 
 
 @pytest.fixture
@@ -495,8 +498,6 @@ def test_provider_key_rejects_quoted_empty_and_unwraps_quoted_values(
     then exports the quotes rather than a key — so the operator learns at the
     first provider request instead of before the session starts.
     """
-    from vigil_cli.preflight import _resolve_provider_key
-
     monkeypatch.delenv("DEEPSEEK_API_KEY", raising=False)
     install_root = tmp_path / "install"
     engagement = tmp_path / "eng"
@@ -536,10 +537,6 @@ def test_the_assess_passthrough_does_not_warn_about_a_stale_install(
     stops being read. `vigil engagement start` is the one place it is both
     actionable and read, and it keeps it.
     """
-    import os
-
-    from vigil_cli import main as main_module
-
     install_root = tmp_path / "install"
     (install_root / "agent" / "scripts").mkdir(parents=True)
     assess = install_root / "agent" / "scripts" / "assess.py"
@@ -584,11 +581,6 @@ def test_the_assess_passthrough_does_not_warn_about_a_stale_install(
 
 def _doctor_checks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **tools: object):
     """`collect_doctor_checks` with the host binary probe under test control."""
-    import subprocess
-
-    from vigil_cli import status as status_module
-    from vigil_cli.docker import DockerResult
-
     present: dict[str, bool] = {name: bool(value) for name, value in tools.items()}
 
     monkeypatch.setattr(

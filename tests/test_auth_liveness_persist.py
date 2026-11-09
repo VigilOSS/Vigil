@@ -11,21 +11,22 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from vigil_cli import auth  # noqa: E402
-from vigil_cli import main as main_mod  # noqa: E402
+from vigil_cli import auth
+from vigil_cli import main as main_mod
 
 
-def test_persist_liveness_posts_verdict_to_route(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+@pytest.fixture
+def eng(tmp_path):
+    """One engagement directory under a throwaway install root."""
+    directory = tmp_path / "agent" / "engagements" / "eng"
+    directory.mkdir(parents=True)
+    return directory
+
+
+def test_persist_liveness_posts_verdict_to_route(eng, monkeypatch):
     calls: list[tuple] = []
 
     def fake_api(engagement_dir, method, path="", payload=None):
@@ -46,9 +47,7 @@ def test_persist_liveness_posts_verdict_to_route(tmp_path, monkeypatch):
     assert result["liveness_verdict"] == "dead"
 
 
-def test_persist_liveness_defaults_probed_at_to_now(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_persist_liveness_defaults_probed_at_to_now(eng, monkeypatch):
     captured: dict = {}
 
     def fake_api(engagement_dir, method, path="", payload=None):
@@ -105,9 +104,7 @@ def _wire_status(monkeypatch, eng, verdict="live"):
     return persisted
 
 
-def test_status_probe_with_identity_persists(tmp_path, monkeypatch, capsys):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_status_probe_with_identity_persists(eng, tmp_path, monkeypatch, capsys):
     persisted = _wire_status(monkeypatch, eng, verdict="dead")
     main_mod._auth(_status_args(identity="cap-target"), tmp_path)
     out = capsys.readouterr().out
@@ -116,9 +113,7 @@ def test_status_probe_with_identity_persists(tmp_path, monkeypatch, capsys):
     assert "persisted=True" in out
 
 
-def test_status_probe_active_identity_does_not_persist(tmp_path, monkeypatch, capsys):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_status_probe_active_identity_does_not_persist(eng, tmp_path, monkeypatch, capsys):
     persisted = _wire_status(monkeypatch, eng, verdict="live")
     main_mod._auth(_status_args(identity=None), tmp_path)
     out = capsys.readouterr().out
@@ -127,11 +122,7 @@ def test_status_probe_active_identity_does_not_persist(tmp_path, monkeypatch, ca
     assert "liveness=live" in out
 
 
-def test_status_probe_missing_alias_does_not_persist_to_alias_name(
-    tmp_path, monkeypatch, capsys
-):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_status_probe_missing_alias_does_not_persist_to_alias_name(eng, tmp_path, monkeypatch, capsys):
     persisted = _wire_status(monkeypatch, eng, verdict="unknown")
     monkeypatch.setattr(
         main_mod.auth_module,
@@ -151,11 +142,7 @@ def test_status_probe_missing_alias_does_not_persist_to_alias_name(
     assert "persisted=False" in capsys.readouterr().out
 
 
-def test_auth_show_identity_fetches_only_requested_record(
-    tmp_path, monkeypatch, capsys
-):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_auth_show_identity_fetches_only_requested_record(eng, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(main_mod, "_resolve_command_engagement", lambda *_: eng)
     calls: list[str] = []
     monkeypatch.setattr(
@@ -183,11 +170,7 @@ def test_auth_show_identity_fetches_only_requested_record(
     assert json.loads(capsys.readouterr().out)["identity_name"] == "user_a"
 
 
-def test_auth_quarantine_disables_identity_without_deleting(
-    tmp_path, monkeypatch, capsys
-):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_auth_quarantine_disables_identity_without_deleting(eng, tmp_path, monkeypatch, capsys):
     monkeypatch.setattr(main_mod, "_resolve_command_engagement", lambda *_: eng)
     calls: list[str] = []
     monkeypatch.setattr(

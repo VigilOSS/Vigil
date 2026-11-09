@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import code_coverage
+from _fake_client import StubClient
 
 _PAGE = {
     "repo_id": None,
@@ -56,17 +57,8 @@ _PAGE = {
 }
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     requested: list[str] = []
-
-    def __init__(self, *_args, **_kwargs) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def get(self, endpoint: str):
         type(self).requested.append(endpoint)

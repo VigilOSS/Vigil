@@ -63,12 +63,18 @@ def root(path: Path) -> Path:
     return Path(_run(args)).resolve()
 
 
+def _log_lines(path: Path, expression: str, template: str = "commit_id") -> str:
+    """One raw ``jj log`` read: *template* rendered for *expression*, as given.
+
+    Canonical home for the log argv. :func:`_log` adds the newline suffix and
+    the exactly-one-commit refusal on top; the boolean revset probes want the
+    empty string as their no-match answer and read this directly.
+    """
+    return _run(command(path, "log", "-r", expression, "--no-graph", "-T", template))
+
+
 def _log(path: Path, expression: str, template: str = "commit_id") -> str:
-    value = _run(
-        command(
-            path, "log", "-r", expression, "--no-graph", "-T", template + ' ++ "\\n"'
-        )
-    )
+    value = _log_lines(path, expression, template + ' ++ "\\n"')
     if not value or "\n" in value:
         raise ValueError("Revision must resolve to exactly one commit")
     return value
@@ -201,19 +207,7 @@ def branch_matches(path: Path, name: str) -> bool:
     try:
         if is_jj(path):
             target = _log(path, f"bookmarks(exact:{json.dumps(name)})")
-            return bool(
-                _run(
-                    command(
-                        path,
-                        "log",
-                        "-r",
-                        f"{target} & ancestors(@)",
-                        "--no-graph",
-                        "-T",
-                        "commit_id",
-                    )
-                )
-            )
+            return bool(_log_lines(path, f"{target} & ancestors(@)"))
         return (
             _run(["git", "-C", str(path), "symbolic-ref", "--quiet", "--short", "HEAD"])
             == name
@@ -393,19 +387,7 @@ def ancestor(path: Path, older: str, newer: str) -> bool:
     if a == b:
         return False
     if is_jj(path):
-        return bool(
-            _run(
-                command(
-                    path,
-                    "log",
-                    "-r",
-                    f"{a} & ancestors({b})",
-                    "--no-graph",
-                    "-T",
-                    "commit_id",
-                )
-            )
-        )
+        return bool(_log_lines(path, f"{a} & ancestors({b})"))
     return (
         subprocess.run(
             ["git", "-C", str(path), "merge-base", "--is-ancestor", a, b],

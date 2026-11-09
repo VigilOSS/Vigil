@@ -33,6 +33,7 @@ import sys
 
 from assess.lib import probe_args
 from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.contracts import add_contract_subparser, render_contract_epilog
 
@@ -71,15 +72,14 @@ def run(args) -> None:
     probe_args.enforce_required_inputs(args, "record-probe")
     covering = args.result_status in _COVERING_STATUSES
     if covering and not (args.evidence_ref or "").strip():
-        print(
-            "record-probe: --evidence-ref is required for a covering probe "
+        fail(
+            "record-probe",
+            "--evidence-ref is required for a covering probe "
             f"(result_status={args.result_status}) — a covering verdict without "
             "evidence is not coverage. Record a touched-but-inconclusive probe as "
             "--result-status attempted|blocked|no-signal|error instead (evidence "
             "optional), or attach the evidence path.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     effective_status = args.result_status
     if args.result_status == "signal" and not (args.outcome_assertion or "").strip():

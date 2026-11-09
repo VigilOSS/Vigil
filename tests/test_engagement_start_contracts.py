@@ -15,19 +15,19 @@ directory) that could never work:
 
 from __future__ import annotations
 
+import subprocess
 import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
-
-from vigil_cli import engagements  # noqa: E402
-from vigil_cli import main as main_module  # noqa: E402
-from vigil_cli import preflight as preflight_module  # noqa: E402
-from vigil_cli.engagements import CreateEngagementOptions  # noqa: E402
-from vigil_cli.main import main  # noqa: E402
+from vigil_cli import engagements
+from vigil_cli import main as main_module
+from vigil_cli import orchestrator
+from vigil_cli import preflight as preflight_module
+from vigil_cli.engagements import CreateEngagementOptions
+from vigil_cli.main import main
 
 
 @pytest.fixture(autouse=True)
@@ -90,8 +90,6 @@ def test_create_reports_progress_before_slow_steps_on_stderr(
 def test_create_prints_the_key_and_start_command_uniformly(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys, engagement_type: str
 ) -> None:
-    import subprocess
-
     install_root = _install_root(tmp_path)
     (install_root / "agent" / "operator-core-code.md").write_text("# Code overlay\n")
     monkeypatch.setattr(engagements, "_install_client_kind", lambda *_: "none")
@@ -516,7 +514,6 @@ def preflight_env(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.setattr(preflight_module, "orchestrator_status", lambda _root: "running")
     monkeypatch.setattr(engagements, "inspect_backend_ownership", lambda root, *a: engagements.BackendOwnership(engagements.BackendInstallRootStatus.VERIFIED, "http://127.0.0.1:18000", str(root)))
     monkeypatch.setattr(engagements, "_verify_backend_install_root", lambda *_: engagements.BackendInstallRootStatus.VERIFIED)
-    from vigil_cli import orchestrator
     monkeypatch.setattr(orchestrator, "start_orchestrator", lambda *_: None)
     monkeypatch.setattr(preflight_module, "runtime_status", lambda: "running")
     monkeypatch.setattr(preflight_module, "_warn_if_install_stale", lambda _root: None)

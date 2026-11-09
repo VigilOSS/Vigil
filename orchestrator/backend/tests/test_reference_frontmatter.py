@@ -17,10 +17,7 @@ See the "Add a reference" recipe in the root AGENTS.md.
 
 from __future__ import annotations
 
-import sys
 from pathlib import Path
-
-import pytest
 
 _REPO = Path(__file__).resolve().parents[3]
 _SCRIPTS = _REPO / "agent" / "scripts"
@@ -107,13 +104,6 @@ _KNOWN_UNPAIRED = {
     # skill by design (unlike its AWS/GWS/M365/Okta/EDR/Network siblings).
     "tenants/_template-generic.md",
 }
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _scripts_on_path():
-    if str(_SCRIPTS) not in sys.path:
-        sys.path.insert(0, str(_SCRIPTS))
-    yield
 
 
 def _reference_files() -> list[Path]:

@@ -35,6 +35,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import export_submission
 from assess.lib.client import AssessError
@@ -55,7 +56,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Routes GETs to canned payloads and records every GET/POST endpoint."""
 
     def __init__(
@@ -201,16 +202,6 @@ class _FakeClient:
             "relative_path": payload.get("path", ""),
         }
 
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
-
-
 def _nonempty_slug(finding: dict) -> str:
     return str(finding.get("slug") or "")
 
@@ -305,6 +296,12 @@ def _install(monkeypatch, tmp_path, fake: _FakeClient) -> None:
     monkeypatch.setattr(export_submission, "AssessmentClient", lambda *a, **k: fake)
 
 
+def _export(monkeypatch, tmp_path, fake: _FakeClient, *argv: str) -> None:
+    """Install *fake*, parse *argv* through the real parser, and run the verb."""
+    _install(monkeypatch, tmp_path, fake)
+    export_submission.run(_parse(list(argv), str(tmp_path)))
+
+
 def _submission_path(tmp_path, slug: str = "VA-047"):
     return tmp_path / "submissions" / slug / "submission.md"
 
@@ -315,9 +312,7 @@ def test_draft_writes_with_needs_markers(tmp_path, monkeypatch, capsys):
     # A bare finding: no CVSS, no vrt, no impact/summary, no proof.
     fake = _FakeClient(_finding(details={}, evidence_ref=""))
     fake._finding["summary"] = ""  # remove the impact fallback too
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -355,9 +350,7 @@ def test_final_blocks_when_incomplete_and_writes_nothing(tmp_path, monkeypatch, 
 
 def test_final_passes_with_complete_finding(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -391,23 +384,10 @@ def test_final_snapshots_context_and_calls_shared_version_api(
     tmp_path, monkeypatch, capsys
 ):
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(
-        [
-            "submission",
-            "VA-047",
-            "--platform",
-            "bugcrowd",
-            "--attachment-id",
-            "42",
-            "--attachment-id",
-            "17",
-            "--json",
-        ],
-        str(tmp_path),
+    _export(
+        monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd",
+        "--attachment-id", "42", "--attachment-id", "17", "--json",
     )
-
-    export_submission.run(args)
 
     output = json.loads(capsys.readouterr().out)
     context_path = tmp_path / "submissions" / "VA-047" / "submission-context.json"
@@ -451,13 +431,7 @@ def test_final_snapshots_context_and_calls_shared_version_api(
 
 def test_draft_does_not_create_an_immutable_version(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
-        str(tmp_path),
-    )
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     assert not any(endpoint.startswith("submissions/") for endpoint, _ in fake.posts)
@@ -467,10 +441,7 @@ def test_recover_mode_uses_the_shared_recovery_api_without_rendering(
     tmp_path, monkeypatch, capsys
 ):
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "--recover", "--json"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "--recover", "--json")
 
     assert json.loads(capsys.readouterr().out) == {
         "recovered_version_ids": [77],
@@ -508,10 +479,7 @@ def test_recover_human_output_prints_failure_reasons_and_orphan_paths(
     fake = _FakeClient(
         _finding(details=_complete_details()), post_response=recovery
     )
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "--recover"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "--recover")
 
     output = capsys.readouterr().out
     assert "VA-047 version 3 (id=12): staged package is missing" in output
@@ -594,10 +562,7 @@ def test_recover_mode_consumes_every_bounded_diagnostic_page(
             return responses.pop(0)
 
     fake = PagedRecoveryClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "--recover", "--json"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "--recover", "--json")
 
     result = json.loads(capsys.readouterr().out)
     assert result["recovered_version_ids"] == [77]
@@ -638,9 +603,7 @@ def test_operator_details_surfaces_full_record(tmp_path, monkeypatch, capsys):
     finding["verification_status"] = "confirmed"
     finding["notes"] = "MECHANISM: no E00207 caller-authz on qtame writes. REACHABILITY: prod accepted."
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -696,13 +659,7 @@ def test_operator_details_and_context_preserve_structured_verification_audit(
         "truncated": False,
     }
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
-        str(tmp_path),
-    )
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -747,12 +704,7 @@ def test_operator_details_names_the_authority_behind_a_waived_verdict(
         "operator_authority": _WAIVER,
     }
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
-    )
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -774,12 +726,7 @@ def test_a_receipt_backed_submission_states_the_verdict_alone(
         "operator_authority": None,
     }
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
-    )
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -804,12 +751,7 @@ def test_an_attested_reason_cannot_forge_structure_in_the_submission(
         },
     }
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
-    )
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -823,9 +765,7 @@ def test_location_method_not_doubled(tmp_path, monkeypatch, capsys):
     finding = _finding(details=_complete_details(request_method="POST"))
     finding["canonical_location"] = "POST https://app.example.com/api/tame/qtameSubmit"
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -850,9 +790,7 @@ def test_location_method_kept_when_location_merely_starts_with_the_verb(
     finding = _finding(details=_complete_details(request_method="POST"))
     finding["canonical_location"] = "POSTMAN collection endpoint /api/orders/1001"
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -887,9 +825,10 @@ def test_platform_blocker_gates_final_but_draft_writes(tmp_path, monkeypatch, ca
 
     # draft: writes with the matching marker.
     fake_draft = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake_draft)
-    args = _parse(["submission", "VA-047", "--platform", platform, "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(
+        monkeypatch, tmp_path, fake_draft, "submission", "VA-047", "--platform", platform,
+        "--draft",
+    )
     capsys.readouterr()
     assert f"[NEEDS: {marker}]" in _submission_path(tmp_path).read_text()
 
@@ -948,9 +887,7 @@ def test_indexed_present_evidence_ref_satisfies_durable_proof(tmp_path, monkeypa
     details = _complete_details(poc_request={}, poc_response={})
     finding = _finding(details=details, evidence_ref="scans/idor-orders.txt")
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
     body = _submission_path(tmp_path).read_text()
     assert "scans/idor-orders.txt" in body
@@ -968,10 +905,7 @@ def test_inline_poc_does_not_replace_durable_evidence(tmp_path, monkeypatch, cap
     assert "indexed, present evidence artifact" in str(exc.value)
     assert not _submission_path(tmp_path).exists()
 
-    draft_args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"],
-        str(tmp_path),
-    )
+    draft_args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
     export_submission.run(draft_args)
     capsys.readouterr()
     context = _context(tmp_path)
@@ -1050,10 +984,7 @@ def test_final_finds_exact_evidence_beyond_first_search_page(tmp_path, monkeypat
         }
     )
     fake = _FakeClient(_finding(details=_complete_details()), artifacts=decoys)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     assert _submission_path(tmp_path).exists()
@@ -1079,10 +1010,7 @@ def test_final_uses_evidence_artifact_id_as_the_exact_link(
             }
         ],
     )
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     assert "artifacts/700" in fake.gets
@@ -1132,9 +1060,7 @@ def test_final_normalizes_contained_evidence_paths(tmp_path, monkeypatch, capsys
         else "/engagements/test-eng/scans/idor-orders.txt"
     )
     fake = _FakeClient(_finding(details=_complete_details(), evidence_ref=evidence_ref))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
     proof = _context(tmp_path)["proof"]
     assert proof["evidence_path"] == "scans/idor-orders.txt"
@@ -1144,9 +1070,7 @@ def test_final_normalizes_contained_evidence_paths(tmp_path, monkeypatch, capsys
 def test_hackerone_weakness_falls_back_to_cwe_id(tmp_path, monkeypatch, capsys):
     details = _complete_details(weakness="", cwe_id="CWE-639")
     fake = _FakeClient(_finding(details=details))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "hackerone"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "hackerone")
     capsys.readouterr()
     assert "**Weakness:** CWE-639" in _submission_path(tmp_path).read_text()
 
@@ -1206,12 +1130,10 @@ def test_flags_supply_taxonomy(tmp_path, monkeypatch, capsys):
     # Details omit vrt/weakness; the CLI flags supply them and satisfy the gate.
     details = _complete_details(vrt_category="", weakness="")
     fake = _FakeClient(_finding(details=details))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--vrt-category", "server_security_misconfiguration"],
-        str(tmp_path),
+    _export(
+        monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd",
+        "--vrt-category", "server_security_misconfiguration",
     )
-    export_submission.run(args)
     capsys.readouterr()
     assert "server_security_misconfiguration" in _submission_path(tmp_path).read_text()
 
@@ -1222,9 +1144,7 @@ def test_direct_mode_drops_taxonomy_and_gate(tmp_path, monkeypatch, capsys):
     # No vrt, no weakness — direct must still pass final and omit both fields.
     details = _complete_details(vrt_category="", weakness="")
     fake = _FakeClient(_finding(details=details))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "direct"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "direct")
     capsys.readouterr()
     body = _submission_path(tmp_path).read_text()
     # Neither the Bugcrowd VRT nor the HackerOne weakness taxonomy line appears.
@@ -1240,9 +1160,7 @@ def test_direct_mode_drops_taxonomy_and_gate(tmp_path, monkeypatch, capsys):
 
 def test_artifact_registered_as_submission_without_submission_status(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     artifact_posts = [(ep, payload) for ep, payload in fake.posts if ep == "artifacts"]
@@ -1271,9 +1189,7 @@ def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
         7: {"id": 7, "command": "curl -s https://app.example.com/secret", "intent": "unrelated", "return_code": 0},
     }
     fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1330,9 +1246,7 @@ def test_retired_links_are_not_exported_as_current_evidence(
         6: {"id": 6, "command": "curl -sk https://app.example.com/retired-probe", "intent": "withdrawn", "return_code": 0},
     }
     fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1355,9 +1269,7 @@ def test_empty_retired_at_is_treated_as_a_live_link(tmp_path, monkeypatch, capsy
         5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce IDOR", "return_code": 0},
     }
     fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     assert [r["id"] for r in _context(tmp_path)["linked_command_runs"]] == [5]
@@ -1386,9 +1298,7 @@ def test_repro_runs_render_real_argv_separately_from_linked_runs(
     }
     details = _complete_details(repro_runs=[11, "12"])
     fake = _FakeClient(_finding(details=details), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1421,9 +1331,7 @@ def test_authored_steps_without_repro_runs_advise_but_never_block(
     the field existed, so the render says so and publishes.
     """
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     captured = capsys.readouterr()
 
     assert _submission_path(tmp_path).exists()  # final mode still publishes
@@ -1438,9 +1346,7 @@ def test_authored_steps_without_repro_runs_advise_but_never_block(
 def test_draft_marks_missing_repro_runs_with_a_needs_marker(tmp_path, monkeypatch, capsys):
     """A draft names the gap where the runs would have rendered."""
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1590,13 +1496,7 @@ def test_submission_outputs_render_proof_verbatim(tmp_path, monkeypatch, capsys)
         links=links,
         command_runs=command_runs,
     )
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd"],
-        str(tmp_path),
-    )
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     markdown = _submission_path(tmp_path).read_text()
@@ -1697,9 +1597,7 @@ def test_operator_details_consolidates_all_reference(tmp_path, monkeypatch, caps
         references=["https://cwe.mitre.org/data/definitions/639.html"],
     )
     fake = _FakeClient(_finding(details=details), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1736,9 +1634,7 @@ def test_evidence_authored_from_details_evidence(tmp_path, monkeypatch, capsys):
     }
     details = _complete_details(evidence="Response body carried member B's masked order (o***1002).")
     fake = _FakeClient(_finding(details=details), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1779,9 +1675,7 @@ def test_hygiene_flags_leaks_without_mutating_body(tmp_path, monkeypatch, capsys
         evidence=f"Reproduced; artifact saved to {abs_evidence} under internal agent {_UUID}.",
     )
     fake = _FakeClient(_finding(details=details, evidence_ref=abs_evidence), links=links, command_runs=command_runs)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     err = capsys.readouterr().err
 
     body = _submission_path(tmp_path).read_text()
@@ -1810,9 +1704,7 @@ def test_target_uuid_in_poc_reaches_output_verbatim(tmp_path, monkeypatch, capsy
         "body": "",
     }
     fake = _FakeClient(_finding(details=_complete_details(poc_request=poc_request)))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1828,9 +1720,7 @@ def test_slug_in_operator_details_only_does_not_warn(tmp_path, monkeypatch, caps
     finding = _finding(details=_complete_details())
     finding["notes"] = "Tracked as VA-047 in the work queue; see the linked run for repro."
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1849,9 +1739,7 @@ def test_slug_in_pasteable_body_still_warns(tmp_path, monkeypatch, capsys):
     finding = _finding(details=_complete_details())
     finding["summary"] = "Finding VA-047: an authenticated member can read another member's order."
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1881,9 +1769,7 @@ def test_steps_render_verbatim_without_renumbering(tmp_path, monkeypatch, capsys
         ]
     )
     fake = _FakeClient(_finding(details=details))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1915,9 +1801,10 @@ def test_authored_step_block_renders_byte_for_byte(tmp_path, monkeypatch, capsys
         "3. Follow the location header from step 2 and observe member B's data"
     )
     details = _complete_details(steps_to_reproduce=block)
-    _install(monkeypatch, tmp_path, _FakeClient(_finding(details=details)))
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(
+        monkeypatch, tmp_path, _FakeClient(_finding(details=details)), "submission", "VA-047",
+        "--platform", "bugcrowd",
+    )
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -1951,10 +1838,7 @@ def test_title_word_count_advises_but_never_blocks(
     finding = _finding(details=_complete_details())
     finding["title"] = title
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     captured = capsys.readouterr()
 
     # Publishes either way — a long title never blocks.
@@ -1997,9 +1881,10 @@ def test_overwrite_guard(tmp_path, monkeypatch, capsys):
 
     # With --overwrite it proceeds.
     fake3 = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake3)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"], str(tmp_path))
-    export_submission.run(args)
+    _export(
+        monkeypatch, tmp_path, fake3, "submission", "VA-047", "--platform", "bugcrowd",
+        "--overwrite",
+    )
     capsys.readouterr()
     assert any(ep == "artifacts" for ep, _ in fake3.posts)
 
@@ -2008,9 +1893,7 @@ def test_overwrite_guard(tmp_path, monkeypatch, capsys):
 
 def test_json_summary_shape(tmp_path, monkeypatch, capsys):
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--json"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--json")
     out = json.loads(capsys.readouterr().out)
     assert out["slug"] == "VA-047"
     assert out["platform"] == "bugcrowd"
@@ -2028,10 +1911,7 @@ def test_final_output_must_be_inside_engagement(tmp_path, monkeypatch):
     outside = tmp_path.parent / f"{tmp_path.name}-outside"
     fake = _FakeClient(_finding(details=_complete_details()))
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--output", str(outside)],
-        str(tmp_path),
-    )
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--output", str(outside)], str(tmp_path))
     with pytest.raises(AssessError) as exc:
         export_submission.run(args)
     assert "inside the engagement" in str(exc.value)
@@ -2077,10 +1957,7 @@ def test_final_rejects_malformed_submission_artifact_receipt(
         return original_post(endpoint, payload)
 
     fake.post = capture_written_files
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"],
-        str(tmp_path),
-    )
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"], str(tmp_path))
 
     with pytest.raises(AssessError, match="artifact registration failed") as exc:
         export_submission.run(args)
@@ -2106,10 +1983,7 @@ def test_failed_final_registration_restores_overwritten_outputs(tmp_path, monkey
         post_error="HTTP 422: artifact payload rejected before commit",
     )
     _install(monkeypatch, tmp_path, fake)
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"],
-        str(tmp_path),
-    )
+    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"], str(tmp_path))
 
     with pytest.raises(AssessError, match="artifact registration failed"):
         export_submission.run(args)
@@ -2144,9 +2018,7 @@ def test_draft_surfaces_target_readiness_blocker_without_gating(tmp_path, monkey
         _finding(details=_complete_details()),
         readiness={"ready": False, "blockers": [blocker], "advisories": []},
     )
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
     assert _context(tmp_path)["readiness_blockers"] == [blocker]
 
@@ -2182,9 +2054,7 @@ def test_a2_operational_header_renders_from_fields(tmp_path, monkeypatch, capsys
     )
     finding["canonical_location"] = "https://app.example.com/api/orders/1001"
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -2219,9 +2089,10 @@ def test_a2_operational_header_survives_overwrite(tmp_path, monkeypatch, capsys)
     export_submission.run(args)
     capsys.readouterr()
 
-    _install(monkeypatch, tmp_path, _FakeClient(finding))
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--overwrite"], str(tmp_path))
-    export_submission.run(args)
+    _export(
+        monkeypatch, tmp_path, _FakeClient(finding), "submission", "VA-047", "--platform",
+        "bugcrowd", "--overwrite",
+    )
     capsys.readouterr()
 
     header = _submission_path(tmp_path).read_text().partition("\n---\n")[0]
@@ -2239,9 +2110,7 @@ def test_a2_operational_lines_omitted_without_backing_data(tmp_path, monkeypatch
     omitted entirely; the Asset line (from canonical_location) still renders."""
     finding = _finding(details=_complete_details())  # no run/pass_if, no scope.json written
     fake = _FakeClient(finding)
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     header = _submission_path(tmp_path).read_text().partition("\n---\n")[0]
@@ -2274,10 +2143,10 @@ def test_final_render_keeps_every_details_section(tmp_path, monkeypatch, capsys)
     finding = _finding(details=details)
     finding["canonical_location"] = "https://app.example.com/api/orders/1001"
     finding["notes"] = "Mechanism: no ownership check on the order id."
-    _install(monkeypatch, tmp_path, _FakeClient(finding))
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-
-    export_submission.run(args)
+    _export(
+        monkeypatch, tmp_path, _FakeClient(finding), "submission", "VA-047", "--platform",
+        "bugcrowd",
+    )
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -2302,12 +2171,10 @@ def test_malformed_details_warn_instead_of_blanking_silently(
     """Corrupt details must announce themselves, not render as an unauthored finding."""
     finding = _finding(details=_complete_details())
     finding["details"] = '{"evidence": "truncated'  # an object is required
-    _install(monkeypatch, tmp_path, _FakeClient(finding))
-    args = _parse(
-        ["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path)
+    _export(
+        monkeypatch, tmp_path, _FakeClient(finding), "submission", "VA-047", "--platform",
+        "bugcrowd", "--draft",
     )
-
-    export_submission.run(args)
     captured = capsys.readouterr()
 
     assert "details" in captured.err
@@ -2852,10 +2719,8 @@ def test_final_export_publishes_with_every_prose_advisory_firing(
     no longer decide that this finding needs the extra sentence.
     """
     fake = _FakeClient(_bloated_finding())
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-
-    export_submission.run(args)  # final mode, no --draft: must NOT raise
+    # final mode, no --draft: must NOT raise
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     captured = capsys.readouterr()
 
     assert _submission_path(tmp_path).exists()
@@ -2885,9 +2750,7 @@ def test_prose_advisories_surface_in_the_operator_details_block(
 ):
     """Surfaced where the report-writer is already reading, under the never-paste line."""
     fake = _FakeClient(_bloated_finding())
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd", "--draft"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
 
     body = _submission_path(tmp_path).read_text()
@@ -2902,9 +2765,7 @@ def test_prose_advisories_surface_in_the_operator_details_block(
 def test_prose_advisories_stay_silent_on_a_tight_finding(tmp_path, monkeypatch, capsys):
     """The default fixture is inside every ceiling, so it earns no prose advisory."""
     fake = _FakeClient(_finding(details=_complete_details()))
-    _install(monkeypatch, tmp_path, fake)
-    args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
-    export_submission.run(args)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     advisories = _context(tmp_path)["advisories"]

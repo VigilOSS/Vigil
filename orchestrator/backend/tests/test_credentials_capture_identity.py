@@ -14,6 +14,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from test_engagements_api import write_engagement
 
 from app import db
@@ -29,6 +30,16 @@ def _seed(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"], KEY)
     assert client.get("/engagements").status_code == 200
     return db.get_engagement_by_key(KEY).id
+
+
+@pytest.fixture
+def eng(client, isolate_settings):
+    """The engagement id the DB-backed cases below capture into.
+
+    Requested last by each test so it is seeded after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _jwt(payload: dict) -> str:
@@ -332,8 +343,7 @@ def _capture(eng_id, host, cookies, headers=None, tokens=None):
     )
 
 
-def test_two_distinct_sids_one_host_make_two_rows(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_two_distinct_sids_one_host_make_two_rows(eng):
     _capture(eng, "app.example.com", {"sid": "ACCOUNT-A-session-1"})
     _capture(eng, "app.example.com", {"sid": "ACCOUNT-B-session-2"})
     rows = db.list_credentials(eng)
@@ -343,8 +353,7 @@ def test_two_distinct_sids_one_host_make_two_rows(client, isolate_settings):
     assert len(active) == 1
 
 
-def test_reload_same_login_refreshes_one_row_and_bumps_last_seen(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_reload_same_login_refreshes_one_row_and_bumps_last_seen(eng):
     first = _capture(eng, "app.example.com", {"sid": "AAA-session", "csrf": "v1-rotating"})
     name = first["identity_name"]
     created = first["created_at"]
@@ -365,8 +374,7 @@ def test_reload_same_login_refreshes_one_row_and_bumps_last_seen(client, isolate
     assert second["created_at"] == created            # first-capture time preserved
 
 
-def test_logout_then_login_appends(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_logout_then_login_appends(eng):
     _capture(eng, "app.example.com", {"sid": "SESSION-ONE"})
     # Logout: deletion cookies -> no-op.
     assert _capture(eng, "app.example.com", {"sid": "deleted"}) == {}
@@ -376,29 +384,25 @@ def test_logout_then_login_appends(client, isolate_settings):
     assert len(db.list_credentials(eng)) == 2
 
 
-def test_shared_stickiness_cookie_no_false_merge(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_shared_stickiness_cookie_no_false_merge(eng):
     shared = "AWSALB" + "z" * 40
     _capture(eng, "app.example.com", {"sid": "ACCT-A", "AWSALB": shared})
     _capture(eng, "app.example.com", {"sid": "ACCT-B", "AWSALB": shared})
     assert len(db.list_credentials(eng)) == 2
 
 
-def test_anonymous_capture_creates_nothing(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_anonymous_capture_creates_nothing(eng):
     assert _capture(eng, "app.example.com", {"cookie_consent": "yes"}) == {}
     assert db.list_credentials(eng) == []
 
 
-def test_jwt_same_sub_two_raw_tokens_one_row(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_jwt_same_sub_two_raw_tokens_one_row(eng):
     _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'u1', 'iat': 1})}"})
     _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'u1', 'iat': 2})}"})
     assert len(db.list_credentials(eng)) == 1
 
 
-def test_jwt_different_audiences_keep_separate_bearer_rows(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_jwt_different_audiences_keep_separate_bearer_rows(eng):
     token_a = _jwt({"sub": "u1", "iss": "https://idp", "aud": "app-a"})
     token_b = _jwt({"sub": "u1", "iss": "https://idp", "aud": "app-b"})
 
@@ -422,10 +426,7 @@ def test_jwt_different_audiences_keep_separate_bearer_rows(client, isolate_setti
     assert rows[second["identity_name"]]["headers"]["Authorization"] == f"Bearer {token_b}"
 
 
-def test_contextless_jwt_keeps_separate_bearers_per_capture_host(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_contextless_jwt_keeps_separate_bearers_per_capture_host(eng):
     token_a = _jwt({"sub": "u1", "iat": 1})
     token_b = _jwt({"sub": "u1", "iat": 2})
 
@@ -449,10 +450,9 @@ def test_contextless_jwt_keeps_separate_bearers_per_capture_host(
     assert rows[second["identity_name"]]["headers"]["Authorization"] == f"Bearer {token_b}"
 
 
-def test_capture_names_row_after_principal_and_refresh_coalesces(client, isolate_settings):
+def test_capture_names_row_after_principal_and_refresh_coalesces(eng):
     # A JWT-principal capture names the stored row readably; a refreshed token
     # for the same principal REFRESHES that one row (append-in-place dedup).
-    eng = _seed(client, isolate_settings)
     first = _capture(
         eng, "api.example.com", {},
         headers={"Authorization": f"Bearer {_jwt({'sub': 'acme-user', 'iat': 1})}"},
@@ -468,10 +468,9 @@ def test_capture_names_row_after_principal_and_refresh_coalesces(client, isolate
     assert rows[0]["identity_name"] == first["identity_name"]
 
 
-def test_capture_distinct_principals_make_two_named_rows(client, isolate_settings):
+def test_capture_distinct_principals_make_two_named_rows(eng):
     # Two different principals append as two distinct, readably-named rows —
     # this is the account-A vs account-B distinction for IDOR/BOLA testing.
-    eng = _seed(client, isolate_settings)
     alice = _capture(
         eng,
         "api.example.com",
@@ -494,8 +493,7 @@ def test_capture_distinct_principals_make_two_named_rows(client, isolate_setting
 # Host-filtered listing
 # ---------------------------------------------------------------------------
 
-def test_list_host_filter(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_list_host_filter(eng):
     _capture(eng, "app.example.com", {"sid": "ON-APP-EXAMPLE"})
     _capture(eng, "shop.other.com", {"sid": "ON-SHOP-OTHER"})
     all_rows = db.list_credentials(eng)
@@ -510,12 +508,11 @@ def test_list_host_filter(client, isolate_settings):
     assert any(r["cookies"]["sid"] == "PARENT-DOMAIN" for r in sub)
 
 
-def test_list_host_filter_shows_host_agnostic_bearer_identity(client, isolate_settings):
+def test_list_host_filter_shows_host_agnostic_bearer_identity(eng):
     """A bearer/JWT identity carries no cookie bucket, but replay injects its
     Authorization header on ANY host — so `auth list --host X` must show it for
     every host (list must match what replay would actually use). This is the
     SPA/JWT IDOR case."""
-    eng = _seed(client, isolate_settings)
     _capture(eng, "app.example.com", {"sid": "COOKIE-SESSION"})
     _capture(eng, "api.example.com", {}, headers={"Authorization": f"Bearer {_jwt({'sub': 'svc'})}"})
     # The cookie session lists only for its host; the bearer identity lists for BOTH
@@ -527,8 +524,7 @@ def test_list_host_filter_shows_host_agnostic_bearer_identity(client, isolate_se
     assert on_unrelated[0]["headers"].get("Authorization", "").startswith("Bearer ")
 
 
-def test_host_filtered_load_preserves_global_active_identity(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_host_filtered_load_preserves_global_active_identity(eng):
     active = _capture(eng, "app.example.com", {"sid": "GLOBAL-ACTIVE"})
     other = _capture(eng, "shop.example.com", {"sid": "HOST-MATCHING-OTHER"})
 
@@ -551,8 +547,7 @@ def _backdate(eng, name, dt):
         )
 
 
-def test_age_sweep_flags_stale_then_hard_deletes(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_age_sweep_flags_stale_then_hard_deletes(eng):
     mat = _capture(eng, "app.example.com", {"sid": "AGING-SESSION"})
     name = mat["identity_name"]
     now = datetime.now(timezone.utc)
@@ -568,17 +563,14 @@ def test_age_sweep_flags_stale_then_hard_deletes(client, isolate_settings):
     assert db.list_credentials(eng, include_dead=True) == []
 
 
-def test_age_sweep_leaves_fresh_untouched(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_age_sweep_leaves_fresh_untouched(eng):
     mat = _capture(eng, "app.example.com", {"sid": "FRESH-SESSION"})
     rows = db.list_credentials(eng)
     assert rows[0]["state"] == "available"
     assert mat["state"] == "available"
 
 
-def test_resolve_for_replay_refreshes_last_seen_so_an_in_use_identity_never_ages_out(
-    client, isolate_settings
-):
+def test_resolve_for_replay_refreshes_last_seen_so_an_in_use_identity_never_ages_out(eng):
     """An identity that is actively being replayed must not hit the age backstop.
 
     ``last_seen_at`` used to move only on a WRITE (capture / import / live
@@ -586,7 +578,6 @@ def test_resolve_for_replay_refreshes_last_seen_so_an_in_use_identity_never_ages
     flipped to ``stale`` at exactly the 8h TTL. A resolve-for-replay is a USE
     and now resets the clock.
     """
-    eng = _seed(client, isolate_settings)
     mat = _capture(eng, "app.example.com", {"sid": "IN-CONSTANT-USE"})
     name = mat["identity_name"]
     now = datetime.now(timezone.utc)
@@ -606,11 +597,8 @@ def test_resolve_for_replay_refreshes_last_seen_so_an_in_use_identity_never_ages
     assert db.get_credential(eng, name)["state"] == "available"
 
 
-def test_plain_listing_is_not_a_use_and_does_not_reset_the_age_clock(
-    client, isolate_settings
-):
+def test_plain_listing_is_not_a_use_and_does_not_reset_the_age_clock(eng):
     """Only a resolve-for-replay counts as a USE; listing must not keep rows alive."""
-    eng = _seed(client, isolate_settings)
     mat = _capture(eng, "app.example.com", {"sid": "ONLY-LISTED"})
     name = mat["identity_name"]
     stale_seen = (datetime.now(timezone.utc) - timedelta(hours=7, minutes=59)).strftime(
@@ -630,10 +618,7 @@ def test_plain_listing_is_not_a_use_and_does_not_reset_the_age_clock(
     assert row["last_seen_at"] == stale_seen
 
 
-def test_touch_credential_use_never_revives_a_probe_dead_session(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_touch_credential_use_never_revives_a_probe_dead_session(eng):
     mat = _capture(eng, "app.example.com", {"sid": "PROVEN-DEAD"})
     name = mat["identity_name"]
     db.set_liveness(eng, name, "dead", "2026-07-03T10:00:00Z")
@@ -653,9 +638,8 @@ def test_touch_credential_use_never_revives_a_probe_dead_session(
     assert row["last_seen_at"] == dead_seen
 
 
-def test_age_sweep_never_marks_dead(client, isolate_settings):
+def test_age_sweep_never_marks_dead(eng):
     # 9h old but probe-proven dead must STAY dead (age never overrides a probe).
-    eng = _seed(client, isolate_settings)
     mat = _capture(eng, "app.example.com", {"sid": "DEAD-SESSION"})
     name = mat["identity_name"]
     db.set_liveness(eng, name, "dead", datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"))
@@ -668,8 +652,7 @@ def test_age_sweep_never_marks_dead(client, isolate_settings):
 # set_liveness — dead-only state semantics + default dead exclusion
 # ---------------------------------------------------------------------------
 
-def test_set_liveness_dead_sets_state_and_hides_by_default(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_set_liveness_dead_sets_state_and_hides_by_default(eng):
     mat = _capture(eng, "app.example.com", {"sid": "TO-KILL"})
     name = mat["identity_name"]
     probed = "2026-07-03T10:00:00Z"
@@ -682,8 +665,7 @@ def test_set_liveness_dead_sets_state_and_hides_by_default(client, isolate_setti
     assert len(db.list_credentials(eng, include_dead=True)) == 1
 
 
-def test_get_active_credential_skips_probe_dead_active_identity(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_get_active_credential_skips_probe_dead_active_identity(eng):
     active = _capture(eng, "app.example.com", {"sid": "ACTIVE-THEN-DEAD"})
     fallback = _capture(eng, "app.example.com", {"sid": "FALLBACK-STILL-LIVE"})
 
@@ -695,8 +677,7 @@ def test_get_active_credential_skips_probe_dead_active_identity(client, isolate_
     assert resolved["state"] == "available"
 
 
-def test_set_liveness_live_refreshes_last_seen_before_age_sweep(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_set_liveness_live_refreshes_last_seen_before_age_sweep(eng):
     mat = _capture(eng, "app.example.com", {"sid": "STALE-BUT-LIVE"})
     name = mat["identity_name"]
     probed = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -714,8 +695,7 @@ def test_set_liveness_live_refreshes_last_seen_before_age_sweep(client, isolate_
     assert db.get_credential(eng, name)["state"] == "available"
 
 
-def test_set_liveness_non_dead_does_not_change_state(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_set_liveness_non_dead_does_not_change_state(eng):
     mat = _capture(eng, "app.example.com", {"sid": "STAYS-ALIVE"})
     name = mat["identity_name"]
     for verdict in ("live", "stale", "unknown"):
@@ -726,8 +706,7 @@ def test_set_liveness_non_dead_does_not_change_state(client, isolate_settings):
         )
 
 
-def test_set_liveness_unknown_identity_returns_none(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_set_liveness_unknown_identity_returns_none(eng):
     assert db.set_liveness(eng, "cap-nope", "live", "2026-07-03T10:00:00Z") is None
 
 
@@ -743,15 +722,13 @@ def _put_capability(eng: int, name: str, principal: str, *, mfa_factor: str = ""
     )
 
 
-def test_principal_and_mfa_factor_round_trip(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_principal_and_mfa_factor_round_trip(eng):
     row = _put_capability(eng, "cap-old", "user-42", mfa_factor="totp")
     assert row["principal_id"] == "user-42"
     assert row["mfa_factor"] == "totp"
 
 
-def test_alias_resolves_freshest_live_capability_for_principal_and_scope(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_alias_resolves_freshest_live_capability_for_principal_and_scope(eng):
     _put_capability(eng, "cap-old", "user-42")
     _put_capability(eng, "cap-new", "user-42")
     db.set_credential_alias(eng, "member", "user-42", "billing")
@@ -770,8 +747,7 @@ def test_alias_resolves_freshest_live_capability_for_principal_and_scope(client,
     assert material["liveness_observations"][0]["source"] == "keepalive"
 
 
-def test_literal_identity_name_beats_alias(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_literal_identity_name_beats_alias(eng):
     _put_capability(eng, "member", "literal-principal")
     _put_capability(eng, "cap-aliased", "aliased-principal")
     db.set_credential_alias(eng, "member", "aliased-principal", "")
@@ -784,8 +760,7 @@ def test_literal_identity_name_beats_alias(client, isolate_settings):
     assert material["principal_id"] == "literal-principal"
 
 
-def test_scoped_liveness_ttl_never_crosses_scope_or_uses_expired_live(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_scoped_liveness_ttl_never_crosses_scope_or_uses_expired_live(eng):
     _put_capability(eng, "cap-billing", "user-42")
     db.set_credential_alias(eng, "member", "user-42", "billing")
     db.record_credential_liveness(
@@ -800,8 +775,7 @@ def test_scoped_liveness_ttl_never_crosses_scope_or_uses_expired_live(client, is
     assert creds.resolve_identity(eng, "member", scope_key="billing") == ("member", {})
 
 
-def test_alias_and_scoped_liveness_api(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_alias_and_scoped_liveness_api(client, eng):
     put = client.put(
         f"/engagements/{KEY}/credentials/cap-member",
         json={"principal_id": "user-42", "mfa_factor": "webauthn", "cookies": {"sid": "abc"}},
@@ -832,8 +806,7 @@ def test_alias_and_scoped_liveness_api(client, isolate_settings):
     assert resolved.json()["identity_name"] == "cap-member"
 
 
-def test_credential_refresh_preserves_durable_principal_and_mfa(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_credential_refresh_preserves_durable_principal_and_mfa(client, eng):
     initial = client.put(
         f"/engagements/{KEY}/credentials/cap-member",
         json={
@@ -853,8 +826,7 @@ def test_credential_refresh_preserves_durable_principal_and_mfa(client, isolate_
     assert refreshed.json()["mfa_factor"] == "webauthn"
 
 
-def test_older_unscoped_liveness_cannot_overwrite_newer_verdict(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_older_unscoped_liveness_cannot_overwrite_newer_verdict(client, eng):
     put = client.put(
         f"/engagements/{KEY}/credentials/cap-member",
         json={"principal_id": "user-42", "cookies": {"sid": "abc"}},
@@ -884,8 +856,7 @@ def test_older_unscoped_liveness_cannot_overwrite_newer_verdict(client, isolate_
     assert unscoped["observed_at"] == newer
 
 
-def test_liveness_timestamps_are_normalized_to_utc(client, isolate_settings):
-    eng = _seed(client, isolate_settings)
+def test_liveness_timestamps_are_normalized_to_utc(eng):
     _put_capability(eng, "cap-member", "user-42")
     db.record_credential_liveness(
         eng,
@@ -940,10 +911,7 @@ def _recent_liveness_times() -> tuple[str, str, str]:
     )
 
 
-def test_unscoped_list_projects_newer_live_for_identity_with_one_defensible_host(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_unscoped_list_projects_newer_live_for_identity_with_one_defensible_host(eng):
     _credential_with_hosts(eng, "cap-chat", "chat.example.test")
     legacy_dead_at, scoped_live_at, _ = _recent_liveness_times()
     _force_legacy_liveness_projection(
@@ -970,10 +938,7 @@ def test_unscoped_list_projects_newer_live_for_identity_with_one_defensible_host
     assert material["last_probed_at"] == scoped_live_at
 
 
-def test_unscoped_list_reports_unknown_when_multiple_hosts_have_conflicting_proof(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_unscoped_list_reports_unknown_when_multiple_hosts_have_conflicting_proof(eng):
     _credential_with_hosts(
         eng, "cap-multi", "chat.example.test", "api.example.test"
     )
@@ -1011,10 +976,7 @@ def test_unscoped_list_reports_unknown_when_multiple_hosts_have_conflicting_proo
     assert material["last_probed_at"] is None
 
 
-def test_host_scoped_list_uses_only_newest_matching_origin_and_isolates_identities(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_host_scoped_list_uses_only_newest_matching_origin_and_isolates_identities(eng):
     _credential_with_hosts(
         eng, "cap-multi", "chat.example.test", "api.example.test"
     )
@@ -1058,10 +1020,7 @@ def test_host_scoped_list_uses_only_newest_matching_origin_and_isolates_identiti
     assert identities["cap-other"]["last_probed_at"] == other_dead_at
 
 
-def test_include_dead_list_keeps_newest_compatible_dead_proof_dead(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_include_dead_list_keeps_newest_compatible_dead_proof_dead(eng):
     _credential_with_hosts(eng, "cap-dead", "chat.example.test")
     older_live_at, newer_dead_at, _ = _recent_liveness_times()
     _force_legacy_liveness_projection(
@@ -1090,10 +1049,7 @@ def test_include_dead_list_keeps_newest_compatible_dead_proof_dead(
     assert material["last_probed_at"] == newer_dead_at
 
 
-def test_available_unscoped_list_drops_unqualified_dead_after_scoped_live_expires(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_available_unscoped_list_drops_unqualified_dead_after_scoped_live_expires(eng):
     _put_capability(eng, "cap-flat", "user-42")
     now = datetime.now(timezone.utc).replace(microsecond=0)
     legacy_dead_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -1122,10 +1078,7 @@ def test_available_unscoped_list_drops_unqualified_dead_after_scoped_live_expire
     assert material["last_probed_at"] is None
 
 
-def test_available_unscoped_list_drops_unqualified_dead_without_typed_observation(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_available_unscoped_list_drops_unqualified_dead_without_typed_observation(eng):
     _put_capability(eng, "cap-flat", "user-42")
     legacy_dead_at, _, _ = _recent_liveness_times()
     _force_legacy_liveness_projection(
@@ -1143,10 +1096,7 @@ def test_available_unscoped_list_drops_unqualified_dead_without_typed_observatio
     assert material["last_probed_at"] is None
 
 
-def test_explicit_dead_unscoped_list_preserves_legacy_dead_projection(
-    client, isolate_settings
-):
-    eng = _seed(client, isolate_settings)
+def test_explicit_dead_unscoped_list_preserves_legacy_dead_projection(eng):
     _put_capability(eng, "cap-flat-dead", "user-42")
     legacy_dead_at, _, _ = _recent_liveness_times()
     _force_legacy_liveness_projection(

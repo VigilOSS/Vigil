@@ -3,12 +3,15 @@
 // those two views (a <section> vs a .rpt-doc-block), so the chrome stays with
 // each caller and the parts that must not drift live here.
 
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import { Check, Copy } from "lucide-react";
 
 import type { ReportFinding } from "../types";
 import { formatDateTime, referenceLink } from "../lib/format";
 import { findingToMarkdown } from "../lib/findingMarkdown";
+import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "../lib/poc";
+import { reproRunIds, stepsText } from "../lib/steps";
+import { Markdown } from "./Markdown";
 import {
   asOperatorAuthority,
   operatorAuthorityLabel,
@@ -175,5 +178,114 @@ export function ReferenceList({ references }: { references?: unknown[] }) {
         </li>
       ))}
     </ul>
+  );
+}
+
+/** Which chrome wraps a section: the detail pane's bare `<section>`, or the document's block. */
+type SectionBlock = "section" | "doc";
+
+function Block({ block, children }: { block: SectionBlock; children: ReactNode }) {
+  if (block === "doc") return <div className="rpt-doc-block">{children}</div>;
+  return <section>{children}</section>;
+}
+
+/**
+ * The finding's own claims — Summary, Impact, Evidence, Steps to reproduce,
+ * Reproduction request, Observed response, Proof of concept, Remediation,
+ * References — in the order both views read them.
+ *
+ * `block` is the only thing that differs between the Findings table's detail
+ * pane and the Full Report document: a bare `<section>` there, a
+ * `.rpt-doc-block` here. Everything inside is the same markup, so it lives here
+ * where the two views cannot drift apart.
+ */
+export function FindingSections({
+  finding,
+  draft,
+  block,
+}: {
+  finding: ReportFinding;
+  draft: boolean;
+  block: SectionBlock;
+}) {
+  const steps = stepsText(finding.steps_to_reproduce);
+  const curl = pocCurl(asPocRequest(finding.poc_request));
+  const responseText = pocResponseText(asPocResponse(finding.poc_response));
+  return (
+    <>
+      {finding.summary && (
+        <Block block={block}>
+          <h4>Summary</h4>
+          <Markdown text={finding.summary} />
+        </Block>
+      )}
+      {finding.impact && (
+        <Block block={block}>
+          <h4>Impact</h4>
+          <Markdown text={finding.impact} />
+        </Block>
+      )}
+      {finding.evidence_detail && (
+        <Block block={block}>
+          <h4>Evidence</h4>
+          {/* Verbatim. `evidence_detail` is a CAPTURE — a request/response pair,
+              a log excerpt, a stack trace — not authored prose, and markdown
+              silently rewrites exactly the characters that carry its meaning:
+              `__init__.py` loses its underscores to bold, a `>` request marker
+              becomes a blockquote, `#` becomes a heading, and consecutive lines
+              of an HTTP transcript collapse into one paragraph. Vigil does not
+              alter what the operator captured (AGENTS.md; ADR 0019), and
+              lib/findingMarkdown.ts already fences this field for the same
+              reason — rendering it through Markdown made the page lossier than
+              its own copy button. */}
+          <pre className="rpt-code">{finding.evidence_detail}</pre>
+        </Block>
+      )}
+      {steps && (
+        <Block block={block}>
+          <h4>Steps to reproduce</h4>
+          {/* Verbatim — the author's numbering is what other sections cite. */}
+          <div className="rpt-steps">{steps}</div>
+          <ReproRunProvenance
+            runIds={reproRunIds(finding.repro_runs)}
+            draft={draft}
+            basis={finding.reproduction_basis}
+          />
+        </Block>
+      )}
+      {curl && (
+        <Block block={block}>
+          <h4>Reproduction request</h4>
+          {/* Synthesized from the recorded request object so it pastes into a
+              terminal and runs: see lib/poc.ts. rpt-code-command does not
+              soft-wrap, so a copied line is the line that was shown. */}
+          <pre className="rpt-code rpt-code-command">{curl}</pre>
+        </Block>
+      )}
+      {responseText && (
+        <Block block={block}>
+          <h4>Observed response</h4>
+          <pre className="rpt-code">{responseText}</pre>
+        </Block>
+      )}
+      {finding.poc_code && (
+        <Block block={block}>
+          <h4>Proof of concept</h4>
+          <pre className="rpt-code rpt-code-command">{finding.poc_code}</pre>
+        </Block>
+      )}
+      {finding.remediation && (
+        <Block block={block}>
+          <h4>Remediation</h4>
+          <Markdown text={finding.remediation} />
+        </Block>
+      )}
+      {Array.isArray(finding.references) && finding.references.length > 0 && (
+        <Block block={block}>
+          <h4>References</h4>
+          <ReferenceList references={finding.references} />
+        </Block>
+      )}
+    </>
   );
 }

@@ -28,6 +28,7 @@ import io
 import json
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import link_finding, update_finding
 
@@ -112,9 +113,7 @@ def test_finding_link_accepts_either_spelling_of_the_rationale(flag: str) -> Non
     parser = argparse.ArgumentParser()
     link_finding.register(parser.add_subparsers(dest="action"))
 
-    args = parser.parse_args(
-        ["link", "acme-002", "--root-cause", "acme-001", flag, "same parser bug"]
-    )
+    args = parser.parse_args(["link", "acme-002", "--root-cause", "acme-001", flag, "same parser bug"])
 
     assert args.reason_text == "same parser bug"
 
@@ -126,7 +125,7 @@ def test_finding_link_notes_reaches_the_generic_link_notes_field(
 ) -> None:
     posts: list[tuple[str, dict]] = []
 
-    class _Client:
+    class _Client(StubClient):
         def post(self, path: str, payload: dict) -> dict:
             posts.append((path, payload))
             return {
@@ -135,15 +134,6 @@ def test_finding_link_notes_reaches_the_generic_link_notes_field(
                 "target_kind": payload["target_kind"],
                 "target_ref": payload["target_ref"],
             }
-
-        def __enter__(self) -> "_Client":
-            return self
-
-        def __exit__(self, *exc) -> bool:
-            return False
-
-        def close(self) -> None:
-            return None
 
     class _Cfg:
         engagement_dir = str(tmp_path)
@@ -155,20 +145,10 @@ def test_finding_link_notes_reaches_the_generic_link_notes_field(
 
     parser = argparse.ArgumentParser()
     link_finding.register(parser.add_subparsers(dest="action"))
-    args = parser.parse_args(
-        [
-            "link",
-            "acme-002",
-            "--link-kind",
-            "unblocked_by",
-            "--target-kind",
-            "finding",
-            "--target-ref",
-            "acme-003",
-            "--notes",
-            "credential wall cleared",
-        ]
-    )
+    args = parser.parse_args([
+        "link", "acme-002", "--link-kind", "unblocked_by", "--target-kind", "finding",
+        "--target-ref", "acme-003", "--notes", "credential wall cleared",
+    ])
     args.engagement_dir = str(tmp_path)
     link_finding.run(args)
     capsys.readouterr()
@@ -200,7 +180,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self) -> None:
         self.gets: list[str] = []
         self.patches: list[tuple[str, dict]] = []
@@ -212,16 +192,6 @@ class _FakeClient:
     def patch(self, path: str, payload: dict) -> dict:
         self.patches.append((path, payload))
         return {"finding": {"slug": path.split("/", 1)[-1], "row_version": 8}}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:
-        return None
-
 
 def _update_args(argv: list[str], engagement_dir: str) -> argparse.Namespace:
     parser = argparse.ArgumentParser()
@@ -255,9 +225,7 @@ def test_payload_file_notes_append_needs_no_expected_row_version(
     )
 
     update_finding.run(
-        _update_args(
-            ["update", "acme-001", "--payload-file", payload_file], str(tmp_path)
-        )
+        _update_args(["update", "acme-001", "--payload-file", payload_file], str(tmp_path))
     )
 
     captured = capsys.readouterr()
@@ -303,9 +271,7 @@ def test_payload_file_still_requires_the_token_for_a_non_append_patch(
 
     with pytest.raises(SystemExit) as exc_info:
         update_finding.run(
-            _update_args(
-                ["update", "acme-001", "--payload-file", payload_file], str(tmp_path)
-            )
+            _update_args(["update", "acme-001", "--payload-file", payload_file], str(tmp_path))
         )
 
     assert exc_info.value.code == 1
@@ -330,9 +296,7 @@ def test_payload_file_append_with_a_bad_token_is_still_refused(
 
     with pytest.raises(SystemExit) as exc_info:
         update_finding.run(
-            _update_args(
-                ["update", "acme-001", "--payload-file", payload_file], str(tmp_path)
-            )
+            _update_args(["update", "acme-001", "--payload-file", payload_file], str(tmp_path))
         )
 
     assert exc_info.value.code == 1

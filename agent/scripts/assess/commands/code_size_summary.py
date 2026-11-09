@@ -6,8 +6,8 @@ import json
 import sys
 from typing import Any
 
+from assess.commands.code_dispatch import CodeFileListingChanged, page_code_files
 from assess.lib.client import AssessmentClient
-from assess.lib.code_structural_identity import parse_code_file_page
 from assess.lib.config import load_config
 
 
@@ -55,32 +55,22 @@ def run(args) -> None:
 
 def _fetch_code_files(cfg, *, repo_id: int | None = None) -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
-    offset = 0
-    expected_total: int | None = None
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        while True:
-            endpoint = f"code/files?limit={_PAGE_SIZE}&offset={offset}"
-            if repo_id is not None:
-                endpoint += f"&repo_id={int(repo_id)}"
-            page = client.get(endpoint)
-            try:
-                items, total, has_more = parse_code_file_page(
-                    page,
-                    expected_offset=offset,
-                    context="code-size-summary response",
-                )
-            except ValueError:
-                print("code-size-summary: unexpected backend response", file=sys.stderr)
-                sys.exit(1)
-            if expected_total is None:
-                expected_total = total
-            elif total != expected_total:
-                print("code-size-summary: backend total changed while paging", file=sys.stderr)
-                sys.exit(1)
-            rows.extend(items)
-            if not has_more:
-                return rows
-            offset += len(items)
+        try:
+            page_code_files(
+                client,
+                page_size=_PAGE_SIZE,
+                context="code-size-summary response",
+                repo_id=repo_id,
+                consume=rows.extend,
+            )
+        except CodeFileListingChanged:
+            print("code-size-summary: backend total changed while paging", file=sys.stderr)
+            sys.exit(1)
+        except ValueError:
+            print("code-size-summary: unexpected backend response", file=sys.stderr)
+            sys.exit(1)
+    return rows
 
 
 def summarize_code_size(

@@ -17,6 +17,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 from assess.commands import http_cmd
+from _fake_client import StubClient
 
 
 class _Cfg:
@@ -26,7 +27,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Records get/post/put calls and serves canned responses."""
 
     def __init__(self, *, get_result=None) -> None:
@@ -63,15 +64,6 @@ class _FakeClient:
         }
         merged.update(payload)
         return merged
-
-    def close(self) -> None:
-        self.closed = True
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
 
 
 def _parser():

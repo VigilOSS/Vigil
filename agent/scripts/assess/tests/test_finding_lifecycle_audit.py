@@ -12,6 +12,7 @@ from assess import cli
 from assess.commands import record_finding, update_finding
 from assess.lib import config, contracts
 from assess.lib.client import AssessmentClient
+from _fake_client import StubClient
 
 
 def _engagement(tmp_path):
@@ -385,15 +386,9 @@ def test_retract_claim_rejects_an_unidentified_success_response(
     assert "do not retry automatically" in stderr
 
 
-class _RecordClient:
+class _RecordClient(StubClient):
     def __init__(self, calls: list[tuple[str, dict]]) -> None:
         self.calls = calls
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc) -> bool:
-        return False
 
     def get(self, endpoint: str):
         if endpoint == "dispatches/FINDING-AUTHOR-1":
@@ -525,13 +520,7 @@ def test_update_submission_identity_flags_reach_existing_patch_fields(
     args.engagement_dir = str(tmp_path)
     captured: dict[str, object] = {}
 
-    class _UpdateClient:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc) -> bool:
-            return False
-
+    class _UpdateClient(StubClient):
         def get(self, endpoint: str):
             assert endpoint == "findings/VA-021"
             return {"slug": "VA-021", "row_version": 4}

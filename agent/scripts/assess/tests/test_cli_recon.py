@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import recon, recon_status
 from assess.lib import runtime_route
@@ -310,7 +311,7 @@ def test_brute_preflight_requires_massdns_even_when_puredns_present(monkeypatch)
 # --------------------------------------------------------------------------- #
 
 
-class _BgClient:
+class _BgClient(StubClient):
     def __init__(self):
         self.posts: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
@@ -322,16 +323,6 @@ class _BgClient:
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
         return {"id": 9, **payload}
-
-    def close(self):
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
 
 def test_recon_background_records_job_and_spawns_detached(monkeypatch, tmp_path):
     monkeypatch.setattr(recon, "load_config", lambda d: _cfg(tmp_path))

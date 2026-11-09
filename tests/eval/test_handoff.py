@@ -36,65 +36,50 @@ def _dispatch(payload: dict) -> tuple[list[str], list[str]]:
 
 
 # ---------------------------------------------------------------------------
-# Valid: operator dispatch (no skills required; operator is exempt)
+# Valid: one row per documented dispatch shape, each must pass unchanged
 # ---------------------------------------------------------------------------
 
 
-def test_valid_operator_dispatch_no_errors():
-    """Operator role is exempt from skills; minimal dispatch must pass."""
-    payload = {
-        "role": "operator",
-        "dispatch_mode": "hypothesis-driven",
-    }
-    errors, warnings = _dispatch(payload)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Valid: vulnerability-analyst dispatch with skills
-# ---------------------------------------------------------------------------
-
-
-def test_valid_vuln_analyst_dispatch_no_errors():
-    """vulnerability-analyst with a valid skill list and dispatch_mode passes."""
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": ["sqli-testing", "xss-testing"],
-    }
-    errors, warnings = _dispatch(payload)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Valid: exploit-developer dispatch (deep-manual mode)
-# ---------------------------------------------------------------------------
-
-
-def test_valid_exploit_developer_dispatch_no_errors():
-    """exploit-developer with skills and deep-manual mode passes."""
-    payload = {
-        "role": "exploit-developer",
-        "dispatch_mode": "deep-manual",
-        "skills": ["exploit-playbook-authoring"],
-        "requested_model": "claude-opus-4-5",
-    }
-    errors, warnings = _dispatch(payload)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Valid: agent_role alias accepted
-# ---------------------------------------------------------------------------
-
-
-def test_valid_agent_role_alias_accepted():
-    """Using ``agent_role`` instead of ``role`` is a valid alias."""
-    payload = {
-        "agent_role": "osint-analyst",
-        "dispatch_mode": "hypothesis-driven",
-        "skills": ["osint-recon"],
-    }
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Operator role is exempt from skills; minimal dispatch must pass.
+        pytest.param(
+            {"role": "operator", "dispatch_mode": "hypothesis-driven"},
+            id="operator_dispatch",
+        ),
+        # vulnerability-analyst with a valid skill list and dispatch_mode passes.
+        pytest.param(
+            {
+                "role": "vulnerability-analyst",
+                "dispatch_mode": "item-iterating",
+                "skills": ["sqli-testing", "xss-testing"],
+            },
+            id="vuln_analyst_dispatch",
+        ),
+        # exploit-developer with skills and deep-manual mode passes.
+        pytest.param(
+            {
+                "role": "exploit-developer",
+                "dispatch_mode": "deep-manual",
+                "skills": ["exploit-playbook-authoring"],
+                "requested_model": "claude-opus-4-5",
+            },
+            id="exploit_developer_dispatch",
+        ),
+        # Using ``agent_role`` instead of ``role`` is a valid alias.
+        pytest.param(
+            {
+                "agent_role": "osint-analyst",
+                "dispatch_mode": "hypothesis-driven",
+                "skills": ["osint-recon"],
+            },
+            id="agent_role_alias",
+        ),
+    ],
+)
+def test_valid_dispatch_no_errors(payload: dict):
+    """Every documented valid dispatch shape must produce zero errors."""
     errors, warnings = _dispatch(payload)
     assert errors == [], f"Unexpected errors: {errors}"
 
@@ -223,60 +208,49 @@ def test_role_and_agent_role_mismatch_is_rejected():
 
 
 # ---------------------------------------------------------------------------
-# Valid: application-unit attribution is optional dispatch metadata
+# Valid: dispatch admission never depends on a scope declaration
 # ---------------------------------------------------------------------------
 
 
-def test_application_unit_identity_is_valid_dispatch_metadata():
-    """Concrete unit attribution is metadata, never dispatch authorization."""
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": ["sqli-testing"],
-        "application_unit_id": 17,
-    }
-    errors, warnings = _dispatch(payload)
-    assert errors == []
-    assert not any("scope" in warning.lower() for warning in warnings)
-
-
-def test_dispatch_contract_does_not_require_target_scope():
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # Concrete unit attribution is metadata, never dispatch authorization.
+        pytest.param(
+            {
+                "role": "vulnerability-analyst",
+                "dispatch_mode": "item-iterating",
+                "skills": ["sqli-testing"],
+                "application_unit_id": 17,
+            },
+            id="application_unit_identity_is_dispatch_metadata",
+        ),
+        # Dispatch admission is about the agent contract, not target authorization.
+        # A specialist dispatch carries an objective, not a scope declaration.
+        pytest.param(
+            {
+                "role": "vulnerability-analyst",
+                "dispatch_mode": "item-iterating",
+                "skills": ["sqli-testing"],
+            },
+            id="vulnerability_analyst_needs_no_scope_field",
+        ),
+        # Exploit dispatch validation is independent of scope-shaping settings.
+        pytest.param(
+            {
+                "role": "exploit-developer",
+                "dispatch_mode": "deep-manual",
+                "skills": ["sqli-testing"],
+            },
+            id="exploit_developer_needs_no_scope_field",
+        ),
+    ],
+)
+def test_dispatch_contract_does_not_require_target_scope(payload: dict):
     """Dispatch admission is about the agent contract, not target authorization."""
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": ["sqli-testing"],
-    }
-    errors, warnings = _dispatch(payload)
-    assert errors == []
-    assert not any("scope" in warning.lower() for warning in warnings)
-
-
-# ---------------------------------------------------------------------------
-# Valid: active specialist roles need no scope field
-# ---------------------------------------------------------------------------
-
-
-def test_vulnerability_analyst_dispatch_needs_no_scope_field():
-    """A specialist dispatch carries an objective, not a scope declaration."""
-    payload = {
-        "role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": ["sqli-testing"],
-    }
     errors, warnings = _dispatch(payload)
     assert errors == [], f"Unexpected errors: {errors}"
-
-
-def test_exploit_developer_dispatch_needs_no_scope_field():
-    """Exploit dispatch validation is independent of scope-shaping settings."""
-    payload = {
-        "role": "exploit-developer",
-        "dispatch_mode": "deep-manual",
-        "skills": ["sqli-testing"],
-    }
-    errors, _warnings = _dispatch(payload)
-    assert errors == []
+    assert not any("scope" in warning.lower() for warning in warnings)
 
 
 # ---------------------------------------------------------------------------

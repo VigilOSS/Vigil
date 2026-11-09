@@ -8,15 +8,13 @@ self-correct without re-reading the contract.
 from __future__ import annotations
 
 import importlib.util
-import sys
 from pathlib import Path
+
+import pytest
 
 
 def _load_module(name: str, relative: str):
     repo_root = Path(__file__).resolve().parents[3]
-    scripts_root = repo_root / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     module_path = repo_root / relative
     spec = importlib.util.spec_from_file_location(name, module_path)
     assert spec is not None
@@ -33,8 +31,13 @@ def _validation_module():
     )
 
 
-def test_did_you_mean_suggests_source_name_when_source_used():
-    module = _validation_module()
+@pytest.fixture
+def module():
+    """The schema-validation module under test."""
+    return _validation_module()
+
+
+def test_did_you_mean_suggests_source_name_when_source_used(module):
     schema = module.load_schema("intel-tech-component.schema.json")
     payload = {"component": "vendor-saas-platform", "source": "wappalyzer"}
 
@@ -45,8 +48,7 @@ def test_did_you_mean_suggests_source_name_when_source_used():
     assert "source_name" in matches[0]
 
 
-def test_did_you_mean_omitted_for_truly_unknown_field():
-    module = _validation_module()
+def test_did_you_mean_omitted_for_truly_unknown_field(module):
     schema = module.load_schema("intel-tech-component.schema.json")
     payload = {"component": "x", "fizzbuzz": "y"}
 
@@ -57,12 +59,11 @@ def test_did_you_mean_omitted_for_truly_unknown_field():
     assert "Did you mean" not in matches[0]
 
 
-def test_did_you_mean_returns_multiple_suggestions_when_close():
+def test_did_you_mean_returns_multiple_suggestions_when_close(module):
     """The hint surfaces up to three candidates so a single high-score outlier
     (`evidence` -> `evidence_ref`) does not drown out alternatives like
     `evidence_quote` that are equally plausible.
     """
-    module = _validation_module()
     schema = module.load_schema("intel-tech-component.schema.json")
     payload = {"component": "x", "evidence": "stuff"}
 
@@ -76,14 +77,13 @@ def test_did_you_mean_returns_multiple_suggestions_when_close():
     assert "evidence_ref" in matches[0]
 
 
-def test_intel_cve_allof_if_then_enforces_block_reason_when_attempted_blocked():
+def test_intel_cve_allof_if_then_enforces_block_reason_when_attempted_blocked(module):
     """L4-5: the validator previously IGNORED allOf/if-then, so intel-cve's
     `validation_status='attempted_blocked' -> details.block_reason required`
     rule was silently un-enforced. It must now reject a payload that violates
     the conditional and accept a conforming one — matching the backend Pydantic
     `CveRecordRequest` model_validator.
     """
-    module = _validation_module()
     schema = module.load_schema("intel-cve.schema.json")
 
     bad = {
@@ -109,12 +109,11 @@ def test_intel_cve_allof_if_then_enforces_block_reason_when_attempted_blocked():
     assert module.collect_validation_errors(good, schema) == []
 
 
-def test_intel_cve_if_then_does_not_fire_when_status_not_attempted_blocked():
+def test_intel_cve_if_then_does_not_fire_when_status_not_attempted_blocked(module):
     """L4-5: the conditional must NOT bite when validation_status is anything
     other than attempted_blocked — a CVE with no block_reason and a non-blocked
     status is valid (the if-condition fails, so `then` is not applied).
     """
-    module = _validation_module()
     schema = module.load_schema("intel-cve.schema.json")
 
     neutral = {
@@ -145,14 +144,13 @@ def _finding_base() -> dict:
     }
 
 
-def test_finding_rejects_empty_cvss_vector_but_accepts_a_zero_score():
+def test_finding_rejects_empty_cvss_vector_but_accepts_a_zero_score(module):
     """An empty cvss_vector is a meaningless record and stays rejected
     (minLength:1). A cvss_score of 0.0 is NOT: an all-N vector genuinely
     computes to it, and it is the only score the `info` severity band (< 0.1)
     can hold, so excluding it made an informational finding unrepresentable.
     Below zero is still off the CVSS scale.
     """
-    module = _validation_module()
     schema = module.load_schema("finding-record.schema.json")
 
     base = _finding_base()
@@ -176,12 +174,11 @@ def test_finding_rejects_empty_cvss_vector_but_accepts_a_zero_score():
     assert any("cvss_score" in e for e in errors), errors
 
 
-def test_finding_accepts_valid_cvss_and_no_cvss_at_record_time():
+def test_finding_accepts_valid_cvss_and_no_cvss_at_record_time(module):
     """L4-6: a real CVSS (vector set + score 7.5) passes, and a finding with NO
     cvss at all still passes — cvss is a report-time field, not in
     details.required, so the record-time floor must remain unblocked.
     """
-    module = _validation_module()
     schema = module.load_schema("finding-record.schema.json")
 
     base = _finding_base()
@@ -197,12 +194,11 @@ def test_finding_accepts_valid_cvss_and_no_cvss_at_record_time():
     assert module.collect_validation_errors(base, schema) == []
 
 
-def test_patch_validation_skips_required_check_but_keeps_unknown_field_hint():
+def test_patch_validation_skips_required_check_but_keeps_unknown_field_hint(module):
     """Partial-update validators must not reject a payload for missing required
     natural-key fields, since the backend whitelist filters those. Typos still
     surface a Did-you-mean hint.
     """
-    module = _validation_module()
     schema = module.load_schema("intel-tech-component.schema.json")
 
     # `component` is required in the full schema; the patch validator must
@@ -217,8 +213,7 @@ def test_patch_validation_skips_required_check_but_keeps_unknown_field_hint():
     assert "source_name" in matches[0]
 
 
-def test_array_bounds_are_enforced_at_every_nested_level():
-    module = _validation_module()
+def test_array_bounds_are_enforced_at_every_nested_level(module):
     schema = {
         "type": "array",
         "minItems": 1,
@@ -250,8 +245,7 @@ def test_array_bounds_are_enforced_at_every_nested_level():
     ]
 
 
-def test_unique_items_handles_nested_json_values_deterministically():
-    module = _validation_module()
+def test_unique_items_handles_nested_json_values_deterministically(module):
     schema = {
         "type": "array",
         "uniqueItems": True,
@@ -274,8 +268,7 @@ def test_unique_items_handles_nested_json_values_deterministically():
     ]
 
 
-def test_typeless_array_subschema_still_applies_array_keywords_recursively():
-    module = _validation_module()
+def test_typeless_array_subschema_still_applies_array_keywords_recursively(module):
     schema = {
         "properties": {
             "groups": {

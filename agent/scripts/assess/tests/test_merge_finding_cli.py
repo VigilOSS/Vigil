@@ -12,6 +12,8 @@ from __future__ import annotations
 
 import argparse
 
+from _fake_client import StubClient
+
 from assess.commands import merge_finding
 
 
@@ -22,7 +24,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self, response: dict) -> None:
         self._response = response
         self.posts: list[tuple[str, dict]] = []
@@ -35,16 +37,6 @@ class _FakeClient:
     def post_event(self, payload: dict) -> dict:
         self.events.append(payload)
         return {}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
-
 
 def _run(monkeypatch, tmp_path, response: dict) -> _FakeClient:
     fake = _FakeClient(response)

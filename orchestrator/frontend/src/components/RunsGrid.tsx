@@ -13,14 +13,14 @@
 
 import { useMemo } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { CellKeyDownEvent, ColDef, GridApi, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { ColDef, GridApi, ICellRendererParams } from "ag-grid-community";
 import {
   AG_GRID_THEME,
   GRID_HEADER_HEIGHT,
   GRID_THEME_PROP,
   defaultColDef,
-  focusGridInvoker,
   registerAgGrid,
+  rowOpenHandlers,
 } from "../lib/agGrid";
 import { DEFAULT_RUN_SORT, type RunRow, type RunSort } from "../lib/runAudit";
 import { formatDuration, gridTimeComparator } from "../lib/serverTime";
@@ -241,22 +241,11 @@ export default function RunsGrid({ engagementKey, rows, selectedId, onRowOpen, o
     [FindingsCell],
   );
 
-  const onRowClicked = (event: RowClickedEvent<RunRow>) => {
-    const selection = window.getSelection?.();
-    if (selection && selection.type === "Range" && selection.toString().length > 0) return;
-    const target = event.event?.target as HTMLElement | undefined;
-    if (target?.closest("a, button")) return;
-    if (event.data) onRowOpen(event.data.id, focusGridInvoker(event.event));
-  };
-
-  const onCellKeyDown = (event: CellKeyDownEvent<RunRow>) => {
-    const keyboardEvent = event.event as KeyboardEvent;
-    const target = keyboardEvent.target as HTMLElement | null;
-    if (target?.closest("a, button")) return;
-    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
-    keyboardEvent.preventDefault();
-    onRowOpen(event.data.id, focusGridInvoker(keyboardEvent));
-  };
+  // A link or button inside the row handles its own activation.
+  const { onRowClicked, onCellKeyDown } = rowOpenHandlers<RunRow>(
+    (row, invoker) => onRowOpen(row.id, invoker),
+    { clickIgnore: "a, button", keyIgnore: "a, button" },
+  );
 
   return (
     <div className={`${AG_GRID_THEME} grid-host runs-grid-host`}>

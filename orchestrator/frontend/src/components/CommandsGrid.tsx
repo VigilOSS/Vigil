@@ -10,23 +10,13 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type {
-  CellKeyDownEvent,
   ColDef,
   GridApi,
   ICellRendererParams,
   IDatasource,
-  RowClickedEvent,
   SortChangedEvent,
 } from "ag-grid-community";
-import {
-  AG_GRID_THEME,
-  GRID_HEADER_HEIGHT,
-  GRID_ROW_HEIGHT,
-  GRID_THEME_PROP,
-  defaultColDef,
-  focusGridInvoker,
-  registerAgGrid,
-} from "../lib/agGrid";
+import { AG_GRID_THEME, GRID_ROW_HEIGHT, gridBaseProps, registerAgGrid, rowOpenHandlers } from "../lib/agGrid";
 import {
   DEFAULT_COMMAND_SORT,
   commandSortColumn,
@@ -311,22 +301,11 @@ export default function CommandsGrid({
     [TargetCell, startSort],
   );
 
-  const onRowClicked = (event: RowClickedEvent<CommandLedgerRow>) => {
-    // Text selection and the target button inside the row do not open it.
-    const selection = window.getSelection?.();
-    if (selection && selection.type === "Range" && selection.toString().length > 0) return;
-    const target = event.event?.target as HTMLElement | undefined;
-    if (target?.closest("button")) return;
-    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
-  };
-
-  const onCellKeyDown = (event: CellKeyDownEvent<CommandLedgerRow>) => {
-    const keyboardEvent = event.event as KeyboardEvent;
-    if ((keyboardEvent.target as HTMLElement | null)?.closest("button")) return;
-    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
-    keyboardEvent.preventDefault();
-    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
-  };
+  // Text selection and the target button inside the row do not open it.
+  const { onRowClicked, onCellKeyDown } = rowOpenHandlers<CommandLedgerRow>(onRowOpen, {
+    clickIgnore: "button",
+    keyIgnore: "button",
+  });
 
   const onSortChanged = (event: SortChangedEvent<CommandLedgerRow>) => {
     const model = event.api.getColumnState().map((column) => ({ colId: column.colId, sort: column.sort }));
@@ -336,7 +315,7 @@ export default function CommandsGrid({
   return (
     <div className={`${AG_GRID_THEME} grid-host commands-grid-host`}>
       <AgGridReact<CommandLedgerRow>
-        theme={GRID_THEME_PROP}
+        {...gridBaseProps}
         rowModelType="infinite"
         datasource={datasource}
         cacheBlockSize={COMMAND_GRID_BLOCK_SIZE}
@@ -344,12 +323,8 @@ export default function CommandsGrid({
         blockLoadDebounceMillis={80}
         infiniteInitialRowCount={COMMAND_GRID_BLOCK_SIZE}
         columnDefs={columnDefs}
-        defaultColDef={defaultColDef}
         suppressMultiSort
         getRowId={(p) => String(p.data.id)}
-        rowHeight={GRID_ROW_HEIGHT}
-        headerHeight={GRID_HEADER_HEIGHT}
-        tooltipShowDelay={400}
         onGridReady={(event) => {
           apiRef.current = event.api;
           onHandleRef.current?.(handle);

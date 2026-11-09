@@ -3,13 +3,17 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
 import subprocess
 import tomllib
+from pathlib import Path
 
 import pytest
 
+from vigil_cli import application as application_module
+from vigil_cli import assessment_clients, client_rosters, client_sessions
 from vigil_cli import blue, engagements, remediation_sessions
+from vigil_cli import main as main_module
+from vigil_cli.client_sessions import active_client_sessions, historical_client_starts
 
 
 @pytest.fixture
@@ -71,8 +75,6 @@ def test_remediation_route_resolves_roles_from_application_not_workspace(layout)
 
 
 def test_launcher_pins_release_helper_and_private_workspace(layout, monkeypatch):
-    from vigil_cli import application as application_module
-
     application, workspace = layout
     helper_bin = application / "bin"
     helper_bin.mkdir()
@@ -105,8 +107,6 @@ def test_tenant_init_refuses_an_application_owned_destination(layout, monkeypatc
 
 
 def test_remediation_environment_pins_application_and_helpers(layout, monkeypatch):
-    from vigil_cli import application as application_module
-
     application, workspace = layout
     helper_bin = application / "bin"
     monkeypatch.setattr(application_module, "session_cli_directory", lambda *_: helper_bin)
@@ -168,7 +168,6 @@ def test_start_refreshes_only_selected_generated_entrypoints_for_current_release
     engagements.start_engagement(workspace, engagement, "codex", [])
 
     assert launched
-    from vigil_cli.client_sessions import historical_client_starts
     starts, _ = historical_client_starts(workspace)
     assert any(row.get("event") == "launch_requested" and row["client"] == "codex" for row in starts)
     assert str(application / "agent/operator-core-code.md") in (engagement / "AGENTS.md").read_text()
@@ -201,7 +200,6 @@ def test_concurrent_start_reuses_shared_release_without_rewriting_live_configura
 
     assert Path(launched[-1][0]).name == f"start_{client}.sh"
     assert original == ((engagement / "start_codex.sh").read_bytes(), (engagement / "AGENTS.md").read_bytes())
-    from vigil_cli.client_sessions import active_client_sessions
     assert {row["application"]["root"] for row in active_client_sessions(workspace)} == {str(application)}
     warning = capsys.readouterr().err
     assert "Warning:" in warning and "PID" in warning
@@ -209,9 +207,6 @@ def test_concurrent_start_reuses_shared_release_without_rewriting_live_configura
 
 
 def test_opencode_upgrade_prepares_new_context_without_rebinding_active_session_config(layout, monkeypatch):
-    from vigil_cli import main as main_module
-    from vigil_cli import assessment_clients, client_sessions
-
     application, workspace = layout
     engagement = workspace / "engagements/acme"
     engagement.mkdir(parents=True)
@@ -250,8 +245,6 @@ def test_opencode_upgrade_prepares_new_context_without_rebinding_active_session_
 
 
 def test_adding_track_keeps_live_shared_clients_on_their_bound_application(layout, monkeypatch):
-    from vigil_cli import client_sessions
-
     application, workspace = layout
     adapter = application / "agent/scripts/hooks/goose-hook-adapter.sh"
     adapter.parent.mkdir(parents=True)
@@ -286,8 +279,6 @@ def test_adding_track_keeps_live_shared_clients_on_their_bound_application(layou
 
 @pytest.mark.parametrize(("original_client", "new_client"), [("claude", "codex"), ("codex", "claude")])
 def test_concurrent_start_initializes_a_new_client_without_rewriting_existing_files(layout, monkeypatch, original_client, new_client):
-    from vigil_cli import client_sessions
-
     application, workspace = layout
     engagement = workspace / "engagements/acme"
     engagement.mkdir(parents=True)
@@ -366,8 +357,6 @@ def test_official_start_preserves_operator_settings_and_custom_hooks(layout, mon
 
 @pytest.mark.parametrize("cli_directory", ["cli", "src"])
 def test_goose_launcher_uses_release_proxy_not_obsolete_workspace_code(layout, monkeypatch, cli_directory):
-    from vigil_cli import application as application_module
-
     application, workspace = layout
     helper_bin = application / "bin"
     helper_bin.mkdir()
@@ -431,8 +420,6 @@ def test_upgrade_start_rebinds_goose_prompt_with_matching_router_and_retains_add
 
 @pytest.mark.parametrize("client", ["codex", "claude"])
 def test_start_config_refresh_preserves_custom_arguments_and_pipelines(layout, client):
-    from vigil_cli import client_rosters
-
     application, workspace = layout
     agent = application / "agent"
     custom_command = "bash /old/application/agent/scripts/hooks/session-end.sh --acme-option | acme-notify"
@@ -455,8 +442,6 @@ def test_start_config_refresh_preserves_custom_arguments_and_pipelines(layout, c
 
 
 def test_start_config_refresh_preserves_operator_authored_compact_prompt(layout, monkeypatch):
-    from vigil_cli import client_rosters
-
     application, workspace = layout
     source_dir = application / "agent/.codex"
     source_dir.mkdir()

@@ -14,10 +14,12 @@ import hashlib
 from pathlib import Path
 from types import SimpleNamespace
 
+from _fake_client import StubClient
+
 from assess.commands import agent, resume_brief
 
 
-class _LedgerClient:
+class _LedgerClient(StubClient):
     """Only the finding ledger; every other read is an unexpected call."""
 
     def __init__(self, total: int) -> None:
@@ -130,9 +132,6 @@ def test_the_rendered_count_is_the_one_the_advisory_compares_against(
             packet["sha256"] = hashlib.sha256(packet["rendered_prompt"].encode()).hexdigest()
             return {"id": 3, **payload, "status": "in-progress",
                     "prompt_packet": packet, "launch_required": True}
-
-        def close(self) -> None:
-            pass
 
     parser = argparse.ArgumentParser()
     agent.register(parser.add_subparsers())

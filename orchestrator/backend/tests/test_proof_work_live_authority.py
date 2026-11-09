@@ -3,7 +3,18 @@ from __future__ import annotations
 import json
 import pytest
 
+from app import db
 from tests.test_proof_work_api import BASE, seed, prepare, claim
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the proof-work cases below claim against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``seed(...)`` call used to run.
+    """
+    return seed(client, isolate_settings)
 
 
 def approval(client, work, approved=True, **kwargs):
@@ -26,8 +37,7 @@ def policy(path, policy, **extra):
     {'approved': True, 'actor': 'ui', 'human_confirmation': 'x' * 2001},
     {'approved': False, 'actor': 'operator', 'reason': '  '},
 ])
-def test_approval_requires_audited_human_decision(client, isolate_settings, body):
-    seed(client, isolate_settings)
+def test_approval_requires_audited_human_decision(client, body, seeded_engagement):
     work = prepare(client, 'web')
     response = client.post(f'{BASE}/proof-work/{work["id"]}/approval', json=body)
     assert response.status_code == 422, response.text
@@ -68,8 +78,7 @@ def test_selected_exploit_authority_does_not_grant_parked_proof(client, isolate_
     assert claim(client, work).status_code == 409
 
 
-def test_reapproval_preserves_independent_blocker(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_reapproval_preserves_independent_blocker(client, seeded_engagement):
     work = prepare(client, 'web')
     assert approval(client, work).status_code == 200
     assert claim(client, work).status_code == 200
@@ -81,8 +90,7 @@ def test_reapproval_preserves_independent_blocker(client, isolate_settings):
     assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['blocker'] == 'Missing Acme test account'
 
 
-def test_proof_owner_cannot_continue_after_release(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_proof_owner_cannot_continue_after_release(client, seeded_engagement):
     work = prepare(client)
     owned = claim(client, work).json()
     assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
@@ -95,8 +103,9 @@ def test_proof_owner_cannot_continue_after_release(client, isolate_settings):
     assert 'proof' in response.json()['detail'].lower()
 
 
-def test_installed_instruction_identity_retains_hashes_without_attesting_loading(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_installed_instruction_identity_retains_hashes_without_attesting_loading(
+    client, seeded_engagement
+):
     response = client.post(f'{BASE}/dispatches', json={
         'agent_id': 'ACME-INSTALLED', 'agent_role': 'vulnerability-analyst', 'task': 'Review Acme',
         'client_name': 'codex', 'instruction_identity_status': 'installed',
@@ -109,8 +118,7 @@ def test_installed_instruction_identity_retains_hashes_without_attesting_loading
     assert response.json()['actual_model'] == 'unknown'
 
 
-def test_ordinary_continuation_requires_closed_predecessor(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_ordinary_continuation_requires_closed_predecessor(client, seeded_engagement):
     parent = client.post(f'{BASE}/dispatches', json={
         'agent_id': 'ACME-PARENT', 'agent_role': 'vulnerability-analyst', 'task': 'Inspect Acme',
     }).json()
@@ -122,9 +130,9 @@ def test_ordinary_continuation_requires_closed_predecessor(client, isolate_setti
 
 
 @pytest.mark.parametrize('execution', ['descendant', 'ambiguous'])
-def test_release_refuses_historical_descendant_or_ambiguous_execution(client, isolate_settings, execution):
-    from app import db
-    seed(client, isolate_settings)
+def test_release_refuses_historical_descendant_or_ambiguous_execution(
+    client, execution, seeded_engagement
+):
     work = prepare(client)
     owner = claim(client, work).json()
     assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
@@ -145,7 +153,6 @@ def test_release_refuses_historical_descendant_or_ambiguous_execution(client, is
 
 @pytest.mark.parametrize('missing', ['threat_model', 'structural_index'])
 def test_source_bound_claim_checks_current_prerequisites_before_dispatch(client, isolate_settings, missing):
-    from app import db
     from tests.test_proof_work_api import bind_source_candidate
     from app.services.code_analysis_support import STRUCTURAL_INDEX_SCHEMA
     seed(client, isolate_settings)
@@ -164,8 +171,7 @@ def test_source_bound_claim_checks_current_prerequisites_before_dispatch(client,
     assert claim(client, work).status_code == 200
 
 
-def test_code_only_dispatch_defaults_to_code_and_rejects_web(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_code_only_dispatch_defaults_to_code_and_rejects_web(client, seeded_engagement):
     body = {'agent_id': 'CODE-VERIFY', 'agent_role': 'code-vuln-verifier', 'task': 'Review Acme'}
     response = client.post(f'{BASE}/dispatches', json=body)
     assert response.status_code == 201, response.text
@@ -190,7 +196,6 @@ def test_full_send_loss_blocks_only_work_without_exact_approval(client, isolate_
 
 
 def test_legacy_binding_approval_events_normalize_and_reprepare_resets_epoch(client, isolate_settings):
-    from app import db
     path = seed(client, isolate_settings)
     work = prepare(client, 'web')
     with db.get_connection() as connection:
@@ -211,9 +216,9 @@ def test_legacy_binding_approval_events_normalize_and_reprepare_resets_epoch(cli
     assert restored['approval_decision'] is None
 
 
-def test_release_uses_claim_time_not_preparation_time_for_ambiguous_command(client, isolate_settings):
-    from app import db
-    seed(client, isolate_settings)
+def test_release_uses_claim_time_not_preparation_time_for_ambiguous_command(
+    client, seeded_engagement
+):
     work = prepare(client)
     assert claim(client, work).status_code == 200
     assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
@@ -228,8 +233,7 @@ def test_release_uses_claim_time_not_preparation_time_for_ambiguous_command(clie
     assert response.status_code == 200, response.text
 
 
-def test_revocation_refuses_run_attachment_but_retains_canonical_run(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_revocation_refuses_run_attachment_but_retains_canonical_run(client, seeded_engagement):
     work = prepare(client, 'web')
     assert approval(client, work).status_code == 200
     assert claim(client, work).status_code == 200
@@ -247,8 +251,7 @@ def test_revocation_refuses_run_attachment_but_retains_canonical_run(client, iso
     assert client.get(f'{BASE}/proof-work/{work["id"]}').json()['run_ids'] == []
 
 
-def test_approval_changes_do_not_reopen_finished_work(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_approval_changes_do_not_reopen_finished_work(client, seeded_engagement):
     work = prepare(client, 'web')
     assert approval(client, work).status_code == 200
     assert claim(client, work).status_code == 200
@@ -266,8 +269,7 @@ def test_code_only_dispatch_roles_match_assess_packet_roles():
     assert _CODE_ASSESSMENT_ROLES == _CODE_SOURCE_IDENTITY_ROLES
 
 
-def test_scope_admission_failure_names_requested_host_and_flag(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_scope_admission_failure_names_requested_host_and_flag(client, seeded_engagement):
     response = client.post(f'{BASE}/proof-work', json={
         'finding_slug': 'VA-050', 'route': 'web', 'objective': 'Challenge Acme boundary',
         'target_hosts': ['outside.example'],
@@ -286,10 +288,8 @@ def test_scope_admission_failure_names_requested_host_and_flag(client, isolate_s
     ('PROOF-1', '2026-01-04 00:00:00', False),
 ])
 def test_finished_proof_bounds_ambiguous_execution_but_retains_owned_work(
-    client, isolate_settings, execution, agent, when, allowed,
+    client, execution, agent, when, allowed, seeded_engagement
 ):
-    from app import db
-    seed(client, isolate_settings)
     work = prepare(client)
     assert claim(client, work).status_code == 200
     assert client.patch(f'{BASE}/proof-work/{work["id"]}', json={
@@ -393,9 +393,9 @@ def test_later_stale_predecessor_revoke_stops_successor_until_new_exact_approval
 
 @pytest.mark.parametrize('same_work', [False, True])
 @pytest.mark.parametrize('agent', ['operator', 'PROOF-1'])
-def test_released_claim_only_blocks_new_claim_for_later_attributable_execution(client, isolate_settings, same_work, agent):
-    from app import db
-    seed(client, isolate_settings)
+def test_released_claim_only_blocks_new_claim_for_later_attributable_execution(
+    client, same_work, agent, seeded_engagement
+):
     work = prepare(client)
     assert claim(client, work).status_code == 200
     assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200
@@ -435,8 +435,7 @@ def test_reusing_older_work_preserves_later_context_stop_lineage(client, isolate
     assert claim(client, restored).status_code == 200
 
 
-def test_claimed_progress_event_does_not_invent_an_owner_after_release(client, isolate_settings):
-    seed(client, isolate_settings)
+def test_claimed_progress_event_does_not_invent_an_owner_after_release(client, seeded_engagement):
     work = prepare(client)
     assert claim(client, work).status_code == 200
     run = client.post(f'{BASE}/assessment-runs', json={
@@ -456,9 +455,7 @@ def test_claimed_progress_event_does_not_invent_an_owner_after_release(client, i
     assert response.status_code == 200, response.text
 
 
-def test_released_claim_with_missing_recorded_owner_still_blocks_retry(client, isolate_settings):
-    from app import db
-    seed(client, isolate_settings)
+def test_released_claim_with_missing_recorded_owner_still_blocks_retry(client, seeded_engagement):
     work = prepare(client)
     owned = claim(client, work).json()
     assert client.patch(f'{BASE}/dispatches/PROOF-1', json={'status': 'completed'}).status_code == 200

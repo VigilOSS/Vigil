@@ -20,6 +20,7 @@ import json
 import re
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import record_chain
 
@@ -48,7 +49,7 @@ _EVENT_FIELD_CAPS = {
 }
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Stand-in for `AssessmentClient` used as a context manager.
 
     Records the attack-chain POST and the emitted event, and mimics the backend
@@ -77,13 +78,6 @@ class _FakeClient:
                 self.rejected_events.append((field, payload))
                 return None
         return {"id": len(self.events)}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
 
 def _record_chain_ns(json_file: str, engagement_dir: str) -> argparse.Namespace:
     return argparse.Namespace(

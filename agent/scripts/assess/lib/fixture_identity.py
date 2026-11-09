@@ -47,9 +47,7 @@ def _clean_field(value: str) -> str:
 
 
 def _clean_id(value: Any) -> str:
-    if isinstance(value, (Mapping, list, tuple, set, frozenset)):
-        raise FixtureIdentityError("fixture id must be a non-empty scalar")
-    if isinstance(value, (bool, bytes, bytearray)) or value is None:
+    if isinstance(value, (Mapping, list, tuple, set, frozenset, bool, bytes, bytearray)) or value is None:
         raise FixtureIdentityError("fixture id must be a non-empty scalar")
     result = str(value).strip()
     # Reject shell/template placeholders. Binding one from a narrative is a
@@ -61,30 +59,31 @@ def _clean_id(value: Any) -> str:
     return result
 
 
-def _field_for_key(key: str) -> str | None:
-    normalized = re.sub(r"[^a-z0-9]", "", str(key).lower())
-    aliases = {
-        "organizationid": "organization_id",
-        "organizationref": "organization_id",
-        "orgid": "organization_id",
-        "personid": "person_id",
-        "userid": "person_id",
-        "memberid": "person_id",
-        "subscriptionid": "subscription_id",
-    }
-    return aliases.get(normalized)
+# Key and ``type`` spellings that name a fixture field. Two tables because the
+# vocabularies differ: a key alias names a field, a type alias names the field
+# that object's own ``id`` belongs to.
+_FIELD_BY_KEY_ALIAS = {
+    "organizationid": "organization_id",
+    "organizationref": "organization_id",
+    "orgid": "organization_id",
+    "personid": "person_id",
+    "userid": "person_id",
+    "memberid": "person_id",
+    "subscriptionid": "subscription_id",
+}
+_FIELD_BY_TYPE_ALIAS = {
+    "organization": "organization_id",
+    "org": "organization_id",
+    "person": "person_id",
+    "user": "person_id",
+    "member": "person_id",
+    "subscription": "subscription_id",
+}
 
 
-def _field_for_type(value: Any) -> str | None:
-    normalized = re.sub(r"[^a-z0-9]", "", str(value or "").lower())
-    return {
-        "organization": "organization_id",
-        "org": "organization_id",
-        "person": "person_id",
-        "user": "person_id",
-        "member": "person_id",
-        "subscription": "subscription_id",
-    }.get(normalized)
+def _field_for(value: Any, table: dict[str, str]) -> str | None:
+    """The fixture field *value* names in *table*, ignoring case and punctuation."""
+    return table.get(re.sub(r"[^a-z0-9]", "", str(value or "").lower()))
 
 
 def extract_fixture_ids(payload: Any) -> dict[str, str]:
@@ -117,17 +116,17 @@ def extract_fixture_ids(payload: Any) -> dict[str, str]:
         if not isinstance(node, Mapping):
             return
 
-        typed_field = _field_for_type(node.get("type"))
+        typed_field = _field_for(node.get("type"), _FIELD_BY_TYPE_ALIAS)
         if typed_field and "id" in node:
             add(typed_field, node["id"])
         for key, value in node.items():
-            field = _field_for_key(str(key))
+            field = _field_for(str(key), _FIELD_BY_KEY_ALIAS)
             if field:
                 add(field, value)
         # JSON:API metadata commonly carries the tenant in meta.parent.
         parent = node.get("parent")
         if isinstance(parent, Mapping) and "id" in parent:
-            parent_field = _field_for_type(parent.get("type"))
+            parent_field = _field_for(parent.get("type"), _FIELD_BY_TYPE_ALIAS)
             if parent_field:
                 add(parent_field, parent["id"])
         for value in node.values():

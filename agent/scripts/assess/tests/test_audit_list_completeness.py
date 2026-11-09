@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import artifact, coverage, http_cmd
 from assess.lib.client import AssessError
@@ -36,13 +37,10 @@ def _window(endpoint: str, rows: list[dict]) -> list[dict]:
     return rows[offset : offset + limit]
 
 
-class _PagedClient:
+class _PagedClient(StubClient):
     rows: list[dict] = []
     endpoints: list[str] = []
     envelope = False
-
-    def __init__(self, *_args, **_kwargs) -> None:
-        pass
 
     def get(self, endpoint: str):
         type(self).endpoints.append(endpoint)
@@ -50,12 +48,6 @@ class _PagedClient:
         if type(self).envelope:
             return {"attempts": page, "count": len(page)}
         return page
-
-    def close(self) -> None:
-        pass
-
-    def __enter__(self):
-        return self
 
     def __exit__(self, *_exc) -> bool:
         self.close()
@@ -139,11 +131,7 @@ def test_artifact_search_paginate_reaches_the_final_record(
 
     monkeypatch.setattr(artifact, "AssessmentClient", Client)
     monkeypatch.setattr(artifact, "load_config", lambda _path: _config())
-    args = _args(
-        artifact,
-        "artifact",
-        ["search", "--limit", "2", "--offset", "1", "--paginate", "--json"],
-    )
+    args = _args(artifact, "artifact", ["search", "--limit", "2", "--offset", "1", "--paginate", "--json"])
 
     args.func(args)
 
@@ -224,11 +212,7 @@ def test_http_list_bounds_default_and_reports_continuation(
 
     monkeypatch.setattr(http_cmd, "AssessmentClient", Client)
     monkeypatch.setattr(http_cmd, "load_config", lambda _path: _config())
-    args = _args(
-        http_cmd,
-        "http",
-        ["list", "--host", "target.example", "--limit", "1", "--json"],
-    )
+    args = _args(http_cmd, "http", ["list", "--host", "target.example", "--limit", "1", "--json"])
 
     args.func(args)
 

@@ -45,6 +45,14 @@ def _case(client, isolate_settings, **overrides):
     return client.get(f"{BASE}/cases/{identifier}").json()
 
 
+def _case_worktree(client, isolate_settings, **overrides):
+    """One intake case plus its freshly created remediation worktree."""
+    case = _case(client, isolate_settings, **overrides)
+    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
+    worktree.mkdir(parents=True)
+    return case, worktree
+
+
 def _approve(client, case_id: int):
     digest = client.get(f"{BASE}/cases/{case_id}").json()["review_digest"]
     return client.post(f"{BASE}/cases/{case_id}/approve", json={
@@ -212,9 +220,7 @@ def test_historical_null_environment_keeps_review_digest(monkeypatch, tmp_path):
 
 
 def test_remediation_approval_invalidated_by_code_and_plan_changes(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     code = worktree / "fix.php"
     code.write_text("fixed v1")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
@@ -249,9 +255,7 @@ def test_remediation_approval_invalidated_by_code_and_plan_changes(client, isola
 
 
 def test_remediation_rejects_claimed_revision_that_is_not_worktree_head(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "add", "fix.php"], check=True)
@@ -458,9 +462,7 @@ def test_remediation_diff_explains_missing_worktree(client, isolate_settings):
 
 
 def test_remediation_review_diff_shows_local_change(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("old")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "add", "fix.php"], check=True)
@@ -475,9 +477,7 @@ def test_remediation_review_diff_shows_local_change(client, isolate_settings):
 
 
 def test_remediation_diff_requires_main_base(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=feature", str(worktree)], check=True)
     _red_baseline(worktree)
@@ -497,9 +497,7 @@ def test_remediation_diff_requires_main_base(client, isolate_settings):
 
 
 def test_remediation_review_digest_changes_when_main_base_moves(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     code = worktree / "fix.php"
     code.write_text("old")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
@@ -518,9 +516,7 @@ def test_remediation_review_digest_changes_when_main_base_moves(client, isolate_
 
 
 def test_remediation_diff_does_not_read_untracked_symlink_target(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "add", "fix.php"], check=True)
@@ -537,9 +533,7 @@ def test_remediation_diff_does_not_read_untracked_symlink_target(client, isolate
 
 
 def test_remediation_diff_bounds_untracked_file_reads(client, isolate_settings, monkeypatch):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "add", "fix.php"], check=True)
@@ -564,9 +558,7 @@ def test_remediation_diff_bounds_untracked_file_reads(client, isolate_settings, 
 
 
 def test_remediation_diff_stops_at_aggregate_untracked_limit(client, isolate_settings, monkeypatch):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "add", "fix.php"], check=True)
@@ -593,9 +585,7 @@ def test_remediation_diff_stops_at_aggregate_untracked_limit(client, isolate_set
 
 @pytest.mark.parametrize("change_kind", ["committed", "committed_binary", "local"])
 def test_remediation_diff_bounds_tracked_git_output(client, isolate_settings, monkeypatch, change_kind):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     code = worktree / "fix.php"
     code.write_text("base")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
@@ -630,9 +620,7 @@ def test_remediation_diff_bounds_tracked_git_output(client, isolate_settings, mo
 
 
 def test_remediation_rejects_approval_of_truncated_review_diff(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("base")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     subprocess.run(["git", "-C", str(worktree), "-c", "user.name=Vigil Test", "-c", "user.email=test@example.invalid", "add", "fix.php"], check=True)
@@ -706,9 +694,7 @@ def test_remediation_stagehand_result_shape_preserves_case_access(
 def test_remediation_api_rejects_unrehearsed_stagehand_evidence(
     client, isolate_settings, stagehand_steps, screenshot_valid,
 ):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     _red_baseline(worktree)
@@ -731,9 +717,7 @@ def test_remediation_api_rejects_unrehearsed_stagehand_evidence(
 
 
 def test_remediation_review_requires_baseline_outcome(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     (worktree / "fix.php").write_text("fixed")
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     _red_baseline(worktree)
@@ -885,9 +869,7 @@ def test_remediation_worktree_must_belong_to_case(client, isolate_settings):
 
 
 def test_remediation_case_binds_registered_worktree_branch_across_revision_sync(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     _red_baseline(worktree)
     subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "fix/custom-case"], check=True)
@@ -911,9 +893,7 @@ def test_remediation_case_binds_registered_worktree_branch_across_revision_sync(
 
 
 def test_remediation_case_rejects_branch_mismatch_or_rebinding(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     subprocess.run(["git", "init", "-q", "--initial-branch=fix/custom-case", str(worktree)], check=True)
     endpoint = f"{BASE}/cases/{case['id']}"
     assert client.patch(endpoint, json={"worktree_path": str(worktree), "worktree_branch": "fix/other"}).status_code == 400
@@ -926,9 +906,7 @@ def test_remediation_case_rejects_branch_mismatch_or_rebinding(client, isolate_s
 
 
 def test_remediation_case_rejects_revision_sync_after_checkout_switch(client, isolate_settings):
-    case = _case(client, isolate_settings)
-    worktree = isolate_settings["engagements_dir"] / KEY / "remediation" / "cases" / str(case["id"]) / "worktree"
-    worktree.mkdir(parents=True)
+    case, worktree = _case_worktree(client, isolate_settings)
     subprocess.run(["git", "init", "-q", "--initial-branch=main", str(worktree)], check=True)
     _red_baseline(worktree)
     subprocess.run(["git", "-C", str(worktree), "switch", "-qc", "fix/custom-case"], check=True)

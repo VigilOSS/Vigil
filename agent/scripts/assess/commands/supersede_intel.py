@@ -26,6 +26,7 @@ import json
 import sys
 
 from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.intel_types import INTEL_TYPES
 from assess.lib.json_inputs import parse_json_argument
@@ -151,13 +152,12 @@ def run(args) -> None:
     to_existing_id = getattr(args, "to_existing_id", None)
     if to_existing_id is not None:
         if args.payload is not None or args.inline_payload is not None:
-            print(
-                "supersede-intel: --to-existing is mutually exclusive with a "
+            fail(
+                "supersede-intel",
+                "--to-existing is mutually exclusive with a "
                 "payload/--inline argument (it repoints at an existing row "
                 "instead of recording a replacement)",
-                file=sys.stderr,
             )
-            sys.exit(1)
         request = {
             "to_existing_id": int(to_existing_id),
             "rationale": args.rationale,
@@ -168,11 +168,10 @@ def run(args) -> None:
 
     raw_payload = args.inline_payload if args.inline_payload is not None else args.payload
     if raw_payload is None:
-        print(
-            "supersede-intel: provide a JSON payload file path, --inline JSON, or --to-existing <id>",
-            file=sys.stderr,
+        fail(
+            "supersede-intel",
+            "provide a JSON payload file path, --inline JSON, or --to-existing <id>",
         )
-        sys.exit(1)
     try:
         new_payload, _ = parse_json_argument(
             raw_payload,

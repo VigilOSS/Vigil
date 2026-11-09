@@ -17,6 +17,7 @@ import pytest
 
 from assess.commands import code_ingest
 from assess.lib.code_snapshot import RootedSourceTree
+from _fake_client import StubClient
 
 
 def _args(repo: Path, **overrides) -> SimpleNamespace:
@@ -467,43 +468,10 @@ def test_line_shape_applies_only_to_javascript_and_css(tmp_path):
     assert _admitted(repo, _args(repo)) == ["data/fixture.py"]
 
 
-# --- collapsed-admission remedy ---------------------------------------------
-
-
-def _offline_ingest(monkeypatch, tmp_path) -> tuple[Path, Path]:
-    repo = tmp_path / "acme reports"
-    _write(repo, "app.py", "print('ok')\n")
-    engagement = tmp_path / "engagement"
-    engagement.mkdir()
-    monkeypatch.setattr(code_ingest, "AssessmentClient", _FakeClient)
-    monkeypatch.setattr(
-        code_ingest,
-        "load_config",
-        lambda *_args: SimpleNamespace(
-            base_url="http://example.test", engagement_key="eng", engagement_dir=str(engagement)
-        ),
-    )
-    monkeypatch.setattr(
-        code_ingest,
-        "_setup_ctags",
-        lambda *_args, **kwargs: {"available": False, **kwargs},
-    )
-    return repo, engagement
-
-
 # --- ingest summary ------------------------------------------------------------
 
 
-class _FakeClient:
-    def __init__(self, *_args, **_kwargs) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
+class _FakeClient(StubClient):
     def post(self, endpoint: str, payload: dict, **_options):
         if endpoint == "code/repos/refresh/preview":
             return {"repo_key": payload["repo_key"], "files": len(payload["files"])}

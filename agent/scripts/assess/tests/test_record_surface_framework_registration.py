@@ -11,21 +11,16 @@ import argparse
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import record_surface
 from assess.lib.contracts import FRAMEWORK_REGISTRATION_KINDS
 
 
-class _RecordingClient:
+class _RecordingClient(StubClient):
     def __init__(self) -> None:
         self.payloads: list[dict] = []
         self.events: list[dict] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post(self, _endpoint, payload):
         self.payloads.append(payload)
@@ -102,29 +97,16 @@ def test_parser_accepts_every_registered_kind_and_rejects_others(tmp_path):
     parser = _parser()
 
     for kind in FRAMEWORK_REGISTRATION_KINDS:
-        parsed = parser.parse_args(
-            [
-                "record-surface",
-                "auth_entry",
-                "target",
-                "source",
-                "--framework-registration",
-                kind,
-            ]
-        )
+        parsed = parser.parse_args([
+            "record-surface", "auth_entry", "target", "source", "--framework-registration", kind,
+        ])
         assert parsed.framework_registration == kind
 
     with pytest.raises(SystemExit):
-        parser.parse_args(
-            [
-                "record-surface",
-                "auth_entry",
-                "target",
-                "source",
-                "--framework-registration",
-                "keycloak_authenticator",
-            ]
-        )
+        parser.parse_args([
+            "record-surface", "auth_entry", "target", "source", "--framework-registration",
+            "keycloak_authenticator",
+        ])
 
 
 def test_registration_kinds_do_not_collide_with_semantic_surface_types():

@@ -14,13 +14,21 @@ Two invariants carry this suite:
 from __future__ import annotations
 
 import io
+import json
 import re
+import shlex
+import urllib.request
 from pathlib import Path
 
 import pytest
 
+from vigil_cli import main as main_module
+from vigil_cli import mitmproxy
 from vigil_cli import orchestrator, restart_manifest, runtime
+from vigil_cli import status as status_module
 from vigil_cli.docker import DockerResult
+from vigil_cli.image_freshness import EXCLUDED_INPUT_NAMES, is_excluded_input
+from vigil_cli.install import InstallResult
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -284,8 +292,6 @@ def test_mitmproxy_dockerfile_copy_sources_all_exist_in_the_staged_build_context
     and resolving each COPY against it checks the declared input list and the
     staging code together.
     """
-    from vigil_cli import mitmproxy
-
     for relative in (
         Path("agent/docker/mitmproxy/Dockerfile"),
         Path("agent/scripts/proxy_addon.py"),
@@ -358,8 +364,6 @@ def _source_directory_names(package_dir: Path) -> set[str]:
     something the build reads — Vite's default `publicDir` (`public/`) being the
     one that would otherwise slip in unnoticed.
     """
-    from vigil_cli.image_freshness import is_excluded_input
-
     return {
         entry.name
         for entry in package_dir.iterdir()
@@ -390,7 +394,6 @@ def test_the_backend_and_the_cli_agree_on_what_a_source_file_is() -> None:
     freshness check rebuild forever.
     """
     from app.main import _NOT_SOURCE_NAMES
-    from vigil_cli.image_freshness import EXCLUDED_INPUT_NAMES
 
     assert _NOT_SOURCE_NAMES <= EXCLUDED_INPUT_NAMES
 
@@ -572,9 +575,6 @@ def test_cli_matches_retained_release_snapshot_without_digesting_asset_bundle(tm
 
 
 def _post_install_output(states: list[restart_manifest.ConsumerState], *, tty: bool) -> str:
-    from vigil_cli import main as main_module
-    from vigil_cli.install import InstallResult
-
     stream = FakeStream(tty=tty)
     result = InstallResult(install_root=Path("/tmp/vigil"), is_upgrade=True, image_built=False)
     main_module._print_post_install(result, states=states, stream=stream)
@@ -720,9 +720,6 @@ def test_post_install_writes_nothing_to_stdout(
     capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`root=$(vigil install …)` captures stdout; this block must not pollute it."""
-    from vigil_cli import main as main_module
-    from vigil_cli.install import InstallResult
-
     monkeypatch.setattr(
         main_module.restart_manifest,
         "consumer_states",
@@ -740,9 +737,6 @@ def test_post_install_says_so_when_it_cannot_determine_the_answer(
     capsys: pytest.CaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """A summary that cannot be computed must not claim "nothing to restart"."""
-    from vigil_cli import main as main_module
-    from vigil_cli.install import InstallResult
-
     def boom(*_args: object, **_kwargs: object) -> list[restart_manifest.ConsumerState]:
         raise OSError("input vanished mid-walk")
 
@@ -772,9 +766,6 @@ def test_a_wedged_docker_daemon_reads_as_unknown_not_as_a_missing_image(
 def test_an_unreachable_daemon_is_not_reported_as_something_to_rebuild(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli import main as main_module
-    from vigil_cli.install import InstallResult
-
     states = restart_manifest.consumer_states(tmp_path, runner=_fake_runner(daemon=False))
     stream = FakeStream(tty=False)
     main_module._print_post_install(
@@ -804,8 +795,6 @@ def _backend_state_for(
     install_root: Path,
     process: dict[str, object] | None = None,
 ) -> restart_manifest.ConsumerState:
-    from vigil_cli import status as status_module
-
     monkeypatch.setattr(
         restart_manifest, "_readyz_backend_runtime", _REAL_READYZ_BACKEND_RUNTIME
     )
@@ -958,10 +947,6 @@ def test_readyz_records_why_it_could_not_be_reached(monkeypatch: pytest.MonkeyPa
     `backend_state` cannot separate a refusal from a timeout if the only thing
     it is handed is `reachable: False`.
     """
-    import urllib.request
-
-    from vigil_cli import status as status_module
-
     def _refuse(*_args: object, **_kwargs: object) -> object:
         raise ConnectionRefusedError(61, "Connection refused")
 
@@ -1103,8 +1088,6 @@ def test_every_proxy_dockerfile_copy_is_covered_by_the_declared_image_inputs() -
     happens to stage would still be absent from the content digest — and the
     image would read `current` after that file changed. This closes that gap.
     """
-    from vigil_cli import mitmproxy
-
     install_root = REPO_ROOT
     declared = mitmproxy.mitmproxy_image_inputs(install_root)
     declared_relative = set()
@@ -1271,14 +1254,12 @@ def test_the_cli_remedy_reruns_the_install_that_recomputes_everything() -> None:
     re-run — otherwise every verdict computed through the old binary stands
     unchallenged after the binary is replaced.
     """
-    from vigil_cli import restart_manifest as rm
-
     running = Path("/opt/venv/vigil_cli")
-    state = rm.ConsumerState(
+    state = restart_manifest.ConsumerState(
         key="cli",
-        label=rm._CLI_LABEL,
+        label=restart_manifest._CLI_LABEL,
         state="stale",
-        remedy=rm._cli_stale_remedy(Path("/checkout")),
+        remedy=restart_manifest._cli_stale_remedy(Path("/checkout")),
         detail="",
     )
     assert "uv tool install --force --from https://github.com/VigilOSS/Vigil/releases/download/" in state.remedy
@@ -1289,8 +1270,6 @@ def test_the_cli_remedy_reruns_the_install_that_recomputes_everything() -> None:
 
 
 def test_cli_release_remedy_installs_matched_wheel_not_unpublished_registry_package(tmp_path):
-    import json
-
     release = tmp_path / "release"
     release.mkdir()
     (release / "bundle.json").write_text(json.dumps({"version": "1.1.0"}))
@@ -1370,9 +1349,6 @@ def test_post_install_judges_the_cli_against_the_installed_source(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """End to end: `_print_post_install` hands the result's source down."""
-    from vigil_cli import main as main_module
-    from vigil_cli.install import InstallResult
-
     installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
     seen: list[Path | None] = []
 
@@ -1420,8 +1396,6 @@ def test_the_cli_remedy_reinstalls_from_the_source_it_was_judged_against(
     On a box with two application overrides the remedy must install the CLI
     from the same explicit development checkout used for this comparison.
     """
-    import shlex
-
     installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
 
     state = restart_manifest.cli_state(source_root=installed_from)
@@ -1508,8 +1482,6 @@ def test_the_working_root_remedy_names_the_source_it_was_judged_against(
     `no-stamp` matters as much as `stale`: an install predating content stamping
     is exactly the one an operator is most likely to repair from the wrong tree.
     """
-    import shlex
-
     installed_from = _fake_cli_source(tmp_path / "chosen", "VERSION = 'chosen'\n")
     expected = f"vigil --source {shlex.quote(str(installed_from))} install"
 
@@ -1558,11 +1530,6 @@ def test_the_pinned_reinstall_remedy_is_a_command_the_cli_actually_accepts(
     subparser: a wrong remedy is worse than a bare one, because the operator
     only learns it was wrong after the install they were told to run fails.
     """
-    import shlex
-
-    from vigil_cli import main as main_module
-    from vigil_cli.install import InstallResult
-
     named = tmp_path / "chosen"
     for root in (named, tmp_path / "other"):
         (root / "agent").mkdir(parents=True)

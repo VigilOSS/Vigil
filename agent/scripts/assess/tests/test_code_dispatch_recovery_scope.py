@@ -17,6 +17,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import code_dispatch
+from _fake_client import StubClient
 
 
 def _config(tmp_path: Path) -> SimpleNamespace:
@@ -27,20 +28,11 @@ def _config(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-class _PostClient:
+class _PostClient(StubClient):
     """Records one POST and answers with a caller-supplied response."""
 
     response: dict = {}
     posts: list[tuple[str, dict]] = []
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post(self, endpoint: str, payload: dict, **_kwargs):
         type(self).posts.append((endpoint, payload))

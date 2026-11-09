@@ -26,6 +26,7 @@ import pytest
 from assess.commands import record_finding
 from assess.lib.client import AssessError
 from assess.lib.schema_validation import collect_validation_errors
+from _fake_client import StubClient
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -135,7 +136,7 @@ class _Cfg:
         self.engagement_key = "acme-web"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Every HTTP read/write `finding record` makes, and nothing above it."""
 
     def __init__(self, stored: dict | None = None) -> None:
@@ -175,15 +176,6 @@ class _FakeClient:
 
     def post_event(self, _payload: dict) -> None:
         return None
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 def _record_args(tmp_path, payload: dict, *, update_slug: str = "", **over):

@@ -21,15 +21,10 @@ through the same dict shape ``classify_from_fields`` builds internally.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 
 def _classify_buckets():
     """Load the classifier module the same way ``test_work_buffer.py`` does."""
-    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     import assess.lib.classify_buckets as cb
 
     return cb

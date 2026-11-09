@@ -8,6 +8,8 @@ from pathlib import Path
 import pytest
 
 from vigil_cli import engagements
+from vigil_cli import main as main_module
+from vigil_cli.main import main
 
 
 def _engagement(tmp_path: Path, scope: dict) -> Path:
@@ -55,8 +57,6 @@ def test_new_creation_rejects_combined_operator_type(tmp_path: Path) -> None:
 
 
 def test_creation_refuses_combined_inputs_instead_of_dropping_host_scope(tmp_path: Path) -> None:
-    from vigil_cli.main import main
-
     with pytest.raises(SystemExit, match="remediation"):
         main([
             "--root", str(tmp_path), "engagement", "create", "--no-prompt",
@@ -65,8 +65,6 @@ def test_creation_refuses_combined_inputs_instead_of_dropping_host_scope(tmp_pat
 
 
 def test_mode_command_reports_session_selected_prompt_and_tracks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    from vigil_cli.main import main
-
     path = _engagement(tmp_path, {
         "engagement_type": "offensive",
         "tracks": {"web": {"phase": "recon"}, "code": {"phase": "hunt"}},
@@ -86,8 +84,6 @@ def test_mode_command_reports_session_selected_prompt_and_tracks(tmp_path: Path,
 
 
 def test_start_passes_explicit_session_mode_to_launcher(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from vigil_cli import main as main_module
-
     _engagement(tmp_path, {
         "engagement_type": "offensive",
         "tracks": {"web": {"phase": "recon"}, "code": {"phase": "hunt"}},
@@ -238,8 +234,6 @@ def test_install_repairs_legacy_code_pointer_to_absolute_code_core(tmp_path: Pat
 
 
 def test_mode_inspects_dual_tracks_without_selecting_a_session(tmp_path, monkeypatch, capsys):
-    from vigil_cli.main import main
-
     _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
         "web": {"phase": "recon"}, "code": {"phase": "hunt"},
     }})
@@ -258,8 +252,6 @@ def test_mode_inspects_dual_tracks_without_selecting_a_session(tmp_path, monkeyp
 
 @pytest.mark.parametrize("binding", ["same", "other", "none"])
 def test_mode_uses_only_the_inspected_engagement_session(tmp_path, monkeypatch, capsys, binding):
-    from vigil_cli.main import main
-
     path = _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
         "web": {"phase": "collect"}, "code": {"phase": "hunt"},
     }})
@@ -313,8 +305,6 @@ def test_start_reports_workspace_client_mode_and_phase_before_exec(tmp_path, mon
 
 @pytest.mark.parametrize("session_binding", ["same", "other"])
 def test_mode_prefers_session_binding_over_artifact_directory(tmp_path, monkeypatch, capsys, session_binding):
-    from vigil_cli.main import main
-
     path = _engagement(tmp_path, {"engagement_type": "offensive", "tracks": {
         "web": {"phase": "recon"}, "code": {"phase": "hunt"},
     }})

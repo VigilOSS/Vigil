@@ -7,19 +7,9 @@ from __future__ import annotations
 
 import importlib
 import sys
-from pathlib import Path
 from types import ModuleType
 
 import pytest
-
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _scripts_on_path():
-    if str(_SCRIPTS_ROOT) not in sys.path:
-        sys.path.insert(0, str(_SCRIPTS_ROOT))
-    yield
 
 
 @pytest.fixture(autouse=True)

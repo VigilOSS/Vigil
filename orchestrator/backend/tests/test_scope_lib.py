@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 import threading
 import time
 from pathlib import Path
@@ -21,8 +20,6 @@ import pytest
 
 def _load_scope_module():
     scripts_root = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     module_path = scripts_root / "assess" / "lib" / "scope.py"
     spec = importlib.util.spec_from_file_location("test_scope_lib_module", module_path)
     assert spec is not None and spec.loader is not None
@@ -63,8 +60,6 @@ def test_scope_mutation_and_reader_share_one_entry_validation_owner():
     assert scope.classify_scope_entry is canonical.classify_scope_entry
 
 
-
-
 def test_cidr_entry_is_classified_as_network_not_single_host():
     entry = scope.classify_scope_entry("10.0.0.0/24")
     assert entry is not None
@@ -92,8 +87,6 @@ def test_bare_ip_without_slash_is_still_a_plain_host():
     assert entry is not None
     assert entry["entry_kind"] == "bare_host"
     assert entry["host"] == "10.0.0.5"
-
-
 
 
 def test_single_label_host_is_admitted_from_scope_entry():
@@ -167,8 +160,6 @@ def test_scope_mutations_are_serialized_without_losing_fields(tmp_path):
 def test_free_text_token_parsing_still_rejects_bare_single_label():
     assert scope.host_from_token("intranet") == ""
     assert scope.host_from_token("intranet", allow_single_label=True) == "intranet"
-
-
 
 
 def test_path_bearing_url_entry_warns_and_admits_host(capsys):

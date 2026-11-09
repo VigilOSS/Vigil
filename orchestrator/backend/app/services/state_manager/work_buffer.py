@@ -978,7 +978,13 @@ def fetch_work_items_by_unit(
 # ---------------------------------------------------------------------------
 # Lifecycle mutations
 # ---------------------------------------------------------------------------
-def mark_work_items_done(engagement_id: int, ids: list[int]) -> dict[str, Any]:
+def _mark_work_items(
+    engagement_id: int, ids: list[int], *, set_sql: str, set_params: tuple[Any, ...] = ()
+) -> dict[str, Any]:
+    """Apply one literal SET to the named work items, engagement-scoped, by id.
+
+    ``set_params`` bind ahead of the engagement and id placeholders.
+    """
     engagement = _engagement_or_404(engagement_id)
     valid = _int_ids(ids)
     if not valid:
@@ -986,27 +992,20 @@ def mark_work_items_done(engagement_id: int, ids: list[int]) -> dict[str, Any]:
     ph = ",".join("?" * len(valid))
     with _common.get_connection() as connection:
         affected = connection.execute(
-            f"UPDATE assessment_work_items SET status = 'done', updated_at = CURRENT_TIMESTAMP "
+            f"UPDATE assessment_work_items SET {set_sql}, updated_at = CURRENT_TIMESTAMP "
             f"WHERE engagement_id = ? AND id IN ({ph})",
-            (engagement.id, *valid),
+            (*set_params, engagement.id, *valid),
         ).rowcount
     return {"affected": affected, "ids": valid}
+
+
+def mark_work_items_done(engagement_id: int, ids: list[int]) -> dict[str, Any]:
+    return _mark_work_items(engagement_id, ids, set_sql="status = 'done'")
 
 
 def mark_work_items_error(engagement_id: int, ids: list[int]) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    valid = _int_ids(ids)
-    if not valid:
-        return {"affected": 0, "ids": []}
-    ph = ",".join("?" * len(valid))
-    with _common.get_connection() as connection:
-        affected = connection.execute(
-            f"UPDATE assessment_work_items SET status = 'error', "
-            f"retry_count = COALESCE(retry_count, 0) + 1, updated_at = CURRENT_TIMESTAMP "
-            f"WHERE engagement_id = ? AND id IN ({ph})",
-            (engagement.id, *valid),
-        ).rowcount
-    return {"affected": affected, "ids": valid}
+    set_sql = "status = 'error', retry_count = COALESCE(retry_count, 0) + 1"
+    return _mark_work_items(engagement_id, ids, set_sql=set_sql)
 
 
 _SQL_ID_CHUNK = 300
@@ -1074,18 +1073,10 @@ def defer_work_item_cluster(
 
 
 def mark_work_items_manual(engagement_id: int, ids: list[int]) -> dict[str, Any]:
-    engagement = _engagement_or_404(engagement_id)
-    valid = _int_ids(ids)
-    if not valid:
-        return {"affected": 0, "ids": []}
-    ph = ",".join("?" * len(valid))
-    with _common.get_connection() as connection:
-        affected = connection.execute(
-            f"UPDATE assessment_work_items SET classifier_version = ?, updated_at = CURRENT_TIMESTAMP "
-            f"WHERE engagement_id = ? AND id IN ({ph})",
-            (MANUAL_CLASSIFIER_VERSION, engagement.id, *valid),
-        ).rowcount
-    return {"affected": affected, "ids": valid}
+    return _mark_work_items(
+        engagement_id, ids, set_sql="classifier_version = ?",
+        set_params=(MANUAL_CLASSIFIER_VERSION,),
+    )
 
 
 def reset_stale_work_items(engagement_id: int, *, minutes: int) -> dict[str, Any]:

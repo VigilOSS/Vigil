@@ -2,15 +2,11 @@ import { useMemo, useState } from "react";
 import { ChevronDown, ChevronRight, Search } from "lucide-react";
 import type { ReportData, ReportFinding } from "../types";
 import { flattenFindings, formatLabel, SEVERITY_ORDER, SEVERITY_RANK } from "../lib/format";
-import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "../lib/poc";
-import { reproRunIds, stepsText } from "../lib/steps";
-import { Markdown } from "./Markdown";
 import {
   CopyMarkdownButton,
+  FindingSections,
   OperatorAuthorityAttestation,
   OperatorAuthorityTag,
-  ReferenceList,
-  ReproRunProvenance,
 } from "./FindingParts";
 
 interface Props {
@@ -30,8 +26,6 @@ function severityRank(finding: ReportFinding): number {
  * `SubmissionPane`.
  */
 export function FindingDetail({ finding, draft }: { finding: ReportFinding; draft: boolean }) {
-  const curl = pocCurl(asPocRequest(finding.poc_request));
-  const responseText = pocResponseText(asPocResponse(finding.poc_response));
   return (
     <div className="rpt-finding-detail">
       <div className="rpt-finding-detail-actions no-print">
@@ -40,78 +34,7 @@ export function FindingDetail({ finding, draft }: { finding: ReportFinding; draf
       {/* Ahead of the finding's own claims: how the verdict was reached
           qualifies every section below it. */}
       <OperatorAuthorityAttestation finding={finding} />
-      {finding.summary && (
-        <section>
-          <h4>Summary</h4>
-          <Markdown text={finding.summary} />
-        </section>
-      )}
-      {finding.impact && (
-        <section>
-          <h4>Impact</h4>
-          <Markdown text={finding.impact} />
-        </section>
-      )}
-      {finding.evidence_detail && (
-        <section>
-          <h4>Evidence</h4>
-          {/* Verbatim. `evidence_detail` is a CAPTURE — a request/response pair,
-              a log excerpt, a stack trace — not authored prose, and markdown
-              silently rewrites exactly the characters that carry its meaning:
-              `__init__.py` loses its underscores to bold, a `>` request marker
-              becomes a blockquote, `#` becomes a heading, and consecutive lines
-              of an HTTP transcript collapse into one paragraph. Vigil does not
-              alter what the operator captured (AGENTS.md; ADR 0019), and
-              lib/findingMarkdown.ts already fences this field for the same
-              reason — rendering it through Markdown made the page lossier than
-              its own copy button. */}
-          <pre className="rpt-code">{finding.evidence_detail}</pre>
-        </section>
-      )}
-      {stepsText(finding.steps_to_reproduce) && (
-        <section>
-          <h4>Steps to reproduce</h4>
-          {/* Verbatim — the author's numbering is what other sections cite. */}
-          <div className="rpt-steps">{stepsText(finding.steps_to_reproduce)}</div>
-          <ReproRunProvenance
-            runIds={reproRunIds(finding.repro_runs)}
-            draft={draft}
-            basis={finding.reproduction_basis}
-          />
-        </section>
-      )}
-      {curl && (
-        <section>
-          <h4>Reproduction request</h4>
-          {/* Synthesized from the recorded request object so it pastes into a
-              terminal and runs: see lib/poc.ts. */}
-          <pre className="rpt-code rpt-code-command">{curl}</pre>
-        </section>
-      )}
-      {responseText && (
-        <section>
-          <h4>Observed response</h4>
-          <pre className="rpt-code">{responseText}</pre>
-        </section>
-      )}
-      {finding.poc_code && (
-        <section>
-          <h4>Proof of concept</h4>
-          <pre className="rpt-code rpt-code-command">{finding.poc_code}</pre>
-        </section>
-      )}
-      {finding.remediation && (
-        <section>
-          <h4>Remediation</h4>
-          <Markdown text={finding.remediation} />
-        </section>
-      )}
-      {Array.isArray(finding.references) && finding.references.length > 0 && (
-        <section>
-          <h4>References</h4>
-          <ReferenceList references={finding.references} />
-        </section>
-      )}
+      <FindingSections finding={finding} draft={draft} block="section" />
       <dl className="rpt-finding-meta">
         {finding.canonical_location && (
           <div>

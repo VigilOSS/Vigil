@@ -7,9 +7,10 @@ import pytest
 
 from assess.commands.dispatch import handoff_renderer
 from assess.lib.client import AssessError
+from _fake_client import StubClient
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     handoff: dict[str, object]
     dispatch: dict[str, object] | None
     packet: dict[str, object] | None = None
@@ -17,12 +18,6 @@ class _FakeClient:
 
     def __init__(self, _base_url: str, _engagement_key: str) -> None:
         self.fetched = []
-
-    def __enter__(self) -> _FakeClient:
-        return self
-
-    def __exit__(self, *_exc: object) -> bool:
-        return False
 
     def get_handoff(self, _agent_id: str) -> dict[str, object]:
         return self.handoff

@@ -33,6 +33,7 @@ import pytest
 from assess.commands import kali_sweep_orphans as kso
 from assess.lib import kali_jobs
 from assess.lib.client import AssessError
+from _fake_client import StubClient
 
 
 @pytest.fixture(autouse=True)
@@ -45,7 +46,7 @@ def _managed_runtime_ready(monkeypatch):
 # --------------------------------------------------------------------------- #
 
 
-class FakeClient:
+class FakeClient(StubClient):
     """Minimal AssessmentClient stand-in capturing post/patch/get calls.
 
     ``get_value`` is returned from every get(); ``post_value`` from every
@@ -79,15 +80,6 @@ class FakeClient:
             return [dict(r) for r in val]
         return dict(val)
 
-    def close(self):
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
 
 def _cfg(tmp_path: Path) -> SimpleNamespace:
     return SimpleNamespace(
@@ -115,6 +107,23 @@ def _running_record(tmp_path: Path, *, job_id: int = 5, uuid: str = "deadbeef") 
         "stderr_path": str(stdout).replace(".out", ".err"),
         "dtach_socket_path": f"/tmp/vigil-jobs/{uuid}.sock",
     }
+
+
+def _await_exit_marker(exit_path: Path, *, attempts: int = 60) -> str:
+    """The wrapper's exit marker once it lands, or "" if it never does.
+
+    The wrapper writes it from a background shell, so the read races the write
+    and an empty or missing file just means "not yet".
+    """
+    for _ in range(attempts):
+        try:
+            marker = exit_path.read_text(encoding="utf-8").strip()
+        except OSError:
+            marker = ""
+        if marker:
+            return marker
+        time.sleep(0.05)
+    return ""
 
 
 def _write_marker(tmp_path: Path, uuid: str, rc: int) -> None:
@@ -352,15 +361,7 @@ def test_wrapper_marker_captures_real_tool_exit(tmp_path):
         exit_path=str(exit_path),
     )
     subprocess.run(["sh", "-c", wrapper], timeout=10, check=False)  # noqa: S603,S607
-    marker = ""
-    for _ in range(60):
-        try:
-            marker = exit_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            marker = ""
-        if marker:
-            break
-        time.sleep(0.05)
+    marker = _await_exit_marker(exit_path)
     assert marker == "42"
 
 
@@ -480,15 +481,7 @@ def test_wrapper_deadline_kills_hung_tool_and_finalizes(tmp_path):
     elapsed = time.monotonic() - start
     # Killed at ~budget (1s) + a poll tick — NOT after the tool's natural 30s.
     assert elapsed < 15, f"watchdog did not enforce the deadline (took {elapsed:.1f}s)"
-    marker = ""
-    for _ in range(60):
-        try:
-            marker = exit_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            marker = ""
-        if marker:
-            break
-        time.sleep(0.05)
+    marker = _await_exit_marker(exit_path)
     rc = int(marker)
     # A deadline kill is observed as a 128+signal wait status (SIGTERM=143).
     assert rc >= 128, f"expected a kill wait-status >=128, got {rc}"
@@ -539,15 +532,7 @@ def test_wrapper_natural_exit_is_prompt_under_deadline(tmp_path):
     elapsed = time.monotonic() - start
     # Returns in ~a poll tick, not the 600s budget — the watchdog never lingers.
     assert elapsed < 10, f"natural exit was delayed by the watchdog (took {elapsed:.1f}s)"
-    marker = ""
-    for _ in range(60):
-        try:
-            marker = exit_path.read_text(encoding="utf-8").strip()
-        except OSError:
-            marker = ""
-        if marker:
-            break
-        time.sleep(0.05)
+    marker = _await_exit_marker(exit_path)
     assert marker == "0"
 
 
@@ -809,7 +794,7 @@ def test_reap_jobs_classifies_terminal_and_failures(monkeypatch, tmp_path):
 # --------------------------------------------------------------------------- #
 
 
-class FakeJobsSweepClient:
+class FakeJobsSweepClient(StubClient):
     """get() routes by the ?status= filter so a sweep can fetch running and
     queued rows separately; patch() records finalize calls."""
 
@@ -833,15 +818,6 @@ class FakeJobsSweepClient:
     def patch(self, endpoint, payload, *, accept_409: bool = False):
         self.patches.append((endpoint, payload))
         return {"id": int(endpoint.split("/")[-1]), **payload}
-
-    def close(self):
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
 
 
 def test_sweep_lists_every_job_page_beyond_one_thousand() -> None:

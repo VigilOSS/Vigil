@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -41,9 +40,6 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 
 
 def _load_transition_module(name: str):
-    scripts_root = _REPO_ROOT / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     module_path = _REPO_ROOT / "agent" / "scripts" / "assess" / "commands" / "transition_phase.py"
     spec = importlib.util.spec_from_file_location(name, module_path)
     assert spec is not None and spec.loader is not None

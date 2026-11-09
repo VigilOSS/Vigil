@@ -16,6 +16,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.lib import kali_audit
 from assess.lib.client import AssessError
@@ -146,7 +147,7 @@ def test_host_finalize_validation_binds_id_and_run_uuid(row_id, run_uuid) -> Non
 # CR-36 http=000 retry, which is the only path where the run has two attempts.
 
 
-class _RunClient:
+class _RunClient(StubClient):
     """Backend-less AssessmentClient double that keeps the whole exchange."""
 
     def __init__(self, *_args, **_kwargs) -> None:
@@ -160,10 +161,6 @@ class _RunClient:
     def patch(self, endpoint: str, payload: dict, *, accept_409: bool = False) -> dict:
         self.patches.append((endpoint, payload))
         return {"id": 7, "status": payload.get("status")}
-
-    def close(self) -> None:
-        return None
-
 
 class _Proc:
     def __init__(self, returncode: int) -> None:

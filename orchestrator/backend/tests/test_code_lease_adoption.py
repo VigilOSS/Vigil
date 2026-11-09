@@ -50,6 +50,19 @@ def _seed_claimed_parser(client, isolate_settings, engagement_key: str, repo_key
     return repo, parser, claim
 
 
+def _adopt_lease_body(claim: dict, *, reason: str, **overrides: object) -> dict[str, object]:
+    """The adopt-lease request body: hunter-b taking over hunter-a's claim."""
+    return {
+        "item_id": claim["id"],
+        "expected_agent": "hunter-a",
+        "expected_lease_token": claim["lease_token"],
+        "agent_name": "hunter-b",
+        "stale_minutes": 10,
+        "reason": reason,
+        **overrides,
+    }
+
+
 def _record_clean_receipt(client, engagement_key: str, claim: dict) -> dict:
     response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
@@ -139,14 +152,7 @@ def test_lease_adoption_refuses_a_lease_that_is_still_live(
 
     refused = client.post(
         f"{base}/analysis-queue/adopt-lease",
-        json={
-            "item_id": claim["id"],
-            "expected_agent": "hunter-a",
-            "expected_lease_token": claim["lease_token"],
-            "agent_name": "hunter-b",
-            "stale_minutes": 10,
-            "reason": "hunter-a stopped responding",
-        },
+        json=_adopt_lease_body(claim, reason="hunter-a stopped responding"),
     )
     assert refused.status_code == 409, refused.text
     assert "live" in refused.json()["detail"]
@@ -172,14 +178,7 @@ def test_lease_adoption_preserves_receipts_and_closes_under_the_new_lease(
 
     adopted = client.post(
         f"{base}/analysis-queue/adopt-lease",
-        json={
-            "item_id": claim["id"],
-            "expected_agent": "hunter-a",
-            "expected_lease_token": claim["lease_token"],
-            "agent_name": "hunter-b",
-            "stale_minutes": 10,
-            "reason": "hunter-a died mid-file; adopting its recorded receipts",
-        },
+        json=_adopt_lease_body(claim, reason="hunter-a died mid-file; adopting its recorded receipts"),
     )
     assert adopted.status_code == 200, adopted.text
     payload = adopted.json()
@@ -244,27 +243,21 @@ def test_lease_adoption_compare_and_swap_rejects_a_rotated_lease(
 
     stale_token = client.post(
         f"{base}/analysis-queue/adopt-lease",
-        json={
-            "item_id": claim["id"],
-            "expected_agent": "hunter-a",
-            "expected_lease_token": "a-token-that-was-never-issued",
-            "agent_name": "hunter-b",
-            "stale_minutes": 10,
-            "reason": "stale observation",
-        },
+        json=_adopt_lease_body(
+            claim,
+            reason="stale observation",
+            expected_lease_token="a-token-that-was-never-issued",
+        ),
     )
     assert stale_token.status_code == 409, stale_token.text
 
     wrong_agent = client.post(
         f"{base}/analysis-queue/adopt-lease",
-        json={
-            "item_id": claim["id"],
-            "expected_agent": "hunter-z",
-            "expected_lease_token": claim["lease_token"],
-            "agent_name": "hunter-b",
-            "stale_minutes": 10,
-            "reason": "stale observation",
-        },
+        json=_adopt_lease_body(
+            claim,
+            reason="stale observation",
+            expected_agent="hunter-z",
+        ),
     )
     assert wrong_agent.status_code == 409, wrong_agent.text
 
@@ -289,14 +282,7 @@ def test_reset_stale_after_adoption_discards_the_whole_owner_chain(
 
     adopted = client.post(
         f"{base}/analysis-queue/adopt-lease",
-        json={
-            "item_id": claim["id"],
-            "expected_agent": "hunter-a",
-            "expected_lease_token": claim["lease_token"],
-            "agent_name": "hunter-b",
-            "stale_minutes": 10,
-            "reason": "adopting a dead lease",
-        },
+        json=_adopt_lease_body(claim, reason="adopting a dead lease"),
     )
     assert adopted.status_code == 200, adopted.text
     _age_lease(engagement_key, int(claim["id"]), minutes=60)
@@ -386,14 +372,12 @@ def test_open_authoring_lease_is_visible_in_coverage_and_resume_state(
 def _adopt(client, engagement_key: str, claim: dict, *, agent_name: str) -> dict:
     response = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/adopt-lease",
-        json={
-            "item_id": claim["id"],
-            "expected_agent": claim["agent_name"],
-            "expected_lease_token": claim["lease_token"],
-            "agent_name": agent_name,
-            "stale_minutes": 10,
-            "reason": "prior lease stopped heartbeating",
-        },
+        json=_adopt_lease_body(
+            claim,
+            reason="prior lease stopped heartbeating",
+            expected_agent=claim["agent_name"],
+            agent_name=agent_name,
+        ),
     )
     assert response.status_code == 200, response.text
     return response.json()

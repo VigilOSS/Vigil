@@ -33,7 +33,7 @@ against the same durable state now living behind the client.
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Self
 from urllib.parse import parse_qs, urlparse
 
 
@@ -47,7 +47,33 @@ def host_of(url: str | None) -> str:
         return ""
 
 
-class FakeAssessmentClient:
+class StubClient:
+    """The context-manager protocol every backend-less client fake in this suite shares.
+
+    ``assess`` commands reach the backend through
+    ``with AssessmentClient(base_url, engagement_key) as client:``, so a fake
+    monkeypatched in place of that class has to accept the constructor
+    arguments, hand ``self`` to the ``with`` body, and return a falsy value from
+    ``__exit__`` so an exception raised inside the body still propagates.
+    Subclasses add only their own endpoint routing and their own recorders; one
+    that needs constructor arguments of its own defines ``__init__`` and does
+    not call ``super().__init__``.
+    """
+
+    def __init__(self, *_args: Any, **_kwargs: Any) -> None:
+        pass
+
+    def __enter__(self) -> Self:
+        return self
+
+    def __exit__(self, *_exc: Any) -> bool:
+        return False
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class FakeAssessmentClient(StubClient):
     """In-memory stand-in for :class:`assess.lib.client.AssessmentClient`."""
 
     def __init__(self, base_url: str | None = None, engagement_key: str | None = None,
@@ -70,15 +96,9 @@ class FakeAssessmentClient:
         self.fetch_response: dict[str, Any] = {"claimed": [], "non_routable": []}
 
     # -- context manager -------------------------------------------------- #
-    def __enter__(self) -> "FakeAssessmentClient":
-        return self
-
     def __exit__(self, *exc: Any) -> bool:
         self.close()
         return False
-
-    def close(self) -> None:
-        self.closed = True
 
     # -- row seeding ------------------------------------------------------ #
     def add_row(self, **fields: Any) -> dict:

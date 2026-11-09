@@ -24,6 +24,11 @@ from ..variant_scopes import (
 
 
 
+def _json_list(value: Any) -> str:
+    """Store one optional list column exactly as its creating writer stores it."""
+    return json.dumps(list(value))
+
+
 def _require_terminal_dispatch_status(value: str | None) -> str | None:
     if value is None:
         return None
@@ -995,42 +1000,27 @@ def update_handoff(
                 )
             sets.append("summary = ?")
             values.append(summary)
-        if phase is not None:
-            sets.append("phase = ?")
-            values.append(phase)
-        if confidence is not None:
-            sets.append("confidence = ?")
-            values.append(confidence)
-        if finding_slugs is not None:
-            sets.append("finding_slugs_json = ?")
-            values.append(json.dumps(list(finding_slugs)))
-        if coverage_gaps is not None:
-            sets.append("coverage_gaps_json = ?")
-            values.append(json.dumps(list(coverage_gaps)))
-        if next_steps is not None:
-            sets.append("next_steps_json = ?")
-            values.append(json.dumps(list(next_steps)))
-        if runtime_issues is not None:
-            sets.append("runtime_issues_json = ?")
-            values.append(json.dumps(list(runtime_issues)))
-        if working_artifacts is not None:
-            sets.append("working_artifacts_json = ?")
-            values.append(json.dumps(list(working_artifacts)))
-        if open_questions is not None:
-            sets.append("open_questions_json = ?")
-            values.append(json.dumps(list(open_questions)))
-        if recommended_next_agent is not None:
-            sets.append("recommended_next_agent = ?")
-            values.append(recommended_next_agent)
-        if handoff_status is not None:
-            sets.append("handoff_status = ?")
-            values.append(handoff_status)
-        if closed_dispatch_status is not None:
-            sets.append("closed_dispatch_status = ?")
-            values.append(closed_dispatch_status)
-        if extras is not None:
-            sets.append("extras_json = ?")
-            values.append(json.dumps(extras))
+        # The remaining optional columns, in the order their SET fragments are
+        # emitted — which is also the UPDATE's parameter order, so the rows are
+        # not reorderable. `encode` is the stored form of a JSON-backed column.
+        for column, value, encode in (
+            ("phase", phase, None),
+            ("confidence", confidence, None),
+            ("finding_slugs_json", finding_slugs, _json_list),
+            ("coverage_gaps_json", coverage_gaps, _json_list),
+            ("next_steps_json", next_steps, _json_list),
+            ("runtime_issues_json", runtime_issues, _json_list),
+            ("working_artifacts_json", working_artifacts, _json_list),
+            ("open_questions_json", open_questions, _json_list),
+            ("recommended_next_agent", recommended_next_agent, None),
+            ("handoff_status", handoff_status, None),
+            ("closed_dispatch_status", closed_dispatch_status, None),
+            ("extras_json", extras, json.dumps),
+        ):
+            if value is None:
+                continue
+            sets.append(f"{column} = ?")
+            values.append(value if encode is None else encode(value))
         if not sets:
             return _serialize_handoff(existing)
         sets.append("handoff_version = COALESCE(handoff_version, 1) + 1")

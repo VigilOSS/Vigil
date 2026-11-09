@@ -23,6 +23,7 @@ module is CLI-side glue only.
 from __future__ import annotations
 
 import ipaddress
+import itertools
 from pathlib import Path
 from typing import Any
 
@@ -43,6 +44,16 @@ from assess.lib.scope import (
 # ===========================================================================
 # surface-coverage — surface-resolution gate (former check-coverage body)
 # ===========================================================================
+# The three surface-coverage blocker blocks, in emission order: the payload key,
+# its header, and whether each item also carries its follow-up condition. Only
+# the high-risk block adds the resolve-them line after its items.
+_SURFACE_COVERAGE_BLOCKS: tuple[tuple[str, str, bool], ...] = (
+    ("unresolved_surfaces", "Uncovered surfaces remain:", False),
+    ("partially_covered_surfaces", "Partially covered surfaces need follow-up:", True),
+    ("high_risk_deferred_surfaces", "High-risk surfaces cannot remain deferred:", False),
+)
+
+
 def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]:
     """Render the surface-coverage gate from a ``/coverage-readiness`` payload.
 
@@ -54,33 +65,21 @@ def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]
     if not isinstance(readiness, dict):
         return False, [], ["surface-coverage: unexpected response from backend"]
 
-    unresolved = readiness.get("unresolved_surfaces") or []
-    partially_covered = readiness.get("partially_covered_surfaces") or []
-    blocked_deferred = readiness.get("high_risk_deferred_surfaces") or []
-
     if readiness.get("ready", False):
         return True, ["surface coverage: ok"], []
 
     blockers: list[str] = []
-    if unresolved:
-        blockers.append("Uncovered surfaces remain:")
-        for item in unresolved:
-            blockers.append(
-                f"  - {item.get('surface_type')} | {item.get('target_descriptor')}"
-            )
-    if partially_covered:
-        blockers.append("Partially covered surfaces need follow-up:")
-        for item in partially_covered:
-            blockers.append(
-                f"  - {item.get('surface_type')} | {item.get('target_descriptor')} | "
-                f"{item.get('followup_condition')}"
-            )
-    if blocked_deferred:
-        blockers.append("High-risk surfaces cannot remain deferred:")
-        for item in blocked_deferred:
-            blockers.append(
-                f"  - {item.get('surface_type')} | {item.get('target_descriptor')}"
-            )
+    for key, header, with_followup in _SURFACE_COVERAGE_BLOCKS:
+        items = readiness.get(key) or []
+        if not items:
+            continue
+        blockers.append(header)
+        for item in items:
+            line = f"  - {item.get('surface_type')} | {item.get('target_descriptor')}"
+            if with_followup:
+                line += f" | {item.get('followup_condition')}"
+            blockers.append(line)
+    if readiness.get("high_risk_deferred_surfaces"):
         blockers.append(
             "Resolve them as covered or not_applicable before finishing Test/Report."
         )
@@ -1246,17 +1245,13 @@ def _vendor_saas_hosts_pending_decision(
 ) -> list[tuple[str, str]]:
     """Return ``[(host, vendor), ...]`` for vendor-SaaS hosts lacking a decision."""
     seen: dict[str, str] = {}
-    for svc in services:
-        host = _endpoint_host(str(svc.get("endpoint") or ""))
-        vendor = host_is_vendor_saas(host)
-        if host and vendor and host not in decided_hosts and host not in seen:
-            seen[host] = vendor
-    for surface in surfaces:
-        host = _endpoint_host(str(surface.get("target_descriptor") or ""))
-        vendor = host_is_vendor_saas(host)
-        if host and vendor and host not in decided_hosts and host not in seen:
-            seen[host] = vendor
-    for host in work_by_host.keys():
+    # services -> surfaces -> work rows, the order the first-wins vendor
+    # attribution below depends on.
+    for host in itertools.chain(
+        (_endpoint_host(str(svc.get("endpoint") or "")) for svc in services),
+        (_endpoint_host(str(s.get("target_descriptor") or "")) for s in surfaces),
+        work_by_host,
+    ):
         vendor = host_is_vendor_saas(host)
         if host and vendor and host not in decided_hosts and host not in seen:
             seen[host] = vendor

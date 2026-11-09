@@ -54,6 +54,40 @@ def _finding(client, slug: str, **overrides) -> dict:
     return response.json()["finding"]
 
 
+def _post_provenance_finding(client, slug: str, *, title: str, provenance: dict):
+    """POST a finding whose provenance is the subject, returning the raw response."""
+
+    return client.post(
+        f"{BASE}/findings",
+        json={
+            "slug": slug,
+            "title": title,
+            "severity": "medium",
+            "workflow_status": "active",
+            "verification_status": "unreviewed",
+            "canonical_location": f"https://example.test/{slug}",
+            "source_name": "vulnerability-analyst",
+            "details": {"evidence": "e", "impact": "i"},
+            "provenance": provenance,
+        },
+    )
+
+
+def _relocate(client, slug: str, *, expected_row_version: int, provenance: dict):
+    """PUT an audited canonical-location relocation and return the raw response."""
+
+    return client.put(
+        f"{BASE}/findings/{slug}/canonical-location",
+        json={
+            "canonical_location": f"https://example.test/{slug}/moved",
+            "reason_text": "Runtime proof relocated the defect server-side.",
+            "source_name": "operator",
+            "expected_row_version": expected_row_version,
+            "provenance": provenance,
+        },
+    )
+
+
 def _legacy_authorless_finding(slug: str) -> dict:
     with db_module.get_connection() as connection:
         engagement = connection.execute(
@@ -1083,15 +1117,8 @@ def test_a_relocation_cannot_author_either_operator_authority_stamp(
         "reason": "a waiver no relocation was ever granted",
     }
 
-    forged = client.put(
-        f"{BASE}/findings/VA-057/canonical-location",
-        json={
-            "canonical_location": "https://example.test/VA-057/moved",
-            "reason_text": "Runtime proof relocated the defect server-side.",
-            "source_name": "operator",
-            "expected_row_version": 1,
-            "provenance": {key: hand_written},
-        },
+    forged = _relocate(
+        client, "VA-057", expected_row_version=1, provenance={key: hand_written}
     )
 
     assert forged.status_code == 400, forged.text
@@ -1111,15 +1138,8 @@ def test_a_relocation_that_authors_no_stamp_still_relocates(
     _seed(client, isolate_settings)
     _finding(client, "VA-058")
 
-    moved = client.put(
-        f"{BASE}/findings/VA-058/canonical-location",
-        json={
-            "canonical_location": "https://example.test/VA-058/moved",
-            "reason_text": "Runtime proof relocated the defect server-side.",
-            "source_name": "operator",
-            "expected_row_version": 1,
-            "provenance": {"evidence_quote": "the handler reads the raw id"},
-        },
+    moved = _relocate(
+        client, "VA-058", expected_row_version=1, provenance={"evidence_quote": "the handler reads the raw id"}
     )
 
     assert moved.status_code == 200, moved.text
@@ -1184,15 +1204,8 @@ def test_no_finding_provenance_door_accepts_an_authored_waiver(
                 "provenance": {key: hand_written},
             },
         ),
-        "relocate": lambda key: client.put(
-            f"{BASE}/findings/VA-062/canonical-location",
-            json={
-                "canonical_location": "https://example.test/VA-062/moved",
-                "reason_text": "Runtime proof relocated the defect server-side.",
-                "source_name": "operator",
-                "expected_row_version": 1,
-                "provenance": {key: hand_written},
-            },
+        "relocate": lambda key: _relocate(
+            client, "VA-062", expected_row_version=1, provenance={key: hand_written}
         ),
     }
     for door, call in doors.items():
@@ -1279,19 +1292,11 @@ def test_no_finding_provenance_door_accepts_an_authored_service_stamp(
     _seed(client, isolate_settings)
     forged = _FORGED_SERVICE_STAMPS[key]
 
-    created = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-065",
-            "title": "Authored service stamp on create",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://example.test/VA-065",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "e", "impact": "i"},
-            "provenance": {"agent_id": "HUNT-1", key: forged},
-        },
+    created = _post_provenance_finding(
+        client,
+        "VA-065",
+        title="Authored service stamp on create",
+        provenance={"agent_id": "HUNT-1", key: forged},
     )
     assert created.status_code == 400, created.text
     assert key in created.text
@@ -1311,15 +1316,8 @@ def test_no_finding_provenance_door_accepts_an_authored_service_stamp(
                 "provenance": {key: forged},
             },
         ),
-        "relocate": lambda: client.put(
-            f"{BASE}/findings/VA-066/canonical-location",
-            json={
-                "canonical_location": "https://example.test/VA-066/moved",
-                "reason_text": "Runtime proof relocated the defect server-side.",
-                "source_name": "operator",
-                "expected_row_version": 1,
-                "provenance": {key: forged},
-            },
+        "relocate": lambda: _relocate(
+            client, "VA-066", expected_row_version=1, provenance={key: forged}
         ),
     }
     for door, call in doors.items():
@@ -1357,15 +1355,8 @@ def test_only_the_door_that_restamps_an_attestation_lets_one_ride_a_binding(
         ],
     }
 
-    forged = client.put(
-        f"{BASE}/findings/VA-070/canonical-location",
-        json={
-            "canonical_location": "https://example.test/VA-070/moved",
-            "reason_text": "Runtime proof relocated the defect server-side.",
-            "source_name": "operator",
-            "expected_row_version": 1,
-            "provenance": riding_along,
-        },
+    forged = _relocate(
+        client, "VA-070", expected_row_version=1, provenance=riding_along
     )
 
     assert forged.status_code == 400, forged.text
@@ -1398,19 +1389,11 @@ def test_every_caller_assertable_provenance_key_still_round_trips(
         "verified_by": "code-vuln-verifier",
     }
 
-    created = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-067",
-            "title": "Caller-assertable provenance round trip",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://example.test/VA-067",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "e", "impact": "i"},
-            "provenance": authored,
-        },
+    created = _post_provenance_finding(
+        client,
+        "VA-067",
+        title="Caller-assertable provenance round trip",
+        provenance=authored,
     )
 
     assert created.status_code == 201, created.text
@@ -1431,19 +1414,11 @@ def test_an_authored_command_run_citation_must_name_a_run_in_this_engagement(
     """
     _seed(client, isolate_settings)
 
-    refused = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-068",
-            "title": "Unresolvable command-run citation",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://example.test/VA-068",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "e", "impact": "i"},
-            "provenance": {"agent_id": "HUNT-1", "command_run_id": 99999},
-        },
+    refused = _post_provenance_finding(
+        client,
+        "VA-068",
+        title="Unresolvable command-run citation",
+        provenance={"agent_id": "HUNT-1", "command_run_id": 99999},
     )
 
     assert refused.status_code == 400, refused.text
@@ -1468,22 +1443,11 @@ def test_an_authored_command_run_citation_must_name_a_run_in_this_engagement(
     )
     assert run.status_code == 201, run.text
 
-    accepted = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-069",
-            "title": "Resolvable command-run citation",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://example.test/VA-069",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "e", "impact": "i"},
-            "provenance": {
-                "agent_id": "HUNT-1",
-                "command_run_id": int(run.json()["id"]),
-            },
-        },
+    accepted = _post_provenance_finding(
+        client,
+        "VA-069",
+        title="Resolvable command-run citation",
+        provenance={"agent_id": "HUNT-1", "command_run_id": int(run.json()["id"])},
     )
 
     assert accepted.status_code == 201, accepted.text
@@ -1498,15 +1462,8 @@ def test_an_authored_command_run_citation_must_name_a_run_in_this_engagement(
         json={"provenance": {"command_run_id": 99999}},
     )
     assert patched.status_code == 400, patched.text
-    relocated = client.put(
-        f"{BASE}/findings/VA-069/canonical-location",
-        json={
-            "canonical_location": "https://example.test/VA-069/moved",
-            "reason_text": "Runtime proof relocated the defect server-side.",
-            "source_name": "operator",
-            "expected_row_version": 1,
-            "provenance": {"command_run_id": 99999},
-        },
+    relocated = _relocate(
+        client, "VA-069", expected_row_version=1, provenance={"command_run_id": 99999}
     )
     assert relocated.status_code == 400, relocated.text
     stored = client.get(f"{BASE}/findings/VA-069").json()

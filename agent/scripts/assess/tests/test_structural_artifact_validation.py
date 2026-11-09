@@ -18,6 +18,7 @@ from assess.lib.code_structural_identity import (
 )
 from assess.lib.code_structural_metadata import validated_structural_metadata
 from assess.lib.treesitter_index import index_file
+from _fake_client import StubClient
 
 
 def _artifact(source: bytes) -> dict:
@@ -154,6 +155,22 @@ def test_legitimate_noncallable_exports_remain_publishable(source: bytes) -> Non
     validated_structural_metadata(artifact, rel_path="public.ts", source_size=len(source))
 
 
+def _record_structural_posts(client_type, monkeypatch) -> list[dict]:
+    """Record every bulk-structural-metadata POST body and echo its bound identity."""
+    posts: list[dict] = []
+
+    def post(_self, endpoint, payload, **_kwargs):
+        assert endpoint == "code/files/bulk-structural-metadata"
+        posts.append(payload)
+        return {field: payload[field] for field in (
+            "repo_id", "repo_generation", "source_manifest_digest",
+            "structural_input_digest", "structural_index_schema",
+        )} | {"updated": len(payload["updates"])}
+
+    monkeypatch.setattr(client_type, "post", post)
+    return posts
+
+
 @pytest.fixture
 def index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     raw = b"def f(): pass\n"
@@ -172,10 +189,7 @@ def index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo = {"id": 7, "repo_key": "demo", "repo_path": str(snapshot.source_path),
             "active_generation": 1, "source_manifest_digest": "d" * 64}
 
-    class Client:
-        def __init__(self, *_args):
-            pass
-
+    class Client(StubClient):
         def get(self, endpoint):
             if endpoint == "code/repos/7":
                 return repo
@@ -186,12 +200,6 @@ def index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
         def post(self, *_args, **_kwargs):
             pytest.fail("invalid structural artifacts must not be published")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
 
     for module in (code_index, code_index_sync):
         monkeypatch.setattr(module, "AssessmentClient", Client)
@@ -341,17 +349,7 @@ def test_corrected_build_and_sync_preserve_historical_v6_artifacts(index_project
     current_manifest = output / top["repos"]["7"]["manifest_path"]
     assert json.loads(current_manifest.read_text())["schema"] == "structural-index/v7"
     assert "v7" in current_manifest.parts
-    posts = []
-
-    def post(_self, endpoint, payload, **_kwargs):
-        assert endpoint == "code/files/bulk-structural-metadata"
-        posts.append(payload)
-        return {field: payload[field] for field in (
-            "repo_id", "repo_generation", "source_manifest_digest",
-            "structural_input_digest", "structural_index_schema",
-        )} | {"updated": len(payload["updates"])}
-
-    monkeypatch.setattr(client_type, "post", post)
+    posts = _record_structural_posts(client_type, monkeypatch)
     code_index_sync.run(SimpleNamespace(manifest=str(top_path), index_dir=None,
                                        repo_id=None, repo_key=None, engagement_dir=args.engagement_dir))
     assert len(posts) == 1
@@ -410,17 +408,7 @@ def test_selected_v7_sync_coexists_with_unselected_v6_aggregate_pointer(
 
     code_index.run(args)
     assert json.loads(top_path.read_text())["repos"]["8"] == old_pointer
-    posts = []
-
-    def post(_self, endpoint, payload, **_kwargs):
-        assert endpoint == "code/files/bulk-structural-metadata"
-        posts.append(payload)
-        return {field: payload[field] for field in (
-            "repo_id", "repo_generation", "source_manifest_digest",
-            "structural_input_digest", "structural_index_schema",
-        )} | {"updated": len(payload["updates"])}
-
-    monkeypatch.setattr(client_type, "post", post)
+    posts = _record_structural_posts(client_type, monkeypatch)
     sync_args = SimpleNamespace(manifest=str(top_path), index_dir=None, repo_id=None,
                                 repo_key=None, engagement_dir=args.engagement_dir)
     code_index_sync.run(SimpleNamespace(**(vars(sync_args) | selection)))
@@ -510,17 +498,7 @@ def _renamed_artifact(source: bytes) -> dict:
 
 
 def _sync_posts(args, client_type, monkeypatch) -> list[dict]:
-    posts: list[dict] = []
-
-    def post(_self, endpoint, payload, **_kwargs):
-        assert endpoint == "code/files/bulk-structural-metadata"
-        posts.append(payload)
-        return {field: payload[field] for field in (
-            "repo_id", "repo_generation", "source_manifest_digest",
-            "structural_input_digest", "structural_index_schema",
-        )} | {"updated": len(payload["updates"])}
-
-    monkeypatch.setattr(client_type, "post", post)
+    posts = _record_structural_posts(client_type, monkeypatch)
     code_index_sync.run(SimpleNamespace(
         manifest=str(Path(args.output_dir) / "structural-index-manifest.json"), index_dir=None,
         repo_id=None, repo_key=None, engagement_dir=args.engagement_dir,

@@ -95,21 +95,23 @@ type FilterSpec = {
   summaryKey?: string;
   label: string;
   singular: string;
+  /** Normalized lowercase single-word token the "type:" scope filter matches. */
+  slug: string;
 };
 
 // Ordering mirrors the original sidebar in §3a.
 const ENTITY_FILTERS: FilterSpec[] = [
-  { key: "tech_component", summaryKey: "tech_components", label: "Tech stack", singular: "tech component" },
-  { key: "person", summaryKey: "people", label: "People", singular: "person" },
-  { key: "email", summaryKey: "emails", label: "Emails", singular: "email" },
-  { key: "domain", summaryKey: "domains", label: "Domains", singular: "domain" },
-  { key: "credentials", label: "Credentials", singular: "credential" },
-  { key: "cve", summaryKey: "cves", label: "CVEs", singular: "CVE" },
-  { key: "dns_record", summaryKey: "dns_records", label: "DNS", singular: "DNS record" },
-  { key: "social_profile", summaryKey: "social_profiles", label: "Social", singular: "social profile" },
-  { key: "breach_record", summaryKey: "breach_records", label: "Breach", singular: "breach record" },
-  { key: "org_fact", summaryKey: "org_facts", label: "Org", singular: "org fact" },
-  { key: "note", summaryKey: "notes", label: "Notes", singular: "note" },
+  { key: "tech_component", summaryKey: "tech_components", label: "Tech stack", singular: "tech component", slug: "tech" },
+  { key: "person", summaryKey: "people", label: "People", singular: "person", slug: "person" },
+  { key: "email", summaryKey: "emails", label: "Emails", singular: "email", slug: "email" },
+  { key: "domain", summaryKey: "domains", label: "Domains", singular: "domain", slug: "domain" },
+  { key: "credentials", label: "Credentials", singular: "credential", slug: "credential" },
+  { key: "cve", summaryKey: "cves", label: "CVEs", singular: "CVE", slug: "cve" },
+  { key: "dns_record", summaryKey: "dns_records", label: "DNS", singular: "DNS record", slug: "dns" },
+  { key: "social_profile", summaryKey: "social_profiles", label: "Social", singular: "social profile", slug: "social" },
+  { key: "breach_record", summaryKey: "breach_records", label: "Breach", singular: "breach record", slug: "breach" },
+  { key: "org_fact", summaryKey: "org_facts", label: "Org", singular: "org fact", slug: "org" },
+  { key: "note", summaryKey: "notes", label: "Notes", singular: "note", slug: "note" },
 ];
 
 function isEntityFilter(value: string | undefined): value is EntityFilter {
@@ -307,33 +309,9 @@ type Derived = {
   searchCorpus: string;
 };
 
-// Determine the intel type label (used as the "type:" filter key & chip).
+// The intel type token (used as the "type:" filter key & chip); ENTITY_FILTERS owns it.
 function entityTypeSlug(e: EntityFilter): string {
-  // normalized lowercase single-word tokens for scope matching
-  switch (e) {
-    case "tech_component":
-      return "tech";
-    case "person":
-      return "person";
-    case "email":
-      return "email";
-    case "domain":
-      return "domain";
-    case "credentials":
-      return "credential";
-    case "cve":
-      return "cve";
-    case "dns_record":
-      return "dns";
-    case "social_profile":
-      return "social";
-    case "breach_record":
-      return "breach";
-    case "org_fact":
-      return "org";
-    case "note":
-      return "note";
-  }
+  return ENTITY_FILTERS.find((spec) => spec.key === e)?.slug ?? e;
 }
 
 function activeLeadRank(d: Derived): number {

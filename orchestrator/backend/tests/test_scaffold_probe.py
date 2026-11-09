@@ -20,7 +20,6 @@ import ast
 import importlib.util
 import json
 import py_compile
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,9 +36,6 @@ def _repo_root() -> Path:
 
 
 def _load_script_module(name: str, relative_path: str):
-    scripts_root = _repo_root() / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     module_path = _repo_root() / relative_path
     spec = importlib.util.spec_from_file_location(name, module_path)
     assert spec is not None and spec.loader is not None

@@ -844,23 +844,10 @@ MAX_PROBE_RUN_LIST_LIMIT = 5000
 MAX_ASSESSMENT_LIST_LIMIT = 5000
 
 
-def _bounded_request_list_window(limit: int, offset: int) -> tuple[int, int]:
+def _bounded_window(limit: int, offset: int, *, maximum: int) -> tuple[int, int]:
+    """Clamp one list window. The ceilings stay separately tunable per route."""
     return (
-        max(1, min(int(limit), MAX_REQUEST_LIST_LIMIT)),
-        max(0, int(offset)),
-    )
-
-
-def _bounded_probe_run_window(limit: int, offset: int) -> tuple[int, int]:
-    return (
-        max(1, min(int(limit), MAX_PROBE_RUN_LIST_LIMIT)),
-        max(0, int(offset)),
-    )
-
-
-def _bounded_assessment_list_window(limit: int, offset: int) -> tuple[int, int]:
-    return (
-        max(1, min(int(limit), MAX_ASSESSMENT_LIST_LIMIT)),
+        max(1, min(int(limit), maximum)),
         max(0, int(offset)),
     )
 
@@ -872,7 +859,7 @@ def list_request_variants(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_request_list_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_REQUEST_LIST_LIMIT)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
@@ -893,7 +880,7 @@ def list_request_observations(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_request_list_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_REQUEST_LIST_LIMIT)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
@@ -1213,7 +1200,7 @@ def list_coverage_items(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_assessment_list_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_ASSESSMENT_LIST_LIMIT)
     # Optional exact-match filters, mirroring ``list_probe_runs``. Column names
     # are a fixed allowlist, never caller text, so the f-string interpolation is
     # safe; every value is bound. An unknown VALUE narrows to zero rows — the
@@ -1529,6 +1516,32 @@ _COVERAGE_LEDGER_ROW_COLUMNS = f"""
 """
 
 
+def _coverage_ledger_order(sort: str, direction: str) -> str:
+    """The ``ORDER BY`` the page read and the record-navigation read must share."""
+    if sort not in _COVERAGE_LEDGER_SORTS or direction not in {"asc", "desc"}:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported coverage sort")
+    expression, nullable = _COVERAGE_LEDGER_SORTS[sort]
+    sql_direction = direction.upper()
+    order = f"{expression} {sql_direction}, coverage.id {sql_direction}"
+    return f"({expression}) IS NULL, {order}" if nullable else order
+
+
+def _hydrate_coverage_items(connection: Any, item_ids: list[int]) -> dict[int, dict[str, Any]]:
+    """The ledger projection of each listed item, keyed by id. Both the page and
+    the record-navigation read select ids first and hydrate only those rows."""
+    if not item_ids:
+        return {}
+    rows = connection.execute(
+        f"""
+        SELECT {_COVERAGE_LEDGER_ROW_COLUMNS}
+        FROM assessment_coverage_items AS coverage {_COVERAGE_LEDGER_JOINS}
+        WHERE coverage.id IN ({', '.join('?' for _ in item_ids)})
+        """,
+        tuple(item_ids),
+    ).fetchall()
+    return {int(row["id"]): _coverage_ledger_row(row) for row in rows}
+
+
 def page_coverage_items(
     engagement_id: int,
     filters: CoverageLedgerFilters,
@@ -1540,16 +1553,10 @@ def page_coverage_items(
 ) -> dict[str, Any]:
     """One page of the operator ledger plus the total matching the filters."""
     engagement = _engagement_or_404(engagement_id)
-    if sort not in _COVERAGE_LEDGER_SORTS or direction not in {"asc", "desc"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported coverage sort")
+    order = _coverage_ledger_order(sort, direction)
     limit = max(1, min(int(limit), COVERAGE_LEDGER_PAGE_MAX_LIMIT))
     offset = max(0, int(offset))
     where, params, needs_join = _coverage_ledger_where(engagement.id, filters)
-    expression, nullable = _COVERAGE_LEDGER_SORTS[sort]
-    sql_direction = direction.upper()
-    order = f"{expression} {sql_direction}, coverage.id {sql_direction}"
-    if nullable:
-        order = f"({expression}) IS NULL, {order}"
     joins = _COVERAGE_LEDGER_JOINS if needs_join else ""
     sort_joins = _COVERAGE_LEDGER_JOINS if needs_join or sort in _COVERAGE_LEDGER_JOINED_SORTS else ""
     with _common.get_connection() as connection:
@@ -1574,17 +1581,7 @@ def page_coverage_items(
                 (*params, limit, offset),
             ).fetchall()
         ]
-        hydrated: dict[int, dict[str, Any]] = {}
-        if page_ids:
-            rows = connection.execute(
-                f"""
-                SELECT {_COVERAGE_LEDGER_ROW_COLUMNS}
-                FROM assessment_coverage_items AS coverage {_COVERAGE_LEDGER_JOINS}
-                WHERE coverage.id IN ({', '.join('?' for _ in page_ids)})
-                """,
-                tuple(page_ids),
-            ).fetchall()
-            hydrated = {int(row["id"]): _coverage_ledger_row(row) for row in rows}
+        hydrated = _hydrate_coverage_items(connection, page_ids)
     items = [hydrated[item_id] for item_id in page_ids if item_id in hydrated]
     return {
         "total": total,
@@ -1611,14 +1608,8 @@ def coverage_item_position(
     null when the item does not match the filters.
     """
     engagement = _engagement_or_404(engagement_id)
-    if sort not in _COVERAGE_LEDGER_SORTS or direction not in {"asc", "desc"}:
-        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="unsupported coverage sort")
+    order = _coverage_ledger_order(sort, direction)
     where, params, needs_join = _coverage_ledger_where(engagement.id, filters)
-    expression, nullable = _COVERAGE_LEDGER_SORTS[sort]
-    sql_direction = direction.upper()
-    order = f"{expression} {sql_direction}, coverage.id {sql_direction}"
-    if nullable:
-        order = f"({expression}) IS NULL, {order}"
     joins = _COVERAGE_LEDGER_JOINS if needs_join else ""
     sort_joins = _COVERAGE_LEDGER_JOINS if needs_join or sort in _COVERAGE_LEDGER_JOINED_SORTS else ""
     with _common.get_connection() as connection:
@@ -1651,17 +1642,7 @@ def coverage_item_position(
         positions = {int(row[0]): int(row[1]) for row in ranked}
         index = positions.get(coverage_item_id)
         neighbour_ids = [item_id for item_id in positions if item_id != coverage_item_id]
-        hydrated: dict[int, dict[str, Any]] = {}
-        if neighbour_ids:
-            rows = connection.execute(
-                f"""
-                SELECT {_COVERAGE_LEDGER_ROW_COLUMNS}
-                FROM assessment_coverage_items AS coverage {_COVERAGE_LEDGER_JOINS}
-                WHERE coverage.id IN ({', '.join('?' for _ in neighbour_ids)})
-                """,
-                tuple(neighbour_ids),
-            ).fetchall()
-            hydrated = {int(row["id"]): _coverage_ledger_row(row) for row in rows}
+        hydrated = _hydrate_coverage_items(connection, neighbour_ids)
 
     def neighbour(offset: int) -> dict[str, Any] | None:
         if index is None:
@@ -2489,7 +2470,7 @@ def list_probe_runs(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_probe_run_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_PROBE_RUN_LIST_LIMIT)
     # Optional exact-match filters (empty string = no filter). Column names are a
     # fixed allowlist, never caller text, so the f-string interpolation is safe;
     # every value is bound. Lets `fetch probe-runs?attack_family=sqli` return only
@@ -2595,7 +2576,7 @@ def list_attempts(
     (created_at DESC) list; grouping by lens × result_status is done CLI-side.
     """
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_probe_run_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_PROBE_RUN_LIST_LIMIT)
 
     with _common.get_connection() as connection:
         finding_id_filter: int | None = None
@@ -2737,7 +2718,7 @@ def list_surfaces(
                 """,
                 (engagement.id,),
             )
-        limit, offset = _bounded_assessment_list_window(limit, offset)
+        limit, offset = _bounded_window(limit, offset, maximum=MAX_ASSESSMENT_LIST_LIMIT)
         return _fetch_all(
             connection,
             """
@@ -2992,7 +2973,7 @@ def list_surface_request_variant_links_by_surface(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_assessment_list_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_ASSESSMENT_LIST_LIMIT)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,
@@ -3014,7 +2995,7 @@ def list_surface_request_variant_links_by_variant(
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
-    limit, offset = _bounded_assessment_list_window(limit, offset)
+    limit, offset = _bounded_window(limit, offset, maximum=MAX_ASSESSMENT_LIST_LIMIT)
     with _common.get_connection() as connection:
         return _fetch_all(
             connection,

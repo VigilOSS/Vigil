@@ -1210,27 +1210,22 @@ _INTERPRETER_INLINE_SOURCE_FLAGS: dict[str, frozenset[str]] = {
 # the executed file. This is the one argv-shape table shared by evidence-path
 # isolation and required-header inspection. Unknown options make the result
 # unknown instead of guessing that their value is a script path.
+# ``node`` and ``nodejs`` are the same binary under two names, so they share one
+# option set rather than carrying two copies that could drift apart.
+_NODE_VALUE_OPTIONS = frozenset(
+    {
+        "-C", "--conditions", "--diagnostic-dir", "--env-file",
+        "--env-file-if-exists", "--experimental-loader",
+        "--experimental-sea-config", "--icu-data-dir", "--import",
+        "--inspect-port", "--loader", "--openssl-config",
+        "--redirect-warnings", "-r", "--require", "--title",
+    }
+)
 _INTERPRETER_VALUE_OPTIONS: dict[str, frozenset[str]] = {
     "bash": frozenset({"-O", "+O", "-o", "+o", "--init-file", "--rcfile"}),
     "dash": frozenset({"-o", "+o"}),
-    "node": frozenset(
-        {
-            "-C", "--conditions", "--diagnostic-dir", "--env-file",
-            "--env-file-if-exists", "--experimental-loader",
-            "--experimental-sea-config", "--icu-data-dir", "--import",
-            "--inspect-port", "--loader", "--openssl-config",
-            "--redirect-warnings", "-r", "--require", "--title",
-        }
-    ),
-    "nodejs": frozenset(
-        {
-            "-C", "--conditions", "--diagnostic-dir", "--env-file",
-            "--env-file-if-exists", "--experimental-loader",
-            "--experimental-sea-config", "--icu-data-dir", "--import",
-            "--inspect-port", "--loader", "--openssl-config",
-            "--redirect-warnings", "-r", "--require", "--title",
-        }
-    ),
+    "node": _NODE_VALUE_OPTIONS,
+    "nodejs": _NODE_VALUE_OPTIONS,
     "perl": frozenset({"-F", "-I", "-M", "-m"}),
     "php": frozenset(
         {
@@ -1260,6 +1255,9 @@ _INTERPRETER_FILE_OPTIONS: dict[str, frozenset[str]] = {
     "php": frozenset({"-f", "--file"}),
 }
 
+# Options that consume no argv word at all. Only the two interpreters that have
+# any are listed; every other head reads as the empty set through ``.get``, the
+# same way the mode and file tables are read.
 _INTERPRETER_FLAG_OPTIONS: dict[str, frozenset[str]] = {
     "bash": frozenset(
         {
@@ -1268,16 +1266,7 @@ _INTERPRETER_FLAG_OPTIONS: dict[str, frozenset[str]] = {
             "--version",
         }
     ),
-    "dash": frozenset(),
-    "node": frozenset(),
-    "nodejs": frozenset(),
-    "perl": frozenset(),
     "php": frozenset({"-n", "--no-php-ini", "-q", "--no-header"}),
-    "python": frozenset(),
-    "python3": frozenset(),
-    "ruby": frozenset(),
-    "sh": frozenset(),
-    "zsh": frozenset(),
 }
 
 
@@ -1311,7 +1300,7 @@ def execution_script_argv(argv: list[str]) -> str:
     value_options = _INTERPRETER_VALUE_OPTIONS[head]
     mode_options = _INTERPRETER_MODE_OPTIONS.get(head, frozenset())
     file_options = _INTERPRETER_FILE_OPTIONS.get(head, frozenset())
-    flag_options = _INTERPRETER_FLAG_OPTIONS[head]
+    flag_options = _INTERPRETER_FLAG_OPTIONS.get(head, frozenset())
     index = 1
     while index < len(effective):
         token = str(effective[index])

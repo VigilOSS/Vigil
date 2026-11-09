@@ -55,9 +55,7 @@ def test_resume_brief_scopes_dual_track_operator_view(client, isolate_settings):
     scope_path.write_text(json.dumps(scope), encoding="utf-8")
     _seed_finding(client, eng)
     for agent_id, role in (("web-worker", "vulnerability-analyst"), ("code-worker", "code-vuln-hunter")):
-        response = client.post(f"{BASE}/dispatches", json={
-            "agent_id": agent_id, "agent_role": role, "task": "track work",
-        })
+        response = _dispatch(client, agent_id=agent_id, agent_role=role, task="track work")
         assert response.status_code == 201, response.text
     checkpoint = client.post(f"{BASE}/operator-checkpoints", json={
         "intent_note": "continue code sink analysis",
@@ -94,6 +92,16 @@ def test_resume_brief_scopes_dual_track_operator_view(client, isolate_settings):
         assert "continue code sink analysis" not in json.dumps(body)
 
 
+def _artifact(client, **body):
+    """POST one artifact registration and return the raw response."""
+    return client.post(f"{BASE}/artifacts", json=body)
+
+
+def _dispatch(client, **body):
+    """POST one dispatch for the fixture engagement and return the response."""
+    return client.post(f"{BASE}/dispatches", json=body)
+
+
 def _register_note(client, path: str, **kwargs) -> dict:
     """POST /artifacts to register a note explicitly.
 
@@ -111,13 +119,11 @@ def _register_note(client, path: str, **kwargs) -> dict:
 
 def _author_finding(client, slug: str) -> str:
     author_id = f"artifact-author-{slug.lower()}"
-    author = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": author_id,
-            "agent_role": "vulnerability-analyst",
-            "task": f"record {slug}",
-        },
+    author = _dispatch(
+        client,
+        agent_id=author_id,
+        agent_role="vulnerability-analyst",
+        task=f"record {slug}",
     )
     assert author.status_code == 201, author.text
     return author_id
@@ -160,13 +166,11 @@ def _seed_finding(client, eng: Path, slug: str = "VA-047") -> None:
 
 def _verify_finding(client, slug: str, *, artifact_id: int) -> None:
     verifier_id = f"artifact-verifier-{slug.lower()}"
-    dispatch = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": verifier_id,
-            "agent_role": "code-vuln-verifier",
-            "task": f"independently verify {slug}",
-        },
+    dispatch = _dispatch(
+        client,
+        agent_id=verifier_id,
+        agent_role="code-vuln-verifier",
+        task=f"independently verify {slug}",
     )
     assert dispatch.status_code == 201, dispatch.text
     run = client.post(
@@ -374,9 +378,7 @@ def test_artifact_contract_has_no_operator_data_suppression_flag(
     (eng / "notes" / "literal-token.md").write_text(
         "Authorization: Bearer literal-operator-token", encoding="utf-8"
     )
-    registered = client.post(
-        f"{BASE}/artifacts", json={"path": "notes/literal-token.md"}
-    )
+    registered = _artifact(client, path="notes/literal-token.md")
     assert registered.status_code == 201, registered.text
     assert "sensitive" not in registered.json()
     assert "Authorization: Bearer literal-operator-token" in registered.json()["indexed_text"]
@@ -394,9 +396,7 @@ def test_artifact_search_indexes_text_beyond_legacy_16k_boundary(
         encoding="utf-8",
     )
 
-    registered = client.post(
-        f"{BASE}/artifacts", json={"path": "notes/long-knowledge.md"}
-    )
+    registered = _artifact(client, path="notes/long-knowledge.md")
     assert registered.status_code == 201, registered.text
     assert registered.json()["index_status"] == "complete"
 
@@ -417,9 +417,7 @@ def test_artifact_refresh_rebuilds_a_legacy_partial_text_index(
     note = eng / "notes" / "legacy-partial.md"
     note.parent.mkdir(parents=True, exist_ok=True)
     note.write_text("prefix " * 3000 + " refresh-tail-marker\n", encoding="utf-8")
-    registered = client.post(
-        f"{BASE}/artifacts", json={"path": "notes/legacy-partial.md"}
-    )
+    registered = _artifact(client, path="notes/legacy-partial.md")
     assert registered.status_code == 201, registered.text
 
     with sqlite3.connect(str(db_module.database_path())) as connection:
@@ -475,7 +473,7 @@ def test_artifact_register_supports_blue_ir_artifact_roots(client, isolate_setti
         "ir/reports/incident.md",
         "ir/alerts/raw-alert.txt",
     ):
-        registered = client.post(f"{BASE}/artifacts", json={"path": relative_path})
+        registered = _artifact(client, path=relative_path)
         assert registered.status_code == 201, registered.text
 
     search = client.get(f"{BASE}/artifacts/search", params={"q": "beacons"})
@@ -522,9 +520,7 @@ def test_artifact_refresh_updates_missing_registered_files(client, isolate_setti
     assert missing["size_bytes"] == original["size_bytes"]
     assert missing["preview_text"] == original["preview_text"]
 
-    reregistered = client.post(
-        f"{BASE}/artifacts", json={"path": "notes/VA-047-note.md"}
-    )
+    reregistered = _artifact(client, path="notes/VA-047-note.md")
     assert reregistered.status_code == 201, reregistered.text
     tombstone = reregistered.json()
     assert tombstone["present"] is False
@@ -603,13 +599,11 @@ def test_artifact_register_preserves_existing_legacy_finding_slug(client, isolat
         )
         connection.commit()
 
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={
-            "path": "notes/legacy-note.md",
-            "kind": "note",
-            "related_finding_slug": "legacy-title-slug",
-        },
+    registered = _artifact(
+        client,
+        path="notes/legacy-note.md",
+        kind="note",
+        related_finding_slug="legacy-title-slug",
     )
     assert registered.status_code == 201, registered.text
     assert registered.json()["related_finding_slug"] == "legacy-title-slug"
@@ -642,20 +636,18 @@ def test_artifact_register_preserves_explicit_kind_on_bare_reregister(client, is
     # First registration carries an explicit kind that differs from what
     # _guess_kind() infers for a notes/ path ("note"), plus an explicit
     # media_type that differs from the mimetypes guess for .md.
-    first = client.post(
-        f"{BASE}/artifacts",
-        json={
-            "path": "notes/va-047-proof.md",
-            "kind": "verification-narrative",
-            "media_type": "application/x-vigil-proof",
-        },
+    first = _artifact(
+        client,
+        path="notes/va-047-proof.md",
+        kind="verification-narrative",
+        media_type="application/x-vigil-proof",
     )
     assert first.status_code == 201, first.text
     assert first.json()["kind"] == "verification-narrative"
     assert first.json()["media_type"] == "application/x-vigil-proof"
 
     # Bare re-register: no kind / no media_type (CLI --kind defaults to "").
-    bare = client.post(f"{BASE}/artifacts", json={"path": "notes/va-047-proof.md"})
+    bare = _artifact(client, path="notes/va-047-proof.md")
     assert bare.status_code == 201, bare.text
     assert bare.json()["kind"] == "verification-narrative", "bare re-register clobbered explicit kind"
     assert bare.json()["media_type"] == "application/x-vigil-proof", "bare re-register clobbered explicit media_type"
@@ -668,10 +660,7 @@ def test_artifact_register_preserves_explicit_kind_on_bare_reregister(client, is
     ), "kind-filtered search missed the artifact after bare re-register"
 
     # An explicit new kind on re-register still overrides (last-writer-wins).
-    relabel = client.post(
-        f"{BASE}/artifacts",
-        json={"path": "notes/va-047-proof.md", "kind": "scan-report"},
-    )
+    relabel = _artifact(client, path="notes/va-047-proof.md", kind="scan-report")
     assert relabel.status_code == 201, relabel.text
     assert relabel.json()["kind"] == "scan-report"
 
@@ -702,15 +691,13 @@ def test_resume_brief_returns_bounded_operating_picture(client, isolate_settings
         },
     )
     assert command.status_code == 201, command.text
-    dispatch = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "va-memory",
-            "agent_role": "vulnerability-analyst",
-            "task": "continue VA-047",
-            "skills": "auth-bypass",
-            "finding_slugs": ["VA-047"],
-        },
+    dispatch = _dispatch(
+        client,
+        agent_id="va-memory",
+        agent_role="vulnerability-analyst",
+        task="continue VA-047",
+        skills="auth-bypass",
+        finding_slugs=["VA-047"],
     )
     assert dispatch.status_code == 201, dispatch.text
     handoff = client.post(
@@ -1143,10 +1130,7 @@ def test_report_readiness_checks_unlinked_root_markdown_documents(client, isolat
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
     (eng / "RESUME.md").write_text("Durable engagement state", encoding="utf-8")
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={"path": "RESUME.md", "kind": "note"},
-    )
+    registered = _artifact(client, path="RESUME.md", kind="note")
     assert registered.status_code == 201, registered.text
 
     readiness = client.get(f"{BASE}/report-readiness")
@@ -1194,10 +1178,7 @@ def test_report_readiness_flags_missing_markdown_paths_cited_by_durable_notes(
         "Deferred work is tracked in `OOB-CALLBACKS.md`.",
         encoding="utf-8",
     )
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
-    )
+    registered = _artifact(client, path="RESUME.md", kind="note", producer_agent_id="operator")
     assert registered.status_code == 201, registered.text
 
     readiness = client.get(f"{BASE}/report-readiness")
@@ -1224,10 +1205,7 @@ def test_report_readiness_does_not_follow_markdown_citations_outside_engagement(
         "Deferred work is tracked in `../outside.md`.",
         encoding="utf-8",
     )
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
-    )
+    registered = _artifact(client, path="RESUME.md", kind="note", producer_agent_id="operator")
     assert registered.status_code == 201, registered.text
 
     readiness = client.get(f"{BASE}/report-readiness")
@@ -1475,16 +1453,14 @@ def test_resume_brief_stale_threshold_per_role(client, isolate_settings) -> None
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     # Dispatch an exploit-developer 36h ago — under role default 48h, not stale.
     old_iso = "2026-05-18T00:00:00Z"  # ~36h before frozen test clock? actually deterministic check below
-    dispatch = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "exp-old",
-            "agent_role": "exploit-developer",
-            "assessment_mode": "web",
-            "task": "deep chain",
-            "skills": "exploit-playbook-authoring",
-            "dispatched_at": old_iso,
-        },
+    dispatch = _dispatch(
+        client,
+        agent_id="exp-old",
+        agent_role="exploit-developer",
+        assessment_mode="web",
+        task="deep chain",
+        skills="exploit-playbook-authoring",
+        dispatched_at=old_iso,
     )
     assert dispatch.status_code == 201, dispatch.text
     # Force --max-age-hours=12 — should now flag it stale regardless of role default.
@@ -1507,14 +1483,12 @@ def test_resume_brief_surfaces_terminal_handoff_less_dispatch(client, isolate_se
     `stale_in_progress_dispatches`."""
     _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
-    dispatch = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "recon-died-1",
-            "agent_role": "recon-specialist",
-            "task": "enumerate subdomains",
-            "skills": "recon-methodology",
-        },
+    dispatch = _dispatch(
+        client,
+        agent_id="recon-died-1",
+        agent_role="recon-specialist",
+        task="enumerate subdomains",
+        skills="recon-methodology",
     )
     assert dispatch.status_code == 201, dispatch.text
     closed = client.patch(
@@ -1547,9 +1521,11 @@ def test_resume_brief_surfaces_ready_handoff_waiting_for_dispatch_close(
 ) -> None:
     _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
-    created = client.post(
-        f"{BASE}/dispatches",
-        json={"agent_id": "ready-open", "agent_role": "vulnerability-analyst", "task": "verify"},
+    created = _dispatch(
+        client,
+        agent_id="ready-open",
+        agent_role="vulnerability-analyst",
+        task="verify",
     )
     assert created.status_code == 201, created.text
     handoff = client.post(
@@ -1665,14 +1641,12 @@ def test_resume_brief_surfaces_completed_handoff_gap_until_decision_reconciles_i
 ) -> None:
     _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
-    created = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "recon-completed-no-handoff",
-            "agent_role": "recon-specialist",
-            "task": "enumerate",
-            "skills": "recon-methodology",
-        },
+    created = _dispatch(
+        client,
+        agent_id="recon-completed-no-handoff",
+        agent_role="recon-specialist",
+        task="enumerate",
+        skills="recon-methodology",
     )
     assert created.status_code == 201, created.text
     closed = client.patch(
@@ -1719,29 +1693,25 @@ def test_resume_brief_stale_in_progress_below_display_window_is_reported(client,
     # them push any older dispatch out of the newest-N display window.
     recent_iso = dt.datetime.now(dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     for index in range(30):
-        resp = client.post(
-            f"{BASE}/dispatches",
-            json={
-                "agent_id": f"recent-{index:02d}",
-                "agent_role": "vulnerability-analyst",
-                "task": "probe",
-                "skills": "web-methodology",
-                "dispatched_at": recent_iso,
-            },
+        resp = _dispatch(
+            client,
+            agent_id=f"recent-{index:02d}",
+            agent_role="vulnerability-analyst",
+            task="probe",
+            skills="web-methodology",
+            dispatched_at=recent_iso,
         )
         assert resp.status_code == 201, resp.text
 
     # One OLD in-progress dispatch: far past the 24h threshold and, having the
     # oldest dispatched_at, sorted at the very bottom (below the display window).
-    old = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "stale-old",
-            "agent_role": "vulnerability-analyst",
-            "task": "deep enumeration",
-            "skills": "web-methodology",
-            "dispatched_at": "2026-01-01T00:00:00Z",
-        },
+    old = _dispatch(
+        client,
+        agent_id="stale-old",
+        agent_role="vulnerability-analyst",
+        task="deep enumeration",
+        skills="web-methodology",
+        dispatched_at="2026-01-01T00:00:00Z",
     )
     assert old.status_code == 201, old.text
 
@@ -1761,14 +1731,12 @@ def test_resume_brief_stale_in_progress_below_display_window_is_reported(client,
 
 def _record_handoff(client, agent_id: str, *, agent_role: str = "recon-specialist") -> None:
     """Register a dispatch and its handoff — the pair the brief reads together."""
-    dispatch = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": agent_id,
-            "agent_role": agent_role,
-            "task": f"sweep for {agent_id}",
-            "skills": "recon-methodology",
-        },
+    dispatch = _dispatch(
+        client,
+        agent_id=agent_id,
+        agent_role=agent_role,
+        task=f"sweep for {agent_id}",
+        skills="recon-methodology",
     )
     assert dispatch.status_code == 201, dispatch.text
     handoff = client.post(

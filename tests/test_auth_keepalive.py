@@ -21,18 +21,26 @@ LIVE/DEAD to the log — all with the subprocess/network boundary stubbed.
 """
 from __future__ import annotations
 
+import json as _json
 import os
 import shutil
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
+from vigil_cli import auth
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
 
-import pytest  # noqa: E402
 
-from vigil_cli import auth  # noqa: E402  (src must be on sys.path first)
+@pytest.fixture
+def eng(tmp_path):
+    """One engagement directory under a throwaway install root."""
+    directory = tmp_path / "agent" / "engagements" / "eng"
+    directory.mkdir(parents=True)
+    return directory
 
 
 # The engagement's operator-declared session-anchor cookie names. These are
@@ -187,7 +195,6 @@ def test_parse_deleted_detection_ignores_undeclared_anchor():
 
 def test_parse_never_calls_json_loads(monkeypatch):
     # Hard rule: the parser must not json.loads the (often-truncated) envelope.
-    import json as _json
 
     def _boom(*_a, **_k):  # pragma: no cover - only fires on a violation
         raise AssertionError("_parse_probe_blob must not call json.loads")
@@ -239,9 +246,7 @@ def test_classify_defers_to_material_liveness_when_present():
 # --------------------------------------------------------------------------- #
 # _vigil_assess_argv — routes through kali exec, argv list, NEVER bash -c
 # --------------------------------------------------------------------------- #
-def test_probe_argv_uses_kali_exec_with_identity_and_no_shell(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_argv_uses_kali_exec_with_identity_and_no_shell(eng, monkeypatch):
     monkeypatch.setattr(auth.shutil, "which", lambda _name: "/usr/local/bin/vigil")
     argv = auth._vigil_assess_argv(eng, "cap-x", "https://portal.example/profile")
     assert argv[0] == "/usr/local/bin/vigil"
@@ -255,9 +260,7 @@ def test_probe_argv_uses_kali_exec_with_identity_and_no_shell(tmp_path, monkeypa
     assert argv.index("--") < argv.index("curl")
 
 
-def test_probe_argv_falls_back_to_assess_script_off_path(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_argv_falls_back_to_assess_script_off_path(eng, monkeypatch):
     monkeypatch.setattr(auth.shutil, "which", lambda _name: None)
     argv = auth._vigil_assess_argv(eng, "cap-x", "https://x/y")
     assert argv[0].endswith("agent/scripts/assess.py")
@@ -267,18 +270,14 @@ def test_probe_argv_falls_back_to_assess_script_off_path(tmp_path, monkeypatch):
 # --------------------------------------------------------------------------- #
 # keepalive() — arg validation + foreground loop tees LIVE/DEAD to the log
 # --------------------------------------------------------------------------- #
-def test_keepalive_requires_probe_url(tmp_path):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_keepalive_requires_probe_url(eng):
     # Anchor is supplied so the ONLY missing input under test is --probe-url.
     with pytest.raises(SystemExit) as exc:
         auth.keepalive(eng, probe_url="", anchor_cookies=["MRHSession"], iters=1)
     assert "probe-url" in str(exc.value)
 
 
-def test_keepalive_requires_anchor_cookie(tmp_path):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_keepalive_requires_anchor_cookie(eng):
     # A valid probe URL but NO --anchor-cookie must error clearly. Vigil bakes in no
     # default anchor set, so the operator must name the engagement's anchor cookie(s).
     with pytest.raises(SystemExit) as exc:
@@ -294,9 +293,7 @@ def test_keepalive_requires_anchor_cookie(tmp_path):
         )
 
 
-def test_keepalive_foreground_loop_tees_verdict_to_log(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_keepalive_foreground_loop_tees_verdict_to_log(eng, tmp_path, monkeypatch):
     log = tmp_path / "keepalive.log"
 
     monkeypatch.setattr(
@@ -323,9 +320,7 @@ def test_keepalive_foreground_loop_tees_verdict_to_log(tmp_path, monkeypatch):
     assert "userId=u-9" in text
 
 
-def test_keepalive_cycle_persists_typed_scoped_liveness(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_keepalive_cycle_persists_typed_scoped_liveness(eng, monkeypatch):
     monkeypatch.setattr(
         auth,
         "read_auth",

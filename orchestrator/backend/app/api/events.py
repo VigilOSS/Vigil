@@ -1,8 +1,5 @@
 from __future__ import annotations
 
-import functools
-
-import anyio
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel, Field
 
@@ -11,6 +8,7 @@ from ..services.engagements import get_engagement_or_404
 from ..services.events import create_event_for_engagement, list_events_for_engagement, summarize_events_for_engagement
 from ..services.timestamps import iso_utc
 from ..ws import broadcaster
+from .assessment import _offload
 
 router = APIRouter(prefix="/engagements/{engagement_key}/events", tags=["events"])
 
@@ -47,17 +45,15 @@ def _event_response(event: Event) -> EventResponse:
 
 @router.post("", response_model=EventResponse, status_code=status.HTTP_201_CREATED)
 async def create_event(engagement_key: str, request: CreateEventRequest) -> EventResponse:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    event = await anyio.to_thread.run_sync(
-        functools.partial(
-            create_event_for_engagement,
-            engagement.id,
-            event_type=request.event_type,
-            phase=request.phase,
-            task_name=request.task_name,
-            agent_name=request.agent_name,
-            summary=request.summary,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    event = await _offload(
+        create_event_for_engagement,
+        engagement.id,
+        event_type=request.event_type,
+        phase=request.phase,
+        task_name=request.task_name,
+        agent_name=request.agent_name,
+        summary=request.summary,
     )
     response = _event_response(event)
     await broadcaster.publish(

@@ -257,16 +257,11 @@ def _set_rationale(client, id_list, rationale: str) -> None:
     print(f"Updated triage rationale on {affected} item(s)")
 
 
-def _done(client, id_list) -> None:
+def _mark_terminal(client, id_list, *, endpoint: str, label: str) -> None:
+    """Flip the given ids to a terminal state and echo them back."""
     ids = _validate_id_list(id_list)
-    client.post("work-items/done", {"ids": ids})
-    print(f"Marked done: {','.join(str(i) for i in ids)}")
-
-
-def _error(client, id_list) -> None:
-    ids = _validate_id_list(id_list)
-    client.post("work-items/error", {"ids": ids})
-    print(f"Marked error: {','.join(str(i) for i in ids)}")
+    client.post(endpoint, {"ids": ids})
+    print(f"Marked {label}: {','.join(str(i) for i in ids)}")
 
 
 def _reset_stale(client, minutes: int) -> None:

@@ -210,6 +210,14 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
 - `agent/scripts/assess/lib/findings.py:_AGENT_PREFIX_MAP` owns finding prefixes with
   `state_manager/findings.py:_FINDING_PREFIX_BY_SOURCE`;
   a new finding-recording agent needs both maps and the applicable operator prompt table.
+- `api/assessment.py:_RUN_CHILD_LISTERS` (13 run-child reads), `_ENGAGEMENT_LIST_ROUTES`
+  (12 whole-engagement reads) and `api/intel.py:_INTEL_LIST_ROUTES` (10 intel reads) own the
+  registration of those list routes; a new one is a table row, not a decorator. Each table's
+  registration POSITION is load-bearing twice over: FastAPI matches in declaration order, so a
+  literal path must register ahead of a parameterised sibling (`/finding-groups/{root_slug}`,
+  `/blocked-techniques/history`), and it builds the OpenAPI `paths` mapping in registration
+  order, so `_RUN_CHILD_LISTERS` registers after its sibling POST handlers to keep each path
+  item listing `post` before `get`.
 - `contract_registry.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
 - `code_analysis_support.py:_analysis_repo_sql` / `_analysis_repo_files_sql`
   — every query counting an OBLIGATION over `code_files` must carry one, or a `reference` repository

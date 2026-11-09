@@ -7,16 +7,16 @@ list endpoint is a thin passthrough to ``services.intel``; search hits
 """
 from __future__ import annotations
 
-import functools
+from collections.abc import Callable
 from typing import Any, Literal
 
-import anyio
 from fastapi import APIRouter, HTTPException, Query, status
 
 from ..services import intel as intel_service
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
+from .assessment import _offload
 from .intel_schemas import (
     BreachRecordRequest,
     CveRecordRequest,
@@ -33,21 +33,6 @@ from .intel_schemas import (
     SocialProfileRecordRequest,
     TechComponentRecordRequest,
 )
-
-
-# Map URL plural segment -> CLI/type slug used by services.intel helpers.
-_INTEL_TYPE_BY_PLURAL: dict[str, str] = {
-    "tech-components": "tech-component",
-    "people": "person",
-    "emails": "email",
-    "domains": "domain",
-    "cves": "cve",
-    "dns-records": "dns-record",
-    "social-profiles": "social-profile",
-    "breach-records": "breach-record",
-    "org-facts": "org-fact",
-    "notes": "note",
-}
 
 
 router = APIRouter(prefix="/engagements/{engagement_key}/intel", tags=["intel"])
@@ -140,134 +125,50 @@ def list_intel_credentials(
     return state_manager.list_credentials(engagement.id, limit=limit, offset=offset)
 
 
-@router.get("/tech-components")
-def list_tech_components(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_tech_components(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
+def _make_intel_list_handler(
+    name: str, lister: Callable[..., list[dict[str, Any]]]
+) -> Callable[..., list[dict[str, Any]]]:
+    """Build one per-family ``GET`` list handler.
+
+    The ten intel families list identically — same query bounds, same service
+    signature — so the shared signature is declared once here. ``__name__`` is
+    set to the per-family operation name because FastAPI derives the OpenAPI
+    ``operationId`` and summary from it.
+    """
+
+    def handler(
+        engagement_key: str,
+        include_superseded: bool = Query(default=True),
+        limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
+        offset: int = Query(default=0, ge=0),
+    ) -> list[dict[str, Any]]:
+        engagement = get_engagement_or_404(engagement_key)
+        return lister(
+            engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
+        )
+
+    handler.__name__ = name
+    return handler
 
 
-@router.get("/people")
-def list_people(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_people(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
+# (URL plural segment, operation name, service lister) in declaration order.
+# These must be registered BEFORE the parameterised ``/{intel_type_plural}/...``
+# routes below, because FastAPI matches in declaration order.
+_INTEL_LIST_ROUTES: tuple[tuple[str, str, Callable[..., list[dict[str, Any]]]], ...] = (
+    ("tech-components", "list_tech_components", intel_service.list_tech_components),
+    ("people", "list_people", intel_service.list_people),
+    ("emails", "list_emails", intel_service.list_emails),
+    ("domains", "list_domains", intel_service.list_domains),
+    ("cves", "list_cves", intel_service.list_cves),
+    ("dns-records", "list_dns_records", intel_service.list_dns_records),
+    ("social-profiles", "list_social_profiles", intel_service.list_social_profiles),
+    ("breach-records", "list_breach_records", intel_service.list_breach_records),
+    ("org-facts", "list_org_facts", intel_service.list_org_facts),
+    ("notes", "list_notes", intel_service.list_notes),
+)
 
-
-@router.get("/emails")
-def list_emails(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_emails(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/domains")
-def list_domains(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_domains(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/cves")
-def list_cves(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_cves(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/dns-records")
-def list_dns_records(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_dns_records(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/social-profiles")
-def list_social_profiles(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_social_profiles(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/breach-records")
-def list_breach_records(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_breach_records(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/org-facts")
-def list_org_facts(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_org_facts(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
-
-
-@router.get("/notes")
-def list_notes(
-    engagement_key: str,
-    include_superseded: bool = Query(default=True),
-    limit: int = Query(default=DEFAULT_INTEL_LIST_LIMIT, ge=1, le=MAX_INTEL_LIST_LIMIT),
-    offset: int = Query(default=0, ge=0),
-) -> list[dict[str, Any]]:
-    engagement = get_engagement_or_404(engagement_key)
-    return intel_service.list_notes(
-        engagement.id, include_superseded=include_superseded, limit=limit, offset=offset
-    )
+for _plural, _operation_name, _lister in _INTEL_LIST_ROUTES:
+    router.get(f"/{_plural}")(_make_intel_list_handler(_operation_name, _lister))
 
 
 # ── POST endpoints ─────────────────────────────────────────
@@ -277,128 +178,48 @@ def list_notes(
 async def create_tech_component(
     engagement_key: str, request: TechComponentRecordRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_tech_component,
-            engagement.id,
-            component=request.component,
-            version=request.version,
-            source_name=request.source_name,
-            confidence=request.confidence,
-            evidence_ref=request.evidence_ref,
-            first_seen_at=request.first_seen_at,
-            last_seen_at=request.last_seen_at,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_tech_component, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "tech_component", record)
     return record
 
 
 @router.post("/people", status_code=status.HTTP_201_CREATED)
 async def create_person(engagement_key: str, request: PersonRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_person,
-            engagement.id,
-            name=request.name,
-            role=request.role,
-            organization=request.organization,
-            email=request.email,
-            source_name=request.source_name,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_person, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "person", record)
     return record
 
 
 @router.post("/emails", status_code=status.HTTP_201_CREATED)
 async def create_email(engagement_key: str, request: EmailRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_email,
-            engagement.id,
-            address=request.address,
-            role_hint=request.role_hint,
-            linked_person_id=request.linked_person_id,
-            source_name=request.source_name,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_email, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "email", record)
     return record
 
 
 @router.post("/domains", status_code=status.HTTP_201_CREATED)
 async def create_domain(engagement_key: str, request: DomainRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_domain,
-            engagement.id,
-            identity=request.identity,
-            kind=request.kind,
-            value=request.value,
-            source_name=request.source_name,
-            live_status=request.live_status,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_domain, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "domain", record)
     return record
 
 
 @router.post("/cves", status_code=status.HTTP_201_CREATED)
 async def create_cve(engagement_key: str, request: CveRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_cve,
-            engagement.id,
-            cve_id=request.cve_id,
-            affected_component=request.affected_component,
-            affected_version_range=request.affected_version_range,
-            cvss_score=request.cvss_score,
-            cvss_vector=request.cvss_vector,
-            cwe_id=request.cwe_id,
-            poc_available=request.poc_available,
-            source_name=request.source_name,
-            validation_status=request.validation_status,
-            linked_finding_slug=request.linked_finding_slug,
-            notes=request.notes,
-            details=request.details,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_cve, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "cve", record)
     return record
 
 
 @router.post("/dns-records", status_code=status.HTTP_201_CREATED)
 async def create_dns_record(engagement_key: str, request: DnsRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_dns_record,
-            engagement.id,
-            record_type=request.record_type,
-            name=request.name,
-            value=request.value,
-            first_seen=request.first_seen,
-            last_seen=request.last_seen,
-            source_name=request.source_name,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_dns_record, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "dns_record", record)
     return record
 
@@ -407,21 +228,8 @@ async def create_dns_record(engagement_key: str, request: DnsRecordRequest) -> d
 async def create_social_profile(
     engagement_key: str, request: SocialProfileRecordRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_social_profile,
-            engagement.id,
-            subject_kind=request.subject_kind,
-            subject_ref=request.subject_ref,
-            platform=request.platform,
-            handle=request.handle,
-            url=request.url,
-            source_name=request.source_name,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_social_profile, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "social_profile", record)
     return record
 
@@ -430,44 +238,28 @@ async def create_social_profile(
 async def create_breach_record(
     engagement_key: str, request: BreachRecordRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_breach_record,
-            engagement.id,
-            subject=request.subject,
-            breach_name=request.breach_name,
-            breach_date=request.breach_date,
-            data_types=request.data_types,
-            source_name=request.source_name,
-            notes=request.notes,
-            provenance=request.provenance,
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_breach_record, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "breach_record", record)
     return record
 
 
 @router.post("/org-facts", status_code=status.HTTP_201_CREATED)
 async def create_org_fact(engagement_key: str, request: OrgFactRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_org_fact,
-            engagement.id,
-            fact_key=request.fact_key,
-            fact_value=request.fact_value,
-            source_name=request.source_name,
-            notes=request.notes,
-            provenance=(
-                request.provenance
-                if "provenance" in request.model_fields_set
-                else None
-            ),
-            authored_by=request.authored_by,
-            scope=request.scope,
-            validity_context=request.validity_context,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        intel_service.record_org_fact,
+        engagement.id,
+        fact_key=request.fact_key,
+        fact_value=request.fact_value,
+        source_name=request.source_name,
+        notes=request.notes,
+        provenance=request.provenance
+            if "provenance" in request.model_fields_set
+            else None,
+        authored_by=request.authored_by,
+        scope=request.scope,
+        validity_context=request.validity_context,
     )
     await _broadcast(engagement.key, "org_fact", record)
     return record
@@ -475,14 +267,8 @@ async def create_org_fact(engagement_key: str, request: OrgFactRecordRequest) ->
 
 @router.post("/notes", status_code=status.HTTP_201_CREATED)
 async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.record_note,
-            engagement.id,
-            **request.model_dump(exclude_unset=True),
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(intel_service.record_note, engagement.id, **request.model_dump(exclude_unset=True))
     await _broadcast(engagement.key, "note", record)
     return record
 
@@ -491,7 +277,7 @@ async def create_note(engagement_key: str, request: NoteRecordRequest) -> dict[s
 
 
 def _resolve_intel_plural(intel_type_plural: str) -> str:
-    intel_type = _INTEL_TYPE_BY_PLURAL.get(intel_type_plural)
+    intel_type = intel_service.INTEL_TYPE_BY_PLURAL.get(intel_type_plural)
     if not intel_type:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -514,11 +300,9 @@ async def get_intel_record(
     Three distinct 404s, matching the PATCH on the same path template: engagement
     not found, unknown intel type segment, and intel id not found.
     """
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    engagement = await _offload(get_engagement_or_404, engagement_key)
     intel_type = _resolve_intel_plural(intel_type_plural)
-    return await anyio.to_thread.run_sync(
-        functools.partial(intel_service.get_intel_row, engagement.id, intel_type, intel_id)
-    )
+    return await _offload(intel_service.get_intel_row, engagement.id, intel_type, intel_id)
 
 
 @router.patch("/{intel_type_plural}/{intel_id}")
@@ -539,13 +323,9 @@ async def patch_intel_record(
     so callers can disambiguate without parsing the URL back out of the
     request.
     """
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    engagement = await _offload(get_engagement_or_404, engagement_key)
     intel_type = _resolve_intel_plural(intel_type_plural)
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.update_intel, engagement.id, intel_type, intel_id, request.payload
-        )
-    )
+    record = await _offload(intel_service.update_intel, engagement.id, intel_type, intel_id, request.payload)
     await _broadcast(engagement.key, intel_type.replace("-", "_"), record)
     return record
 
@@ -562,18 +342,16 @@ async def supersede_intel_record(
     Returns ``{"superseded": {...}, "current": {...}}`` so callers can render
     both rows side-by-side without a second fetch.
     """
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    engagement = await _offload(get_engagement_or_404, engagement_key)
     intel_type = _resolve_intel_plural(intel_type_plural)
-    result = await anyio.to_thread.run_sync(
-        functools.partial(
-            intel_service.supersede_intel,
-            engagement.id,
-            intel_type,
-            intel_id,
-            request.payload,
-            rationale=request.rationale,
-            to_existing_id=request.to_existing_id,
-        )
+    result = await _offload(
+        intel_service.supersede_intel,
+        engagement.id,
+        intel_type,
+        intel_id,
+        request.payload,
+        rationale=request.rationale,
+        to_existing_id=request.to_existing_id,
     )
     await _broadcast(engagement.key, intel_type.replace("-", "_"), result.get("current", {}))
     return result

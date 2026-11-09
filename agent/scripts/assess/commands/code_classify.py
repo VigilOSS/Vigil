@@ -1,11 +1,16 @@
 """vigil assess code-record classify — bulk-classify code files by tier and role."""
 from __future__ import annotations
 
-from fnmatch import fnmatch
+from collections import Counter
 import json
 import sys
 from pathlib import Path
 
+from assess.commands.code_dispatch import (
+    CodeFileListingChanged,
+    _file_ids_for_path,
+    page_code_files,
+)
 from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE
 from assess.lib.client import (
     DEFAULT_READ_TIMEOUT_SECONDS,
@@ -14,7 +19,6 @@ from assess.lib.client import (
     require_write_result,
 )
 from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
-from assess.lib.code_structural_identity import parse_code_file_page
 from assess.lib.config import load_config
 from assess.lib.contracts import CODE_SKIP_REASONS
 from assess.lib.schema_validation import load_schema
@@ -66,35 +70,19 @@ def register(subparsers) -> None:
 
 
 def _fetch_code_files(cfg) -> list[dict]:
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        rows: list[dict] = []
-        offset = 0
-        expected_total: int | None = None
-        while True:
-            page = client.get(f'code/files?limit={_CODE_FILE_LOOKUP_PAGE_SIZE}&offset={offset}')
-            try:
-                items, total, has_more = parse_code_file_page(
-                    page,
-                    expected_offset=offset,
-                    context="code file lookup response",
-                )
-            except ValueError:
-                result = None
-                break
-            if expected_total is None:
-                expected_total = total
-            elif total != expected_total:
-                result = None
-                break
-            rows.extend(items)
-            if not has_more:
-                result = rows
-                break
-            offset += len(items)
-    if result is None:
+    rows: list[dict] = []
+    try:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            page_code_files(
+                client,
+                page_size=_CODE_FILE_LOOKUP_PAGE_SIZE,
+                context="code file lookup response",
+                consume=rows.extend,
+            )
+    except (ValueError, CodeFileListingChanged):
         print("Could not fetch code files for path resolution", file=sys.stderr)
         sys.exit(1)
-    return result
+    return rows
 
 
 def _resolve_matching_file_ids(item: dict, code_files: list[dict]) -> list[int]:
@@ -118,30 +106,7 @@ def _resolve_matching_file_ids(item: dict, code_files: list[dict]) -> list[int]:
     else:
         repo_id = None
 
-    has_glob = any(ch in file_path for ch in "*?[")
-    matches = []
-    for row in code_files:
-        candidate = str(row.get('file_path', ''))
-        if has_glob:
-            if fnmatch(candidate, file_path):
-                matches.append(row)
-        elif candidate == file_path:
-            matches.append(row)
-    if repo_id is not None:
-        matches = [row for row in matches if int(row.get('repo_id', -1)) == repo_id]
-
-    if not matches:
-        print(f"No code file found for classification path: {file_path}", file=sys.stderr)
-        sys.exit(1)
-
-    if not has_glob and len(matches) > 1:
-        print(
-            f"Ambiguous classification path {file_path!r}; include file_id or repo_id to disambiguate",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    return [int(row['id']) for row in matches]
+    return _file_ids_for_path(file_path, repo_id, code_files, noun="classification")
 
 
 _LOCAL_ONLY_FIELDS = frozenset({"file_path", "repo_id"})
@@ -407,16 +372,15 @@ def run(args) -> None:
                     invalidated_repo_ids.append(repo_id)
             language_changes.extend(changes)
 
-    tier_counts: dict[str, int] = {}
-    for item in normalized_payload:
-        tier = item.get('classification', 'unknown')
-        tier_counts[tier] = tier_counts.get(tier, 0) + 1
+    tier_counts = Counter(
+        item.get('classification', 'unknown') for item in normalized_payload
+    )
 
     print("=== Code Classification Summary ===")
     print(f"Total classified: {classified_count}")
     print("\nBreakdown by tier:")
-    for tier in sorted(tier_counts.keys()):
-        print(f"  {tier}: {tier_counts[tier]}")
+    for tier, count in sorted(tier_counts.items()):
+        print(f"  {tier}: {count}")
 
     _warn_on_structural_invalidation(
         {

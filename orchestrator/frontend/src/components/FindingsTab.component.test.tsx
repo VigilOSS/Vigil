@@ -23,6 +23,7 @@ import {
   createRemediationFromFinding,
   listEngagements,
 } from "../lib/api";
+import type { AssessmentFindingTransition, AssessmentFindingTransitionSummary } from "../lib/api";
 import { FindingsTab, HistoryPane, RelatedIntelSection, SubmissionPane } from "./FindingsTab";
 import type { Derived } from "./FindingsTab";
 
@@ -47,6 +48,39 @@ vi.mock("../lib/api", async (importOriginal) => {
 });
 
 const writeText = vi.fn();
+
+// What a transition's audit record holds when no receipt, counter-check or
+// severity variance stands behind the verdict.
+const emptyAudit = {
+  proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
+  counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
+  record_limit: 20, truncated: false,
+};
+
+/**
+ * One transition as the pane meets it twice: the summary row the list renders,
+ * and the lossless record the row's disclosure loads. The axis — who acted and
+ * which verdict moved — is written once, because the two readings of the same
+ * transition have to agree about it.
+ */
+function transitionPair(
+  axis: Partial<AssessmentFindingTransition>,
+  over: { row?: Partial<AssessmentFindingTransitionSummary>; detail?: Partial<AssessmentFindingTransition> } = {},
+) {
+  const shared = { from_workflow_status: "active", to_workflow_status: "active", created_at: new Date().toISOString(), ...axis };
+  return {
+    row: {
+      ...shared,
+      reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
+      ...over.row,
+    } as AssessmentFindingTransitionSummary,
+    detail: {
+      ...shared,
+      reason_text: "", artifact_ref: "", metadata_json: "{}", verification_audit: emptyAudit,
+      ...over.detail,
+    } as AssessmentFindingTransition,
+  };
+}
 
 function derived(over: Partial<Derived>): Derived {
   return { slug: "VA-001", title: "T", references: [], links: [], ...over } as unknown as Derived;
@@ -239,16 +273,7 @@ describe("HistoryPane", () => {
           artifact_ref: "",
           metadata_json: "{}",
           created_at: new Date().toISOString(),
-          verification_audit: {
-            proof_receipt_ids: [],
-            proof_receipt_total: 0,
-            counter_checks: [],
-            counter_check_total: 0,
-            severity_variances: [],
-            severity_variance_total: 0,
-            record_limit: 20,
-            truncated: false,
-          },
+          verification_audit: emptyAudit,
         }]}
       />,
     );
@@ -262,57 +287,34 @@ describe("HistoryPane", () => {
   });
 
   it("loads the lossless transition only when a summary row is opened", async () => {
-    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+    const { row, detail } = transitionPair({
       id: 7,
       actor: "operator",
       action: "updated",
-      from_workflow_status: "active",
-      to_workflow_status: "active",
       from_verification_status: "unreviewed",
       to_verification_status: "confirmed",
       verification_event_version: 1,
       from_severity: "medium",
       to_severity: "medium",
       reason_code: "review",
-      reason_text: "Full **Markdown** reason",
-      artifact_ref: "",
-      metadata_json: "{}",
-      details_before_json: "{\"summary\":\"before\"}",
-      details_after_json: "{\"summary\":\"after\"}",
-      notes_before_json: "before notes",
-      notes_after_json: "after notes",
-      created_at: new Date().toISOString(),
-      verification_audit: {
-        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
-        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
-        record_limit: 20, truncated: false,
+    }, {
+      row: { reason_preview: "Preview reason", reason_word_count: 2, has_snapshot: true },
+      detail: {
+        reason_text: "Full **Markdown** reason",
+        details_before_json: "{\"summary\":\"before\"}",
+        details_after_json: "{\"summary\":\"after\"}",
+        notes_before_json: "before notes",
+        notes_after_json: "after notes",
       },
     });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
     const { container } = render(
       <HistoryPane
         engagementKey="demo"
         findingSlug="VA-001"
         loading={false}
         error={null}
-        transitions={[{
-          id: 7,
-          actor: "operator",
-          action: "updated",
-          from_workflow_status: "active",
-          to_workflow_status: "active",
-          from_verification_status: "unreviewed",
-          to_verification_status: "confirmed",
-          verification_event_version: 1,
-          from_severity: "medium",
-          to_severity: "medium",
-          reason_code: "review",
-          artifact_ref: "",
-          created_at: new Date().toISOString(),
-          reason_preview: "Preview reason",
-          reason_word_count: 2,
-          reason_truncated: false,
-          has_snapshot: true,
-        }]}
+        transitions={[row]}
       />,
     );
 
@@ -326,30 +328,20 @@ describe("HistoryPane", () => {
   });
 
   it("keeps an empty-reason audit row openable even without a snapshot", async () => {
-    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+    const { row, detail } = transitionPair({
       id: 8, actor: "system", action: "updated",
-      from_workflow_status: "active", to_workflow_status: "active",
       from_verification_status: "unreviewed", to_verification_status: "unreviewed",
       verification_event_version: 1, from_severity: "low", to_severity: "low",
-      reason_code: "sync", reason_text: "", artifact_ref: "", metadata_json: "{}",
-      details_before_json: "{\"state\":\"before\"}", details_after_json: "{\"state\":\"after\"}",
-      created_at: new Date().toISOString(),
-      verification_audit: {
-        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
-        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
-        record_limit: 20, truncated: false,
+      reason_code: "sync",
+    }, {
+      detail: {
+        details_before_json: "{\"state\":\"before\"}", details_after_json: "{\"state\":\"after\"}",
       },
     });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
     render(
       <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
-        transitions={[{
-          id: 8, actor: "system", action: "updated",
-          from_workflow_status: "active", to_workflow_status: "active",
-          from_verification_status: "unreviewed", to_verification_status: "unreviewed",
-          verification_event_version: 1, from_severity: "low", to_severity: "low",
-          reason_code: "sync", artifact_ref: "", created_at: new Date().toISOString(),
-          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
-        }]}
+        transitions={[row]}
       />,
     );
 
@@ -359,37 +351,25 @@ describe("HistoryPane", () => {
   });
 
   it("renders the structured confirmation falsification check from transition metadata", async () => {
-    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+    const { row, detail } = transitionPair({
       id: 12, actor: "verifier", action: "verified_confirmed",
-      from_workflow_status: "active", to_workflow_status: "active",
       from_verification_status: "unreviewed", to_verification_status: "confirmed",
       verification_event_version: 2, from_severity: "high", to_severity: "high",
-      reason_code: "verified", reason_text: "", artifact_ref: "",
-      metadata_json: JSON.stringify({ confirm_check: {
+      reason_code: "verified",
+    }, {
+      detail: { metadata_json: JSON.stringify({ confirm_check: {
         method: "Replay as a non-admin",
         attempted_falsification: "Try the same request without the privileged role",
         expected_result: "Access denied",
         observed_result: "The endpoint still returned the protected record",
         completed: true,
         proof_receipt_ids: [41, 42],
-      } }),
-      created_at: new Date().toISOString(),
-      verification_audit: {
-        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
-        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
-        record_limit: 20, truncated: false,
-      },
+      } }) },
     });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
     const { container } = render(
       <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
-        transitions={[{
-          id: 12, actor: "verifier", action: "verified_confirmed",
-          from_workflow_status: "active", to_workflow_status: "active",
-          from_verification_status: "unreviewed", to_verification_status: "confirmed",
-          verification_event_version: 2, from_severity: "high", to_severity: "high",
-          reason_code: "verified", artifact_ref: "", created_at: new Date().toISOString(),
-          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
-        }]}
+        transitions={[row]}
       />,
     );
 
@@ -432,30 +412,18 @@ describe("HistoryPane", () => {
   });
 
   it("names the intel table beside the cited id in the operator-authority record", async () => {
-    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+    const { row, detail } = transitionPair({
       id: 21, actor: "operator", action: "verified_downgraded",
-      from_workflow_status: "active", to_workflow_status: "active",
       from_verification_status: "unreviewed", to_verification_status: "downgraded",
       verification_event_version: 2, from_severity: "high", to_severity: "low",
-      reason_code: "verified", reason_text: "", artifact_ref: "",
-      metadata_json: JSON.stringify({ operator_authority: historyWaiver }),
-      created_at: new Date().toISOString(),
-      verification_audit: {
-        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
-        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
-        record_limit: 20, truncated: false,
-      },
-    } as never);
+      reason_code: "verified",
+    }, {
+      detail: { metadata_json: JSON.stringify({ operator_authority: historyWaiver }) },
+    });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
     const { container } = render(
       <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
-        transitions={[{
-          id: 21, actor: "operator", action: "verified_downgraded",
-          from_workflow_status: "active", to_workflow_status: "active",
-          from_verification_status: "unreviewed", to_verification_status: "downgraded",
-          verification_event_version: 2, from_severity: "high", to_severity: "low",
-          reason_code: "verified", artifact_ref: "", created_at: new Date().toISOString(),
-          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
-        }]}
+        transitions={[row]}
       />,
     );
 
@@ -476,33 +444,21 @@ describe("HistoryPane", () => {
 
 describe("finding change policy audit", () => {
   it("renders the verdict effect and each changed axis from transition metadata", async () => {
-    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+    const { row, detail } = transitionPair({
       id: 14, actor: "operator", action: "claim_review_pending",
-      from_workflow_status: "active", to_workflow_status: "active",
       from_verification_status: "confirmed", to_verification_status: "confirmed",
       verification_event_version: 2, from_severity: "high", to_severity: "high",
-      reason_code: "claim_text_changed", reason_text: "", artifact_ref: "",
-      metadata_json: JSON.stringify({ change_policy: {
+      reason_code: "claim_text_changed",
+    }, {
+      detail: { metadata_json: JSON.stringify({ change_policy: {
         version: 1, effect: "claim_review", outcome: "claim_review",
         axes: [{ axis: "title", effect: "keep" }, { axis: "summary", effect: "claim_review" }],
-      } }),
-      created_at: new Date().toISOString(),
-      verification_audit: {
-        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
-        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
-        record_limit: 20, truncated: false,
-      },
+      } }) },
     });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
     const { container } = render(
       <HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null}
-        transitions={[{
-          id: 14, actor: "operator", action: "claim_review_pending",
-          from_workflow_status: "active", to_workflow_status: "active",
-          from_verification_status: "confirmed", to_verification_status: "confirmed",
-          verification_event_version: 2, from_severity: "high", to_severity: "high",
-          reason_code: "claim_text_changed", artifact_ref: "", created_at: new Date().toISOString(),
-          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
-        }]}
+        transitions={[row]}
       />,
     );
 
@@ -516,33 +472,21 @@ describe("finding change policy audit", () => {
   });
 
   it("does not report an invalidation when the finding held no verdict", async () => {
-    vi.mocked(getAssessmentFindingTransition).mockResolvedValue({
+    const { row, detail } = transitionPair({
       id: 15, actor: "operator", action: "details_patched",
-      from_workflow_status: "active", to_workflow_status: "active",
       from_verification_status: "unreviewed", to_verification_status: "unreviewed",
       verification_event_version: 0, from_severity: "high", to_severity: "critical",
-      reason_code: "", reason_text: "", artifact_ref: "",
-      metadata_json: JSON.stringify({ change_policy: {
+      reason_code: "",
+    }, {
+      detail: { metadata_json: JSON.stringify({ change_policy: {
         version: 1, effect: "invalidate", outcome: "keep",
         axes: [{ axis: "severity", effect: "invalidate" }],
-      } }),
-      created_at: new Date().toISOString(),
-      verification_audit: {
-        proof_receipt_ids: [], proof_receipt_total: 0, counter_checks: [],
-        counter_check_total: 0, severity_variances: [], severity_variance_total: 0,
-        record_limit: 20, truncated: false,
-      },
+      } }) },
     });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
     const { container } = render(
       <HistoryPane engagementKey="demo" findingSlug="VA-002" loading={false} error={null}
-        transitions={[{
-          id: 15, actor: "operator", action: "details_patched",
-          from_workflow_status: "active", to_workflow_status: "active",
-          from_verification_status: "unreviewed", to_verification_status: "unreviewed",
-          verification_event_version: 0, from_severity: "high", to_severity: "critical",
-          reason_code: "", artifact_ref: "", created_at: new Date().toISOString(),
-          reason_preview: "", reason_word_count: 0, reason_truncated: false, has_snapshot: false,
-        }]}
+        transitions={[row]}
       />,
     );
 

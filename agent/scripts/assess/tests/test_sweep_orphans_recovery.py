@@ -19,6 +19,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import kali_sweep_orphans as kso
 from assess.lib.client import AssessError
@@ -32,7 +33,7 @@ def _cfg(tmp_path: Path) -> SimpleNamespace:
     )
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self, rows):
         self._rows = rows
         self.patches: list[tuple[str, dict]] = []
@@ -47,16 +48,6 @@ class _FakeClient:
             "run_uuid": self._rows[0]["run_uuid"],
             "status": payload.get("status"),
         }
-
-    def close(self):
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
 
 class _MalformedLaterPageClient:
     def __init__(self, prefix: str) -> None:

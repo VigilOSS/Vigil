@@ -1,6 +1,7 @@
 """Operator-facing contract for generic assessment-run accounting."""
 from __future__ import annotations
 
+import copy
 import hashlib
 import json
 import os
@@ -196,60 +197,73 @@ def _run(purpose: str = "proof") -> dict:
     return {"id": 17, "run_purpose": purpose, "status": "running"}
 
 
+def _only_source_page(monkeypatch: pytest.MonkeyPatch, source: dict) -> None:
+    """Serve ``source`` as the whole bounded source page the reader walks."""
+    monkeypatch.setattr(
+        AssessmentClient,
+        "get",
+        lambda *_args: {
+            "items": [source],
+            "total": 1,
+            "offset": 0,
+            "limit": 1000,
+            "has_more": False,
+        },
+    )
+
+
+def _record_posts(monkeypatch: pytest.MonkeyPatch, posts: list[dict]) -> None:
+    """Record every POST body on ``posts`` and answer with ``None``."""
+    monkeypatch.setattr(
+        AssessmentClient,
+        "post",
+        lambda _client, _endpoint, payload: posts.append(payload),
+    )
+
+
+def _without(row: dict, *fields: str) -> dict:
+    """``row`` minus ``fields``; KeyError when a field the case strips is absent."""
+    stripped = dict(row)
+    for field in fields:
+        stripped.pop(field)
+    return stripped
+
+
+# case -> (argv tail, client method, endpoint, request payload, canned response)
+_WRITE_CASES: dict[str, tuple[list[str], str, str, dict, object]] = {
+    "sources-import": (["sources", "import", "17"], "post", "assessment-runs/17/sources",
+                       {"sources": [_without(_source(), "id", "run_id")]}, [_source()]),
+    "obligation-record": (["obligation", "record", "17"], "post", "assessment-runs/17/obligations",
+                          _without(_obligation(), "id", "run_id"), _obligation()),
+    "obligation-update": (["obligation", "update", "17", "51"], "patch", "assessment-runs/17/obligations/51",
+                          {"status": "resolved", "resolution": "reviewed", "proof_receipt_ids": [71]},
+                          _obligation(status="resolved")),
+    "candidate-record": (["candidate", "record", "17"], "post", "assessment-runs/17/candidates",
+                         {**_without(_candidate(), "id", "run_id", "dispatch_id"), "dispatch_agent_id": "HUNT-1"},
+                         _candidate()),
+    "candidate-update": (["candidate", "update", "17", "61"], "patch", "assessment-runs/17/candidates/61",
+                         {"state": "promoted", "reason": "confirmed", "proof_receipt_ids": [71], "finding_slug": "VA-047"},
+                         _candidate(state="promoted")),
+    "tool-signal-record": (["tool-signal", "record", "17"], "post", "assessment-runs/17/tool-signals",
+                           _without({**_tool_signal(), "dispatch_agent_id": "HUNT-1"},
+                                    "id", "run_id", "dispatch_id", "candidate_id", "record_sha256", "created_at"),
+                           _tool_signal()),
+    "discovery-pass-record": (["discovery-pass", "record", "17"], "post", "assessment-runs/17/discovery-passes",
+                              _without({**_discovery_pass(), "dispatch_agent_id": "HUNT-1"},
+                                       "id", "run_id", "dispatch_id", "candidate_delta", "record_sha256", "created_at"),
+                              _discovery_pass()),
+    "code-receipt-record": (["code-receipt", "record", "17"], "post", "assessment-runs/17/code-receipts",
+                            _without(_code_receipt(), "id", "run_id", "obligation_status", "record_sha256", "created_at"),
+                            _code_receipt()),
+}
+
+
 def _write_case(case: str) -> tuple[list[str], str, str, dict, object]:
-    if case == "sources-import":
-        source = {key: value for key, value in _source().items() if key not in {"id", "run_id"}}
-        payload = {"sources": [source]}
-        return ["sources", "import", "17"], "post", "assessment-runs/17/sources", payload, [_source()]
-    if case == "obligation-record":
-        payload = {key: value for key, value in _obligation().items() if key not in {"id", "run_id"}}
-        return ["obligation", "record", "17"], "post", "assessment-runs/17/obligations", payload, _obligation()
-    if case == "obligation-update":
-        payload = {"status": "resolved", "resolution": "reviewed", "proof_receipt_ids": [71]}
-        return ["obligation", "update", "17", "51"], "patch", "assessment-runs/17/obligations/51", payload, _obligation(status="resolved")
-    if case == "candidate-record":
-        payload = {key: value for key, value in _candidate().items() if key not in {"id", "run_id", "dispatch_id"}}
-        payload["dispatch_agent_id"] = "HUNT-1"
-        return ["candidate", "record", "17"], "post", "assessment-runs/17/candidates", payload, _candidate()
-    if case == "candidate-update":
-        payload = {"state": "promoted", "reason": "confirmed", "proof_receipt_ids": [71], "finding_slug": "VA-047"}
-        return ["candidate", "update", "17", "61"], "patch", "assessment-runs/17/candidates/61", payload, _candidate(state="promoted")
-    if case == "tool-signal-record":
-        payload = {
-            **_tool_signal(),
-            "dispatch_agent_id": "HUNT-1",
-        }
-        for field in ("id", "run_id", "dispatch_id", "candidate_id", "record_sha256", "created_at"):
-            payload.pop(field)
-        return ["tool-signal", "record", "17"], "post", "assessment-runs/17/tool-signals", payload, _tool_signal()
-    if case == "discovery-pass-record":
-        payload = {**_discovery_pass(), "dispatch_agent_id": "HUNT-1"}
-        for field in ("id", "run_id", "dispatch_id", "candidate_delta", "record_sha256", "created_at"):
-            payload.pop(field)
-        return ["discovery-pass", "record", "17"], "post", "assessment-runs/17/discovery-passes", payload, _discovery_pass()
-    if case == "code-receipt-record":
-        payload = {
-            key: value
-            for key, value in _code_receipt().items()
-            if key not in {"id", "run_id", "obligation_status", "record_sha256", "created_at"}
-        }
-        return ["code-receipt", "record", "17"], "post", "assessment-runs/17/code-receipts", payload, _code_receipt()
-    raise AssertionError(case)
+    """A fresh copy of ``case``'s row, so no test can mutate another's table entry."""
+    return copy.deepcopy(_WRITE_CASES[case])
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "sources-import",
-        "obligation-record",
-        "obligation-update",
-        "candidate-record",
-        "candidate-update",
-        "tool-signal-record",
-        "discovery-pass-record",
-        "code-receipt-record",
-    ],
-)
+@pytest.mark.parametrize("case", list(_WRITE_CASES))
 def test_run_audit_writes_json_documents_and_validates_bound_receipts(
     case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -281,19 +295,7 @@ def test_run_audit_writes_json_documents_and_validates_bound_receipts(
     assert calls == [(method, endpoint, payload)]
 
 
-@pytest.mark.parametrize(
-    "case",
-    [
-        "sources-import",
-        "obligation-record",
-        "obligation-update",
-        "candidate-record",
-        "candidate-update",
-        "tool-signal-record",
-        "discovery-pass-record",
-        "code-receipt-record",
-    ],
-)
+@pytest.mark.parametrize("case", list(_WRITE_CASES))
 def test_run_audit_writes_reject_malformed_success_without_retrying(
     case: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
@@ -682,17 +684,7 @@ def test_run_audit_source_read_defaults_to_streaming_content_on_stdout(
         "encoding": "utf-16",
     }
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-    monkeypatch.setattr(
-        AssessmentClient,
-        "get",
-        lambda *_args: {
-            "items": [source],
-            "total": 1,
-            "offset": 0,
-            "limit": 1000,
-            "has_more": False,
-        },
-    )
+    _only_source_page(monkeypatch, source)
     monkeypatch.setattr(AssessmentClient, "post", lambda *_args: receipt)
 
     cli.main(
@@ -753,22 +745,8 @@ def test_run_audit_source_read_fails_closed_before_recording_untrusted_files(
         source["exclusion_reason"] = "generated"
     posts: list[dict] = []
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-    monkeypatch.setattr(
-        AssessmentClient,
-        "get",
-        lambda *_args: {
-            "items": [source],
-            "total": 1,
-            "offset": 0,
-            "limit": 1000,
-            "has_more": False,
-        },
-    )
-    monkeypatch.setattr(
-        AssessmentClient,
-        "post",
-        lambda _client, _endpoint, payload: posts.append(payload),
-    )
+    _only_source_page(monkeypatch, source)
+    _record_posts(monkeypatch, posts)
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(
@@ -817,22 +795,8 @@ def test_run_audit_source_read_names_the_expected_path_for_a_wrong_one(
     }
     posts: list[dict] = []
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-    monkeypatch.setattr(
-        AssessmentClient,
-        "get",
-        lambda *_args: {
-            "items": [source],
-            "total": 1,
-            "offset": 0,
-            "limit": 1000,
-            "has_more": False,
-        },
-    )
-    monkeypatch.setattr(
-        AssessmentClient,
-        "post",
-        lambda _client, _endpoint, payload: posts.append(payload),
-    )
+    _only_source_page(monkeypatch, source)
+    _record_posts(monkeypatch, posts)
 
     with pytest.raises(SystemExit) as excinfo:
         cli.main(
@@ -871,17 +835,7 @@ def test_run_audit_source_read_malformed_receipt_warns_without_retry(
         "line_count": 1,
     }
     monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
-    monkeypatch.setattr(
-        AssessmentClient,
-        "get",
-        lambda *_args: {
-            "items": [source],
-            "total": 1,
-            "offset": 0,
-            "limit": 1000,
-            "has_more": False,
-        },
-    )
+    _only_source_page(monkeypatch, source)
     monkeypatch.setattr(AssessmentClient, "post", lambda *_args: {"id": True})
 
     with pytest.raises(SystemExit) as excinfo:

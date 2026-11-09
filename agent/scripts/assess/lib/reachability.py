@@ -48,28 +48,21 @@ def _has_ip(remote_ip) -> bool:
     return bool((remote_ip or "").strip()) and (remote_ip or "").strip() not in _SENTINEL_IPS
 
 
-def _answered(http_code) -> bool:
-    """True when http_code is a real, non-zero HTTP status."""
-    if http_code in (None, ""):
-        return False
-    try:
-        return int(str(http_code).strip()) > 0
-    except (TypeError, ValueError):
-        return False
+def _status_code(http_code) -> int | None:
+    """The probe's HTTP status as an int, or ``None`` when there is not one.
 
-
-def _is_explicit_zero_code(http_code) -> bool:
-    """True only for an explicit zero status (curl's ``000`` / httpx ``0``).
-
-    An absent code (``None``/``""``) is NOT a zero — it just means the field was
-    not supplied, which must stay UNKNOWN rather than collapsing to a blackhole.
+    ``None`` covers both an absent code (``None``/``""``) and an unparseable
+    one. An absent code is NOT a zero — it just means the field was not
+    supplied, which must stay UNKNOWN rather than collapsing to a blackhole,
+    which is why the two callers below test ``> 0`` and ``== 0`` against this
+    rather than against a coerced ``0``.
     """
     if http_code in (None, ""):
-        return False
+        return None
     try:
-        return int(str(http_code).strip()) == 0
+        return int(str(http_code).strip())
     except (TypeError, ValueError):
-        return False
+        return None
 
 
 def _tls_reset_signature(curl_exit, stderr: str) -> bool:
@@ -113,7 +106,8 @@ def classify_probe(
     # explicitly marked failed. httpx ``failed=False`` is an explicit success.
     # (The §9 CONNECT-proxy-artifact case — IP present, no ``failed`` flag — is
     # still LIVE because ``failed`` is None there, not True.)
-    if failed is False or (failed is not True and (connected or _answered(http_code))):
+    code = _status_code(http_code)
+    if failed is False or (failed is not True and (connected or (code is not None and code > 0))):
         return LIVE
 
     # The connection did not complete past here.
@@ -128,7 +122,7 @@ def classify_probe(
 
     # No curl exit available (e.g. the httpx-json path): a clean failure is an
     # explicit ``failed=true`` or an explicit zero status code.
-    if failed is True or _is_explicit_zero_code(http_code):
+    if failed is True or code == 0:
         return BLACKHOLED
 
     return UNKNOWN

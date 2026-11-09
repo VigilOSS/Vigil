@@ -17,6 +17,7 @@ from types import SimpleNamespace
 from urllib.parse import parse_qsl
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_dispatch
 
@@ -41,7 +42,7 @@ def _queue_rows(count: int) -> list[dict]:
     ]
 
 
-class _QueueListingClient:
+class _QueueListingClient(StubClient):
     """Pages the analysis-queue listing over a fixed row list.
 
     ``malformed_page`` makes one page answer with a non-object, the way a
@@ -66,12 +67,6 @@ class _QueueListingClient:
         self.malformed_page = malformed_page
         self.lane_excluded = lane_excluded or set()
         self.reads: list[str] = []
-
-    def __enter__(self) -> "_QueueListingClient":
-        return self
-
-    def __exit__(self, *_exc) -> bool:
-        return False
 
     def get(self, endpoint: str):
         page_index = len(self.reads)

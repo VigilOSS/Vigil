@@ -176,10 +176,6 @@ def _read_index(path: Path, *, expected_sha256: str) -> dict[str, Any]:
     return value
 
 
-def _backend_files(client: AssessmentClient, repo_id: int) -> dict[str, dict]:
-    return fetch_backend_file_inventory(client, repo_id)
-
-
 def _invalid_artifact_fallback(
     source_tree: RootedSourceTree, rel_path: str, language: str, source_sha: str
 ) -> dict[str, Any]:
@@ -290,7 +286,7 @@ def _prepare_repo_payload(
     if manifest.get("path_to_index") != expected_lookup:
         raise ValueError(f"repo {repo_id} path_to_index differs from its file bindings")
 
-    backend_by_path = _backend_files(client, repo_id)
+    backend_by_path = fetch_backend_file_inventory(client, repo_id)
     bound_inputs = bind_structural_inputs(source_files, backend_by_path, repo_id=repo_id)
     expected_input_digest = structural_input_digest(
         bound_inputs,
@@ -504,7 +500,6 @@ def run(args) -> None:
             sys.exit(1)
 
         total_updated = 0
-        total_skipped = 0
         for payload in prepared:
             result = client.post(
                 "code/files/bulk-structural-metadata",
@@ -533,17 +528,18 @@ def run(args) -> None:
                     "the submitted snapshot; the write may have committed, so inspect "
                     "durable state and do not retry automatically"
                 )
-            skipped = 0
             total_updated += updated
-            total_skipped += skipped
+            # The bulk endpoint applies every submitted update or refuses the
+            # batch, so nothing is ever skipped; the count stays in the line
+            # because it is what the operator reads the result against.
             print(
                 f"  sync repo_id={payload['repo_id']} generation={payload['repo_generation']}: "
-                f"{updated} updated, {skipped} skipped",
+                f"{updated} updated, 0 skipped",
                 file=sys.stderr,
             )
 
     print(
         f"\nStructural metadata synced across {len(prepared)} repos: "
-        f"{total_updated} files updated, {total_skipped} skipped",
+        f"{total_updated} files updated, 0 skipped",
         file=sys.stderr,
     )

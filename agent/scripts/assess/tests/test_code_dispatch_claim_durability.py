@@ -24,6 +24,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_dispatch
 
@@ -65,17 +66,8 @@ def _claim_item(item_id: int, *, file_path: str) -> dict[str, object]:
     }
 
 
-class _PartialClaimClient:
+class _PartialClaimClient(StubClient):
     """Grants two of the three requested ids, so the per-id report fires."""
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post(self, endpoint: str, _payload: dict):
         assert endpoint == "code/analysis-queue/fetch"
@@ -235,16 +227,7 @@ def test_an_adopted_lease_is_durable_before_its_diagnostics(monkeypatch, tmp_pat
     monkeypatch.setattr(sys, "stderr", closed)
     monkeypatch.setattr(sys, "stdout", closed)
 
-    class _AdoptClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _AdoptClient(StubClient):
         def post(self, endpoint: str, _payload: dict):
             assert endpoint == "code/analysis-queue/adopt-lease"
             return _adopt_response()
@@ -269,16 +252,7 @@ def test_a_malformed_adoption_response_is_recorded_before_it_is_refused(
     """The swap committed backend-side; whatever the backend said about it is
     the only evidence of the new token, so it is recorded before the refusal."""
 
-    class _MalformedAdoptClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _MalformedAdoptClient(StubClient):
         def post(self, _endpoint: str, _payload: dict):
             return {"item_id": 41, "lease_token": "f0c7a1d2-stranded"}
 
@@ -299,18 +273,9 @@ def test_a_malformed_adoption_response_is_recorded_before_it_is_refused(
 # retry-needs-context commits new current attempts and must record them too
 # ─────────────────────────────────────────────────────────────────────────────
 
-class _RetryClient:
+class _RetryClient(StubClient):
     endpoint: str = ""
     posted: dict = {}
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post(self, endpoint: str, payload: dict):
         type(self).endpoint = endpoint

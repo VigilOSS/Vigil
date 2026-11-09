@@ -19,6 +19,7 @@ import re
 import sys
 
 from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 
@@ -127,8 +128,7 @@ def run(args) -> None:
             # operator's log entry. Print the error and exit non-zero; an
             # unreadable acknowledgement may already be durable, so its
             # diagnostic directs callers to inspect instead of retrying.
-            print(f"vigil assess log: failed to record activity entry: {exc}", file=sys.stderr)
-            sys.exit(1)
+            fail("vigil assess log", f"failed to record activity entry: {exc}")
 
     # Emit event (fire-and-forget).
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as event_client:

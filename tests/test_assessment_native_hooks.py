@@ -1,9 +1,10 @@
 """Exercise native protocol callbacks without contacting models or live state."""
+import hashlib
 import json
 import os
-from pathlib import Path
-import subprocess
 import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -100,7 +101,6 @@ await plugin['experimental.chat.system.transform']({sessionID:'s1',model:{id:'m1
 const receipt = JSON.parse(fs.readFileSync(process.argv[2]));
 process.stdout.write(JSON.stringify({receipt,summarizer}));
 """
-    import hashlib
     health = tmp_path / (".vigil-health-" + hashlib.sha256(b"s1").hexdigest() + ".json")
     result = subprocess.run(["node", "--input-type=module", "-e", script,
         str(ROOT / "agent/.opencode/plugin/assessment-hooks.js"), str(health)],

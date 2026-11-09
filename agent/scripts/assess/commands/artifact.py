@@ -23,6 +23,7 @@ from assess.lib.client import (
     require_artifact_write_response,
     require_write_result,
 )
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.finding_render import warn_untrusted_data
 from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
@@ -362,16 +363,14 @@ def _register_paths(args) -> list[str]:
             try:
                 text = Path(source).read_text(encoding="utf-8")
             except OSError as exc:
-                print(f"register artifact: --paths-file {source}: {exc}", file=sys.stderr)
-                sys.exit(1)
+                fail("register artifact", f"--paths-file {source}: {exc}")
         paths.extend(entry for entry in (line.strip() for line in text.splitlines()) if entry)
     if not paths:
-        print(
-            "register artifact: at least one path is required — pass paths positionally "
+        fail(
+            "register artifact",
+            "at least one path is required — pass paths positionally "
             "or with --paths-file <PATH> ('-' reads stdin)",
-            file=sys.stderr,
         )
-        sys.exit(1)
     return paths
 
 

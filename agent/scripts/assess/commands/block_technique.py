@@ -27,6 +27,7 @@ from urllib.parse import urlencode
 
 from assess.lib.audit_enums import TECHNIQUE_ENUM, normalize_technique
 from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
 from assess.lib.json_inputs import parse_optional_inline_json
@@ -179,12 +180,11 @@ def _derive_technique_key(technique: str, target_kind: str, target_ref: str) -> 
 def run_block(args) -> None:
     technique = normalize_technique(args.technique)
     if TECHNIQUE_ENUM and technique not in TECHNIQUE_ENUM:
-        print(
-            f"block-technique: --technique {args.technique!r} is not a valid technique. "
+        fail(
+            "block-technique",
+            f"--technique {args.technique!r} is not a valid technique. "
             f"Use one of: {', '.join(TECHNIQUE_ENUM)}",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     target_kind = str(args.target_kind).strip()
     target_ref = str(args.target_ref).strip()

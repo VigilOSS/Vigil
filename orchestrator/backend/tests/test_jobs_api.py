@@ -71,12 +71,21 @@ def _post_command_run(client, **kwargs):
     )
 
 
+def _create_job(client, **body):
+    """POST one assessment job and return the raw response."""
+    return client.post(f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs", json=body)
+
+
+def _patch_job(client, job_id, **body):
+    """PATCH one assessment job by id and return the raw response."""
+    return client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{job_id}", json=body
+    )
+
+
 def test_create_job_minimal_payload(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "queued"},
-    )
+    response = _create_job(client, status="queued")
     assert response.status_code == 201, response.text
     body = response.json()
     assert body["status"] == "queued"
@@ -88,22 +97,20 @@ def test_create_job_minimal_payload(client, isolate_settings):
 def test_create_job_links_to_command_run(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     parent = _post_command_run(client).json()
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={
-            "parent_command_run_id": parent["id"],
-            "status": "running",
-            "dtach_socket_path": "/tmp/jobs/abc.sock",
-            "stdout_path": "/engagements/example/scans/kali/job-abc.out",
-            "stderr_path": "/engagements/example/scans/kali/job-abc.err",
-            "audit_metadata": {
-                "technique": "RECON",
-                "intent": "long-running nuclei sweep",
-                "probe_kind": "fingerprint",
-                "destructive": False,
-                "phase": "recon",
-                "agent_name": "recon-specialist",
-            },
+    response = _create_job(
+        client,
+        parent_command_run_id=parent["id"],
+        status="running",
+        dtach_socket_path="/tmp/jobs/abc.sock",
+        stdout_path="/engagements/example/scans/kali/job-abc.out",
+        stderr_path="/engagements/example/scans/kali/job-abc.err",
+        audit_metadata={
+            "technique": "RECON",
+            "intent": "long-running nuclei sweep",
+            "probe_kind": "fingerprint",
+            "destructive": False,
+            "phase": "recon",
+            "agent_name": "recon-specialist",
         },
     )
     assert response.status_code == 201, response.text
@@ -116,19 +123,13 @@ def test_create_job_links_to_command_run(client, isolate_settings):
 
 def test_create_job_rejects_unknown_parent(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"parent_command_run_id": 9999, "status": "queued"},
-    )
+    response = _create_job(client, parent_command_run_id=9999, status="queued")
     assert response.status_code == 400
 
 
 def test_get_job_by_id(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "queued"},
-    ).json()
+    created = _create_job(client, status="queued").json()
     response = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}"
     )
@@ -146,15 +147,9 @@ def test_get_job_404_for_unknown(client, isolate_settings):
 
 def test_list_jobs_filters_by_status(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs", json={"status": "queued"}
-    )
-    client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs", json={"status": "running"}
-    )
-    client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs", json={"status": "completed"}
-    )
+    _create_job(client, status="queued")
+    _create_job(client, status="running")
+    _create_job(client, status="completed")
     all_rows = client.get(f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs").json()
     assert len(all_rows) == 3
     queued = client.get(
@@ -172,14 +167,8 @@ def test_list_jobs_filters_by_status(client, isolate_settings):
 def test_list_jobs_filters_by_parent_command_run(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
     parent = _post_command_run(client).json()
-    client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"parent_command_run_id": parent["id"], "status": "queued"},
-    )
-    client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "queued"},
-    )
+    _create_job(client, parent_command_run_id=parent["id"], status="queued")
+    _create_job(client, status="queued")
     rows = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs?parent_command_run_id={parent['id']}"
     ).json()
@@ -189,17 +178,12 @@ def test_list_jobs_filters_by_parent_command_run(client, isolate_settings):
 
 def test_patch_job_updates_terminal_status(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "running"},
-    ).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={
-            "status": "completed",
-            "ended_at": "2026-04-17T13:30:00Z",
-            "exit_code": 0,
-        },
+    created = _create_job(client, status="running").json()
+    response = _patch_job(
+        client, created["id"],
+        status="completed",
+        ended_at="2026-04-17T13:30:00Z",
+        exit_code=0,
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -209,20 +193,11 @@ def test_patch_job_updates_terminal_status(client, isolate_settings):
 
 def test_patch_job_rejects_terminal_status_overwrite(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "running"},
-    ).json()
-    completed = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={"status": "completed", "exit_code": 0},
-    )
+    created = _create_job(client, status="running").json()
+    completed = _patch_job(client, created["id"], status="completed", exit_code=0)
     assert completed.status_code == 200, completed.text
 
-    overwrite = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={"status": "killed"},
-    )
+    overwrite = _patch_job(client, created["id"], status="killed")
 
     assert overwrite.status_code == 409
     assert overwrite.json()["detail"]["existing"]["status"] == "completed"
@@ -235,23 +210,15 @@ def test_patch_job_rejects_terminal_status_overwrite(client, isolate_settings):
 def test_patch_job_allows_stop_failed_reconciliation(client, isolate_settings):
     """stop_failed means process ownership needs attention, not that it ended."""
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "running"},
-    ).json()
-    stopped = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={"status": "stop_failed"},
-    )
+    created = _create_job(client, status="running").json()
+    stopped = _patch_job(client, created["id"], status="stop_failed")
     assert stopped.status_code == 200, stopped.text
 
-    reconciled = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={
-            "status": "completed",
-            "ended_at": "2026-04-17T13:30:00Z",
-            "exit_code": 0,
-        },
+    reconciled = _patch_job(
+        client, created["id"],
+        status="completed",
+        ended_at="2026-04-17T13:30:00Z",
+        exit_code=0,
     )
 
     assert reconciled.status_code == 200, reconciled.text
@@ -269,10 +236,7 @@ def test_patch_job_status_update_uses_preterminal_compare_and_swap(
     from app.services import state_manager
 
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "running"},
-    ).json()
+    created = _create_job(client, status="running").json()
 
     with db_module.get_connection() as connection:
         stale_running_row = connection.execute(
@@ -314,10 +278,7 @@ def test_patch_job_status_update_uses_preterminal_compare_and_swap(
 
     monkeypatch.setattr(state_manager._common, "get_connection", stale_read_connection)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={"status": target_status, "exit_code": -9},
-    )
+    response = _patch_job(client, created["id"], status=target_status, exit_code=-9)
 
     assert response.status_code == 409, response.text
     assert response.json()["detail"]["existing"]["status"] == "completed"
@@ -331,14 +292,11 @@ def test_patch_job_status_update_uses_preterminal_compare_and_swap(
 
 def test_patch_job_allows_terminal_artifact_update_without_status(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "completed"},
-    ).json()
+    created = _create_job(client, status="completed").json()
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-        json={"stdout_path": "/engagements/example/scans/kali/job.out"},
+    response = _patch_job(
+        client, created["id"],
+        stdout_path="/engagements/example/scans/kali/job.out",
     )
 
     assert response.status_code == 200, response.text
@@ -358,18 +316,12 @@ def test_patch_job_404_for_unknown(client, isolate_settings):
 
 def test_patch_job_broadcasts_via_websocket(client, isolate_settings):
     _write_engagement(isolate_settings["engagements_dir"])
-    created = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"status": "running"},
-    ).json()
+    created = _create_job(client, status="running").json()
     with client.websocket_connect(
         f"/ws/engagements/{ENGAGEMENT_KEY}",
         headers={"origin": "http://127.0.0.1:18000"},
     ) as websocket:
-        response = client.patch(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs/{created['id']}",
-            json={"status": "completed", "exit_code": 0},
-        )
+        response = _patch_job(client, created["id"], status="completed", exit_code=0)
         assert response.status_code == 200
         message = websocket.receive_json()
         assert message["type"] == "assessment.updated"
@@ -383,10 +335,7 @@ def test_parent_command_run_cascade_set_null(client, isolate_settings):
     not cascade-delete the job. The schema uses ON DELETE SET NULL."""
     _write_engagement(isolate_settings["engagements_dir"])
     parent = _post_command_run(client).json()
-    job = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/jobs",
-        json={"parent_command_run_id": parent["id"], "status": "running"},
-    ).json()
+    job = _create_job(client, parent_command_run_id=parent["id"], status="running").json()
     # Delete the parent row directly. Use the underlying connection.
     from app.db import get_connection
 

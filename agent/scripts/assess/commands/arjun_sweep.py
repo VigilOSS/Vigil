@@ -33,6 +33,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import arjun_select, ingest_arjun
+from assess.commands.kali_arjun import ensure_arjun_artifact
 from assess.commands.kali_sweep import aggregate_exit_code
 from assess.lib.client import AssessmentClient
 from assess.lib.config import load_config
@@ -70,27 +71,11 @@ def _arjun_mode(method: str) -> str:
 
 
 def _ensure_json_artifact(json_host: Path, *, incomplete: bool) -> None:
-    """Ensure a per-method Arjun JSON artifact exists and is marked if partial."""
-    try:
-        if incomplete:
-            from assess.lib.arjun_enrich import (
-                incomplete_sentinel,
-                mark_artifact_incomplete,
-            )
+    """Ensure a per-method Arjun JSON artifact exists and is marked if partial.
 
-            if json_host.exists():
-                json_host.write_text(
-                    mark_artifact_incomplete(
-                        json_host.read_text(encoding="utf-8", errors="replace")
-                    ),
-                    encoding="utf-8",
-                )
-            else:
-                json_host.write_text(incomplete_sentinel(), encoding="utf-8")
-        elif not json_host.exists():
-            json_host.write_text("{}", encoding="utf-8")
-    except OSError:
-        pass
+    The per-method paths are pre-created here, so no parent directory is made.
+    """
+    ensure_arjun_artifact(json_host, incomplete=incomplete)
 
 
 def register(subparsers: argparse._SubParsersAction) -> None:

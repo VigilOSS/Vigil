@@ -386,6 +386,31 @@ def _prefix_from_path(path: str) -> str:
     return "/" + segments[0] if segments else "/"
 
 
+def _band(value: int, thresholds: tuple[tuple[int, int], ...]) -> int:
+    """Points for the first threshold row whose floor ``value`` reaches."""
+    for floor, points in thresholds:
+        if value >= floor:
+            return points
+    return 0
+
+
+# Each band reads top-down: the first floor the measured count reaches wins.
+_PATH_RICHNESS_BANDS = ((20, 3), (6, 2), (2, 1))
+_PARAM_RICHNESS_BANDS = ((5, 2), (1, 1))
+_FRAMEWORK_FINGERPRINT_BANDS = ((2, 2), (1, 1))
+_GF_DENSITY_BANDS = ((3, 2), (1, 1))
+
+# Risk signals scored alike: +2 when the unit carries the surface type, +1 when
+# a path segment names it, capped at 3. Each row names its own evidence flags,
+# which differ per signal and are operator-visible.
+_SURFACE_PATH_SIGNALS: tuple[tuple[str, str, tuple[str, ...], str, str], ...] = (
+    ("privileged_write", "privileged_write", _PRIV_TOKENS, "priv_surface", "priv_path"),
+    ("api_inventory", "api_documentation", _API_DOC_TOKENS, "api_surface", "api_path"),
+    ("business_workflow", "workflow_token", _WORKFLOW_TOKENS,
+     "workflow_surface", "workflow_path"),
+)
+
+
 def _score_structure(
     variants: list[dict[str, Any]],
     statuses: list[int],
@@ -396,14 +421,7 @@ def _score_structure(
     methods = {str(v["method"]).upper() for v in variants}
 
     n_paths = len(distinct_paths)
-    if n_paths >= 20:
-        path_pts = 3
-    elif n_paths >= 6:
-        path_pts = 2
-    elif n_paths >= 2:
-        path_pts = 1
-    else:
-        path_pts = 0
+    path_pts = _band(n_paths, _PATH_RICHNESS_BANDS)
     ev["path_richness"] = {"points": path_pts, "distinct_paths": n_paths}
 
     write_methods = methods & {"PUT", "PATCH", "DELETE"}
@@ -422,12 +440,7 @@ def _score_structure(
         or _schema_nonempty(v.get("body_schema_json"))
         or _schema_nonempty(v.get("path_schema_json"))
     )
-    if param_rows >= 5:
-        param_pts = 2
-    elif param_rows >= 1:
-        param_pts = 1
-    else:
-        param_pts = 0
+    param_pts = _band(param_rows, _PARAM_RICHNESS_BANDS)
     ev["param_richness"] = {"points": param_pts, "param_bearing_variants": param_rows}
 
     dynamic_rows = sum(
@@ -448,12 +461,7 @@ def _score_structure(
         "status_routing": routing,
     }
 
-    if framework_hits >= 2:
-        fw_pts = 2
-    elif framework_hits >= 1:
-        fw_pts = 1
-    else:
-        fw_pts = 0
+    fw_pts = _band(framework_hits, _FRAMEWORK_FINGERPRINT_BANDS)
     ev["framework_fingerprint"] = {"points": fw_pts, "framework_components": framework_hits}
 
     total = path_pts + method_pts + param_pts + dyn_pts + fw_pts
@@ -503,35 +511,13 @@ def _score_risk(
         "id_like_params": id_refs, "idor_class": idor_class,
     }
 
-    priv_surface = "privileged_write" in unit_surface_types
-    priv_path = any(_path_has_segment_token(p, _PRIV_TOKENS) for p in paths)
-    priv_pts = 0
-    if priv_surface:
-        priv_pts += 2
-    if priv_path:
-        priv_pts += 1
-    priv_pts = min(priv_pts, 3)
-    ev["privileged_write"] = {"points": priv_pts, "priv_surface": priv_surface, "priv_path": priv_path}
-
-    api_surface = "api_documentation" in unit_surface_types
-    api_path = any(_path_has_segment_token(p, _API_DOC_TOKENS) for p in paths)
-    api_pts = 0
-    if api_surface:
-        api_pts += 2
-    if api_path:
-        api_pts += 1
-    api_pts = min(api_pts, 3)
-    ev["api_inventory"] = {"points": api_pts, "api_surface": api_surface, "api_path": api_path}
-
-    wf_surface = "workflow_token" in unit_surface_types
-    wf_path = any(_path_has_segment_token(p, _WORKFLOW_TOKENS) for p in paths)
-    wf_pts = 0
-    if wf_surface:
-        wf_pts += 2
-    if wf_path:
-        wf_pts += 1
-    wf_pts = min(wf_pts, 3)
-    ev["business_workflow"] = {"points": wf_pts, "workflow_surface": wf_surface, "workflow_path": wf_path}
+    surface_path_pts = 0
+    for key, surface_type, tokens, surface_flag, path_flag in _SURFACE_PATH_SIGNALS:
+        has_surface = surface_type in unit_surface_types
+        has_path = any(_path_has_segment_token(p, tokens) for p in paths)
+        points = min((2 if has_surface else 0) + (1 if has_path else 0), 3)
+        surface_path_pts += points
+        ev[key] = {"points": points, surface_flag: has_surface, path_flag: has_path}
 
     skew_pts = 2 if version_skew else 0
     ev["version_skew"] = {"points": skew_pts, "version_skew": version_skew}
@@ -541,16 +527,10 @@ def _score_risk(
         "points": diversity_pts, "auth_contexts": sorted(auth_contexts),
     }
 
-    n_classes = len(coverage_classes)
-    if n_classes >= 3:
-        density_pts = 2
-    elif n_classes >= 1:
-        density_pts = 1
-    else:
-        density_pts = 0
+    density_pts = _band(len(coverage_classes), _GF_DENSITY_BANDS)
     ev["gf_density"] = {"points": density_pts, "distinct_classes": sorted(coverage_classes)}
 
-    total = (auth_pts + gated_pts + obj_pts + priv_pts + api_pts + wf_pts
+    total = (auth_pts + gated_pts + obj_pts + surface_path_pts
              + skew_pts + diversity_pts + density_pts)
     return total, ev
 

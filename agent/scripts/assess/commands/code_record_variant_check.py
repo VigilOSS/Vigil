@@ -2,12 +2,12 @@
 from __future__ import annotations
 
 import json
-import re
 import sys
 from pathlib import Path
 from typing import NoReturn
 
 from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.code_record_input import sha256
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.config import load_config
 from assess.lib.contracts import MAX_VARIANT_PARENT_FINDINGS
@@ -27,7 +27,6 @@ _REQUIRED_FIELDS = frozenset(
         "rationale",
     }
 )
-_LOWER_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class _DuplicateJSONField(ValueError):
@@ -135,9 +134,7 @@ def _validate_payload(payload: dict[str, object]) -> None:
     _validate_positive_integer(payload, "repo_generation")
 
     for field in ("source_manifest_digest", "file_sha256"):
-        value = payload[field]
-        if not isinstance(value, str) or _LOWER_SHA256_RE.fullmatch(value) is None:
-            _fail(f"{field} must be a lowercase SHA-256 digest")
+        sha256("variant-check", payload, field)
 
     parent_slugs = payload["parent_finding_slugs"]
     if not isinstance(parent_slugs, list):

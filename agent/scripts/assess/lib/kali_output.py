@@ -1210,7 +1210,8 @@ def _inject_headers_into_script(
 
 
 def _apply_required_headers(
-    cmd: list[str], tool_name: str, headers: dict[str, str]
+    cmd: list[str], tool_name: str, headers: dict[str, str],
+    *, classify_passive: bool = True, write_back_on_noop: bool = False,
 ) -> str:
     """Inject program-mandated attribution header(s) into an HTTP command argv.
 
@@ -1242,6 +1243,9 @@ def _apply_required_headers(
     tool). If no -H-capable sub-command is present or the script can't be lexed,
     we fall back to classifying by ``tool_name`` (silent ``skipped`` for a
     passive wrapper, else ``warned``) and NEVER append ``-H`` to the shell argv.
+
+    ``classify_passive`` / ``write_back_on_noop`` are the only two divergences
+    the identity door (:func:`_apply_identity_headers`) needs.
     """
     if not headers:
         return "noop"
@@ -1249,24 +1253,25 @@ def _apply_required_headers(
     script_idx = _wrapped_shell_script_index(cmd)
     if script_idx is not None:
         status, new_script = _inject_headers_into_script(cmd[script_idx], headers)
-        if status == "injected":
+        if status == "injected" or (write_back_on_noop and status == "noop"):
             cmd[script_idx] = new_script
-            return "injected"
+            return status
         if status == "noop":
             return "noop"
         # No -H-capable sub-command was edited (none present, or unsafe to lex).
         # Classify by the derived tool name so a passive/archive wrapper stays
         # silent and any other wrapper WARNs — but never append -H to the shell
         # argv, where it would become a positional param and miss the tool.
-        if tool_name.lower() in _REQUIRED_HEADER_SKIP:
+        if classify_passive and tool_name.lower() in _REQUIRED_HEADER_SKIP:
             return "skipped"
         return "warned"
 
     name_lower = tool_name.lower()
-    if name_lower in _REQUIRED_HEADER_SELF_ATTRIBUTING:
-        return "self_attributed"
-    if name_lower in _REQUIRED_HEADER_SKIP:
-        return "skipped"
+    if classify_passive:
+        if name_lower in _REQUIRED_HEADER_SELF_ATTRIBUTING:
+            return "self_attributed"
+        if name_lower in _REQUIRED_HEADER_SKIP:
+            return "skipped"
     if name_lower in _REQUIRED_HEADER_FLAG_SPECS:
         return _inject_tool_flag_headers(cmd, name_lower, headers)
     if name_lower not in _REQUIRED_HEADER_INJECTABLE:
@@ -1290,30 +1295,15 @@ def _apply_identity_headers(
 
     Existing header names win. This preserves required-attribution precedence
     when credential material happens to carry the same header name.
+
+    Identity material is not program-mandated attribution, so the passive /
+    self-attributing classification is NOT consulted: a tool that carries no
+    HTTP request has nothing to put a cookie on, which is a ``warned``, not a
+    silent ``skipped``.
     """
-    if not headers:
-        return "noop"
-    script_idx = _wrapped_shell_script_index(cmd)
-    if script_idx is not None:
-        status, new_script = _inject_headers_into_script(cmd[script_idx], headers)
-        if status in {"injected", "noop"}:
-            cmd[script_idx] = new_script
-            return status
-        return "warned"
-    tool = tool_name.lower()
-    if tool in _REQUIRED_HEADER_FLAG_SPECS:
-        return _inject_tool_flag_headers(cmd, tool, headers)
-    if tool not in _REQUIRED_HEADER_INJECTABLE:
-        return "warned"
-    existing = _existing_header_names(cmd)
-    injected = False
-    for name, value in headers.items():
-        if name.lower() in existing:
-            continue
-        cmd.extend(["-H", f"{name}: {value}"])
-        existing.add(name.lower())
-        injected = True
-    return "injected" if injected else "noop"
+    return _apply_required_headers(
+        cmd, tool_name, headers, classify_passive=False, write_back_on_noop=True
+    )
 
 
 # --------------------------------------------------------------------------- #

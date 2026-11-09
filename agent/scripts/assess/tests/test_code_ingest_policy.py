@@ -21,6 +21,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_ingest
 from assess.lib.code_snapshot import RootedSourceTree
@@ -193,12 +194,8 @@ def test_repeatable_include_path_parses_in_both_flag_orderings():
     parser = argparse.ArgumentParser()
     code_ingest.register(parser.add_subparsers(dest="cmd"))
 
-    trailing = parser.parse_args(
-        ["code-ingest", "/repo", "--include-path", "a/dist", "--include-path", "b/dist"]
-    )
-    leading = parser.parse_args(
-        ["code-ingest", "--include-path", "a/dist", "--include-path", "b/dist", "/repo"]
-    )
+    trailing = parser.parse_args(["code-ingest", "/repo", "--include-path", "a/dist", "--include-path", "b/dist"])
+    leading = parser.parse_args(["code-ingest", "--include-path", "a/dist", "--include-path", "b/dist", "/repo"])
     assert trailing.include_path == ["a/dist", "b/dist"] == leading.include_path
     assert trailing.repo_path == leading.repo_path == "/repo"
 
@@ -264,16 +261,7 @@ def test_one_matching_pattern_keeps_the_run_alive_but_still_warns(tmp_path, caps
 
     posted: dict[str, object] = {}
 
-    class _Client:
-        def __init__(self, *args, **kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
+    class _Client(StubClient):
         def post(self, path, payload):
             posted["path"] = path
             posted["files"] = payload["files"]

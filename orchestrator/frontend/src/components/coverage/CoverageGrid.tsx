@@ -7,23 +7,13 @@
 import { useCallback, useEffect, useMemo, useRef, type MutableRefObject } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type {
-  CellKeyDownEvent,
   ColDef,
   GridApi,
   ICellRendererParams,
   IDatasource,
-  RowClickedEvent,
   SortChangedEvent,
 } from "ag-grid-community";
-import {
-  AG_GRID_THEME,
-  GRID_HEADER_HEIGHT,
-  GRID_ROW_HEIGHT,
-  GRID_THEME_PROP,
-  defaultColDef,
-  focusGridInvoker,
-  registerAgGrid,
-} from "../../lib/agGrid";
+import { AG_GRID_THEME, GRID_ROW_HEIGHT, gridBaseProps, registerAgGrid, rowOpenHandlers } from "../../lib/agGrid";
 import {
   fetchCoveragePage,
   type CoverageFilters,
@@ -248,28 +238,17 @@ export default function CoverageGrid({
     };
   }, [revealRef]);
 
-  const onRowClicked = (event: RowClickedEvent<CoverageLedgerItem>) => {
-    const selection = window.getSelection?.();
-    if (selection && selection.type === "Range" && selection.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
-  };
+  const { onRowClicked, onCellKeyDown } = rowOpenHandlers<CoverageLedgerItem>(onRowOpen);
 
   const onSortChanged = (event: SortChangedEvent<CoverageLedgerItem>) => {
     const model = event.api.getColumnState().map((column) => ({ colId: column.colId, sort: column.sort }));
     onSortChange?.(serverSortFromModel(model));
   };
 
-  const onCellKeyDown = (event: CellKeyDownEvent<CoverageLedgerItem>) => {
-    const keyboardEvent = event.event as KeyboardEvent;
-    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
-    keyboardEvent.preventDefault();
-    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
-  };
-
   return (
     <div className={`${AG_GRID_THEME} cov-grid-host`}>
       <AgGridReact<CoverageLedgerItem>
-        theme={GRID_THEME_PROP}
+        {...gridBaseProps}
         rowModelType="infinite"
         datasource={datasource}
         cacheBlockSize={COVERAGE_GRID_BLOCK_SIZE}
@@ -277,12 +256,8 @@ export default function CoverageGrid({
         blockLoadDebounceMillis={80}
         infiniteInitialRowCount={COVERAGE_GRID_BLOCK_SIZE}
         columnDefs={columnDefs}
-        defaultColDef={defaultColDef}
         suppressMultiSort
         getRowId={(p) => String(p.data.id)}
-        rowHeight={GRID_ROW_HEIGHT}
-        headerHeight={GRID_HEADER_HEIGHT}
-        tooltipShowDelay={400}
         onGridReady={(event) => {
           apiRef.current = event.api;
         }}

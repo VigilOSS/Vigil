@@ -8,8 +8,9 @@ import json
 import re
 import stat
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import NamedTuple
+from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
 from assess.lib.code_audit import write_json_snapshot
@@ -569,17 +570,52 @@ _RESET_STALE_OPTIONS = {
 }
 
 
-def _parse_reset_stale_options(tokens: list[str]) -> dict[str, object]:
-    """Parse the lane scope the sweep is confined to; absent means engagement-wide."""
-    options: dict[str, object] = {}
+class _IntOption(NamedTuple):
+    """An option whose value must be an integer inside a stated range.
+
+    A ``maximum`` of ``None`` means open-ended, which is the whole difference
+    between the two refusal sentences these verbs print. ``keep_text`` is for
+    `list`, whose filters go straight into a query string and so stay the digits
+    the operator typed rather than becoming ints and back.
+    """
+
+    minimum: int
+    maximum: int | None = None
+    keep_text: bool = False
+
+
+def _parse_verb_options(
+    tokens: list[str],
+    *,
+    verb: str,
+    fields: dict[str, str],
+    int_options: dict[str, _IntOption] | None = None,
+    switch: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
+    """Walk one code-dispatch verb's `--flag value` tokens into its fields.
+
+    One rule for every verb that parses its own tokens: an unknown or
+    value-less flag refuses, a repeated flag refuses, an empty value refuses, a
+    path-scope flag accumulates through :func:`_add_path_scope_value`, an
+    integer field is range-checked, and the path scopes merge LAST so their key
+    order never depends on typing order. What is not the same fact stays with
+    the verb — the required-field sentence and the default window after the
+    walk, and `list`'s output modes in ``switch``, which consumes a one-token
+    flag itself and owns its own refusals.
+    """
+    bounded = int_options or {}
+    options: dict[str, Any] = {}
     path_scopes: dict[str, list[str]] = {}
     index = 0
     while index < len(tokens):
         token = tokens[index]
-        field = _RESET_STALE_OPTIONS.get(token)
+        if switch is not None and switch(token):
+            index += 1
+            continue
+        field = fields.get(token)
         if field is None or index + 1 >= len(tokens):
             print(
-                f"Unknown or incomplete code-dispatch reset-stale option: {token}",
+                f"Unknown or incomplete code-dispatch {verb} option: {token}",
                 file=sys.stderr,
             )
             raise SystemExit(1)
@@ -591,19 +627,38 @@ def _parse_reset_stale_options(tokens: list[str]) -> dict[str, object]:
         if field in options:
             print(f"ERROR: {token} was specified more than once", file=sys.stderr)
             raise SystemExit(1)
-        if field == "repo_id":
-            if re.fullmatch(r"[0-9]+", value) is None or int(value) < 1:
-                print("ERROR: --repo-id requires an integer >= 1", file=sys.stderr)
-                raise SystemExit(1)
-            options[field] = int(value)
-        else:
+        bounds = bounded.get(field)
+        if bounds is None:
             if not value.strip():
                 print(f"ERROR: {token} requires a value", file=sys.stderr)
                 raise SystemExit(1)
             options[field] = value
+        elif re.fullmatch(r"[0-9]+", value) is None or not (
+            bounds.minimum <= int(value)
+            and (bounds.maximum is None or int(value) <= bounds.maximum)
+        ):
+            allowed = (
+                f">= {bounds.minimum}"
+                if bounds.maximum is None
+                else f"between {bounds.minimum} and {bounds.maximum}"
+            )
+            print(f"ERROR: {token} requires an integer {allowed}", file=sys.stderr)
+            raise SystemExit(1)
+        else:
+            options[field] = value if bounds.keep_text else int(value)
         index += 2
     options.update(path_scopes)
     return options
+
+
+def _parse_reset_stale_options(tokens: list[str]) -> dict[str, object]:
+    """Parse the lane scope the sweep is confined to; absent means engagement-wide."""
+    return _parse_verb_options(
+        tokens,
+        verb="reset-stale",
+        fields=_RESET_STALE_OPTIONS,
+        int_options={"repo_id": _IntOption(minimum=1)},
+    )
 
 
 def _parse_release_options(tokens: list[str]) -> dict[str, object]:
@@ -612,25 +667,9 @@ def _parse_release_options(tokens: list[str]) -> dict[str, object]:
     The reason is the only durable record of why a claimed file carries no
     verdict, so the verb refuses to run without it.
     """
-    options: dict[str, object] = {}
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        if token != "--reason" or index + 1 >= len(tokens):
-            print(
-                f"Unknown or incomplete code-dispatch release option: {token}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        if "reason" in options:
-            print("ERROR: --reason was specified more than once", file=sys.stderr)
-            raise SystemExit(1)
-        value = tokens[index + 1]
-        if not value.strip():
-            print("ERROR: --reason requires a value", file=sys.stderr)
-            raise SystemExit(1)
-        options["reason"] = value
-        index += 2
+    options = _parse_verb_options(
+        tokens, verb="release", fields={"--reason": "reason"}
+    )
     if "reason" not in options:
         print(
             "ERROR: code-dispatch release requires --reason TEXT; it is the only "
@@ -708,14 +747,12 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
     reads — so a render flag can never become a server-side filter the backend
     would reject.
     """
-    fields = dict(_LIST_FILTER_OPTIONS)
-    values: dict[str, str | list[str]] = {}
-    path_scopes: dict[str, list[str]] = {}
     output = "table"
     show_tokens = False
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
+
+    def _output_mode(token: str) -> bool:
+        """Consume one output-mode flag; the three refusals are its own."""
+        nonlocal output, show_tokens
         if token == "--show-tokens":
             if show_tokens:
                 print(
@@ -731,8 +768,7 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
                 )
                 raise SystemExit(1)
             show_tokens = True
-            index += 1
-            continue
+            return True
         if token in {"--json", "--ids-only"}:
             if output != "table":
                 print(
@@ -748,37 +784,19 @@ def _parse_list_filters(tokens: list[str]) -> tuple[dict[str, str | list[str]], 
                 )
                 raise SystemExit(1)
             output = "json" if token == "--json" else "ids"
-            index += 1
-            continue
-        field = fields.get(token)
-        if field is None or index + 1 >= len(tokens):
-            print(
-                f"Unknown or incomplete code-dispatch list option: {token}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        if token in _PATH_SCOPE_OPTIONS:
-            _add_path_scope_value(path_scopes, token, tokens[index + 1])
-            index += 2
-            continue
-        if field in values:
-            print(f"ERROR: {token} was specified more than once", file=sys.stderr)
-            raise SystemExit(1)
-        value = tokens[index + 1]
-        minimum = _LIST_INT_MINIMUMS.get(field)
-        if minimum is None:
-            if not value.strip():
-                print(f"ERROR: {token} requires a value", file=sys.stderr)
-                raise SystemExit(1)
-        elif re.fullmatch(r"[0-9]+", value) is None or int(value) < minimum:
-            print(
-                f"ERROR: {token} requires an integer >= {minimum}",
-                file=sys.stderr,
-            )
-            raise SystemExit(1)
-        values[field] = value
-        index += 2
-    values.update(path_scopes)
+            return True
+        return False
+
+    values: dict[str, str | list[str]] = _parse_verb_options(
+        tokens,
+        verb="list",
+        fields=dict(_LIST_FILTER_OPTIONS),
+        int_options={
+            field: _IntOption(minimum=minimum, keep_text=True)
+            for field, minimum in _LIST_INT_MINIMUMS.items()
+        },
+        switch=_output_mode,
+    )
     if show_tokens:
         values[_LIST_SHOW_TOKENS_FIELD] = "1"
     return values, output
@@ -929,42 +947,17 @@ def _parse_adopt_lease_options(tokens: list[str]) -> dict[str, object]:
     minutes `reset-stale` defaults to — the two verbs act on one definition of
     an abandoned lease and must not drift apart on its default either.
     """
-    options: dict[str, object] = {}
-    index = 0
-    while index < len(tokens):
-        token = tokens[index]
-        field = _ADOPT_LEASE_OPTIONS.get(token)
-        if field is None or index + 1 >= len(tokens):
-            print(
-                f"Unknown or incomplete code-dispatch adopt-lease option: {token}",
-                file=sys.stderr,
+    options = _parse_verb_options(
+        tokens,
+        verb="adopt-lease",
+        fields=_ADOPT_LEASE_OPTIONS,
+        int_options={
+            "stale_minutes": _IntOption(
+                minimum=_MIN_ADOPTION_STALE_MINUTES,
+                maximum=_MAX_ADOPTION_STALE_MINUTES,
             )
-            raise SystemExit(1)
-        if field in options:
-            print(f"ERROR: {token} was specified more than once", file=sys.stderr)
-            raise SystemExit(1)
-        value = tokens[index + 1]
-        if field == "stale_minutes":
-            if (
-                re.fullmatch(r"[0-9]+", value) is None
-                or not _MIN_ADOPTION_STALE_MINUTES
-                <= int(value)
-                <= _MAX_ADOPTION_STALE_MINUTES
-            ):
-                print(
-                    "ERROR: --stale-minutes requires an integer between "
-                    f"{_MIN_ADOPTION_STALE_MINUTES} and "
-                    f"{_MAX_ADOPTION_STALE_MINUTES}",
-                    file=sys.stderr,
-                )
-                raise SystemExit(1)
-            options[field] = int(value)
-        else:
-            if not value.strip():
-                print(f"ERROR: {token} requires a value", file=sys.stderr)
-                raise SystemExit(1)
-            options[field] = value
-        index += 2
+        },
+    )
     missing = [
         flag
         for flag, field in _ADOPT_LEASE_OPTIONS.items()
@@ -1717,6 +1710,18 @@ def _heartbeat(cfg, item_id: str, agent_name: str, lease_token: str) -> None:
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
+def _report_queue_write(result: object, snapshot: Path, count_line: str) -> None:
+    """Report one analysis-queue write: count line, audit snapshot, response body.
+
+    The count line stays the verb's own: each names a different transition and
+    reads a different response key.
+    """
+    print(count_line)
+    print(f"Saved audit snapshot: {snapshot.name}")
+    if isinstance(result, dict) and result:
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
 def _error(cfg, id_list: str, agent_name: str, lease_token: str, notes: str = "") -> None:
     ids = [_validate_single_id(id_list)]
     payload: dict = {'item_ids': ids, 'agent_name': agent_name, 'lease_token': lease_token}
@@ -1733,10 +1738,7 @@ def _error(cfg, id_list: str, agent_name: str, lease_token: str, notes: str = ""
         metadata={"command": "code-dispatch error", "item_ids": ids},
     )
     updated = result.get('updated', 0) if isinstance(result, dict) else result
-    print(f"Marked error: {updated} item(s)")
-    print(f"Saved audit snapshot: {snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    _report_queue_write(result, snapshot, f"Marked error: {updated} item(s)")
 
 
 def _needs_context(
@@ -1764,10 +1766,7 @@ def _needs_context(
         source_path=expansion_file,
         metadata={"command": "code-dispatch needs-context", "item_ids": ids},
     )
-    print(f"Marked needs-context: {id_list}")
-    print(f"Saved audit snapshot: {snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    _report_queue_write(result, snapshot, f"Marked needs-context: {id_list}")
 
 
 def _scope_text(scope: dict[str, object] | None) -> str:
@@ -1795,13 +1794,12 @@ def _reset_stale(cfg, minutes: int, scope: dict[str, object] | None = None) -> N
         },
     )
     reset_count = result.get('reset', 0) if isinstance(result, dict) else 0
-    print(
+    _report_queue_write(
+        result,
+        snapshot,
         f"Reset {reset_count} stale item(s) (stuck > {minutes} min; "
-        f"scope: {_scope_text(scope)})"
+        f"scope: {_scope_text(scope)})",
     )
-    print(f"Saved audit snapshot: {snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
 
 
 def _release(
@@ -1880,10 +1878,7 @@ def _retry_error(cfg, id_list: str, reason: str = "") -> None:
         metadata={"command": "code-dispatch retry-error", "item_ids": ids, "reason": reason},
     )
     retried = result.get('retried', 0) if isinstance(result, dict) else 0
-    print(f"Retried (error -> pending): {retried} item(s)")
-    print(f"Saved audit snapshot: {snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
+    _report_queue_write(result, snapshot, f"Retried (error -> pending): {retried} item(s)")
 
 
 def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
@@ -1915,14 +1910,7 @@ def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
         },
     )
     retried = result.get('retried', 0) if isinstance(result, dict) else 0
-    print(f"Retried (needs_context -> pending): {retried} item(s)")
-    print(f"Saved audit snapshot: {snapshot.name}")
-    if isinstance(result, dict) and result:
-        print(json.dumps(result, indent=2, ensure_ascii=False))
-
-
-def _queue_lookup_matches(row: dict, selectors: list[dict]) -> bool:
-    return _compiled_queue_lookup_matches(row, _compile_queue_lookup(selectors))
+    _report_queue_write(result, snapshot, f"Retried (needs_context -> pending): {retried} item(s)")
 
 
 def _compile_queue_lookup(
@@ -1967,56 +1955,81 @@ def _compiled_queue_lookup_matches(
     return False
 
 
+class CodeFileListingChanged(Exception):
+    """The ``code/files`` total moved while the listing was being paged.
+
+    Distinct from the ``ValueError`` ``parse_code_file_page`` raises for a
+    malformed envelope: `code-size-summary` reports which of the two happened.
+    """
+
+
+def page_code_files(
+    client,
+    *,
+    page_size: int,
+    context: str,
+    repo_id: int | None = None,
+    consume: Callable[[list[dict]], None],
+) -> None:
+    """Walk the bounded ``code/files`` listing, handing each page to `consume`.
+
+    One walk for the three verbs that read this listing: the limit/offset
+    composition, `parse_code_file_page` as the sole validator, and the pinned
+    total that detects a listing which changed underneath them. What a page
+    MEANS, and what a failed walk tells the operator, stays at the call site.
+    """
+    offset = 0
+    expected_total: int | None = None
+    while True:
+        endpoint = f"code/files?limit={page_size}&offset={offset}"
+        if repo_id is not None:
+            endpoint += f"&repo_id={int(repo_id)}"
+        items, total, has_more = parse_code_file_page(
+            client.get(endpoint), expected_offset=offset, context=context
+        )
+        if expected_total is None:
+            expected_total = total
+        elif total != expected_total:
+            raise CodeFileListingChanged(context)
+        consume(items)
+        if not has_more:
+            return
+        offset += len(items)
+
+
 def _fetch_code_files(cfg, selectors: list[dict]) -> list[dict]:
     lookup = _compile_queue_lookup(selectors)
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        matched_by_id: dict[int, dict] = {}
-        offset = 0
-        expected_total: int | None = None
-        result: list[dict] | None = None
-        while True:
-            page = client.get(f'code/files?limit={_CODE_FILE_LOOKUP_PAGE_SIZE}&offset={offset}')
-            try:
-                items, total, has_more = parse_code_file_page(
-                    page,
-                    expected_offset=offset,
-                    context="code queue file lookup response",
+    matched_by_id: dict[int, dict] = {}
+
+    def _keep_matches(items: list[dict]) -> None:
+        for row in items:
+            if not _compiled_queue_lookup_matches(row, lookup):
+                continue
+            file_id = row.get("id")
+            if type(file_id) is not int or file_id <= 0:
+                raise ValueError("code/files row carries an invalid id")
+            matched_by_id[file_id] = row
+            if len(matched_by_id) > _MAX_QUEUE_LOOKUP_MATCHES:
+                print(
+                    "Queue path lookup exceeds the bounded match cap of "
+                    f"{_MAX_QUEUE_LOOKUP_MATCHES}; split broad globs into smaller "
+                    "path or repository selections",
+                    file=sys.stderr,
                 )
-            except ValueError:
-                result = None
-                break
-            if expected_total is None:
-                expected_total = total
-            elif total != expected_total:
-                result = None
-                break
-            invalid_row = False
-            for row in items:
-                if not _compiled_queue_lookup_matches(row, lookup):
-                    continue
-                file_id = row.get("id")
-                if type(file_id) is not int or file_id <= 0:
-                    invalid_row = True
-                    break
-                matched_by_id[file_id] = row
-                if len(matched_by_id) > _MAX_QUEUE_LOOKUP_MATCHES:
-                    print(
-                        "Queue path lookup exceeds the bounded match cap of "
-                        f"{_MAX_QUEUE_LOOKUP_MATCHES}; split broad globs into smaller "
-                        "path or repository selections",
-                        file=sys.stderr,
-                    )
-                    sys.exit(1)
-            if invalid_row:
-                break
-            if not has_more:
-                result = list(matched_by_id.values())
-                break
-            offset += len(items)
-    if result is None:
+                sys.exit(1)
+
+    try:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            page_code_files(
+                client,
+                page_size=_CODE_FILE_LOOKUP_PAGE_SIZE,
+                context="code queue file lookup response",
+                consume=_keep_matches,
+            )
+    except (ValueError, CodeFileListingChanged):
         print("Could not fetch code files for queue normalization", file=sys.stderr)
         sys.exit(1)
-    return result
+    return list(matched_by_id.values())
 
 
 def _normalize_string_list(value) -> list[str]:
@@ -2118,6 +2131,43 @@ def _flatten_queue_specs(item, inherited: dict | None = None) -> list[dict]:
     sys.exit(1)
 
 
+def _file_ids_for_path(
+    file_path: str, repo_id: int | None, code_files: list[dict], *, noun: str
+) -> list[int]:
+    """The code-file ids one path selector names, or the refusal it earns.
+
+    A queue item and a classification item resolve a path by the same rule — a
+    glob matches every row it fits, an exact path must name exactly one, and an
+    explicit repo_id narrows the matches first — so the rule lives here once and
+    only the noun in the two refusals is the caller's.
+    """
+    has_glob = any(ch in file_path for ch in "*?[")
+    matches: list[dict] = []
+    for row in code_files:
+        candidate = str(row.get('file_path', ''))
+        if has_glob:
+            if fnmatch(candidate, file_path):
+                matches.append(row)
+        elif candidate == file_path:
+            matches.append(row)
+
+    if repo_id is not None:
+        matches = [row for row in matches if int(row.get('repo_id', -1)) == repo_id]
+
+    if not matches:
+        print(f"No code file found for {noun} path: {file_path}", file=sys.stderr)
+        sys.exit(1)
+
+    if not has_glob and len(matches) > 1:
+        print(
+            f"Ambiguous {noun} path {file_path!r}; include file_id or repo_id to disambiguate",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+
+    return [int(row['id']) for row in matches]
+
+
 def _resolve_queue_file_ids(
     item: dict, code_files: list[dict], queue_rows: _QueueRowLookup | None = None
 ) -> list[int]:
@@ -2198,31 +2248,7 @@ def _resolve_queue_file_ids(
     else:
         repo_id = None
 
-    has_glob = any(ch in file_path for ch in "*?[")
-    matches: list[dict] = []
-    for row in code_files:
-        candidate = str(row.get('file_path', ''))
-        if has_glob:
-            if fnmatch(candidate, file_path):
-                matches.append(row)
-        elif candidate == file_path:
-            matches.append(row)
-
-    if repo_id is not None:
-        matches = [row for row in matches if int(row.get('repo_id', -1)) == repo_id]
-
-    if not matches:
-        print(f"No code file found for queue path: {file_path}", file=sys.stderr)
-        sys.exit(1)
-
-    if not has_glob and len(matches) > 1:
-        print(
-            f"Ambiguous queue path {file_path!r}; include file_id or repo_id to disambiguate",
-            file=sys.stderr,
-        )
-        sys.exit(1)
-
-    return [int(row['id']) for row in matches]
+    return _file_ids_for_path(file_path, repo_id, code_files, noun="queue")
 
 
 def _normalize_queue_items(cfg, raw_items: list[dict], *, mode: str = "initial") -> list[dict]:

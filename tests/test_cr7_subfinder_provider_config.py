@@ -17,17 +17,12 @@ isolation constraint.
 from __future__ import annotations
 
 import subprocess
-import sys
 from pathlib import Path
 
 import pytest
 
-SRC = str(Path(__file__).resolve().parents[1] / "src")
-if SRC not in sys.path:
-    sys.path.insert(0, SRC)
-
-from vigil_cli.docker import DockerResult  # noqa: E402
-from vigil_cli.runtime import (  # noqa: E402
+from vigil_cli.docker import DockerResult
+from vigil_cli.runtime import (
     _SUBFINDER_CONFIG_REL_PATH,
     _subfinder_provider_config_script,
     generate_subfinder_provider_config,

@@ -26,6 +26,16 @@ from tests.test_finding_code_snapshot_provenance import (
 BASE = f"/engagements/{_ENGAGEMENT_KEY}/assessment"
 
 
+@pytest.fixture
+def binding(client, isolate_settings):
+    """The sealed snapshot binding the citation cases below assert against.
+
+    Requested last by each test so the repo is seeded after that test's other
+    fixtures, exactly where the per-test ``_seed_repo(...)`` call used to run.
+    """
+    return _seed_repo(client, isolate_settings)
+
+
 def _confirmed(client, isolate_settings, slug: str) -> dict[str, object]:
     binding = _seed_repo(client, isolate_settings)
     _dispatch(client, f"hunter-{slug.lower()}")
@@ -63,9 +73,7 @@ def _state(client, slug: str) -> tuple[str, str, int, int]:
     )
 
 
-def test_record_refuses_a_path_absent_from_the_bound_generation(client, isolate_settings):
-    binding = _seed_repo(client, isolate_settings)
-
+def test_record_refuses_a_path_absent_from_the_bound_generation(client, binding):
     response = _record(
         client, _finding_payload("VA-301", binding, location="file:src/parsr.c:41")
     )
@@ -80,9 +88,7 @@ def test_record_refuses_a_path_absent_from_the_bound_generation(client, isolate_
     assert client.get(f"{BASE}/findings/VA-301").status_code == 404
 
 
-def test_record_refuses_a_line_past_the_end_of_the_file(client, isolate_settings):
-    binding = _seed_repo(client, isolate_settings)
-
+def test_record_refuses_a_line_past_the_end_of_the_file(client, binding):
     response = _record(
         client, _finding_payload("VA-302", binding, location="file:src/parser.c:99999")
     )
@@ -103,18 +109,14 @@ def test_record_refuses_a_line_past_the_end_of_the_file(client, isolate_settings
         "file:src/parser.c:40-44",
     ],
 )
-def test_record_accepts_lineless_column_and_range_forms(client, isolate_settings, location):
-    binding = _seed_repo(client, isolate_settings)
-
+def test_record_accepts_lineless_column_and_range_forms(client, location, binding):
     response = _record(client, _finding_payload("VA-303", binding, location=location))
 
     assert response.status_code == 201, response.text
     assert response.json()["finding"]["canonical_location"] == location
 
 
-def test_record_refuses_a_range_that_runs_past_the_file(client, isolate_settings):
-    binding = _seed_repo(client, isolate_settings)
-
+def test_record_refuses_a_range_that_runs_past_the_file(client, binding):
     response = _record(
         client,
         _finding_payload(
@@ -126,8 +128,7 @@ def test_record_refuses_a_range_that_runs_past_the_file(client, isolate_settings
     assert f"line {_SEEDED_FILE_LOC + 1} is outside src/parser.c" in response.json()["detail"]
 
 
-def test_an_idempotent_replay_of_a_bad_citation_is_refused(client, isolate_settings):
-    binding = _seed_repo(client, isolate_settings)
+def test_an_idempotent_replay_of_a_bad_citation_is_refused(client, binding):
     payload = _finding_payload("VA-305", binding)
     assert _record(client, payload).status_code == 201
     with db_module.get_connection() as connection:
@@ -146,10 +147,7 @@ def test_an_idempotent_replay_of_a_bad_citation_is_refused(client, isolate_setti
     )
 
 
-def test_an_empty_generation_roster_is_refused_with_its_own_message(
-    client, isolate_settings
-):
-    binding = _seed_repo(client, isolate_settings)
+def test_an_empty_generation_roster_is_refused_with_its_own_message(client, binding):
     with db_module.get_connection() as connection:
         connection.execute("DELETE FROM code_source_generation_files")
 
@@ -212,10 +210,7 @@ def test_a_relocation_outside_the_snapshot_is_refused_and_keeps_the_verdict(
     assert _state(client, "VA-308") == before
 
 
-def test_relocation_from_a_web_location_into_a_missing_file_is_refused(
-    client, isolate_settings
-):
-    binding = _seed_repo(client, isolate_settings)
+def test_relocation_from_a_web_location_into_a_missing_file_is_refused(client, binding):
     assert _record(
         client, _finding_payload("VA-309", None, location="https://example.com/api/x")
     ).status_code == 201
@@ -239,10 +234,7 @@ def test_relocation_from_a_web_location_into_a_missing_file_is_refused(
     )
 
 
-def test_a_rebind_to_a_generation_that_dropped_the_file_is_refused(
-    client, isolate_settings
-):
-    binding = _seed_repo(client, isolate_settings)
+def test_a_rebind_to_a_generation_that_dropped_the_file_is_refused(client, binding):
     _dispatch(client, "hunter-310")
     assert _record(
         client, _finding_payload("VA-310", binding, author_agent_id="hunter-310")
@@ -274,9 +266,7 @@ def test_a_rebind_to_a_generation_that_dropped_the_file_is_refused(
     assert _state(client, "VA-310") == before
 
 
-def test_web_findings_are_not_resolved_against_the_snapshot(client, isolate_settings):
-    binding = _seed_repo(client, isolate_settings)
-
+def test_web_findings_are_not_resolved_against_the_snapshot(client, binding):
     recorded = _record(
         client,
         _finding_payload("VA-311", binding, location="https://example.com/src/missing.c"),

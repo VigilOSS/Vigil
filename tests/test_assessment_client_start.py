@@ -1,16 +1,21 @@
 """Native client starts prepare a bounded workspace without a false GUI receipt."""
-from contextlib import nullcontext
 import json
-from pathlib import Path
+import os
 import re
 import shlex
+import subprocess
+from contextlib import nullcontext
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from vigil_cli import assessment_clients as clients
+from vigil_cli import client_sessions
 from vigil_cli import engagements
 from vigil_cli import main as cli
-from vigil_cli import client_sessions
+from vigil_cli import remediation_clients, term
+from vigil_cli.assessment_clients import prepare_workspace
 
 ROOT = Path(__file__).resolve().parents[1]
 ORIGINAL_BOOTSTRAP = client_sessions.client_session_bootstrap
@@ -52,7 +57,6 @@ def test_zcode_start_cli_accepts_the_native_client_without_backend_work(context,
 
 def test_zcode_start_prepares_two_mode_bound_workspaces_and_no_pid_receipt(context, monkeypatch):
     root, engagement, receipts = context
-    from vigil_cli import remediation_clients
     monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
     calls = []
     monkeypatch.setattr(engagements.subprocess, "run", lambda *a, **kw: calls.append((a, kw)) or SimpleNamespace(returncode=0))
@@ -79,7 +83,6 @@ def test_zcode_start_prepares_two_mode_bound_workspaces_and_no_pid_receipt(conte
 
 
 def test_zcode_project_address_is_stable_when_native_build_changes(context, monkeypatch):
-    from vigil_cli import remediation_clients
     root, engagement, _ = context
     versions = iter(("3.15.3", "3.16.0"))
     monkeypatch.setattr(remediation_clients, "_zcode_application",
@@ -94,7 +97,6 @@ def test_zcode_project_address_is_stable_when_native_build_changes(context, monk
 
 
 def test_native_project_start_does_not_rebind_shared_client_files(context, monkeypatch):
-    from vigil_cli import remediation_clients
     root, engagement, _ = context
     monkeypatch.setattr(client_sessions, "client_session_bootstrap", ORIGINAL_BOOTSTRAP)
     def shared_guard(*_):
@@ -121,8 +123,6 @@ def test_zcode_refuses_unsupported_mode_before_preparing_context(context):
 
 @pytest.mark.parametrize("terminal", [True, False])
 def test_zcode_launch_separates_setup_paths_and_copyable_prompt(context, monkeypatch, capsys, terminal):
-    from vigil_cli import remediation_clients, term
-
     root, engagement, _ = context
     monkeypatch.setenv("NO_COLOR", "1")
     monkeypatch.setattr(term, "is_terminal", lambda _stream: terminal)
@@ -151,8 +151,6 @@ def test_zcode_launch_separates_setup_paths_and_copyable_prompt(context, monkeyp
 
 
 def test_zcode_no_autoprompt_still_explains_how_to_begin(context, monkeypatch, capsys):
-    from vigil_cli import remediation_clients
-
     root, engagement, _ = context
     monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
     monkeypatch.setattr(engagements.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=0))
@@ -161,8 +159,6 @@ def test_zcode_no_autoprompt_still_explains_how_to_begin(context, monkeypatch, c
 
 
 def test_zcode_opening_prompt_resolves_its_project_instructions_and_helper(context, monkeypatch, capsys):
-    from vigil_cli import remediation_clients
-
     root, engagement, _ = context
     monkeypatch.setattr(remediation_clients, "_zcode_application", lambda: (Path("/Applications/ZCode.app"), "3.15.3"))
     opened = []
@@ -182,7 +178,6 @@ def test_zcode_opening_prompt_resolves_its_project_instructions_and_helper(conte
 
 @pytest.mark.parametrize("width", [60, 80, 100])
 def test_zcode_start_has_compact_formatted_setup(context, monkeypatch, capsys, width):
-    from vigil_cli import remediation_clients, term
     root, engagement, _ = context
     monkeypatch.setenv("COLUMNS", str(width))
     monkeypatch.setenv("NO_COLOR", "1")
@@ -200,8 +195,6 @@ def test_zcode_start_has_compact_formatted_setup(context, monkeypatch, capsys, w
 @pytest.mark.parametrize("client", ["zcode", "opencode"])
 @pytest.mark.parametrize("mode", ["web", "code"])
 def test_generated_router_shell_commands_preserve_helper_path_with_spaces(context, client, mode):
-    from vigil_cli.assessment_clients import prepare_workspace
-
     root, engagement, _ = context
     spaced = root.with_name("Acme private workspace")
     root.rename(spaced)
@@ -217,7 +210,6 @@ def test_generated_router_shell_commands_preserve_helper_path_with_spaces(contex
 @pytest.mark.parametrize("arguments", [["investigate Acme"], ["--prompt", "investigate Acme"],
                                        ["--prompt=investigate Acme"]])
 def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch, arguments):
-    from vigil_cli import assessment_clients as clients
     root, engagement, receipts = context
     original = clients.shutil.which
     monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
@@ -245,9 +237,6 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
 
 
 def test_native_helper_executes_docker_from_resolved_directory(context, monkeypatch):
-    import os
-    import subprocess
-    from vigil_cli import assessment_clients as clients
     root, engagement, _ = context
     docker = root / "Acme container tools/docker"
     docker.parent.mkdir()

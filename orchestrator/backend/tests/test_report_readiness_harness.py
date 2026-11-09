@@ -20,6 +20,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
 from app import db as db_module
 from tests.proof_fixtures import completed_confirm_check, post_artifact_backed_source_observation
 
@@ -66,6 +67,12 @@ def _write_engagement(engagements_dir: Path) -> Path:
         encoding="utf-8",
     )
     return eng
+
+
+@pytest.fixture
+def eng(isolate_settings):
+    """The engagement directory the readiness cases below report on."""
+    return _write_engagement(isolate_settings["engagements_dir"])
 
 
 def _reportable_finding(
@@ -165,8 +172,7 @@ def _readiness(client) -> dict:
     return response.json()
 
 
-def test_return_shape_backward_compatible(client, isolate_settings) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_return_shape_backward_compatible(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng)
 
@@ -177,8 +183,7 @@ def test_return_shape_backward_compatible(client, isolate_settings) -> None:
     assert body["ready"] is True, body
 
 
-def test_l1_1_unlinked_markdown_note_is_advisory_not_blocking(client, isolate_settings) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_l1_1_unlinked_markdown_note_is_advisory_not_blocking(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng)
 
@@ -196,8 +201,7 @@ def test_l1_1_unlinked_markdown_note_is_advisory_not_blocking(client, isolate_se
     assert body["ready"] is True, body
 
 
-def test_l1_8_stale_ready_handoff_is_advisory_not_blocking(client, isolate_settings) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_l1_8_stale_ready_handoff_is_advisory_not_blocking(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng)
 
@@ -233,8 +237,7 @@ def test_l1_8_stale_ready_handoff_is_advisory_not_blocking(client, isolate_setti
     assert body["ready"] is True, body
 
 
-def test_s21_web_draft_finding_is_advisory_with_slug(client, isolate_settings) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_s21_web_draft_finding_is_advisory_with_slug(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng, slug="HR-002", workflow_status="draft")
 
@@ -254,8 +257,7 @@ def test_s21_web_draft_finding_is_advisory_with_slug(client, isolate_settings) -
     assert body["ready"] is True, body
 
 
-def test_over_soften_guard_unverified_high_finding_still_blocks(client, isolate_settings) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_over_soften_guard_unverified_high_finding_still_blocks(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(
         client,
@@ -272,10 +274,7 @@ def test_over_soften_guard_unverified_high_finding_still_blocks(client, isolate_
     ), body
 
 
-def test_legacy_severity_rationale_does_not_fabricate_variance_approval(
-    client, isolate_settings
-) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_legacy_severity_rationale_does_not_fabricate_variance_approval(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(
         client,
@@ -314,10 +313,7 @@ def test_legacy_severity_rationale_does_not_fabricate_variance_approval(
     )
 
 
-def test_attributed_severity_variance_allows_report_readiness(
-    client, isolate_settings
-) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_attributed_severity_variance_allows_report_readiness(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(
         client,
@@ -348,10 +344,7 @@ def test_attributed_severity_variance_allows_report_readiness(
     assert "structured variance" in advisory["detail"]
 
 
-def test_same_status_reverification_repairs_legacy_severity_variance(
-    client, isolate_settings
-) -> None:
-    eng = _write_engagement(isolate_settings["engagements_dir"])
+def test_same_status_reverification_repairs_legacy_severity_variance(client, eng) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(
         client,
@@ -443,7 +436,7 @@ def test_same_status_reverification_repairs_legacy_severity_variance(
     )
 
 
-def test_chain_non_step_links_do_not_block_readiness(client, isolate_settings) -> None:
+def test_chain_non_step_links_do_not_block_readiness(client, eng) -> None:
     """I-14a: evidence/access/credential chain links (relation != 'step') are
     legitimate supporting context, not path steps, so they must NOT be flagged
     as unlinked finding-steps. Only genuine 'step' links must resolve to a
@@ -452,7 +445,6 @@ def test_chain_non_step_links_do_not_block_readiness(client, isolate_settings) -
     Regression: the chain-link readiness query had no relation filter and
     flagged every non-finding link as ``chain_step_not_finding_linked``.
     """
-    eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng, slug="HR-010")
 
@@ -480,11 +472,10 @@ def test_chain_non_step_links_do_not_block_readiness(client, isolate_settings) -
     assert missing_step == [], missing_step
 
 
-def test_chain_non_finding_step_still_blocks_readiness(client, isolate_settings) -> None:
+def test_chain_non_finding_step_still_blocks_readiness(client, eng) -> None:
     """Over-scope guard for I-14a: a genuine 'step' link whose entity is not a
     finding MUST still block. The fix narrows the rule to steps, it does not
     disable it."""
-    eng = _write_engagement(isolate_settings["engagements_dir"])
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _reportable_finding(client, eng, slug="HR-011")
 

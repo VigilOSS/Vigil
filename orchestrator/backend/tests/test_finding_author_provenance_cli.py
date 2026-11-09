@@ -20,8 +20,6 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
@@ -29,9 +27,6 @@ from tests.test_engagements_api import write_engagement
 from tests.proof_fixtures import completed_confirm_check
 from app import db as db_module
 
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 record_finding = importlib.import_module("assess.commands.record_finding")
 finding_ids = importlib.import_module("assess.lib.findings")
@@ -70,6 +65,16 @@ def _seed(client, isolate_settings) -> None:
             json={"agent_id": agent_id, "agent_role": role, "task": role},
         )
         assert response.status_code == 201, response.text
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _cli_payload(slug: str, *, dispatch_agent_id: str) -> dict:
@@ -302,8 +307,7 @@ def test_record_finding_cli_update_uses_but_does_not_rebind_stored_author(
     assert seen == [f"dispatches/{AUTHOR_DISPATCH}"]
 
 
-def test_cli_recorded_finding_reaches_confirmed(client, isolate_settings) -> None:
-    _seed(client, isolate_settings)
+def test_cli_recorded_finding_reaches_confirmed(client, seeded_engagement) -> None:
     recorded = client.post(
         f"{BASE}/findings", json=_cli_payload("VA-010", dispatch_agent_id=AUTHOR_DISPATCH)
     )
@@ -324,10 +328,7 @@ def test_cli_recorded_finding_reaches_confirmed(client, isolate_settings) -> Non
     assert confirmed.json()["finding"]["verification_status"] == "confirmed"
 
 
-def test_new_finding_without_the_carrier_is_refused(
-    client, isolate_settings
-) -> None:
-    _seed(client, isolate_settings)
+def test_new_finding_without_the_carrier_is_refused(client, seeded_engagement) -> None:
     recorded = client.post(
         f"{BASE}/findings", json=_cli_payload("VA-011", dispatch_agent_id="")
     )
@@ -335,10 +336,7 @@ def test_new_finding_without_the_carrier_is_refused(
     assert "provenance.agent_id" in recorded.json()["detail"]
 
 
-def test_new_finding_with_unknown_author_dispatch_is_refused(
-    client, isolate_settings
-) -> None:
-    _seed(client, isolate_settings)
+def test_new_finding_with_unknown_author_dispatch_is_refused(client, seeded_engagement) -> None:
     recorded = client.post(
         f"{BASE}/findings",
         json=_cli_payload("VA-014", dispatch_agent_id="NOT-A-DISPATCH"),
@@ -348,9 +346,8 @@ def test_new_finding_with_unknown_author_dispatch_is_refused(
 
 
 def test_rerecord_omits_author_and_preserves_original_immutable_binding(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     first = client.post(
         f"{BASE}/findings",
         json=_cli_payload("VA-015", dispatch_agent_id=AUTHOR_DISPATCH),
@@ -369,9 +366,8 @@ def test_rerecord_omits_author_and_preserves_original_immutable_binding(
 
 
 def test_authorless_finding_can_be_bound_once_with_an_audited_repair(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     _seed_legacy_finding("VA-012")
     recorded = client.get(f"{BASE}/findings/VA-012")
     assert recorded.status_code == 200, recorded.text
@@ -414,9 +410,8 @@ def test_authorless_finding_can_be_bound_once_with_an_audited_repair(
 
 
 def test_unresolvable_legacy_author_can_be_replaced_once_with_full_audit(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     old_agent_id = "MISSING-HISTORICAL-DISPATCH"
     _seed_legacy_finding("VA-016", agent_id=old_agent_id)
     recorded = client.get(f"{BASE}/findings/VA-016")
@@ -449,8 +444,7 @@ def test_unresolvable_legacy_author_can_be_replaced_once_with_full_audit(
     assert metadata["repair_kind"] == "unresolvable_author"
 
 
-def test_author_repair_rejects_an_unknown_dispatch(client, isolate_settings) -> None:
-    _seed(client, isolate_settings)
+def test_author_repair_rejects_an_unknown_dispatch(client, seeded_engagement) -> None:
     _seed_legacy_finding("VA-013")
     recorded = client.get(f"{BASE}/findings/VA-013")
     assert recorded.status_code == 200, recorded.text
@@ -472,9 +466,8 @@ def test_author_repair_rejects_an_unknown_dispatch(client, isolate_settings) -> 
     (("actor", "VA-017"), ("reason", "VA-018")),
 )
 def test_author_repair_rejects_whitespace_only_audit_fields(
-    client, isolate_settings, field: str, slug: str
+    client, field: str, slug: str, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     _seed_legacy_finding(slug)
     recorded = client.get(f"{BASE}/findings/{slug}")
     payload = {
@@ -495,11 +488,10 @@ def test_author_repair_rejects_whitespace_only_audit_fields(
 
 @pytest.mark.parametrize(("slug", "agent_id"), [("VA-021", VERIFIER_DISPATCH)])
 def test_terminal_verification_still_requires_an_independent_resolvable_author(
-    client, isolate_settings, slug, agent_id
+    client, slug, agent_id, seeded_engagement
 ) -> None:
     """Admitting the key must not weaken what the key is checked against."""
 
-    _seed(client, isolate_settings)
     recorded = client.post(
         f"{BASE}/findings", json=_cli_payload(slug, dispatch_agent_id=agent_id)
     )

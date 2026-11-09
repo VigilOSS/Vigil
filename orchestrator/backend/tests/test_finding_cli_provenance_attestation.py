@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,8 +32,6 @@ _REPO_GENERATION = 4
 def _load_assess_module(module_filename: str, module_name: str):
     repo_root = Path(__file__).resolve().parents[3]
     scripts_root = repo_root / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     module_path = scripts_root / "assess" / "commands" / module_filename
     spec = importlib.util.spec_from_file_location(module_name, module_path)
     assert spec is not None and spec.loader is not None

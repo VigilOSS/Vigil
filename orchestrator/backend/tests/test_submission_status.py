@@ -26,21 +26,12 @@ import argparse
 import importlib
 import json
 import sqlite3
-import sys
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
-# The assess CLI package lives under agent/scripts; put it on the path so the
-# CLI-boundary half of the dual enforcement is testable from the backend suite
-# (mirrors test_record_finding.py).
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
-
-from app import db as db_module  # noqa: E402
-from app.services.state_manager._common import (  # noqa: E402
+from app import db as db_module
+from app.services.state_manager._common import (
     SUBMISSION_STATUSES as BACKEND_SUBMISSION_STATUSES,
 )
 
@@ -90,6 +81,16 @@ def _seed(client, isolate_settings) -> None:
         },
     )
     assert dispatch.status_code == 201, dispatch.text
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _base() -> str:
@@ -142,8 +143,7 @@ def test_cli_and_backend_vocabulary_stay_in_sync():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_default_submission_status_is_none(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_default_submission_status_is_none(client, seeded_engagement):
     created = client.post(f"{_base()}/findings", json=_finding_payload())
     assert created.status_code in (200, 201), created.text
     assert created.json()["finding"]["submission_status"] == "none"
@@ -153,8 +153,7 @@ def test_default_submission_status_is_none(client, isolate_settings):
     assert fetched.json()["submission_status"] == "none"
 
 
-def test_read_projection_includes_submission_status_in_list(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_read_projection_includes_submission_status_in_list(client, seeded_engagement):
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     listing = client.get(f"{_base()}/findings")
@@ -167,8 +166,7 @@ def test_read_projection_includes_submission_status_in_list(client, isolate_sett
 
 
 @pytest.mark.parametrize("state", NON_DEFAULT_STATES)
-def test_patch_sets_each_valid_submission_state(client, isolate_settings, state):
-    _seed(client, isolate_settings)
+def test_patch_sets_each_valid_submission_state(client, state, seeded_engagement):
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     resp = client.patch(f"{_base()}/findings/VA-001", json=_submission_patch(state))
@@ -181,8 +179,7 @@ def test_patch_sets_each_valid_submission_state(client, isolate_settings, state)
     assert fetched.json()["submission_ref"] == f"REP-{state}-1"
 
 
-def test_create_accepts_explicit_submission_status(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_create_accepts_explicit_submission_status(client, seeded_engagement):
     created = client.post(
         f"{_base()}/findings",
         json=_finding_payload(
@@ -200,11 +197,8 @@ def test_create_accepts_explicit_submission_status(client, isolate_settings):
     assert finding["submission_url"] == "https://bugcrowd.com/submissions/BC-9911"
 
 
-def test_a_net_new_record_straight_into_submitted_needs_a_reference(
-    client, isolate_settings
-):
+def test_a_net_new_record_straight_into_submitted_needs_a_reference(client, seeded_engagement):
     """The gate is on the RESULTING status, so the create path is not a hole in it."""
-    _seed(client, isolate_settings)
 
     refused = client.post(
         f"{_base()}/findings", json=_finding_payload(submission_status="submitted")
@@ -214,9 +208,8 @@ def test_a_net_new_record_straight_into_submitted_needs_a_reference(
     assert "submission_ref" in refused.json()["detail"]
 
 
-def test_moving_onto_a_submitted_status_requires_a_reference(client, isolate_settings):
+def test_moving_onto_a_submitted_status_requires_a_reference(client, seeded_engagement):
     """The identity requirement fires on the write that MOVES the axis."""
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     refused = client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "submitted"})
@@ -225,10 +218,9 @@ def test_moving_onto_a_submitted_status_requires_a_reference(client, isolate_set
     assert client.get(f"{_base()}/findings/VA-001").json()["submission_status"] == "none"
 
 
-def test_a_legacy_row_with_a_status_but_no_ref_stays_writable(client, isolate_settings):
+def test_a_legacy_row_with_a_status_but_no_ref_stays_writable(client, seeded_engagement):
     """A hard requirement on ANY patch would freeze exactly the rows that need
     backfilling. The gate is a NEW TRANSITION gate, not a row invariant."""
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
     with db_module.get_connection() as connection:
         connection.execute(
@@ -248,8 +240,7 @@ def test_a_legacy_row_with_a_status_but_no_ref_stays_writable(client, isolate_se
     assert client.get(f"{_base()}/findings/VA-001").json()["submission_ref"] == "H1-4242"
 
 
-def test_withdrawn_requires_a_reason(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_withdrawn_requires_a_reason(client, seeded_engagement):
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     refused = client.patch(
@@ -266,10 +257,9 @@ def test_withdrawn_requires_a_reason(client, isolate_settings):
     assert accepted.json()["finding"]["submission_status"] == "withdrawn"
 
 
-def test_withdrawn_while_still_reported_is_a_readiness_blocker(client, isolate_settings):
+def test_withdrawn_while_still_reported_is_a_readiness_blocker(client, seeded_engagement):
     """A withdrawal moves the SUBMISSION axis; readiness reads the WORKFLOW axis.
     Rather than silently re-band the finding, make the contradiction loud."""
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
     assert (
         client.patch(
@@ -289,14 +279,12 @@ def test_withdrawn_while_still_reported_is_a_readiness_blocker(client, isolate_s
     assert "finding_withdrawn_but_reported" in kinds
 
 
-def test_api_rejects_invalid_submission_status_on_create(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_api_rejects_invalid_submission_status_on_create(client, seeded_engagement):
     resp = client.post(f"{_base()}/findings", json=_finding_payload(submission_status="bogus"))
     assert resp.status_code == 422, resp.text
 
 
-def test_api_rejects_invalid_submission_status_on_patch(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_api_rejects_invalid_submission_status_on_patch(client, seeded_engagement):
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     resp = client.patch(f"{_base()}/findings/VA-001", json={"submission_status": "totally-made-up"})
@@ -310,8 +298,7 @@ def test_api_rejects_invalid_submission_status_on_patch(client, isolate_settings
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_setting_submission_status_does_not_change_workflow_status(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_setting_submission_status_does_not_change_workflow_status(client, seeded_engagement):
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     resp = client.patch(f"{_base()}/findings/VA-001", json=_submission_patch("accepted"))
@@ -322,8 +309,7 @@ def test_setting_submission_status_does_not_change_workflow_status(client, isola
     assert finding["workflow_status"] == "active"
 
 
-def test_setting_workflow_status_does_not_change_submission_status(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_setting_workflow_status_does_not_change_submission_status(client, seeded_engagement):
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
 
     # First park the finding at submission_status=accepted.
@@ -343,11 +329,10 @@ def test_setting_workflow_status_does_not_change_submission_status(client, isola
     assert finding["submission_status"] == "accepted"
 
 
-def test_re_record_upsert_preserves_submission_status(client, isolate_settings):
+def test_re_record_upsert_preserves_submission_status(client, seeded_engagement):
     """record-finding is an upsert; re-recording a matched finding without a
     submission_status must NOT silently reset it (orthogonality on the create
     path, mirroring how evidence_type is preserved across checkpoints)."""
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_finding_payload()).status_code in (200, 201)
     assert (
         client.patch(f"{_base()}/findings/VA-001", json=_submission_patch("accepted")).status_code

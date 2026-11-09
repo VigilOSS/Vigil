@@ -15,6 +15,7 @@ import pytest
 
 from assess.commands import block_technique
 from assess.lib.client import AssessError
+from _fake_client import StubClient
 
 
 class _Cfg:
@@ -24,7 +25,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Records POSTs and serves them back on GET as the backend upsert would."""
 
     def __init__(self) -> None:
@@ -51,15 +52,6 @@ class _FakeClient:
             return list(self.history)
         assert endpoint == "blocked-techniques"
         return list(self._rows_by_key.values())
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 def _parser():

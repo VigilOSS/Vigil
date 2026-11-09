@@ -1,10 +1,15 @@
-from pathlib import Path
 import json
 import shutil
+from pathlib import Path
 
 import pytest
 
+from assess.lib.code_snapshot import RootedSourceTree, SnapshotBuilder, validate_snapshot
 from vigil_cli import config, workspace
+from vigil_cli import engagements
+from vigil_cli.engagements import engagement_source_state
+from vigil_cli.install_manifest import install_source_content_sha256
+from vigil_cli.paths import add_assess_import_path
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -69,10 +74,7 @@ def test_runtime_sizing_rejects_invalid_workspace_cpu_value(tmp_path, monkeypatc
 
 
 def test_retained_sealed_source_remains_resumable_without_original(tmp_path):
-    from vigil_cli.paths import add_assess_import_path
-    from vigil_cli.engagements import engagement_source_state
     add_assess_import_path(tmp_path)
-    from assess.lib.code_snapshot import SnapshotBuilder, RootedSourceTree
     original = tmp_path / 'original'
     original.mkdir()
     (original / 'acme.py').write_text('print("Acme")\n')
@@ -89,7 +91,6 @@ def test_retained_sealed_source_remains_resumable_without_original(tmp_path):
 
 
 def test_invalid_retained_snapshot_does_not_make_source_resumable(tmp_path):
-    from vigil_cli.engagements import engagement_source_state
     snapshot = tmp_path / 'tools/analysis-state/code-snapshots/acme' / ('a' * 64)
     (snapshot / 'source').mkdir(parents=True)
     (snapshot / 'manifest.json').write_text('{}')
@@ -115,10 +116,7 @@ def test_source_state_does_not_reread_sealed_snapshot_bytes(tmp_path):
     only a per-file content check can see the difference. The point-of-use
     attestation must still refuse it; the projection must not pay for it.
     """
-    from vigil_cli.paths import add_assess_import_path
-    from vigil_cli.engagements import engagement_source_state
     add_assess_import_path(tmp_path)
-    from assess.lib.code_snapshot import RootedSourceTree, SnapshotBuilder, validate_snapshot
     original = tmp_path / 'original'
     original.mkdir()
     (original / 'acme.py').write_text('print("Acme")\n')
@@ -159,10 +157,7 @@ def test_source_state_still_refuses_a_manifest_that_does_not_match_itself(tmp_pa
     copy is intact at the moment they are deciding whether to resume or re-ingest,
     which is the one wrong answer this read must never give.
     """
-    from vigil_cli.paths import add_assess_import_path
-    from vigil_cli.engagements import engagement_source_state
     add_assess_import_path(tmp_path)
-    from assess.lib.code_snapshot import RootedSourceTree, SnapshotBuilder, validate_snapshot
     original = tmp_path / 'original'
     original.mkdir()
     (original / 'acme.py').write_text('print("Acme")\n')
@@ -204,8 +199,6 @@ def test_install_digest_does_not_descend_into_engagement_source_or_snapshots(tmp
     adoption). The legacy ``agent/engagements`` location is preserved rather
     than copied, and this pins that the digest stops there.
     """
-    from vigil_cli.install_manifest import install_source_content_sha256
-
     source = tmp_path / 'source'
     (source / 'src').mkdir(parents=True)
     (source / 'src' / 'feature.py').write_text('enabled = True\n', encoding='utf-8')
@@ -233,7 +226,6 @@ def test_runtime_shared_memory_rejects_invalid_size(tmp_path, monkeypatch, value
 
 
 def test_moved_workspace_start_rebinds_generated_launcher_without_rewriting_operator_env(tmp_path, monkeypatch):
-    from vigil_cli import engagements
     original = tmp_path / 'original'
     workspace.initialize_workspace(original, REPO)
     monkeypatch.setattr(engagements, '_install_client_kind', lambda *a: 'both')

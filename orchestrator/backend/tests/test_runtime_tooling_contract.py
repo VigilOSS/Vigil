@@ -171,6 +171,21 @@ def _dockerfile_has_install_line(text: str, binary: str) -> bool:
     return False
 
 
+def _missing_install_lines(binaries: tuple[str, ...]) -> list[str]:
+    """Binaries with no install line across the runtime-full build inputs.
+
+    The Dockerfile and its external-tool installer are read as one text because
+    a tool may be installed from either, and the per-skill contracts below each
+    assert over their own binary set with their own failure explanation.
+    """
+    text = (
+        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
+        + "\n"
+        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
+    )
+    return [name for name in binaries if not _dockerfile_has_install_line(text, name)]
+
+
 def test_runtime_full_dockerfile_declares_subdomain_enum_binaries():
     """Static check: every binary the subdomain-enum preflight expects is installed via an
     actual install line in the runtime-full Dockerfile. This is the always-on guard that
@@ -181,14 +196,7 @@ def test_runtime_full_dockerfile_declares_subdomain_enum_binaries():
     line (`go install`, `apt-get install`, `pipx install`, `pip install`, or `cp /root/go/bin/<name>`)
     so a comment that mentions the binary cannot satisfy the contract.
     """
-    text = (
-        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
-        + "\n"
-        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
-    )
-    missing = [
-        name for name in SUBDOMAIN_ENUM_BINARIES if not _dockerfile_has_install_line(text, name)
-    ]
+    missing = _missing_install_lines(SUBDOMAIN_ENUM_BINARIES)
     assert not missing, (
         "agent/docker/runtime-full/Dockerfile is missing install lines for: "
         f"{missing}. The subdomain-enumeration SKILL preflights these binaries; if any are "
@@ -219,14 +227,7 @@ def test_runtime_full_dockerfile_declares_port_scan_binaries():
     XML XPath assertion. Without it, the per-host port-data presence gate falls back to text-only
     output and silently misses host-timeout failures.
     """
-    text = (
-        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
-        + "\n"
-        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
-    )
-    missing = [
-        name for name in PORT_SCAN_BINARIES if not _dockerfile_has_install_line(text, name)
-    ]
+    missing = _missing_install_lines(PORT_SCAN_BINARIES)
     assert not missing, (
         "agent/docker/runtime-full/Dockerfile is missing install lines for: "
         f"{missing}. port-scanning/SKILL.md `Per-host port-data presence assertion` "
@@ -239,14 +240,7 @@ def test_runtime_full_dockerfile_declares_jwt_testing_binaries():
     secret cracking, and key confusion. If the clone/wrapper is dropped, that skill's
     jwt_tool invocations die on first use and the skill silently degrades to the
     native alg:none + hashcat first-pass set only."""
-    text = (
-        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
-        + "\n"
-        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
-    )
-    missing = [
-        name for name in JWT_TESTING_BINARIES if not _dockerfile_has_install_line(text, name)
-    ]
+    missing = _missing_install_lines(JWT_TESTING_BINARIES)
     assert not missing, (
         "agent/docker/runtime-full/Dockerfile is missing install lines for JWT testing tools: "
         f"{missing}. jwt-testing/SKILL.md references these for claim editing / secret cracking."
@@ -256,14 +250,7 @@ def test_runtime_full_dockerfile_declares_jwt_testing_binaries():
 def test_runtime_full_dockerfile_declares_android_apk_binaries():
     """Android APK review needs acquisition, decompilation, signing metadata,
     and optional device access tools available before dispatch starts."""
-    text = (
-        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
-        + "\n"
-        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
-    )
-    missing = [
-        name for name in ANDROID_APK_BINARIES if not _dockerfile_has_install_line(text, name)
-    ]
+    missing = _missing_install_lines(ANDROID_APK_BINARIES)
     assert not missing, (
         "agent/docker/runtime-full/Dockerfile is missing install lines for Android APK tools: "
         f"{missing}. Android artifact engagements preflight these binaries before analysis."
@@ -326,14 +313,7 @@ def test_runtime_full_dockerfile_declares_cloud_exposure_tools():
     bucket/blob enumeration and S3-claimability screening with cloud_enum + s3scanner.
     If either is dropped from the runtime image, that skill's Step 0 discovery pass
     and Step 2 takeover-screening invocations die on first use."""
-    text = (
-        RUNTIME_FULL_DOCKERFILE.read_text(encoding="utf-8")
-        + "\n"
-        + RUNTIME_FULL_EXTERNAL_INSTALLER.read_text(encoding="utf-8")
-    )
-    missing = [
-        name for name in CLOUD_EXPOSURE_TOOLS if not _dockerfile_has_install_line(text, name)
-    ]
+    missing = _missing_install_lines(CLOUD_EXPOSURE_TOOLS)
     assert not missing, (
         "agent/docker/runtime-full/Dockerfile is missing install lines for cloud-exposure tools: "
         f"{missing}. The cloud-exposure SKILL preflights these for bucket enumeration and "

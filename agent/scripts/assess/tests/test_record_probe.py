@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import record_probe
 from assess.lib.client import AssessError
@@ -26,7 +27,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self, findings: dict | None = None) -> None:
         self.posts: list[tuple[str, dict]] = []
         self.gets: list[str] = []
@@ -44,16 +45,6 @@ class _FakeClient:
 
             raise AssessError(f"HTTP 404: finding {slug} not found")
         return self._findings[slug]
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
-
 
 def _parser():
     parser = argparse.ArgumentParser()
@@ -117,12 +108,8 @@ def test_record_probe_rejects_response_without_canonical_probe_id(
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         [
-            "record-probe",
-            "--result-status", "attempted",
-            "--attack-family", "ssrf",
-            "--target-host", "app.example.com",
-            "--input-slot", "query:url",
-            "--auth-context", "anonymous",
+            "record-probe", "--result-status", "attempted", "--attack-family", "ssrf", "--target-host",
+            "app.example.com", "--input-slot", "query:url", "--auth-context", "anonymous",
         ],
         str(tmp_path),
     )
@@ -202,11 +189,10 @@ def test_record_probe_noncovering_needs_no_evidence(tmp_path, monkeypatch, capsy
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         [
-            "record-probe", "--result-status", status, "--attack-family", "SSRF",
-            "--lens", "tenant-boundary", "--target-host", "api.example.com",
-            "--target-path", "/fetch", "--target-port", "443",
-            "--input-slot", "query:url", "--auth-context", "member",
-            "--notes", "WAF 403 on internal hosts",
+            "record-probe", "--result-status", status, "--attack-family", "SSRF", "--lens",
+            "tenant-boundary", "--target-host", "api.example.com", "--target-path", "/fetch",
+            "--target-port", "443", "--input-slot", "query:url", "--auth-context", "member", "--notes",
+            "WAF 403 on internal hosts",
         ],
         str(tmp_path),
     )
@@ -313,11 +299,10 @@ def test_record_probe_resolves_finding_slug(tmp_path, monkeypatch, capsys):
     _install(monkeypatch, tmp_path, fake)
     args = _parse(
         [
-            "record-probe", "--result-status", "signal", "--attack-family", "ssrf",
-            "--target-host", "api.example.com", "--input-slot", "query:url",
-            "--auth-context", "anonymous", "--evidence-ref", "scans/ssrf.txt",
-            "--outcome-assertion", "OOB callback nonce matched the request",
-            "--finding", "VA-047",
+            "record-probe", "--result-status", "signal", "--attack-family", "ssrf", "--target-host",
+            "api.example.com", "--input-slot", "query:url", "--auth-context", "anonymous",
+            "--evidence-ref", "scans/ssrf.txt", "--outcome-assertion",
+            "OOB callback nonce matched the request", "--finding", "VA-047",
         ],
         str(tmp_path),
     )

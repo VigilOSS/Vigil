@@ -319,10 +319,13 @@ def oob_status(
                 check=False,
             ).stdout
             frpc_rejections = _frpc_unregistered_proxy_lines(frpc_log)
-        client_health = [
-            {"name": name, "registered": bool(client_payload_host(name, container_name, runner=runner, oob_domain=domain))}
-            for name in running
-        ]
+        def _registration_sweep() -> list[dict[str, object]]:
+            return [
+                {"name": name, "registered": bool(client_payload_host(name, container_name, runner=runner, oob_domain=domain))}
+                for name in running
+            ]
+
+        client_health = _registration_sweep()
         domain_resolves = _oob_domain_resolves(container_name, domain, runner=runner)
         edge_route_healthy = _oob_http_route_healthy(
             container_name, domain, runner=runner
@@ -332,35 +335,16 @@ def oob_status(
             item["registered"] for item in client_health
         )
         if registration_failed or not domain_resolves or not edge_route_healthy:
+            # One retry, with only the checks that failed re-probed: a check that
+            # already succeeded must not pay for the daemon round trip again.
             probe_attempts = 2
             time.sleep(OOB_STATUS_RETRY_DELAY_SECONDS)
             if registration_failed:
-                client_health = [
-                    {
-                        "name": name,
-                        "registered": bool(
-                            client_payload_host(
-                                name,
-                                container_name,
-                                runner=runner,
-                                oob_domain=domain,
-                            )
-                        ),
-                    }
-                    for name in running
-                ]
+                client_health = _registration_sweep()
             if not domain_resolves:
-                domain_resolves = _oob_domain_resolves(
-                    container_name,
-                    domain,
-                    runner=runner,
-                )
+                domain_resolves = _oob_domain_resolves(container_name, domain, runner=runner)
             if not edge_route_healthy:
-                edge_route_healthy = _oob_http_route_healthy(
-                    container_name,
-                    domain,
-                    runner=runner,
-                )
+                edge_route_healthy = _oob_http_route_healthy(container_name, domain, runner=runner)
     else:
         client_health = [{"name": name, "registered": None} for name in running]
         domain_resolves = None

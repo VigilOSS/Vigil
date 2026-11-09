@@ -18,18 +18,8 @@ import argparse
 import importlib
 import json
 import sqlite3
-import sys
-from pathlib import Path
 
 import pytest
-
-# The assess CLI package lives under agent/scripts; put it on the path so the
-# CLI-boundary half of the dual enforcement is testable from the backend suite
-# (mirrors test_kali_cli.py).
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
-
 
 ENGAGEMENT_KEY = "2026-06-30-120000-clobber"
 AUTHOR_DISPATCH = "HUNT-CLOBBER-1"
@@ -58,6 +48,16 @@ def _seed(client, isolate_settings) -> None:
         },
     )
     assert dispatch.status_code == 201, dispatch.text
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _base() -> str:
@@ -100,8 +100,7 @@ def _finding(
     return payload
 
 
-def test_net_new_collision_against_reported_is_refused(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_net_new_collision_against_reported_is_refused(client, seeded_engagement):
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="reported")
     ).status_code == 201
@@ -122,8 +121,7 @@ def test_net_new_collision_against_reported_is_refused(client, isolate_settings)
     assert next(r for r in rows if r["slug"] == "VA-001")["summary"] == "IDOR"
 
 
-def test_net_new_collision_against_active_is_refused(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_net_new_collision_against_active_is_refused(client, seeded_engagement):
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="active")
     ).status_code == 201
@@ -136,9 +134,8 @@ def test_net_new_collision_against_active_is_refused(client, isolate_settings):
 
 
 def test_evidence_artifact_backfill_does_not_attach_to_concurrently_replaced_evidence(
-    client, isolate_settings, monkeypatch
+    client, isolate_settings, monkeypatch, seeded_engagement
 ):
-    _seed(client, isolate_settings)
     payload = _finding("VA-099")
     payload["evidence_ref"] = ""
     created = client.post(f"{_base()}/findings", json=payload)
@@ -185,10 +182,9 @@ def test_evidence_artifact_backfill_does_not_attach_to_concurrently_replaced_evi
     assert finding["row_version"] == initial_version + 2
 
 
-def test_no_slug_collision_against_reported_is_refused(client, isolate_settings):
+def test_no_slug_collision_against_reported_is_refused(client, seeded_engagement):
     # The CLI always allocates a slug, but a raw POST can omit it — the backend
     # must still refuse the silent clobber (the CLI-bypass backstop).
-    _seed(client, isolate_settings)
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="reported")
     ).status_code == 201
@@ -199,9 +195,8 @@ def test_no_slug_collision_against_reported_is_refused(client, isolate_settings)
     assert resp.status_code == 409, resp.text
 
 
-def test_explicit_slug_updates_reported_finding(client, isolate_settings):
+def test_explicit_slug_updates_reported_finding(client, seeded_engagement):
     # Naming the exact existing slug == the --update opt-in: intentional modify.
-    _seed(client, isolate_settings)
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="reported")
     ).status_code == 201
@@ -215,8 +210,7 @@ def test_explicit_slug_updates_reported_finding(client, isolate_settings):
     assert resp.json()["finding"]["summary"] == "updated replayable proof"
 
 
-def test_genuinely_new_tuple_records_normally(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_genuinely_new_tuple_records_normally(client, seeded_engagement):
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="reported")
     ).status_code == 201
@@ -239,10 +233,9 @@ def test_genuinely_new_tuple_records_normally(client, isolate_settings):
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-001", "VA-002"}
 
 
-def test_collision_against_draft_upserts_not_refused(client, isolate_settings):
+def test_collision_against_draft_upserts_not_refused(client, seeded_engagement):
     # A draft finding is not load-bearing; the historical dedup upsert still
     # applies so checkpoints accrete onto it.
-    _seed(client, isolate_settings)
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="draft")
     ).status_code == 201
@@ -256,11 +249,10 @@ def test_collision_against_draft_upserts_not_refused(client, isolate_settings):
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-001"}
 
 
-def test_false_positive_rerecord_is_not_clobber_guarded(client, isolate_settings):
+def test_false_positive_rerecord_is_not_clobber_guarded(client, seeded_engagement):
     # Regression: a suppressed (false_positive) finding stays semantically
     # sticky — a rediscovery folds onto it and is NOT refused (fp is outside the
     # reported/active guard set).
-    _seed(client, isolate_settings)
     assert client.post(
         f"{_base()}/findings",
         json=_finding(
@@ -300,11 +292,10 @@ def _killed_ssrf(slug, **over) -> dict:
     )
 
 
-def test_d4_remint_of_killed_at_shared_endpoint_is_refused(client, isolate_settings):
+def test_d4_remint_of_killed_at_shared_endpoint_is_refused(client, seeded_engagement):
     # (a) A net-new record sharing the SAME technique + normalized endpoint with a
     # killed finding, but a DIFFERENT canonical_location/root_cause_key/title (so it
     # misses the exact dedup tuple), is refused with an actionable message.
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
 
     resp = client.post(
@@ -329,9 +320,8 @@ def test_d4_remint_of_killed_at_shared_endpoint_is_refused(client, isolate_setti
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050"}
 
 
-def test_d4_remint_allowed_with_override_flag(client, isolate_settings):
+def test_d4_remint_allowed_with_override_flag(client, seeded_engagement):
     # (b) --allow-remint / allow_remint=true forces an intentional distinct re-mint.
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
 
     payload = _finding(
@@ -349,10 +339,9 @@ def test_d4_remint_allowed_with_override_flag(client, isolate_settings):
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050", "VA-051"}
 
 
-def test_d4_different_class_at_same_endpoint_is_not_refused(client, isolate_settings):
+def test_d4_different_class_at_same_endpoint_is_not_refused(client, seeded_engagement):
     # (c) Same endpoint, GENUINELY different vuln class (defect_family) => the
     # technique gate misses => not refused. A shared endpoint alone is not enough.
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
 
     resp = client.post(
@@ -370,10 +359,9 @@ def test_d4_different_class_at_same_endpoint_is_not_refused(client, isolate_sett
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050", "VA-051"}
 
 
-def test_d4_same_technique_different_endpoint_is_not_refused(client, isolate_settings):
+def test_d4_same_technique_different_endpoint_is_not_refused(client, seeded_engagement):
     # Boundary: same technique but a genuinely different endpoint => no shared
     # signal => allowed (the guard is technique AND endpoint, not technique alone).
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
 
     resp = client.post(
@@ -391,10 +379,9 @@ def test_d4_same_technique_different_endpoint_is_not_refused(client, isolate_set
     assert {r["slug"] for r in client.get(f"{_base()}/findings").json()} == {"VA-050", "VA-051"}
 
 
-def test_d4_active_reported_clobber_guard_unchanged(client, isolate_settings):
+def test_d4_active_reported_clobber_guard_unchanged(client, seeded_engagement):
     # (d) The D4 killed-guard is additive: the reported/active clobber guard on the
     # EXACT tuple still fires (and D4 does not double-refuse or change its message).
-    _seed(client, isolate_settings)
     assert client.post(
         f"{_base()}/findings", json=_finding("VA-001", workflow_status="reported")
     ).status_code == 201
@@ -406,10 +393,9 @@ def test_d4_active_reported_clobber_guard_unchanged(client, isolate_settings):
     assert "Refusing to clobber" in resp.json()["detail"]
 
 
-def test_d4_reset_finding_reopens_killed(client, isolate_settings):
+def test_d4_reset_finding_reopens_killed(client, seeded_engagement):
     # (e) reset-finding (PATCH reopen) still works on a killed finding, and after
     # reopening it is no longer false_positive so the D4 guard no longer keys on it.
-    _seed(client, isolate_settings)
     assert client.post(f"{_base()}/findings", json=_killed_ssrf("VA-050")).status_code == 201
 
     resp = client.patch(

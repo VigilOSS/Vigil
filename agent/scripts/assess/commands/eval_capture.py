@@ -36,6 +36,7 @@ if _SCRIPTS_ROOT not in sys.path:
     sys.path.insert(0, _SCRIPTS_ROOT)
 
 from assess.lib.client import AssessmentClient  # noqa: E402
+from assess.lib.code_record_input import fail  # noqa: E402
 from assess.lib.config import load_config  # noqa: E402
 from assess.lib.schema_validation import collect_validation_errors, load_schema  # noqa: E402
 
@@ -413,8 +414,7 @@ def run(args) -> None:
         rows = client.get("findings")
 
     if not isinstance(rows, list):
-        print("eval-capture: unexpected response from backend (expected a findings list)", file=sys.stderr)
-        sys.exit(1)
+        fail("eval-capture", "unexpected response from backend (expected a findings list)")
 
     records = _capture_records(rows, args)
 
@@ -427,20 +427,17 @@ def run(args) -> None:
 
     if args.check:
         if not out_path.is_file():
-            print(
-                f"eval-capture --check: golden fixture not found at {out_path}; "
+            fail(
+                "eval-capture --check",
+                f"golden fixture not found at {out_path}; "
                 "run eval-capture without --check to create it first.",
-                file=sys.stderr,
             )
-            sys.exit(1)
         try:
             golden = json.loads(out_path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            print(f"eval-capture --check: golden fixture {out_path} is not valid JSON: {exc}", file=sys.stderr)
-            sys.exit(1)
+            fail("eval-capture --check", f"golden fixture {out_path} is not valid JSON: {exc}")
         if not isinstance(golden, list):
-            print(f"eval-capture --check: golden fixture {out_path} must be a JSON array", file=sys.stderr)
-            sys.exit(1)
+            fail("eval-capture --check", f"golden fixture {out_path} must be a JSON array")
         regressions = _diff_against_golden(records, golden)
         if regressions:
             print(

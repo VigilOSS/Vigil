@@ -21,14 +21,23 @@ vi.mock("../lib/api", () => ({
   searchIntel: vi.fn(),
 }));
 
+/**
+ * Answer `listIntel` per entity type: a type named in `items` reads its rows,
+ * every other type reads none. The ledger shows the server's own `total`
+ * rather than the loaded window, so a test that asserts a count passes it.
+ */
+function mockIntel(items: Record<string, unknown[]>, total: Record<string, number> = {}) {
+  vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
+    entity_type: entityType,
+    total: total[entityType] ?? 0,
+    items: (items[entityType] ?? []) as never[],
+  }));
+}
+
 beforeEach(() => {
   window.sessionStorage.clear();
   window.history.replaceState({}, "", "#/engagements");
-  vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-    entity_type: entityType,
-    total: 0,
-    items: [],
-  }));
+  mockIntel({});
   vi.mocked(listIntelCredentials).mockResolvedValue([]);
   vi.mocked(getIntelReadiness).mockResolvedValue({
     applicable: true,
@@ -83,7 +92,7 @@ describe("IntelTab deep links", () => {
   });
 
   it("contains intel-palette focus and restores its opener on Escape", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 1 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }] as never[] : [] }));
+    mockIntel({ cve: [{ id: 44, cve_id: "CVE-2026-4444" }] }, { cve: 1 });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} /></ToastProvider>);
     await screen.findAllByText("CVE-2026-4444");
     const opener = screen.getByRole("button", { name: /Jump to…/ });
@@ -104,7 +113,7 @@ describe("IntelTab deep links", () => {
     expect(document.body.classList.contains("detail-modal-open")).toBe(false);
   });
   it("opens the arrow-selected intel record with its exact canonical identity", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 2 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] as never[] : [] }));
+    mockIntel({ cve: [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] }, { cve: 2 });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 2 } }} /></ToastProvider>);
     await screen.findAllByText("CVE-2026-4444");
     fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
@@ -117,7 +126,7 @@ describe("IntelTab deep links", () => {
     expect(window.location.hash).toContain("intel_id=45");
   });
   it("opens the palette over an open record and keeps its route", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 2 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] as never[] : [] }));
+    mockIntel({ cve: [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] }, { cve: 2 });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 2 } }} /></ToastProvider>);
     await screen.findAllByText("CVE-2026-4444");
     fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
@@ -142,7 +151,7 @@ describe("IntelTab deep links", () => {
     expect(window.location.hash).toContain("intel_id=45");
   });
   it("closes the palette when history restores an authoritative intel selection", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 1 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }] as never[] : [] }));
+    mockIntel({ cve: [{ id: 44, cve_id: "CVE-2026-4444" }] }, { cve: 1 });
     const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} /></ToastProvider>);
     await screen.findAllByText("CVE-2026-4444");
     fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
@@ -169,20 +178,14 @@ describe("IntelTab deep links", () => {
     expect(screen.queryByRole("region", { name: "Intel record" })).toBeNull();
   });
   it("does not move the record while a detail control handles a native key", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({ entity_type: entityType, total: entityType === "cve" ? 2 : 0, items: entityType === "cve" ? [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] as never[] : [] }));
+    mockIntel({ cve: [{ id: 44, cve_id: "CVE-2026-4444" }, { id: 45, cve_id: "CVE-2026-5555" }] }, { cve: 2 });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 2 } }} initialIntelType="cve" initialIntelId={44} /></ToastProvider>);
     await screen.findByRole("region", { name: "Intel record" });
     fireEvent.keyDown(screen.getByRole("button", { name: "Back to results" }), { key: "j" });
     expect(screen.getByRole("heading", { level: 2, name: "CVE-2026-4444" })).toBeTruthy();
   });
   it("opens a recorded linked finding without inferring provenance from the intel text", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: entityType === "cve" ? 1 : 0,
-      items: entityType === "cve"
-        ? [{ id: 44, cve_id: "CVE-2026-4444", linked_finding_slug: "VA-012" } as never]
-        : [],
-    }));
+    mockIntel({ cve: [{ id: 44, cve_id: "CVE-2026-4444", linked_finding_slug: "VA-012" } as never] }, { cve: 1 });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: { cves: 1 } }} initialIntelType="cve" initialIntelId={44} /></ToastProvider>);
     await screen.findByRole("region", { name: "Intel record" });
     fireEvent.click(screen.getByRole("button", { name: /Links & tags/i }));
@@ -193,13 +196,7 @@ describe("IntelTab deep links", () => {
   it("opens the exact typed record after its entity cache loads", async () => {
     const hashChange = vi.fn();
     window.addEventListener("hashchange", hashChange);
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: entityType === "note" ? 1 : 0,
-      items: entityType === "note"
-        ? [{ id: 42, title: "OAuth boundary research", body_markdown: "Research body" } as never]
-        : [],
-    }));
+    mockIntel({ note: [{ id: 42, title: "OAuth boundary research", body_markdown: "Research body" } as never] }, { note: 1 });
     vi.mocked(listIntelCredentials).mockResolvedValue([]);
 
     const view = render(
@@ -284,11 +281,7 @@ describe("IntelTab record view", () => {
     { id: 3, cve_id: "CVE-2026-0003", tags: ["gateway"] },
   ];
   beforeEach(() => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: (entityType === "cve" ? cves : entityType === "note" ? [{ id: 9, title: "Reference note" }] : []) as never[],
-    }));
+    mockIntel({ cve: cves, note: [{ id: 9, title: "Reference note" }] });
   });
 
   it("walks the filtered results with previous and next, and Back returns to them intact", async () => {
@@ -406,16 +399,12 @@ describe("IntelTab record view", () => {
   });
 
   it("links a recorded web address and shows any other scheme as text", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: (entityType === "social_profile"
-        ? [
-            { id: 7, platform: "web", handle: "acme", url: "https://social.example/acme" },
-            { id: 8, platform: "web", handle: "acme-script", url: "javascript:alert(1)" },
-          ]
-        : []) as never[],
-    }));
+    mockIntel({
+      social_profile: [
+        { id: 7, platform: "web", handle: "acme", url: "https://social.example/acme" },
+        { id: 8, platform: "web", handle: "acme-script", url: "javascript:alert(1)" },
+      ],
+    });
     const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="social_profile" initialIntelId={7} initialDrawerTab="references" /></ToastProvider>);
     const record = await screen.findByRole("region", { name: "Intel record" });
     expect((await within(record).findByRole("link", { name: /social\.example\/acme/ })).getAttribute("href")).toBe("https://social.example/acme");
@@ -448,28 +437,24 @@ describe("IntelTab record view", () => {
 
 describe("IntelTab active work", () => {
   it("treats note lead_status as first-class status and prioritizes active leads", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: entityType === "note" ? 2 : 0,
-      items: entityType === "note"
-        ? ([
-            {
-              id: 1,
-              title: "Reference history",
-              body_markdown: "Keep this visible",
-              updated_at: "2026-09-21T13:00:00Z",
-              lead_status: null,
-            },
-            {
-              id: 2,
-              title: "Lead: authorization bypass",
-              body_markdown: "Test tenant boundary",
-              updated_at: "2026-09-20T13:00:00Z",
-              lead_status: "in_progress",
-            },
-          ] as never[])
-        : [],
-    }));
+    mockIntel({
+      note: [
+        {
+          id: 1,
+          title: "Reference history",
+          body_markdown: "Keep this visible",
+          updated_at: "2026-09-21T13:00:00Z",
+          lead_status: null,
+        },
+        {
+          id: 2,
+          title: "Lead: authorization bypass",
+          body_markdown: "Test tenant boundary",
+          updated_at: "2026-09-20T13:00:00Z",
+          lead_status: "in_progress",
+        },
+      ],
+    }, { note: 2 });
 
     render(
       <ToastProvider>
@@ -493,13 +478,7 @@ describe("IntelTab active work", () => {
   });
 
   it("loads the advisory readiness summary and uses active leads as a record entry", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: entityType === "note" ? 1 : 0,
-      items: entityType === "note"
-        ? [{ id: 9, title: "Lead: SSRF", lead_status: "open" } as never]
-        : [],
-    }));
+    mockIntel({ note: [{ id: 9, title: "Lead: SSRF", lead_status: "open" } as never] }, { note: 1 });
     vi.mocked(getIntelReadiness).mockResolvedValue({
       applicable: true,
       engagement_type: "red",
@@ -591,11 +570,7 @@ describe("IntelTab page and filters", () => {
     const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} refreshVersion={0} /></ToastProvider>);
     await screen.findByText("No intel recorded yet.");
     const reads = vi.mocked(listIntel).mock.calls.length;
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: entityType === "note" ? 1 : 0,
-      items: entityType === "note" ? [{ id: 5, title: "Fresh lead", lead_status: "open" } as never] : [],
-    }));
+    mockIntel({ note: [{ id: 5, title: "Fresh lead", lead_status: "open" } as never] }, { note: 1 });
     view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} refreshVersion={1} /></ToastProvider>);
     expect(await screen.findByRole("button", { name: /Fresh lead/ })).toBeTruthy();
     expect(vi.mocked(listIntel).mock.calls.length).toBeGreaterThan(reads);
@@ -603,17 +578,13 @@ describe("IntelTab page and filters", () => {
   });
 
   it("shows exactly the readiness open leads from the Active work count", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: entityType === "note"
-        ? [
-            { id: 1, title: "Live lead", lead_status: "open" },
-            { id: 2, title: "Replaced lead", lead_status: "open", superseded_by_id: 1 },
-            { id: 3, title: "Reference", lead_status: null },
-          ] as never[]
-        : [],
-    }));
+    mockIntel({
+      note: [
+        { id: 1, title: "Live lead", lead_status: "open" },
+        { id: 2, title: "Replaced lead", lead_status: "open", superseded_by_id: 1 },
+        { id: 3, title: "Reference", lead_status: null },
+      ],
+    });
     vi.mocked(getIntelReadiness).mockResolvedValue({
       applicable: true,
       engagement_type: "red",
@@ -631,15 +602,10 @@ describe("IntelTab page and filters", () => {
   });
 
   it("groups statuses by what they describe and never cuts off sources", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: (entityType === "note"
-        ? Array.from({ length: 10 }, (_, index) => ({ id: index + 1, title: `Lead ${index + 1}`, lead_status: "open", source_name: `source-${index + 1}` }))
-        : entityType === "tech_component"
-          ? [{ id: 20, component: "nginx", confidence: "high", source_name: "source-1" }]
-          : []) as never[],
-    }));
+    mockIntel({
+      note: Array.from({ length: 10 }, (_, index) => ({ id: index + 1, title: `Lead ${index + 1}`, lead_status: "open", source_name: `source-${index + 1}` })),
+      tech_component: [{ id: 20, component: "nginx", confidence: "high", source_name: "source-1" }],
+    });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     const leads = await screen.findByRole("group", { name: "Lead status" });
     expect(within(leads).getByRole("button", { name: /^Open\s*10/ })).toBeTruthy();
@@ -652,22 +618,14 @@ describe("IntelTab page and filters", () => {
   });
 
   it("lists each tag once", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: entityType === "note" ? [{ id: 1, title: "Architecture map", source_agent: "code-architect", tags: ["code-architect", "auth"] } as never] : [],
-    }));
+    mockIntel({ note: [{ id: 1, title: "Architecture map", source_agent: "code-architect", tags: ["code-architect", "auth"] } as never] });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     const row = await screen.findByRole("row", { name: /Architecture map/ });
     expect(within(row).getAllByText("code-architect")).toHaveLength(1);
   });
 
   it("tells an empty engagement apart from filters that match nothing", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: entityType === "note" ? [{ id: 1, title: "Only note" } as never] : [],
-    }));
+    mockIntel({ note: [{ id: 1, title: "Only note" } as never] });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     await screen.findByRole("button", { name: /Only note/ });
     fireEvent.change(screen.getByRole("searchbox", { name: "Search intel" }), { target: { value: "zzz-no-match" } });
@@ -707,9 +665,7 @@ describe("IntelTab page and filters", () => {
   });
 
   it("follows j and k across result pages", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType, total: 0, items: entityType === "note" ? notes(45) as never[] : [],
-    }));
+    mockIntel({ note: notes(45) });
     // Note 40 is the last row of the first page; Back returns to it there.
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="note" initialIntelId={40} /></ToastProvider>);
     const record = await screen.findByRole("region", { name: "Intel record" });
@@ -722,9 +678,7 @@ describe("IntelTab page and filters", () => {
   });
 
   it("returns from a stepped record to that record's row", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType, total: 0, items: entityType === "note" ? notes(3) as never[] : [],
-    }));
+    mockIntel({ note: notes(3) });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     fireEvent.click(await screen.findByRole("button", { name: /Note 01/ }));
     const record = await screen.findByRole("region", { name: "Intel record" });
@@ -735,9 +689,7 @@ describe("IntelTab page and filters", () => {
   });
 
   it("lays the list out as a table of records with sortable column headers", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType, total: 0, items: entityType === "note" ? [{ id: 1, title: "Bravo", tags: ["edge"] }] as never[] : [],
-    }));
+    mockIntel({ note: [{ id: 1, title: "Bravo", tags: ["edge"] }] });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     const table = screen.getByRole("table", { name: "Intel records" });
     expect(within(table).getAllByRole("columnheader").map((header) => header.textContent)).toEqual(["Type", "Title / subtitle", "Location", "Tags", "Status"]);
@@ -750,17 +702,13 @@ describe("IntelTab page and filters", () => {
   });
 
   it("offers open leads as the Needs attention scope and keeps the view across visits", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: entityType === "note"
-        ? [
-            { id: 1, title: "Live lead", lead_status: "open" },
-            { id: 2, title: "Replaced lead", lead_status: "open", superseded_by_id: 1 },
-            { id: 3, title: "Reference", lead_status: null },
-          ] as never[]
-        : [],
-    }));
+    mockIntel({
+      note: [
+        { id: 1, title: "Live lead", lead_status: "open" },
+        { id: 2, title: "Replaced lead", lead_status: "open", superseded_by_id: 1 },
+        { id: 3, title: "Reference", lead_status: null },
+      ],
+    });
     const first = render(<ToastProvider><IntelTab engagementKey="scope-demo" summary={{ counts: {} }} /></ToastProvider>);
     const all = await screen.findByRole("button", { name: /^All\s*3/ });
     expect(all.getAttribute("aria-pressed")).toBe("true");
@@ -776,13 +724,7 @@ describe("IntelTab page and filters", () => {
   });
 
   it("sorts by status with the most urgent first and records without a status last", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType,
-      total: 0,
-      items: entityType === "note"
-        ? [{ id: 1, title: "Settled lead", lead_status: "resolved" }, { id: 2, title: "Plain note" }, { id: 3, title: "Fresh lead", lead_status: "open" }] as never[]
-        : [],
-    }));
+    mockIntel({ note: [{ id: 1, title: "Settled lead", lead_status: "resolved" }, { id: 2, title: "Plain note" }, { id: 3, title: "Fresh lead", lead_status: "open" }] });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     await screen.findByRole("button", { name: "Plain note" });
     fireEvent.click(screen.getByRole("button", { name: /^Status/ }));
@@ -796,9 +738,7 @@ describe("IntelTab page and filters", () => {
   });
 
   it("sorts by a column header and says so", async () => {
-    vi.mocked(listIntel).mockImplementation(async (_key, entityType) => ({
-      entity_type: entityType, total: 0, items: entityType === "note" ? [{ id: 1, title: "Bravo" }, { id: 2, title: "Alpha" }] as never[] : [],
-    }));
+    mockIntel({ note: [{ id: 1, title: "Bravo" }, { id: 2, title: "Alpha" }] });
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
     await screen.findByRole("button", { name: /Bravo/ });
     fireEvent.click(screen.getByRole("button", { name: /^Title/ }));

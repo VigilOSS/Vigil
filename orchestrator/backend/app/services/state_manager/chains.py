@@ -183,10 +183,14 @@ def create_attack_chain_link(
             provenance=provenance,
         )
 
-def list_attack_chains(engagement_id: int) -> list[dict[str, Any]]:
+def _list_engagement_rows(engagement_id: int, table: str) -> list[dict[str, Any]]:
+    """Every row of one engagement-scoped entity table, newest update first."""
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_attack_chains WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+        return _fetch_all(connection, f"SELECT * FROM {table} WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+
+def list_attack_chains(engagement_id: int) -> list[dict[str, Any]]:
+    return _list_engagement_rows(engagement_id, "assessment_attack_chains")
 
 def list_attack_chain_links(engagement_id: int) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
@@ -642,9 +646,7 @@ def record_credential_test(
     return dict(row)
 
 def list_credential_tests(engagement_id: int) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_credential_tests WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+    return _list_engagement_rows(engagement_id, "assessment_credential_tests")
 
 def record_access_record(
     engagement_id: int,
@@ -682,9 +684,7 @@ def record_access_record(
         )
 
 def list_access_records(engagement_id: int) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_access_records WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+    return _list_engagement_rows(engagement_id, "assessment_access_records")
 
 def record_pivot(
     engagement_id: int,
@@ -720,9 +720,7 @@ def record_pivot(
         )
 
 def list_pivots(engagement_id: int) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_pivots WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+    return _list_engagement_rows(engagement_id, "assessment_pivots")
 
 def record_tunnel(
     engagement_id: int,
@@ -758,9 +756,7 @@ def record_tunnel(
         )
 
 def list_tunnels(engagement_id: int) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_tunnels WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+    return _list_engagement_rows(engagement_id, "assessment_tunnels")
 
 def record_blocked_technique(
     engagement_id: int,
@@ -837,9 +833,7 @@ def record_blocked_technique(
         return record
 
 def list_blocked_techniques(engagement_id: int) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
-    with _common.get_connection() as connection:
-        return _fetch_all(connection, "SELECT * FROM assessment_blocked_techniques WHERE engagement_id = ? ORDER BY updated_at DESC, id DESC", (engagement.id,))
+    return _list_engagement_rows(engagement_id, "assessment_blocked_techniques")
 
 
 def list_blocked_technique_history(

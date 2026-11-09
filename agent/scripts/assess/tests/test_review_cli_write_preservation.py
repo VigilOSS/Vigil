@@ -5,6 +5,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_classify
 from assess.commands.dispatch import agent as dispatch_agent
@@ -24,12 +25,9 @@ def test_invalid_direct_classification_id_reports_the_existing_id_contract(
         base_url="http://example.com", engagement_key="acme"
     ))
 
-    class Client:
+    class Client(StubClient):
         def __enter__(self):
             pytest.fail("invalid classifications must not open a write client")
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(code_classify, "AssessmentClient", lambda *_args: Client())
 
@@ -58,13 +56,7 @@ def test_duplicate_classifications_across_batches_write_nothing(
     path.write_text(json.dumps(payload), encoding="utf-8")
     posts = []
 
-    class Client:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class Client(StubClient):
         def post(self, _endpoint, payload, **_options):
             posts.append(payload)
             count = len(payload["classifications"])
@@ -118,7 +110,7 @@ def test_a_failed_dispatch_scope_read_does_not_replace_scope(monkeypatch, capsys
 def test_dispatch_scope_addition_can_retry_after_a_failed_read(monkeypatch, capsys):
     stored = {"agent_id": "acme-reviewer", "finding_slugs": ["VA-001"]}
 
-    class Client:
+    class Client(StubClient):
         unavailable = True
 
         def get_dispatch(self, _agent_id):
@@ -129,9 +121,6 @@ def test_dispatch_scope_addition_can_retry_after_a_failed_read(monkeypatch, caps
         def update_dispatch(self, _agent_id, patch):
             stored.update(patch)
             return dict(stored)
-
-        def close(self):
-            pass
 
     client = Client()
     monkeypatch.setattr(dispatch_agent, "_client_for", lambda _args: (client, None))

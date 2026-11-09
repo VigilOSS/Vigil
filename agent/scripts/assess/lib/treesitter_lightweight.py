@@ -8,7 +8,7 @@ import shlex
 from pathlib import Path
 from typing import Any
 
-from assess.lib.treesitter_common import _empty_func, _snippet
+from assess.lib.treesitter_common import _empty_func, _entry_point, _snippet
 
 _DOCKER_INSTR_RE = re.compile(r"^\s*([A-Z]+)\s+(.*)$")
 _DOCKER_SECRET_NAMES = re.compile(r"\b(TOKEN|SECRET|PASSWORD|PASSWD|API[_-]?KEY|PRIVATE[_-]?KEY|ACCESS[_-]?KEY|AUTH)\b", re.IGNORECASE)
@@ -66,12 +66,7 @@ def _extract_dockerfile(
                 })
 
         if instr in {"CMD", "ENTRYPOINT"}:
-            entry_points.append({
-                "name": instr,
-                "line": block_start,
-                "kind": "container_" + instr.lower(),
-                "annotation": "",
-            })
+            entry_points.append(_entry_point(instr, block_start, "container_" + instr.lower()))
             exports.append({"name": instr, "kind": "container_entrypoint", "line": block_start})
 
         if instr == "EXPOSE":
@@ -189,6 +184,25 @@ def _extract_dockerfile(
 _SHELL_FUNC_PAREN_RE = re.compile(r"^\s*([A-Za-z_][\w-]*)\s*\(\s*\)\s*\{?")
 _SHELL_FUNC_KW_RE = re.compile(r"^\s*function\s+([A-Za-z_][\w-]*)\s*(?:\(\s*\))?\s*\{?")
 _SHELL_SOURCE_RE = re.compile(r"^\s*(?:\.|source)\s+(\S+)")
+# What one shell line shows on its own, scanned in this order. The
+# `hardcoded_credential` rule reads the captured variable name, so it stays
+# out of the table.
+_SHELL_SINK_PATTERNS: tuple[dict[str, Any], ...] = (
+    {"kind": "shell_eval", "pattern": re.compile(r"\beval\b"),
+     "vuln_classes": ["injection"]},
+    {"kind": "remote_pipe_to_shell",
+     "pattern": re.compile(r"\b(curl|wget)\b[^|;]*\|\s*(sh|bash|zsh)\b"),
+     "vuln_classes": ["supply-chain", "injection"]},
+    {"kind": "permissive_chmod",
+     "pattern": re.compile(r"\bchmod\s+(?:-R\s+)?[0-7]*777\b"),
+     "vuln_classes": ["privilege-escalation"]},
+    {"kind": "sudo", "pattern": re.compile(r"\bsudo\b"),
+     "vuln_classes": ["privilege-escalation"]},
+    # Command substitution with $1/$@/$* (user-tainted) inside backticks or $(...)
+    {"kind": "tainted_command_substitution",
+     "pattern": re.compile(r"(?:`[^`]*\$[1-9@*][^`]*`|\$\([^)]*\$[1-9@*][^)]*\))"),
+     "vuln_classes": ["injection"]},
+)
 
 
 def _extract_shell(
@@ -239,58 +253,16 @@ def _extract_shell(
         line_no = idx + 1
         # shebang as entry point
         if idx == 0 and stripped.startswith("#!"):
-            entry_points.append({
-                "name": "script",
-                "line": 1,
-                "kind": "shell_script",
-                "annotation": stripped,
-            })
+            entry_points.append(_entry_point("script", 1, "shell_script", stripped))
         # source / dot includes
         m = _SHELL_SOURCE_RE.match(line)
         if m:
             imports.append(m.group(1))
         # Security sinks
-        if re.search(r"\beval\b", line):
-            sinks.append({
-                "kind": "shell_eval",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\b(curl|wget)\b[^|;]*\|\s*(sh|bash|zsh)\b", line):
-            sinks.append({
-                "kind": "remote_pipe_to_shell",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["supply-chain", "injection"],
-            })
-        if re.search(r"\bchmod\s+(?:-R\s+)?[0-7]*777\b", line):
-            sinks.append({
-                "kind": "permissive_chmod",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["privilege-escalation"],
-            })
-        if re.search(r"\bsudo\b", line):
-            sinks.append({
-                "kind": "sudo",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["privilege-escalation"],
-            })
-        # Command substitution with $1/$@/$* (user-tainted) inside backticks or $(...)
-        if re.search(r"(?:`[^`]*\$[1-9@*][^`]*`|\$\([^)]*\$[1-9@*][^)]*\))", line):
-            sinks.append({
-                "kind": "tainted_command_substitution",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
+        sinks.extend(_table_sinks(
+            _SHELL_SINK_PATTERNS,
+            scan_line=line, evidence_line=line, line_no=line_no, funcs=funcs,
+        ))
         # Hardcoded credentials: VAR=... where VAR name looks secret-y and value is a quoted literal
         cred_m = re.match(r"\s*(?:export\s+)?([A-Za-z_][\w]*)\s*=\s*['\"]([^'\"]+)['\"]", line)
         if cred_m and _DOCKER_SECRET_NAMES.search(cred_m.group(1)):
@@ -303,6 +275,46 @@ def _extract_shell(
             })
 
     return funcs, entry_points, sinks, exports, imports
+
+
+def _line_starts(lines: list[str]) -> list[int]:
+    """Where each line of `"\n".join(lines)` begins, plus one past its end."""
+    starts = [0]
+    for line in lines:
+        starts.append(starts[-1] + len(line) + 1)
+    return starts
+
+
+def _table_sinks(
+    rows: tuple[dict[str, Any], ...],
+    *,
+    scan_line: str,
+    evidence_line: str,
+    line_no: int,
+    funcs: list[dict[str, Any]] | None = None,
+) -> list[dict[str, Any]]:
+    """The rows of a line-sink table whose pattern matches *scan_line*.
+
+    Each row carries its own compiled pattern, vuln classes and attribution:
+    either a fixed `function` label, or the callable *line_no* falls in, which
+    is resolved only for a row that matched. The snippet always comes from
+    *evidence_line*, so a scan over comment-masked text still reports the
+    source line verbatim.
+    """
+    return [
+        {
+            "kind": row["kind"],
+            "line": line_no,
+            "function": (
+                row["function"] if "function" in row
+                else _find_enclosing_func(funcs or [], line_no)
+            ),
+            "snippet": _snippet(evidence_line),
+            "vuln_classes": list(row["vuln_classes"]),
+        }
+        for row in rows
+        if row["pattern"].search(scan_line)
+    ]
 
 
 def _find_enclosing_func(funcs: list[dict[str, Any]], line_no: int) -> str:
@@ -478,12 +490,9 @@ def _extract_powershell(
         # A `param()` block outside every function is the script's own argument
         # surface: whatever invokes the script reaches the body through it.
         if enclosing == "<script>" and _PS_PARAM_BLOCK_RE.match(stripped):
-            entry_points.append({
-                "name": "<script>",
-                "line": line_no,
-                "kind": "script_parameters",
-                "annotation": _snippet(line),
-            })
+            entry_points.append(_entry_point(
+                "<script>", line_no, "script_parameters", _snippet(line),
+            ))
 
         imported = _PS_IMPORT_RE.match(line) or _PS_DOT_SOURCE_RE.match(line)
         if imported is not None:
@@ -520,6 +529,18 @@ _LUA_LOCAL_FUNC_ASSIGN_RE = re.compile(
     r"^\s*local\s+([A-Za-z_]\w*)\s*=\s*function\s*\(([^)]*)\)"
 )
 _LUA_DYNAMIC_REDIS_COMMAND_RE = r"\bredis\.(?:call|pcall)\s*\(\s*(?!['\"])[^,\s)]+"
+# What one lua line shows on its own, scanned in this order. The `require`
+# import scan reads its captured target, so it stays out of the table.
+_LUA_SINK_PATTERNS: tuple[dict[str, Any], ...] = (
+    {"kind": "redis_dynamic_command",
+     "pattern": re.compile(_LUA_DYNAMIC_REDIS_COMMAND_RE), "vuln_classes": ["injection"]},
+    {"kind": "dynamic_code_load",
+     "pattern": re.compile(r"\b(loadstring|load)\s*\("), "vuln_classes": ["injection"]},
+    {"kind": "os_execute",
+     "pattern": re.compile(r"\bos\.execute\s*\("), "vuln_classes": ["injection"]},
+    {"kind": "io_popen",
+     "pattern": re.compile(r"\bio\.popen\s*\("), "vuln_classes": ["injection"]},
+)
 
 
 def _extract_lua(
@@ -557,16 +578,7 @@ def _extract_lua(
                 end_line = j + 1
                 break
             end_line = j + 1
-        funcs.append({
-            "name": name,
-            "qualified_name": name,
-            "line_start": start_line,
-            "line_end": end_line,
-            "params": params,
-            "modifiers": [],
-            "annotations": [],
-            "is_entry_point": False,
-        })
+        funcs.append(_empty_func(name, start_line, end_line, params=params))
         if not is_local:
             exports.append({"name": name, "kind": "lua_function", "line": start_line})
 
@@ -578,38 +590,10 @@ def _extract_lua(
         req_m = re.search(r"""require\s*\(?\s*['"]([^'"]+)['"]""", line)
         if req_m:
             imports.append(req_m.group(1))
-        if re.search(_LUA_DYNAMIC_REDIS_COMMAND_RE, line):
-            sinks.append({
-                "kind": "redis_dynamic_command",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\b(loadstring|load)\s*\(", line):
-            sinks.append({
-                "kind": "dynamic_code_load",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bos\.execute\s*\(", line):
-            sinks.append({
-                "kind": "os_execute",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
-        if re.search(r"\bio\.popen\s*\(", line):
-            sinks.append({
-                "kind": "io_popen",
-                "line": line_no,
-                "function": _find_enclosing_func(funcs, line_no),
-                "snippet": _snippet(line),
-                "vuln_classes": ["injection"],
-            })
+        sinks.extend(_table_sinks(
+            _LUA_SINK_PATTERNS,
+            scan_line=line, evidence_line=line, line_no=line_no, funcs=funcs,
+        ))
 
     return funcs, entry_points, sinks, exports, imports
 
@@ -636,6 +620,19 @@ _TEMPLATE_BRACE_STEP = r"(?:[^{}]|\{(?!\{)|\}(?!\}))"
 _TEMPLATE_BRACE_STEP_LINE = r"(?:[^{}\r\n]|\{(?!\{)|\}(?!\}))"
 _HTML_MUSTACHE_RE = re.compile(r"\{\{" + _TEMPLATE_BRACE_STEP_LINE + r"+\}\}")
 _HTML_ASP_RE = re.compile(r"<%[^%]+%>")
+# What one markup line shows on its own, scanned in this order over the
+# comment-masked copy. The `<html>` rows are document structure and the
+# `<template>` rows are interpolation, so each row carries its own label.
+_HTML_LINE_SINK_PATTERNS: tuple[dict[str, Any], ...] = (
+    {"kind": "inline_event_handler", "pattern": _HTML_INLINE_HANDLER_RE,
+     "function": "<html>", "vuln_classes": ["xss"]},
+    {"kind": "javascript_url", "pattern": _HTML_JS_URL_RE,
+     "function": "<html>", "vuln_classes": ["xss"]},
+    {"kind": "template_interpolation", "pattern": _HTML_MUSTACHE_RE,
+     "function": "<template>", "vuln_classes": ["xss", "ssti"]},
+    {"kind": "asp_interpolation", "pattern": _HTML_ASP_RE,
+     "function": "<template>", "vuln_classes": ["xss", "ssti"]},
+)
 # Code a lightweight reader holds but does not read: the script an inline
 # `<script>` element runs, unless its type names a data block, and the PHP a
 # Blade template runs. Each markup language masks its own comments as its HTML
@@ -750,9 +747,7 @@ def _extract_html(
     if template_comments is not None:
         masked_lines = _mask_delimited_comments(masked_lines, *template_comments)
     text = "\n".join(masked_lines)
-    line_starts = [0]
-    for line in masked_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
+    line_starts = _line_starts(masked_lines)
 
     for match in _HTML_TAG_RE.finditer(text):
         tag = match.group("tag").lower()
@@ -768,12 +763,7 @@ def _extract_html(
         raw_line = source_lines[line_no - 1]
         if tag == "form":
             action = attrs.get("action", "")
-            entry_points.append({
-                "name": "form",
-                "line": line_no,
-                "kind": "html_form",
-                "annotation": action,
-            })
+            entry_points.append(_entry_point("form", line_no, "html_form", action))
             funcs.append(_empty_func(f"form:{action}", line_no, line_no))
         elif tag == "script" and (src := attrs.get("src")):
             imports.append(src)
@@ -806,39 +796,10 @@ def _extract_html(
             })
 
     for idx, (line, raw_line) in enumerate(zip(masked_lines, source_lines)):
-        line_no = idx + 1
-        if _HTML_INLINE_HANDLER_RE.search(line):
-            sinks.append({
-                "kind": "inline_event_handler",
-                "line": line_no,
-                "function": "<html>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss"],
-            })
-        if _HTML_JS_URL_RE.search(line):
-            sinks.append({
-                "kind": "javascript_url",
-                "line": line_no,
-                "function": "<html>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss"],
-            })
-        if _HTML_MUSTACHE_RE.search(line):
-            sinks.append({
-                "kind": "template_interpolation",
-                "line": line_no,
-                "function": "<template>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss", "ssti"],
-            })
-        if _HTML_ASP_RE.search(line):
-            sinks.append({
-                "kind": "asp_interpolation",
-                "line": line_no,
-                "function": "<template>",
-                "snippet": _snippet(raw_line),
-                "vuln_classes": ["xss", "ssti"],
-            })
+        sinks.extend(_table_sinks(
+            _HTML_LINE_SINK_PATTERNS,
+            scan_line=line, evidence_line=raw_line, line_no=idx + 1,
+        ))
 
     return funcs, entry_points, sinks, exports, imports
 
@@ -888,9 +849,7 @@ def _blade_echoes(source_lines: list[str]) -> list[dict[str, Any]]:
     cannot disagree about what a Blade echo is.
     """
     text = "\n".join(source_lines)
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
+    line_starts = _line_starts(source_lines)
 
     echoes: list[dict[str, Any]] = []
     for match in _BLADE_CONSTRUCT_RE.finditer(text):
@@ -944,9 +903,7 @@ def _extract_blade(
     sinks = [sink for sink in sinks if sink["kind"] != "template_interpolation"]
 
     text = "\n".join(_mask_delimited_comments(source_lines, "{{--", "--}}"))
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
+    line_starts = _line_starts(source_lines)
 
     def line_of(offset: int) -> int:
         return bisect.bisect_right(line_starts, offset)
@@ -1047,9 +1004,7 @@ def _extract_twig(
     sinks = [sink for sink in sinks if sink["kind"] != "template_interpolation"]
 
     text = "\n".join(source_lines)
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
+    line_starts = _line_starts(source_lines)
 
     def flag(kind: str, start: int, vuln_classes: list[str]) -> None:
         line = bisect.bisect_right(line_starts, start)
@@ -1086,6 +1041,17 @@ _CSS_URL_RE = re.compile(r"\burl\(\s*['\"]?([^'\"\)]+)", re.IGNORECASE)
 _CSS_EXPRESSION_RE = re.compile(r"\bexpression\s*\(", re.IGNORECASE)
 _CSS_BEHAVIOR_RE = re.compile(r"\bbehavior\s*:", re.IGNORECASE)
 _CSS_BINDING_RE = re.compile(r"-moz-binding\s*:", re.IGNORECASE)
+# What one stylesheet line shows on its own, scanned in this order over the
+# comment-masked copy. The `@import` scan reads its captured url, so it stays
+# out of the table.
+_CSS_SINK_PATTERNS: tuple[dict[str, Any], ...] = (
+    {"kind": "css_expression", "pattern": _CSS_EXPRESSION_RE,
+     "function": "<stylesheet>", "vuln_classes": ["xss"]},
+    {"kind": "css_behavior", "pattern": _CSS_BEHAVIOR_RE,
+     "function": "<stylesheet>", "vuln_classes": ["xss"]},
+    {"kind": "css_moz_binding", "pattern": _CSS_BINDING_RE,
+     "function": "<stylesheet>", "vuln_classes": ["xss"]},
+)
 
 
 def _extract_css(
@@ -1102,9 +1068,7 @@ def _extract_css(
         if line.lstrip().startswith("//"):
             masked_lines[idx] = " " * len(line)
     text = "\n".join(masked_lines)
-    line_starts = [0]
-    for line in masked_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
+    line_starts = _line_starts(masked_lines)
 
     for match in _CSS_IMPORT_RE.finditer(text):
         url = match.group(1)
@@ -1124,31 +1088,10 @@ def _extract_css(
             imports.append(ref)
 
     for idx, line in enumerate(masked_lines):
-        line_no = idx + 1
-        if _CSS_EXPRESSION_RE.search(line):
-            sinks.append({
-                "kind": "css_expression",
-                "line": line_no,
-                "function": "<stylesheet>",
-                "snippet": _snippet(source_lines[idx]),
-                "vuln_classes": ["xss"],
-            })
-        if _CSS_BEHAVIOR_RE.search(line):
-            sinks.append({
-                "kind": "css_behavior",
-                "line": line_no,
-                "function": "<stylesheet>",
-                "snippet": _snippet(source_lines[idx]),
-                "vuln_classes": ["xss"],
-            })
-        if _CSS_BINDING_RE.search(line):
-            sinks.append({
-                "kind": "css_moz_binding",
-                "line": line_no,
-                "function": "<stylesheet>",
-                "snippet": _snippet(source_lines[idx]),
-                "vuln_classes": ["xss"],
-            })
+        sinks.extend(_table_sinks(
+            _CSS_SINK_PATTERNS,
+            scan_line=line, evidence_line=source_lines[idx], line_no=idx + 1,
+        ))
 
     return funcs, entry_points, sinks, exports, imports
 
@@ -1572,9 +1515,7 @@ def _extract_freemarker(
     # resolve either the output context or the enclosing escape scope.
     text = "\n".join(source_lines)
     length = len(text)
-    line_starts = [0]
-    for line in source_lines:
-        line_starts.append(line_starts[-1] + len(line) + 1)
+    line_starts = _line_starts(source_lines)
 
     header_escaping = Path(file_path).suffix.lower() in _FREEMARKER_ESCAPING_EXTENSIONS
     escape_stack: list[dict[str, Any]] = []
@@ -1603,12 +1544,7 @@ def _extract_freemarker(
         func["params"] = frame["params"]
         func["is_entry_point"] = True
         funcs.append(func)
-        entry_points.append({
-            "name": frame["name"],
-            "line": frame["line"],
-            "kind": callable_kind,
-            "annotation": "",
-        })
+        entry_points.append(_entry_point(frame["name"], frame["line"], callable_kind))
         exports.append({
             "name": frame["name"], "kind": callable_kind, "line": frame["line"]
         })
@@ -1738,12 +1674,9 @@ def _extract_freemarker(
             values = dict(attributes)
             field = values.get("name", "")
             if field:
-                entry_points.append({
-                    "name": field,
-                    "line": line_of(start),
-                    "kind": "html_form_field",
-                    "annotation": values.get("type", ""),
-                })
+                entry_points.append(_entry_point(
+                    field, line_of(start), "html_form_field", values.get("type", ""),
+                ))
         return end
 
     index = 0

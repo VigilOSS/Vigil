@@ -28,6 +28,7 @@
 // in a code-split chunk and never bloat the main entry bundle.
 
 import { AllCommunityModule, ModuleRegistry } from "ag-grid-community";
+import type { CellKeyDownEvent, RowClickedEvent } from "ag-grid-community";
 
 // Legacy structural stylesheet. Our `.ag-theme-vigil` class supplies the
 // look via --ag-* vars; we do NOT import ag-theme-quartz.css because we
@@ -82,6 +83,18 @@ export const defaultColDef = {
   suppressHeaderMenuButton: true,
 } as const;
 
+// The <AgGridReact> prelude the dense list grids share: the legacy CSS-var
+// theme, the shared column defaults, the dense row metrics and the tooltip
+// delay the lists open with. Spread it first so a grid can still state its
+// own value after it.
+export const gridBaseProps = {
+  theme: GRID_THEME_PROP,
+  defaultColDef,
+  rowHeight: GRID_ROW_HEIGHT,
+  headerHeight: GRID_HEADER_HEIGHT,
+  tooltipShowDelay: 400,
+};
+
 /** Focus and return the AG Grid cell that invoked a row-level action. */
 export function focusGridInvoker(
   event: { target: EventTarget | null } | null | undefined,
@@ -91,4 +104,45 @@ export function focusGridInvoker(
   const cell = target.closest<HTMLElement>('[role="gridcell"]');
   cell?.focus();
   return cell;
+}
+
+/**
+ * The row-open wiring every list grid shares: a click, or Enter / Space on a
+ * cell, opens that row's record and focuses the invoking cell so the record
+ * can hand focus back to it. Text dragged across a row selects the text
+ * instead of opening the row.
+ *
+ * `clickIgnore` / `keyIgnore` are CSS selectors for the controls inside a row
+ * that handle their own activation (an in-row link or action button). They are
+ * separate because the grids guard different sets, and a grid that guards
+ * neither passes neither.
+ */
+export function rowOpenHandlers<T>(
+  open: (row: T, invoker: HTMLElement | null) => void,
+  options: { clickIgnore?: string; keyIgnore?: string } = {},
+): {
+  onRowClicked: (event: RowClickedEvent<T>) => void;
+  onCellKeyDown: (event: CellKeyDownEvent<T>) => void;
+} {
+  return {
+    onRowClicked: (event) => {
+      const selection = window.getSelection?.();
+      if (selection && selection.type === "Range" && selection.toString().length > 0) return;
+      if (options.clickIgnore) {
+        const target = event.event?.target as HTMLElement | undefined;
+        if (target?.closest(options.clickIgnore)) return;
+      }
+      if (event.data) open(event.data, focusGridInvoker(event.event));
+    },
+    onCellKeyDown: (event) => {
+      const keyboardEvent = event.event as KeyboardEvent;
+      if (options.keyIgnore) {
+        const target = keyboardEvent.target as HTMLElement | null;
+        if (target?.closest(options.keyIgnore)) return;
+      }
+      if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
+      keyboardEvent.preventDefault();
+      open(event.data, focusGridInvoker(keyboardEvent));
+    },
+  };
 }

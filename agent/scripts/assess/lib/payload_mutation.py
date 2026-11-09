@@ -204,6 +204,20 @@ def classify_value(value: str) -> str:
 # Mutation generators — one per intent
 # ---------------------------------------------------------------------------
 
+def _dedupe_variants(candidates: list[str], value: str) -> list[str]:
+    """Drop the original value and repeats, preserving candidate order.
+
+    The shared tail of the candidate-list intents (boundary / escalation /
+    format): a generator that produced the input back, or the same variant
+    twice, would spend a request proving nothing.
+    """
+    variants: list[str] = []
+    for c in candidates:
+        if c != value and c not in variants:
+            variants.append(c)
+    return variants
+
+
 def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
     """Neighboring values — adjacent IDs, swapped chars, near-zero variants."""
     variants: list[str] = []
@@ -268,8 +282,6 @@ def _mutate_neighbor(value: str, vtype: str, max_n: int) -> list[str]:
 
 def _mutate_boundary(value: str, vtype: str, max_n: int) -> list[str]:
     """Boundary values — zero, -1, very large, empty, max-length strings."""
-    variants: list[str] = []
-
     if vtype in ("sequential_id", "integer"):
         candidates = ["0", "-1", "1", "99999999", "2147483647", "-2147483648", "9999999999999"]
     elif vtype == "uuid":
@@ -296,18 +308,11 @@ def _mutate_boundary(value: str, vtype: str, max_n: int) -> list[str]:
         candidates = ["/", ".", "", "/etc/passwd", "/proc/self/environ"]
     else:
         candidates = ["", "0", "-1", "null"]
-
-    for c in candidates:
-        if c != value and c not in variants:
-            variants.append(c)
-
-    return variants[:max_n]
+    return _dedupe_variants(candidates, value)[:max_n]
 
 
 def _mutate_escalation(value: str, vtype: str, max_n: int) -> list[str]:
     """Escalation / privilege-hint values — admin IDs, role hints, path traversal."""
-    variants: list[str] = []
-
     if vtype in ("sequential_id", "integer"):
         candidates = ["1", "0", "2", "admin", "root", "-1", "99999999"]
     elif vtype == "uuid":
@@ -349,18 +354,11 @@ def _mutate_escalation(value: str, vtype: str, max_n: int) -> list[str]:
         candidates = [f"{header}.{payload_part}.", value.rsplit(".", 1)[0] + ".AAAA"]
     else:
         candidates = ["admin", "1", "root", "0"]
-
-    for c in candidates:
-        if c != value and c not in variants:
-            variants.append(c)
-
-    return variants[:max_n]
+    return _dedupe_variants(candidates, value)[:max_n]
 
 
 def _mutate_format(value: str, vtype: str, max_n: int) -> list[str]:
     """Type-confusion / format variants — int→string/array/null, json→malformed."""
-    variants: list[str] = []
-
     if vtype in ("sequential_id", "integer"):
         candidates = [
             f'"{value}"',           # int as string
@@ -415,12 +413,7 @@ def _mutate_format(value: str, vtype: str, max_n: int) -> list[str]:
         candidates = ["null", '""', "0", "[]", '{}']
     else:
         candidates = ["null", '""', "0", "[]", "{}"]
-
-    for c in candidates:
-        if c != value and c not in variants:
-            variants.append(c)
-
-    return variants[:max_n]
+    return _dedupe_variants(candidates, value)[:max_n]
 
 
 def _mutate_empty(value: str, vtype: str, max_n: int) -> list[str]:  # noqa: ARG001

@@ -12,6 +12,7 @@ import argparse
 import pytest
 
 from assess.commands import link_finding
+from _fake_client import StubClient
 class _Cfg:
     def __init__(self, engagement_dir: str) -> None:
         self.engagement_dir = engagement_dir
@@ -19,7 +20,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
         self.puts: list[tuple[str, dict]] = []
@@ -53,15 +54,6 @@ class _FakeClient:
 
     def get(self, endpoint: str) -> dict:
         return {"slug": endpoint.split("/")[1], "details": {}}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 def _parser():

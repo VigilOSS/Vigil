@@ -17,9 +17,6 @@ def _scripts_root() -> Path:
 
 
 def _load_cmd():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
     spec = importlib.util.spec_from_file_location(
         "fixture_identity_cmd_ut",
         _scripts_root() / "assess" / "commands" / "fixture_identity.py",
@@ -172,9 +169,6 @@ def test_fixture_cli_requires_manifest() -> None:
 
 
 def test_fixture_contract_is_registered() -> None:
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
     from assess.lib import contracts
 
     contract = contracts.get_contract("fixture")

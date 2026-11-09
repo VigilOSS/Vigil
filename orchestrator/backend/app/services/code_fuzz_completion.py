@@ -11,6 +11,7 @@ from fastapi import HTTPException, status
 
 from ..db import get_connection
 from .artifact_index import _normalize_relative_path, _open_registered_artifact
+from .code_analysis_support import require_current_source_binding
 from .code_security_policy import NATIVE_MEMORY_SAFETY_DEFECT_FAMILIES
 from .events import _engagement_or_404
 from .state_manager.findings import (
@@ -107,25 +108,6 @@ def _repo_row(connection, engagement_id: int, repo_id: int) -> dict[str, Any]:
             detail="published verified code repository not found",
         )
     return dict(row)
-
-
-def _require_current_identity(
-    repo: dict[str, Any],
-    *,
-    repo_generation: int,
-    source_manifest_digest: str,
-    label: str,
-) -> None:
-    if int(repo["active_generation"]) != repo_generation:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"{label} repository generation is stale",
-        )
-    if str(repo["source_manifest_digest"] or "") != source_manifest_digest:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"{label} source manifest digest is stale",
-        )
 
 
 def _evidence_identity(engagement_root: str, evidence_ref: str) -> tuple[str, str]:
@@ -232,6 +214,24 @@ def _current_memory_finding_slugs(
     return current
 
 
+def _evidence_matches(engagement_root: str, row: dict[str, Any]) -> bool:
+    """Does the stored evidence still resolve to the ref and digest recorded?
+
+    Evidence that no longer reads, or that reads as different bytes, makes the
+    receipt that cites it non-current rather than an error.
+    """
+    try:
+        evidence_ref, evidence_sha256 = _evidence_identity(
+            engagement_root, str(row["evidence_ref"])
+        )
+    except HTTPException:
+        return False
+    return (
+        evidence_ref == str(row["evidence_ref"])
+        and evidence_sha256 == str(row["evidence_sha256"])
+    )
+
+
 def _decision_fingerprint(
     *,
     repo_id: int,
@@ -284,16 +284,7 @@ def _decision_is_current(
     )
     if expected != str(row["decision_fingerprint"]):
         return False
-    try:
-        evidence_ref, evidence_sha256 = _evidence_identity(
-            engagement_root, str(row["evidence_ref"])
-        )
-    except HTTPException:
-        return False
-    return (
-        evidence_ref == str(row["evidence_ref"])
-        and evidence_sha256 == str(row["evidence_sha256"])
-    )
+    return _evidence_matches(engagement_root, row)
 
 
 def record_fuzz_decision(
@@ -329,7 +320,7 @@ def record_fuzz_decision(
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         repo = _repo_row(connection, engagement.id, repo_id)
-        _require_current_identity(
+        require_current_source_binding(
             repo,
             repo_generation=repo_generation,
             source_manifest_digest=source_manifest_digest,
@@ -559,16 +550,7 @@ def _campaign_receipt_is_current(
     )
     if expected != str(row["receipt_fingerprint"]):
         return False
-    try:
-        evidence_ref, evidence_sha256 = _evidence_identity(
-            engagement_root, str(row["evidence_ref"])
-        )
-    except HTTPException:
-        return False
-    return (
-        evidence_ref == str(row["evidence_ref"])
-        and evidence_sha256 == str(row["evidence_sha256"])
-    )
+    return _evidence_matches(engagement_root, row)
 
 
 def record_fuzz_campaign_receipt(
@@ -651,7 +633,7 @@ def record_fuzz_campaign_receipt(
                 ),
             )
         repo = _repo_row(connection, engagement.id, repo_id)
-        _require_current_identity(
+        require_current_source_binding(
             repo,
             repo_generation=repo_generation,
             source_manifest_digest=source_manifest_digest,

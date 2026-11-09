@@ -8,23 +8,13 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type {
-  CellKeyDownEvent,
   ColDef,
   GridApi,
   ICellRendererParams,
   IDatasource,
-  RowClickedEvent,
   SortChangedEvent,
 } from "ag-grid-community";
-import {
-  AG_GRID_THEME,
-  GRID_HEADER_HEIGHT,
-  GRID_ROW_HEIGHT,
-  GRID_THEME_PROP,
-  defaultColDef,
-  focusGridInvoker,
-  registerAgGrid,
-} from "../lib/agGrid";
+import { AG_GRID_THEME, GRID_ROW_HEIGHT, gridBaseProps, registerAgGrid, rowOpenHandlers } from "../lib/agGrid";
 import {
   createRequestVariantDatasource,
   fetchRequestVariantPage,
@@ -255,18 +245,7 @@ export default function HttpGrid({
     [],
   );
 
-  const onRowClicked = (event: RowClickedEvent<RequestVariant>) => {
-    const selection = window.getSelection?.();
-    if (selection && selection.type === "Range" && selection.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
-  };
-
-  const onCellKeyDown = (event: CellKeyDownEvent<RequestVariant>) => {
-    const keyboardEvent = event.event as KeyboardEvent;
-    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
-    keyboardEvent.preventDefault();
-    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
-  };
+  const { onRowClicked, onCellKeyDown } = rowOpenHandlers<RequestVariant>(onRowOpen);
 
   const onSortChanged = (event: SortChangedEvent<RequestVariant>) => {
     const model = event.api.getColumnState().map((column) => ({ colId: column.colId, sort: column.sort }));
@@ -276,7 +255,7 @@ export default function HttpGrid({
   return (
     <div className={`${AG_GRID_THEME} grid-host http-grid-host`}>
       <AgGridReact<RequestVariant>
-        theme={GRID_THEME_PROP}
+        {...gridBaseProps}
         rowModelType="infinite"
         datasource={datasource}
         cacheBlockSize={HTTP_GRID_BLOCK_SIZE}
@@ -284,12 +263,8 @@ export default function HttpGrid({
         blockLoadDebounceMillis={80}
         infiniteInitialRowCount={HTTP_GRID_BLOCK_SIZE}
         columnDefs={columnDefs}
-        defaultColDef={defaultColDef}
         suppressMultiSort
         getRowId={(p) => String(p.data.id)}
-        rowHeight={GRID_ROW_HEIGHT}
-        headerHeight={GRID_HEADER_HEIGHT}
-        tooltipShowDelay={400}
         onGridReady={(event) => {
           apiRef.current = event.api;
           callbacks.current.onApi?.(event.api);

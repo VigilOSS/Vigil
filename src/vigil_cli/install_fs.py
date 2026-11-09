@@ -150,18 +150,6 @@ def remove_entry(directory_fd: int, name: str, display: Path) -> None:
     os.unlink(name, dir_fd=directory_fd)
 
 
-def ensure_directory(directory_fd: int, name: str, display: Path) -> int:
-    metadata = entry_stat(directory_fd, name)
-    if metadata is not None and stat.S_ISLNK(metadata.st_mode):
-        raise unsafe_path(display)
-    if metadata is not None and not stat.S_ISDIR(metadata.st_mode):
-        remove_entry(directory_fd, name, display)
-        metadata = None
-    if metadata is None:
-        os.mkdir(name, dir_fd=directory_fd)
-    return open_child_directory(directory_fd, name, display)
-
-
 def atomic_write_bytes(
     directory_fd: int,
     name: str,

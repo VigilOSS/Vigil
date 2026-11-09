@@ -5,7 +5,8 @@
 // count covers the whole ledger. `GET /command-runs/{id}` (lib/api.ts) keeps
 // the full record: command, argv and the output previews.
 
-import { request, type AssessmentCommandRunDetail, type CommandRunStatus } from "./api.ts";
+import { request, type AssessmentCommandRunDetail, type CommandRunStatus, type OffsetPage } from "./api.ts";
+import type { RecordPosition } from "../components/record/recordNavigation.ts";
 import type { SortKind } from "../components/ui/Sorting.tsx";
 
 export type CommandScope = "attention" | "all";
@@ -101,13 +102,7 @@ export type CommandLedgerRow = {
   attention_reasons: string[];
 };
 
-export type CommandLedgerPage = {
-  total: number;
-  offset: number;
-  count: number;
-  has_more: boolean;
-  items: CommandLedgerRow[];
-};
+export type CommandLedgerPage = OffsetPage<CommandLedgerRow>;
 
 export type CommandFacet = {
   values: Array<{ value: string; count: number }>;
@@ -128,13 +123,8 @@ export type CommandLedgerFacets = {
   facets: { status: CommandFacet; tool: CommandFacet; agent: CommandFacet; technique: CommandFacet; probe_kind: CommandFacet };
 };
 
-export type CommandLedgerPosition = {
-  /** 0-based; null when the run does not match the filters. */
-  index: number | null;
-  total: number;
-  previous: CommandLedgerRow | null;
-  next: CommandLedgerRow | null;
-};
+/** Where a run sits in the page order; `index` is 0-based and null when the run does not match the filters. */
+export type CommandLedgerPosition = RecordPosition<CommandLedgerRow>;
 
 function ledgerPath(engagementKey: string, suffix: string) {
   return `/engagements/${encodeURIComponent(engagementKey)}/assessment/command-runs${suffix}`;

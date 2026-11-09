@@ -246,6 +246,29 @@ def _remember_attention_id(summary: dict, field: str, row_id: int) -> None:
         summary[f"{field}_omitted"] += 1
 
 
+def _note_mutating_abnormal(summary: dict, row: dict, *, run_id: int, status: str) -> None:
+    """Count one destructive run that never reached its trapped EXIT restore."""
+    summary["mutating_terminated_abnormally"] += 1
+    summary["mutating_terminated_abnormally_warnings"].append(
+        _warn_mutating_run_terminated_abnormally(row, run_id=run_id, status=status)
+    )
+
+
+def _note_pending_recovery_failure(summary: dict, row_id: int, message: str) -> None:
+    """Count one pending-output row whose recovery could not be verified.
+
+    The row is skipped, counted in both the unverifiable and the
+    recovery-failed buckets the resume brief reads, remembered for its
+    attention list, and flagged with the operator action that chases it.
+    """
+    summary["skipped"] += 1
+    summary["skipped_unverifiable"] += 1
+    summary["pending_recovery_failed"] += 1
+    _remember_attention_id(summary, "pending_recovery_failed_ids", row_id)
+    summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
+    print(f"warning: {message}", file=sys.stderr)
+
+
 def _job_age_seconds(row: dict, now: _dt.datetime) -> float | None:
     """Age queued jobs from creation; running jobs from their actual start."""
     timestamp = row.get("started_at") or row.get("created_at")
@@ -289,10 +312,6 @@ def _read_container_pid_result(container_name: str, run_uuid: str) -> _PidReadRe
     ``(pid, reason)`` tuple into the local ``_PidReadResult``."""
     pid, reason = _cat_container_pid_file(container_name, _container_pid_file(run_uuid))
     return _PidReadResult(pid, reason)
-
-
-def _read_container_pid(container_name: str, run_uuid: str) -> int | None:
-    return _read_container_pid_result(container_name, run_uuid).pid
 
 
 def _pid_alive_in_container(container_name: str, pid: int) -> bool | None:
@@ -505,17 +524,11 @@ def _sweep_command_runs(
         )
         if pending_output and age_seconds is None:
             summary["checked"] += 1
-            summary["skipped"] += 1
-            summary["skipped_unverifiable"] += 1
-            summary["pending_recovery_failed"] += 1
-            _remember_attention_id(
-                summary, "pending_recovery_failed_ids", int(row_id)
-            )
-            summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
-            print(
-                "warning: pending-output recovery baseline is missing or "
+            _note_pending_recovery_failure(
+                summary,
+                int(row_id),
+                "pending-output recovery baseline is missing or "
                 f"unparseable for id={row_id}; refusing client-time fallback",
-                file=sys.stderr,
             )
             continue
         if age_seconds is None or age_seconds < max_age:
@@ -550,17 +563,10 @@ def _sweep_command_runs(
                         requested_status=existing_status,
                     )
                 except (AssessError, json.JSONDecodeError) as exc:
-                    summary["skipped"] += 1
-                    summary["skipped_unverifiable"] += 1
-                    summary["pending_recovery_failed"] += 1
-                    _remember_attention_id(
-                        summary, "pending_recovery_failed_ids", int(row_id)
-                    )
-                    summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
-                    print(
-                        f"warning: pending-output recovery PATCH failed for "
-                        f"id={row_id}: {exc}",
-                        file=sys.stderr,
+                    _note_pending_recovery_failure(
+                        summary,
+                        int(row_id),
+                        f"pending-output recovery PATCH failed for id={row_id}: {exc}",
                     )
                     continue
                 proved, degraded, proof_error = _pending_recovery_proof(
@@ -569,17 +575,11 @@ def _sweep_command_runs(
                     terminal_status=existing_status,
                 )
                 if not proved:
-                    summary["skipped"] += 1
-                    summary["skipped_unverifiable"] += 1
-                    summary["pending_recovery_failed"] += 1
-                    _remember_attention_id(
-                        summary, "pending_recovery_failed_ids", int(row_id)
-                    )
-                    summary["output_attention_action"] = _OUTPUT_ATTENTION_ACTION
-                    print(
-                        f"warning: pending-output recovery was not proven for "
+                    _note_pending_recovery_failure(
+                        summary,
+                        int(row_id),
+                        "pending-output recovery was not proven for "
                         f"id={row_id}: {proof_error}",
-                        file=sys.stderr,
                     )
                     continue
                 summary["recovered_pending"] += 1
@@ -647,12 +647,7 @@ def _sweep_command_runs(
                 f"recovered_output_bytes={recovered_bytes}"
             )
             if destructive:
-                summary["mutating_terminated_abnormally"] += 1
-                summary["mutating_terminated_abnormally_warnings"].append(
-                    _warn_mutating_run_terminated_abnormally(
-                        row, run_id=int(row_id), status="lost"
-                    )
-                )
+                _note_mutating_abnormal(summary, row, run_id=int(row_id), status="lost")
             continue
 
         try:
@@ -679,12 +674,7 @@ def _sweep_command_runs(
             f"age={int(age_seconds)} recovered_output_bytes={recovered_bytes}"
         )
         if destructive:
-            summary["mutating_terminated_abnormally"] += 1
-            summary["mutating_terminated_abnormally_warnings"].append(
-                _warn_mutating_run_terminated_abnormally(
-                    row, run_id=int(row_id), status="lost"
-                )
-            )
+            _note_mutating_abnormal(summary, row, run_id=int(row_id), status="lost")
     return summary
 
 

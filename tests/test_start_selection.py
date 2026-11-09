@@ -8,6 +8,7 @@ import pytest
 
 from vigil_cli import engagements
 from vigil_cli import main as cli
+from vigil_cli import prompts
 
 
 class TerminalInput(io.StringIO):
@@ -92,8 +93,6 @@ def test_noninteractive_start_requires_missing_session_choice(setup, monkeypatch
 
 
 def test_engagement_start_uses_fzf_with_recency_preview_and_create_action(setup, monkeypatch):
-    from vigil_cli import prompts
-
     root, calls = setup
     engagement(root, "acme-a")
     selected = engagement(root, "acme-b")

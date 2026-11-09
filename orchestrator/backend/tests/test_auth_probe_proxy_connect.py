@@ -13,14 +13,11 @@ a blob that still carries one is read correctly anyway.
 """
 from __future__ import annotations
 
-import sys
 from pathlib import Path
 
 import pytest
 
 repo_root = Path(__file__).resolve().parents[3]
-sys.path.insert(0, str(repo_root))
-sys.path.insert(0, str(repo_root / "src"))
 
 from vigil_cli.auth import (  # noqa: E402
     _classify_probe,

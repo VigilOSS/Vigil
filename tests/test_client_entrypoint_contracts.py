@@ -7,20 +7,23 @@ than inferring support from launcher-file presence.
 
 from __future__ import annotations
 
-import json
 import io
+import json
 import os
 import shlex
 import shutil
 import subprocess
 import sys
+import tomllib
 from pathlib import Path
 
 import pytest
 
+from vigil_cli import client_rosters
 from vigil_cli import engagements
 from vigil_cli import install as install_module
-from vigil_cli import client_rosters
+from vigil_cli import main as main_module
+from vigil_cli.paths import resolve_orchestrator_base_url
 
 
 @pytest.fixture(autouse=True)
@@ -224,6 +227,23 @@ def test_claude_settings_materialize_absolute_hooks_for_bare_engagement_sessions
         assert marker.is_file()
 
 
+def _legacy_engagement(
+    tmp_path: Path, key: str, *, install_name: str = "install"
+) -> tuple[Path, Path, Path]:
+    """The on-disk shape an install left before entrypoint repair existed: an
+    install root whose agent tree holds one engagement directory.
+
+    Returns ``(install_root, agent_root, engagement_dir)``. Each caller writes
+    that engagement's own scope.json, client configs and launchers.
+    """
+    install_root = tmp_path / install_name
+    agent_root = install_root / "agent"
+    engagement_dir = agent_root / "engagements" / key
+    engagement_dir.mkdir(parents=True)
+    _write_agent_sources(agent_root)
+    return install_root, agent_root, engagement_dir
+
+
 def _write_vigil_entrypoint(bin_dir: Path) -> None:
     # Exercise this checkout's CLI, independent of any globally installed version.
     code = (
@@ -240,11 +260,9 @@ def _write_vigil_entrypoint(bin_dir: Path) -> None:
 def _build_entrypoint_fixture(tmp_path: Path) -> tuple[Path, Path, Path]:
     # The literal shell expansion is deliberate: install paths are data, and must
     # survive launcher generation without being interpreted as shell syntax.
-    install_root = tmp_path / "install-$VIGIL_PATH_EXPANSION"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "client-contract"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(
+        tmp_path, "client-contract", install_name="install-$VIGIL_PATH_EXPANSION"
+    )
 
     (install_root / ".env").write_text("DEEPSEEK_API_KEY=test-deepseek\n")
     (engagement_dir / ".orchestrator.env").write_text(
@@ -294,11 +312,9 @@ def _seed_physical_client_rosters(
 def test_physical_client_rosters_require_explicit_refresh_and_preserve_extras(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-physical-rosters"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(
+        tmp_path, "legacy-physical-rosters"
+    )
     (engagement_dir / "scope.json").write_text("{}\n")
     roster_pairs, extra = _seed_physical_client_rosters(agent_root, engagement_dir)
     new_sources = (
@@ -356,11 +372,7 @@ def test_physical_client_roster_refresh_rejects_collision_before_any_write(
     tmp_path: Path,
     collision_kind: str,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-unsafe-roster"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-unsafe-roster")
     (engagement_dir / "scope.json").write_text("{}\n")
     roster_pairs, _extra = _seed_physical_client_rosters(agent_root, engagement_dir)
     codex_destination = engagement_dir / ".codex" / "agents" / "operator.toml"
@@ -558,11 +570,9 @@ def test_install_upgrade_reconciles_all_client_entrypoints_for_existing_engageme
     source_agent_root = source_root / "agent"
     _write_agent_sources(source_agent_root)
 
-    install_root = tmp_path / "install-$VIGIL_PATH_EXPANSION"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-client-contract"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(
+        tmp_path, "legacy-client-contract", install_name="install-$VIGIL_PATH_EXPANSION"
+    )
     (install_root / ".runtime-data").mkdir()
     (install_root / ".env").write_text("DEEPSEEK_API_KEY=test-deepseek\n")
     (engagement_dir / ".orchestrator.env").write_text(
@@ -759,11 +769,7 @@ def test_entrypoint_repair_preserves_existing_primary_client_kind(
     present_primary: str,
     absent_primary: str,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / f"legacy-{client_kind}"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, f"legacy-{client_kind}")
     (engagement_dir / "scope.json").write_text("{}\n")
     engagements._write_prompt_wrappers(
         agent_root, engagement_dir, client_kind, engagement_type="web"
@@ -789,11 +795,7 @@ def test_entrypoint_repair_preserves_existing_primary_client_kind(
 def test_entrypoint_repair_migrates_legacy_generated_codex_skip_flag(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-codex-skip"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-codex-skip")
     (engagement_dir / "scope.json").write_text("{}\n")
     engagements._write_prompt_wrappers(
         agent_root, engagement_dir, "both", engagement_type="web"
@@ -823,11 +825,7 @@ def test_entrypoint_repair_migrates_legacy_generated_codex_skip_flag(
 def test_entrypoint_repair_skips_conflicting_existing_permission_modes(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-conflict"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-conflict")
     (engagement_dir / "scope.json").write_text("{}\n")
     engagements._write_prompt_wrappers(
         agent_root, engagement_dir, "both", engagement_type="web"
@@ -857,11 +855,7 @@ def test_entrypoint_repair_skips_conflicting_existing_permission_modes(
 def test_entrypoint_repair_explicit_skip_override_normalizes_recognized_conflict(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-conflict"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-conflict")
     (engagement_dir / "scope.json").write_text("{}\n")
     engagements._write_prompt_wrappers(
         agent_root, engagement_dir, "both", engagement_type="web"
@@ -896,11 +890,7 @@ def test_entrypoint_repair_explicit_skip_override_normalizes_recognized_conflict
 def test_entrypoint_repair_skips_config_only_legacy_engagement_without_permission_evidence(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-config-only"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-config-only")
     (engagement_dir / "scope.json").write_text("{}\n")
     (engagement_dir / ".codex").mkdir()
     (engagement_dir / ".claude").mkdir()
@@ -922,11 +912,7 @@ def test_entrypoint_repair_skips_config_only_legacy_engagement_without_permissio
 def test_entrypoint_repair_explicit_skip_override_upgrades_config_only_legacy_engagement(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-config-only"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-config-only")
     (engagement_dir / "scope.json").write_text("{}\n")
     (engagement_dir / "AGENTS.md").write_text("# Legacy pointer\n")
     (engagement_dir / ".codex").mkdir()
@@ -1014,11 +1000,7 @@ def test_entrypoint_repair_does_not_overwrite_unrecognized_primary_launcher(
 def test_entrypoint_repair_accepts_legacy_generated_launcher_without_engagement_key(
     tmp_path: Path,
 ) -> None:
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-pre-key-export"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-pre-key-export")
     (engagement_dir / "scope.json").write_text("{}\n")
     (engagement_dir / "AGENTS.md").write_text("# Legacy pointer\n")
     (engagement_dir / ".claude").mkdir()
@@ -1182,8 +1164,6 @@ def test_install_cli_plumbs_explicit_ambiguous_permission_override(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from vigil_cli import main as main_module
-
     source_root = tmp_path / "source"
     (source_root / "agent").mkdir(parents=True)
     (source_root / "orchestrator").mkdir()
@@ -1224,11 +1204,7 @@ def test_install_upgrade_applies_explicit_ambiguous_permission_override(
 ) -> None:
     source_root = tmp_path / "source"
     _write_agent_sources(source_root / "agent")
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-config-only"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-config-only")
     (install_root / ".runtime-data").mkdir()
     (engagement_dir / "scope.json").write_text("{}\n")
     (engagement_dir / "AGENTS.md").write_text("# Legacy pointer\n")
@@ -1815,8 +1791,6 @@ def test_opencode_standard_hook_reports_unresolvable_bare_session(
 
 def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) -> None:
     """Codex hooks must also work when the client is opened without a launcher."""
-    import tomllib
-
     repo_root = Path(__file__).resolve().parents[1]
     agent_root = tmp_path / "agent root 'with spaces'"
     source_dir = agent_root / ".codex"
@@ -1997,8 +1971,6 @@ def test_committed_claude_settings_register_compaction_and_session_end_hooks() -
 
 def test_committed_codex_config_registers_compaction_resume_and_session_end() -> None:
     """The template steers compaction and rehydrates its immediate continuation."""
-    import tomllib
-
     repo_root = Path(__file__).resolve().parents[1]
     config = tomllib.loads(
         (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
@@ -2057,8 +2029,6 @@ def test_committed_client_configs_disable_cross_session_memory_for_both_clients(
     off so the backend ledger stays the engagement's single record of truth, and
     so an operator's global config cannot turn either on inside an engagement.
     """
-    import tomllib
-
     repo_root = Path(__file__).resolve().parents[1]
 
     claude_settings = json.loads(
@@ -2088,8 +2058,6 @@ def test_committed_codex_config_pins_the_clean_room_specialist_spawn() -> None:
     `agent/phases/code-phase-2-hunt.md` deliberately keeps blind to the Phase 2A
     findings they are re-deriving.
     """
-    import tomllib
-
     repo_root = Path(__file__).resolve().parents[1]
     codex_config = tomllib.loads(
         (repo_root / "agent" / ".codex" / "config.toml").read_text(encoding="utf-8")
@@ -2146,11 +2114,7 @@ def test_entrypoint_repair_backfills_codex_hook_trust_bypass(tmp_path: Path) -> 
     matters as much as writing the new one: a launcher that failed to parse would
     be skipped as unrecognized and keep running without the hooks.
     """
-    install_root = tmp_path / "install"
-    agent_root = install_root / "agent"
-    engagement_dir = agent_root / "engagements" / "legacy-hook-trust"
-    engagement_dir.mkdir(parents=True)
-    _write_agent_sources(agent_root)
+    install_root, agent_root, engagement_dir = _legacy_engagement(tmp_path, "legacy-hook-trust")
     (engagement_dir / "scope.json").write_text("{}\n")
     engagements._write_prompt_wrappers(
         agent_root, engagement_dir, "both", engagement_type="web"
@@ -2182,8 +2146,6 @@ def test_entrypoint_repair_backfills_codex_hook_trust_bypass(tmp_path: Path) -> 
 @pytest.mark.parametrize("client", ["codex", "claude", "opencode", "goose", "kimi", "pi"])
 @pytest.mark.parametrize("source", ["config", "engagement", "install", "environment", "default"])
 def test_launcher_uses_canonical_backend_url(tmp_path, monkeypatch, client, source):
-    from vigil_cli.paths import resolve_orchestrator_base_url
-
     install_root, engagement_dir, bin_dir = _build_entrypoint_fixture(tmp_path)
     (engagement_dir / ".orchestrator.env").write_text("")
     # Resolve at launch time: configuration can change after launcher generation.

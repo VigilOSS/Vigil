@@ -13,6 +13,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_dispatch
 
@@ -64,18 +65,9 @@ _PAGE = {
 }
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     requested: list[str] = []
     payload: dict = _PAGE
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def get(self, endpoint: str):
         type(self).requested.append(endpoint)
@@ -95,17 +87,10 @@ def test_list_is_a_registered_action() -> None:
 
 
 def test_list_sends_every_filter_in_one_canonical_query(fake_client, tmp_path, capsys):
-    filters, output = code_dispatch._parse_list_filters(
-        [
-            "--queue-mode", "trigger",
-            "--status", "pending",
-            "--limit", "2",
-            "--repo-id", "1",
-            "--classification", "critical",
-            "--batch-theme", "parser core",
-            "--offset", "4",
-        ]
-    )
+    filters, output = code_dispatch._parse_list_filters([
+        "--queue-mode", "trigger", "--status", "pending", "--limit", "2", "--repo-id", "1",
+        "--classification", "critical", "--batch-theme", "parser core", "--offset", "4",
+    ])
     code_dispatch._list(_config(tmp_path), filters, output)
 
     assert output == "table"
@@ -199,16 +184,7 @@ def test_list_rejects_malformed_filters(tokens, capsys):
 def test_fetch_passes_queue_mode_filter_to_the_backend(monkeypatch, tmp_path, capsys):
     posted: dict[str, object] = {}
 
-    class _FetchClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _FetchClient(StubClient):
         def get(self, endpoint: str):
             posted.setdefault("scope_reads", []).append(endpoint)  # type: ignore[union-attr]
             return {"total": 0, "offset": 0, "count": 0, "has_more": False,
@@ -241,14 +217,10 @@ def test_fetch_passes_queue_mode_filter_to_the_backend(monkeypatch, tmp_path, ca
         _config(tmp_path),
         3,
         "auth-hunter",
-        code_dispatch._parse_fetch_filters(
-            [
-                "--path-glob", "*.py",
-                "--path-prefix", "src/billing",
-                "--repo-id", "2",
-                "--path-prefix", "src/auth",
-            ]
-        ),
+        code_dispatch._parse_fetch_filters([
+            "--path-glob", "*.py", "--path-prefix", "src/billing", "--repo-id", "2",
+            "--path-prefix", "src/auth",
+        ]),
     )
 
     assert posted["payload"] == {
@@ -332,7 +304,7 @@ def test_ids_file_accepts_single_and_multiple_plain_ids(tmp_path, content, expec
 # --- B10: an empty claim must say WHICH kind of empty it is -----------------
 
 
-class _EmptyFetchClient:
+class _EmptyFetchClient(StubClient):
     """A claim that returns nothing, plus the scope read that explains why."""
 
     scope_page: dict = {
@@ -341,15 +313,6 @@ class _EmptyFetchClient:
     }
     reads: list[str] = []
     claimed: list[dict] = []
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def get(self, endpoint: str):
         type(self).reads.append(endpoint)
@@ -386,16 +349,10 @@ def test_an_empty_claim_reads_the_same_scope_with_no_status_filter(
         _config(tmp_path),
         5,
         "idle-hunter",
-        code_dispatch._parse_fetch_filters(
-            [
-                "--repo-id", "3",
-                "--classification", "critical",
-                "--batch-theme", "parser core",
-                "--queue-mode", "initial",
-                "--path-prefix", "src/auth",
-                "--path-glob", "*.py",
-            ]
-        ),
+        code_dispatch._parse_fetch_filters([
+            "--repo-id", "3", "--classification", "critical", "--batch-theme", "parser core",
+            "--queue-mode", "initial", "--path-prefix", "src/auth", "--path-glob", "*.py",
+        ]),
     )
 
     assert empty_fetch_client.reads == [
@@ -479,16 +436,7 @@ def test_a_partial_ids_file_claim_names_the_unclaimed_ids_and_their_status(
 ):
     """1,560 of 1,574 claimed printed nothing; 14 files were never reviewed."""
 
-    class _PartialClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _PartialClient(StubClient):
         def get(self, endpoint: str):
             assert endpoint.startswith("code/analysis-queue?")
             return {
@@ -528,16 +476,7 @@ def test_a_partial_ids_file_claim_names_the_unclaimed_ids_and_their_status(
 
 
 def test_a_complete_ids_file_claim_warns_about_nothing(monkeypatch, tmp_path, capsys):
-    class _CompleteClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _CompleteClient(StubClient):
         def get(self, endpoint: str):
             pytest.fail(f"a complete claim must not issue a diagnostic read: {endpoint}")
 
@@ -562,16 +501,7 @@ def test_an_ids_file_claim_that_got_nothing_still_names_every_id(
 ):
     """A total ids-file failure is the same question, with every id unclaimed."""
 
-    class _NoneClaimedClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _NoneClaimedClient(StubClient):
         def get(self, _endpoint: str):
             return {
                 "total": 1, "offset": 0, "count": 1, "has_more": False,
@@ -604,16 +534,7 @@ def test_a_failed_status_lookup_is_not_reported_as_a_missing_row(
     """"We could not look" must never render as "the row is gone"."""
     from assess.lib.client import AssessError
 
-    class _BrokenLookupClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _BrokenLookupClient(StubClient):
         def get(self, _endpoint: str):
             raise AssessError("HTTP 503 analysis-queue listing unavailable")
 

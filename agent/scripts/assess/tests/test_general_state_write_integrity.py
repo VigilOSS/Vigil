@@ -3,21 +3,16 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import app_unit, log_entry
 from assess.lib.client import AssessError
 
 
-class _Client:
+class _Client(StubClient):
     def __init__(self, response: dict) -> None:
         self.response = response
         self.events: list[dict] = []
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post(self, _endpoint: str, _payload: dict) -> dict:
         return self.response

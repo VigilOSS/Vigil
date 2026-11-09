@@ -26,19 +26,9 @@ from __future__ import annotations
 import importlib
 import json
 import sys
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _scripts_on_path():
-    if str(_SCRIPTS_ROOT) not in sys.path:
-        sys.path.insert(0, str(_SCRIPTS_ROOT))
-    yield
 
 
 @pytest.fixture(autouse=True)
@@ -54,6 +44,18 @@ def _import(name: str) -> ModuleType:
     return importlib.import_module(name)
 
 
+@pytest.fixture
+def kr():
+    """``assess.lib.kali_resolve``, imported per test as the cases below do."""
+    return _import("assess.lib.kali_resolve")
+
+
+@pytest.fixture
+def ko():
+    """``assess.lib.kali_output``, imported per test as the cases below do."""
+    return _import("assess.lib.kali_output")
+
+
 def _runtimes():
     rr = _import("assess.lib.runtime_route")
     dd = rr.RuntimeInfo(platform="darwin", is_docker_desktop=True, recommended="host")
@@ -66,14 +68,13 @@ def _runtimes():
 # ──────────────────────────────────────────────────────────────────────────
 
 
-def test_pin_injects_resolve_for_curl_on_docker_desktop(monkeypatch):
+def test_pin_injects_resolve_for_curl_on_docker_desktop(monkeypatch, kr):
     # Multi-A selection is `secrets.choice` over the resolved set — deliberately
     # randomized so a multi-A target does not concentrate every request on
     # address zero (see `test_apply_resolve_pin_distributes_multi_address_hosts`
     # in agent/scripts/assess/tests/test_kali_resolve.py). This test is about the
     # INJECTION, not the selection, so pin the choice to make it deterministic;
     # asserting a specific element made it a ~50% flake.
-    kr = _import("assess.lib.kali_resolve")
     _rr, dd, _lx = _runtimes()
     monkeypatch.setattr(kr.secrets, "choice", lambda values: values[0])
     cmd = ["curl", "-sS", "https://api.example.com/v1/users"]
@@ -82,8 +83,7 @@ def test_pin_injects_resolve_for_curl_on_docker_desktop(monkeypatch):
     assert cmd[-2:] == ["--resolve", "api.example.com:443:203.0.113.7"]
 
 
-def test_pin_is_idempotent_on_repeat_call():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_is_idempotent_on_repeat_call(kr):
     _rr, dd, _lx = _runtimes()
     cmd = ["curl", "https://api.example.com/"]
     assert kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7"]) == "203.0.113.7"
@@ -92,23 +92,20 @@ def test_pin_is_idempotent_on_repeat_call():
     assert cmd.count("--resolve") == 1
 
 
-def test_pin_respects_operator_supplied_resolve():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_respects_operator_supplied_resolve(kr):
     _rr, dd, _lx = _runtimes()
     cmd = ["curl", "--resolve", "api.example.com:443:9.9.9.9", "https://api.example.com/"]
     assert kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7"]) is None
     assert cmd.count("--resolve") == 1  # operator's pin untouched
 
 
-def test_pin_respects_operator_wildcard_port_resolve():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_respects_operator_wildcard_port_resolve(kr):
     _rr, dd, _lx = _runtimes()
     cmd = ["curl", "--resolve", "api.example.com:*:9.9.9.9", "https://api.example.com/"]
     assert kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7"]) is None
 
 
-def test_pin_excludes_sqlmap():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_excludes_sqlmap(kr):
     _rr, dd, _lx = _runtimes()
     # sqlmap is in _IDENTITY_INJECTABLE_TOOLS but does NOT accept --resolve.
     cmd = ["sqlmap", "-u", "https://api.example.com/?id=1"]
@@ -116,16 +113,14 @@ def test_pin_excludes_sqlmap():
     assert "--resolve" not in cmd
 
 
-def test_pin_is_noop_on_native_linux():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_is_noop_on_native_linux(kr):
     _rr, _dd, lx = _runtimes()
     cmd = ["curl", "https://api.example.com/"]
     assert kr.apply_resolve_pin(cmd, "curl", runtime=lx, ips=["203.0.113.7"]) is None
     assert "--resolve" not in cmd
 
 
-def test_pin_disabled_by_env(monkeypatch):
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_disabled_by_env(monkeypatch, kr):
     _rr, dd, _lx = _runtimes()
     monkeypatch.setenv("VIGIL_NO_RESOLVE_PIN", "1")
     cmd = ["curl", "https://api.example.com/"]
@@ -133,16 +128,14 @@ def test_pin_disabled_by_env(monkeypatch):
     assert "--resolve" not in cmd
 
 
-def test_pin_skips_ip_literal_target():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_skips_ip_literal_target(kr):
     _rr, dd, _lx = _runtimes()
     cmd = ["curl", "https://203.0.113.50/health"]
     assert kr.target_host_port("curl", cmd) == ("", 0)
     assert kr.apply_resolve_pin(cmd, "curl", runtime=dd, ips=["203.0.113.7"]) is None
 
 
-def test_pin_skips_when_resolution_empty():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_skips_when_resolution_empty(kr):
     _rr, dd, _lx = _runtimes()
     cmd = ["curl", "https://api.example.com/"]
     # Empty resolution list (host did not resolve) → no pin, no crash.
@@ -150,16 +143,14 @@ def test_pin_skips_when_resolution_empty():
     assert "--resolve" not in cmd
 
 
-def test_target_host_port_http_scheme_defaults_80():
-    kr = _import("assess.lib.kali_resolve")
+def test_target_host_port_http_scheme_defaults_80(kr):
     assert kr.target_host_port("curl", ["curl", "http://plain.example.com/x"]) == (
         "plain.example.com",
         80,
     )
 
 
-def test_target_host_port_https_default_443_and_explicit_port():
-    kr = _import("assess.lib.kali_resolve")
+def test_target_host_port_https_default_443_and_explicit_port(kr):
     assert kr.target_host_port("httpx", ["httpx", "-u", "https://api.example.com/"]) == (
         "api.example.com",
         443,
@@ -170,14 +161,12 @@ def test_target_host_port_https_default_443_and_explicit_port():
     )
 
 
-def test_resolve_host_ips_ip_literal_is_empty():
-    kr = _import("assess.lib.kali_resolve")
+def test_resolve_host_ips_ip_literal_is_empty(kr):
     assert kr.resolve_host_ips("203.0.113.50") == []
     assert kr.resolve_host_ips("") == []
 
 
-def test_pin_tools_excludes_sqlmap_and_ffuf_includes_http_set():
-    kr = _import("assess.lib.kali_resolve")
+def test_pin_tools_excludes_sqlmap_and_ffuf_includes_http_set(kr):
     # curl is the only shipped HTTP tool that accepts curl-style
     # `--resolve host:port:ip`. ProjectDiscovery tools and ffuf stay OUT of the
     # pin set; the post-run http=000 guard still handles resolver flaps.
@@ -202,8 +191,7 @@ def test_pin_tools_excludes_sqlmap_and_ffuf_includes_http_set():
         (1, "dial tcp: i/o timeout"),
     ],
 )
-def test_detect_transport_error_positive_signatures(rc, stderr):
-    ko = _import("assess.lib.kali_output")
+def test_detect_transport_error_positive_signatures(rc, stderr, ko):
     is_te, detail = ko.detect_transport_error(
         tool_name="curl", return_code=rc, stdout_preview="", stderr_preview=stderr, timed_out=False
     )
@@ -211,8 +199,7 @@ def test_detect_transport_error_positive_signatures(rc, stderr):
     assert "http=000" in detail
 
 
-def test_detect_transport_error_real_answer_with_body_is_not_flagged():
-    ko = _import("assess.lib.kali_output")
+def test_detect_transport_error_real_answer_with_body_is_not_flagged(ko):
     # A 4xx/5xx wall that returned a BODY is a real verdict (LIVE), never a TE.
     is_te, _ = ko.detect_transport_error(
         tool_name="curl",
@@ -224,13 +211,12 @@ def test_detect_transport_error_real_answer_with_body_is_not_flagged():
     assert is_te is False
 
 
-def test_detect_transport_error_curl_w_writeout_000_is_flagged():
+def test_detect_transport_error_curl_w_writeout_000_is_flagged(ko):
     """REGRESSION (the gap that masked the original defect): the canonical probe
     `curl -o /dev/null -w "%{http_code} %{time_connect} %{remote_ip}"` writes a
     `000 0.000000 ` write-out line to stdout EVEN on a transport failure. A naive
     "non-empty stdout = real answer" shortcut would let this through as a clean
     verdict — exactly the false negative CR-36 exists to prevent. It MUST flag."""
-    ko = _import("assess.lib.kali_output")
     is_te, detail = ko.detect_transport_error(
         tool_name="curl",
         return_code=7,  # couldn't connect
@@ -242,10 +228,9 @@ def test_detect_transport_error_curl_w_writeout_000_is_flagged():
     assert "http=000" in detail
 
 
-def test_detect_transport_error_curl_w_writeout_real_status_not_flagged():
+def test_detect_transport_error_curl_w_writeout_real_status_not_flagged(ko):
     """A write-out line carrying a real (>0) HTTP status is a genuine verdict,
     never a transport error — the parser must read the status, not the byte count."""
-    ko = _import("assess.lib.kali_output")
     is_te, _ = ko.detect_transport_error(
         tool_name="curl",
         return_code=7,
@@ -256,8 +241,7 @@ def test_detect_transport_error_curl_w_writeout_real_status_not_flagged():
     assert is_te is False
 
 
-def test_detect_transport_error_clean_exit_zero_is_not_flagged():
-    ko = _import("assess.lib.kali_output")
+def test_detect_transport_error_clean_exit_zero_is_not_flagged(ko):
     is_te, _ = ko.detect_transport_error(
         tool_name="httpx",
         return_code=0,
@@ -268,8 +252,7 @@ def test_detect_transport_error_clean_exit_zero_is_not_flagged():
     assert is_te is False
 
 
-def test_detect_transport_error_non_http_tool_never_flagged():
-    ko = _import("assess.lib.kali_output")
+def test_detect_transport_error_non_http_tool_never_flagged(ko):
     is_te, _ = ko.detect_transport_error(
         tool_name="nmap",
         return_code=1,
@@ -280,8 +263,7 @@ def test_detect_transport_error_non_http_tool_never_flagged():
     assert is_te is False
 
 
-def test_detect_transport_error_timeout_is_not_flagged():
-    ko = _import("assess.lib.kali_output")
+def test_detect_transport_error_timeout_is_not_flagged(ko):
     # A wall-clock timeout is its own terminal status (partial-but-real), kept
     # distinct from the transport-failure signature.
     is_te, _ = ko.detect_transport_error(
@@ -294,8 +276,7 @@ def test_detect_transport_error_timeout_is_not_flagged():
     assert is_te is False
 
 
-def test_detect_transport_error_nonzero_exit_no_signature_not_flagged():
-    ko = _import("assess.lib.kali_output")
+def test_detect_transport_error_nonzero_exit_no_signature_not_flagged(ko):
     # Non-transport error exit (e.g. nuclei bad-template) with no telltale
     # stderr and no body → not a transport error (UNKNOWN, not flagged).
     is_te, _ = ko.detect_transport_error(
@@ -308,8 +289,7 @@ def test_detect_transport_error_nonzero_exit_no_signature_not_flagged():
     assert is_te is False
 
 
-def test_kali_result_transport_error_defaults_false():
-    ko = _import("assess.lib.kali_output")
+def test_kali_result_transport_error_defaults_false(ko):
     r = ko.KaliResult(
         run_id=1,
         status="completed",

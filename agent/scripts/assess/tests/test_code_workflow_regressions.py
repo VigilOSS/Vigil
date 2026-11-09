@@ -11,6 +11,18 @@ import pytest
 
 from assess import cli
 from assess.commands import code_coverage, code_dispatch, code_ingest, host_exec
+from _fake_client import StubClient
+
+
+def _offline_config(monkeypatch: pytest.MonkeyPatch, module, **fields) -> None:
+    """Point ``module.load_config`` at the backend-less config these tests run on."""
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", **fields
+        ),
+    )
 
 
 def _host_exec_parser() -> argparse.ArgumentParser:
@@ -162,30 +174,13 @@ def test_code_dispatch_done_rejects_unknown_flag_before_backend_mutation(
     )
     posts: list[tuple[str, dict]] = []
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, endpoint: str, payload: dict):
             posts.append((endpoint, payload))
             return {"updated": 1}
 
     monkeypatch.setattr(code_dispatch, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        code_dispatch,
-        "load_config",
-        lambda *_args: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _offline_config(monkeypatch, code_dispatch, engagement_dir=str(tmp_path))
 
     with pytest.raises(SystemExit) as exc:
         code_dispatch.run(SimpleNamespace(
@@ -231,15 +226,7 @@ def test_code_dispatch_done_rejects_duplicate_or_malformed_options_before_backen
             raise AssertionError("invalid options must fail before client construction")
 
     monkeypatch.setattr(code_dispatch, "AssessmentClient", ForbiddenClient)
-    monkeypatch.setattr(
-        code_dispatch,
-        "load_config",
-        lambda *_args: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _offline_config(monkeypatch, code_dispatch, engagement_dir=str(tmp_path))
 
     with pytest.raises(SystemExit) as exc:
         code_dispatch.run(SimpleNamespace(
@@ -261,16 +248,7 @@ def test_code_dispatch_done_rejects_duplicate_or_malformed_options_before_backen
 
 
 def test_code_dispatch_stats_prints_one_backend_total(monkeypatch, capsys):
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, endpoint: str):
             assert endpoint == "code/analysis-queue/stats"
             return {
@@ -311,16 +289,7 @@ def test_code_coverage_prints_review_quality_once_with_readiness(monkeypatch, ca
         "quality_gate": {"passed": True, "warnings": []},
     }
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, endpoint: str):
             if endpoint == "code/coverage":
                 return coverage
@@ -328,11 +297,7 @@ def test_code_coverage_prints_review_quality_once_with_readiness(monkeypatch, ca
             return readiness
 
     monkeypatch.setattr(code_coverage, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        code_coverage,
-        "load_config",
-        lambda *_args: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _offline_config(monkeypatch, code_coverage)
 
     code_coverage.run(SimpleNamespace(
         engagement_dir=Path("/tmp/eng"),
@@ -369,16 +334,7 @@ def test_code_coverage_combined_quality_and_readiness_flags_report_both_before_e
 ):
     requested: list[str] = []
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, endpoint: str):
             requested.append(endpoint)
             if endpoint == "code/coverage?detail=cwe":
@@ -412,11 +368,7 @@ def test_code_coverage_combined_quality_and_readiness_flags_report_both_before_e
             }
 
     monkeypatch.setattr(code_coverage, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        code_coverage,
-        "load_config",
-        lambda *_args: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _offline_config(monkeypatch, code_coverage)
 
     with pytest.raises(SystemExit) as exc:
         code_coverage.run(SimpleNamespace(
@@ -448,16 +400,7 @@ def test_code_ingest_summary_matches_registered_admitted_file_count(monkeypatch,
     engagement_dir.mkdir()
     captured: dict[str, object] = {}
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, endpoint: str, payload: dict):
             if endpoint == "code/repos/refresh/start":
                 captured["repo_payload"] = payload
@@ -483,15 +426,7 @@ def test_code_ingest_summary_matches_registered_admitted_file_count(monkeypatch,
             raise AssertionError(f"Unexpected endpoint: {endpoint}")
 
     monkeypatch.setattr(code_ingest, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        code_ingest,
-        "load_config",
-        lambda *_args: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _offline_config(monkeypatch, code_ingest, engagement_dir=str(engagement_dir))
     monkeypatch.setattr(
         code_ingest,
         "_setup_ctags",

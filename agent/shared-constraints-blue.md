@@ -124,8 +124,8 @@ producer, command-run, and finding linkage that report-readiness relies on.
 The backend computes SHA-256, FTS-indexes a preview, and links the artifact to
 its producer agent (`producer_agent_id`, `producer_agent_role`), the originating
 command run (`producer_command_run_id`), and the finding it substantiates
-(`related_finding_slug`). The `assessment_artifacts` table at
-`orchestrator/backend/app/db.py:1766` is the schema source of truth.
+(`related_finding_slug`). The `assessment_artifacts` table in
+`orchestrator/backend/app/db.py` is the schema source of truth.
 
 PII-bearing exports are indexed and rendered verbatim like every other artifact.
 `register` has no inline scratch flag — mark

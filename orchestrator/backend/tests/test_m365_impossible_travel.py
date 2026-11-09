@@ -30,14 +30,12 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from io import StringIO
 from pathlib import Path
 
 
-
 # ---------------------------------------------------------------------------
-# Module loader (same sys.path.insert + importlib pattern as
+# Module loader (same importlib pattern as
 # test_anomaly_score.py / test_classify_payload.py)
 # ---------------------------------------------------------------------------
 
@@ -46,9 +44,6 @@ def _scripts_root() -> Path:
 
 
 def _load_mod():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
     spec = importlib.util.spec_from_file_location(
         "m365_impossible_travel_ut",
         _scripts_root() / "m365" / "impossible_travel.py",

@@ -16,14 +16,11 @@ lives in the backend (`app.services.code_analysis`), imported normally.
 from __future__ import annotations
 
 import ast
-import sys
 from pathlib import Path
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPTS_ROOT = _REPO_ROOT / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 from assess.lib import (  # noqa: E402
     audit_enums,

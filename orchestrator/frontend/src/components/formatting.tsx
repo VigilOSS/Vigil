@@ -126,6 +126,64 @@ export function TimeStamp({ value, mode = "relative", precision, fallback = "—
 
 // ── Copy-to-clipboard ─────────────────────────────────────────────────
 
+/**
+ * The clipboard mechanics the copy affordances share: write `text`, claim
+ * success only once the write resolves, drop the claim 1200ms later, and
+ * report nothing at all for a copy of text the view has since replaced (the
+ * feedback is scoped to the text it was started for, so a record that moved on
+ * never shows a stale "Copied") or for one still in flight at unmount.
+ *
+ * `onSuccess` / `onFailure` are the caller's own report (a toast, a hook);
+ * `failed` is for the affordances that offer the manual-copy fallback inline.
+ */
+export function useCopyFeedback(
+  text: string,
+  { onSuccess, onFailure }: { onSuccess?: () => void; onFailure?: () => void } = {},
+): { copied: boolean; failed: boolean; copy: () => Promise<void> } {
+  const scope = useMemo(() => ({}), [text]);
+  const activeScope = useRef<object | null>(scope);
+  const activeRequest = useRef<object | null>(null);
+  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [feedback, setFeedback] = useState<{ scope: object; result: "copied" | "failed" } | null>(null);
+  activeScope.current = scope;
+
+  useEffect(() => {
+    activeScope.current = scope;
+    return () => {
+      if (activeScope.current === scope) activeScope.current = null;
+      activeRequest.current = null;
+      if (timer.current !== null) clearTimeout(timer.current);
+    };
+  }, [scope]);
+
+  const copy = async () => {
+    const request = {};
+    activeRequest.current = request;
+    const current = () => activeScope.current === scope && activeRequest.current === request;
+    setFeedback(null);
+    if (timer.current !== null) clearTimeout(timer.current);
+    try {
+      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
+      await navigator.clipboard.writeText(text);
+      if (!current()) return;
+      setFeedback({ scope, result: "copied" });
+      timer.current = setTimeout(() => { if (current()) setFeedback(null); }, 1200);
+      onSuccess?.();
+    } catch {
+      if (current()) {
+        setFeedback({ scope, result: "failed" });
+        onFailure?.();
+      }
+    }
+  };
+
+  return {
+    copied: feedback?.scope === scope && feedback.result === "copied",
+    failed: feedback?.scope === scope && feedback.result === "failed",
+    copy,
+  };
+}
+
 export function CopyInline({
   text,
   children,
@@ -139,47 +197,13 @@ export function CopyInline({
   // non-drawer callers (IntelTab provenance) are unaffected.
   onCopied?: () => void;
 }) {
-  const scope = useMemo(() => ({}), [text]);
-  const activeScope = useRef<object | null>(scope);
-  const activeRequest = useRef<object | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [feedback, setFeedback] = useState<{ scope: object; result: "copied" | "failed" } | null>(null);
-  activeScope.current = scope;
-  const copied = feedback?.scope === scope && feedback.result === "copied";
-  const failed = feedback?.scope === scope && feedback.result === "failed";
-
-  useEffect(() => {
-    activeScope.current = scope;
-    return () => {
-      if (activeScope.current === scope) activeScope.current = null;
-      activeRequest.current = null;
-      if (timer.current !== null) clearTimeout(timer.current);
-    };
-  }, [scope]);
-
-  const onCopy = async () => {
-    const request = {};
-    activeRequest.current = request;
-    const current = () => activeScope.current === scope && activeRequest.current === request;
-    setFeedback(null);
-    if (timer.current !== null) clearTimeout(timer.current);
-    try {
-      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(text);
-      if (!current()) return;
-      setFeedback({ scope, result: "copied" });
-      timer.current = setTimeout(() => { if (current()) setFeedback(null); }, 1200);
-      onCopied?.();
-    } catch {
-      if (current()) setFeedback({ scope, result: "failed" });
-    }
-  };
+  const { copied, failed, copy } = useCopyFeedback(text, { onSuccess: onCopied });
   return (
     <>
     <button
       type="button"
       className={`copy-inline ${copied ? "is-copied" : ""}`}
-      onClick={onCopy}
+      onClick={copy}
       aria-label={ariaLabel ?? "Copy to clipboard"}
     >
       {copied ? "Copied" : children ?? "Copy"}

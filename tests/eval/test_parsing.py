@@ -15,6 +15,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from assess.lib.schema_validation import collect_validation_errors, load_schema
 
 # ---------------------------------------------------------------------------
@@ -29,22 +31,31 @@ def _load(filename: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Positive: finding-record (schema examples — extracted verbatim)
+# Positive: one row per schema family, every fixture must validate cleanly
 # ---------------------------------------------------------------------------
 
 
-def test_finding_record_schema_example_sqli_validates():
-    """Schema example 1 (SQLi) must validate with zero errors."""
-    schema = load_schema("finding-record.schema.json")
-    payload = _load("finding_sqli.json")
-    errors = collect_validation_errors(payload, schema)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-def test_finding_record_schema_example_bof_validates():
-    """Schema example 2 (heap BOF) patched to supply required fields validates."""
-    schema = load_schema("finding-record.schema.json")
-    payload = _load("finding_bof.json")
+@pytest.mark.parametrize(
+    ("schema_name", "fixture"),
+    [
+        # finding-record: schema example 1 (SQLi).
+        pytest.param("finding-record.schema.json", "finding_sqli.json", id="schema_example_sqli"),
+        # finding-record: schema example 2 (heap BOF) patched to supply required fields.
+        pytest.param("finding-record.schema.json", "finding_bof.json", id="schema_example_bof"),
+        # finding-record: stored XSS finding fixture.
+        pytest.param("finding-record.schema.json", "finding_xss.json", id="finding_xss"),
+        # probe-run: minimal valid payload.
+        pytest.param("probe-run.schema.json", "probe_run_valid.json", id="probe_run"),
+        # intel-cve: minimal valid payload.
+        pytest.param("intel-cve.schema.json", "intel_cve_valid.json", id="intel_cve"),
+        # attack-chain: minimal valid payload.
+        pytest.param("attack-chain.schema.json", "attack_chain_valid.json", id="attack_chain"),
+    ],
+)
+def test_positive_fixture_validates(schema_name: str, fixture: str):
+    """A positive fixture must validate against its schema with zero errors."""
+    schema = load_schema(schema_name)
+    payload = _load(fixture)
     errors = collect_validation_errors(payload, schema)
     assert errors == [], f"Unexpected errors: {errors}"
 
@@ -90,80 +101,41 @@ def test_finding_record_snapshot_digest_must_be_lowercase_sha256():
     assert any("source_manifest_digest" in error and "pattern" in error for error in errors)
 
 
-def test_finding_record_xss_validates():
-    """Stored XSS finding fixture validates."""
+# ---------------------------------------------------------------------------
+# Negative: a required-or-enum violation must name the offending field
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    ("fixture", "expected_substrings"),
+    [
+        # Missing required top-level field: expect a 'title is required' error.
+        pytest.param(
+            "neg_finding_missing_title.json",
+            ("title", "required"),
+            id="finding_record_missing_title",
+        ),
+        # Bad enum value (severity="urgent" — not a real severity).
+        pytest.param(
+            "neg_finding_bad_severity.json",
+            ("severity", "must be one of"),
+            id="finding_record_bad_severity_enum",
+        ),
+        # Missing nested required field: expect a 'details.evidence is required' error.
+        pytest.param(
+            "neg_finding_missing_details_evidence.json",
+            ("evidence", "required"),
+            id="finding_record_missing_details_evidence",
+        ),
+    ],
+)
+def test_negative_fixture_is_rejected(fixture: str, expected_substrings: tuple[str, ...]):
+    """A negative fixture must surface one error carrying every expected substring."""
     schema = load_schema("finding-record.schema.json")
-    payload = _load("finding_xss.json")
+    payload = _load(fixture)
     errors = collect_validation_errors(payload, schema)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Positive: probe-run
-# ---------------------------------------------------------------------------
-
-
-def test_probe_run_validates():
-    """Minimal valid probe-run payload validates with zero errors."""
-    schema = load_schema("probe-run.schema.json")
-    payload = _load("probe_run_valid.json")
-    errors = collect_validation_errors(payload, schema)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Positive: intel-cve
-# ---------------------------------------------------------------------------
-
-
-def test_intel_cve_validates():
-    """Minimal valid intel-cve payload validates with zero errors."""
-    schema = load_schema("intel-cve.schema.json")
-    payload = _load("intel_cve_valid.json")
-    errors = collect_validation_errors(payload, schema)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Positive: attack-chain
-# ---------------------------------------------------------------------------
-
-
-def test_attack_chain_validates():
-    """Minimal valid attack-chain payload validates with zero errors."""
-    schema = load_schema("attack-chain.schema.json")
-    payload = _load("attack_chain_valid.json")
-    errors = collect_validation_errors(payload, schema)
-    assert errors == [], f"Unexpected errors: {errors}"
-
-
-# ---------------------------------------------------------------------------
-# Negative: missing required top-level field (title)
-# ---------------------------------------------------------------------------
-
-
-def test_finding_record_missing_title_is_rejected():
-    """A finding payload with no ``title`` must surface a required-field error."""
-    schema = load_schema("finding-record.schema.json")
-    payload = _load("neg_finding_missing_title.json")
-    errors = collect_validation_errors(payload, schema)
-    assert any("title" in e and "required" in e for e in errors), (
-        f"Expected a 'title is required' error, got: {errors}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Negative: bad enum value (severity="urgent" — not a real severity)
-# ---------------------------------------------------------------------------
-
-
-def test_finding_record_bad_severity_enum_is_rejected():
-    """severity='urgent' must surface an enum validation error."""
-    schema = load_schema("finding-record.schema.json")
-    payload = _load("neg_finding_bad_severity.json")
-    errors = collect_validation_errors(payload, schema)
-    assert any("severity" in e and "must be one of" in e for e in errors), (
-        f"Expected a severity enum error, got: {errors}"
+    assert any(all(part in e for part in expected_substrings) for e in errors), (
+        f"Expected an error containing {expected_substrings}, got: {errors}"
     )
 
 
@@ -198,19 +170,4 @@ def test_finding_record_unknown_field_did_you_mean():
     # Must include a did-you-mean hint
     assert any("Did you mean" in e for e in unknown_errors), (
         f"Expected 'Did you mean' hint in error, got: {unknown_errors}"
-    )
-
-
-# ---------------------------------------------------------------------------
-# Negative: missing nested required field (details.evidence)
-# ---------------------------------------------------------------------------
-
-
-def test_finding_record_missing_details_evidence_is_rejected():
-    """A finding payload missing ``details.evidence`` must surface a required error."""
-    schema = load_schema("finding-record.schema.json")
-    payload = _load("neg_finding_missing_details_evidence.json")
-    errors = collect_validation_errors(payload, schema)
-    assert any("evidence" in e and "required" in e for e in errors), (
-        f"Expected 'details.evidence is required' error, got: {errors}"
     )

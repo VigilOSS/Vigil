@@ -28,6 +28,56 @@ from assess.lib.code_structural_identity import (  # noqa: E402
 )
 
 
+class _FakeClientBase:
+    """Constructor and context-manager scaffolding for `AssessmentClient` stand-ins.
+
+    Subclasses declare only the request methods the command under test is meant
+    to call, so a request the test did not configure still fails loudly.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+_ECHO_ENGAGEMENT_DIR = object()
+
+
+def _patch_load_config(
+    monkeypatch,
+    module,
+    *,
+    engagement_dir: object = None,
+    base_url: str = "http://example.test",
+    engagement_key: str = "eng",
+    raising: bool = True,
+) -> None:
+    """Install a `load_config` stand-in carrying the attributes commands read.
+
+    `engagement_dir=_ECHO_ENGAGEMENT_DIR` echoes the directory the command
+    passes in; leaving it unset omits the attribute entirely.
+    """
+
+    def _load_config(*args, **kwargs):
+        attrs: dict[str, object] = {"base_url": base_url, "engagement_key": engagement_key}
+        if engagement_dir is _ECHO_ENGAGEMENT_DIR:
+            attrs["engagement_dir"] = str(args[0] if args else kwargs.get("engagement_dir"))
+        elif engagement_dir is not None:
+            attrs["engagement_dir"] = engagement_dir
+        return SimpleNamespace(**attrs)
+
+    monkeypatch.setattr(module, "load_config", _load_config, raising=raising)
+
+
 def _load_command(filename: str, name: str):
     path = SCRIPTS_ROOT / "assess" / "commands" / filename
     spec = importlib.util.spec_from_file_location(name, path)
@@ -66,6 +116,100 @@ def _lsp_publish_response(payload: dict[str, object]) -> dict[str, object]:
         "active_generation": payload["repo_generation"],
         "source_manifest_digest": payload["source_manifest_digest"],
         "lsp_config": payload["lsp_config"],
+    }
+
+
+def _repo_row(source: Path, digest: object, *, active_generation: int = 4) -> dict[str, object]:
+    """The `code/repos/{id}` row the snapshot commands read for the demo repository."""
+    return {
+        "id": 7,
+        "repo_key": "demo-repo",
+        "repo_path": str(source.resolve()),
+        "active_generation": active_generation,
+        "source_manifest_digest": digest,
+    }
+
+
+def _file_row(
+    file_path: object, file_hash: object, language: object, *, file_id: int = 11
+) -> dict[str, object]:
+    """One `code/files` row for the demo repository."""
+    return {
+        "id": file_id,
+        "repo_id": 7,
+        "file_path": file_path,
+        "file_hash": file_hash,
+        "language": language,
+    }
+
+
+def _structural_counts(**overrides: int) -> dict[str, int]:
+    """Structural signal counts, zero unless the caller names a dimension."""
+    return {"entry_points": 0, "imports": 0, "security_sinks": 0, "security_sources": 0, **overrides}
+
+
+def _v4_manifest() -> dict[str, object]:
+    """The sealed v4 manifest the legacy-aggregate publish path validates against."""
+    return {
+        "repo_key": "demo-repo",
+        "repo_generation": 4,
+        "source_manifest_digest": "d" * 64,
+        "structural_input_digest": "e" * 64,
+        "degraded_files": 0,
+        "degraded_file_paths": [],
+        "artifact_truncated_files": 0,
+        "artifact_truncated_file_paths": [],
+        "analysis_status_counts": {"complete": 1, "degraded": 0, "unsupported": 0},
+    }
+
+
+def _v4_manifest_path(root: Path) -> Path:
+    """The generation-scoped manifest path that `_v4_manifest` is bound to."""
+    return (
+        root
+        / "structural-index"
+        / "7"
+        / "4"
+        / STRUCTURAL_INDEX_PATH_VERSION
+        / ("d" * 64)
+        / ("e" * 64)
+        / "manifest.json"
+    )
+
+
+def _structural_artifact(file_path: str, **overrides: object) -> dict[str, object]:
+    """A complete tree-sitter structural artifact for one file, before overrides.
+
+    The per-test identities (`source_manifest_digest`, `structural_input_digest`,
+    `source_sha256`, `source_size`, `bytes_scanned`) and anything a scenario
+    varies are named by the caller; the rest is the fully-analyzed baseline.
+    """
+    return {
+        "file_path": file_path,
+        "language": "python",
+        "repo_id": 7,
+        "repo_generation": 4,
+        "total_functions": 0,
+        "total_exports": 0,
+        "total_lines": 1,
+        "functions": [],
+        "entry_points": [],
+        "security_sinks": [],
+        "security_sources": [],
+        "call_sites": [],
+        "imports": [],
+        "import_targets": [],
+        "exports": [],
+        "classes": [],
+        "structural_index_available": True,
+        "analysis_status": "complete",
+        "analysis_mode": "tree_sitter",
+        "degradation_reason": None,
+        "unavailable_dimensions": [],
+        "artifact_truncated": False,
+        "truncated_dimensions": [],
+        "signal_counts": _structural_counts(),
+        **overrides,
     }
 
 
@@ -137,25 +281,14 @@ def test_code_ingest_rejects_noncanonical_refresh_receipts(
     (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
     engagement = tmp_path / "engagement"
     engagement.mkdir()
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     monkeypatch.setattr(
         module,
         "_setup_ctags",
         lambda *_args, **kwargs: {"available": False, **kwargs},
     )
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict):
             if endpoint == "code/repos/refresh/start":
                 return start_response
@@ -165,12 +298,6 @@ def test_code_ingest_rejects_noncanonical_refresh_receipts(
                 assert commit_response is not None
                 return commit_response
             pytest.fail(f"invalid receipt was accepted before {endpoint}")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -773,22 +900,11 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
     alias.symlink_to(repo, target_is_directory=True)
     engagement = tmp_path / "engagement"
     engagement.mkdir()
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     monkeypatch.setattr(module, "_setup_ctags", lambda *args, **kwargs: {"available": False, **kwargs})
     captured: dict[str, dict] = {}
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict):
             if endpoint == "code/repos/refresh/start":
                 captured["start"] = payload
@@ -809,12 +925,6 @@ def test_code_ingest_plain_directory_uses_canonical_directory_provenance(
                 assert payload["lsp_config"]["ctags"]["repo_generation"] == 1
                 return _lsp_publish_response(payload)
             raise AssertionError(endpoint)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     module.run(_ingest_args(alias, engagement))
@@ -889,9 +999,7 @@ def test_code_ingest_confirms_a_refresh_commit_whose_response_was_lost(
     (repo / "node_modules" / "acme").mkdir(parents=True)
     (repo / "main.py").write_text("print('acme')\n", encoding="utf-8")
     (repo / "node_modules" / "acme" / "index.js").write_text("module.exports = 1;\n", encoding="utf-8")
-    monkeypatch.setattr(module, "load_config", lambda *_: SimpleNamespace(
-        base_url="http://example.test", engagement_key=key, engagement_dir=str(engagement),
-    ))
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement), engagement_key=key)
     ctags_calls: list[dict] = []
 
     def setup_ctags(*_args, **kwargs):
@@ -1058,15 +1166,7 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
     (node_modules / "nested-link").symlink_to(outside)
     engagement = tmp_path / "engagement"
     engagement.mkdir()
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     monkeypatch.setattr(
         module,
         "_setup_ctags",
@@ -1074,10 +1174,7 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
     )
     captured: dict[str, dict] = {}
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict):
             if endpoint == "code/repos/refresh/start":
                 captured["start"] = payload
@@ -1099,12 +1196,6 @@ def test_code_ingest_authenticates_complete_exclusion_accounting(
         def patch(self, endpoint: str, _payload: dict):
             assert endpoint == "code/repos/7"
             return {"id": 7}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     module.run(_ingest_args(repo, engagement))
@@ -1185,15 +1276,7 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
     engagement = tmp_path / "engagement"
     engagement.mkdir()
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     monkeypatch.setattr(
         module,
         "_prepare_git_source",
@@ -1208,10 +1291,7 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
 
     posted: list[tuple[str, dict]] = []
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict):
             posted.append((endpoint, payload))
             if endpoint == "code/repos/refresh/start":
@@ -1232,12 +1312,6 @@ def test_code_ingest_accepts_git_file_and_publishes_read_only_content_addressed_
                 assert payload["source_manifest_digest"] == "e" * 64
                 return _lsp_publish_response(payload)
             raise AssertionError(endpoint)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1348,15 +1422,7 @@ def test_code_ingest_rechecks_full_git_provenance_before_publish_or_backend(
     monkeypatch.setattr(module, "_git_commit_count", lambda *_: 0)
     monkeypatch.setattr(module, "_git_churn_scores", lambda *_: {})
     monkeypatch.setattr(module, "_git_security_files", lambda *_: set())
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
 
     class ForbiddenClient:
         def __init__(self, *_args, **_kwargs):
@@ -1378,15 +1444,7 @@ def test_code_ingest_rewalk_rejects_file_added_after_first_capture(
     repo.mkdir()
     (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
     engagement = tmp_path / "engagement"
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     real_capture = module.RootedSourceTree.capture
     added = False
 
@@ -1707,15 +1765,7 @@ def test_code_ingest_dry_run_creates_no_local_artifacts(
     (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
     engagement = tmp_path / "engagement"
     engagement.mkdir()
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     monkeypatch.setattr(
         module,
         "_prepare_git_source",
@@ -1728,19 +1778,10 @@ def test_code_ingest_dry_run_creates_no_local_artifacts(
         lambda *_: {"head": "a" * 40, "branch": "main", "dirty": False},
     )
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, _payload: dict):
             assert endpoint == "code/repos/refresh/preview"
             return {"added": ["main.py"], "changed": [], "renamed": [], "removed": []}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     module.run(_ingest_args(repo, engagement, dry_run=True))
@@ -1756,15 +1797,7 @@ def test_code_ingest_closes_capture_spool_on_record_build_failure(
     repo.mkdir()
     (repo / "main.py").write_text("print('safe')\n", encoding="utf-8")
     engagement = tmp_path / "engagement"
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     captured_spools: list[object] = []
     real_capture = module.RootedSourceTree.capture
 
@@ -1806,13 +1839,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         lambda: _restore_tree_writable(output / "structural-index" / "history")
     )
     backend_rows = [
-        {
-            "id": file_id,
-            "repo_id": 7,
-            "file_path": rel_path,
-            "file_hash": hashlib.sha256(content).hexdigest(),
-            "language": language,
-        }
+        _file_row(rel_path, hashlib.sha256(content).hexdigest(), language, file_id=file_id)
         for file_id, (rel_path, content, language) in enumerate(
             (("main.py", raw, "python"), ("notes.md", notes, "markdown")),
             start=11,
@@ -1850,36 +1877,16 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         / f"{hashlib.sha256(legacy_aggregate_bytes).hexdigest()}.json"
     )
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos/7":
-                return {
-                    "id": 7,
-                    "repo_key": "demo-repo",
-                    "repo_path": str(source.resolve()),
-                    "active_generation": 4,
-                    "source_manifest_digest": server_digest,
-                }
+                return _repo_row(source, server_digest)
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 return _file_page([dict(row) for row in backend_rows])
             raise AssertionError(endpoint)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient, raising=False)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-        raising=False,
-    )
+    _patch_load_config(monkeypatch, module, raising=False)
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
     parsed: list[bytes | None] = []
     parser_fails = False
@@ -1923,12 +1930,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
             "unavailable_dimensions": [],
             "artifact_truncated": False,
             "truncated_dimensions": [],
-            "signal_counts": {
-                "entry_points": 0,
-                "imports": 0,
-                "security_sinks": 0,
-                "security_sources": 0,
-            },
+            "signal_counts": _structural_counts(),
         }
 
     monkeypatch.setattr(module, "index_file", fake_index)
@@ -2323,13 +2325,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         def get(self, endpoint: str):
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=7"
             return _file_page([
-                {
-                    "id": file_id,
-                    "repo_id": 7,
-                    "file_path": rel_path,
-                    "file_hash": hashlib.sha256(content).hexdigest(),
-                    "language": language,
-                }
+                _file_row(rel_path, hashlib.sha256(content).hexdigest(), language, file_id=file_id)
                 for file_id, (rel_path, content, language) in enumerate(
                     (("main.py", raw, "python"), ("notes.md", notes, "markdown")),
                     start=11,
@@ -2339,13 +2335,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
     sync_manifest = {**built, "_resolved_manifest_path": str(manifests[0])}
     prepared = sync_module._prepare_repo_payload(
         SyncClient(),
-        {
-            "id": 7,
-            "repo_key": "demo-repo",
-            "repo_path": str(source.resolve()),
-            "active_generation": 4,
-            "source_manifest_digest": server_digest,
-        },
+        _repo_row(source, server_digest),
         sync_manifest,
         output / "structural-index",
     )
@@ -2374,36 +2364,15 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
     output = tmp_path / "analysis-state"
     current_language = "c"
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos/7":
-                return {
-                    "id": 7,
-                    "repo_key": "demo-repo",
-                    "repo_path": str(source.resolve()),
-                    "active_generation": 4,
-                    "source_manifest_digest": server_digest,
-                }
+                return _repo_row(source, server_digest)
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 return _file_page([
-                    {
-                        "id": 11,
-                        "repo_id": 7,
-                        "file_path": "include/demo.h",
-                        "file_hash": source_sha,
-                        "language": current_language,
-                    }
+                    _file_row("include/demo.h", source_sha, current_language)
                 ])
             raise AssertionError(endpoint)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     parsed_languages: list[str] = []
 
@@ -2420,12 +2389,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
             "unavailable_dimensions": [],
             "artifact_truncated": False,
             "truncated_dimensions": [],
-            "signal_counts": {
-                "entry_points": 0,
-                "imports": 0,
-                "security_sinks": 0,
-                "security_sources": 0,
-            },
+            "signal_counts": _structural_counts(),
             "total_functions": 0,
             "total_exports": 0,
             "total_lines": 1,
@@ -2441,11 +2405,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
         }
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _patch_load_config(monkeypatch, module)
     monkeypatch.setattr(module, "index_file", fake_index)
     args = SimpleNamespace(
         repo_path=str(source),
@@ -2504,13 +2464,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
         "structural_input_digest"
     ]
 
-    backend_repo = {
-        "id": 7,
-        "repo_key": "demo-repo",
-        "repo_path": str(source.resolve()),
-        "active_generation": 4,
-        "source_manifest_digest": server_digest,
-    }
+    backend_repo = _repo_row(source, server_digest)
     with pytest.raises(ValueError, match="language"):
         sync_module._prepare_repo_payload(
             FakeClient(),
@@ -2547,43 +2501,18 @@ def test_code_index_explicit_unknown_backend_language_never_falls_back_to_filena
     source_sha = hashlib.sha256(raw).hexdigest()
     output = tmp_path / "analysis-state"
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos/7":
-                return {
-                    "id": 7,
-                    "repo_key": "demo-repo",
-                    "repo_path": str(source.resolve()),
-                    "active_generation": 4,
-                    "source_manifest_digest": "d" * 64,
-                }
+                return _repo_row(source, "d" * 64)
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 return _file_page([
-                    {
-                        "id": 11,
-                        "repo_id": 7,
-                        "file_path": "include/demo.h",
-                        "file_hash": source_sha,
-                        "language": "",
-                    }
+                    _file_row("include/demo.h", source_sha, "")
                 ])
             raise AssertionError(endpoint)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _patch_load_config(monkeypatch, module)
     monkeypatch.setattr(
         module,
         "index_file",
@@ -2613,13 +2542,7 @@ def test_code_index_explicit_unknown_backend_language_never_falls_back_to_filena
     assert artifact["analysis_status"] == "unsupported"
     prepared = sync_module._prepare_repo_payload(
         FakeClient(),
-        {
-            "id": 7,
-            "repo_key": "demo-repo",
-            "repo_path": str(source.resolve()),
-            "active_generation": 4,
-            "source_manifest_digest": "d" * 64,
-        },
+        _repo_row(source, "d" * 64),
         {**manifest, "_resolved_manifest_path": str(manifest_path)},
         output / "structural-index",
     )
@@ -2649,50 +2572,23 @@ def test_code_index_build_rejects_untrusted_backend_inventory(
     source_sha = hashlib.sha256(raw).hexdigest()
     repo_reads = 0
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             nonlocal repo_reads
             if endpoint == "code/repos/7":
                 repo_reads += 1
                 generation = 5 if failure == "generation" and repo_reads > 1 else 4
-                return {
-                    "id": 7,
-                    "repo_key": "demo-repo",
-                    "repo_path": str(source.resolve()),
-                    "active_generation": generation,
-                    "source_manifest_digest": "d" * 64,
-                }
+                return _repo_row(source, "d" * 64, active_generation=generation)
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 if failure == "incomplete":
                     return _file_page([])
                 return _file_page([
-                    {
-                        "id": 11,
-                        "repo_id": 7,
-                        "file_path": (
-                            "include/other.h" if failure == "path" else "include/demo.h"
-                        ),
-                        "file_hash": "a" * 64 if failure == "hash" else source_sha,
-                        "language": "brainfuck" if failure == "unknown-language" else "c",
-                    }
+                    _file_row("include/other.h" if failure == "path" else "include/demo.h", "a" * 64 if failure == "hash" else source_sha, "brainfuck" if failure == "unknown-language" else "c")
                 ])
             raise AssertionError(endpoint)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _patch_load_config(monkeypatch, module)
     def fake_index(path, language, source=None, **_kwargs):
         if failure != "generation":
             pytest.fail("untrusted inventory reached the parser")
@@ -2770,43 +2666,18 @@ def test_code_index_build_rejects_an_ancestor_swapped_after_validation(
     outside.mkdir()
     (outside / "main.py").write_bytes(raw)
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos/7":
-                return {
-                    "id": 7,
-                    "repo_key": "demo-repo",
-                    "repo_path": str(source.resolve()),
-                    "active_generation": 4,
-                    "source_manifest_digest": "d" * 64,
-                }
+                return _repo_row(source, "d" * 64)
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 return _file_page([
-                    {
-                        "id": 11,
-                        "repo_id": 7,
-                        "file_path": "nested/main.py",
-                        "file_hash": hashlib.sha256(raw).hexdigest(),
-                        "language": "python",
-                    }
+                    _file_row("nested/main.py", hashlib.sha256(raw).hexdigest(), "python")
                 ])
             raise AssertionError(endpoint)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _patch_load_config(monkeypatch, module)
     monkeypatch.setattr(module, "validate_snapshot", lambda *_args, **_kwargs: source_manifest)
     original_capture = RootedSourceTree.capture
     swapped = False
@@ -2916,36 +2787,65 @@ def test_code_index_publish_fails_closed_on_unknown_or_malformed_aggregate(
     assert not (tmp_path / "structural-index" / "history").exists()
 
 
-@pytest.mark.parametrize(
-    "corruption",
-    [
-        "top-level-extra-field",
-        "missing-updated-at",
-        "invalid-updated-at",
-        "empty-repos",
-        "noncanonical-repo-map-key",
-        "summary-not-object",
-        "summary-extra-field",
-        "summary-missing-field",
-        "mismatched-repo-id",
-        "repo-id-overflow",
-        "unsafe-repo-key",
-        "invalid-generation",
-        "generation-overflow",
-        "invalid-source-digest",
-        "invalid-input-digest",
-        "misbound-manifest-path",
-        "negative-degraded-count",
-        "degraded-path-count-mismatch",
-        "unsafe-degraded-path",
-        "invalid-truncated-paths",
-        "invalid-status-keys",
-        "invalid-status-count",
-        "status-count-overflow",
-        "degraded-status-mismatch",
-        "truncated-count-exceeds-total",
-    ],
-)
+def _corrupt_repo_id_overflow(aggregate: dict, summary: dict) -> None:
+    repo_id = 2**63
+    aggregate["repos"][str(repo_id)] = aggregate["repos"].pop("999")
+    summary["repo_id"] = repo_id
+    summary["manifest_path"] = summary["manifest_path"].replace(
+        "structural-index/999/", f"structural-index/{repo_id}/"
+    )
+
+
+def _corrupt_generation_overflow(aggregate: dict, summary: dict) -> None:
+    generation = 2**63
+    summary["repo_generation"] = generation
+    summary["manifest_path"] = summary["manifest_path"].replace(
+        "/4/v4/", f"/{generation}/v4/"
+    )
+
+
+def _corrupt_invalid_truncated_paths(aggregate: dict, summary: dict) -> None:
+    summary["artifact_truncated_file_paths"] = ["legacy.c", "legacy.c"]
+    summary["artifact_truncated_files"] = 2
+
+
+def _corrupt_truncated_count_exceeds_total(aggregate: dict, summary: dict) -> None:
+    summary["artifact_truncated_files"] = 2
+    summary["artifact_truncated_file_paths"] = ["legacy.c", "other.c"]
+
+
+# The roster and the mutation it names live in one table, so a corruption can no
+# longer be listed without being applied (or applied without being listed).
+_V3_CORRUPTIONS: dict[str, Callable[[dict, dict], None]] = {
+    "top-level-extra-field": lambda aggregate, summary: aggregate.__setitem__("unexpected", True),
+    "missing-updated-at": lambda aggregate, summary: aggregate.pop("updated_at"),
+    "invalid-updated-at": lambda aggregate, summary: aggregate.__setitem__("updated_at", "yesterday"),
+    "empty-repos": lambda aggregate, summary: aggregate.__setitem__("repos", {}),
+    "noncanonical-repo-map-key": lambda aggregate, summary: aggregate["repos"].__setitem__("0999", aggregate["repos"].pop("999")),
+    "summary-not-object": lambda aggregate, summary: aggregate["repos"].__setitem__("999", []),
+    "summary-extra-field": lambda aggregate, summary: summary.__setitem__("unexpected", True),
+    "summary-missing-field": lambda aggregate, summary: summary.pop("repo_key"),
+    "mismatched-repo-id": lambda aggregate, summary: summary.__setitem__("repo_id", 998),
+    "repo-id-overflow": _corrupt_repo_id_overflow,
+    "unsafe-repo-key": lambda aggregate, summary: summary.__setitem__("repo_key", "../stale-repo"),
+    "invalid-generation": lambda aggregate, summary: summary.__setitem__("repo_generation", 0),
+    "generation-overflow": _corrupt_generation_overflow,
+    "invalid-source-digest": lambda aggregate, summary: summary.__setitem__("source_manifest_digest", "g" * 64),
+    "invalid-input-digest": lambda aggregate, summary: summary.__setitem__("structural_input_digest", "B" * 64),
+    "misbound-manifest-path": lambda aggregate, summary: summary.__setitem__("manifest_path", "/tmp/stale/manifest.json"),
+    "negative-degraded-count": lambda aggregate, summary: summary.__setitem__("degraded_files", -1),
+    "degraded-path-count-mismatch": lambda aggregate, summary: summary.__setitem__("degraded_file_paths", []),
+    "unsafe-degraded-path": lambda aggregate, summary: summary.__setitem__("degraded_file_paths", ["../legacy.c"]),
+    "invalid-truncated-paths": _corrupt_invalid_truncated_paths,
+    "invalid-status-keys": lambda aggregate, summary: summary["analysis_status_counts"].__setitem__("pending", 0),
+    "invalid-status-count": lambda aggregate, summary: summary["analysis_status_counts"].__setitem__("complete", True),
+    "status-count-overflow": lambda aggregate, summary: summary["analysis_status_counts"].__setitem__("complete", 2**63),
+    "degraded-status-mismatch": lambda aggregate, summary: summary["analysis_status_counts"].__setitem__("degraded", 0),
+    "truncated-count-exceeds-total": _corrupt_truncated_count_exceeds_total,
+}
+
+
+@pytest.mark.parametrize("corruption", list(_V3_CORRUPTIONS))
 def test_code_index_publish_rejects_corrupt_known_v3_summary_without_archiving(
     tmp_path: Path,
     corruption: str,
@@ -2953,94 +2853,13 @@ def test_code_index_publish_rejects_corrupt_known_v3_summary_without_archiving(
     module = _load_command("code_index.py", f"test_sealed_code_index_corrupt_v3_{corruption}")
     aggregate = _legacy_v3_aggregate()
     summary = aggregate["repos"]["999"]
-    if corruption == "top-level-extra-field":
-        aggregate["unexpected"] = True
-    elif corruption == "missing-updated-at":
-        aggregate.pop("updated_at")
-    elif corruption == "invalid-updated-at":
-        aggregate["updated_at"] = "yesterday"
-    elif corruption == "empty-repos":
-        aggregate["repos"] = {}
-    elif corruption == "noncanonical-repo-map-key":
-        aggregate["repos"]["0999"] = aggregate["repos"].pop("999")
-    elif corruption == "summary-not-object":
-        aggregate["repos"]["999"] = []
-    elif corruption == "summary-extra-field":
-        summary["unexpected"] = True
-    elif corruption == "summary-missing-field":
-        summary.pop("repo_key")
-    elif corruption == "mismatched-repo-id":
-        summary["repo_id"] = 998
-    elif corruption == "repo-id-overflow":
-        repo_id = 2**63
-        aggregate["repos"][str(repo_id)] = aggregate["repos"].pop("999")
-        summary["repo_id"] = repo_id
-        summary["manifest_path"] = summary["manifest_path"].replace(
-            "structural-index/999/", f"structural-index/{repo_id}/"
-        )
-    elif corruption == "unsafe-repo-key":
-        summary["repo_key"] = "../stale-repo"
-    elif corruption == "invalid-generation":
-        summary["repo_generation"] = 0
-    elif corruption == "generation-overflow":
-        generation = 2**63
-        summary["repo_generation"] = generation
-        summary["manifest_path"] = summary["manifest_path"].replace(
-            "/4/v4/", f"/{generation}/v4/"
-        )
-    elif corruption == "invalid-source-digest":
-        summary["source_manifest_digest"] = "g" * 64
-    elif corruption == "invalid-input-digest":
-        summary["structural_input_digest"] = "B" * 64
-    elif corruption == "misbound-manifest-path":
-        summary["manifest_path"] = "/tmp/stale/manifest.json"
-    elif corruption == "negative-degraded-count":
-        summary["degraded_files"] = -1
-    elif corruption == "degraded-path-count-mismatch":
-        summary["degraded_file_paths"] = []
-    elif corruption == "unsafe-degraded-path":
-        summary["degraded_file_paths"] = ["../legacy.c"]
-    elif corruption == "invalid-truncated-paths":
-        summary["artifact_truncated_file_paths"] = ["legacy.c", "legacy.c"]
-        summary["artifact_truncated_files"] = 2
-    elif corruption == "invalid-status-keys":
-        summary["analysis_status_counts"]["pending"] = 0
-    elif corruption == "invalid-status-count":
-        summary["analysis_status_counts"]["complete"] = True
-    elif corruption == "status-count-overflow":
-        summary["analysis_status_counts"]["complete"] = 2**63
-    elif corruption == "degraded-status-mismatch":
-        summary["analysis_status_counts"]["degraded"] = 0
-    elif corruption == "truncated-count-exceeds-total":
-        summary["artifact_truncated_files"] = 2
-        summary["artifact_truncated_file_paths"] = ["legacy.c", "other.c"]
-    else:  # pragma: no cover - the parameter roster is exhaustive
-        raise AssertionError(corruption)
+    _V3_CORRUPTIONS[corruption](aggregate, summary)
 
     aggregate_path = tmp_path / "structural-index-manifest.json"
     original = (json.dumps(aggregate, sort_keys=True) + "\n").encode("utf-8")
     aggregate_path.write_bytes(original)
-    manifest_path = (
-        tmp_path
-        / "structural-index"
-        / "7"
-        / "4"
-        / STRUCTURAL_INDEX_PATH_VERSION
-        / ("d" * 64)
-        / ("e" * 64)
-        / "manifest.json"
-    )
-    manifest = {
-        "repo_key": "demo-repo",
-        "repo_generation": 4,
-        "source_manifest_digest": "d" * 64,
-        "structural_input_digest": "e" * 64,
-        "degraded_files": 0,
-        "degraded_file_paths": [],
-        "artifact_truncated_files": 0,
-        "artifact_truncated_file_paths": [],
-        "analysis_status_counts": {"complete": 1, "degraded": 0, "unsupported": 0},
-    }
+    manifest_path = _v4_manifest_path(tmp_path)
+    manifest = _v4_manifest()
 
     with pytest.raises(ValueError, match="legacy structural index aggregate"):
         module._publish_aggregate(tmp_path, 7, manifest_path, manifest)
@@ -3073,27 +2892,8 @@ def test_code_index_publish_rejects_duplicate_legacy_v3_object_keys(
     aggregate_bytes = aggregate_text.encode("utf-8")
     aggregate_path = tmp_path / "structural-index-manifest.json"
     aggregate_path.write_bytes(aggregate_bytes)
-    manifest_path = (
-        tmp_path
-        / "structural-index"
-        / "7"
-        / "4"
-        / STRUCTURAL_INDEX_PATH_VERSION
-        / ("d" * 64)
-        / ("e" * 64)
-        / "manifest.json"
-    )
-    manifest = {
-        "repo_key": "demo-repo",
-        "repo_generation": 4,
-        "source_manifest_digest": "d" * 64,
-        "structural_input_digest": "e" * 64,
-        "degraded_files": 0,
-        "degraded_file_paths": [],
-        "artifact_truncated_files": 0,
-        "artifact_truncated_file_paths": [],
-        "analysis_status_counts": {"complete": 1, "degraded": 0, "unsupported": 0},
-    }
+    manifest_path = _v4_manifest_path(tmp_path)
+    manifest = _v4_manifest()
 
     with pytest.raises(ValueError, match="duplicate JSON object key"):
         module._publish_aggregate(tmp_path, 7, manifest_path, manifest)
@@ -3131,27 +2931,8 @@ def test_code_index_publish_rejects_fifo_collision_without_blocking(
         archive_path.parent.mkdir(parents=True)
         os.mkfifo(archive_path)
 
-    manifest_path = (
-        tmp_path
-        / "structural-index"
-        / "7"
-        / "4"
-        / STRUCTURAL_INDEX_PATH_VERSION
-        / ("d" * 64)
-        / ("e" * 64)
-        / "manifest.json"
-    )
-    manifest = {
-        "repo_key": "demo-repo",
-        "repo_generation": 4,
-        "source_manifest_digest": "d" * 64,
-        "structural_input_digest": "e" * 64,
-        "degraded_files": 0,
-        "degraded_file_paths": [],
-        "artifact_truncated_files": 0,
-        "artifact_truncated_file_paths": [],
-        "analysis_status_counts": {"complete": 1, "degraded": 0, "unsupported": 0},
-    }
+    manifest_path = _v4_manifest_path(tmp_path)
+    manifest = _v4_manifest()
 
     outcome = _fork_call_outcome(
         lambda: module._publish_aggregate(tmp_path, 7, manifest_path, manifest)
@@ -3188,27 +2969,8 @@ def test_code_index_publish_rejects_unsafe_lock_nodes_without_blocking(
         outside_lock = tmp_path / "outside.lock"
         outside_lock.write_bytes(b"outside-lock-sentinel")
         lock_path.symlink_to(outside_lock)
-    manifest_path = (
-        tmp_path
-        / "structural-index"
-        / "7"
-        / "4"
-        / STRUCTURAL_INDEX_PATH_VERSION
-        / ("d" * 64)
-        / ("e" * 64)
-        / "manifest.json"
-    )
-    manifest = {
-        "repo_key": "demo-repo",
-        "repo_generation": 4,
-        "source_manifest_digest": "d" * 64,
-        "structural_input_digest": "e" * 64,
-        "degraded_files": 0,
-        "degraded_file_paths": [],
-        "artifact_truncated_files": 0,
-        "artifact_truncated_file_paths": [],
-        "analysis_status_counts": {"complete": 1, "degraded": 0, "unsupported": 0},
-    }
+    manifest_path = _v4_manifest_path(tmp_path)
+    manifest = _v4_manifest()
     outcome = _fork_call_outcome(
         lambda: module._publish_aggregate(tmp_path, 7, manifest_path, manifest)
     )
@@ -3346,27 +3108,8 @@ def test_code_index_publish_rejects_group_writable_legacy_archive_directory(
     archive_dir = tmp_path / "structural-index" / "history" / "aggregates" / "v3"
     archive_dir.mkdir(parents=True)
     os.chmod(archive_dir, 0o777)
-    manifest_path = (
-        tmp_path
-        / "structural-index"
-        / "7"
-        / "4"
-        / STRUCTURAL_INDEX_PATH_VERSION
-        / ("d" * 64)
-        / ("e" * 64)
-        / "manifest.json"
-    )
-    manifest = {
-        "repo_key": "demo-repo",
-        "repo_generation": 4,
-        "source_manifest_digest": "d" * 64,
-        "structural_input_digest": "e" * 64,
-        "degraded_files": 0,
-        "degraded_file_paths": [],
-        "artifact_truncated_files": 0,
-        "artifact_truncated_file_paths": [],
-        "analysis_status_counts": {"complete": 1, "degraded": 0, "unsupported": 0},
-    }
+    manifest_path = _v4_manifest_path(tmp_path)
+    manifest = _v4_manifest()
 
     with pytest.raises(ValueError, match="archive directory"):
         module._publish_aggregate(tmp_path, 7, manifest_path, manifest)
@@ -3444,15 +3187,7 @@ def test_code_index_sync_rejects_legacy_contracts_before_backend_access(
             client_opened = True
 
     monkeypatch.setattr(module, "AssessmentClient", NeverClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     args = SimpleNamespace(
         manifest=str(top_path),
         index_dir=str(tmp_path / "structural-index"),
@@ -3529,13 +3264,7 @@ def test_code_index_sync_rejects_source_path_traversal(tmp_path: Path) -> None:
                 }
             ])
 
-    backend_repo = {
-        "id": 7,
-        "repo_key": "demo-repo",
-        "repo_path": str(source.resolve()),
-        "active_generation": 4,
-        "source_manifest_digest": digest,
-    }
+    backend_repo = _repo_row(source, digest)
     with pytest.raises(ValueError, match="unsafe source file path"):
         module._prepare_repo_payload(FakeClient(), backend_repo, manifest, index_root)
 
@@ -3551,13 +3280,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     source, source_manifest = _sealed_snapshot(tmp_path, {"main.py": raw})
     request.addfinalizer(lambda: _restore_tree_writable(source.parent))
     source_sha = hashlib.sha256(raw).hexdigest()
-    backend_row = {
-        "id": 11,
-        "repo_id": 7,
-        "file_path": "main.py",
-        "file_hash": source_sha,
-        "language": "python",
-    }
+    backend_row = _file_row("main.py", source_sha, "python")
     input_digest = _structural_identity(
         source_manifest,
         [backend_row],
@@ -3568,18 +3291,15 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
         index_root / "7" / "4" / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest / "files" / "main.json"
     )
     index_file.parent.mkdir(parents=True)
-    index_payload = {
-        "file_path": "main.py",
-        "language": "python",
-        "repo_id": 7,
-        "repo_generation": 4,
-        "source_manifest_digest": digest,
-        "structural_input_digest": input_digest,
-        "source_sha256": source_sha,
-        "total_functions": 1,
-        "total_exports": 0,
-        "total_lines": 1,
-        "functions": [
+    index_payload = _structural_artifact(
+        "main.py",
+        source_manifest_digest=digest,
+        structural_input_digest=input_digest,
+        source_sha256=source_sha,
+        source_size=len(raw),
+        bytes_scanned=len(raw),
+        total_functions=1,
+        functions=[
             {
                 "name": "main",
                 "qualified_name": "main",
@@ -3587,30 +3307,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                 "line_end": 1,
             }
         ],
-        "entry_points": [],
-        "security_sinks": [],
-        "security_sources": [],
-        "call_sites": [],
-        "imports": [],
-        "import_targets": [],
-        "exports": [],
-        "classes": [],
-        "structural_index_available": True,
-        "analysis_status": "complete",
-        "analysis_mode": "tree_sitter",
-        "degradation_reason": None,
-        "source_size": len(raw),
-        "bytes_scanned": len(raw),
-        "unavailable_dimensions": [],
-        "artifact_truncated": False,
-        "truncated_dimensions": [],
-        "signal_counts": {
-            "entry_points": 0,
-            "imports": 0,
-            "security_sinks": 0,
-            "security_sources": 0,
-        },
-    }
+    )
     index_file.write_text(json.dumps(index_payload), encoding="utf-8")
     index_sha = hashlib.sha256(index_file.read_bytes()).hexdigest()
     manifest = {
@@ -3676,20 +3373,11 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     posted: list[tuple[str, dict]] = []
     include_extra_backend_file = False
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos":
                 return [
-                    {
-                        "id": 7,
-                        "repo_key": "demo-repo",
-                        "repo_path": str(source.resolve()),
-                        "active_generation": 4,
-                        "source_manifest_digest": digest,
-                    }
+                    _repo_row(source, digest)
                 ]
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 rows = [
@@ -3697,13 +3385,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                 ]
                 if include_extra_backend_file:
                     rows.append(
-                        {
-                            "id": 12,
-                            "repo_id": 7,
-                            "file_path": "unbound.py",
-                            "file_hash": "a" * 64,
-                            "language": "python",
-                        }
+                        _file_row("unbound.py", "a" * 64, "python", file_id=12)
                     )
                 return _file_page(rows)
             raise AssertionError(endpoint)
@@ -3721,22 +3403,8 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
                 )
             } | {"updated": len(payload["updates"])}
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     args = SimpleNamespace(
         manifest=str(top),
         index_dir=str(index_root),
@@ -3808,13 +3476,7 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
         "_resolved_manifest_path": str(manifest_path),
         "path_to_index": {"main.py": "7/4/wrong.json"},
     }
-    backend_repo = {
-        "id": 7,
-        "repo_key": "demo-repo",
-        "repo_path": str(source.resolve()),
-        "active_generation": 4,
-        "source_manifest_digest": digest,
-    }
+    backend_repo = _repo_row(source, digest)
     with pytest.raises(ValueError, match="path_to_index"):
         module._prepare_repo_payload(FakeClient(), backend_repo, tampered_manifest, index_root)
 
@@ -3849,13 +3511,7 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
     raw = b"print('sealed')\n"
     source, source_manifest = _sealed_snapshot(tmp_path, {"nested/main.py": raw})
     source_sha = hashlib.sha256(raw).hexdigest()
-    backend_row = {
-        "id": 11,
-        "repo_id": 7,
-        "file_path": "nested/main.py",
-        "file_hash": source_sha,
-        "language": "python",
-    }
+    backend_row = _file_row("nested/main.py", source_sha, "python")
     input_digest = _structural_identity(
         source_manifest,
         [backend_row],
@@ -3866,42 +3522,14 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
         index_root / "7" / "4" / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest / "files" / "main.json"
     )
     artifact_path.parent.mkdir(parents=True)
-    artifact = {
-        "file_path": "nested/main.py",
-        "language": "python",
-        "repo_id": 7,
-        "repo_generation": 4,
-        "source_manifest_digest": digest,
-        "structural_input_digest": input_digest,
-        "source_sha256": source_sha,
-        "total_functions": 0,
-        "total_exports": 0,
-        "total_lines": 1,
-        "functions": [],
-        "entry_points": [],
-        "security_sinks": [],
-        "security_sources": [],
-        "call_sites": [],
-        "imports": [],
-        "import_targets": [],
-        "exports": [],
-        "classes": [],
-        "structural_index_available": True,
-        "analysis_status": "complete",
-        "analysis_mode": "tree_sitter",
-        "degradation_reason": None,
-        "source_size": len(raw),
-        "bytes_scanned": len(raw),
-        "unavailable_dimensions": [],
-        "artifact_truncated": False,
-        "truncated_dimensions": [],
-        "signal_counts": {
-            "entry_points": 0,
-            "imports": 0,
-            "security_sinks": 0,
-            "security_sources": 0,
-        },
-    }
+    artifact = _structural_artifact(
+        "nested/main.py",
+        source_manifest_digest=digest,
+        structural_input_digest=input_digest,
+        source_sha256=source_sha,
+        source_size=len(raw),
+        bytes_scanned=len(raw),
+    )
     artifact_bytes = json.dumps(artifact).encode()
     artifact_path.write_bytes(artifact_bytes)
     manifest_path = artifact_path.parent.parent / "manifest.json"
@@ -3965,20 +3593,11 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
     )
     posted: list[tuple[str, dict]] = []
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos":
                 return [
-                    {
-                        "id": 7,
-                        "repo_key": "demo-repo",
-                        "repo_path": str(source.resolve()),
-                        "active_generation": 4,
-                        "source_manifest_digest": digest,
-                    }
+                    _repo_row(source, digest)
                 ]
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 return _file_page([dict(backend_row)])
@@ -3997,22 +3616,8 @@ def test_code_index_sync_ancestor_swap_fails_before_any_post(
                 )
             } | {"updated": len(payload["updates"])}
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "validate_snapshot", lambda *_args, **_kwargs: source_manifest)
     original_capture = RootedSourceTree.capture
     detached = tmp_path / "detached-sync-nested"
@@ -4314,13 +3919,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
     source, source_manifest = _sealed_snapshot(tmp_path, {"main.py": raw})
     request.addfinalizer(lambda: _restore_tree_writable(source.parent))
     source_sha = hashlib.sha256(raw).hexdigest()
-    backend_row = {
-        "id": 11,
-        "repo_id": 7,
-        "file_path": "main.py",
-        "file_hash": source_sha,
-        "language": "python",
-    }
+    backend_row = _file_row("main.py", source_sha, "python")
     input_digest = _structural_identity(
         source_manifest,
         [backend_row],
@@ -4331,47 +3930,29 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
         index_root / "7" / "4" / STRUCTURAL_INDEX_PATH_VERSION / digest / input_digest / "files" / "main.json"
     )
     artifact_path.parent.mkdir(parents=True)
-    artifact = {
-        "file_path": "main.py",
-        "language": "python",
-        "repo_id": 7,
-        "repo_generation": 4,
-        "source_manifest_digest": digest,
-        "structural_input_digest": input_digest,
-        "source_sha256": source_sha,
-        "total_functions": 1,
-        "total_lines": 1,
-        "functions": [],
-        "entry_points": [{"name": "a"}, {"name": "b"}],
-        "security_sinks": [{"kind": "eval_exec"}, {"kind": "process_exec"}],
-        "security_sources": [],
-        "call_sites": [],
-        "imports": [],
-        "import_targets": [],
-        "total_exports": 5,
-        "exports": [{"name": "one"}, {"name": "two"}],
-        "classes": [],
-        "structural_index_available": True,
-        "analysis_status": "degraded",
-        "analysis_mode": "tree_sitter",
-        "degradation_reason": "artifact_signal_limit",
-        "source_size": len(raw),
-        "bytes_scanned": len(raw),
-        "unavailable_dimensions": [],
-        "artifact_truncated": True,
-        "truncated_dimensions": [
+    artifact = _structural_artifact(
+        "main.py",
+        source_manifest_digest=digest,
+        structural_input_digest=input_digest,
+        source_sha256=source_sha,
+        source_size=len(raw),
+        bytes_scanned=len(raw),
+        total_functions=1,
+        total_exports=5,
+        entry_points=[{"name": "a"}, {"name": "b"}],
+        security_sinks=[{"kind": "eval_exec"}, {"kind": "process_exec"}],
+        exports=[{"name": "one"}, {"name": "two"}],
+        analysis_status="degraded",
+        degradation_reason="artifact_signal_limit",
+        artifact_truncated=True,
+        truncated_dimensions=[
             "entry_points",
             "exports",
             "functions",
             "security_sinks",
         ],
-        "signal_counts": {
-            "entry_points": 5,
-            "imports": 0,
-            "security_sinks": 4,
-            "security_sources": 0,
-        },
-    }
+        signal_counts=_structural_counts(entry_points=5, security_sinks=4),
+    )
     artifact_bytes = json.dumps(artifact).encode()
     artifact_path.write_bytes(artifact_bytes)
     index_rel = str(artifact_path.relative_to(index_root))
@@ -4413,13 +3994,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
 
     payload = module._prepare_repo_payload(
         FakeClient(),
-        {
-            "id": 7,
-            "repo_key": "demo-repo",
-            "repo_path": str(source.resolve()),
-            "active_generation": 4,
-            "source_manifest_digest": digest,
-        },
+        _repo_row(source, digest),
         manifest,
         index_root,
     )
@@ -4453,12 +4028,7 @@ def _structural_metadata_artifact() -> dict[str, object]:
         "unavailable_dimensions": [],
         "artifact_truncated": False,
         "truncated_dimensions": [],
-        "signal_counts": {
-            "entry_points": 0,
-            "imports": 0,
-            "security_sinks": 0,
-            "security_sources": 0,
-        },
+        "signal_counts": _structural_counts(),
     }
 
 
@@ -4508,12 +4078,7 @@ def test_code_index_sync_rejects_signal_counts_below_every_retained_dimension(
         ("imports", ["os"]),
         (
             "signal_counts",
-            {
-                "entry_points": 0,
-                "imports": 0,
-                "security_sinks": 0,
-                "security_sources": 1,
-            },
+            _structural_counts(security_sources=1),
         ),
     ],
 )
@@ -4667,10 +4232,7 @@ def test_code_record_threat_model_requires_and_posts_snapshot_binding(
     threat.write_text('{"targets": ["parser"]}', encoding="utf-8")
     captured: dict[str, object] = {}
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
@@ -4682,18 +4244,8 @@ def test_code_record_threat_model_requires_and_posts_snapshot_binding(
                 "threat_model": {"targets": ["parser"]},
             }
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _patch_load_config(monkeypatch, module)
     module.run(
         SimpleNamespace(
             repo_id="7",
@@ -4944,43 +4496,18 @@ def test_code_index_large_file_fallback_scans_every_byte_and_surfaces_debt(
     source, _source_manifest = _sealed_snapshot(tmp_path, {"main.py": raw})
     output = tmp_path / "analysis-state"
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "code/repos/7":
-                return {
-                    "id": 7,
-                    "repo_key": "demo-repo",
-                    "repo_path": str(source.resolve()),
-                    "active_generation": 4,
-                    "source_manifest_digest": server_digest,
-                }
+                return _repo_row(source, server_digest)
             if endpoint == "code/files?limit=5000&offset=0&repo_id=7":
                 return _file_page([
-                    {
-                        "id": 11,
-                        "repo_id": 7,
-                        "file_path": "main.py",
-                        "file_hash": hashlib.sha256(raw).hexdigest(),
-                        "language": "python",
-                    }
+                    _file_row("main.py", hashlib.sha256(raw).hexdigest(), "python")
                 ])
             raise AssertionError(endpoint)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _patch_load_config(monkeypatch, module)
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
 
     def should_not_materialize(*_args, **_kwargs):
@@ -5737,15 +5264,7 @@ def test_code_ingest_scales_the_staging_budget_per_batch(
         )
     engagement = tmp_path / "engagement"
     engagement.mkdir()
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement))
     monkeypatch.setattr(
         module,
         "_setup_ctags",
@@ -5753,10 +5272,7 @@ def test_code_ingest_scales_the_staging_budget_per_batch(
     )
     staged: list[tuple[int, float | None]] = []
 
-    class FakeClient:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict, **options):
             if endpoint == "code/repos/refresh/start":
                 return {"repo_id": 7, "refresh_token": "refresh-7"}
@@ -5777,12 +5293,6 @@ def test_code_ingest_scales_the_staging_budget_per_batch(
 
         def patch(self, endpoint: str, _payload: dict):
             return {"id": 7}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     module.run(_ingest_args(repo, engagement))

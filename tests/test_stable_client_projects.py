@@ -2,12 +2,13 @@
 import hashlib
 import json
 import os
-from pathlib import Path
-import subprocess
 import shutil
+import subprocess
+from pathlib import Path
 
 import pytest
 
+from vigil_cli import assessment_clients
 from vigil_cli.assessment_clients import prepare_workspace
 from vigil_cli.client_projects import prepare_project
 
@@ -25,7 +26,6 @@ def prepared(tmp_path, monkeypatch):
         "tracks": {"web": {"phase": "recon"}, "code": {"phase": "hunt"}}}))
 
     def prepare(client, version="1", mode="code", release=None, layout=None):
-        from vigil_cli import assessment_clients
         target = engagement
         if layout == "legacy":
             target = root / "agent/engagements/acme"

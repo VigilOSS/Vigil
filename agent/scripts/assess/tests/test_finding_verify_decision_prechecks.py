@@ -14,6 +14,7 @@ import json
 import pytest
 
 from assess.commands import verify_finding
+from _fake_client import StubClient
 
 
 class _Cfg:
@@ -23,7 +24,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self) -> None:
         self.posts: list[tuple[str, dict]] = []
 
@@ -33,15 +34,6 @@ class _FakeClient:
     def post(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
         return {"finding": {"slug": endpoint.split("/")[1]}}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:
-        return None
 
 
 def _args(tmp_path, monkeypatch, argv: list[str]) -> tuple[argparse.Namespace, _FakeClient]:

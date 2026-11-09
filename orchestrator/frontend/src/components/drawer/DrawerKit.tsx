@@ -14,10 +14,9 @@
 // these components emit the exact class names that CSS already targets, so
 // no new markup contracts are introduced.
 
-import { useEffect, useMemo, useRef, useState } from "react";
 import { Check, Code as CodeIcon, Copy, Eye } from "lucide-react";
 import { MarkdownBlock } from "../Markdown";
-import { TimeStamp } from "../formatting";
+import { TimeStamp, useCopyFeedback } from "../formatting";
 import type { AbsoluteTimePrecision } from "../../lib/serverTime";
 
 // Toast callback type (matches useToast().toast). Threaded into the kit so
@@ -33,43 +32,15 @@ export type ProseMode = "rendered" | "raw";
 // ~1.2s and fires toast("Copied"). Renders a compact icon affordance suitable
 // for section-title headers.
 export function CopyChip({ text, toast, label }: { text: string; toast: ToastFn; label?: string }) {
-  const scope = useMemo(() => ({}), [text]);
-  const activeScope = useRef<object | null>(scope);
-  const activeRequest = useRef<object | null>(null);
-  const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [copiedScope, setCopiedScope] = useState<object | null>(null);
-  activeScope.current = scope;
-  const copied = copiedScope === scope;
-  useEffect(() => {
-    activeScope.current = scope;
-    return () => {
-      if (activeScope.current === scope) activeScope.current = null;
-      activeRequest.current = null;
-      if (timer.current !== null) clearTimeout(timer.current);
-    };
-  }, [scope]);
-  const onCopy = async () => {
-    const request = {};
-    activeRequest.current = request;
-    const current = () => activeScope.current === scope && activeRequest.current === request;
-    setCopiedScope(null);
-    if (timer.current !== null) clearTimeout(timer.current);
-    try {
-      if (!navigator.clipboard) throw new Error("Clipboard unavailable");
-      await navigator.clipboard.writeText(text);
-      if (!current()) return;
-      setCopiedScope(scope);
-      timer.current = setTimeout(() => { if (current()) setCopiedScope(null); }, 1200);
-      toast("Copied", "success");
-    } catch {
-      if (current()) toast("Could not copy to clipboard", "error");
-    }
-  };
+  const { copied, copy } = useCopyFeedback(text, {
+    onSuccess: () => toast("Copied", "success"),
+    onFailure: () => toast("Could not copy to clipboard", "error"),
+  });
   return (
     <button
       type="button"
       className={`copy-chip ${copied ? "is-copied" : ""}`}
-      onClick={onCopy}
+      onClick={copy}
       aria-label={label ?? "Copy to clipboard"}
       title={label ?? "Copy"}
     >

@@ -30,6 +30,7 @@ from assess.commands.dispatch.handoff_renderer import (
     _render_handoff,
 )
 from assess.lib.client import AssessError
+from assess.lib.code_record_input import fail
 from assess.lib.code_structural_identity import parse_code_file_page
 from assess.lib.contracts import (
     BINDABLE_CLIENTS,
@@ -542,8 +543,7 @@ def _done(args) -> None:
     if not ids and getattr(args, "agent_id", None):
         ids = [str(args.agent_id).strip()]
     if not ids:
-        print("agent done: agent id required as positional arg or --agent-id", file=sys.stderr)
-        sys.exit(1)
+        fail("agent done", "agent id required as positional arg or --agent-id")
     explicit_status = bool(getattr(args, "dispatch_status", None))
     if not explicit_status:
         args.dispatch_status = "completed"
@@ -594,13 +594,12 @@ def _check_handoff_before_raw_done(args, *, explicit_status: bool) -> None:
     status_value = str(handoff.get("handoff_status") or "")
     if status_value in {"ready", "blocked"}:
         if not explicit_status:
-            print(
-                f"agent done: handoff for {args.agent_id} is {status_value}; "
+            fail(
+                "agent done",
+                f"handoff for {args.agent_id} is {status_value}; "
                 f"use `vigil assess agent close {args.agent_id}` to record the closure "
                 "decision, or pass --status explicitly for a raw recovery write.",
-                file=sys.stderr,
             )
-            sys.exit(1)
         print(
             f"WARN agent done: handoff for {args.agent_id} is handoff_status={status_value!r}; "
             f"`vigil assess agent close {args.agent_id}` would write a dispatch_closed_from_handoff "
@@ -628,26 +627,20 @@ def _close(args) -> None:
     if not ids and getattr(args, "agent_id", None):
         ids = [str(args.agent_id).strip()]
     if all_ready and ids:
-        print(
-            "agent close: --all-ready derives the id list from backend state; drop the "
+        fail(
+            "agent close",
+            "--all-ready derives the id list from backend state; drop the "
             "explicit agent ids or drop --all-ready",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if all_ready and returned_status:
-        print(
-            f"agent close: --all-ready selects dispatches that already have a final "
+        fail(
+            "agent close",
+            f"--all-ready selects dispatches that already have a final "
             f"handoff; --status {returned_status} records an observed return for a "
             "dispatch that has none. Close those by id.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if not ids and not all_ready:
-        print(
-            "agent close: agent id required as positional arg, --agent-id, or --all-ready",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("agent close", "agent id required as positional arg, --agent-id, or --all-ready")
     client, _ = dispatch._client_for(args)  # noqa: SLF001
     closed = 0
     failed = 0
@@ -1035,8 +1028,7 @@ def _bind_client_handle(args) -> None:
     """
     agent_id = str(args.extra[0]).strip()
     if not agent_id:
-        print("agent bind-client-handle: agent id required", file=sys.stderr)
-        sys.exit(1)
+        fail("agent bind-client-handle", "agent id required")
     payload = {
         "asserted_client": args.bind_client,
         "asserted_session_namespace": str(args.bind_session_namespace).strip(),
@@ -1173,8 +1165,9 @@ def _require_registered_role(payload: dict, cfg) -> None:
         return
     available = sorted(path.stem for path in roster.glob("*.md"))
     nearest = difflib.get_close_matches(role, available, n=1, cutoff=0.6)
-    print(
-        f"agent start: role {role!r} has no prompt at {roster / (role + '.md')}. The "
+    fail(
+        "agent start",
+        f"role {role!r} has no prompt at {roster / (role + '.md')}. The "
         f"packet would tell the specialist to read agent/agents/{role}.md, which does "
         "not exist, so it would run with no role prompt and none of its mandatory "
         "references."
@@ -1182,9 +1175,7 @@ def _require_registered_role(payload: dict, cfg) -> None:
         + " Registered roles: "
         + ", ".join(available)
         + ".",
-        file=sys.stderr,
     )
-    raise SystemExit(1)
 
 
 def _require_proof_variant_parent_set(payload: dict, engagement_dir: Path) -> None:
@@ -1212,12 +1203,11 @@ def _require_proof_variant_parent_set(payload: dict, engagement_dir: Path) -> No
     code_phase = phases.get("code")
     code_proof = role == "code-variant-hunter" and code_phase == "verify-variant"
     if (web_proof or code_proof) and not payload.get("finding_slugs"):
-        print(
-            "agent start: proof-bearing variant dispatch requires --finding-slugs "
+        fail(
+            "agent start",
+            "proof-bearing variant dispatch requires --finding-slugs "
             "with the parent finding set",
-            file=sys.stderr,
         )
-        raise SystemExit(1)
 
 
 # A per-slug obligation needs all three on one line: the slug scope, an
@@ -1493,19 +1483,17 @@ def _dispatch_prompt(
             print(f"agent start: cannot read {scope_path}: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         if not isinstance(scope, dict):
-            print("agent start: scope.json must contain an object", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "scope.json must contain an object")
         if str(scope.get("engagement_type") or "") == "blue":
             refs = scope.get("tenant_reference_paths")
             if not isinstance(refs, list) or not all(
                 isinstance(ref, str) and ref.strip() for ref in refs
             ) or not refs:
-                print(
-                    "agent start: blue scope requires non-empty "
+                fail(
+                    "agent start",
+                    "blue scope requires non-empty "
                     "tenant_reference_paths",
-                    file=sys.stderr,
                 )
-                raise SystemExit(1)
             try:
                 from vigil_cli.paths import tenant_references_root, workspace_root_for_engagement
 
@@ -1514,11 +1502,7 @@ def _dispatch_prompt(
                     refs, tenant_root=tenant_references_root(workspace_root), relative_root=workspace_root,
                 )
             except TenantReferenceError as exc:
-                print(
-                    f"agent start: {exc}",
-                    file=sys.stderr,
-                )
-                raise SystemExit(1)
+                fail("agent start", f"{exc}")
             tenant_lines = [
                 "## Load First (tenant context — read before role-specific skill)",
                 *(f"- {ref}" for ref in validated_refs),
@@ -1548,8 +1532,7 @@ def _dispatch_prompt(
             for key, value in [line.split(": ", 1)]
         }
         if client is None or not identity.get("repo_id"):
-            print("agent start: queue_item_ids require an active Code Source Identity", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "queue_item_ids require an active Code Source Identity")
         backend_prior_state.extend(_backend_queue_manifest(
             client, queue_ids,
             repo_id=int(identity["repo_id"]),
@@ -1756,11 +1739,7 @@ def _load_prompt_context(args) -> dict[str, Any]:
     if source is None:
         source = {}
     if not isinstance(source, dict):
-        print(
-            "agent start: --prompt-context-json must provide a JSON object",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+        fail("agent start", "--prompt-context-json must provide a JSON object")
     return _validate_prompt_context(source, allow_saved_metadata=False)
 
 
@@ -1842,21 +1821,24 @@ def _establish_authorized_phase(context: dict, *, engagement_dir, payload: dict,
 def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dict:
     reserved = {"assignment_source", "standing_brief", "source_identity", "traffic_declaration", "continuation_source", "_registration_sha256"}
     if not allow_saved_metadata and reserved.intersection(source):
-        print("agent start: helper-owned packet metadata cannot be supplied in public prompt context; use --packet-file for captured assignment text", file=sys.stderr)
-        raise SystemExit(1)
+        fail(
+            "agent start",
+            "helper-owned packet metadata cannot be supplied in public prompt context; use --packet-file for captured assignment text",
+        )
     unknown = sorted(set(source) - {*_PROMPT_CONTEXT_FIELDS, "queue_item_ids", "prior_agent_id", "lane_file", "standing_brief_file"})
     if not allow_saved_metadata and unknown:
         hints = {"task": "task (pass the objective with --task, or longer assignment text with --packet-file)"}
-        print("agent start: unknown prompt context keys: " + ", ".join(hints.get(key, key) for key in unknown), file=sys.stderr)
-        raise SystemExit(1)
+        fail(
+            "agent start",
+            "unknown prompt context keys: " + ", ".join(hints.get(key, key) for key in unknown),
+        )
     assignment = source.get("assignment_source")
     if assignment is not None and (not isinstance(assignment, dict)
             or not isinstance(assignment.get("text"), str)
             or not isinstance(assignment.get("path"), str)
             or len(assignment["text"].encode("utf-8")) > 64 * 1024
             or hashlib.sha256(assignment["text"].encode("utf-8")).hexdigest() != assignment.get("sha256")):
-        print("agent start: invalid saved assignment capture", file=sys.stderr)
-        raise SystemExit(1)
+        fail("agent start", "invalid saved assignment capture")
     missing = []
     rendered = {
         field: _render_prompt_context_value(
@@ -1874,13 +1856,12 @@ def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dic
             problems.append("missing keys: " + ", ".join(missing))
         if empty:
             problems.append("empty values: " + ", ".join(empty))
-        print(
-            "agent start: incomplete prompt context ("
+        fail(
+            "agent start",
+            "incomplete prompt context ("
             + "; ".join(problems)
             + "). Use explicit 'none' or 'not applicable' where appropriate.",
-            file=sys.stderr,
         )
-        raise SystemExit(1)
     if isinstance(source.get("prior_state"), str):
         rendered["prior_state"] = source["prior_state"]
     brief_source = source.get("standing_brief_file")
@@ -1889,8 +1870,10 @@ def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dic
             raise AssessError("standing_brief_file must be a non-empty path string")
         rendered["standing_brief_file"] = brief_source
     if len(rendered["prior_state"]) > 16384:
-        print("agent start: prior_state must be at most 16384 characters; use backend IDs and handoff pointers for larger context", file=sys.stderr)
-        raise SystemExit(1)
+        fail(
+            "agent start",
+            "prior_state must be at most 16384 characters; use backend IDs and handoff pointers for larger context",
+        )
     queue_ids = source.get("queue_item_ids")
     if queue_ids is not None:
         if (
@@ -1898,20 +1881,17 @@ def _validate_prompt_context(source: dict, *, allow_saved_metadata: bool) -> dic
             or any(type(item) is not int or item <= 0 for item in queue_ids)
             or len(set(queue_ids)) != len(queue_ids)
         ):
-            print("agent start: queue_item_ids must be 1–20 distinct positive integer IDs", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "queue_item_ids must be 1–20 distinct positive integer IDs")
         rendered["queue_item_ids"] = queue_ids
     prior_agent_id = source.get("prior_agent_id")
     if prior_agent_id is not None:
         if not isinstance(prior_agent_id, str) or not prior_agent_id.strip() or len(prior_agent_id) > 128 or any(char.isspace() for char in prior_agent_id):
-            print("agent start: prior_agent_id must be one non-empty dispatch ID", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "prior_agent_id must be one non-empty dispatch ID")
         rendered["prior_agent_id"] = prior_agent_id
     lane_file = source.get("lane_file")
     if lane_file is not None and str(lane_file).strip().lower() not in {"", "none", "not applicable"}:
         if not isinstance(lane_file, str) or len(lane_file) > 4096:
-            print("agent start: lane_file must be a path string", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "lane_file must be a path string")
         rendered["lane_file"] = lane_file.strip()
     for field in ("assignment_source", "standing_brief", "source_identity", "traffic_declaration", "continuation_source"):
         if field in source:
@@ -2003,21 +1983,20 @@ def _selected_queue_facts(client, item_ids: list[int], *, repo_id: int, repo_gen
     for query in _selected_fact_queries("code/analysis-queue", repo_id, "item_id", item_ids):
         page = client.get(query)
         if not isinstance(page, dict) or not isinstance(page.get("items"), list) or page.get("has_more"):
-            print("agent start: selected code queue facts returned invalid or incomplete data", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "selected code queue facts returned invalid or incomplete data")
         for row in page["items"]:
             if not isinstance(row, dict) or type(row.get("id")) is not int or row["id"] not in selected:
-                print("agent start: selected code queue facts returned an unexpected item", file=sys.stderr)
-                raise SystemExit(1)
+                fail("agent start", "selected code queue facts returned an unexpected item")
             if (int(row.get("repo_id") or 0) != repo_id
                     or int(row.get("repo_generation") or 0) != repo_generation):
-                print("agent start: queue item IDs missing or stale for selected repository", file=sys.stderr)
-                raise SystemExit(1)
+                fail("agent start", "queue item IDs missing or stale for selected repository")
             found[row["id"]] = row
     if selected != found.keys():
-        print("agent start: queue item IDs missing or stale for selected repository: "
-              + ", ".join(map(str, sorted(selected - found.keys()))), file=sys.stderr)
-        raise SystemExit(1)
+        fail(
+            "agent start",
+            "queue item IDs missing or stale for selected repository: "
+              + ", ".join(map(str, sorted(selected - found.keys()))),
+        )
     return found
 
 
@@ -2045,16 +2024,13 @@ def _backend_file_locs(client, repo_id: int, paths: list[str], *, repo_generatio
             print(f"agent start: code file listing returned invalid data: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         if has_more:
-            print("agent start: selected code file facts returned an incomplete page", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "selected code file facts returned an incomplete page")
         for row in items:
             if repo_generation is not None and row.get("repo_generation") != repo_generation:
-                print("agent start: selected code file facts are stale for the packet generation", file=sys.stderr)
-                raise SystemExit(1)
+                fail("agent start", "selected code file facts are stale for the packet generation")
             if (row.get("file_path") not in selected or type(row.get("loc")) is not int
                     or row["loc"] < 0):
-                print("agent start: selected code file facts returned invalid data", file=sys.stderr)
-                raise SystemExit(1)
+                fail("agent start", "selected code file facts returned invalid data")
             index[row["file_path"]] = row["loc"]
     return index
 
@@ -2087,16 +2063,14 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
     resolved = path.expanduser().resolve()
     try:
         if resolved.stat().st_size > 8 * 1024 * 1024:
-            print("agent start: lane_file exceeds 8 MiB", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "lane_file exceeds 8 MiB")
         raw = resolved.read_text(encoding="utf-8")
     except (OSError, UnicodeError) as exc:
         print(f"agent start: cannot read lane_file {resolved}: {exc}", file=sys.stderr)
         raise SystemExit(1) from exc
     stripped = raw.strip()
     if not stripped:
-        print("agent start: lane_file is empty", file=sys.stderr)
-        raise SystemExit(1)
+        fail("agent start", "lane_file is empty")
     rows: list[tuple[str, int, int | None, str | None, tuple[str, ...], tuple[str, ...]]]
     if resolved.suffix.lower() == ".json" or stripped.startswith(("[", "{")):
         try:
@@ -2105,19 +2079,19 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
             print(f"agent start: invalid lane-file JSON: {exc}", file=sys.stderr)
             raise SystemExit(1) from exc
         if isinstance(data, list) and len(data) > 5000:
-            print("agent start: lane_file must contain at most 5000 distinct file paths", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "lane_file must contain at most 5000 distinct file paths")
         if not isinstance(data, list) or not data or any(
             not isinstance(item, dict) or type(item.get("id")) is not int
             or item["id"] <= 0 or not isinstance(item.get("file"), dict)
             for item in data
         ):
-            print("agent start: unsupported or ambiguous lane-file JSON; expected code queue fetch array", file=sys.stderr)
-            raise SystemExit(1)
+            fail(
+                "agent start",
+                "unsupported or ambiguous lane-file JSON; expected code queue fetch array",
+            )
         identity = {key: value for line in source_identity if ": " in line for key, value in [line.split(": ", 1)]}
         if client is None or not identity.get("repo_id") or not identity.get("repo_generation"):
-            print("agent start: queue-fetch lane_file requires an active Code Source Identity", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "queue-fetch lane_file requires an active Code Source Identity")
         repo_id, repo_generation = int(identity["repo_id"]), int(identity["repo_generation"])
         queue_rows = _selected_queue_facts(client, [item["id"] for item in data],
                                            repo_id=repo_id, repo_generation=repo_generation)
@@ -2132,11 +2106,12 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
                     or type(generation) is not int or generation != int(identity["repo_generation"])
                     or not isinstance(file_path, str) or not file_path.strip()
                     or type(loc) is not int or loc < 0):
-                print("agent start: unsupported, stale, or cross-repository lane-file JSON; queue items need matching repo identity/generation and current backend file facts", file=sys.stderr)
-                raise SystemExit(1)
+                fail(
+                    "agent start",
+                    "unsupported, stale, or cross-repository lane-file JSON; queue items need matching repo identity/generation and current backend file facts",
+                )
             if not isinstance(backend_row.get("applicable_vuln_classes"), list):
-                print("agent start: selected code queue facts omitted applicable_vuln_classes", file=sys.stderr)
-                raise SystemExit(1)
+                fail("agent start", "selected code queue facts omitted applicable_vuln_classes")
             lease_token = backend_row.get("lease_token")
             scratch = (_dispatch_scratch_relative(queue_item_id=item["id"], lease_token=lease_token).as_posix()
                        if isinstance(lease_token, str) and lease_token else None)
@@ -2150,22 +2125,21 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
     else:
         paths = [line.strip() for line in raw.splitlines() if line.strip()]
         if not paths or len(paths) > 5000 or any("\x00" in item for item in paths) or len(set(paths)) != len(paths):
-            print("agent start: lane_file path list must contain 1–5000 distinct non-empty paths", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "lane_file path list must contain 1–5000 distinct non-empty paths")
         identity = {key: value for line in source_identity if ": " in line for key, value in [line.split(": ", 1)]}
         if client is None or not identity.get("repo_id"):
-            print("agent start: newline lane_file paths require an active Code Source Identity", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", "newline lane_file paths require an active Code Source Identity")
         indexed = _backend_file_locs(client, int(identity["repo_id"]), paths,
                                      repo_generation=int(identity["repo_generation"]) if identity.get("repo_generation") else None)
         missing = [item for item in paths if item not in indexed]
         if missing:
-            print("agent start: lane_file paths missing from selected repository: " + ", ".join(missing[:20]), file=sys.stderr)
-            raise SystemExit(1)
+            fail(
+                "agent start",
+                "lane_file paths missing from selected repository: " + ", ".join(missing[:20]),
+            )
         rows = [(item, indexed[item], None, None, (), ()) for item in paths]
     if len(rows) > 5000 or len({item[0] for item in rows}) != len(rows):
-        print("agent start: lane_file must contain at most 5000 distinct file paths", file=sys.stderr)
-        raise SystemExit(1)
+        fail("agent start", "lane_file must contain at most 5000 distinct file paths")
     directories: dict[str, list[int]] = {}
     for file_path, loc, *_ in rows:
         parent = str(Path(file_path).parent)
@@ -2201,8 +2175,7 @@ def _backend_queue_manifest(client, item_ids: list[int], *, repo_id: int, repo_g
     for item_id in item_ids:
         row = found[item_id]
         if not isinstance(row.get("applicable_vuln_classes"), list):
-            print(f"agent start: queue item {item_id} did not report applicable_vuln_classes", file=sys.stderr)
-            raise SystemExit(1)
+            fail("agent start", f"queue item {item_id} did not report applicable_vuln_classes")
         families[item_id] = (_vuln_class_names(row["applicable_vuln_classes"]),
                              _vuln_class_names(row.get("path_suggested_vuln_classes")))
     common = _common_family_floor([families[item_id][0] for item_id in item_ids])
@@ -2277,8 +2250,7 @@ def _code_source_identity_lines(
 
     repos = client.get("code/repos")
     if not isinstance(repos, list):
-        print("agent start: code repository listing returned an invalid payload", file=sys.stderr)
-        raise SystemExit(1)
+        fail("agent start", "code repository listing returned an invalid payload")
     active_repos = [
         repo
         for repo in repos
@@ -2295,27 +2267,21 @@ def _code_source_identity_lines(
             repo for repo in active_repos if int(repo.get("id") or 0) == requested_repo_id
         ]
         if not active_repos:
-            print(
-                f"agent start: --code-repo-id {requested_repo_id} does not identify an active repository",
-                file=sys.stderr,
+            fail(
+                "agent start",
+                f"--code-repo-id {requested_repo_id} does not identify an active repository",
             )
-            raise SystemExit(1)
     elif len(active_repos) > 1:
         choices = ", ".join(
             f"{repo.get('id')}:{repo.get('repo_key')}" for repo in active_repos
         )
-        print(
-            "agent start: multiple active code repositories exist; pass "
+        fail(
+            "agent start",
+            "multiple active code repositories exist; pass "
             f"--code-repo-id to select exactly one ({choices})",
-            file=sys.stderr,
         )
-        raise SystemExit(1)
     elif not active_repos:
-        print(
-            "agent start: code role requires one active indexed repository",
-            file=sys.stderr,
-        )
-        raise SystemExit(1)
+        fail("agent start", "code role requires one active indexed repository")
 
     repo = active_repos[0]
     repo_id = int(repo.get("id") or 0)
@@ -2336,12 +2302,11 @@ def _code_source_identity_lines(
     if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
         missing.append("source_manifest_digest")
     if missing:
-        print(
-            "agent start: active code repository has incomplete source identity: "
+        fail(
+            "agent start",
+            "active code repository has incomplete source identity: "
             + ", ".join(sorted(set(missing))),
-            file=sys.stderr,
         )
-        raise SystemExit(1)
 
     ctags_path = "unavailable"
     lsp_config = repo.get("lsp_config")
@@ -2404,29 +2369,23 @@ def _start_swarm(args) -> None:
     """
     role = getattr(args, "agent_role", None)
     if not role:
-        print("agent start-swarm: --role is required", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", "--role is required")
     workers = getattr(args, "swarm_workers", None)
     batch_size = getattr(args, "swarm_batch_size", None)
     items_file = getattr(args, "swarm_items_file", None)
     if not workers or workers < 1:
-        print("agent start-swarm: --workers must be >= 1", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", "--workers must be >= 1")
     if not batch_size or batch_size < 1:
-        print("agent start-swarm: --batch-size must be >= 1", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", "--batch-size must be >= 1")
     if not items_file:
-        print("agent start-swarm: --items-file is required", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", "--items-file is required")
 
     items_path = Path(items_file)
     if not items_path.is_file():
-        print(f"agent start-swarm: items file not found: {items_file}", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", f"items file not found: {items_file}")
     items = [line.strip() for line in items_path.read_text(encoding="utf-8").splitlines() if line.strip()]
     if not items:
-        print(f"agent start-swarm: items file is empty: {items_file}", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", f"items file is empty: {items_file}")
 
     # Split items into worker batches. Workers receive contiguous ranges so
     # operators can correlate batch_i with items[i*batch_size : (i+1)*batch_size]
@@ -2440,11 +2399,7 @@ def _start_swarm(args) -> None:
         batches.append(chunk)
         cursor += batch_size
     if not batches:
-        print(
-            "agent start-swarm: nothing to dispatch; items file shorter than --batch-size",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("agent start-swarm", "nothing to dispatch; items file shorter than --batch-size")
     if cursor < len(items):
         leftover = len(items) - cursor
         print(
@@ -2455,8 +2410,7 @@ def _start_swarm(args) -> None:
 
     user_task = (getattr(args, "task", None) or "").strip()
     if not user_task:
-        print("agent start-swarm: --task is required", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start-swarm", "--task is required")
 
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     _require_registered_role({"agent_role": role}, cfg)
@@ -2541,12 +2495,11 @@ def _start_swarm(args) -> None:
             "Next: launch only rows whose status is not failed_to_record; retry or "
             "repair the failed durable writes before launching their specialists."
         )
-        print(
-            f"agent start-swarm incomplete: {failed_writes} of {len(rows_emitted)} "
+        fail(
+            "agent start-swarm incomplete",
+            f"{failed_writes} of {len(rows_emitted)} "
             "dispatch writes failed; successful rows remain recorded.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     print(
         "Next: launch one fresh specialist per row using the native role-selection schema "
         "(Agent with the registered subagent_type in Claude Code; the actual spawn schema in Codex), "
@@ -2563,17 +2516,6 @@ def _native_wrappers(engagement_dir: Path, role: str) -> tuple[bool, bool]:
         (engagement_dir / ".claude" / "agents" / f"{role}.md").exists(),
         (engagement_dir / ".codex" / "agents" / f"{role}.toml").exists(),
     )
-
-
-def _spawn_command_hint(engagement_dir: Path, role: str) -> str:
-    """Describe native role selection and bootstrap from installed role files."""
-    claude, codex = _native_wrappers(engagement_dir, role)
-    label = role or "<role>"
-    if claude and not codex:
-        return f"Claude Code's native `Agent` tool with `subagent_type={label}` and the saved dispatch packet"
-    if codex and not claude:
-        return f"Codex's actual spawn tool with fresh context (`fork_turns=none` when exposed); begin by reading `agent/agents/{label}.md` and its Load First files"
-    return f"Claude Code's native `Agent` tool with `subagent_type={label}` and the saved dispatch packet, or Codex's actual spawn tool with fresh context (`fork_turns=none` when exposed), directing the child to read `agent/agents/{label}.md` and its Load First files"
 
 
 def _warn_missing_native_wrapper(engagement_dir: Path, role: str) -> None:

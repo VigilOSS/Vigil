@@ -43,6 +43,12 @@ from assess.lib.code_structural_identity import (  # noqa: E402
 
 _SEALED_TEST_BYTES_BY_HASH: dict[str, bytes] = {}
 
+# The exact field set a refresh manifest projects out of a code_files row.
+_MANIFEST_FIELDS = (
+    "file_path", "language", "loc", "file_hash",
+    "header_snippet", "git_churn_score", "has_past_cve_fix",
+)
+
 
 def test_million_file_inventory_dispatch_and_queue_retry_qualification(
     client, isolate_settings, monkeypatch, tmp_path, capsys
@@ -644,6 +650,93 @@ def _create_files(client, engagement_key: str, repo_id: int) -> list[dict[str, o
     return files_response.json()["items"]
 
 
+def _queue_stats(**overrides: object) -> dict[str, object]:
+    """The all-zero analysis-queue stats envelope with ``overrides`` applied."""
+    return {
+        "pending": 0,
+        "processing": 0,
+        "done": 0,
+        "error": 0,
+        "needs_context": 0,
+        "total": 0,
+        "historical_total": 0,
+        "superseded_history": 0,
+        "invalid_active_identity": 0,
+        "invalid_active_history": 0,
+        "reference_repo_items": [],
+        **overrides,
+    }
+
+
+def _bulk_classify(client, base, **body):
+    """POST the bulk-classify door and return the raw response."""
+    return client.post(f"{base}/files/bulk-classify", json=body)
+
+
+def _queue_file(client, engagement_key: str, file_id, priority):
+    """Queue one file for analysis and return the raw response."""
+    return client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
+        json={"items": [{"file_id": file_id, "priority": priority}]},
+    )
+
+
+def _fetch_queue(
+    client,
+    engagement_key: str,
+    *,
+    limit: int = 1,
+    agent_name: str = "code-vuln-hunter",
+):
+    """Claim from the analysis queue and return the raw response."""
+    return client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
+        json={"limit": limit, "agent_name": agent_name},
+    )
+
+
+def _blocker_codes(readiness) -> set[object]:
+    """Every ``code`` carried by a parsed readiness payload's blockers."""
+    return {blocker["code"] for blocker in readiness["blockers"]}
+
+
+def _blocker_kinds(readiness) -> set[object]:
+    """Every ``kind`` carried by a parsed readiness payload's blockers."""
+    return {blocker["kind"] for blocker in readiness["blockers"]}
+
+
+def _blocker(readiness, value: str, *, key: str = "code") -> dict[str, object]:
+    """The single blocker whose ``key`` equals ``value``.
+
+    Raises ``StopIteration`` when nothing matches, exactly as the inline
+    ``next()`` lookups this replaces do, so a missing blocker fails here
+    instead of becoming a ``None`` that a later assertion accepts.
+    """
+    return next(blocker for blocker in readiness["blockers"] if blocker[key] == value)
+
+
+def _seed_repo(
+    client,
+    isolate_settings,
+    engagement_key: str,
+    repo_key: str = "demo-repo",
+) -> dict[str, object]:
+    """Write the engagement on disk and commit one verified repo snapshot."""
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    return _create_repo(client, engagement_key, repo_key=repo_key)
+
+
+def _seed_repo_files(
+    client,
+    isolate_settings,
+    engagement_key: str,
+    repo_key: str = "demo-repo",
+) -> tuple[dict[str, object], list[dict[str, object]]]:
+    """``_seed_repo`` plus the standard src/parser.py and src/helpers.py rows."""
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key)
+    return repo, _create_files(client, engagement_key, int(repo["id"]))
+
+
 def _refresh_repo_files(
     client,
     engagement_key: str,
@@ -1182,10 +1275,7 @@ def _claim_file_for_analysis(
         )
     if priority is None:
         priority = int(file_response.json()["analysis_priority"])
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": file_id, "priority": priority}]},
-    )
+    queue_response = _queue_file(client, engagement_key, file_id, priority)
     assert queue_response.status_code == 201
     claimed = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
@@ -1338,9 +1428,7 @@ def test_grouped_analysis_receipt_binds_structural_callables_and_derives_coverag
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-grouped-code-receipt"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="grouped-receipt-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="grouped-receipt-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     parser_callables = [
@@ -1395,19 +1483,15 @@ def test_grouped_analysis_receipt_binds_structural_callables_and_derives_coverag
     ]
     assert all(re.fullmatch(r"[0-9a-f]{64}", ref["callable_key"]) for ref in body["callable_refs"])
 
-    completed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Grouped call-chain review completed against exact structural spans.",
-            cwe_coverage=_network_input_coverage(
-                default_effort=80,
-                overrides={
-                    "web-app-injection": {"functions_analyzed": 999},
-                },
-            ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Grouped call-chain review completed against exact structural spans.",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={
+                "web-app-injection": {"functions_analyzed": 999},
+            },
         ),
     )
     assert completed.status_code == 200, completed.text
@@ -1447,18 +1531,14 @@ def test_grouped_analysis_receipt_binds_structural_callables_and_derives_coverag
         "?target_phase=verify-variant"
     )
     assert readiness.status_code == 200, readiness.text
-    assert "critical_high_incomplete" in {
-        blocker["code"] for blocker in readiness.json()["blockers"]
-    }
+    assert "critical_high_incomplete" in _blocker_codes(readiness.json())
 
 
 def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-code-generation-history"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="generation-history-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="generation-history-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     parser_callable = _structural_callable("parse", start_line=1, end_line=2)
@@ -1499,31 +1579,18 @@ def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
         ),
     )
     assert receipt.status_code == 201, receipt.text
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Original source generation reviewed.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Original source generation reviewed.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
     trigger = client.get(f"{base}/triggers").json()[0]
     prior_parser_hash = parser["file_hash"]
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     refreshed_manifest = [
-        {key: row[key] for key in manifest_fields}
+        {key: row[key] for key in _MANIFEST_FIELDS}
         for row in files
         if row["id"] != helper["id"]
     ]
@@ -1702,19 +1769,7 @@ def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
     assert stale_resolution.json()["resolved"] == 0
     assert stale_resolution.json()["not_resolved"] == [str(trigger["id"])]
     queue_stats = client.get(f"{base}/analysis-queue/stats").json()
-    assert queue_stats == {
-        "pending": 0,
-        "processing": 0,
-        "done": 0,
-        "error": 0,
-        "needs_context": 0,
-        "total": 0,
-        "historical_total": 1,
-        "superseded_history": 1,
-        "invalid_active_identity": 0,
-        "invalid_active_history": 0,
-        "reference_repo_items": [],
-    }
+    assert queue_stats == _queue_stats(historical_total=1, superseded_history=1)
 
     coverage = client.get(f"{base}/coverage?repo_id={repo['id']}&detail=cwe").json()
     assert coverage["total_files"] == 1
@@ -1726,9 +1781,7 @@ def test_generation_history_migration_captures_only_live_current_source(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-code-generation-history-upgrade"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="generation-history-upgrade")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="generation-history-upgrade")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     engagement_id = int(repo["engagement_id"])
 
@@ -1782,9 +1835,7 @@ def test_analysis_result_history_includes_queue_less_legacy_function_rows(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-queue-less-analysis-history"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="queue-less-history-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="queue-less-history-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     with db_module.get_connection() as connection:
         legacy_id = int(
@@ -1819,9 +1870,7 @@ def test_grouped_analysis_receipt_rejects_unbound_or_inexact_source_anchors(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-grouped-code-receipt-validation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="grouped-receipt-validation-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="grouped-receipt-validation-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     parser_callable = _structural_callable("parse", start_line=1, end_line=2)
     _publish_structural_callables(
@@ -1889,15 +1938,11 @@ def test_grouped_analysis_receipt_rejects_unbound_or_inexact_source_anchors(
     assert outside_file.status_code == 400, outside_file.text
     assert "reviewed span" in outside_file.json()["detail"]
 
-    no_receipt_close = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="No bound source receipt was recorded.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    no_receipt_close = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="No bound source receipt was recorded.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert no_receipt_close.status_code == 400, no_receipt_close.text
     assert "source-level receipt" in no_receipt_close.json()["detail"]
@@ -1933,38 +1978,28 @@ def test_grouped_analysis_receipt_rejects_unbound_or_inexact_source_anchors(
     )
     assert span_receipt.status_code == 201, span_receipt.text
     assert span_receipt.json()["receipt_binding_status"] == "source_span"
-    accepted_close = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Exact source span receipt recorded.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    accepted_close = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Exact source span receipt recorded.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert accepted_close.status_code == 200, accepted_close.text
 
 
 def test_medium_clean_close_requires_current_source_receipt(client, isolate_settings):
     engagement_key = "2026-09-25-medium-clean-receipt"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="medium-clean-receipt-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="medium-clean-receipt-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "medium", 40)
     claim = _claim_file_for_analysis(
         client, engagement_key, int(parser["id"]), priority=40
     )
-    closed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="No source receipt was accepted.",
-            cwe_coverage=_network_input_coverage(default_effort=40),
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="No source receipt was accepted.",
+        cwe_coverage=_network_input_coverage(default_effort=40),
     )
     assert closed.status_code == 400, closed.text
     assert "source-level receipt" in closed.json()["detail"]
@@ -1972,8 +2007,7 @@ def test_medium_clean_close_requires_current_source_receipt(client, isolate_sett
 
 def test_sealed_empty_file_has_explicit_review_receipt(client, isolate_settings):
     engagement_key = "2026-09-25-empty-source-review"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="empty-source-review-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="empty-source-review-repo")
     files = _refresh_repo_files(
         client,
         engagement_key,
@@ -2009,15 +2043,11 @@ def test_sealed_empty_file_has_explicit_review_receipt(client, isolate_settings)
     )
     assert receipt.status_code == 201, receipt.text
     assert receipt.json()["receipt_binding_status"] == "empty_file"
-    closed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Confirmed the sealed file is empty.",
-            cwe_coverage=_network_input_coverage(default_effort=40),
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Confirmed the sealed file is empty.",
+        cwe_coverage=_network_input_coverage(default_effort=40),
     )
     assert closed.status_code == 200, closed.text
     coverage = client.get(f"{base}/coverage?repo_id={repo['id']}")
@@ -2029,9 +2059,7 @@ def test_structural_sync_binds_only_unambiguous_legacy_function_rows(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-legacy-code-receipts"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="legacy-receipt-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="legacy-receipt-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     claim = _claim_file_for_analysis(
@@ -2132,9 +2160,7 @@ def test_new_non_skipped_receipt_requires_source_anchor_before_registry_publicat
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-unpublished-source-receipt"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="unpublished-receipt-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="unpublished-receipt-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     claim = _claim_file_for_analysis(
@@ -2164,9 +2190,7 @@ def test_critical_close_requires_source_receipt_without_registry_publication(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-unpublished-critical-close"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="unpublished-close-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="unpublished-close-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     claim = _claim_file_for_analysis(
@@ -2200,15 +2224,11 @@ def test_critical_close_requires_source_receipt_without_registry_publication(
             ),
         )
 
-    closed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Legacy unbound history cannot close a critical review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Legacy unbound history cannot close a critical review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
 
     assert closed.status_code == 400, closed.text
@@ -2219,9 +2239,7 @@ def test_non_skipped_span_requires_sealed_callable_publication(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-unpublished-source-span"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="unpublished-span-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="unpublished-span-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     claim = _claim_file_for_analysis(
@@ -2261,15 +2279,11 @@ def test_non_skipped_span_requires_sealed_callable_publication(
         ),
     )
     assert accepted.status_code == 201, accepted.text
-    closed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="The truthful empty registry and disjoint span close this review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="The truthful empty registry and disjoint span close this review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert closed.status_code == 200, closed.text
 
@@ -2342,15 +2356,11 @@ def test_omitted_callable_registry_cannot_authorize_source_proof_or_closeout(
     assert span_result.status_code == 409, span_result.text
     assert "callable registry publication" in span_result.json()["detail"]
 
-    closeout = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="An unpublished registry cannot prove source review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    closeout = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="An unpublished registry cannot prove source review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert closeout.status_code == 400, closeout.text
     assert "source-level receipt" in closeout.json()["detail"]
@@ -2360,9 +2370,7 @@ def test_critical_clean_close_rejects_anchored_skipped_receipt(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-skipped-receipt-critical-close"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="skipped-receipt-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="skipped-receipt-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
@@ -2380,15 +2388,11 @@ def test_critical_clean_close_rejects_anchored_skipped_receipt(
     )
     assert skipped.status_code == 201, skipped.text
 
-    closed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="A skipped receipt cannot prove a clean critical review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="A skipped receipt cannot prove a clean critical review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
 
     assert closed.status_code == 400, closed.text
@@ -2400,9 +2404,7 @@ def test_analysis_result_write_rejects_legacy_function_name_field(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-reject-new-function-name"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="reject-function-name-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="reject-function-name-repo")
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "medium", 49)
@@ -2431,9 +2433,7 @@ def test_empty_structural_callable_publication_is_idempotent_and_rebinds_unrefer
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-empty-callable-publication"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="empty-callables-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="empty-callables-repo")
 
     first = _publish_structural_callables(
         client, engagement_key, int(repo["id"]), files, {}
@@ -2529,8 +2529,7 @@ def test_structural_republication_preserves_receipt_bound_callables(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-11-04-callable-republication"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="callable-republication-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="callable-republication-repo")
     repo_id = int(repo["id"])
     files = _create_files(client, engagement_key, repo_id)
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
@@ -2641,8 +2640,7 @@ def test_structural_republication_refuses_ambiguous_receipt_bound_requalificatio
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-11-04-ambiguous-requalification"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="ambiguous-requalification-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="ambiguous-requalification-repo")
     repo_id = int(repo["id"])
     files = _create_files(client, engagement_key, repo_id)
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
@@ -2732,8 +2730,7 @@ def test_php_namespace_qualification_rebinds_receipt_bound_callables_with_unchan
     ]
 
     engagement_key = "2026-11-04-php-namespace-rebind"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="php-namespace-rebind-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="php-namespace-rebind-repo")
     repo_id = int(repo["id"])
     _create_files(client, engagement_key, repo_id)
     files = _append_repo_files(
@@ -2849,8 +2846,7 @@ def test_javascript_expression_owner_rebinds_receipt_bound_callables_with_unchan
     previous = [{**upgraded[0], "qualified_name": f"{target.decode()}.render"}]
 
     engagement_key = "2026-11-05-javascript-owner-rebind"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="javascript-owner-rebind-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="javascript-owner-rebind-repo")
     repo_id = int(repo["id"])
     _create_files(client, engagement_key, repo_id)
     files = _append_repo_files(
@@ -2910,9 +2906,7 @@ def test_complete_structural_publication_rejects_callable_registry_shortfall(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-12-callable-registry-shortfall"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="callable-shortfall-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="callable-shortfall-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
@@ -3135,10 +3129,26 @@ def _owned(queue_item: dict[str, object], **payload: object) -> dict[str, object
     }
 
 
+def _close_queue_item(client, engagement_key: str, queue_item, **payload):
+    """Close one claimed queue item through its lease-owned done door.
+
+    ``queue_item_id`` is refused rather than forwarded: it switches ``_owned``
+    into its span/callable-injection branch, which every caller of this helper
+    is written to avoid. A caller that needs that branch builds its own
+    ``_owned`` payload inline so the injected fields stay visible at the site.
+    """
+    assert "queue_item_id" not in payload, (
+        "_close_queue_item would route queue_item_id into _owned's injection "
+        "branch; build the payload inline instead"
+    )
+    return client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
+        json=_owned(queue_item, item_ids=[queue_item["id"]], **payload),
+    )
+
+
 def _seed_reviewed_parser(client, isolate_settings, engagement_key: str):
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"{engagement_key}-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"{engagement_key}-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _publish_structural_totals(
         client,
@@ -3199,10 +3209,7 @@ def _seed_reviewed_parser(client, isolate_settings, engagement_key: str):
         },
     )
     assert queued.status_code == 201, queued.text
-    claim = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    ).json()[0]
+    claim = _fetch_queue(client, engagement_key).json()[0]
     result = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
         json=_owned(
@@ -3213,15 +3220,11 @@ def _seed_reviewed_parser(client, isolate_settings, engagement_key: str):
         ),
     )
     assert result.status_code == 201, result.text
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="review complete",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    done = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="review complete",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200, done.text
     return repo, client.get(
@@ -3340,15 +3343,10 @@ def test_code_file_listing_is_bounded_envelope_with_current_queue_join(
     client, isolate_settings
 ):
     engagement_key = "2026-09-11-code-file-envelope"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="file-envelope-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="file-envelope-repo")
     parser_file = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
-    queue = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue.status_code == 201, queue.text
     queue_id = queue.json()["outcomes"][0]["queue_item_id"]
 
@@ -3412,8 +3410,7 @@ def test_refresh_start_does_not_promote_a_generation_before_commit(client, isola
 
 def test_legacy_repo_migration_marks_existing_snapshot_as_generation_one(client, isolate_settings):
     engagement_key = "2026-07-14-code-refresh-legacy-migration"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="legacy-generation-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="legacy-generation-repo")
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     db_module.close_thread_connection()
     with sqlite3.connect(str(db_path)) as connection:
@@ -3434,9 +3431,7 @@ def test_review_identity_migration_seeds_exact_snapshot_without_reopening_review
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-code-review-identity-migration"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="review-identity-migration")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="review-identity-migration")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     generation = int(binding["active_generation"])
@@ -3477,11 +3472,7 @@ def test_review_identity_migration_seeds_exact_snapshot_without_reopening_review
         ).fetchone()
     assert migrated_identity == ("",)
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
-    unchanged_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    unchanged_manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     exact_snapshot = _verified_repo_payload(
         client,
         engagement_key,
@@ -3522,9 +3513,7 @@ def test_unseeded_review_identity_advances_on_ambiguous_snapshot_change(
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-code-review-identity-ambiguous-migration"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="ambiguous-review-identity")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="ambiguous-review-identity")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
 
@@ -3537,11 +3526,7 @@ def test_unseeded_review_identity_advances_on_ambiguous_snapshot_change(
         connection.commit()
     db_module.init_db()
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
-    unchanged_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    unchanged_manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     ambiguous_snapshot = _verified_repo_payload(
         client,
         engagement_key,
@@ -3572,9 +3557,7 @@ def test_snapshot_binding_is_deterministic_and_noop_refresh_retains_generation(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-snapshot-binding"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="snapshot-binding-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="snapshot-binding-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
 
     bound = client.get(f"{base}/repos/{repo['id']}").json()
@@ -3592,12 +3575,8 @@ def test_snapshot_binding_is_deterministic_and_noop_refresh_retains_generation(
     assert bound["worktree_dirty"] is None
     assert len(digest) == 64
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
     unchanged_manifest = [
-        {key: row[key] for key in manifest_fields}
+        {key: row[key] for key in _MANIFEST_FIELDS}
         for row in reversed(files)
     ]
     started = client.post(
@@ -3651,9 +3630,7 @@ def test_provenance_only_snapshot_change_preserves_generation_and_derived_bindin
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-snapshot-identity-generation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="snapshot-identity-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="snapshot-identity-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
 
@@ -3697,11 +3674,7 @@ def test_provenance_only_snapshot_change_preserves_generation_and_derived_bindin
     )
     assert threat.status_code == 200, threat.text
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
-    unchanged_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    unchanged_manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     next_snapshot = _verified_repo_payload(
         client,
         engagement_key,
@@ -3741,16 +3714,10 @@ def test_exclusion_boundary_change_advances_generation_with_identical_admitted_b
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-code-snapshot-exclusion-generation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="snapshot-exclusion-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="snapshot-exclusion-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
-    unchanged_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    unchanged_manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     next_snapshot = _verified_repo_payload(
         client,
         engagement_key,
@@ -3784,9 +3751,7 @@ def test_snapshot_quality_and_identity_transitions_advance_generation_monotonica
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-snapshot-quality-generation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="snapshot-quality-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="snapshot-quality-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
 
@@ -3828,12 +3793,8 @@ def test_snapshot_quality_and_identity_transitions_advance_generation_monotonica
         },
     ).status_code == 200
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
     unchanged_manifest = [
-        {key: row[key] for key in manifest_fields}
+        {key: row[key] for key in _MANIFEST_FIELDS}
         for row in files
     ]
     unverified_identity = {
@@ -3995,8 +3956,7 @@ def test_verified_refresh_commit_rejects_staged_drift_without_promoting(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-staged-snapshot-drift"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, "staged-snapshot-drift")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="staged-snapshot-drift")
     base = f"/engagements/{engagement_key}/assessment/code"
     before = client.get(f"{base}/repos/{repo['id']}").json()
     files: list[dict[str, object]] = [
@@ -4202,9 +4162,7 @@ def test_language_change_advances_generation_and_clears_derived_bindings(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-language-generation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="language-generation-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="language-generation-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     indexed = client.post(
@@ -4313,9 +4271,7 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
     client, isolate_settings, mutation_mode
 ):
     engagement_key = f"2026-08-05-code-language-correction-{mutation_mode}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"language-correction-{mutation_mode}")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"language-correction-{mutation_mode}")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
@@ -4360,15 +4316,11 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
         ),
     )
     assert result.status_code == 201, result.text
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Original-language review complete.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Original-language review complete.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
     coverage_before = client.get(f"{base}/coverage?repo_id={repo['id']}").json()
@@ -4378,18 +4330,16 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
     ) == 1
 
     if mutation_mode == "bulk-classify":
-        corrected = client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    {
-                        "file_id": parser["id"],
-                        "classification": "low",
-                        "language": "c++",
-                        "analysis_priority": 10,
-                    }
-                ]
-            },
+        corrected = _bulk_classify(
+            client, base,
+            classifications=[
+                {
+                    "file_id": parser["id"],
+                    "classification": "low",
+                    "language": "c++",
+                    "analysis_priority": 10,
+                }
+            ],
         )
     else:
         corrected = client.patch(
@@ -4419,7 +4369,7 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
         for classification in coverage_after["by_classification"].values()
     ) == 0
     readiness = client.get(f"{base}/readiness?target_phase=classify-map").json()
-    assert "structural_index_stale" in {blocker["code"] for blocker in readiness["blockers"]}
+    assert "structural_index_stale" in _blocker_codes(readiness)
 
     rebuilt_files = client.get(f"{base}/files?repo_id={repo['id']}&limit=20").json()["items"]
     rebuilt = client.post(
@@ -4451,9 +4401,7 @@ def test_language_correction_invalidates_structural_index_until_rebuilt(
     )
     assert rebuilt.status_code == 200, rebuilt.text
     rebuilt_readiness = client.get(f"{base}/readiness?target_phase=classify-map").json()
-    assert "structural_index_stale" not in {
-        blocker["code"] for blocker in rebuilt_readiness["blockers"]
-    }
+    assert "structural_index_stale" not in _blocker_codes(rebuilt_readiness)
 
 
 @pytest.mark.parametrize("mutation_mode", ["bulk-classify", "file-patch", "staging"])
@@ -4469,26 +4417,23 @@ def test_classification_refuses_a_language_the_index_cannot_bind(
     that wrote it returned 200.
     """
     engagement_key = f"2026-11-06-code-language-enum-{mutation_mode}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"language-enum-{mutation_mode}")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key=f"language-enum-{mutation_mode}")
     repo_id = int(repo["id"])
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, repo_id)
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
 
     if mutation_mode == "bulk-classify":
-        response = client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    {
-                        "file_id": parser["id"],
-                        "classification": "low",
-                        "language": "prisma",
-                        "analysis_priority": 10,
-                    }
-                ]
-            },
+        response = _bulk_classify(
+            client, base,
+            classifications=[
+                {
+                    "file_id": parser["id"],
+                    "classification": "low",
+                    "language": "prisma",
+                    "analysis_priority": 10,
+                }
+            ],
         )
     elif mutation_mode == "file-patch":
         response = client.patch(
@@ -4556,16 +4501,11 @@ def test_staged_ingest_language_cannot_unbind_the_repository_index(
     canonical one at the staging door rather than folded into shape there.
     """
     engagement_key = "2026-11-07-code-staged-language-padding"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="staged-language-padding")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="staged-language-padding")
     repo_id = int(repo["id"])
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, repo_id)
-    manifest_fields = (
-        "file_path", "language", "loc", "file_hash",
-        "header_snippet", "git_churn_score", "has_past_cve_fix",
-    )
-    manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     manifest.append(
         {
             "file_path": "src/padded.py",
@@ -4642,25 +4582,22 @@ def test_bulk_classify_reports_the_structural_invalidation_it_caused(
     only `{updated, total}`, so the whole repair hint could never fire.
     """
     engagement_key = "2026-11-06-code-classify-invalidation-report"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="classify-invalidation-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="classify-invalidation-repo")
     repo_id = int(repo["id"])
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, repo_id)
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
 
-    unchanged = client.post(
-        f"{base}/files/bulk-classify",
-        json={
-            "classifications": [
-                {
-                    "file_id": helper["id"],
-                    "classification": "low",
-                    "analysis_priority": 10,
-                }
-            ]
-        },
+    unchanged = _bulk_classify(
+        client, base,
+        classifications=[
+            {
+                "file_id": helper["id"],
+                "classification": "low",
+                "analysis_priority": 10,
+            }
+        ],
     )
     assert unchanged.status_code == 200, unchanged.text
     assert unchanged.json() == {
@@ -4670,20 +4607,18 @@ def test_bulk_classify_reports_the_structural_invalidation_it_caused(
         "language_changes": [],
     }
 
-    corrected = client.post(
-        f"{base}/files/bulk-classify",
-        json={
-            "classifications": [
-                {
-                    "file_id": parser["id"],
-                    "classification": "high",
-                    "role": "parser",
-                    "slot_types": ["NETWORK-INPUT"],
-                    "language": "c++",
-                    "analysis_priority": 70,
-                }
-            ]
-        },
+    corrected = _bulk_classify(
+        client, base,
+        classifications=[
+            {
+                "file_id": parser["id"],
+                "classification": "high",
+                "role": "parser",
+                "slot_types": ["NETWORK-INPUT"],
+                "language": "c++",
+                "analysis_priority": 70,
+            }
+        ],
     )
     assert corrected.status_code == 200, corrected.text
     assert corrected.json() == {
@@ -4710,21 +4645,18 @@ def test_classification_records_a_standard_skip_reason(client, isolate_settings)
     no projection reads.
     """
     engagement_key = "2026-11-06-code-classify-skip-reason"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="classify-skip-reason-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="classify-skip-reason-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
 
     def classify(file_id, **extra):
-        return client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    {"file_id": file_id, "classification": "skip", "analysis_priority": 0, **extra}
-                ]
-            },
+        return _bulk_classify(
+            client, base,
+            classifications=[
+                {"file_id": file_id, "classification": "skip", "analysis_priority": 0, **extra}
+            ],
         )
 
     without_reason = classify(parser["id"])
@@ -4741,18 +4673,16 @@ def test_classification_records_a_standard_skip_reason(client, isolate_settings)
     assert client.get(f"{base}/files/{parser['id']}").json()["skip_reason"] == "generated-code"
 
     # A reason only describes a skip, so any other classification refuses one.
-    misplaced = client.post(
-        f"{base}/files/bulk-classify",
-        json={
-            "classifications": [
-                {
-                    "file_id": helper["id"],
-                    "classification": "low",
-                    "analysis_priority": 10,
-                    "skip_reason": "generated-code",
-                }
-            ]
-        },
+    misplaced = _bulk_classify(
+        client, base,
+        classifications=[
+            {
+                "file_id": helper["id"],
+                "classification": "low",
+                "analysis_priority": 10,
+                "skip_reason": "generated-code",
+            }
+        ],
     )
     assert misplaced.status_code == 400, misplaced.text
 
@@ -4779,24 +4709,21 @@ def test_both_classify_doors_refuse_the_same_unexplained_skip(
     skip the coverage obligation can never account for.
     """
     engagement_key = "2026-11-07-code-patch-skip-reason-parity"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="patch-skip-reason-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="patch-skip-reason-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
 
-    bulk = client.post(
-        f"{base}/files/bulk-classify",
-        json={
-            "classifications": [
-                {
-                    "file_id": parser["id"],
-                    "classification": "skip",
-                    "analysis_priority": 0,
-                }
-            ]
-        },
+    bulk = _bulk_classify(
+        client, base,
+        classifications=[
+            {
+                "file_id": parser["id"],
+                "classification": "skip",
+                "analysis_priority": 0,
+            }
+        ],
     )
     patched = client.patch(
         f"{base}/files/{parser['id']}",
@@ -4902,9 +4829,7 @@ def test_review_identity_change_retires_current_semantic_receipt(
         + "-"
         + next(iter(mutation))
     )
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"{engagement_key}-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"{engagement_key}-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     base = f"/engagements/{engagement_key}/assessment/code"
     _classify_file(client, engagement_key, int(parser["id"]), "high", 79)
@@ -4919,24 +4844,20 @@ def test_review_identity_change_retires_current_semantic_receipt(
         ),
     )
     assert result.status_code == 201, result.text
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Original review identity completed.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Original review identity completed.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
     before = client.get(f"{base}/coverage?repo_id={repo['id']}").json()
     assert before["by_classification"]["high"]["analyzed"] == 1
 
     if mutation_mode == "bulk-classify":
-        changed = client.post(
-            f"{base}/files/bulk-classify",
-            json={"classifications": [{"file_id": parser["id"], **mutation}]},
+        changed = _bulk_classify(
+            client, base,
+            classifications=[{"file_id": parser["id"], **mutation}],
         )
     else:
         changed = client.patch(f"{base}/files/{parser['id']}", json=mutation)
@@ -4966,9 +4887,7 @@ def test_review_identity_change_retires_current_semantic_receipt(
         for classification in coverage["by_classification"].values()
     ) == 0
     readiness = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    assert "admitted_files_unaccounted" in {
-        blocker["code"] for blocker in readiness["blockers"]
-    }
+    assert "admitted_files_unaccounted" in _blocker_codes(readiness)
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         replacement = connection.execute(
@@ -5006,8 +4925,7 @@ def test_lsp_publish_rejects_a_stale_repository_generation(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-lsp-cas"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="lsp-cas-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="lsp-cas-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     stale_binding = {
         "repo_generation": repo["active_generation"],
@@ -5040,9 +4958,7 @@ def test_lsp_publish_rejects_a_stale_repository_generation(
 
 def test_wave_one_migration_backfills_legacy_snapshot_identity(client, isolate_settings):
     engagement_key = "2026-08-04-code-snapshot-legacy-migration"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="snapshot-legacy-repo")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="snapshot-legacy-repo")
     active_repo = client.get(
         f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}"
     ).json()
@@ -5085,11 +5001,7 @@ def test_wave_one_migration_backfills_legacy_snapshot_identity(client, isolate_s
     readiness = client.get(
         f"/engagements/{engagement_key}/assessment/code/readiness?target_phase=classify-map"
     ).json()
-    identity_blocker = next(
-        blocker
-        for blocker in readiness["blockers"]
-        if blocker["code"] == "source_snapshot_unverified"
-    )
+    identity_blocker = _blocker(readiness, "source_snapshot_unverified")
     assert identity_blocker["repo_id"] == repo["id"]
     assert identity_blocker["overrideable"] is False
 
@@ -5098,9 +5010,7 @@ def test_structural_schema_migration_keeps_legacy_index_identity_but_marks_it_st
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-structural-schema-migration"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="structural-schema-migration")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="structural-schema-migration")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     legacy_path = "tools/analysis-state/structural-index/legacy-v4/manifest.json"
@@ -5306,19 +5216,7 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
     assert client.get(f"{base}/files").json()["items"] == []
     assert client.get(f"{base}/files/{hidden_file_id}").status_code == 404
     assert client.get(f"{base}/modules").json() == []
-    assert client.get(f"{base}/analysis-queue/stats").json() == {
-        "pending": 0,
-        "processing": 0,
-        "done": 0,
-        "error": 0,
-        "needs_context": 0,
-        "total": 0,
-        "historical_total": 0,
-            "superseded_history": 0,
-            "invalid_active_identity": 0,
-            "invalid_active_history": 0,
-            "reference_repo_items": [],
-        }
+    assert client.get(f"{base}/analysis-queue/stats").json() == _queue_stats()
     assert client.post(
         f"{base}/analysis-queue/fetch",
         json={"limit": 100, "agent_name": "public-agent"},
@@ -5335,13 +5233,13 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
     # ID-addressed writes return not-found; engagement-wide writes ignore the
     # unpublished children rather than changing their durable state.
     not_found_responses = [
-        client.post(
-            f"{base}/files/bulk-classify",
-            json={"classifications": [{
+        _bulk_classify(
+            client, base,
+            classifications=[{
                 "file_id": hidden_file_id,
                 "classification": "low",
                 "analysis_priority": 1,
-            }]},
+            }],
         ),
         client.patch(f"{base}/files/{hidden_file_id}", json={"notes": "mutated"}),
         client.post(
@@ -5365,10 +5263,7 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
             f"{base}/modules",
             json={"repo_id": repo_id, "modules": [{"module_key": "x", "name": "X"}]},
         ),
-        client.post(
-            f"{base}/analysis-queue",
-            json={"items": [{"file_id": hidden_file_id, "priority": 0}]},
-        ),
+        _queue_file(client, engagement_key, hidden_file_id, 0),
         client.post(
             f"{base}/analysis-queue/done",
             json={
@@ -5539,8 +5434,7 @@ def test_staging_and_refresh_replacement_serialize_without_leaving_stale_rows(
 
 def test_analysis_result_list_hides_superseded_rows_by_default(client, isolate_settings):
     engagement_key = "2026-07-14-code-results-current-only"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="results-current-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="results-current-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -5587,8 +5481,7 @@ def test_public_file_patch_rejects_derived_or_receipt_owned_state(
     client, isolate_settings, field_name, forged_value
 ):
     engagement_key = f"2026-08-05-code-file-state-derived-{field_name}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"derived-{field_name}-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key=f"derived-{field_name}-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -5612,9 +5505,7 @@ def test_public_file_patch_rejects_derived_or_receipt_owned_state(
 
 def test_changed_file_refresh_clears_all_analysis_metadata(client, isolate_settings):
     engagement_key = "2026-07-14-code-refresh-clears-analysis"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="changed-metadata-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="changed-metadata-repo")
     parser_file = next(
         row for row in files
         if row["file_path"] == "src/parser.py"
@@ -5993,15 +5884,11 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
             (metadata_claim["id"], resolved_trigger_id),
         )
     _record_fixture_source_receipt(client, engagement_key, metadata_claim)
-    metadata_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            metadata_claim,
-            item_ids=[metadata_claim["id"]],
-            disposition="clean",
-            notes="Reviewed changed risk metadata, without an assigned trigger hypothesis.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    metadata_done = _close_queue_item(
+        client, engagement_key, metadata_claim,
+        disposition="clean",
+        notes="Reviewed changed risk metadata, without an assigned trigger hypothesis.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert metadata_done.status_code == 200, metadata_done.text
     after_unseen_review = client.get(f"{base}/triggers").json()[0]
@@ -6027,14 +5914,10 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
         for row in trigger_claim["cross_file_triggers"]
         if row.get("source") == "code_analysis_trigger"
     ] == [resolved_trigger_id]
-    trigger_skipped = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            trigger_claim,
-            item_ids=[trigger_claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    trigger_skipped = _close_queue_item(
+        client, engagement_key, trigger_claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert trigger_skipped.status_code == 200, trigger_skipped.text
     after_valid_skip = next(
@@ -6080,15 +5963,11 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
         ),
     )
     assert final_receipt.status_code == 201, final_receipt.text
-    final_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            final_claim,
-            item_ids=[final_claim["id"]],
-            disposition="clean",
-            notes="Reviewed the explicitly supplied trigger hypothesis.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    final_done = _close_queue_item(
+        client, engagement_key, final_claim,
+        disposition="clean",
+        notes="Reviewed the explicitly supplied trigger hypothesis.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert final_done.status_code == 200, final_done.text
     trigger_statuses = {
@@ -6100,9 +5979,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
 
 def test_refresh_preview_reports_same_hash_metadata_changes(client, isolate_settings):
     engagement_key = "2026-07-14-code-refresh-metadata-preview"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="metadata-preview-repo")
-    current = _create_files(client, engagement_key, int(repo["id"]))
+    repo, current = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="metadata-preview-repo")
     manifest = []
     for row in current:
         record = {
@@ -6126,8 +6003,7 @@ def test_refresh_preview_reports_same_hash_metadata_changes(client, isolate_sett
 
 def test_rename_preserves_file_id_and_invalidates_path_sensitive_analysis(client, isolate_settings):
     engagement_key = "2026-07-14-code-refresh-rename-invalidates"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="rename-invalidate-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="rename-invalidate-repo")
     helper = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/helpers.py"
@@ -6174,23 +6050,14 @@ def test_rename_preserves_file_id_and_invalidates_path_sensitive_analysis(client
     )
     assert result.status_code == 201, result.text
     base = f"/engagements/{engagement_key}/assessment/code"
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     renamed_manifest = [
         {
-            **{key: parser[key] for key in manifest_fields},
+            **{key: parser[key] for key in _MANIFEST_FIELDS},
             "file_path": "lib/parser.rb",
             "language": "ruby",
         },
         {
-            **{key: helper[key] for key in manifest_fields},
+            **{key: helper[key] for key in _MANIFEST_FIELDS},
             "file_path": "lib/helpers.rb",
             "language": "ruby",
         },
@@ -6248,8 +6115,7 @@ def test_rename_preserves_file_id_and_invalidates_path_sensitive_analysis(client
 
 def test_queue_claim_issues_lease_and_heartbeat_requires_ownership(client, isolate_settings):
     engagement_key = "2026-07-14-code-queue-lease"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="lease-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="lease-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -6286,9 +6152,7 @@ def test_repo_refresh_invalidates_claim_generation_for_all_agent_writes(
     client, isolate_settings
 ):
     engagement_key = "2026-07-15-code-queue-repo-generation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="generation-lease-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="generation-lease-repo")
     parser_file = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
     claim = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
@@ -6318,12 +6182,8 @@ def test_repo_refresh_invalidates_claim_generation_for_all_agent_writes(
             ).fetchone()
         )
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
     refreshed_manifest = [
-        {key: row[key] for key in manifest_fields}
+        {key: row[key] for key in _MANIFEST_FIELDS}
         for row in files
     ]
     next(row for row in refreshed_manifest if row["file_path"] == "src/helpers.py")[
@@ -6355,30 +6215,20 @@ def test_repo_refresh_invalidates_claim_generation_for_all_agent_writes(
     assert result.status_code == 409
     assert "repository generation" in result.json()["detail"]
 
-    closeout = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="reviewed stale generation",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    closeout = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="reviewed stale generation",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert closeout.status_code == 409
     assert "repository generation" in closeout.json()["detail"]
 
-    current_queue = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    current_queue = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert current_queue.status_code == 201, current_queue.text
     current_queue_id = current_queue.json()["outcomes"][0]["queue_item_id"]
 
-    reclaimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "fresh-generation-agent"},
-    )
+    reclaimed = _fetch_queue(client, engagement_key, agent_name="fresh-generation-agent")
     assert reclaimed.status_code == 200, reclaimed.text
     assert len(reclaimed.json()) == 1
     assert reclaimed.json()[0]["id"] == current_queue_id
@@ -6413,8 +6263,7 @@ def test_repo_refresh_invalidates_claim_generation_for_all_agent_writes(
 
 def test_reclaimed_queue_lease_rejects_stale_result_and_closeout(client, isolate_settings):
     engagement_key = "2026-07-14-code-queue-reclaimed-lease"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="reclaimed-lease-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="reclaimed-lease-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -6456,10 +6305,7 @@ def test_reclaimed_queue_lease_rejects_stale_result_and_closeout(client, isolate
             (partial_result.json()["id"],),
         ).fetchone()[0]
     assert superseded_at
-    new_claim = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "new-agent"},
-    ).json()[0]
+    new_claim = _fetch_queue(client, engagement_key, agent_name="new-agent").json()[0]
     assert new_claim["lease_token"] != old_claim["lease_token"]
 
     stale_result = client.post(
@@ -6490,8 +6336,7 @@ def test_reclaimed_queue_lease_rejects_stale_result_and_closeout(client, isolate
 
 def test_lease_conflicts_distinguish_typo_name_mismatch_and_reclaim(client, isolate_settings):
     engagement_key = "2026-07-14-code-queue-lease-conflicts"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="lease-conflict-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="lease-conflict-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -6553,8 +6398,7 @@ def test_lease_conflicts_distinguish_typo_name_mismatch_and_reclaim(client, isol
 
 def test_analysis_result_retry_is_idempotent_within_lease(client, isolate_settings):
     engagement_key = "2026-07-14-code-result-idempotency"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="result-idempotency-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="result-idempotency-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -6597,8 +6441,7 @@ def test_analysis_result_explicit_supersession_replaces_one_source_receipt(
     client, isolate_settings
 ):
     engagement_key = "2026-09-11-code-result-explicit-supersession"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="result-supersession-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="result-supersession-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -6660,15 +6503,11 @@ def test_analysis_result_explicit_supersession_replaces_one_source_receipt(
     assert conflicting.status_code == 409
     assert "already replaced" in conflicting.json()["detail"]
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Corrected function result is authoritative for this lease.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    done = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Corrected function result is authoritative for this lease.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200, done.text
 
@@ -6823,14 +6662,10 @@ def test_completed_row_correction_clears_a_skip_reason_it_no_longer_carries(
         ),
     )
     assert skipped_receipt.status_code == 201, skipped_receipt.text
-    closed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert closed.status_code == 200, closed.text
     assert _completed_queue_projection(int(claim["id"]))["skip_reason"] == "generated-code"
@@ -6945,18 +6780,14 @@ def test_durable_code_classes_must_be_canonical(client, isolate_settings):
     assert "sqli" in unrelated_detail
     assert client.get(f"{base}/triggers").json() == []
 
-    bad_family = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="reviewed",
-            cwe_coverage=[
-                *_network_input_coverage(default_effort=80),
-                {"family": "manual-structural-review", "effort": 100},
-            ],
-        ),
+    bad_family = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="reviewed",
+        cwe_coverage=[
+            *_network_input_coverage(default_effort=80),
+            {"family": "manual-structural-review", "effort": 100},
+        ],
     )
     assert bad_family.status_code == 400, bad_family.text
     assert "manual-structural-review" in bad_family.json()["detail"]
@@ -6964,18 +6795,14 @@ def test_durable_code_classes_must_be_canonical(client, isolate_settings):
         client.get(f"{base}/analysis-queue?status=processing").json()["total"] == 1
     )
 
-    accepted = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="reviewed",
-            cwe_coverage=[
-                *_network_input_coverage(default_effort=80),
-                {"family": "race-condition", "effort": 0, "not_applicable": True},
-            ],
-        ),
+    accepted = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="reviewed",
+        cwe_coverage=[
+            *_network_input_coverage(default_effort=80),
+            {"family": "race-condition", "effort": 0, "not_applicable": True},
+        ],
     )
     assert accepted.status_code == 200, accepted.text
 
@@ -6988,8 +6815,7 @@ def test_current_review_can_deduplicate_to_stale_finding_without_rebinding_it(
     client, isolate_settings, active_scan
 ):
     engagement_key = "2026-11-06-code-stale-finding-slug"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="stale-slug-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="stale-slug-repo")
     repo_id = int(repo["id"])
     files = _create_files(client, engagement_key, repo_id)
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
@@ -7091,10 +6917,10 @@ def test_current_review_can_deduplicate_to_stale_finding_without_rebinding_it(
     assert association["code_snapshot_status"] == "stale"
     assert association["reverification_required"] is True
     assert "finding verify VF-901" in association["next_action"]
-    closed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(queue_item, item_ids=[queue_item["id"]],
-                    disposition="finding", cwe_coverage=coverage),
+    closed = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="finding",
+        cwe_coverage=coverage,
     )
     assert closed.status_code == 200, closed.text
     assert closed.json()["finding_associations"] == [association]
@@ -7108,7 +6934,7 @@ def test_current_review_can_deduplicate_to_stale_finding_without_rebinding_it(
     findings = client.get(f"/engagements/{engagement_key}/assessment/findings").json()
     assert [row["slug"] for row in findings] == ["VF-901"]
     readiness = client.get(f"{base}/readiness?target_phase=complete").json()
-    assert "finding_snapshot_stale" in {row["code"] for row in readiness["blockers"]}
+    assert "finding_snapshot_stale" in _blocker_codes(readiness)
 
 
 def test_reanalysis_stale_predecessor_is_reported_per_item_and_batch_continues(
@@ -7128,12 +6954,10 @@ def test_reanalysis_stale_predecessor_is_reported_per_item_and_batch_continues(
             client, engagement_key, int(file_row["id"]), priority=10,
             agent_name=f"review-{file_row['id']}",
         )
-        closed = client.post(
-            f"{base}/analysis-queue/done",
-            json=_owned(
-                claim, item_ids=[claim["id"]], disposition="skipped",
-                skip_reason="test-fixture",
-            ),
+        closed = _close_queue_item(
+            client, engagement_key, claim,
+            disposition="skipped",
+            skip_reason="test-fixture",
         )
         assert closed.status_code == 200, closed.text
 
@@ -7160,8 +6984,7 @@ def test_suspicious_result_atomically_materializes_its_run_candidate(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-10-suspicious-run-candidate"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="candidate-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="candidate-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -7405,8 +7228,7 @@ def test_automatic_analysis_candidate_identity_persists_across_equivalent_scans(
     client, isolate_settings
 ) -> None:
     engagement_key = "2026-09-10-stable-analysis-candidate"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="stable-candidate-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="stable-candidate-repo")
     parser_file = next(
         row
         for row in _create_files(client, engagement_key, int(repo["id"]))
@@ -7579,8 +7401,7 @@ def test_filtered_queue_claim_applies_every_lane_inside_atomic_selection(
     client, isolate_settings
 ):
     engagement_key = "2026-07-15-code-filtered-claim"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo_a = _create_repo(client, engagement_key, repo_key="lane-repo-a")
+    repo_a = _seed_repo(client, isolate_settings, engagement_key, repo_key="lane-repo-a")
     repo_b = _create_repo(client, engagement_key, repo_key="lane-repo-b")
     file_a = next(
         row for row in _create_files(client, engagement_key, int(repo_a["id"]))
@@ -7633,10 +7454,7 @@ def test_filtered_queue_claim_applies_every_lane_inside_atomic_selection(
     assert claimed.json()[0]["agent_name"] == "lane-agent"
     assert claimed.json()[0]["lease_token"]
 
-    next_claim = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "next-agent"},
-    )
+    next_claim = _fetch_queue(client, engagement_key, agent_name="next-agent")
     assert next_claim.status_code == 200
     assert next_claim.json()[0]["file_id"] == file_a["id"]
 
@@ -7646,8 +7464,7 @@ def test_signal_closeout_requires_current_result_with_evidence_or_artifact(
     client, isolate_settings, disposition
 ):
     engagement_key = f"2026-07-15-code-closeout-{disposition}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"closeout-{disposition}-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key=f"closeout-{disposition}-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -7723,8 +7540,7 @@ def test_candidate_result_cannot_be_downcast_by_queue_closeout(
     engagement_key = (
         f"2026-08-05-code-closeout-downcast-{result_disposition}-{close_disposition}"
     )
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"{engagement_key}-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key=f"{engagement_key}-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -7787,8 +7603,7 @@ def test_conflicting_candidate_result_dispositions_fail_closed(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-closeout-conflicting-candidates"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="conflicting-candidates-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="conflicting-candidates-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -7816,15 +7631,11 @@ def test_conflicting_candidate_result_dispositions_fail_closed(
         )
         assert created.status_code == 201, created.text
 
-    rejected = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="finding",
-            notes="Cannot choose between contradictory candidate receipts.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    rejected = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="finding",
+        notes="Cannot choose between contradictory candidate receipts.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
 
     assert rejected.status_code == 409
@@ -7841,8 +7652,7 @@ def test_conflicting_candidate_result_dispositions_fail_closed(
 
 def test_clean_closeout_requires_nonempty_review_notes(client, isolate_settings):
     engagement_key = "2026-07-15-code-clean-closeout-notes"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="clean-closeout-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="clean-closeout-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -7870,9 +7680,7 @@ def test_clean_closeout_requires_nonempty_review_notes(client, isolate_settings)
 
 def test_cwe_detail_surfaces_effort_derived_from_current_results(client, isolate_settings):
     engagement_key = "2026-07-15-code-derived-effort"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="derived-effort-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="derived-effort-repo")
     parser_file = next(
         row for row in files
         if row["file_path"] == "src/parser.py"
@@ -7924,9 +7732,7 @@ def test_coverage_projections_exclude_receipts_from_an_unrelated_file_refresh_ge
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-coverage-stale-generation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="coverage-stale-generation-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="coverage-stale-generation-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     base = f"/engagements/{engagement_key}/assessment/code"
@@ -7952,36 +7758,23 @@ def test_coverage_projections_exclude_receipts_from_an_unrelated_file_refresh_ge
         ),
     )
     assert result.status_code == 201, result.text
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Original generation review.",
-            cwe_coverage=_network_input_coverage(default_effort=1),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Original generation review.",
+        cwe_coverage=_network_input_coverage(default_effort=1),
     )
     assert completed.status_code == 200, completed.text
     previous_generation = int(claim["repo_generation"])
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     refreshed = _refresh_repo_files(
         client,
         engagement_key,
         int(repo["id"]),
         [
-            {key: parser[key] for key in manifest_fields},
+            {key: parser[key] for key in _MANIFEST_FIELDS},
             {
-                **{key: helper[key] for key in manifest_fields},
+                **{key: helper[key] for key in _MANIFEST_FIELDS},
                 "file_hash": _source_hash("helpers-generation-two"),
             },
         ],
@@ -8029,8 +7822,7 @@ def test_inherited_coverage_reads_byte_identical_verdicts_without_claiming_curre
     not have (CODE-MAP.md's no-silent-currency rule).
     """
     engagement_key = "2026-11-06-code-inherited-coverage"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="inherited-coverage-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="inherited-coverage-repo")
     repo_id = int(repo["id"])
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, repo_id)
@@ -8046,35 +7838,27 @@ def test_inherited_coverage_reads_byte_identical_verdicts_without_claiming_curre
             agent_name=f"hunter-{file_row['id']}",
         )
         _record_fixture_source_receipt(client, engagement_key, claim)
-        closed = client.post(
-            f"{base}/analysis-queue/done",
-            json=_owned(
-                claim,
-                item_ids=[claim["id"]],
-                disposition="clean",
-                notes="Reviewed at the original generation.",
-                cwe_coverage=_network_input_coverage(default_effort=80),
-            ),
+        closed = _close_queue_item(
+            client, engagement_key, claim,
+            disposition="clean",
+            notes="Reviewed at the original generation.",
+            cwe_coverage=_network_input_coverage(default_effort=80),
         )
         assert closed.status_code == 200, closed.text
     previous_generation = int(client.get(f"{base}/repos/{repo_id}").json()["active_generation"])
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash",
-        "header_snippet", "git_churn_score", "has_past_cve_fix",
-    }
     _refresh_repo_files(
         client,
         engagement_key,
         repo_id,
         [
-            {key: parser[key] for key in manifest_fields},
+            {key: parser[key] for key in _MANIFEST_FIELDS},
             {
-                **{key: helper[key] for key in manifest_fields},
+                **{key: helper[key] for key in _MANIFEST_FIELDS},
                 "file_hash": _source_hash("inherited-helpers-moved"),
             },
             *[
-                {key: row[key] for key in manifest_fields}
+                {key: row[key] for key in _MANIFEST_FIELDS}
                 for row in files
                 if row["id"] not in {parser["id"], helper["id"]}
             ],
@@ -8152,15 +7936,11 @@ def test_inherited_coverage_reads_byte_identical_verdicts_without_claiming_curre
         client, engagement_key, int(parser["id"]), agent_name="hunter-current"
     )
     _record_fixture_source_receipt(client, engagement_key, current_claim)
-    closed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            current_claim,
-            item_ids=[current_claim["id"]],
-            disposition="clean",
-            notes="Reviewed against the current bytes.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    closed = _close_queue_item(
+        client, engagement_key, current_claim,
+        disposition="clean",
+        notes="Reviewed against the current bytes.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert closed.status_code == 200, closed.text
     after = client.get(
@@ -8172,9 +7952,7 @@ def test_inherited_coverage_reads_byte_identical_verdicts_without_claiming_curre
 
 def test_coverage_projections_require_result_lease_identity(client, isolate_settings):
     engagement_key = "2026-08-05-code-coverage-result-lease"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="coverage-result-lease-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="coverage-result-lease-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     base = f"/engagements/{engagement_key}/assessment/code"
     _classify_file(client, engagement_key, int(parser["id"]), "high", 79)
@@ -8228,8 +8006,7 @@ def test_coverage_projections_require_result_lease_identity(client, isolate_sett
 
 def test_needs_context_can_be_recovered_without_stale_coverage_blocker(client, isolate_settings):
     engagement_key = "2026-07-14-code-needs-context-recovery"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="needs-context-recovery-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="needs-context-recovery-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -8263,9 +8040,7 @@ def test_needs_context_can_be_recovered_without_stale_coverage_blocker(client, i
 
 def test_repo_refresh_is_atomic_and_reconciles_changed_retired_and_renamed_files(client, isolate_settings):
     engagement_key = "2026-07-14-code-refresh"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="refresh-repo")
-    original_files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, original_files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="refresh-repo")
     parser = next(row for row in original_files if row["file_path"] == "src/parser.py")
     helper = next(row for row in original_files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
@@ -8284,23 +8059,14 @@ def test_repo_refresh_is_atomic_and_reconciles_changed_retired_and_renamed_files
         )
         connection.commit()
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     next_files = [
         {
-            **{key: parser[key] for key in manifest_fields},
+            **{key: parser[key] for key in _MANIFEST_FIELDS},
             "loc": 81,
             "file_hash": _source_hash("hash-a-changed"),
         },
         {
-            **{key: helper[key] for key in manifest_fields},
+            **{key: helper[key] for key in _MANIFEST_FIELDS},
             "file_path": "src/renamed_helpers.py",
         },
         {
@@ -8383,9 +8149,7 @@ def test_repo_refresh_is_atomic_and_reconciles_changed_retired_and_renamed_files
 
 def test_repo_refresh_complete_empty_manifest_retires_last_file(client, isolate_settings):
     engagement_key = "2026-07-14-code-refresh-empty"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="refresh-empty-repo")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="refresh-empty-repo")
     started = client.post(
         f"/engagements/{engagement_key}/assessment/code/repos/refresh/start",
         json=_verified_repo_payload(
@@ -8438,9 +8202,7 @@ def test_interrupted_first_ingest_does_not_publish_generation_zero_repo(client, 
 
 def test_bulk_classify_rejects_unknown_fields(client, isolate_settings):
     engagement_key = "2026-04-09-code-classify-extra-fields"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="extra-fields-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="extra-fields-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     response = client.post(
@@ -8462,9 +8224,7 @@ def test_bulk_classify_rejects_unknown_fields(client, isolate_settings):
 
 def test_bulk_classify_rejects_invalid_slot_type(client, isolate_settings):
     engagement_key = "2026-04-09-code-classify-invalid-slot"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="invalid-slot-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="invalid-slot-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     response = client.post(
@@ -8487,9 +8247,7 @@ def test_bulk_classify_rejects_invalid_slot_type(client, isolate_settings):
 
 def test_bulk_classify_rejects_high_without_slot_types(client, isolate_settings):
     engagement_key = "2026-04-09-code-classify-missing-slots"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="missing-slots-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="missing-slots-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     response = client.post(
@@ -8686,9 +8444,7 @@ def _network_input_coverage(
 
 def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     engagement_key = "2026-04-04-code-queue"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key)
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key)
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     repo_patch = client.post(
@@ -8706,10 +8462,7 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
 
     file_after_queue = client.get(
@@ -8718,10 +8471,7 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
     assert file_after_queue.status_code == 200
     assert file_after_queue.json()["analysis_status"] == "queued"
 
-    fetch_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 10, "agent_name": "code-vuln-hunter"},
-    )
+    fetch_response = _fetch_queue(client, engagement_key, limit=10)
     assert fetch_response.status_code == 200
     payload = fetch_response.json()
     assert len(payload) == 1
@@ -8748,8 +8498,7 @@ def test_queue_fetch_returns_file_direct_work_items(client, isolate_settings):
 
 def test_repo_patch_rejects_unknown_fields(client, isolate_settings):
     engagement_key = "2026-04-16-code-repo-patch-unknown"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="repo-patch-unknown")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="repo-patch-unknown")
 
     response = client.patch(
         f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}",
@@ -8780,8 +8529,7 @@ def test_repo_patch_rejects_sealed_source_identity(
     client, isolate_settings, field_name, replacement
 ):
     engagement_key = "2026-08-04-code-repo-patch-sealed-source"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="repo-patch-sealed-source")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="repo-patch-sealed-source")
     endpoint = (
         f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}"
     )
@@ -8797,9 +8545,7 @@ def test_repo_patch_rejects_sealed_source_identity(
 
 def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_overrides(client, isolate_settings):
     engagement_key = "2026-04-09-code-queue-applicable-vulns"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="queue-applicable-vulns-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="queue-applicable-vulns-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     classify = client.post(
@@ -8819,16 +8565,10 @@ def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_over
     )
     assert classify.status_code == 200
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
 
-    fetch_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    fetch_response = _fetch_queue(client, engagement_key)
     assert fetch_response.status_code == 200
     item = fetch_response.json()[0]
 
@@ -8841,30 +8581,15 @@ def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_over
 
 def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
     engagement_key = "2026-04-04-code-coverage"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="coverage-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="coverage-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={
-            "items": [
-                {
-                    "file_id": parser_file["id"],
-                    "priority": 100,
-                }
-            ]
-        },
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
     analysis_result = client.post(
@@ -8894,16 +8619,11 @@ def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
     assert file_before_done.status_code == 200
     assert file_before_done.json()["analysis_status"] == "in_progress"
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200
     assert done.json()["updated"] == 1
@@ -8939,23 +8659,15 @@ def test_analysis_completion_rolls_up_file_coverage(client, isolate_settings):
 
 def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isolate_settings):
     engagement_key = "2026-04-04-code-gate"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="gate-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="gate-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    queue_item = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    ).json()[0]
+    queue_item = _fetch_queue(client, engagement_key).json()[0]
 
     analysis_result = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-results",
@@ -8985,28 +8697,19 @@ def test_coverage_gate_stays_closed_until_queue_items_are_completed(client, isol
     assert payload["gate"]["passed"] is False
     assert any("queue items still pending or processing" in reason.lower() for reason in payload["gate"]["reasons"])
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            queue_item,
-            item_ids=[queue_item["id"]],
-            disposition="clean",
-            notes="Reviewed",
-        ),
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed",
     )
     assert done.status_code == 400
     assert "cwe_coverage is required" in done.json()["detail"]
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200
 
@@ -9022,48 +8725,30 @@ def test_queue_done_skipped_disposition_requires_skip_reason(client, isolate_set
     cwe-coverage completeness check is bypassed for skipped items (analyst
     did not analyze)."""
     engagement_key = "2026-04-04-code-skipped"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="skip-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="skip-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "low", 10)
 
-    client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 10}]},
-    )
-    queue_item = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    ).json()[0]
+    _queue_file(client, engagement_key, parser_file["id"], 10)
+    queue_item = _fetch_queue(client, engagement_key).json()[0]
 
     # Missing skip_reason → 400
-    rejected = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "skipped",
-            "notes": "",
-            "cwe_coverage": [],
-        },
+    rejected = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="skipped",
+        notes="",
+        cwe_coverage=[],
     )
     assert rejected.status_code == 400
     assert "skip_reason is required" in rejected.json()["detail"]
 
     # With skip_reason → 200 and cwe_coverage completeness check is bypassed
-    accepted = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "skipped",
-            "notes": "",
-            "cwe_coverage": [],
-            "skip_reason": "test-fixture",
-        },
+    accepted = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="skipped",
+        notes="",
+        cwe_coverage=[],
+        skip_reason="test-fixture",
     )
     assert accepted.status_code == 200
 
@@ -9083,9 +8768,7 @@ def test_queue_done_skipped_requires_a_standard_reason_and_a_tier_below_medium(
     client, isolate_settings, classification, priority, sinks, skip_reason, stale_index, accepted,
 ):
     engagement_key = "2026-11-05-code-skip-signals"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="skip-signals-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="skip-signals-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _publish_structural_totals(
         client,
@@ -9096,38 +8779,31 @@ def test_queue_done_skipped_requires_a_standard_reason_and_a_tier_below_medium(
     )
     _classify_file(client, engagement_key, int(parser_file["id"]), classification, priority)
     base = f"/engagements/{engagement_key}/assessment/code"
-    queued = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": priority}]},
-    )
+    queued = _queue_file(client, engagement_key, parser_file["id"], priority)
     assert queued.status_code == 201, queued.text
-    queue_item = client.post(
-        f"{base}/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    ).json()[0]
+    queue_item = _fetch_queue(client, engagement_key).json()[0]
     if stale_index:
         helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
-        relabelled = client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    {
-                        "file_id": helper_file["id"],
-                        "classification": "low",
-                        "role": "helper",
-                        "slot_types": [],
-                        "analysis_priority": 10,
-                        "language": "ruby",
-                    }
-                ]
-            },
+        relabelled = _bulk_classify(
+            client, base,
+            classifications=[
+                {
+                    "file_id": helper_file["id"],
+                    "classification": "low",
+                    "role": "helper",
+                    "slot_types": [],
+                    "analysis_priority": 10,
+                    "language": "ruby",
+                }
+            ],
         )
         assert relabelled.status_code == 200, relabelled.text
         assert client.get(f"{base}/files/{parser_file['id']}").json()["total_sinks"] == 0
 
-    closed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(queue_item, item_ids=[queue_item["id"]], disposition="skipped", skip_reason=skip_reason),
+    closed = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="skipped",
+        skip_reason=skip_reason,
     )
 
     assert (closed.status_code == 200) is accepted, closed.text
@@ -9141,9 +8817,7 @@ def test_queue_done_skipped_requires_a_standard_reason_and_a_tier_below_medium(
 
 def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-single-item"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="single-item-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="single-item-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
@@ -9160,10 +8834,7 @@ def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
     )
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 2, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key, limit=2)
     assert claimed.status_code == 200
     queue_items = claimed.json()
     assert len(queue_items) == 2
@@ -9182,16 +8853,11 @@ def test_queue_done_rejects_multi_item_completion(client, isolate_settings):
 
 def test_queue_done_requires_processing_state(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-processing-only"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="processing-only-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="processing-only-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
@@ -9221,16 +8887,11 @@ def test_queue_done_requires_processing_state(client, isolate_settings):
 
 def test_analysis_result_requires_processing_queue_item(client, isolate_settings):
     engagement_key = "2026-04-04-analysis-result-processing-only"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="analysis-result-processing-only-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="analysis-result-processing-only-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
@@ -9279,22 +8940,14 @@ def test_queue_status_validation_retains_plural_batch_diagnostics() -> None:
 
 def test_reset_stale_queue_items_parses_iso_consumed_at(client, isolate_settings):
     engagement_key = "2026-04-04-code-reset-stale"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="reset-stale-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="reset-stale-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -9314,10 +8967,7 @@ def test_reset_stale_queue_items_parses_iso_consumed_at(client, isolate_settings
     assert reset.status_code == 200
     assert reset.json()["reset"] == 1
 
-    claimed_again = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "queue-reclaimer"},
-    )
+    claimed_again = _fetch_queue(client, engagement_key, agent_name="queue-reclaimer")
     assert claimed_again.status_code == 200
     assert claimed_again.json()[0]["id"] == queue_item["id"]
 
@@ -9326,8 +8976,7 @@ def test_reset_stale_does_not_supersede_results_when_heartbeat_wins_cas(
     client, isolate_settings, monkeypatch
 ):
     engagement_key = "2026-07-14-code-reset-heartbeat-race"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="reset-heartbeat-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="reset-heartbeat-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -9417,22 +9066,14 @@ def test_retry_error_queue_item_returns_to_pending_with_audit_row(client, isolat
     best-effort `activity_entries` audit row, matching the "queue completion
     appends activity_entries" convention for every other queue mutation."""
     engagement_key = "2026-07-08-code-retry-error"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="retry-error-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="retry-error-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -9477,10 +9118,7 @@ def test_retry_error_queue_item_returns_to_pending_with_audit_row(client, isolat
     assert row[3] == "agent crashed mid-parse\n[retried: transient parser crash, retrying]"
 
     # The item re-enters the fetch rotation like any other pending item.
-    reclaimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter-2"},
-    )
+    reclaimed = _fetch_queue(client, engagement_key, agent_name="code-vuln-hunter-2")
     assert reclaimed.status_code == 200
     assert reclaimed.json()[0]["id"] == queue_item["id"]
 
@@ -9507,17 +9145,13 @@ def test_queue_mutation_succeeds_and_persists_audit_failure(
     client, isolate_settings, monkeypatch
 ):
     engagement_key = "2026-09-20-code-audit-failure"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="audit-failure-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="audit-failure-repo")
     parser_file = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
     )
     _classify_file(client, engagement_key, int(parser_file["id"]), "low", 10)
-    queued = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 10}]},
-    )
+    queued = _queue_file(client, engagement_key, parser_file["id"], 10)
     assert queued.status_code == 201, queued.text
     claim = _claim_file_for_analysis(client, engagement_key, int(parser_file["id"]))
     _record_fixture_source_receipt(client, engagement_key, claim)
@@ -9528,15 +9162,11 @@ def test_queue_mutation_succeeds_and_persists_audit_failure(
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("activity unavailable")),
     )
 
-    completed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="review complete",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="review complete",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
 
     assert completed.status_code == 200, completed.text
@@ -9563,22 +9193,14 @@ def test_retry_error_rejects_empty_reason_without_error(client, isolate_settings
     """`reason` is optional: retrying without one still lands a bare
     `[retried]` breadcrumb rather than failing or leaving notes untouched."""
     engagement_key = "2026-07-08-code-retry-error-no-reason"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="retry-error-no-reason-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="retry-error-no-reason-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -9607,33 +9229,20 @@ def test_retry_error_rejects_empty_reason_without_error(client, isolate_settings
 
 def test_queue_done_rejects_needs_context_disposition(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-needs-context"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="done-needs-context-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="done-needs-context-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "needs_context",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="needs_context",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 400
     assert "Invalid disposition" in done.json()["detail"]
@@ -9641,65 +9250,44 @@ def test_queue_done_rejects_needs_context_disposition(client, isolate_settings):
 
 def test_queue_done_rejects_legacy_trigger_payload(client, isolate_settings):
     engagement_key = "2026-04-04-code-done-no-trigger-payload"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="done-no-trigger-payload-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="done-no-trigger-payload-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-            "cross_file_triggers": [
-                {
-                    "file_path": "src/helpers.py",
-                    "reason": "stale contract",
-                    "vuln_class": "web-app-injection",
-                }
-            ],
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=_network_input_coverage(default_effort=80),
+        cross_file_triggers=[
+            {
+                "file_path": "src/helpers.py",
+                "reason": "stale contract",
+                "vuln_class": "web-app-injection",
+            }
+        ],
     )
     assert done.status_code == 422
 
 
 def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client, isolate_settings):
     engagement_key = "2026-04-04-code-triggers"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="trigger-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="trigger-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
     _classify_file(client, engagement_key, int(helper_file["id"]), "high", 79)
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
     analysis_result = client.post(
@@ -9728,16 +9316,11 @@ def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client
     )
     assert analysis_result.status_code == 201
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed parser",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed parser",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200
 
@@ -9793,24 +9376,16 @@ def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client
     assert requeue_again.json()["inserted"] == 0
     assert requeue_again.json()["already_queued"] == 1
 
-    helper_claim = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "follow-up-hunter"},
-    )
+    helper_claim = _fetch_queue(client, engagement_key, agent_name="follow-up-hunter")
     helper_item = helper_claim.json()[0]
     assert helper_item["file"]["file_path"] == "src/helpers.py"
     _record_fixture_source_receipt(client, engagement_key, helper_item)
 
-    helper_done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [helper_item["id"]],
-            "agent_name": helper_item["agent_name"],
-            "lease_token": helper_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed helper",
-            "cwe_coverage": _network_input_coverage(default_effort=60),
-        },
+    helper_done = _close_queue_item(
+        client, engagement_key, helper_item,
+        disposition="clean",
+        notes="Reviewed helper",
+        cwe_coverage=_network_input_coverage(default_effort=60),
     )
     assert helper_done.status_code == 200
 
@@ -9833,23 +9408,15 @@ def test_cross_file_triggers_block_gate_until_requeued_and_dedupe_targets(client
 
 def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate_settings):
     engagement_key = "2026-04-04-code-trigger-external-gap"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="trigger-external-gap-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="trigger-external-gap-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
     analysis_result = client.post(
@@ -9877,16 +9444,11 @@ def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate
     )
     assert analysis_result.status_code == 201
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed parser",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed parser",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200
 
@@ -9933,21 +9495,13 @@ def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate
 
 def test_not_applicable_cwe_coverage_does_not_block_effort_gate(client, isolate_settings):
     engagement_key = "2026-04-04-code-cwe-not-applicable"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="cwe-not-applicable-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="cwe-not-applicable-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
     coverage = _network_input_coverage(
@@ -9961,16 +9515,11 @@ def test_not_applicable_cwe_coverage_does_not_block_effort_gate(client, isolate_
         },
     )
     _record_fixture_source_receipt(client, engagement_key, queue_item)
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed parser",
-            "cwe_coverage": coverage,
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed parser",
+        cwe_coverage=coverage,
     )
     assert done.status_code == 200
 
@@ -10007,33 +9556,26 @@ def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
     isolate_settings,
 ):
     engagement_key = "2026-05-14-code-cwe-reanalysis-na"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="cwe-reanalysis-na-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="cwe-reanalysis-na-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     file_id = int(parser_file["id"])
     _classify_file(client, engagement_key, file_id, "critical", 100)
 
     first_item = _claim_file_for_analysis(client, engagement_key, file_id, priority=100)
     _record_fixture_source_receipt(client, engagement_key, first_item)
-    first_done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [first_item["id"]],
-            "agent_name": first_item["agent_name"],
-            "lease_token": first_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Initial pass misclassified SSRF as not applicable.",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=80,
-                overrides={
-                    "ssrf": {
-                        "effort": 0,
-                        "disposition": "not_applicable",
-                    }
-                },
-            ),
-        },
+    first_done = _close_queue_item(
+        client, engagement_key, first_item,
+        disposition="clean",
+        notes="Initial pass misclassified SSRF as not applicable.",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={
+                "ssrf": {
+                    "effort": 0,
+                    "disposition": "not_applicable",
+                }
+            },
+        ),
     )
     assert first_done.status_code == 200
 
@@ -10045,19 +9587,14 @@ def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
         reason="Revisit an incorrectly excluded SSRF family",
     )
     _record_fixture_source_receipt(client, engagement_key, second_item)
-    second_done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [second_item["id"]],
-            "agent_name": second_item["agent_name"],
-            "lease_token": second_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Re-analysis found SSRF applicable but under-reviewed.",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=80,
-                overrides={"ssrf": {"effort": 10, "disposition": "clean"}},
-            ),
-        },
+    second_done = _close_queue_item(
+        client, engagement_key, second_item,
+        disposition="clean",
+        notes="Re-analysis found SSRF applicable but under-reviewed.",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={"ssrf": {"effort": 10, "disposition": "clean"}},
+        ),
     )
     assert second_done.status_code == 200
 
@@ -10074,17 +9611,13 @@ def test_effort_gate_names_every_family_under_the_threshold(client, isolate_sett
     engagement_key, repo, file_row = _seed_queue_contract_file(client, isolate_settings, "effort-all")
     claim = _claim_file_for_analysis(client, engagement_key, int(file_row["id"]), priority=80)
     _record_fixture_source_receipt(client, engagement_key, claim)
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Reviewed.",
-            cwe_coverage=_network_input_coverage(
-                default_effort=80,
-                overrides={"ssrf": {"effort": 10}, "file-upload": {"effort": 20}},
-            ),
+    done = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Reviewed.",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={"ssrf": {"effort": 10}, "file-upload": {"effort": 20}},
         ),
     )
     assert done.status_code == 200, done.text
@@ -10112,8 +9645,7 @@ def test_effort_harness_measures_medium_files_and_leaves_low_alone(
     out of the harness entirely.
     """
     engagement_key = "2026-11-06-code-effort-gate-medium"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="effort-gate-medium-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="effort-gate-medium-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, int(repo["id"]))
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
@@ -10121,18 +9653,16 @@ def test_effort_harness_measures_medium_files_and_leaves_low_alone(
     low = next(row for row in files if row["file_path"] == "src/helpers.py")
 
     def close(file_row, tier, priority, effort):
-        classified = client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    {
-                        "file_id": file_row["id"],
-                        "classification": tier,
-                        "role": "utility",
-                        "analysis_priority": priority,
-                    }
-                ]
-            },
+        classified = _bulk_classify(
+            client, base,
+            classifications=[
+                {
+                    "file_id": file_row["id"],
+                    "classification": tier,
+                    "role": "utility",
+                    "analysis_priority": priority,
+                }
+            ],
         )
         assert classified.status_code == 200, classified.text
         claim = _claim_file_for_analysis(
@@ -10140,18 +9670,14 @@ def test_effort_harness_measures_medium_files_and_leaves_low_alone(
             agent_name=f"hunter-{file_row['id']}",
         )
         _record_fixture_source_receipt(client, engagement_key, claim)
-        done = client.post(
-            f"{base}/analysis-queue/done",
-            json=_owned(
-                claim,
-                item_ids=[claim["id"]],
-                disposition="clean",
-                notes="Reviewed.",
-                cwe_coverage=[
-                    {"family": "algorithmic-dos", "effort": effort},
-                    {"family": "error-handling", "effort": effort},
-                ],
-            ),
+        done = _close_queue_item(
+            client, engagement_key, claim,
+            disposition="clean",
+            notes="Reviewed.",
+            cwe_coverage=[
+                {"family": "algorithmic-dos", "effort": effort},
+                {"family": "error-handling", "effort": effort},
+            ],
         )
         assert done.status_code == 200, done.text
 
@@ -10189,42 +9715,35 @@ def test_effort_harness_accepts_a_medium_file_over_its_threshold(
 ):
     """30 is the medium floor, not the first value above it."""
     engagement_key = "2026-11-06-code-effort-gate-medium-pass"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="effort-gate-medium-pass-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="effort-gate-medium-pass-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, int(repo["id"]))
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
     medium = next(row for row in files if row["file_path"] == "src/parser.py")
-    classified = client.post(
-        f"{base}/files/bulk-classify",
-        json={
-            "classifications": [
-                {
-                    "file_id": medium["id"],
-                    "classification": "medium",
-                    "role": "utility",
-                    "analysis_priority": 40,
-                }
-            ]
-        },
+    classified = _bulk_classify(
+        client, base,
+        classifications=[
+            {
+                "file_id": medium["id"],
+                "classification": "medium",
+                "role": "utility",
+                "analysis_priority": 40,
+            }
+        ],
     )
     assert classified.status_code == 200, classified.text
     claim = _claim_file_for_analysis(
         client, engagement_key, int(medium["id"]), priority=40
     )
     _record_fixture_source_receipt(client, engagement_key, claim)
-    done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Reviewed.",
-            cwe_coverage=[
-                {"family": "algorithmic-dos", "effort": 30},
-                {"family": "error-handling", "effort": 45},
-            ],
-        ),
+    done = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Reviewed.",
+        cwe_coverage=[
+            {"family": "algorithmic-dos", "effort": 30},
+            {"family": "error-handling", "effort": 45},
+        ],
     )
     assert done.status_code == 200, done.text
 
@@ -10237,25 +9756,17 @@ def test_effort_harness_accepts_a_medium_file_over_its_threshold(
 
 def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_settings):
     engagement_key = "2026-04-04-analysis-result-triggers"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="analysis-result-trigger-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="analysis-result-trigger-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
     _classify_file(client, engagement_key, int(helper_file["id"]), "high", 79)
     _publish_structural_callables(client, engagement_key, int(repo["id"]), files, {})
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
     analysis_result = client.post(
@@ -10291,16 +9802,11 @@ def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_se
     pending_payload = coverage_before_done.json()
     assert pending_payload["trigger_summary"]["pending"] == 1
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed parser",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed parser",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200
 
@@ -10335,9 +9841,7 @@ def test_analysis_result_triggers_are_recorded_before_requeue(client, isolate_se
 
 def test_trigger_status_does_not_trust_mutable_file_analysis_rollup(client, isolate_settings):
     engagement_key = "2026-08-05-code-trigger-derived-status"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="trigger-derived-status-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="trigger-derived-status-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
@@ -10377,9 +9881,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-trigger-post-trigger-review"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="post-trigger-review-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="post-trigger-review-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
@@ -10402,15 +9904,11 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
         ),
     )
     assert old_helper_receipt.status_code == 201, old_helper_receipt.text
-    old_helper_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            old_helper_claim,
-            item_ids=[old_helper_claim["id"]],
-            disposition="clean",
-            notes="Helper review completed before any cross-file hypothesis existed.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    old_helper_done = _close_queue_item(
+        client, engagement_key, old_helper_claim,
+        disposition="clean",
+        notes="Helper review completed before any cross-file hypothesis existed.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert old_helper_done.status_code == 200, old_helper_done.text
 
@@ -10539,15 +10037,11 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
         ),
     )
     assert follow_up_receipt.status_code == 201, follow_up_receipt.text
-    follow_up_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            follow_up,
-            item_ids=[follow_up["id"]],
-            disposition="clean",
-            notes="Reviewed helper under the newly supplied parser contract.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    follow_up_done = _close_queue_item(
+        client, engagement_key, follow_up,
+        disposition="clean",
+        notes="Reviewed helper under the newly supplied parser contract.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert follow_up_done.status_code == 200, follow_up_done.text
     assert {row["status"] for row in client.get(f"{base}/triggers").json()} == {
@@ -10584,9 +10078,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
 
 def test_requeue_triggered_files_rejects_non_numeric_ids(client, isolate_settings):
     engagement_key = "2026-04-04-code-requeue-invalid-ids"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="requeue-invalid-ids-repo")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="requeue-invalid-ids-repo")
 
     invalid_file_id = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/requeue",
@@ -10605,9 +10097,7 @@ def test_requeue_triggered_files_rejects_non_numeric_ids(client, isolate_setting
 
 def test_requeue_triggered_files_keeps_guidance_strings_separate_from_trigger_context(client, isolate_settings):
     engagement_key = "2026-04-16-code-requeue-guidance-shape"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="requeue-guidance-shape")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="requeue-guidance-shape")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(helper_file["id"]), "high", 79)
 
@@ -10628,10 +10118,7 @@ def test_requeue_triggered_files_keeps_guidance_strings_separate_from_trigger_co
     assert requeue.status_code == 201
     assert requeue.json()["inserted"] == 1
 
-    fetched = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "follow-up-hunter"},
-    )
+    fetched = _fetch_queue(client, engagement_key, agent_name="follow-up-hunter")
     assert fetched.status_code == 200
     item = fetched.json()[0]
     assert item["guidance_hypotheses"] == ["Trace helper input normalization"]
@@ -10660,8 +10147,7 @@ def test_requeue_triggered_files_keeps_guidance_strings_separate_from_trigger_co
 
 def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(client, isolate_settings):
     engagement_key = "2026-04-04-code-coverage-finding-scope"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo_a = _create_repo(client, engagement_key, repo_key="scope-repo-a")
+    repo_a = _seed_repo(client, isolate_settings, engagement_key, repo_key="scope-repo-a")
     repo_b = _create_repo(client, engagement_key, repo_key="scope-repo-b")
     _create_files(client, engagement_key, int(repo_a["id"]))
     _create_files(client, engagement_key, int(repo_b["id"]))
@@ -10798,39 +10284,26 @@ def test_coverage_summary_scopes_findings_to_repo_and_rejects_unknown_repo(clien
 
 def test_coverage_summary_tolerates_non_numeric_effort_values(client, isolate_settings):
     engagement_key = "2026-04-04-code-coverage-nonnumeric-effort"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="nonnumeric-effort-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="nonnumeric-effort-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 100)
 
-    queued = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 100}]},
-    )
+    queued = _queue_file(client, engagement_key, parser_file["id"], 100)
     assert queued.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
     _record_fixture_source_receipt(client, engagement_key, queue_item)
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=80,
-                overrides={"web-app-injection": {"effort": "unknown"}},
-            ),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={"web-app-injection": {"effort": "unknown"}},
+        ),
     )
     assert done.status_code == 200
 
@@ -10845,9 +10318,7 @@ def test_coverage_summary_tolerates_non_numeric_effort_values(client, isolate_se
 
 def test_coverage_summary_excludes_false_positive_variants(client, isolate_settings):
     engagement_key = "2026-04-09-code-coverage-variant-filter"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-filter-repo")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-filter-repo")
 
     _create_root_finding(client, engagement_key, "CH-090")
     author_agent_id = "AUTHOR-CH-001"
@@ -10918,9 +10389,7 @@ def test_coverage_summary_excludes_false_positive_variants(client, isolate_setti
 
 def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
     engagement_key = "2026-04-09-code-coverage-noncode-variants"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="noncode-variant-repo")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="noncode-variant-repo")
 
     _create_root_finding(client, engagement_key, "VA-090", source_name="vulnerability-analyst")
     _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-VA-001")
@@ -10963,8 +10432,7 @@ def test_coverage_summary_excludes_non_code_variants(client, isolate_settings):
 
 def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isolate_settings):
     engagement_key = "2026-04-09-code-coverage-ambiguous-shared-paths"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo_a = _create_repo(client, engagement_key, repo_key="shared-path-repo-a")
+    repo_a = _seed_repo(client, isolate_settings, engagement_key, repo_key="shared-path-repo-a")
     repo_b = _create_repo(client, engagement_key, repo_key="shared-path-repo-b")
 
     shared_files_a = _refresh_repo_files(
@@ -11058,9 +10526,7 @@ def test_repo_scoped_coverage_excludes_ambiguous_shared_file_paths(client, isola
 
 def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, isolate_settings):
     engagement_key = "2026-04-04-code-modules"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="module-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="module-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 90)
@@ -11098,9 +10564,7 @@ def test_module_creation_assigns_files_and_supports_module_scoped_fetch(client, 
 
 def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
     engagement_key = "2026-04-09-code-module-status"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="module-status-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="module-status-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
@@ -11123,10 +10587,7 @@ def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
     module = modules.json()[0]
     assert module["analysis_status"] == "classified"
 
-    queued = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queued = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queued.status_code == 201
 
     queued_modules = client.get(
@@ -11135,10 +10596,7 @@ def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
     assert queued_modules.status_code == 200
     assert queued_modules.json()[0]["analysis_status"] == "queued"
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
     _record_fixture_source_receipt(client, engagement_key, queue_item)
@@ -11149,16 +10607,11 @@ def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
     assert in_progress_modules.status_code == 200
     assert in_progress_modules.json()[0]["analysis_status"] == "in_progress"
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed parser module",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed parser module",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200
 
@@ -11171,8 +10624,7 @@ def test_module_analysis_status_tracks_file_progress(client, isolate_settings):
 
 def test_file_patch_rejects_module_ids_from_other_repos(client, isolate_settings):
     engagement_key = "2026-04-04-code-module-patch-scope"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo_a = _create_repo(client, engagement_key, repo_key="repo-a")
+    repo_a = _seed_repo(client, isolate_settings, engagement_key, repo_key="repo-a")
     repo_b = _create_repo(client, engagement_key, repo_key="repo-b")
     files_a = _create_files(client, engagement_key, int(repo_a["id"]))
     _create_files(client, engagement_key, int(repo_b["id"]))
@@ -11206,9 +10658,7 @@ def test_file_patch_rejects_module_ids_from_other_repos(client, isolate_settings
 
 def test_file_patch_rejects_unknown_fields(client, isolate_settings):
     engagement_key = "2026-04-16-code-file-patch-unknown"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="file-patch-unknown")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="file-patch-unknown")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     response = client.patch(
@@ -11228,9 +10678,7 @@ def test_file_patch_rejects_parser_owned_structural_metadata(
     client, isolate_settings, field_name
 ):
     engagement_key = f"2026-04-15-code-file-patch-structural-{field_name}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"patch-structural-{field_name}")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"patch-structural-{field_name}")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     response = client.patch(
@@ -11250,9 +10698,7 @@ def test_file_patch_rejects_parser_owned_structural_metadata(
 
 def test_bulk_structural_metadata_requires_all_totals(client, isolate_settings):
     engagement_key = "2026-04-15-code-bulk-structural-required"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="bulk-structural-required")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="bulk-structural-required")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     binding = client.get(
         f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}"
@@ -11281,9 +10727,7 @@ def test_bulk_structural_metadata_requires_all_totals(client, isolate_settings):
 
 def test_bulk_structural_metadata_rejects_unknown_fields(client, isolate_settings):
     engagement_key = "2026-04-16-code-bulk-structural-unknown"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="bulk-structural-unknown")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="bulk-structural-unknown")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     binding = client.get(
         f"/engagements/{engagement_key}/assessment/code/repos/{repo['id']}"
@@ -11318,9 +10762,7 @@ def test_bulk_structural_metadata_rejects_conflicting_debt_contracts(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-structural-debt-validation"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="structural-debt-validation")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="structural-debt-validation")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     payload = _complete_structural_payload(
@@ -11604,9 +11046,7 @@ def test_unsupported_structural_metadata_is_explicit_review_debt(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-unsupported-structural-debt"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="unsupported-structural-debt")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="unsupported-structural-debt")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     payload = _complete_structural_payload(
@@ -11679,20 +11119,14 @@ def test_unsupported_structural_metadata_is_explicit_review_debt(
         for warning in classify["quality_gate"]["warnings"]
     )
     verify = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    debt = next(
-        blocker
-        for blocker in verify["blockers"]
-        if blocker["code"] == "structural_analysis_debt_unreviewed"
-    )
+    debt = _blocker(verify, "structural_analysis_debt_unreviewed")
     assert unsupported_path in debt["message"]
     assert debt["overrideable"] is False
 
 
 def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_settings):
     engagement_key = "2026-08-04-code-structural-cas"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="structural-cas-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="structural-cas-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     updates = [
@@ -11769,11 +11203,7 @@ def test_structural_index_update_is_all_or_none_snapshot_cas(client, isolate_set
     assert rejected.status_code == 409
     assert "generation" in rejected.json()["detail"].lower()
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
-    manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     manifest[0]["file_hash"] = _source_hash("changed-after-structural-index")
     _refresh_repo_files(client, engagement_key, int(repo["id"]), manifest)
     refreshed = client.get(f"{base}/repos/{repo['id']}").json()
@@ -11793,9 +11223,7 @@ def test_structural_publication_rejects_payload_from_prior_file_language_identit
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-structural-language-cas"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="structural-language-cas-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="structural-language-cas-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     base = f"/engagements/{engagement_key}/assessment/code"
     changed_to_c = client.patch(f"{base}/files/{parser['id']}", json={"language": "c"})
@@ -11898,9 +11326,7 @@ def test_structural_input_digest_matches_cli_known_vector():
 
 def test_threat_model_binding_becomes_stale_without_destroying_artifact(client, isolate_settings):
     engagement_key = "2026-08-04-code-threat-binding"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="threat-binding-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="threat-binding-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     payload = {
@@ -11923,11 +11349,7 @@ def test_threat_model_binding_becomes_stale_without_destroying_artifact(client, 
         "threat_model": payload["threat_model"],
     }
 
-    manifest_fields = {
-        "file_path", "language", "loc", "file_hash", "header_snippet",
-        "git_churn_score", "has_past_cve_fix",
-    }
-    manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     manifest[0]["file_hash"] = _source_hash("changed-after-threat-model")
     _refresh_repo_files(client, engagement_key, int(repo["id"]), manifest)
 
@@ -11945,9 +11367,7 @@ def test_readiness_separates_snapshot_lifecycle_blockers_from_quality_warnings(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-readiness"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="readiness-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="readiness-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
 
@@ -12040,9 +11460,7 @@ def test_verify_readiness_requires_every_file_accounted_but_skip_is_not_semantic
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-readiness-all-files"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="readiness-all-files-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="readiness-all-files-repo")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     base = f"/engagements/{engagement_key}/assessment/code"
@@ -12091,11 +11509,7 @@ def test_verify_readiness_requires_every_file_accounted_but_skip_is_not_semantic
         )
 
     before = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    unaccounted = next(
-        blocker
-        for blocker in before["blockers"]
-        if blocker["code"] == "admitted_files_unaccounted"
-    )
+    unaccounted = _blocker(before, "admitted_files_unaccounted")
     assert "2 admitted file(s)" in unaccounted["message"]
     coverage = client.get(f"{base}/coverage?repo_id={repo['id']}").json()
     assert coverage["by_classification"]["low"]["analyzed"] == 0
@@ -12112,25 +11526,17 @@ def test_verify_readiness_requires_every_file_accounted_but_skip_is_not_semantic
             claim = _claim_file_for_analysis(
                 client, engagement_key, int(file_row["id"])
             )
-        skipped = client.post(
-            f"{base}/analysis-queue/done",
-            json=_owned(
-                claim,
-                item_ids=[claim["id"]],
-                disposition="skipped",
-                skip_reason="generated-code",
-            ),
+        skipped = _close_queue_item(
+            client, engagement_key, claim,
+            disposition="skipped",
+            skip_reason="generated-code",
         )
         assert skipped.status_code == (400 if file_row is parser else 200), skipped.text
 
     after = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    unaccounted = next(
-        blocker
-        for blocker in after["blockers"]
-        if blocker["code"] == "admitted_files_unaccounted"
-    )
+    unaccounted = _blocker(after, "admitted_files_unaccounted")
     assert "1 admitted file(s)" in unaccounted["message"]
-    assert "critical_high_incomplete" in {blocker["code"] for blocker in after["blockers"]}
+    assert "critical_high_incomplete" in _blocker_codes(after)
 
 
 def test_queue_outcomes_name_the_file_and_the_attempt_a_reanalysis_suspends(
@@ -12145,17 +11551,13 @@ def test_queue_outcomes_name_the_file_and_the_attempt_a_reanalysis_suspends(
     to name the file at all doing a second lookup for the path.
     """
     engagement_key = "2026-11-06-code-queue-outcome-predecessor"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="queue-outcome-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="queue-outcome-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, int(repo["id"]))
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(helper["id"]), "low", 10)
 
-    first = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": helper["id"], "priority": 10}]},
-    )
+    first = _queue_file(client, engagement_key, helper["id"], 10)
     assert first.status_code == 201, first.text
     (initial,) = first.json()["outcomes"]
     assert initial["outcome"] == "inserted"
@@ -12164,20 +11566,13 @@ def test_queue_outcomes_name_the_file_and_the_attempt_a_reanalysis_suspends(
     # being absent.
     assert initial["supersedes"] is None
 
-    claimed = client.post(
-        f"{base}/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200, claimed.text
     claim = claimed.json()[0]
-    skipped = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    skipped = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert skipped.status_code == 200, skipped.text
 
@@ -12214,23 +11609,18 @@ def test_directory_verdicts_read_the_population_their_status_counts_read(
     reviewed and not reviewed.
     """
     engagement_key = "2026-11-07-code-coverage-path-verdict-population"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="coverage-path-verdict-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key="coverage-path-verdict-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     files = _create_files(client, engagement_key, int(repo["id"]))
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 95)
     claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
     _record_fixture_source_receipt(client, engagement_key, claim)
-    done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Reviewed the parser end to end.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    done = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Reviewed the parser end to end.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200, done.text
 
@@ -12271,21 +11661,15 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-coverage-skip-receipts"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="coverage-skip-receipts-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="coverage-skip-receipts-repo")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     base = f"/engagements/{engagement_key}/assessment/code"
     _classify_file(client, engagement_key, int(helper["id"]), "low", 10)
     claim = _claim_file_for_analysis(client, engagement_key, int(helper["id"]))
-    skipped = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    skipped = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert skipped.status_code == 200, skipped.text
 
@@ -12330,14 +11714,10 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
             "item_ids": [replacement_id],
         },
     ).json()[0]
-    replacement = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            replacement_claim,
-            item_ids=[replacement_claim["id"]],
-            disposition="skipped",
-            skip_reason="test-fixture",
-        ),
+    replacement = _close_queue_item(
+        client, engagement_key, replacement_claim,
+        disposition="skipped",
+        skip_reason="test-fixture",
     )
     assert replacement.status_code == 200, replacement.text
     replaced_coverage = client.get(f"{base}/coverage?repo_id={repo['id']}").json()
@@ -12372,26 +11752,22 @@ def test_coverage_skip_reasons_come_from_current_terminal_queue_receipts(
         json={"limit": 1, "agent_name": "final-agent", "item_ids": [final_id]},
     ).json()[0]
     _record_fixture_source_receipt(client, engagement_key, final_claim)
-    final = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            final_claim,
-            item_ids=[final_claim["id"]],
-            disposition="clean",
-            notes="Latest attempt completed with a clean source review.",
-                cwe_coverage=[
-                    {
-                        "family": "error-handling",
-                        "effort": 20,
-                        "notes": "Reviewed helper error paths.",
-                    },
-                    {
-                        "family": "algorithmic-dos",
-                        "effort": 20,
-                        "notes": "Reviewed helper complexity and resource bounds.",
-                    },
-                ],
-        ),
+    final = _close_queue_item(
+        client, engagement_key, final_claim,
+        disposition="clean",
+        notes="Latest attempt completed with a clean source review.",
+        cwe_coverage=[
+            {
+                "family": "error-handling",
+                "effort": 20,
+                "notes": "Reviewed helper error paths.",
+            },
+            {
+                "family": "algorithmic-dos",
+                "effort": 20,
+                "notes": "Reviewed helper complexity and resource bounds.",
+            },
+        ],
     )
     assert final.status_code == 200, final.text
     assert client.get(f"{base}/coverage?repo_id={repo['id']}").json()[
@@ -12409,8 +11785,7 @@ def test_semantic_review_proof_rejects_noncanonical_or_malformed_coverage_json(
     engagement_key = "2026-08-05-code-review-json-" + hashlib.sha256(
         legacy_coverage.encode("utf-8")
     ).hexdigest()[:8]
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"{engagement_key}-repo")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key=f"{engagement_key}-repo")
     parser = next(
         row for row in _create_files(client, engagement_key, int(repo["id"]))
         if row["file_path"] == "src/parser.py"
@@ -12441,18 +11816,14 @@ def test_semantic_review_proof_rejects_noncanonical_or_malformed_coverage_json(
     readiness = client.get(f"{base}/readiness?target_phase=verify-variant").json()
 
     assert coverage["by_classification"]["high"]["analyzed"] == 0
-    assert "admitted_files_unaccounted" in {
-        blocker["code"] for blocker in readiness["blockers"]
-    }
+    assert "admitted_files_unaccounted" in _blocker_codes(readiness)
 
 
 def test_readiness_rejects_current_generation_and_path_without_current_index_schema(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-structural-metadata-incomplete"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="structural-metadata-incomplete")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="structural-metadata-incomplete")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     with db_module.get_connection() as connection:
@@ -12488,9 +11859,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-structural-debt"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="structural-debt-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="structural-debt-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
@@ -12597,9 +11966,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
     assert degraded["structural_signal_counts"]["security_sources"] == 3
 
     classify = client.get(f"{base}/readiness?target_phase=classify-map").json()
-    assert "structural_analysis_debt_unreviewed" not in {
-        blocker["code"] for blocker in classify["blockers"]
-    }
+    assert "structural_analysis_debt_unreviewed" not in _blocker_codes(classify)
     assert classify["transition_ready"] is True
     assert classify["quality_gate"]["passed"] is False
     assert any(
@@ -12608,9 +11975,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
         for warning in classify["quality_gate"]["warnings"]
     )
     hunt = client.get(f"{base}/readiness?target_phase=hunt").json()
-    assert "structural_analysis_debt_unreviewed" not in {
-        blocker["code"] for blocker in hunt["blockers"]
-    }
+    assert "structural_analysis_debt_unreviewed" not in _blocker_codes(hunt)
     assert hunt["quality_gate"]["passed"] is False
     assert any(
         "1 unreviewed admitted file(s)" in warning
@@ -12618,11 +11983,7 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
         for warning in hunt["quality_gate"]["warnings"]
     )
     verify = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    debt = next(
-        blocker
-        for blocker in verify["blockers"]
-        if blocker["code"] == "structural_analysis_debt_unreviewed"
-    )
+    debt = _blocker(verify, "structural_analysis_debt_unreviewed")
     assert debt["repo_id"] == repo["id"]
     assert debt["overrideable"] is False
     assert "src/helpers.py" in debt["message"]
@@ -12633,26 +11994,18 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
             (helper["id"],),
         )
     forged_review = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    assert "structural_analysis_debt_unreviewed" in {
-        blocker["code"] for blocker in forged_review["blockers"]
-    }
+    assert "structural_analysis_debt_unreviewed" in _blocker_codes(forged_review)
 
     _classify_file(client, engagement_key, int(helper["id"]), "low", 10)
     skipped_claim = _claim_file_for_analysis(client, engagement_key, int(helper["id"]))
-    skipped = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            skipped_claim,
-            item_ids=[skipped_claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    skipped = _close_queue_item(
+        client, engagement_key, skipped_claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert skipped.status_code == 200, skipped.text
     after_skip = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    assert "structural_analysis_debt_unreviewed" in {
-        blocker["code"] for blocker in after_skip["blockers"]
-    }
+    assert "structural_analysis_debt_unreviewed" in _blocker_codes(after_skip)
 
     claim = _claim_file_for_reanalysis(
         client,
@@ -12678,40 +12031,25 @@ def test_degraded_structural_metadata_is_durable_and_requires_manual_review(
         ),
     )
     assert result.status_code == 201, result.text
-    reviewed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Manual sealed-source review completed.",
-                cwe_coverage=[
-                    {"family": "algorithmic-dos", "effort": 100},
-                    {"family": "error-handling", "effort": 100},
-                ],
-        ),
+    reviewed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Manual sealed-source review completed.",
+        cwe_coverage=[
+            {"family": "algorithmic-dos", "effort": 100},
+            {"family": "error-handling", "effort": 100},
+        ],
     )
     assert reviewed.status_code == 200, reviewed.text
     after_review = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    assert "structural_analysis_debt_unreviewed" not in {
-        blocker["code"] for blocker in after_review["blockers"]
-    }
+    assert "structural_analysis_debt_unreviewed" not in _blocker_codes(after_review)
     reviewed_hunt = client.get(f"{base}/readiness?target_phase=hunt").json()
     assert not any(
         "structural coverage debt" in warning.lower()
         for warning in reviewed_hunt["quality_gate"]["warnings"]
     )
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
-    changed_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    changed_manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     changed_manifest[0]["file_hash"] = _source_hash(
         "structural-debt-reviewed-source-change"
     )
@@ -12753,9 +12091,7 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-variant-receipt-current"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-receipt-current")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-receipt-current")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "medium", 49)
@@ -12789,9 +12125,7 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
         )
         connection.commit()
     before = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "variant_checks_incomplete" in {
-        blocker["code"] for blocker in before["blockers"]
-    }
+    assert "variant_checks_incomplete" in _blocker_codes(before)
     assert client.get(f"{base}/files/{parser['id']}").json()[
         "variant_check_status"
     ] == "pending"
@@ -12817,9 +12151,7 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
         "variant_check_status"
     ] == "done"
     after_parser = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "variant_checks_incomplete" in {
-        blocker["code"] for blocker in after_parser["blockers"]
-    }
+    assert "variant_checks_incomplete" in _blocker_codes(after_parser)
     helper_receipt = client.post(
         f"{base}/variant-checks",
         json=_variant_receipt_payload(
@@ -12833,26 +12165,20 @@ def test_variant_receipt_is_dispatch_bound_current_and_idempotent(
     )
     assert helper_receipt.status_code == 201, helper_receipt.text
     after = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "variant_checks_incomplete" not in {
-        blocker["code"] for blocker in after["blockers"]
-    }
+    assert "variant_checks_incomplete" not in _blocker_codes(after)
 
 
 def test_variant_readiness_is_not_applicable_until_a_current_phase2_root_exists(
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-code-variant-no-parent"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-no-parent")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-no-parent")
     base = f"/engagements/{engagement_key}/assessment/code"
 
     without_parent = client.get(f"{base}/readiness?target_phase=complete")
 
     assert without_parent.status_code == 200, without_parent.text
-    assert "variant_checks_incomplete" not in {
-        blocker["code"] for blocker in without_parent.json()["blockers"]
-    }
+    assert "variant_checks_incomplete" not in _blocker_codes(without_parent.json())
     empty_dispatch = client.post(
         f"/engagements/{engagement_key}/assessment/dispatches",
         json={
@@ -12960,9 +12286,7 @@ def test_variant_dispatch_scope_is_exact_current_phase2_root_set_and_excludes_ch
     client, isolate_settings
 ):
     engagement_key = "2026-08-07-code-variant-exact-phase2-scope"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-exact-phase2-scope")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-exact-phase2-scope")
     _create_code_parent_finding(
         client, engagement_key, int(repo["id"]), slug="EX-001"
     )
@@ -13023,9 +12347,7 @@ def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
     client, isolate_settings, verified
 ):
     engagement_key = f"2026-08-06-code-draft-finding-{int(verified)}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"draft-finding-{int(verified)}")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"draft-finding-{int(verified)}")
     base = f"/engagements/{engagement_key}/assessment/code"
     slug = f"DF-{int(verified) + 1:03d}"
     _create_code_parent_finding(
@@ -13048,18 +12370,12 @@ def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
     verify_entry = client.get(
         f"{base}/readiness?target_phase=verify-variant"
     ).json()
-    assert "draft_code_findings_unresolved" not in {
-        blocker["code"] for blocker in verify_entry["blockers"]
-    }
+    assert "draft_code_findings_unresolved" not in _blocker_codes(verify_entry)
     for target_phase in ("fuzz", "complete"):
         readiness = client.get(
             f"{base}/readiness?target_phase={target_phase}"
         ).json()
-        draft_blocker = next(
-            blocker
-            for blocker in readiness["blockers"]
-            if blocker["code"] == "draft_code_findings_unresolved"
-        )
+        draft_blocker = _blocker(readiness, "draft_code_findings_unresolved")
         assert draft_blocker == {
             "code": "draft_code_findings_unresolved",
             "message": (
@@ -13070,9 +12386,7 @@ def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
             "overrideable": False,
             "repo_id": repo["id"],
         }
-        assert "variant_checks_incomplete" not in {
-            blocker["code"] for blocker in readiness["blockers"]
-        }
+        assert "variant_checks_incomplete" not in _blocker_codes(readiness)
 
     report_readiness = client.get(
         f"/engagements/{engagement_key}/assessment/report-readiness"
@@ -13097,9 +12411,7 @@ def test_draft_code_finding_blocks_fuzz_and_complete_until_promoted(
     )
     assert promoted.status_code == 200, promoted.text
     after = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "draft_code_findings_unresolved" not in {
-        blocker["code"] for blocker in after["blockers"]
-    }
+    assert "draft_code_findings_unresolved" not in _blocker_codes(after)
     variant_blockers = [
         blocker
         for blocker in after["blockers"]
@@ -13120,9 +12432,7 @@ def test_code_readiness_blocks_current_stale_and_unbound_drafts_but_not_terminal
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-code-draft-binding-states"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="draft-binding-states")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="draft-binding-states")
     base = f"/engagements/{engagement_key}/assessment/code"
     _create_code_parent_finding(
         client,
@@ -13132,16 +12442,7 @@ def test_code_readiness_blocks_current_stale_and_unbound_drafts_but_not_terminal
         workflow_status="draft",
     )
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
-    changed_manifest = [{key: row[key] for key in manifest_fields} for row in files]
+    changed_manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in files]
     changed_manifest[0]["file_hash"] = _source_hash("draft-binding-state-refresh")
     _refresh_repo_files(client, engagement_key, int(repo["id"]), changed_manifest)
 
@@ -13263,9 +12564,7 @@ def test_code_readiness_does_not_drop_draft_bound_to_inactive_repository(
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-code-draft-inactive-repo"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="draft-inactive-repo")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="draft-inactive-repo")
     _create_code_parent_finding(
         client,
         engagement_key,
@@ -13302,9 +12601,7 @@ def test_variant_receipt_rejects_stale_authority_and_unsafe_evidence(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-variant-receipt-authority"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-receipt-authority")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-receipt-authority")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     _create_code_parent_finding(
@@ -13566,9 +12863,7 @@ def test_variant_receipt_scope_survives_kill_excludes_children_and_detects_new_p
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-variant-receipt-parent-race"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-parent-race")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-parent-race")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
@@ -13664,18 +12959,14 @@ def test_variant_receipt_scope_survives_kill_excludes_children_and_detects_new_p
         "variant_check_status"
     ] == "pending"
     readiness = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "variant_checks_incomplete" in {
-        blocker["code"] for blocker in readiness["blockers"]
-    }
+    assert "variant_checks_incomplete" in _blocker_codes(readiness)
 
 
 def test_variant_receipt_replay_does_not_demote_newer_current_receipt(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-variant-receipt-replay-order"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-replay-order")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-replay-order")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
@@ -13741,9 +13032,7 @@ def test_variant_receipt_replay_does_not_demote_newer_current_receipt(
     )
     assert helper_receipt.status_code == 201, helper_receipt.text
     readiness = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "variant_checks_incomplete" not in {
-        blocker["code"] for blocker in readiness["blockers"]
-    }
+    assert "variant_checks_incomplete" not in _blocker_codes(readiness)
 
 
 def test_variant_readiness_query_count_is_independent_of_admitted_file_count(
@@ -13751,9 +13040,7 @@ def test_variant_readiness_query_count_is_independent_of_admitted_file_count(
 ):
     def measure(file_count: int, suffix: str) -> tuple[int, int]:
         engagement_key = f"2026-08-06-variant-query-scale-{suffix}"
-        write_engagement(isolate_settings["engagements_dir"], engagement_key)
-        repo = _create_repo(client, engagement_key, repo_key=f"variant-query-{suffix}")
-        _create_files(client, engagement_key, int(repo["id"]))
+        repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"variant-query-{suffix}")
         extra_count = file_count - 2
         files = _append_repo_files(
             client,
@@ -13851,9 +13138,7 @@ def test_variant_projection_queries_are_skipped_without_parent_obligations(
     client, isolate_settings
 ):
     engagement_key = "2026-08-07-variant-projection-not-applicable"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-projection-none")
-    _create_files(client, engagement_key, int(repo["id"]))
+    repo, _ = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-projection-none")
     engagement_id = int(client.get(f"/engagements/{engagement_key}").json()["id"])
 
     statements: list[str] = []
@@ -13883,9 +13168,7 @@ def test_variant_projection_bounds_historical_receipts_scopes_and_removed_files(
     client, isolate_settings
 ):
     engagement_key = "2026-08-07-variant-projection-history-bound"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-projection-history")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-projection-history")
     _create_code_parent_finding(
         client, engagement_key, int(repo["id"]), slug="PB-001"
     )
@@ -14096,9 +13379,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
     report_endpoint = f"/engagements/{engagement_key}/assessment/report-readiness"
     lead_only = client.get(report_endpoint)
     assert lead_only.status_code == 200, lead_only.text
-    assert "finding_variant_receipts_incomplete" not in {
-        blocker["kind"] for blocker in lead_only.json()["blockers"]
-    }
+    assert "finding_variant_receipts_incomplete" not in _blocker_kinds(lead_only.json())
 
     evidence_path = engagement_dir / "notes" / "VF-001.md"
     evidence_path.parent.mkdir(parents=True, exist_ok=True)
@@ -14267,11 +13548,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
 
     after_medium = client.get(report_endpoint)
     assert after_medium.status_code == 200, after_medium.text
-    after_medium_blocker = next(
-        blocker
-        for blocker in after_medium.json()["blockers"]
-        if blocker["kind"] == "finding_variant_receipts_incomplete"
-    )
+    after_medium_blocker = _blocker(after_medium.json(), "finding_variant_receipts_incomplete", key="kind")
     assert after_medium_blocker["missing_file_paths"] == [
         "build/CMakeLists.txt",
         "src/helpers.py",
@@ -14313,11 +13590,7 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
     assert low_receipt.json()["current"] is True
     after_low = client.get(report_endpoint)
     assert after_low.status_code == 200, after_low.text
-    after_low_blocker = next(
-        blocker
-        for blocker in after_low.json()["blockers"]
-        if blocker["kind"] == "finding_variant_receipts_incomplete"
-    )
+    after_low_blocker = _blocker(after_low.json(), "finding_variant_receipts_incomplete", key="kind")
     assert after_low_blocker["missing_file_paths"] == ["build/CMakeLists.txt"]
     after_low_code = client.get(
         f"/engagements/{engagement_key}/assessment/code/readiness?target_phase=fuzz"
@@ -14357,22 +13630,16 @@ def test_report_readiness_requires_current_variant_receipts_for_report_durable_c
 
     cleared = client.get(report_endpoint)
     assert cleared.status_code == 200, cleared.text
-    assert "finding_variant_receipts_incomplete" not in {
-        blocker["kind"] for blocker in cleared.json()["blockers"]
-    }
+    assert "finding_variant_receipts_incomplete" not in _blocker_kinds(cleared.json())
     cleared_code = client.get(
         f"/engagements/{engagement_key}/assessment/code/readiness?target_phase=fuzz"
     ).json()
-    assert "variant_checks_incomplete" not in {
-        blocker["code"] for blocker in cleared_code["blockers"]
-    }
+    assert "variant_checks_incomplete" not in _blocker_codes(cleared_code)
     cleared_phase = client.get(
         f"/engagements/{engagement_key}/assessment/phase-readiness?phase=report"
     )
     assert cleared_phase.status_code == 200, cleared_phase.text
-    assert "finding_variant_receipts_incomplete" not in {
-        blocker["kind"] for blocker in cleared_phase.json()["blockers"]
-    }
+    assert "finding_variant_receipts_incomplete" not in _blocker_kinds(cleared_phase.json())
 
 
 def test_variant_readiness_blockers_print_the_exact_dispatch_parent_scope(
@@ -14467,9 +13734,7 @@ def test_variant_readiness_blockers_print_the_exact_dispatch_parent_scope(
 
 def test_variant_receipt_history_survives_file_replacement(client, isolate_settings):
     engagement_key = "2026-08-05-code-variant-receipt-file-removal"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="variant-file-removal")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="variant-file-removal")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     helper = next(row for row in files if row["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
@@ -14497,23 +13762,14 @@ def test_variant_receipt_history_survives_file_replacement(client, isolate_setti
     base = f"/engagements/{engagement_key}/assessment/code"
     receipt = client.post(f"{base}/variant-checks", json=payload)
     assert receipt.status_code == 201, receipt.text
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     _refresh_repo_files(
         client,
         engagement_key,
         int(repo["id"]),
         [
-            {key: helper[key] for key in manifest_fields},
+            {key: helper[key] for key in _MANIFEST_FIELDS},
             {
-                **{key: parser[key] for key in manifest_fields},
+                **{key: parser[key] for key in _MANIFEST_FIELDS},
                 "file_hash": _source_hash("replacement-parser"),
                 "header_snippet": "def replacement_parser(data): pass",
             },
@@ -14605,26 +13861,18 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
     _classify_file(client, engagement_key, int(helper["id"]), "low", 10)
     claim = _claim_file_for_analysis(client, engagement_key, int(parser["id"]))
     _record_fixture_source_receipt(client, engagement_key, claim)
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Completed a deliberately shallow review for advisory-gate coverage.",
-            cwe_coverage=_network_input_coverage(default_effort=10),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Completed a deliberately shallow review for advisory-gate coverage.",
+        cwe_coverage=_network_input_coverage(default_effort=10),
     )
     assert completed.status_code == 200, completed.text
     helper_claim = _claim_file_for_analysis(client, engagement_key, int(helper["id"]))
-    helper_skipped = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            helper_claim,
-            item_ids=[helper_claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    helper_skipped = _close_queue_item(
+        client, engagement_key, helper_claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert helper_skipped.status_code == 200, helper_skipped.text
 
@@ -14700,28 +13948,20 @@ def test_fuzz_entry_requires_phase2_root_triage_but_allows_pending_runtime_proof
         client, engagement_key, int(parser["id"])
     )
     _record_fixture_source_receipt(client, engagement_key, parser_claim)
-    parser_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            parser_claim,
-            item_ids=[parser_claim["id"]],
-            disposition="clean",
-            notes="Completed the current-source parser review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    parser_done = _close_queue_item(
+        client, engagement_key, parser_claim,
+        disposition="clean",
+        notes="Completed the current-source parser review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert parser_done.status_code == 200, parser_done.text
     helper_claim = _claim_file_for_analysis(
         client, engagement_key, int(helper["id"])
     )
-    helper_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            helper_claim,
-            item_ids=[helper_claim["id"]],
-            disposition="skipped",
-            skip_reason="generated-code",
-        ),
+    helper_done = _close_queue_item(
+        client, engagement_key, helper_claim,
+        disposition="skipped",
+        skip_reason="generated-code",
     )
     assert helper_done.status_code == 200, helper_done.text
 
@@ -14799,9 +14039,7 @@ def test_complete_readiness_requires_snapshot_current_verification_and_blind_tri
     client, isolate_settings
 ):
     engagement_key = "2026-08-04-code-readiness-complete-findings"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="readiness-complete-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="readiness-complete-repo")
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
     assert client.post(
@@ -14954,15 +14192,9 @@ def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_s
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, first_key, int(parser_file["id"]), "critical", 95)
 
-    queue_response = client.post(
-        f"/engagements/{first_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, first_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
-    queue_item = client.post(
-        f"/engagements/{first_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    ).json()[0]
+    queue_item = _fetch_queue(client, first_key).json()[0]
 
     refresh = client.post(
         f"/engagements/{first_key}/assessment/code/repos/refresh/start",
@@ -14987,10 +14219,7 @@ def test_code_analysis_endpoints_reject_foreign_engagement_ids(client, isolate_s
     )
     assert foreign_files.status_code == 404
 
-    foreign_queue = client.post(
-        f"/engagements/{second_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 50}]},
-    )
+    foreign_queue = _queue_file(client, second_key, parser_file["id"], 50)
     assert foreign_queue.status_code == 404
 
     foreign_threat_model = client.post(
@@ -15068,9 +14297,7 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
     """Queue items with only file_id (no context_id) + batch_theme + slot_types
     should be created, fetched, and completed with cwe_coverage."""
     engagement_key = "2026-04-04-file-only-queue"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="file-only-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="file-only-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
@@ -15100,10 +14327,7 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
     assert file_after_queue.json()["analysis_status"] == "queued"
 
     # Fetch the item — batch_theme preserved
-    fetch_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    fetch_response = _fetch_queue(client, engagement_key)
     assert fetch_response.status_code == 200
     payload = fetch_response.json()
     assert len(payload) == 1
@@ -15124,16 +14348,11 @@ def test_file_only_queue_create_and_fetch(client, isolate_settings):
         },
     )
     _record_fixture_source_receipt(client, engagement_key, work_item)
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [work_item["id"]],
-            "agent_name": work_item["agent_name"],
-            "lease_token": work_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Reviewed all sinks",
-            "cwe_coverage": cwe_coverage_data,
-        },
+    done = _close_queue_item(
+        client, engagement_key, work_item,
+        disposition="clean",
+        notes="Reviewed all sinks",
+        cwe_coverage=cwe_coverage_data,
     )
     assert done.status_code == 200
     assert done.json()["updated"] == 1
@@ -15150,9 +14369,7 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
     """Completing a queue item with cwe_coverage persists it and is visible
     via the coverage detail endpoint."""
     engagement_key = "2026-04-04-cwe-passthrough"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="cwe-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="cwe-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
@@ -15172,10 +14389,7 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
     )
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     queue_item = claimed.json()[0]
 
     # Complete with cwe_coverage
@@ -15187,16 +14401,11 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
         },
     )
     _record_fixture_source_receipt(client, engagement_key, queue_item)
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "All clear",
-            "cwe_coverage": cwe_coverage,
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="All clear",
+        cwe_coverage=cwe_coverage,
     )
     assert done.status_code == 200
 
@@ -15219,22 +14428,14 @@ def test_cwe_coverage_passthrough_on_queue_done(client, isolate_settings):
 
 def test_queue_done_rejects_items_reset_out_of_processing(client, isolate_settings):
     engagement_key = "2026-04-09-code-queue-completion-race"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="queue-race-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="queue-race-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -15253,16 +14454,11 @@ def test_queue_done_rejects_items_reset_out_of_processing(client, isolate_settin
     assert reset.status_code == 200
     assert reset.json()["reset"] == 1
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "notes": "Stale worker should not complete this item",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Stale worker should not complete this item",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 409
     assert done.json()["detail"] == (
@@ -15273,22 +14469,14 @@ def test_queue_done_rejects_items_reset_out_of_processing(client, isolate_settin
 
 def test_queue_error_rejects_items_reclaimed_after_validation(client, isolate_settings, monkeypatch):
     engagement_key = "2026-04-09-code-queue-error-race"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="queue-error-race-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="queue-error-race-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -15310,12 +14498,11 @@ def test_queue_error_rejects_items_reclaimed_after_validation(client, isolate_se
 
     error = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/error",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "notes": "Late worker should not mark reclaimed work as error",
-        },
+        json=_owned(
+            queue_item,
+            item_ids=[queue_item["id"]],
+            notes="Late worker should not mark reclaimed work as error",
+        ),
     )
     assert error.status_code == 409
     assert "changed state before error transition" in error.json()["detail"]
@@ -15323,22 +14510,14 @@ def test_queue_error_rejects_items_reclaimed_after_validation(client, isolate_se
 
 def test_queue_needs_context_rejects_items_reclaimed_after_validation(client, isolate_settings, monkeypatch):
     engagement_key = "2026-04-09-code-queue-needs-context-race"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="queue-needs-context-race-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="queue-needs-context-race-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -15360,15 +14539,14 @@ def test_queue_needs_context_rejects_items_reclaimed_after_validation(client, is
 
     needs_context = client.post(
         f"/engagements/{engagement_key}/assessment/code/analysis-queue/needs-context",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "expansion_request": {
+        json=_owned(
+            queue_item,
+            item_ids=[queue_item["id"]],
+            expansion_request={
                 "reason": "Need additional surrounding code to settle the path",
                 "functions": ["parse_message"],
             },
-        },
+        ),
     )
     assert needs_context.status_code == 409
     assert "changed state before needs_context transition" in needs_context.json()["detail"]
@@ -15435,9 +14613,7 @@ def test_queue_lifecycle_verbs_reject_unknown_fields(
 
 def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, isolate_settings, monkeypatch):
     engagement_key = "2026-04-09-analysis-result-race"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="analysis-result-race-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="analysis-result-race-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
     _publish_structural_callables(
@@ -15448,16 +14624,10 @@ def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, i
         {},
     )
 
-    queue_response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": parser_file["id"], "priority": 95}]},
-    )
+    queue_response = _queue_file(client, engagement_key, parser_file["id"], 95)
     assert queue_response.status_code == 201
 
-    claimed = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "code-vuln-hunter"},
-    )
+    claimed = _fetch_queue(client, engagement_key)
     assert claimed.status_code == 200
     queue_item = claimed.json()[0]
 
@@ -15508,9 +14678,7 @@ def test_analysis_result_rejects_queue_item_reclaimed_after_validation(client, i
 def test_analysis_result_requires_queue_item_id(client, isolate_settings):
     """Analysis results must be tied to a claimed queue item."""
     engagement_key = "2026-04-04-result-no-queue"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="result-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="result-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
 
@@ -15542,9 +14710,7 @@ def test_analysis_result_requires_queue_item_id(client, isolate_settings):
 
 def test_analysis_result_uses_queue_item_file_id_for_coverage_gate(client, isolate_settings):
     engagement_key = "2026-04-04-direct-result-coverage"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="direct-coverage-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="direct-coverage-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
     queue_item = _claim_file_for_analysis(
@@ -15574,16 +14740,11 @@ def test_analysis_result_uses_queue_item_file_id_for_coverage_gate(client, isola
     assert result_response.status_code == 201
     assert result_response.json()["file_id"] == parser_file["id"]
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": _network_input_coverage(default_effort=80),
-            "notes": "Reviewed",
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=_network_input_coverage(default_effort=80),
+        notes="Reviewed",
     )
     assert done.status_code == 200
 
@@ -15599,9 +14760,7 @@ def test_analysis_result_uses_queue_item_file_id_for_coverage_gate(client, isola
 
 def test_analysis_result_rejects_file_id_mismatched_with_queue_item(client, isolate_settings):
     engagement_key = "2026-04-04-result-file-mismatch"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="file-mismatch-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="file-mismatch-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
@@ -15626,9 +14785,7 @@ def test_analysis_result_rejects_file_id_mismatched_with_queue_item(client, isol
 
 def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isolate_settings):
     engagement_key = "2026-04-09-analysis-result-trigger-dedupe"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="trigger-dedupe-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="trigger-dedupe-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
@@ -15684,15 +14841,11 @@ def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isol
     )
     assert distinct_hypothesis.status_code == 201, distinct_hypothesis.text
 
-    first_done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json=_owned(
-            queue_item,
-            item_ids=[queue_item["id"]],
-            disposition="clean",
-            notes="Completed the first source review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    first_done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Completed the first source review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert first_done.status_code == 200, first_done.text
     second_queue = _claim_file_for_reanalysis(
@@ -15740,9 +14893,7 @@ def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isol
 
 def test_analysis_results_include_linked_finding_lifecycle(client, isolate_settings):
     engagement_key = "2026-04-04-analysis-result-finding-lifecycle"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="finding-lifecycle-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="finding-lifecycle-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     _ensure_finding_author_dispatch(client, engagement_key, "AUTHOR-CH-777")
@@ -15828,9 +14979,7 @@ def test_coverage_detail_cwe(client, isolate_settings):
     """GET coverage?detail=cwe returns files with applicable_families and
     cwe_coverage from the canonical latest completed attempt."""
     engagement_key = "2026-04-04-cwe-detail"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="cwe-detail-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="cwe-detail-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
     helper_file = next(item for item in files if item["file_path"] == "src/helpers.py")
     _classify_file(client, engagement_key, int(parser_file["id"]), "critical", 95)
@@ -15849,38 +14998,30 @@ def test_coverage_detail_cwe(client, isolate_settings):
     assert queue_response.status_code == 201
 
     # Fetch and complete first item with partial coverage
-    claimed1 = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "hunter-a"},
-    )
+    claimed1 = _fetch_queue(client, engagement_key, agent_name="hunter-a")
     item1 = claimed1.json()[0]
     _record_fixture_source_receipt(client, engagement_key, item1)
-    client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [item1["id"]],
-            "agent_name": item1["agent_name"],
-            "lease_token": item1["lease_token"],
-            "disposition": "clean",
-            "notes": "Pass 1",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=70,
-                overrides={
-                    "web-app-injection": {
-                        "effort": 60,
-                        "entry_chains_traced": 2,
-                        "functions_analyzed": 5,
-                        "total_entry_chains": 8,
-                    },
-                    "ssrf": {
-                        "effort": 80,
-                        "entry_chains_traced": 1,
-                        "functions_analyzed": 2,
-                        "total_entry_chains": 3,
-                    },
+    _close_queue_item(
+        client, engagement_key, item1,
+        disposition="clean",
+        notes="Pass 1",
+        cwe_coverage=_network_input_coverage(
+            default_effort=70,
+            overrides={
+                "web-app-injection": {
+                    "effort": 60,
+                    "entry_chains_traced": 2,
+                    "functions_analyzed": 5,
+                    "total_entry_chains": 8,
                 },
-            ),
-        },
+                "ssrf": {
+                    "effort": 80,
+                    "entry_chains_traced": 1,
+                    "functions_analyzed": 2,
+                    "total_entry_chains": 3,
+                },
+            },
+        ),
     )
 
     reanalysis_response = client.post(
@@ -15902,39 +15043,31 @@ def test_coverage_detail_cwe(client, isolate_settings):
     assert reanalysis_response.json()["reanalysis"] == 1
 
     # Fetch and complete second item with better coverage for one family
-    claimed2 = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "hunter-b"},
-    )
+    claimed2 = _fetch_queue(client, engagement_key, agent_name="hunter-b")
     item2 = claimed2.json()[0]
     _record_fixture_source_receipt(client, engagement_key, item2)
-    client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [item2["id"]],
-            "agent_name": item2["agent_name"],
-            "lease_token": item2["lease_token"],
-            "disposition": "clean",
-            "notes": "Pass 2",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=70,
-                overrides={
-                    "web-app-injection": {
-                        "effort": 90,
-                        "entry_chains_traced": 3,
-                        "functions_analyzed": 7,
-                        "total_entry_chains": 8,
-                        "notes": "full trace",
-                    },
-                    "ssrf": {
-                        "effort": 70,
-                        "entry_chains_traced": 2,
-                        "functions_analyzed": 3,
-                        "total_entry_chains": 3,
-                    },
+    _close_queue_item(
+        client, engagement_key, item2,
+        disposition="clean",
+        notes="Pass 2",
+        cwe_coverage=_network_input_coverage(
+            default_effort=70,
+            overrides={
+                "web-app-injection": {
+                    "effort": 90,
+                    "entry_chains_traced": 3,
+                    "functions_analyzed": 7,
+                    "total_entry_chains": 8,
+                    "notes": "full trace",
                 },
-            ),
-        },
+                "ssrf": {
+                    "effort": 70,
+                    "entry_chains_traced": 2,
+                    "functions_analyzed": 3,
+                    "total_entry_chains": 3,
+                },
+            },
+        ),
     )
 
     # Get CWE detail
@@ -15980,9 +15113,7 @@ def test_coverage_detail_cwe(client, isolate_settings):
 def test_coverage_integrity_rejects_clean_closeout_without_results(client, isolate_settings):
     """Claimed effort cannot close a file without a current source receipt."""
     engagement_key = "2026-05-12-integrity-no-results"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="integrity-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="integrity-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     _publish_structural_totals(
@@ -15998,19 +15129,14 @@ def test_coverage_integrity_rejects_clean_closeout_without_results(client, isola
     )
 
     # Complete WITHOUT recording any analysis results
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=80,
-                overrides={"web-app-injection": {"effort": 80, "functions_analyzed": 8}},
-            ),
-            "notes": "Reviewed",
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={"web-app-injection": {"effort": 80, "functions_analyzed": 8}},
+        ),
+        notes="Reviewed",
     )
     assert done.status_code == 400
     assert "source-level receipt" in done.json()["detail"]
@@ -16025,9 +15151,7 @@ def test_coverage_integrity_rejects_clean_closeout_without_results(client, isola
 def test_coverage_integrity_passes_with_matching_results(client, isolate_settings):
     """Proper analysis results backing the coverage claims produces no warnings."""
     engagement_key = "2026-05-12-integrity-passes"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="integrity-pass-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="integrity-pass-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     _publish_structural_totals(
@@ -16042,19 +15166,14 @@ def test_coverage_integrity_passes_with_matching_results(client, isolate_setting
 
     _record_fixture_source_receipt(client, engagement_key, queue_item)
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=80,
-                overrides={"web-app-injection": {"effort": 85, "functions_analyzed": 1}},
-            ),
-            "notes": "Thorough review",
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80,
+            overrides={"web-app-injection": {"effort": 85, "functions_analyzed": 1}},
+        ),
+        notes="Thorough review",
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
@@ -16067,9 +15186,7 @@ def test_coverage_integrity_passes_with_matching_results(client, isolate_setting
 def test_coverage_integrity_treats_claimed_exceeds_total_as_advisory(client, isolate_settings):
     """An index undercount can focus review but cannot reject deeper observed coverage."""
     engagement_key = "2026-05-12-integrity-exceeds"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="integrity-exceeds-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="integrity-exceeds-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     _publish_structural_totals(
@@ -16084,19 +15201,14 @@ def test_coverage_integrity_treats_claimed_exceeds_total_as_advisory(client, iso
 
     _record_fixture_source_receipt(client, engagement_key, queue_item)
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=70,
-                overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 10}},
-            ),
-            "notes": "Done",
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=_network_input_coverage(
+            default_effort=70,
+            overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 10}},
+        ),
+        notes="Done",
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
@@ -16108,9 +15220,7 @@ def test_coverage_integrity_treats_claimed_exceeds_total_as_advisory(client, iso
 def test_coverage_integrity_skips_not_applicable_entries(client, isolate_settings):
     """Not-applicable entries do not trigger integrity warnings."""
     engagement_key = "2026-05-12-integrity-na"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="integrity-na-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="integrity-na-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     _publish_structural_totals(
@@ -16138,16 +15248,11 @@ def test_coverage_integrity_skips_not_applicable_entries(client, isolate_setting
         {"family": "error-handling", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
     ]
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": coverage,
-            "notes": "Done",
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=coverage,
+        notes="Done",
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
@@ -16158,9 +15263,7 @@ def test_coverage_integrity_skips_not_applicable_entries(client, isolate_setting
 def test_coverage_integrity_graceful_when_total_functions_zero(client, isolate_settings):
     """Files without structural index (total_functions=0) degrade gracefully."""
     engagement_key = "2026-05-12-integrity-no-index"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="integrity-no-index-repo")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="integrity-no-index-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
 
     # Do NOT set total_functions — defaults to 0
@@ -16169,19 +15272,14 @@ def test_coverage_integrity_graceful_when_total_functions_zero(client, isolate_s
 
     _record_fixture_source_receipt(client, engagement_key, queue_item)
 
-    done = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue/done",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "disposition": "clean",
-            "cwe_coverage": _network_input_coverage(
-                default_effort=70,
-                overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 5}},
-            ),
-            "notes": "Done",
-        },
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        cwe_coverage=_network_input_coverage(
+            default_effort=70,
+            overrides={"web-app-injection": {"effort": 70, "functions_analyzed": 5}},
+        ),
+        notes="Done",
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
@@ -16194,8 +15292,7 @@ def test_coverage_integrity_graceful_when_total_functions_zero(client, isolate_s
 
 def _seed_queue_contract_file(client, isolate_settings, suffix: str):
     engagement_key = f"2026-08-05-queue-contract-{suffix}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"queue-contract-{suffix}")
+    repo = _seed_repo(client, isolate_settings, engagement_key, repo_key=f"queue-contract-{suffix}")
     file_row = next(
         row
         for row in _create_files(client, engagement_key, int(repo["id"]))
@@ -16434,10 +15531,7 @@ def test_initial_queue_retry_never_mutates_live_lease_and_fetch_uses_agent_name(
         f"{base}/analysis-queue",
         json={"mode": "initial", "items": [initial_item]},
     ).status_code == 201
-    claim_response = client.post(
-        f"{base}/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "hunter-live"},
-    )
+    claim_response = _fetch_queue(client, engagement_key, agent_name="hunter-live")
     assert claim_response.status_code == 200, claim_response.text
     claim = claim_response.json()[0]
     assert claim["agent_name"] == "hunter-live"
@@ -16558,10 +15652,7 @@ def test_initial_queue_retry_never_updates_pending_row_with_lease_identity(
         "lease_token": "legacy-lease",
     }
 
-    fetched = client.post(
-        f"{base}/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "must-not-steal-corrupt-lease"},
-    )
+    fetched = _fetch_queue(client, engagement_key, agent_name="must-not-steal-corrupt-lease")
     assert fetched.status_code == 200, fetched.text
     assert fetched.json() == []
     with db_module.get_connection() as connection:
@@ -16579,19 +15670,7 @@ def test_initial_queue_retry_never_updates_pending_row_with_lease_identity(
     }
     stats = client.get(f"{base}/analysis-queue/stats")
     assert stats.status_code == 200, stats.text
-    assert stats.json() == {
-        "pending": 0,
-        "processing": 0,
-        "done": 0,
-        "error": 0,
-        "needs_context": 0,
-        "total": 0,
-        "historical_total": 1,
-            "superseded_history": 0,
-            "invalid_active_identity": 1,
-            "invalid_active_history": 0,
-            "reference_repo_items": [],
-    }
+    assert stats.json() == _queue_stats(historical_total=1, invalid_active_identity=1)
 
 
 def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_link(
@@ -16611,20 +15690,13 @@ def test_explicit_reanalysis_requires_terminal_predecessor_and_records_audit_lin
         json={"mode": "initial", "items": [item]},
     ).json()
     original_id = created["outcomes"][0]["queue_item_id"]
-    claim = client.post(
-        f"{base}/analysis-queue/fetch",
-        json={"limit": 1, "agent_name": "hunter-a"},
-    ).json()[0]
+    claim = _fetch_queue(client, engagement_key, agent_name="hunter-a").json()[0]
     _record_fixture_source_receipt(client, engagement_key, claim)
-    done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            claim,
-            item_ids=[claim["id"]],
-            disposition="clean",
-            notes="Reviewed.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    done = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="clean",
+        notes="Reviewed.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200, done.text
 
@@ -16732,15 +15804,11 @@ def test_reanalysis_history_does_not_block_content_refresh(client, isolate_setti
     base = f"/engagements/{engagement_key}/assessment/code"
     initial = _claim_file_for_analysis(client, engagement_key, int(file_row["id"]), priority=80)
     _record_fixture_source_receipt(client, engagement_key, initial)
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            initial,
-            item_ids=[initial["id"]],
-            disposition="clean",
-            notes="Reviewed.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, initial,
+        disposition="clean",
+        notes="Reviewed.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
     reanalysis = client.post(
@@ -16759,19 +15827,10 @@ def test_reanalysis_history_does_not_block_content_refresh(client, isolate_setti
     )
     assert reanalysis.status_code == 201, reanalysis.text
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     current_files = client.get(
         f"{base}/files?repo_id={repo['id']}&limit=20&include_header_snippet=true"
     ).json()["items"]
-    manifest = [{key: row[key] for key in manifest_fields} for row in current_files]
+    manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in current_files]
     for row in manifest:
         if row["file_path"] == file_row["file_path"]:
             row["file_hash"] = _source_hash("refresh-delete-changed")
@@ -16815,35 +15874,20 @@ def test_concurrent_fetch_never_promotes_stale_generation_history(
         client, isolate_settings, "stale-fetch"
     )
     base = f"/engagements/{engagement_key}/assessment/code"
-    first = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": 80}]},
-    )
+    first = _queue_file(client, engagement_key, file_row["id"], 80)
     assert first.status_code == 201, first.text
     stale_id = first.json()["outcomes"][0]["queue_item_id"]
 
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
     current_files = client.get(
         f"{base}/files?repo_id={repo['id']}&limit=20&include_header_snippet=true"
     ).json()["items"]
-    manifest = [{key: row[key] for key in manifest_fields} for row in current_files]
+    manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in current_files]
     next(row for row in manifest if row["file_path"] == "src/helpers.py")[
         "file_hash"
     ] = _source_hash("stale-fetch-next-generation")
     _refresh_repo_files(client, engagement_key, int(repo["id"]), manifest)
 
-    current = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": 80}]},
-    )
+    current = _queue_file(client, engagement_key, file_row["id"], 80)
     assert current.status_code == 201, current.text
     current_id = current.json()["outcomes"][0]["queue_item_id"]
     engagement_id = client.get(f"/engagements/{engagement_key}").json()["id"]
@@ -16941,10 +15985,7 @@ def test_queue_stats_projects_latest_attempt_and_reports_preserved_history(
     )
     base = f"/engagements/{engagement_key}/assessment/code"
     _classify_file(client, engagement_key, int(file_row["id"]), "critical", 90)
-    queued = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": 90}]},
-    )
+    queued = _queue_file(client, engagement_key, file_row["id"], 90)
     assert queued.status_code == 201, queued.text
 
     reopened = client.patch(
@@ -16976,19 +16017,7 @@ def test_queue_stats_projects_latest_attempt_and_reports_preserved_history(
 
     stats = client.get(f"{base}/analysis-queue/stats")
     assert stats.status_code == 200, stats.text
-    assert stats.json() == {
-        "pending": 1,
-        "processing": 0,
-        "done": 0,
-        "error": 0,
-        "needs_context": 0,
-        "total": 1,
-        "historical_total": 2,
-        "superseded_history": 1,
-        "invalid_active_identity": 0,
-        "invalid_active_history": 0,
-        "reference_repo_items": [],
-    }
+    assert stats.json() == _queue_stats(pending=1, total=1, historical_total=2, superseded_history=1)
 
 
 def _live_lease_queue_row(file_id: int) -> dict[str, object]:
@@ -17039,19 +16068,17 @@ def test_reclassification_refuses_to_force_close_a_live_lease(
     assert str(queue_item["lease_token"]) in detail
     assert _live_lease_queue_row(file_id) == before
 
-    classified = client.post(
-        f"{base}/files/bulk-classify",
-        json={
-            "classifications": [
-                {
-                    "file_id": file_id,
-                    "classification": "high",
-                    "role": "network-parser-v2",
-                    "slot_types": ["NETWORK-INPUT"],
-                    "analysis_priority": 70,
-                }
-            ]
-        },
+    classified = _bulk_classify(
+        client, base,
+        classifications=[
+            {
+                "file_id": file_id,
+                "classification": "high",
+                "role": "network-parser-v2",
+                "slot_types": ["NETWORK-INPUT"],
+                "analysis_priority": 70,
+            }
+        ],
     )
     assert classified.status_code == 409, classified.text
     assert str(queue_item["agent_name"]) in classified.json()["detail"]
@@ -17060,11 +16087,10 @@ def test_reclassification_refuses_to_force_close_a_live_lease(
     # The holder's own lifecycle calls still work: nothing was taken from it.
     heartbeat = client.post(
         f"{base}/analysis-queue/heartbeat",
-        json={
-            "item_id": queue_item["id"],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-        },
+        json=_owned(
+            queue_item,
+            item_id=queue_item["id"],
+        ),
     )
     assert heartbeat.status_code == 200, heartbeat.text
 
@@ -17078,22 +16104,20 @@ def test_heartbeat_conflict_names_the_queue_item_status(client, isolate_settings
     queue_item = _claim_file_for_analysis(client, engagement_key, file_id)
     errored = client.post(
         f"{base}/analysis-queue/error",
-        json={
-            "item_ids": [queue_item["id"]],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-            "notes": "toolchain unavailable",
-        },
+        json=_owned(
+            queue_item,
+            item_ids=[queue_item["id"]],
+            notes="toolchain unavailable",
+        ),
     )
     assert errored.status_code == 200, errored.text
 
     heartbeat = client.post(
         f"{base}/analysis-queue/heartbeat",
-        json={
-            "item_id": queue_item["id"],
-            "agent_name": queue_item["agent_name"],
-            "lease_token": queue_item["lease_token"],
-        },
+        json=_owned(
+            queue_item,
+            item_id=queue_item["id"],
+        ),
     )
     assert heartbeat.status_code == 409, heartbeat.text
     assert "current status is error" in heartbeat.json()["detail"]
@@ -17101,9 +16125,7 @@ def test_heartbeat_conflict_names_the_queue_item_status(client, isolate_settings
 
 def _seed_priority_contract_files(client, isolate_settings, suffix: str):
     engagement_key = f"2026-08-05-priority-contract-{suffix}"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key=f"priority-contract-{suffix}")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key=f"priority-contract-{suffix}")
     return engagement_key, repo, files
 
 
@@ -17376,20 +16398,15 @@ def test_priority_change_updates_unleased_pending_queue(
     file_row = files[0]
     base = f"/engagements/{engagement_key}/assessment/code"
     _classify_file(client, engagement_key, int(file_row["id"]), "high", 70)
-    queued = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": 70}]},
-    )
+    queued = _queue_file(client, engagement_key, file_row["id"], 70)
     assert queued.status_code == 201, queued.text
 
     if mutation_mode == "bulk":
-        changed = client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    _classification_record(int(file_row["id"]), "high", 75)
-                ]
-            },
+        changed = _bulk_classify(
+            client, base,
+            classifications=[
+                _classification_record(int(file_row["id"]), "high", 75)
+            ],
         )
     else:
         changed = client.patch(
@@ -17419,13 +16436,11 @@ def test_priority_change_rejects_live_processing_queue(
     )
 
     if mutation_mode == "bulk":
-        changed = client.post(
-            f"{base}/files/bulk-classify",
-            json={
-                "classifications": [
-                    _classification_record(int(file_row["id"]), "high", 75)
-                ]
-            },
+        changed = _bulk_classify(
+            client, base,
+            classifications=[
+                _classification_record(int(file_row["id"]), "high", 75)
+            ],
         )
     else:
         changed = client.patch(
@@ -17436,11 +16451,10 @@ def test_priority_change_rejects_live_processing_queue(
     assert persisted["analysis_priority"] == 70
     heartbeat = client.post(
         f"{base}/analysis-queue/heartbeat",
-        json={
-            "item_id": claim["id"],
-            "agent_name": claim["agent_name"],
-            "lease_token": claim["lease_token"],
-        },
+        json=_owned(
+            claim,
+            item_id=claim["id"],
+        ),
     )
     assert heartbeat.status_code == 200, heartbeat.text
 
@@ -17465,10 +16479,7 @@ def test_blocked_queue_retry_refreshes_current_file_priority(
     file_row = files[0]
     base = f"/engagements/{engagement_key}/assessment/code"
     _classify_file(client, engagement_key, int(file_row["id"]), "high", 70)
-    queued = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": 70}]},
-    ).json()
+    queued = _queue_file(client, engagement_key, file_row["id"], 70).json()
     queue_id = queued["outcomes"][0]["queue_item_id"]
     with db_module.get_connection() as connection:
         connection.execute(
@@ -17547,10 +16558,7 @@ def test_trigger_requeue_derives_priority_merges_context_and_blocks_initial_over
         "second trigger",
     }
 
-    initial = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": 70}]},
-    )
+    initial = _queue_file(client, engagement_key, file_row["id"], 70)
     assert initial.status_code == 201, initial.text
     assert initial.json()["conflicts"] == 1
     with db_module.get_connection() as connection:
@@ -17715,10 +16723,7 @@ def test_fetch_quarantines_multiple_active_current_generation_attempts(
             )
             for _ in range(2)
         ]
-    fetched = client.post(
-        f"{base}/analysis-queue/fetch",
-        json={"limit": 10, "agent_name": "latest-only"},
-    )
+    fetched = _fetch_queue(client, engagement_key, limit=10, agent_name="latest-only")
     assert fetched.status_code == 200, fetched.text
     assert fetched.json() == []
     with db_module.get_connection() as connection:
@@ -17756,15 +16761,11 @@ def test_latest_failed_reanalysis_blocks_older_successful_receipt(
         ),
     )
     assert result.status_code == 201, result.text
-    done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            initial,
-            item_ids=[initial["id"]],
-            disposition="clean",
-            notes="initial review complete",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    done = _close_queue_item(
+        client, engagement_key, initial,
+        disposition="clean",
+        notes="initial review complete",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200, done.text
     assert client.get(f"{base}/coverage").json()["by_classification"]["critical"][
@@ -17861,22 +16862,16 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
         ),
     )
     assert result.status_code == 201, result.text
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            suspicious,
-            item_ids=[suspicious["id"]],
-            disposition="suspicious",
-            notes="Candidate requires a finding or clean terminal reanalysis.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, suspicious,
+        disposition="suspicious",
+        notes="Candidate requires a finding or clean terminal reanalysis.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
 
     hunt = client.get(f"{base}/readiness?target_phase=hunt").json()
-    assert "unresolved_suspicious_analysis" not in {
-        blocker["code"] for blocker in hunt["blockers"]
-    }
+    assert "unresolved_suspicious_analysis" not in _blocker_codes(hunt)
 
     blocked = client.get(
         f"{base}/readiness?target_phase=verify-variant"
@@ -17961,28 +16956,20 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
         assert finding_result.status_code == 201, finding_result.text
     else:
         _record_fixture_source_receipt(client, engagement_key, resolved)
-    resolved_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            resolved,
-            item_ids=[resolved["id"]],
-            disposition=resolved_disposition,
-            notes="Independent terminal reanalysis resolved the candidate.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    resolved_done = _close_queue_item(
+        client, engagement_key, resolved,
+        disposition=resolved_disposition,
+        notes="Independent terminal reanalysis resolved the candidate.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert resolved_done.status_code == 200, resolved_done.text
     after_resolution = client.get(
         f"{base}/readiness?target_phase=verify-variant"
     ).json()
-    assert "unresolved_suspicious_analysis" not in {
-        blocker["code"] for blocker in after_resolution["blockers"]
-    }
+    assert "unresolved_suspicious_analysis" not in _blocker_codes(after_resolution)
     after_resolution_report = client.get(report_endpoint)
     assert after_resolution_report.status_code == 200, after_resolution_report.text
-    assert "unresolved_suspicious_analysis" not in {
-        blocker["kind"] for blocker in after_resolution_report.json()["blockers"]
-    }
+    assert "unresolved_suspicious_analysis" not in _blocker_kinds(after_resolution_report.json())
 
     # A source-generation advance turns both prior attempts into retained history.
     # Neither an old-generation suspicious row nor a same-generation superseded
@@ -17990,16 +16977,7 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
     current_files = client.get(
         f"{base}/files?repo_id={repo['id']}&limit=20&include_header_snippet=true"
     ).json()["items"]
-    manifest_fields = {
-        "file_path",
-        "language",
-        "loc",
-        "file_hash",
-        "header_snippet",
-        "git_churn_score",
-        "has_past_cve_fix",
-    }
-    manifest = [{key: row[key] for key in manifest_fields} for row in current_files]
+    manifest = [{key: row[key] for key in _MANIFEST_FIELDS} for row in current_files]
     manifest[0]["file_hash"] = _source_hash(
         f"{repo['repo_key']}-suspicious-resolution-source-change"
     )
@@ -18029,14 +17007,10 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
     after_generation_change = client.get(
         f"{base}/readiness?target_phase=verify-variant"
     ).json()
-    assert "unresolved_suspicious_analysis" not in {
-        blocker["code"] for blocker in after_generation_change["blockers"]
-    }
+    assert "unresolved_suspicious_analysis" not in _blocker_codes(after_generation_change)
     after_generation_report = client.get(report_endpoint)
     assert after_generation_report.status_code == 200, after_generation_report.text
-    assert "unresolved_suspicious_analysis" not in {
-        blocker["kind"] for blocker in after_generation_report.json()["blockers"]
-    }
+    assert "unresolved_suspicious_analysis" not in _blocker_kinds(after_generation_report.json())
 
 
 @pytest.mark.parametrize("resolved_disposition", ["clean", "finding"])
@@ -18086,15 +17060,11 @@ def test_suspicious_obligation_survives_nonsemantic_reanalysis_states_until_reso
         ),
     )
     assert suspicious_result.status_code == 201, suspicious_result.text
-    suspicious_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            suspicious,
-            item_ids=[suspicious["id"]],
-            disposition="suspicious",
-            notes="Targeted semantic reanalysis remains required.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    suspicious_done = _close_queue_item(
+        client, engagement_key, suspicious,
+        disposition="suspicious",
+        notes="Targeted semantic reanalysis remains required.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert suspicious_done.status_code == 200, suspicious_done.text
     assert_suspicious_obligation()
@@ -18213,15 +17183,11 @@ def test_suspicious_obligation_survives_nonsemantic_reanalysis_states_until_reso
         assert finding_result.status_code == 201, finding_result.text
     else:
         _record_fixture_source_receipt(client, engagement_key, resolution)
-    resolved = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            resolution,
-            item_ids=[resolution["id"]],
-            disposition=resolved_disposition,
-            notes="Semantic reanalysis resolved the carried suspicious obligation.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    resolved = _close_queue_item(
+        client, engagement_key, resolution,
+        disposition=resolved_disposition,
+        notes="Semantic reanalysis resolved the carried suspicious obligation.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert resolved.status_code == 200, resolved.text
     assert "unresolved_suspicious_analysis" not in {
@@ -18230,9 +17196,7 @@ def test_suspicious_obligation_survives_nonsemantic_reanalysis_states_until_reso
             f"{base}/readiness?target_phase=verify-variant"
         ).json()["blockers"]
     }
-    assert "unresolved_suspicious_analysis" not in {
-        blocker["kind"] for blocker in client.get(report_endpoint).json()["blockers"]
-    }
+    assert "unresolved_suspicious_analysis" not in _blocker_kinds(client.get(report_endpoint).json())
 
 
 def _insert_malformed_terminal_attempt(
@@ -18322,15 +17286,11 @@ def test_malformed_terminal_successor_cannot_resolve_suspicious_obligation(
         ),
     )
     assert recorded.status_code == 201, recorded.text
-    completed = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            suspicious,
-            item_ids=[suspicious["id"]],
-            disposition="suspicious",
-            notes="Legitimate suspicious terminal review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    completed = _close_queue_item(
+        client, engagement_key, suspicious,
+        disposition="suspicious",
+        notes="Legitimate suspicious terminal review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
 
@@ -18409,11 +17369,7 @@ def test_malformed_terminal_attempt_cannot_account_for_admitted_file_review(
     readiness = client.get(
         f"{base}/readiness?target_phase=verify-variant"
     ).json()
-    unaccounted = next(
-        blocker
-        for blocker in readiness["blockers"]
-        if blocker["code"] == "admitted_files_unaccounted"
-    )
+    unaccounted = _blocker(readiness, "admitted_files_unaccounted")
     assert unaccounted["message"] == (
         "Repository has 2 admitted file(s) without a current terminal review "
         "or evidence-based structured skip."
@@ -18437,15 +17393,11 @@ def test_suspicious_semantic_ordering_clean_then_suspicious_then_skip(
         agent_name="ordering-clean-worker",
     )
     _record_fixture_source_receipt(client, engagement_key, clean)
-    clean_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            clean,
-            item_ids=[clean["id"]],
-            disposition="clean",
-            notes="Initial semantic review found no candidate.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    clean_done = _close_queue_item(
+        client, engagement_key, clean,
+        disposition="clean",
+        notes="Initial semantic review found no candidate.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert clean_done.status_code == 200, clean_done.text
     assert "unresolved_suspicious_analysis" not in {
@@ -18473,15 +17425,11 @@ def test_suspicious_semantic_ordering_clean_then_suspicious_then_skip(
         ),
     )
     assert recorded.status_code == 201, recorded.text
-    suspicious_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            suspicious,
-            item_ids=[suspicious["id"]],
-            disposition="suspicious",
-            notes="Reopened by a later semantic review.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    suspicious_done = _close_queue_item(
+        client, engagement_key, suspicious,
+        disposition="suspicious",
+        notes="Reopened by a later semantic review.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert suspicious_done.status_code == 200, suspicious_done.text
 
@@ -18493,14 +17441,10 @@ def test_suspicious_semantic_ordering_clean_then_suspicious_then_skip(
         priority=80,
         agent_name="ordering-skip-worker",
     )
-    skipped_done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            skipped,
-            item_ids=[skipped["id"]],
-            disposition="skipped",
-            skip_reason="test-fixture",
-        ),
+    skipped_done = _close_queue_item(
+        client, engagement_key, skipped,
+        disposition="skipped",
+        skip_reason="test-fixture",
     )
     assert skipped_done.status_code == 400, skipped_done.text
     assert "unresolved_suspicious_analysis" in {
@@ -18521,9 +17465,7 @@ def test_finding_analysis_result_requires_reportable_root_file_finding(
     client, isolate_settings
 ):
     engagement_key = "2026-08-06-finding-result-binding"
-    write_engagement(isolate_settings["engagements_dir"], engagement_key)
-    repo = _create_repo(client, engagement_key, repo_key="finding-result-primary")
-    files = _create_files(client, engagement_key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="finding-result-primary")
     parser = next(row for row in files if row["file_path"] == "src/parser.py")
     _classify_file(client, engagement_key, int(parser["id"]), "critical", 100)
     _create_code_parent_finding(
@@ -18650,10 +17592,7 @@ def test_queue_priority_requires_strict_integer_at_api(
     engagement_key, _, file_row = _seed_queue_contract_file(
         client, isolate_settings, f"strict-{type(priority).__name__}"
     )
-    response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={"items": [{"file_id": file_row["id"], "priority": priority}]},
-    )
+    response = _queue_file(client, engagement_key, file_row["id"], priority)
     assert response.status_code == 422, response.text
 
 
@@ -18699,14 +17638,7 @@ def test_queue_create_requires_strict_integer_file_id(
     )
     file_id = int(file_row["id"])
 
-    response = client.post(
-        f"/engagements/{engagement_key}/assessment/code/analysis-queue",
-        json={
-            "items": [
-                {"file_id": invalid_id_factory(file_id), "priority": 80}
-            ]
-        },
-    )
+    response = _queue_file(client, engagement_key, invalid_id_factory(file_id), 80)
 
     assert response.status_code == 422, response.text
 
@@ -18805,10 +17737,7 @@ def test_initial_queue_create_rejects_superseded_active_queue_attempt(
         repo_generation,
     )
 
-    response = client.post(
-        f"{base}/analysis-queue",
-        json={"items": [{"file_id": file_id, "priority": 70}]},
-    )
+    response = _queue_file(client, engagement_key, file_id, 70)
 
     assert response.status_code == 201, response.text
     assert response.json()["conflicts"] == 1
@@ -19095,15 +18024,11 @@ def test_latest_error_removes_older_cwe_detail_and_effort_proof(
         ),
     )
     assert result.status_code == 201, result.text
-    done = client.post(
-        f"{base}/analysis-queue/done",
-        json=_owned(
-            initial,
-            item_ids=[initial["id"]],
-            disposition="clean",
-            notes="Initial review completed.",
-            cwe_coverage=_network_input_coverage(default_effort=80),
-        ),
+    done = _close_queue_item(
+        client, engagement_key, initial,
+        disposition="clean",
+        notes="Initial review completed.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert done.status_code == 200, done.text
     reread = _claim_file_for_reanalysis(
@@ -19279,9 +18204,7 @@ def test_fuzz_applicability_decision_is_current_source_bound_and_required_at_ent
     base = f"/engagements/{engagement_key}/assessment/code"
 
     missing = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "fuzz_decision_missing" in {
-        blocker["code"] for blocker in missing["blockers"]
-    }
+    assert "fuzz_decision_missing" in _blocker_codes(missing)
 
     recorded = _record_fuzz_decision(
         client, engagement_key, repo, decision="not_required"
@@ -19293,9 +18216,7 @@ def test_fuzz_applicability_decision_is_current_source_bound_and_required_at_ent
     assert state.json()["decision"] == "not_required"
     assert state.json()["source"] == "recorded"
     after = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "fuzz_decision_missing" not in {
-        blocker["code"] for blocker in after["blockers"]
-    }
+    assert "fuzz_decision_missing" not in _blocker_codes(after)
 
     stale = _record_fuzz_decision(
         client,
@@ -19358,12 +18279,8 @@ def test_confirmed_memory_finding_forces_fuzz_and_terminal_receipt_gates_complet
     assert "current non-killed native memory-safety finding" in waived.json()["detail"]
 
     entry = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "fuzz_decision_missing" in {
-        blocker["code"] for blocker in entry["blockers"]
-    }
-    assert "fuzz_campaign_incomplete" not in {
-        blocker["code"] for blocker in entry["blockers"]
-    }
+    assert "fuzz_decision_missing" in _blocker_codes(entry)
+    assert "fuzz_campaign_incomplete" not in _blocker_codes(entry)
     assert entry["fuzz_completion"]["pending_finding_slugs"] == ["VF-003"]
 
     required_without_target = _record_fuzz_decision(
@@ -19392,20 +18309,14 @@ def test_confirmed_memory_finding_forces_fuzz_and_terminal_receipt_gates_complet
     )
     assert required.status_code == 201, required.text
     after_decision = client.get(f"{base}/readiness?target_phase=fuzz").json()
-    assert "fuzz_decision_missing" not in {
-        blocker["code"] for blocker in after_decision["blockers"]
-    }
+    assert "fuzz_decision_missing" not in _blocker_codes(after_decision)
 
     before_complete = client.get(f"{base}/readiness?target_phase=complete").json()
-    assert "fuzz_campaign_incomplete" in {
-        blocker["code"] for blocker in before_complete["blockers"]
-    }
+    assert "fuzz_campaign_incomplete" in _blocker_codes(before_complete)
     before_report = client.get(
         f"/engagements/{engagement_key}/assessment/report-readiness"
     ).json()
-    assert "fuzz_campaign_incomplete" in {
-        blocker["kind"] for blocker in before_report["blockers"]
-    }
+    assert "fuzz_campaign_incomplete" in _blocker_kinds(before_report)
 
     dispatch = _register_fuzz_dispatch(
         client, engagement_key, agent_id="fuzz-forced-worker"
@@ -19471,9 +18382,7 @@ def test_confirmed_memory_finding_forces_fuzz_and_terminal_receipt_gates_complet
     assert failed.status_code == 201, failed.text
     assert failed.json()["covering"] is False
     still_blocked = client.get(f"{base}/readiness?target_phase=complete").json()
-    assert "fuzz_campaign_incomplete" in {
-        blocker["code"] for blocker in still_blocked["blockers"]
-    }
+    assert "fuzz_campaign_incomplete" in _blocker_codes(still_blocked)
 
     completed = client.post(
         f"{base}/fuzz/campaign-receipts",
@@ -19490,15 +18399,11 @@ def test_confirmed_memory_finding_forces_fuzz_and_terminal_receipt_gates_complet
     assert completed.json()["dispatch_agent_id"] == "fuzz-forced-worker"
 
     after_complete = client.get(f"{base}/readiness?target_phase=complete").json()
-    assert "fuzz_campaign_incomplete" not in {
-        blocker["code"] for blocker in after_complete["blockers"]
-    }
+    assert "fuzz_campaign_incomplete" not in _blocker_codes(after_complete)
     after_report = client.get(
         f"/engagements/{engagement_key}/assessment/report-readiness"
     ).json()
-    assert "fuzz_campaign_incomplete" not in {
-        blocker["kind"] for blocker in after_report["blockers"]
-    }
+    assert "fuzz_campaign_incomplete" not in _blocker_kinds(after_report)
 
     (state_dir / "campaign.json").write_text(
         '{"engine":"libFuzzer","tampered":true}', encoding="utf-8"
@@ -20107,9 +19012,7 @@ def test_latest_covering_fuzz_receipt_with_invalid_evidence_fails_closed(
 
 def _seed_variant_currency_case(client, isolate_settings):
     key = "2026-10-23-acme-variant-currency"
-    write_engagement(isolate_settings["engagements_dir"], key)
-    repo = _create_repo(client, key, repo_key="acme-variant-currency")
-    files = _create_files(client, key, int(repo["id"]))
+    repo, files = _seed_repo_files(client, isolate_settings, key, repo_key="acme-variant-currency")
     _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-001")
     dispatch = _register_variant_dispatch(client, key, agent_id="acme-variant", finding_slugs=["AC-001"])
     base = f"/engagements/{key}/assessment/code"

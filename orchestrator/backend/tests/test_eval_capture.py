@@ -26,12 +26,7 @@ from app import db as db_module
 from tests.code_snapshot_fixtures import seal_generation_files
 from tests.proof_fixtures import RUNTIME_PROOF_PLAN
 
-# Put agent/scripts on sys.path so assess.* imports resolve (mirrors
-# tests/eval/conftest.py and test_aith_cli.py).
 _REPO_ROOT = Path(__file__).resolve().parents[3]
-_SCRIPTS_ROOT = _REPO_ROOT / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 from assess.commands import eval_capture  # noqa: E402
 from assess.lib.schema_validation import (  # noqa: E402

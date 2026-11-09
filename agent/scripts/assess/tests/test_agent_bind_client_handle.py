@@ -70,15 +70,8 @@ def test_bind_client_handle_posts_the_asserted_triplet(monkeypatch, capsys) -> N
     _run(
         monkeypatch,
         [
-            "agent",
-            "bind-client-handle",
-            "code-hunter-3",
-            "--client",
-            "claude",
-            "--session-namespace",
-            "/Users/op/vigil/engagements/acme",
-            "--handle",
-            "01JQZ4S8K2A0",
+            "agent", "bind-client-handle", "code-hunter-3", "--client", "claude", "--session-namespace",
+            "/Users/op/vigil/engagements/acme", "--handle", "01JQZ4S8K2A0",
         ],
         stub,
     )
@@ -106,16 +99,8 @@ def test_bind_client_handle_sends_an_optional_note_for_a_correction(
     _run(
         monkeypatch,
         [
-            "agent",
-            "bind-client-handle",
-            "code-hunter-3",
-            "--client",
-            "codex",
-            "--session-namespace",
-            "acme-workspace",
-            "--handle",
-            "conv_7f31",
-            "--note",
+            "agent", "bind-client-handle", "code-hunter-3", "--client", "codex", "--session-namespace",
+            "acme-workspace", "--handle", "conv_7f31", "--note",
             "relaunched after the claude session died",
         ],
         stub,

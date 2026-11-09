@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 import sys
-from pathlib import Path
 
 from assess.commands import recon as _recon
 from assess.lib.client import AssessError
@@ -27,13 +26,6 @@ def register(subparsers) -> None:
                    help="Also cross-check the backend job row (lazy-finalizes it via the exit marker).")
     p.add_argument("--json", dest="as_json", action="store_true", help="Emit the digest as JSON.")
     p.set_defaults(func=run)
-
-
-def _load_json(path: Path):
-    try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
-        return None
 
 
 def _digest(status: dict) -> dict:
@@ -64,7 +56,7 @@ def _digest(status: dict) -> dict:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
-    status = _load_json(_recon.status_path(cfg))
+    status = _recon._load_json(_recon.status_path(cfg))
     if status is None:
         print("recon-status: no recon run found for this engagement "
               "(run `vigil assess recon <apexes>` first).", file=sys.stderr)

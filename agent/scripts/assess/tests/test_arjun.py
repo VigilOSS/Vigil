@@ -23,6 +23,25 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
+def _seed_row(fake, queue_key, method, url, url_path, **over):
+    """Seed one work-item row on the fake backend: every fixture below seeds a
+    pending row with empty param columns and varies only `type` plus the
+    `source` / `live_status` column its case needs."""
+    fake.add_row(
+        queue_key=queue_key, method=method, url=url, url_path=url_path,
+        status="pending", query_params="{}", body_params="{}", path_params="{}",
+        **over,
+    )
+
+
+def _ingest_ns(json_file, engagement_dir, *, default_method="GET"):
+    """The `ingest-arjun` argv every end-to-end case below runs the verb with."""
+    return argparse.Namespace(
+        json_file=json_file, source="arjun",
+        default_method=default_method, engagement_dir=engagement_dir,
+    )
+
+
 # --------------------------------------------------------------------------
 # arjun_enrich — pure helpers (slot routing, sqli rule, signals, rationale,
 # JSON parsing, param merge)
@@ -157,35 +176,36 @@ def test_merge_params_into_field_refuses_to_overwrite_malformed_existing():
 # --------------------------------------------------------------------------
 # arjun_select.select_targets — the gating that keeps Arjun off raw URL dumps
 # --------------------------------------------------------------------------
+def _work_row(url, path, **over):
+    """A work-item row as every selection fixture writes it: a live, pending,
+    param-less form. Each case overrides only the columns it exercises, so a
+    row that deliberately carries an unusual column still spells it out."""
+    base = {"url": url, "url_path": path, "type": "form", "status": "pending",
+            "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"}
+    base.update(over)
+    return base
+
+
 def test_select_targets_live_only_by_default():
     rows = [
-        {"url": "http://h/a", "url_path": "/a", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/b", "url_path": "/b", "type": "form", "status": "pending",
-         "live_status": "blackholed", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/c", "url_path": "/c", "type": "form", "status": "pending",
-         "live_status": "", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("http://h/a", "/a"),
+        _work_row("http://h/b", "/b", live_status="blackholed"),
+        _work_row("http://h/c", "/c", live_status=""),
     ]
     out = arjun_select.select_targets(rows)
     assert out == [("GET", "http://h/a")]
 
 
 def test_select_targets_include_unknown_opts_in_blank_status():
-    rows = [
-        {"url": "http://h/c", "url_path": "/c", "type": "form", "status": "pending",
-         "live_status": "", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-    ]
+    rows = [_work_row("http://h/c", "/c", live_status="")]
     assert arjun_select.select_targets(rows, include_unknown=True) == [("GET", "http://h/c")]
 
 
 def test_select_targets_excludes_inert_and_skipped():
     rows = [
-        {"url": "http://h/i.png", "url_path": "/i.png", "type": "image", "status": "skipped",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/v", "url_path": "/v", "type": "video", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/ok", "url_path": "/ok", "type": "form", "status": "skipped",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("http://h/i.png", "/i.png", type="image", status="skipped"),
+        _work_row("http://h/v", "/v", type="video"),
+        _work_row("http://h/ok", "/ok", status="skipped"),
     ]
     assert arjun_select.select_targets(rows) == []
 
@@ -194,12 +214,8 @@ def test_select_targets_dedups_id_varied_paths_by_template():
     # Both normalize to path:/explore-mvps/{year}, so the (host, template) dedup
     # collapses these id/year-varied URLs into one Arjun target (the scale story).
     rows = [
-        {"url": "http://h/explore-mvps/2024/M0004", "url_path": "/explore-mvps/2024/M0004",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/explore-mvps/2023/G0058", "url_path": "/explore-mvps/2023/G0058",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("http://h/explore-mvps/2024/M0004", "/explore-mvps/2024/M0004"),
+        _work_row("http://h/explore-mvps/2023/G0058", "/explore-mvps/2023/G0058"),
     ]
     out = arjun_select.select_targets(rows)
     assert len(out) == 1
@@ -210,12 +226,8 @@ def test_select_targets_keeps_distinct_sibling_routes():
     # probed: the old 2-segment cluster key collapsed /api/users/search and
     # /api/users/export to /api/users and silently dropped one from Arjun.
     rows = [
-        {"url": "http://h/api/users/search", "url_path": "/api/users/search",
-         "type": "api", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/api/users/export", "url_path": "/api/users/export",
-         "type": "api", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("http://h/api/users/search", "/api/users/search", type="api"),
+        _work_row("http://h/api/users/export", "/api/users/export", type="api"),
     ]
     out = arjun_select.select_targets(rows, max_per_host=50)
     assert sorted(out) == [("GET", "http://h/api/users/export"), ("GET", "http://h/api/users/search")]
@@ -223,11 +235,8 @@ def test_select_targets_keeps_distinct_sibling_routes():
 
 def test_select_targets_param_poor_only():
     rows = [
-        {"url": "http://h/rich", "url_path": "/rich", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": json.dumps({"a": "", "b": "", "c": ""}),
-         "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/poor", "url_path": "/poor", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("http://h/rich", "/rich", query_params=json.dumps({"a": "", "b": "", "c": ""})),
+        _work_row("http://h/poor", "/poor"),
     ]
     assert arjun_select.select_targets(rows, param_poor_only=True) == [("GET", "http://h/poor")]
 
@@ -241,12 +250,8 @@ def test_arjun_select_run_writes_list_and_reports_budget_drops(tmp_path, monkeyp
 
     fake = FakeAssessmentClient()
     for name in ("alpha", "beta", "gamma"):
-        fake.add_row(
-            queue_key=f"k:{name}", method="GET",
-            url=f"https://h.example/{name}", url_path=f"/{name}",
-            type="form", status="pending", live_status="live",
-            query_params="{}", body_params="{}", path_params="{}",
-        )
+        _seed_row(fake, f"k:{name}", "GET", f"https://h.example/{name}", f"/{name}",
+                  type="form", live_status="live")
     monkeypatch.setattr(asel, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(asel, "AssessmentClient", lambda *a, **k: fake)
 
@@ -267,22 +272,16 @@ def test_arjun_select_run_writes_list_and_reports_budget_drops(tmp_path, monkeyp
 def test_select_targets_stats_account_for_every_scanned_row():
     # Every scanned row is either selected or dropped by exactly one gate; the
     # stats must balance so a truncated run can never look like full coverage.
-    def _r(url, path, **over):
-        base = {"url": url, "url_path": path, "type": "form", "status": "pending",
-                "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"}
-        base.update(over)
-        return base
-
     rows = [
-        _r("", ""),                                            # dropped_no_url
-        _r("ws://h/s", "/s"),                                  # dropped_non_http
-        _r("http://h/a.png", "/a.png", type="image"),         # dropped_inert
-        _r("http://h/sk", "/sk", status="skipped"),           # dropped_skipped_status
-        _r("http://h/dead", "/dead", live_status="blackholed"),  # dropped_not_live
-        _r("http://h/p/2024/M0004", "/p/2024/M0004"),         # \ id-varied: collapse
-        _r("http://h/p/2023/G0058", "/p/2023/G0058"),         # / to one template
-        _r("http://h/one", "/one"),                           # template 2 (budget keeps 1)
-        _r("http://h/two", "/two"),                           # template 3 (budget drops)
+        _work_row("", ""),                                            # dropped_no_url
+        _work_row("ws://h/s", "/s"),                                  # dropped_non_http
+        _work_row("http://h/a.png", "/a.png", type="image"),          # dropped_inert
+        _work_row("http://h/sk", "/sk", status="skipped"),            # dropped_skipped_status
+        _work_row("http://h/dead", "/dead", live_status="blackholed"),  # dropped_not_live
+        _work_row("http://h/p/2024/M0004", "/p/2024/M0004"),          # \ id-varied: collapse
+        _work_row("http://h/p/2023/G0058", "/p/2023/G0058"),          # / to one template
+        _work_row("http://h/one", "/one"),                            # template 2 (budget keeps 1)
+        _work_row("http://h/two", "/two"),                            # template 3 (budget drops)
     ]
     stats: dict = {}
     out = arjun_select.select_targets(rows, max_per_host=1, stats=stats)
@@ -301,24 +300,16 @@ def test_select_targets_stats_account_for_every_scanned_row():
 
 def test_select_targets_skips_non_http_and_hostless():
     rows = [
-        {"url": "ws://h/socket", "url_path": "/socket", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "mailto:a@b.com", "url_path": "", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "/relative/only", "url_path": "/relative/only", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "https://h/ok", "url_path": "/ok", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("ws://h/socket", "/socket"),
+        _work_row("mailto:a@b.com", ""),
+        _work_row("/relative/only", "/relative/only"),
+        _work_row("https://h/ok", "/ok"),
     ]
     assert arjun_select.select_targets(rows) == [("GET", "https://h/ok")]
 
 
 def test_select_targets_max_per_host():
-    rows = [
-        {"url": f"http://h/p{i}", "url_path": f"/p{i}", "type": "form", "status": "pending",
-         "live_status": "live", "query_params": "{}", "body_params": "{}", "path_params": "{}"}
-        for i in range(5)
-    ]
+    rows = [_work_row(f"http://h/p{i}", f"/p{i}") for i in range(5)]
     out = arjun_select.select_targets(rows, max_per_host=2)
     assert len(out) == 2
 
@@ -330,12 +321,8 @@ def test_select_targets_keeps_method_variants_separate():
     # never scanned. Method is now part of the dedup key, so BOTH survive, each
     # tagged with its own method.
     rows = [
-        {"url": "http://h/api/search", "url_path": "/api/search", "method": "GET",
-         "type": "api", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "http://h/api/search", "url_path": "/api/search", "method": "POST",
-         "type": "api", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("http://h/api/search", "/api/search", method="GET", type="api"),
+        _work_row("http://h/api/search", "/api/search", method="POST", type="api"),
     ]
     out = arjun_select.select_targets(rows)
     assert sorted(out) == [("GET", "http://h/api/search"), ("POST", "http://h/api/search")]
@@ -346,12 +333,8 @@ def test_select_targets_keeps_same_host_different_port_separate():
     # before the dedup key collapsed them and silently skipped one service. The
     # origin (scheme/host/port) is now in the key, so both are scanned.
     rows = [
-        {"url": "https://app.example:8443/login", "url_path": "/login", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "https://app.example/login", "url_path": "/login", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("https://app.example:8443/login", "/login", method="GET"),
+        _work_row("https://app.example/login", "/login", method="GET"),
     ]
     out = arjun_select.select_targets(rows)
     assert sorted(u for _m, u in out) == [
@@ -364,12 +347,8 @@ def test_select_targets_collapses_explicit_default_port():
     # An explicit default port and a bare URL are the SAME service; the origin
     # normalizes the scheme default away so they collapse (no spurious fork).
     rows = [
-        {"url": "https://app.example:443/login", "url_path": "/login", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "https://app.example/login", "url_path": "/login", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("https://app.example:443/login", "/login", method="GET"),
+        _work_row("https://app.example/login", "/login", method="GET"),
     ]
     out = arjun_select.select_targets(rows)
     assert len(out) == 1
@@ -380,18 +359,10 @@ def test_select_targets_budget_is_per_origin_not_hostname():
     # services and each gets its own cap (the politeness limit protects a single
     # listener's request volume, and these are two listeners).
     rows = [
-        {"url": "https://app.example:8443/a", "url_path": "/a", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "https://app.example:8443/b", "url_path": "/b", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "https://app.example/c", "url_path": "/c", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
-        {"url": "https://app.example/d", "url_path": "/d", "method": "GET",
-         "type": "form", "status": "pending", "live_status": "live",
-         "query_params": "{}", "body_params": "{}", "path_params": "{}"},
+        _work_row("https://app.example:8443/a", "/a", method="GET"),
+        _work_row("https://app.example:8443/b", "/b", method="GET"),
+        _work_row("https://app.example/c", "/c", method="GET"),
+        _work_row("https://app.example/d", "/d", method="GET"),
     ]
     out = arjun_select.select_targets(rows, max_per_host=1)
     # One per origin: the :8443 service AND the :443 service each keep 1.
@@ -407,18 +378,10 @@ def test_arjun_select_run_writes_method_specific_sidecars(tmp_path, monkeypatch,
     from assess.commands import arjun_select as asel
 
     fake = FakeAssessmentClient()
-    fake.add_row(
-        queue_key="k:get", method="GET",
-        url="https://h.example/api/search", url_path="/api/search",
-        type="api", status="pending", live_status="live",
-        query_params="{}", body_params="{}", path_params="{}",
-    )
-    fake.add_row(
-        queue_key="k:post", method="POST",
-        url="https://h.example/api/search", url_path="/api/search",
-        type="api", status="pending", live_status="live",
-        query_params="{}", body_params="{}", path_params="{}",
-    )
+    _seed_row(fake, "k:get", "GET", "https://h.example/api/search", "/api/search",
+              type="api", live_status="live")
+    _seed_row(fake, "k:post", "POST", "https://h.example/api/search", "/api/search",
+              type="api", live_status="live")
     monkeypatch.setattr(asel, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(asel, "AssessmentClient", lambda *a, **k: fake)
 
@@ -466,12 +429,8 @@ def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monk
     (eng / "scope.json").write_text("{}", encoding="utf-8")
 
     fake = FakeAssessmentClient()
-    fake.add_row(
-        queue_key="seed:GET:/known", method="GET",
-        url="https://h.example/known", url_path="/known", type="unknown",
-        source="seed", status="pending",
-        query_params="{}", body_params="{}", path_params="{}",
-    )
+    _seed_row(fake, "seed:GET:/known", "GET", "https://h.example/known", "/known",
+              type="unknown", source="seed")
 
     arjun_json = {"https://h.example/known": {"params": ["debug"], "method": "GET"}}
     rel = "scans/arjun/out.json"
@@ -487,10 +446,7 @@ def test_ingest_arjun_anchors_relative_json_to_engagement(tmp_path, capsys, monk
     other.mkdir()
     monkeypatch.chdir(other)
 
-    ns = argparse.Namespace(
-        json_file=rel, source="arjun",
-        default_method="GET", engagement_dir=str(eng),
-    )
+    ns = _ingest_ns(rel, str(eng))
     ingest_arjun.run(ns)  # must FIND the anchored artifact, not report the cwd no-op
     out = json.loads(capsys.readouterr().out)
     assert out["json_file"] == str(jf)   # anchored to the engagement, not the cwd
@@ -646,16 +602,8 @@ def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatc
     from assess.commands import ingest_arjun
 
     fake = FakeAssessmentClient()
-    fake.add_row(
-        queue_key="seed:GET:/known",
-        method="GET",
-        url="https://h.example/known",
-        url_path="/known",
-        type="unknown",
-        source="seed",
-        status="pending",
-        query_params="{}", body_params="{}", path_params="{}",
-    )
+    _seed_row(fake, "seed:GET:/known", "GET", "https://h.example/known", "/known",
+              type="unknown", source="seed")
 
     arjun_json = {
         "https://h.example/known": {"params": ["debug"], "method": "GET"},
@@ -668,10 +616,7 @@ def test_ingest_arjun_run_creates_new_and_enriches_existing(tmp_path, monkeypatc
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
     monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
-    ns = argparse.Namespace(
-        json_file=str(jf), source="arjun",
-        default_method="GET", engagement_dir=str(tmp_path),
-    )
+    ns = _ingest_ns(str(jf), str(tmp_path))
     ingest_arjun.run(ns)
     out = json.loads(capsys.readouterr().out)
     assert out["enriched"] == 1
@@ -706,10 +651,7 @@ def test_ingest_arjun_candidates_on_two_hosts_create_two_rows(tmp_path, monkeypa
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
     monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
-    ns = argparse.Namespace(
-        json_file=str(jf), source="arjun",
-        default_method="POST", engagement_dir=str(tmp_path),
-    )
+    ns = _ingest_ns(str(jf), str(tmp_path), default_method="POST")
     ingest_arjun.run(ns)
 
     urls = sorted(row["url"] for row in fake.rows)
@@ -787,18 +729,10 @@ def test_ingest_arjun_post_enriches_post_row_not_get_row(tmp_path, monkeypatch, 
 
     fake = FakeAssessmentClient()
     # Seed the GET row first so it lands at the lower id.
-    fake.add_row(
-        queue_key="seed:GET:/api/item", method="GET",
-        url="https://h.example/api/item", url_path="/api/item",
-        type="unknown", source="seed", status="pending",
-        query_params="{}", body_params="{}", path_params="{}",
-    )
-    fake.add_row(
-        queue_key="seed:POST:/api/item", method="POST",
-        url="https://h.example/api/item", url_path="/api/item",
-        type="unknown", source="seed", status="pending",
-        query_params="{}", body_params="{}", path_params="{}",
-    )
+    _seed_row(fake, "seed:GET:/api/item", "GET", "https://h.example/api/item", "/api/item",
+              type="unknown", source="seed")
+    _seed_row(fake, "seed:POST:/api/item", "POST", "https://h.example/api/item", "/api/item",
+              type="unknown", source="seed")
 
     arjun_json = {"https://h.example/api/item": {"params": ["payload"], "method": "POST"}}
     jf = tmp_path / "arjun.json"
@@ -808,10 +742,7 @@ def test_ingest_arjun_post_enriches_post_row_not_get_row(tmp_path, monkeypatch, 
     monkeypatch.setattr(ingest_arjun, "auth_active_context", lambda *a, **k: "anonymous")
     monkeypatch.setattr(ingest_arjun, "AssessmentClient", lambda *a, **k: fake)
 
-    ns = argparse.Namespace(
-        json_file=str(jf), source="arjun",
-        default_method="POST", engagement_dir=str(tmp_path),
-    )
+    ns = _ingest_ns(str(jf), str(tmp_path), default_method="POST")
     ingest_arjun.run(ns)
     out = json.loads(capsys.readouterr().out)
     assert out["enriched"] == 1

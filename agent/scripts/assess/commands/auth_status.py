@@ -108,19 +108,6 @@ def register_status(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _build_liveness_haystack(
-    status: int,
-    reason: str,
-    headers: list[tuple[str, str]],
-    body: str,
-) -> str:
-    """Combine the status line + response headers (incl. ``Location``) + body into
-    the single case-sensitive haystack the liveness classifier matches against."""
-    status_line = f"HTTP {status} {reason}".rstrip()
-    header_text = "\n".join(f"{name}: {value}" for name, value in headers)
-    return "\n".join(part for part in (status_line, header_text, body) if part)
-
-
 def _run_identity_probe(
     engagement_dir: str,
     identity: str | None,

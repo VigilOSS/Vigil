@@ -9,10 +9,11 @@ import os
 import shutil
 import stat
 import tempfile
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path, PurePosixPath
-from typing import Any, BinaryIO, Callable, Self
+from typing import Any, BinaryIO, Callable, Iterator, Self
 
 SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v3"
 _LEGACY_SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v2"
@@ -26,6 +27,15 @@ _HEADER_PREFIX_BYTES = (_HEADER_MAX_CHARS * 4) + 4
 # Language detection reads further than the stored header, so a PHP open tag
 # after a long licence banner still decides the file.
 _HEAD_BYTES = 64 * 1024
+# How a non-regular entry is named in the sealed manifest, in the order the
+# classifier asks: a symlink first, then the device-like kinds.
+_ENTRY_KINDS: tuple[tuple[Callable[[int], bool], str], ...] = (
+    (stat.S_ISLNK, "symlink"),
+    (stat.S_ISFIFO, "fifo"),
+    (stat.S_ISSOCK, "socket"),
+    (stat.S_ISCHR, "character_device"),
+    (stat.S_ISBLK, "block_device"),
+)
 
 
 class SourceSnapshotRaceError(RuntimeError):
@@ -434,6 +444,19 @@ class RootedSourceTree:
             os.close(fd)
             raise
 
+    @contextmanager
+    def _parent(self, raw: str) -> Iterator[tuple[int, PurePosixPath]]:
+        """The descriptor of *raw*'s parent directory, with *raw* made relative."""
+        rel = _safe_relative_path(raw)
+        parent_text = (
+            PurePosixPath(*rel.parts[:-1]).as_posix() if len(rel.parts) > 1 else ""
+        )
+        parent_fd = self._open_directory(parent_text)
+        try:
+            yield parent_fd, rel
+        finally:
+            os.close(parent_fd)
+
     def capture(
         self,
         raw: str,
@@ -443,10 +466,7 @@ class RootedSourceTree:
         chunk_consumer: Callable[[bytes], None] | None = None,
         legacy_text: bool = False,
     ) -> CapturedSourceFile:
-        rel = _safe_relative_path(raw)
-        parent_text = PurePosixPath(*rel.parts[:-1]).as_posix() if len(rel.parts) > 1 else ""
-        parent_fd = self._open_directory(parent_text)
-        try:
+        with self._parent(raw) as (parent_fd, rel):
             fd = os.open(rel.name, self._file_flags, dir_fd=parent_fd)
             try:
                 return _capture_open_file(
@@ -464,8 +484,6 @@ class RootedSourceTree:
                 )
             finally:
                 os.close(fd)
-        finally:
-            os.close(parent_fd)
 
     def regular_file_size(self, raw: str) -> int:
         """Return a no-follow regular file size beneath the pinned root."""
@@ -476,44 +494,13 @@ class RootedSourceTree:
 
     def stat_entry(self, raw: str) -> os.stat_result:
         """Return no-follow metadata for one entry beneath the pinned root."""
-        rel = _safe_relative_path(raw)
-        parent_text = (
-            PurePosixPath(*rel.parts[:-1]).as_posix() if len(rel.parts) > 1 else ""
-        )
-        parent_fd = self._open_directory(parent_text)
-        try:
-            entry_stat = os.stat(rel.name, dir_fd=parent_fd, follow_symlinks=False)
-        finally:
-            os.close(parent_fd)
-        return entry_stat
+        with self._parent(raw) as (parent_fd, rel):
+            return os.stat(rel.name, dir_fd=parent_fd, follow_symlinks=False)
 
     def entry_kind(self, raw: str) -> str:
         """Classify one non-regular entry without following any symlink."""
-
-        rel = _safe_relative_path(raw)
-        parent_text = (
-            PurePosixPath(*rel.parts[:-1]).as_posix() if len(rel.parts) > 1 else ""
-        )
-        parent_fd = self._open_directory(parent_text)
-        try:
-            mode = os.stat(
-                rel.name,
-                dir_fd=parent_fd,
-                follow_symlinks=False,
-            ).st_mode
-        finally:
-            os.close(parent_fd)
-        if stat.S_ISLNK(mode):
-            return "symlink"
-        if stat.S_ISFIFO(mode):
-            return "fifo"
-        if stat.S_ISSOCK(mode):
-            return "socket"
-        if stat.S_ISCHR(mode):
-            return "character_device"
-        if stat.S_ISBLK(mode):
-            return "block_device"
-        return "special"
+        mode = self.stat_entry(raw).st_mode
+        return next((kind for test, kind in _ENTRY_KINDS if test(mode)), "special")
 
     def walk(self, start: str = ""):
         start_rel = _safe_relative_path(start).as_posix() if start else ""

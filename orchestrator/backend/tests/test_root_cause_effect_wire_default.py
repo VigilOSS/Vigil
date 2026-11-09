@@ -21,20 +21,13 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
-# The assess CLI package lives under agent/scripts (mirrors
-# test_finding_patch_contract_mirror.py).
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
-
-from app.api.assessment import RootCauseLinkRequest  # noqa: E402
-from app.services.state_manager import links  # noqa: E402
-from app.services.state_manager.links import DEFAULT_ROOT_CAUSE_EFFECT  # noqa: E402
-from assess.commands import link_finding  # noqa: E402
-from tests.proof_fixtures import (  # noqa: E402
+from app.api.assessment import RootCauseLinkRequest
+from app.services.state_manager import links
+from app.services.state_manager.links import DEFAULT_ROOT_CAUSE_EFFECT
+from assess.commands import link_finding
+from tests.proof_fixtures import (
     completed_confirm_check,
     post_artifact_backed_source_observation,
 )

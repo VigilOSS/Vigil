@@ -19,16 +19,10 @@ Pure/in-process only — no docker, no network, no tool execution (VIGIL_KALI_NO
 from __future__ import annotations
 
 import importlib
-import sys
-from pathlib import Path
 
 import pytest
 
-# Match the convention in test_recon_foundations.py / test_kali_cli.py: make
-# `assess.*` importable from the agent script tree.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "agent" / "scripts"))
-
-from assess.lib import runtime_route as rr  # noqa: E402
+from assess.lib import runtime_route as rr
 
 
 _DESKTOP = rr.RuntimeInfo(platform="darwin", is_docker_desktop=True, recommended="host")

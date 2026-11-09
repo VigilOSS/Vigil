@@ -10,17 +10,9 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { CellKeyDownEvent, ColDef, GridApi, GridReadyEvent, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { ColDef, GridApi, GridReadyEvent, ICellRendererParams } from "ag-grid-community";
 import type { OobProbe } from "../lib/api";
-import {
-  AG_GRID_THEME,
-  GRID_HEADER_HEIGHT,
-  GRID_ROW_HEIGHT,
-  GRID_THEME_PROP,
-  defaultColDef,
-  focusGridInvoker,
-  registerAgGrid,
-} from "../lib/agGrid";
+import { AG_GRID_THEME, gridBaseProps, registerAgGrid, rowOpenHandlers } from "../lib/agGrid";
 import { linkedToParts, oobStatus } from "../lib/oastApi";
 import { TimeStamp } from "./formatting";
 import { gridTimeComparator, gridTimeMode } from "../lib/serverTime";
@@ -189,31 +181,16 @@ export default function OastGrid({ rows, sortColumn, initialSort, selectedNonce,
     });
   };
 
-  const onRowClicked = (event: RowClickedEvent<OobProbe>) => {
-    const sel = window.getSelection?.();
-    if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
-  };
-
-  const onCellKeyDown = (event: CellKeyDownEvent<OobProbe>) => {
-    const keyboardEvent = event.event as KeyboardEvent;
-    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
-    keyboardEvent.preventDefault();
-    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
-  };
+  const { onRowClicked, onCellKeyDown } = rowOpenHandlers<OobProbe>(onRowOpen);
 
   return (
     <div className={`${AG_GRID_THEME} grid-host oast-grid-host`}>
       <AgGridReact<OobProbe>
         ref={gridRef}
-        theme={GRID_THEME_PROP}
+        {...gridBaseProps}
         rowData={rows}
         columnDefs={columnDefs}
-        defaultColDef={defaultColDef}
         getRowId={(p) => p.data.nonce}
-        rowHeight={GRID_ROW_HEIGHT}
-        headerHeight={GRID_HEADER_HEIGHT}
-        tooltipShowDelay={400}
         animateRows
         onGridReady={onGridReady}
         onRowClicked={onRowClicked}

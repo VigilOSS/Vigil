@@ -38,6 +38,12 @@ from assess.lib.kali_output import KaliResult
 # --------------------------------------------------------------------------- #
 
 
+@pytest.fixture
+def eng_dir(tmp_path: Path) -> Path:
+    """The engagement root every scope-driven browser test writes its scope into."""
+    return tmp_path / "eng"
+
+
 def _mk_result() -> KaliResult:
     return KaliResult(
         run_id=1,
@@ -144,26 +150,11 @@ def test_register_wires_url_and_audit_flags():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     kb.register(sub)
-    args = parser.parse_args(
-        [
-            "browser",
-            "https://t.example/x",
-            "--technique",
-            "RECON",
-            "--intent",
-            "render",
-            "--probe-kind",
-            "baseline",
-            "--phase",
-            "recon",
-            "--timeout",
-            "120",
-            "--identity",
-            "member",
-            "--identity-scope",
-            "billing",
-        ]
-    )
+    args = parser.parse_args([
+        "browser", "https://t.example/x", "--technique", "RECON", "--intent", "render",
+        "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120", "--identity",
+        "member", "--identity-scope", "billing",
+    ])
     assert args.url == "https://t.example/x"
     assert args.identity == "member"
     assert args.identity_scope == "billing"
@@ -322,12 +313,11 @@ def _write_scope(eng_dir: Path, **fields) -> None:
     (eng_dir / "scope.json").write_text(json.dumps(payload), encoding="utf-8")
 
 
-def test_run_threads_required_headers_into_driver_argv(tmp_path, monkeypatch):
+def test_run_threads_required_headers_into_driver_argv(eng_dir, monkeypatch):
     # An engagement with required_headers must have those headers reach the
     # headless-chromium navigation. kali_exec's -H injector cannot reach a
     # Browser execution cannot consume CLI -H flags, so the verb threads them in
     # as a JSON execution-plan field installed before Playwright navigation.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
     config = json.loads(cap["cmd"][3])
@@ -337,9 +327,8 @@ def test_run_threads_required_headers_into_driver_argv(tmp_path, monkeypatch):
     assert "route.continue_" in kb._BROWSER_DRIVER
 
 
-def test_run_no_headers_when_scope_has_none(tmp_path, monkeypatch):
+def test_run_no_headers_when_scope_has_none(eng_dir, monkeypatch):
     # No required_headers configured → an empty header map (no header is set).
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir)
     cap = _capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))
     assert json.loads(cap["cmd"][3])["required_headers"] == {}
@@ -354,10 +343,9 @@ def test_run_no_headers_when_engagement_unresolvable(monkeypatch, tmp_path):
     assert json.loads(cap["cmd"][3])["required_headers"] == {}
 
 
-def test_run_required_headers_drop_malformed_pairs(tmp_path, monkeypatch):
+def test_run_required_headers_drop_malformed_pairs(eng_dir, monkeypatch):
     # Only str->str pairs survive (mirrors the shared _required_headers reader),
     # so a malformed scope can never inject a non-header value into the driver.
-    eng_dir = tmp_path / "eng"
     _write_scope(
         eng_dir,
         required_headers={"X-Bug-Bounty": "researcher", "X-Bad": 5, "": "blank"},
@@ -372,9 +360,7 @@ def test_run_required_headers_drop_malformed_pairs(tmp_path, monkeypatch):
 
 
 def test_parse_header_args_splits_first_colon_and_trims():
-    got = kb._parse_header_args(
-        ["X-Debug: 1", "X-Trace:abc", "Authorization: Bearer a:b:c"]
-    )
+    got = kb._parse_header_args(["X-Debug: 1", "X-Trace:abc", "Authorization: Bearer a:b:c"])
     assert got == {"X-Debug": "1", "X-Trace": "abc", "Authorization": "Bearer a:b:c"}
 
 
@@ -382,8 +368,7 @@ def test_parse_header_args_skips_malformed():
     assert kb._parse_header_args(["no-colon", "", ": empty-name", "  : x"]) == {}
 
 
-def test_run_merges_operator_headers_into_driver_argv(tmp_path, monkeypatch):
-    eng_dir = tmp_path / "eng"
+def test_run_merges_operator_headers_into_driver_argv(eng_dir, monkeypatch):
     _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
@@ -394,10 +379,9 @@ def test_run_merges_operator_headers_into_driver_argv(tmp_path, monkeypatch):
     assert config["operator_headers"] == {"X-Debug": "1"}
 
 
-def test_run_required_header_wins_over_operator_same_name(tmp_path, monkeypatch):
+def test_run_required_header_wins_over_operator_same_name(eng_dir, monkeypatch):
     # An operator --header must NEVER strip/override a program attribution header
     # of the same name — required headers win the merge.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
@@ -411,9 +395,8 @@ def test_run_required_header_wins_over_operator_same_name(tmp_path, monkeypatch)
 
 
 def test_run_required_header_wins_case_insensitive_operator_collision(
-    tmp_path, monkeypatch
+    eng_dir, monkeypatch
 ):
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
@@ -442,15 +425,11 @@ def test_register_wires_eval_and_header_flags():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     kb.register(sub)
-    args = parser.parse_args(
-        [
-            "browser", "https://t.example/x",
-            "--technique", "RECON", "--intent", "render",
-            "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120",
-            "--eval", "window.__xss_fired",
-            "--header", "X-Debug: 1", "--header", "X-Trace: 2",
-        ]
-    )
+    args = parser.parse_args([
+        "browser", "https://t.example/x", "--technique", "RECON", "--intent", "render",
+        "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120", "--eval",
+        "window.__xss_fired", "--header", "X-Debug: 1", "--header", "X-Trace: 2",
+    ])
     assert args.eval_js == "window.__xss_fired"
     assert args.extra_headers == ["X-Debug: 1", "X-Trace: 2"]
 
@@ -459,19 +438,12 @@ def test_register_wires_playwright_workflow_flags():
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
     kb.register(sub)
-    args = parser.parse_args(
-        [
-            "browser", "https://t.example/x",
-            "--technique", "RECON", "--intent", "workflow",
-            "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120",
-            "--attribution-scope", "all",
-            "--steps-file", "steps.json",
-            "--har-out", "scans/browser/run.har",
-            "--capture-bodies",
-            "--body-dir", "scans/browser/bodies",
-            "--max-body-bytes", "4096",
-        ]
-    )
+    args = parser.parse_args([
+        "browser", "https://t.example/x", "--technique", "RECON", "--intent", "workflow",
+        "--probe-kind", "baseline", "--phase", "recon", "--timeout", "120", "--attribution-scope",
+        "all", "--steps-file", "steps.json", "--har-out", "scans/browser/run.har",
+        "--capture-bodies", "--body-dir", "scans/browser/bodies", "--max-body-bytes", "4096",
+    ])
     assert args.attribution_scope == "all"
     assert args.steps_file == "steps.json"
     assert args.har_out.endswith("run.har")
@@ -609,10 +581,9 @@ def test_run_exposes_declared_navigation_urls_as_policy_anchors(tmp_path, monkey
     ]
 
 
-def test_run_threads_scope_entries_for_attribution_routing(tmp_path, monkeypatch):
+def test_run_threads_scope_entries_for_attribution_routing(eng_dir, monkeypatch):
     # Attribution is a SCOPE decision, so the normalized allow/deny entries travel
     # in the execution plan and the driver answers per request host.
-    eng_dir = tmp_path / "eng"
     _write_scope(
         eng_dir,
         hosts=["*.example.com", "10.0.0.0/24"],
@@ -656,27 +627,24 @@ def test_driver_attribution_matcher_mirrors_the_shared_scope_primitive(host, adm
     assert scope_lib.host_admitted(host, allow, deny) is admitted
 
 
-def test_run_refuses_mandated_attribution_with_an_unresolvable_boundary(tmp_path):
+def test_run_refuses_mandated_attribution_with_an_unresolvable_boundary(eng_dir):
     # The one fail-closed case: the program mandates a header and scope.json
     # declares no host, so no request could be attributed. Refuse before
     # navigating rather than send unattributed in-scope traffic.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "researcher"})
     with pytest.raises(AssessError, match="cannot resolve the scope boundary"):
         kb.run(_browser_args(engagement_dir=str(eng_dir)))
 
 
-def test_run_without_mandated_headers_tolerates_an_empty_scope(tmp_path, monkeypatch):
+def test_run_without_mandated_headers_tolerates_an_empty_scope(eng_dir, monkeypatch):
     # No mandated header means nothing to misattribute: an empty boundary is not
     # a reason to refuse a render.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, hosts=[])
     config = json.loads(_capture_run(monkeypatch, _browser_args(engagement_dir=str(eng_dir)))["cmd"][3])
     assert config["attribution_allow"] == []
 
 
-def test_run_attribution_scope_all_names_the_leak_on_stderr(tmp_path, monkeypatch, capsys):
-    eng_dir = tmp_path / "eng"
+def test_run_attribution_scope_all_names_the_leak_on_stderr(eng_dir, monkeypatch, capsys):
     _write_scope(eng_dir, required_headers={"X-HackerOne": "researcher"})
     cap = _capture_run(
         monkeypatch,
@@ -687,10 +655,9 @@ def test_run_attribution_scope_all_names_the_leak_on_stderr(tmp_path, monkeypatc
     assert "X-HackerOne" in err and "leaks off-target" in err
 
 
-def test_run_attribution_scope_all_bypasses_the_boundary_refusal(tmp_path, monkeypatch):
+def test_run_attribution_scope_all_bypasses_the_boundary_refusal(eng_dir, monkeypatch):
     # 'all' answers the boundary question by fiat, so it is the documented way
     # past the refusal rather than a dead end.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, hosts=[], required_headers={"X-HackerOne": "researcher"})
     cap = _capture_run(
         monkeypatch,
@@ -774,8 +741,7 @@ def test_driver_creates_body_capture_directory_before_response_writes():
     assert "os.makedirs(directory, exist_ok=True)" in setup
 
 
-def test_run_prepares_identity_for_browser_and_audit(tmp_path, monkeypatch):
-    eng_dir = tmp_path / "eng"
+def test_run_prepares_identity_for_browser_and_audit(eng_dir, monkeypatch):
     _write_scope(eng_dir)
     monkeypatch.setattr(
         kb,
@@ -801,8 +767,7 @@ def test_run_prepares_identity_for_browser_and_audit(tmp_path, monkeypatch):
     assert cap["kwargs"]["prepared_auth_context"] == "alice"
 
 
-def test_run_passes_explicit_scope_to_browser_identity_resolution(tmp_path, monkeypatch):
-    eng_dir = tmp_path / "eng"
+def test_run_passes_explicit_scope_to_browser_identity_resolution(eng_dir, monkeypatch):
     _write_scope(eng_dir)
     scopes = []
 
@@ -830,9 +795,8 @@ def test_run_passes_explicit_scope_to_browser_identity_resolution(tmp_path, monk
 
 
 def test_run_loads_storage_state_only_from_explicit_engagement_artifact(
-    tmp_path, monkeypatch
+    eng_dir, monkeypatch
 ):
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir)
     artifact = eng_dir / "tools" / "auth" / "browser-state.json"
     artifact.parent.mkdir(parents=True)
@@ -869,8 +833,7 @@ def test_run_loads_storage_state_only_from_explicit_engagement_artifact(
     assert cap["kwargs"]["prepared_auth_context"] == "member"
 
 
-def test_run_rejects_storage_state_without_identity(tmp_path, monkeypatch):
-    eng_dir = tmp_path / "eng"
+def test_run_rejects_storage_state_without_identity(eng_dir, monkeypatch):
     _write_scope(eng_dir)
     artifact = eng_dir / "state.json"
     artifact.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
@@ -884,9 +847,8 @@ def test_run_rejects_storage_state_without_identity(tmp_path, monkeypatch):
 
 
 def test_run_rejects_storage_state_for_missing_or_disabled_identity(
-    tmp_path, monkeypatch
+    eng_dir, monkeypatch
 ):
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir)
     artifact = eng_dir / "state.json"
     artifact.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
@@ -913,9 +875,8 @@ def test_run_rejects_storage_state_for_missing_or_disabled_identity(
 
 
 def test_run_rejects_storage_state_artifact_that_escapes_engagement(
-    tmp_path, monkeypatch
+    tmp_path, eng_dir, monkeypatch
 ):
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir)
     outside = tmp_path / "outside.json"
     outside.write_text('{"cookies": [], "origins": []}', encoding="utf-8")
@@ -929,8 +890,7 @@ def test_run_rejects_storage_state_artifact_that_escapes_engagement(
         )
 
 
-def test_run_refuses_unprepared_requested_identity(tmp_path, monkeypatch):
-    eng_dir = tmp_path / "eng"
+def test_run_refuses_unprepared_requested_identity(eng_dir, monkeypatch):
     _write_scope(eng_dir)
     monkeypatch.setattr(
         kb,
@@ -979,7 +939,7 @@ _REJECTED_PATHS = (
     "attr, plan_key", [(attr, key) for attr, key, _field in _OUTPUT_PATH_FLAGS]
 )
 def test_container_absolute_artifact_path_matches_the_relative_form(
-    tmp_path, monkeypatch, attr, plan_key
+    eng_dir, monkeypatch, attr, plan_key
 ):
     """`/engagements/<key>/scans/x` and a bare `scans/x` resolve identically.
 
@@ -987,7 +947,6 @@ def test_container_absolute_artifact_path_matches_the_relative_form(
     other kali verb accepts (``kali_cli._anchor_list_path``); browser used to
     reject it outright, inverting the convention for this one verb.
     """
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir)
     relative = _capture_run(
         monkeypatch, _browser_args(engagement_dir=str(eng_dir), **{attr: "scans/x"})
@@ -1005,9 +964,8 @@ def test_container_absolute_artifact_path_matches_the_relative_form(
     "attr, field", [(attr, field) for attr, _key, field in _OUTPUT_PATH_FLAGS]
 )
 def test_artifact_path_rejection_names_its_own_flag(
-    tmp_path, monkeypatch, attr, field, bad
+    eng_dir, monkeypatch, attr, field, bad
 ):
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir)
     with pytest.raises(AssessError) as excinfo:
         _capture_run(
@@ -1019,8 +977,7 @@ def test_artifact_path_rejection_names_its_own_flag(
     assert repr(bad) in message
 
 
-def test_storage_state_accepts_the_container_absolute_form(tmp_path, monkeypatch):
-    eng_dir = tmp_path / "eng"
+def test_storage_state_accepts_the_container_absolute_form(eng_dir, monkeypatch):
     _write_scope(eng_dir)
     artifact = eng_dir / "tools" / "auth" / "browser-state.json"
     artifact.parent.mkdir(parents=True)
@@ -1051,8 +1008,7 @@ def test_storage_state_accepts_the_container_absolute_form(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("bad", _REJECTED_PATHS)
-def test_storage_state_rejection_names_its_own_flag(tmp_path, monkeypatch, bad):
-    eng_dir = tmp_path / "eng"
+def test_storage_state_rejection_names_its_own_flag(eng_dir, monkeypatch, bad):
     _write_scope(eng_dir)
     with pytest.raises(AssessError) as excinfo:
         kb.run(_browser_args(engagement_dir=str(eng_dir), storage_state=bad))
@@ -1095,14 +1051,13 @@ def test_browser_contract_resolves():
 # --------------------------------------------------------------------------- #
 
 
-def test_target_not_declared_in_scope_hosts_warns_before_navigating(tmp_path, monkeypatch, capsys):
+def test_target_not_declared_in_scope_hosts_warns_before_navigating(eng_dir, monkeypatch, capsys):
     # Vigil does not gate execution on scope (`host_admitted` is a predicate, not
     # a gate), and recon-discovered siblings live in `discovered_hosts`, not
     # `hosts`. Under scope routing such a run navigates the real target with NO
     # program attribution — and `kali_output` reports `browser` as
     # self-attributing, so no injection warning fires either. The omission must
     # be loud at dispatch, not buried in `omitted_attribution_origins`.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     cap = _capture_run(
         monkeypatch,
@@ -1117,8 +1072,7 @@ def test_target_not_declared_in_scope_hosts_warns_before_navigating(tmp_path, mo
     assert config["url"] == "https://app.example.com/dash"
 
 
-def test_declared_target_navigates_without_the_warning(tmp_path, monkeypatch, capsys):
-    eng_dir = tmp_path / "eng"
+def test_declared_target_navigates_without_the_warning(eng_dir, monkeypatch, capsys):
     _write_scope(eng_dir, hosts=["*.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     _capture_run(
         monkeypatch,
@@ -1127,9 +1081,8 @@ def test_declared_target_navigates_without_the_warning(tmp_path, monkeypatch, ca
     assert "WITHOUT the mandated" not in capsys.readouterr().err
 
 
-def test_attribution_scope_all_suppresses_the_unattributed_warning(tmp_path, monkeypatch, capsys):
+def test_attribution_scope_all_suppresses_the_unattributed_warning(eng_dir, monkeypatch, capsys):
     # `all` attributes every origin, so nothing is left unattributed to warn about.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, hosts=["api.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     _capture_run(
         monkeypatch,
@@ -1142,11 +1095,10 @@ def test_attribution_scope_all_suppresses_the_unattributed_warning(tmp_path, mon
     assert "WITHOUT the mandated" not in capsys.readouterr().err
 
 
-def test_declared_navigate_steps_are_checked_too(tmp_path, monkeypatch, capsys):
+def test_declared_navigate_steps_are_checked_too(tmp_path, eng_dir, monkeypatch, capsys):
     # Identity headers already follow declared navigate steps; the attribution
     # check must cover the same hosts or a multi-step workflow leaks an
     # unattributed leg.
-    eng_dir = tmp_path / "eng"
     _write_scope(eng_dir, hosts=["app.example.com"], required_headers={"X-Bug-Bounty": "researcher"})
     steps = tmp_path / "steps.json"
     steps.write_text(

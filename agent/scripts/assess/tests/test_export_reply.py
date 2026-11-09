@@ -28,6 +28,7 @@ import pytest
 
 from assess.commands import export_reply
 from assess.lib.client import AssessError
+from _fake_client import StubClient
 
 # An INTERNAL engagement UUID (an id the backend assigns) that must be FLAGGED (not
 # rewritten) when it leaks into the pasteable reply body.
@@ -41,7 +42,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Routes GETs to canned payloads; records every GET/POST/PATCH endpoint."""
 
     def __init__(
@@ -100,15 +101,6 @@ class _FakeClient:
     def patch(self, endpoint: str, payload: dict, **kwargs) -> dict:
         self.patches.append((endpoint, payload))
         return {"slug": endpoint.split("/", 1)[-1], **payload}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 # -- fixtures / builders ------------------------------------------------------

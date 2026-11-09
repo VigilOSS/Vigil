@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import sqlite3
 
+import pytest
 from app.services import state_manager
 from tests.test_engagements_api import write_engagement
 
@@ -28,6 +29,16 @@ def _seed(client, isolate_settings) -> int:
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
     return int(response.json()["id"])
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _create_service(client, *, endpoint: str, state: str = "up") -> None:
@@ -96,9 +107,8 @@ def _record_decision(client, *, kind: str, payload: dict, surfaced: bool = True)
 # ---------------------------------------------------------------------------
 
 
-def test_per_host_coverage_returns_objectives_and_empty_hosts(client, isolate_settings):
+def test_per_host_coverage_returns_objectives_and_empty_hosts(client, seeded_engagement):
     """An engagement with no signal still returns the objective vocabulary."""
-    _seed(client, isolate_settings)
 
     response = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host")
     assert response.status_code == 200, response.text
@@ -114,8 +124,7 @@ def test_per_host_coverage_returns_objectives_and_empty_hosts(client, isolate_se
     assert body["engagement_signals"]["waf_intel_count"] == 0
 
 
-def test_per_host_coverage_marks_service_inventory_met_for_live_service(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_per_host_coverage_marks_service_inventory_met_for_live_service(client, seeded_engagement):
     _create_service(client, endpoint="api.target.example", state="up")
 
     body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
@@ -130,9 +139,8 @@ def test_per_host_coverage_marks_service_inventory_met_for_live_service(client, 
     assert "waf_tier" in row["unmet_objectives"]
 
 
-def test_per_host_coverage_waf_intel_satisfies_waf_tier_engagement_wide(client, isolate_settings):
+def test_per_host_coverage_waf_intel_satisfies_waf_tier_engagement_wide(client, seeded_engagement):
     """A Cloudflare tech-component row satisfies waf_tier for every host."""
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
     _create_service(client, endpoint="admin.target.example")
     _record_tech_component(client, component="Cloudflare", source_name="wafw00f")
@@ -144,9 +152,8 @@ def test_per_host_coverage_waf_intel_satisfies_waf_tier_engagement_wide(client, 
         assert rows[host]["outcomes"]["waf_tier"]["met"] is True, rows[host]
 
 
-def test_per_host_coverage_osint_satisfied_by_intel_people_alone(client, isolate_settings):
+def test_per_host_coverage_osint_satisfied_by_intel_people_alone(client, seeded_engagement):
     """OSINT is engagement-level: a single intel_people row satisfies every host."""
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="target.example")
 
     # Insert intel_people row directly (POST helper is not strictly needed for
@@ -162,9 +169,8 @@ def test_per_host_coverage_osint_satisfied_by_intel_people_alone(client, isolate
     assert rows["target.example"]["outcomes"]["osint"]["met"] is True
 
 
-def test_per_host_coverage_deferral_marks_objective_deferred(client, isolate_settings):
+def test_per_host_coverage_deferral_marks_objective_deferred(client, seeded_engagement):
     """A coverage_deferral decision flags the named objective and removes it from unmet."""
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
     _record_decision(
         client,
@@ -189,9 +195,8 @@ def test_per_host_coverage_deferral_marks_objective_deferred(client, isolate_set
     assert any(d["kind"] == "coverage_deferral" for d in row["deferrals"])
 
 
-def test_per_host_coverage_deferral_normalizes_url_shaped_target(client, isolate_settings):
+def test_per_host_coverage_deferral_normalizes_url_shaped_target(client, seeded_engagement):
     """A deferral whose `target` is a URL or host:port must match the bare-hostname key."""
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
     _record_decision(
         client,
@@ -223,7 +228,7 @@ def test_per_host_coverage_deferral_normalizes_url_shaped_target(client, isolate
     assert "tech_fingerprint" not in row["unmet_objectives"]
 
 
-def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_settings):
+def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, seeded_engagement):
     """Large engagements can legitimately accumulate >500 active
     coverage_deferral rows; the per-host projection must read all of them so
     deferred objectives do not silently reappear as unmet beyond the cap.
@@ -231,7 +236,6 @@ def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_set
     Regression: the helper previously called
     ``list_decisions(..., limit=500)`` which truncated silently.
     """
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
     # 510 distinct host deferrals covering directory_fuzz for tail-host.test
     # plus 509 unrelated hosts. Use --inline-style POSTs.
@@ -282,9 +286,8 @@ def test_per_host_coverage_deferral_lookup_not_capped_at_500(client, isolate_set
     assert rows["h0000.target.example"]["outcomes"]["directory_fuzz"]["deferred"] is True
 
 
-def test_per_host_coverage_resolved_deferral_no_longer_satisfies(client, isolate_settings):
+def test_per_host_coverage_resolved_deferral_no_longer_satisfies(client, seeded_engagement):
     """A resolved coverage_deferral (the operator un-deferred) returns the host to unmet status."""
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
 
     response = client.post(
@@ -318,7 +321,7 @@ def test_per_host_coverage_resolved_deferral_no_longer_satisfies(client, isolate
 
 
 def test_per_host_coverage_does_not_read_command_runs_via_monkeypatch(
-    client, isolate_settings, monkeypatch
+    client, monkeypatch, seeded_engagement
 ):
     """Hostile-regression assertion: per_host_coverage must NEVER touch assessment_command_runs.
 
@@ -327,7 +330,6 @@ def test_per_host_coverage_does_not_read_command_runs_via_monkeypatch(
     is that the function reads outcome tables only — adding a join against
     ``assessment_command_runs`` is exactly the regression this catches.
     """
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
     _create_surface(client, target_descriptor="https://api.target.example/v1")
     _record_tech_component(client, component="Cloudflare")
@@ -383,9 +385,8 @@ def test_per_host_coverage_does_not_read_command_runs_via_monkeypatch(
     assert any("intel_tech_components" in sql.lower() for sql in seen_sql), seen_sql
 
 
-def test_report_readiness_includes_per_host_coverage(client, isolate_settings):
+def test_report_readiness_includes_per_host_coverage(client, seeded_engagement):
     """C58 — /report-readiness embeds the C40 per-host projection for the UI."""
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
 
     response = client.get(f"{ASSESSMENT_BASE}/report-readiness")
@@ -398,10 +399,8 @@ def test_report_readiness_includes_per_host_coverage(client, isolate_settings):
 
 
 def test_report_readiness_omits_per_host_projection_when_projection_fails(
-    client, isolate_settings, monkeypatch, caplog
+    client, monkeypatch, caplog, seeded_engagement
 ):
-    _seed(client, isolate_settings)
-
     def fail_projection(_engagement_id):
         raise RuntimeError("projection failed")
 
@@ -426,8 +425,7 @@ def _post_decision_raw(client, *, kind: str, payload: dict, surfaced: bool = Tru
     )
 
 
-def test_coverage_deferral_validator_accepts_canonical_payload(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_coverage_deferral_validator_accepts_canonical_payload(client, seeded_engagement):
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -441,8 +439,7 @@ def test_coverage_deferral_validator_accepts_canonical_payload(client, isolate_s
     assert response.status_code == 201, response.text
 
 
-def test_coverage_deferral_validator_rejects_missing_host_aliases(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_coverage_deferral_validator_rejects_missing_host_aliases(client, seeded_engagement):
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -455,8 +452,7 @@ def test_coverage_deferral_validator_rejects_missing_host_aliases(client, isolat
     assert "host" in response.text.lower() or "hostname" in response.text.lower()
 
 
-def test_coverage_deferral_validator_rejects_unknown_objective(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_coverage_deferral_validator_rejects_unknown_objective(client, seeded_engagement):
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -469,8 +465,7 @@ def test_coverage_deferral_validator_rejects_unknown_objective(client, isolate_s
     assert response.status_code == 422
 
 
-def test_coverage_deferral_validator_rejects_empty_objectives(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_coverage_deferral_validator_rejects_empty_objectives(client, seeded_engagement):
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -483,8 +478,7 @@ def test_coverage_deferral_validator_rejects_empty_objectives(client, isolate_se
     assert response.status_code == 422
 
 
-def test_coverage_deferral_validator_rejects_missing_reason(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_coverage_deferral_validator_rejects_missing_reason(client, seeded_engagement):
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -497,8 +491,7 @@ def test_coverage_deferral_validator_rejects_missing_reason(client, isolate_sett
     assert "reason" in response.text.lower()
 
 
-def test_coverage_deferral_validator_accepts_hosts_list_alias(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_coverage_deferral_validator_accepts_hosts_list_alias(client, seeded_engagement):
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -511,13 +504,14 @@ def test_coverage_deferral_validator_accepts_hosts_list_alias(client, isolate_se
     assert response.status_code == 201, response.text
 
 
-def test_coverage_deferral_validator_accepts_engagement_wide_without_host(client, isolate_settings):
+def test_coverage_deferral_validator_accepts_engagement_wide_without_host(
+    client, seeded_engagement
+):
     """`engagement_wide=true` is the supported shape for engagement-level
     skips (e.g., OSINT out-of-scope for the whole engagement). Without this,
     operators would have to duplicate the same deferral per host on wildcard
     engagements — the CLI guidance recommends the engagement-wide form, so
     the validator must accept it."""
-    _seed(client, isolate_settings)
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -531,10 +525,11 @@ def test_coverage_deferral_validator_accepts_engagement_wide_without_host(client
     assert response.status_code == 201, response.text
 
 
-def test_coverage_deferral_validator_rejects_engagement_wide_mixed_with_host(client, isolate_settings):
+def test_coverage_deferral_validator_rejects_engagement_wide_mixed_with_host(
+    client, seeded_engagement
+):
     """Mixing engagement_wide=true with a host field is ambiguous (which
     wins?) and almost always an operator mistake. Reject outright."""
-    _seed(client, isolate_settings)
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -549,14 +544,15 @@ def test_coverage_deferral_validator_rejects_engagement_wide_mixed_with_host(cli
     assert "engagement_wide" in response.text.lower()
 
 
-def test_per_host_coverage_engagement_wide_deferral_satisfies_every_host(client, isolate_settings):
+def test_per_host_coverage_engagement_wide_deferral_satisfies_every_host(
+    client, seeded_engagement
+):
     """An engagement-wide deferral marks the named objectives as deferred
     on EVERY host with signal — that's the whole point of the engagement-
     wide shape. Without this fold, operators on wildcard/large engagements
     have to record duplicate per-host deferrals for objectives that are
     fundamentally engagement-level (OSINT scope decisions, etc.).
     """
-    _seed(client, isolate_settings)
     _create_service(client, endpoint="api.target.example")
     _create_service(client, endpoint="edge.target.example")
     _record_decision(
@@ -585,12 +581,11 @@ def test_per_host_coverage_engagement_wide_deferral_satisfies_every_host(client,
         assert any(p.get("engagement_wide") is True for p in deferral_payloads)
 
 
-def test_coverage_deferral_engagement_wide_rejects_per_host_objectives(client, isolate_settings):
+def test_coverage_deferral_engagement_wide_rejects_per_host_objectives(client, seeded_engagement):
     """engagement_wide=true is restricted to objectives that legitimately apply
     program-wide (osint, waf_tier, directory_fuzz). Per-host signals like
     service_inventory and tech_fingerprint require an explicit host / hosts[] list
     so the audit row carries the per-host rationale."""
-    _seed(client, isolate_settings)
     for forbidden in ("service_inventory", "tech_fingerprint"):
         response = _post_decision_raw(
             client,
@@ -608,11 +603,10 @@ def test_coverage_deferral_engagement_wide_rejects_per_host_objectives(client, i
         assert forbidden in body
 
 
-def test_coverage_deferral_engagement_wide_rejects_mixed_objective_list(client, isolate_settings):
+def test_coverage_deferral_engagement_wide_rejects_mixed_objective_list(client, seeded_engagement):
     """If any objective in a mixed list is per-host, the whole engagement_wide
     deferral is rejected — partial acceptance would silently drop the per-host
     objective from the audit ledger."""
-    _seed(client, isolate_settings)
     response = _post_decision_raw(
         client,
         kind="coverage_deferral",
@@ -627,9 +621,8 @@ def test_coverage_deferral_engagement_wide_rejects_mixed_objective_list(client, 
     assert "service_inventory" in response.text.lower()
 
 
-def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, isolate_settings):
+def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, seeded_engagement):
     """Unknown kinds keep the free-form payload contract — only `coverage_deferral` is gated."""
-    _seed(client, isolate_settings)
     response = _post_decision_raw(
         client,
         kind="scope_decision",
@@ -643,12 +636,9 @@ def test_coverage_deferral_validator_does_not_constrain_other_kinds(client, isol
 # ---------------------------------------------------------------------------
 
 
-def test_per_host_coverage_embeds_scope_hosts_when_scope_json_present(
-    client, isolate_settings, tmp_path
-):
+def test_per_host_coverage_embeds_scope_hosts_when_scope_json_present(client, seeded_engagement):
     """The /coverage-readiness/by-host endpoint surfaces the raw scope.json
     hosts list so the frontend can render the scope-literals-only toggle."""
-    _seed(client, isolate_settings)
     # _seed writes a scope.json — verify the response carries it back.
     body = client.get(f"{ASSESSMENT_BASE}/coverage-readiness/by-host").json()
     assert "scope_hosts" in body
@@ -656,11 +646,10 @@ def test_per_host_coverage_embeds_scope_hosts_when_scope_json_present(
     assert isinstance(body["scope_hosts"], list)
 
 
-def test_report_readiness_per_host_coverage_embeds_scope_hosts(client, isolate_settings):
+def test_report_readiness_per_host_coverage_embeds_scope_hosts(client, seeded_engagement):
     """The /report-readiness endpoint (which the FE Readiness panel fetches)
     also embeds scope_hosts under per_host_coverage so the toggle works
     without a second request."""
-    _seed(client, isolate_settings)
     body = client.get(f"{ASSESSMENT_BASE}/report-readiness").json()
     assert "per_host_coverage" in body
     assert "scope_hosts" in body["per_host_coverage"]

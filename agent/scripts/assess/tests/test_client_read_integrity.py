@@ -10,13 +10,23 @@ import pytest
 from assess.lib.client import AssessError, AssessmentClient
 
 
-@pytest.fixture(params=["assessment", "engagement"])
-def api_read(request, monkeypatch):
+def _stubbed_client(monkeypatch):
+    """A real client whose single HTTP connection is a Mock the test drives.
+
+    Returns ``(client, connection, response)``: the test sets the status/body on
+    *response* and asserts on the exact request *connection* received.
+    """
     client = AssessmentClient("http://localhost:8000/orchestrator", "example")
     connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
     response = Mock(spec=http.client.HTTPResponse)
     connection.getresponse.return_value = response
     monkeypatch.setattr(client, "_get_conn", lambda _: connection)
+    return client, connection, response
+
+
+@pytest.fixture(params=["assessment", "engagement"])
+def api_read(request, monkeypatch):
+    client, connection, response = _stubbed_client(monkeypatch)
     if request.param == "assessment":
         path = "/orchestrator/engagements/example/assessment/findings"
 
@@ -74,13 +84,9 @@ def test_http_error_is_not_reclassified_as_a_json_error(api_read, status):
 
 
 def test_binary_read_preserves_response_bytes_exactly(monkeypatch):
-    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
-    connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
-    response = Mock(spec=http.client.HTTPResponse)
+    client, connection, response = _stubbed_client(monkeypatch)
     response.status = 200
     response.read.return_value = b"renderer bytes: \xc3\xa9\n\xff"
-    connection.getresponse.return_value = response
-    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
 
     assert client.get_bytes("submissions/VA-001/replies/1/sent/download") == (
         b"renderer bytes: \xc3\xa9\n\xff"
@@ -141,11 +147,7 @@ def test_structured_point_helpers_reject_malformed_non_object_responses(
     ]
 )
 def api_write(request, monkeypatch):
-    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
-    connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
-    response = Mock(spec=http.client.HTTPResponse)
-    connection.getresponse.return_value = response
-    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
+    client, connection, response = _stubbed_client(monkeypatch)
 
     payload = {"title": "preserve me"}
     if request.param == "assessment-post":
@@ -256,27 +258,19 @@ def test_ambiguous_write_failure_is_not_retried(api_write, monkeypatch):
 
 
 def test_code_module_bulk_create_preserves_its_documented_array_response(monkeypatch):
-    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
-    connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
-    response = Mock(spec=http.client.HTTPResponse)
+    client, _connection, response = _stubbed_client(monkeypatch)
     response.status = 201
     rows = [{"id": 7, "module_key": "auth_login"}]
     response.read.return_value = json.dumps(rows).encode()
-    connection.getresponse.return_value = response
-    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
 
     assert client.post("code/modules", {"repo_id": 1, "modules": [{}]}) == rows
 
 
 def test_code_analysis_queue_fetch_preserves_its_documented_array_response(monkeypatch):
-    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
-    connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
-    response = Mock(spec=http.client.HTTPResponse)
+    client, _connection, response = _stubbed_client(monkeypatch)
     response.status = 200
     rows = [{"id": 11, "assigned_agent": "code-hunter"}]
     response.read.return_value = json.dumps(rows).encode()
-    connection.getresponse.return_value = response
-    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
 
     assert client.post(
         "code/analysis-queue/fetch",
@@ -285,14 +279,10 @@ def test_code_analysis_queue_fetch_preserves_its_documented_array_response(monke
 
 
 def test_run_source_import_preserves_its_documented_array_response(monkeypatch):
-    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
-    connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
-    response = Mock(spec=http.client.HTTPResponse)
+    client, _connection, response = _stubbed_client(monkeypatch)
     response.status = 201
     rows = [{"id": 29, "run_id": 17, "path": "src/auth.py"}]
     response.read.return_value = json.dumps(rows).encode()
-    connection.getresponse.return_value = response
-    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
 
     assert client.post(
         "assessment-runs/17/sources",
@@ -301,13 +291,9 @@ def test_run_source_import_preserves_its_documented_array_response(monkeypatch):
 
 
 def test_no_content_engagement_delete_remains_supported(monkeypatch):
-    client = AssessmentClient("http://localhost:8000/orchestrator", "example")
-    connection = Mock(spec=http.client.HTTPConnection, sock=Mock())
-    response = Mock(spec=http.client.HTTPResponse)
+    client, connection, response = _stubbed_client(monkeypatch)
     response.status = 204
     response.read.return_value = b""
-    connection.getresponse.return_value = response
-    monkeypatch.setattr(client, "_get_conn", lambda _: connection)
 
     assert client.delete_engagement("credentials/user-a") is None
     connection.request.assert_called_once_with(

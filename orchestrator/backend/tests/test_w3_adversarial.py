@@ -53,6 +53,27 @@ def _register(client, key: str) -> str:
     assert dispatch.status_code == 201, dispatch.text
     return base
 
+def _finding_payload(
+    *, slug: str, title: str, severity: str, workflow_status: str, summary: str
+) -> dict:
+    """The draft/active unreviewed finding body the W3 gate cases post."""
+    return {
+        "slug": slug,
+        "title": title,
+        "severity": severity,
+        "workflow_status": workflow_status,
+        "verification_status": "unreviewed",
+        "canonical_location": "https://api.example.com/x",
+        "summary": summary,
+        "source_name": "vulnerability-analyst",
+        "provenance": {"agent_id": AUTHOR_AGENT_ID},
+    }
+
+def _engagement(engagements_dir: Path, client, key: str, engagement_type: str) -> str:
+    """Write the engagement, register its author dispatch, return its API base."""
+    _write_engagement(engagements_dir, key=key, engagement_type=engagement_type)
+    return _register(client, key)
+
 def _ingest_routes(client, base: str, *, host: str, paths: list[str]) -> None:
     for path in paths:
         resp = client.post(
@@ -80,8 +101,7 @@ SIX_PATHS = ["/alpha", "/bravo", "/charlie", "/delta", "/echo", "/foxtrot"]
 def test_adversarial_resolved_deferral_does_not_clear_host(client, isolate_settings):
     """After resolving a deferral, the uncovered host should REBLOCK."""
     eng_key = "2026-06-20-090000-adv-a1"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "web")
     _ingest_routes(client, base, host="app.example.com", paths=SIX_PATHS)
 
     # Initially blocked
@@ -117,8 +137,7 @@ def test_adversarial_resolved_deferral_does_not_clear_host(client, isolate_setti
 def test_adversarial_named_deferral_does_not_clear_others(client, isolate_settings):
     """A named-host deferral should NOT clear other uncovered hosts."""
     eng_key = "2026-06-20-090000-adv-b1"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "web")
     _ingest_routes(client, base, host="app1.example.com", paths=SIX_PATHS)
     _ingest_routes(client, base, host="app2.example.com", paths=SIX_PATHS)
 
@@ -150,22 +169,17 @@ def test_adversarial_named_deferral_does_not_clear_others(client, isolate_settin
 def test_adversarial_unreviewed_critical_blocks(client, isolate_settings):
     """Critical unreviewed should block (not just medium)."""
     eng_key = "2026-06-20-090000-adv-c1"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "web")
 
     resp = client.post(
         f"{base}/findings",
-        json={
-            "slug": "VA-001",
-            "title": "Ungraded critical",
-            "severity": "critical",
-            "workflow_status": "draft",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://api.example.com/x",
-            "summary": "needs a grade",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": AUTHOR_AGENT_ID},
-        },
+        json=_finding_payload(
+            slug="VA-001",
+            title="Ungraded critical",
+            severity="critical",
+            workflow_status="draft",
+            summary="needs a grade",
+        ),
     )
     assert resp.status_code == 201, resp.text
 
@@ -176,22 +190,17 @@ def test_adversarial_unreviewed_critical_blocks(client, isolate_settings):
 def test_adversarial_unreviewed_high_blocks(client, isolate_settings):
     """High unreviewed should block (not just medium)."""
     eng_key = "2026-06-20-090000-adv-c2"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "web")
 
     resp = client.post(
         f"{base}/findings",
-        json={
-            "slug": "VA-002",
-            "title": "Ungraded high",
-            "severity": "high",
-            "workflow_status": "draft",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://api.example.com/x",
-            "summary": "needs a grade",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": AUTHOR_AGENT_ID},
-        },
+        json=_finding_payload(
+            slug="VA-002",
+            title="Ungraded high",
+            severity="high",
+            workflow_status="draft",
+            summary="needs a grade",
+        ),
     )
     assert resp.status_code == 201, resp.text
 
@@ -203,24 +212,19 @@ def test_adversarial_unreviewed_high_blocks(client, isolate_settings):
 def test_adversarial_code_engagement_not_blocked(client, isolate_settings):
     """CODE engagement must NOT be blocked by W3 gate."""
     eng_key = "2026-06-20-090000-adv-d1"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="code")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "code")
     _ingest_routes(client, base, host="app.example.com", paths=SIX_PATHS)
 
     # Draft unreviewed finding
     resp = client.post(
         f"{base}/findings",
-        json={
-            "slug": "VA-003",
-            "title": "Ungraded",
-            "severity": "critical",
-            "workflow_status": "draft",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://api.example.com/x",
-            "summary": "needs a grade",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": AUTHOR_AGENT_ID},
-        },
+        json=_finding_payload(
+            slug="VA-003",
+            title="Ungraded",
+            severity="critical",
+            workflow_status="draft",
+            summary="needs a grade",
+        ),
     )
     assert resp.status_code == 201, resp.text
 
@@ -232,24 +236,19 @@ def test_adversarial_code_engagement_not_blocked(client, isolate_settings):
 def test_adversarial_blue_engagement_not_blocked(client, isolate_settings):
     """BLUE engagement must NOT be blocked by W3 gate."""
     eng_key = "2026-06-20-090000-adv-d2"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="blue")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "blue")
     _ingest_routes(client, base, host="app.example.com", paths=SIX_PATHS)
 
     # Draft unreviewed finding
     resp = client.post(
         f"{base}/findings",
-        json={
-            "slug": "VA-004",
-            "title": "Ungraded",
-            "severity": "critical",
-            "workflow_status": "draft",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://api.example.com/x",
-            "summary": "needs a grade",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": AUTHOR_AGENT_ID},
-        },
+        json=_finding_payload(
+            slug="VA-004",
+            title="Ungraded",
+            severity="critical",
+            workflow_status="draft",
+            summary="needs a grade",
+        ),
     )
     assert resp.status_code == 201, resp.text
 
@@ -262,23 +261,18 @@ def test_adversarial_blue_engagement_not_blocked(client, isolate_settings):
 def test_pending_runtime_proof_clears_unreviewed_but_not_reportable(client, isolate_settings):
     """A finding with pending_runtime_proof should clear the unreviewed gate but not be in final report."""
     eng_key = "2026-06-20-090000-edge-prp"
-    _write_engagement(isolate_settings["engagements_dir"], key=eng_key, engagement_type="web")
-    base = _register(client, eng_key)
+    base = _engagement(isolate_settings["engagements_dir"], client, eng_key, "web")
 
     # Create an active critical finding
     resp = client.post(
         f"{base}/findings",
-        json={
-            "slug": "VA-500",
-            "title": "Critical pending proof",
-            "severity": "critical",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://api.example.com/x",
-            "summary": "needs verification",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": AUTHOR_AGENT_ID},
-        },
+        json=_finding_payload(
+            slug="VA-500",
+            title="Critical pending proof",
+            severity="critical",
+            workflow_status="active",
+            summary="needs verification",
+        ),
     )
     assert resp.status_code == 201, resp.text
 

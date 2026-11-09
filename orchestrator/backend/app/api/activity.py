@@ -7,10 +7,8 @@ the merged newest-first feed of both (``services/activity_feed.py``).
 """
 from __future__ import annotations
 
-import functools
 from typing import Any, Literal
 
-import anyio
 from fastapi import APIRouter, Query, status
 from pydantic import BaseModel
 
@@ -19,6 +17,7 @@ from ..services import activity as activity_service
 from ..services import activity_feed
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
+from .assessment import _offload
 from .intel_schemas import (
     ActivityEntryRecord,
     ActivityEntryRecordRequest,
@@ -159,21 +158,19 @@ def list_activity_entries(
 async def create_activity_entry(
     engagement_key: str, request: ActivityEntryRecordRequest
 ) -> LosslessJSONResponse:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            activity_service.record_activity_entry,
-            engagement.id,
-            occurred_at=request.occurred_at,
-            actor_kind=request.actor_kind,
-            actor_name=request.actor_name,
-            title=request.title,
-            action=request.action,
-            result=request.result,
-            artifact_ref=request.artifact_ref,
-            body_markdown=request.body_markdown,
-            metadata=request.metadata,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        activity_service.record_activity_entry,
+        engagement.id,
+        occurred_at=request.occurred_at,
+        actor_kind=request.actor_kind,
+        actor_name=request.actor_name,
+        title=request.title,
+        action=request.action,
+        result=request.result,
+        artifact_ref=request.artifact_ref,
+        body_markdown=request.body_markdown,
+        metadata=request.metadata,
     )
     await _broadcast(engagement.key, "activity_entry", record)
     response = ActivityEntryRecord(**record)

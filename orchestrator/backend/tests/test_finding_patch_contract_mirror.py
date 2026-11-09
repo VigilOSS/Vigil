@@ -13,16 +13,8 @@ the roster teaches a patch the API rejects with a 422.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-# The assess CLI package lives under agent/scripts (mirrors test_record_finding.py).
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
-
-from app.api.assessment import FindingPatchRequest  # noqa: E402
-from assess.lib import contracts  # noqa: E402
+from app.api.assessment import FindingPatchRequest
+from assess.lib import contracts
 
 
 def test_documented_patch_fields_mirror_the_backend_model():

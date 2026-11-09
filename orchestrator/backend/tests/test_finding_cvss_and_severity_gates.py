@@ -49,6 +49,16 @@ def _seed(client, isolate_settings) -> None:
     assert author.status_code == 201, author.text
 
 
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
+
+
 def _record(client, slug: str, **overrides):
     payload = {
         "slug": slug,
@@ -147,7 +157,7 @@ def _verify(client, slug: str, **overrides):
     ["pending_runtime_proof", "blocked", "disputed"],
 )
 def test_verify_rejects_new_severity_outside_a_terminal_disposition(
-    client, isolate_settings, disposition
+    client, disposition, seeded_engagement
 ):
     """A band that moved with no fresh attestation behind it is an unproven band.
 
@@ -155,7 +165,6 @@ def test_verify_rejects_new_severity_outside_a_terminal_disposition(
     a decision receipt or an operator-authority stamp, which is what lets the
     same write re-band; see ``test_verification_evidence_gates``.
     """
-    _seed(client, isolate_settings)
     assert _record(client, "VA-001").status_code == 201
 
     response = _verify(
@@ -176,8 +185,7 @@ def test_verify_rejects_new_severity_outside_a_terminal_disposition(
     assert client.get(f"{BASE}/findings/VA-001").json()["severity"] == "high"
 
 
-def test_verify_downgraded_still_consumes_new_severity(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_verify_downgraded_still_consumes_new_severity(client, seeded_engagement):
     assert _record(client, "VA-002").status_code == 201
 
     response = _verify(
@@ -196,9 +204,7 @@ def test_verify_downgraded_still_consumes_new_severity(client, isolate_settings)
 # --------------------------------------------------------------------------- #
 
 
-def test_record_rejects_a_score_that_disagrees_with_its_vector(client, isolate_settings):
-    _seed(client, isolate_settings)
-
+def test_record_rejects_a_score_that_disagrees_with_its_vector(client, seeded_engagement):
     response = _record(
         client,
         "VA-010",
@@ -210,9 +216,7 @@ def test_record_rejects_a_score_that_disagrees_with_its_vector(client, isolate_s
     assert "9.8" in detail and "7.5" in detail
 
 
-def test_record_rejects_an_unparseable_vector(client, isolate_settings):
-    _seed(client, isolate_settings)
-
+def test_record_rejects_an_unparseable_vector(client, seeded_engagement):
     response = _record(
         client,
         "VA-011",
@@ -223,11 +227,8 @@ def test_record_rejects_an_unparseable_vector(client, isolate_settings):
     assert "CVSS:3.1/AV:N" in response.json()["detail"]
 
 
-def test_patch_scores_a_partial_update_against_the_stored_vector(
-    client, isolate_settings
-):
+def test_patch_scores_a_partial_update_against_the_stored_vector(client, seeded_engagement):
     """A patch supplying only the score is judged on the EFFECTIVE merged pair."""
-    _seed(client, isolate_settings)
     assert _record(client, "VA-012").status_code == 201
 
     bad = client.patch(f"{BASE}/findings/VA-012", json={"details": {"cvss_score": 3.2}})
@@ -244,13 +245,12 @@ def test_patch_scores_a_partial_update_against_the_stored_vector(
     assert stored["cvss_vector"] == _INFO_VECTOR
 
 
-def test_a_legacy_mismatch_never_traps_an_unrelated_patch(client, isolate_settings):
+def test_a_legacy_mismatch_never_traps_an_unrelated_patch(client, seeded_engagement):
     """A row written before this gate existed stays editable.
 
     Validating a write that touches neither CVSS key would make the stored
     mismatch reject every later edit — including the one that fixes it.
     """
-    _seed(client, isolate_settings)
     assert _record(client, "VA-013").status_code == 201
     with db_module.get_connection() as connection:
         row = connection.execute(
@@ -274,7 +274,7 @@ def test_a_legacy_mismatch_never_traps_an_unrelated_patch(client, isolate_settin
 
 
 @pytest.mark.parametrize("empty", [None, "", [], {}], ids=["null", "blank", "list", "dict"])
-def test_an_empty_cvss_key_is_not_an_authoring_write(client, isolate_settings, empty):
+def test_an_empty_cvss_key_is_not_an_authoring_write(client, empty, seeded_engagement):
     """A merge-mode patch drops empty incoming values, so a CVSS key carrying
     one changes nothing — and must not be judged as if it did.
 
@@ -282,7 +282,6 @@ def test_an_empty_cvss_key_is_not_an_authoring_write(client, isolate_settings, e
     the strength of stored data the caller never touched, over a write that was
     a no-op for the pair.
     """
-    _seed(client, isolate_settings)
     assert _record(client, "VA-015").status_code == 201
     with db_module.get_connection() as connection:
         row = connection.execute(
@@ -307,11 +306,10 @@ def test_an_empty_cvss_key_is_not_an_authoring_write(client, isolate_settings, e
     assert stored["cvss_score"] == 2.0
 
 
-def test_a_replace_patch_still_judges_an_empty_cvss_key(client, isolate_settings):
+def test_a_replace_patch_still_judges_an_empty_cvss_key(client, seeded_engagement):
     """``details_mode='replace'`` stores the payload verbatim, so an empty CVSS
     value DOES land — and is judged. The empty-value carve-out above is a
     property of the merge write, not a blanket exemption."""
-    _seed(client, isolate_settings)
     assert _record(client, "VA-016").status_code == 201
 
     response = client.patch(
@@ -329,10 +327,9 @@ def test_a_replace_patch_still_judges_an_empty_cvss_key(client, isolate_settings
     assert "details.cvss_score must be of type number, got ''" in response.json()["detail"]
 
 
-def test_an_info_finding_is_representable_end_to_end(client, isolate_settings):
+def test_an_info_finding_is_representable_end_to_end(client, seeded_engagement):
     """cvss_score 0.0 is the ONLY score in the `info` band; it must be storable
     and must not trip the severity<->CVSS or vector<->score readiness blockers."""
-    _seed(client, isolate_settings)
 
     created = _record(
         client,
@@ -359,8 +356,9 @@ def test_an_info_finding_is_representable_end_to_end(client, isolate_settings):
     ], blockers
 
 
-def test_record_and_patch_cvss40_preserve_the_vector_and_check_merged_scores(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_and_patch_cvss40_preserve_the_vector_and_check_merged_scores(
+    client, seeded_engagement
+):
     created = _record(client, "VA-020", severity="critical", details={
         "evidence": "Acme proof", "impact": "Acme impact",
         "cvss_score": 9.2, "cvss_vector": _V4_VECTOR,
@@ -392,8 +390,7 @@ def test_record_and_patch_cvss40_preserve_the_vector_and_check_merged_scores(cli
                 and b["kind"] in {"cvss_vector_invalid", "cvss_vector_score_mismatch", "severity_cvss_mismatch"}], blockers
 
 
-def test_record_rejects_cvss40_score_mismatch(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_rejects_cvss40_score_mismatch(client, seeded_engagement):
     response = _record(client, "VA-021", severity="critical", details={
         "evidence": "Acme proof", "impact": "Acme impact",
         "cvss_score": 9.8, "cvss_vector": _V4_VECTOR,

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pytest
@@ -12,9 +11,8 @@ from fastapi import HTTPException
 from app.services import state_manager
 from app.services.engagements import get_engagement_or_404
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "agent" / "scripts"))
-from assess.commands.block_technique import RETRY_STATES as CLI_RETRY_STATES  # noqa: E402
-from app.services.state_manager.chains import RETRY_STATES  # noqa: E402
+from assess.commands.block_technique import RETRY_STATES as CLI_RETRY_STATES
+from app.services.state_manager.chains import RETRY_STATES
 
 
 ENGAGEMENT_KEY = "2026-09-08-120000-retry-state"

@@ -1,6 +1,7 @@
 """vigil assess code-record analysis — POST grouped source-review receipts."""
 from __future__ import annotations
 
+from collections import Counter
 import json
 import re
 import sys
@@ -209,6 +210,33 @@ def _validate_supersedes(item_index: int, result: dict) -> list[str]:
     return []
 
 
+def _ref_identity(ref: dict) -> tuple:
+    """The five callable_ref fields the backend must echo back unchanged."""
+    return (
+        ref.get("file_id"),
+        ref.get("name"),
+        ref.get("qualified_name"),
+        ref.get("start_line"),
+        ref.get("end_line"),
+    )
+
+
+def _span_identity(span: dict, *, normalize_label: bool) -> tuple:
+    """The four reviewed_span fields the backend must echo back unchanged.
+
+    The submitted side normalizes a missing label to "" and the returned side
+    reads it raw. That asymmetry is deliberate: it lets a backend that echoes a
+    null label for a submitted empty label still compare equal.
+    """
+    label = span.get("label")
+    return (
+        span.get("file_id"),
+        span.get("start_line"),
+        span.get("end_line"),
+        str(label or "") if normalize_label else label,
+    )
+
+
 def _require_canonical_source_receipt_response(
     response: dict, *, submitted: dict
 ) -> None:
@@ -243,49 +271,17 @@ def _require_canonical_source_receipt_response(
             and isinstance(span.get("label"), str)
             for span in returned_spans
         )
-    submitted_ref_identities = [
-        (
-            ref.get("file_id"),
-            ref.get("name"),
-            ref.get("qualified_name"),
-            ref.get("start_line"),
-            ref.get("end_line"),
-        )
-        for ref in submitted_refs
-    ]
+    submitted_ref_identities = [_ref_identity(ref) for ref in submitted_refs]
     returned_ref_identities = (
-        [
-            (
-                ref.get("file_id"),
-                ref.get("name"),
-                ref.get("qualified_name"),
-                ref.get("start_line"),
-                ref.get("end_line"),
-            )
-            for ref in returned_refs
-        ]
+        [_ref_identity(ref) for ref in returned_refs]
         if isinstance(returned_refs, list)
         else []
     )
     submitted_span_identities = [
-        (
-            span.get("file_id"),
-            span.get("start_line"),
-            span.get("end_line"),
-            str(span.get("label") or ""),
-        )
-        for span in submitted_spans
+        _span_identity(span, normalize_label=True) for span in submitted_spans
     ]
     returned_span_identities = (
-        [
-            (
-                span.get("file_id"),
-                span.get("start_line"),
-                span.get("end_line"),
-                span.get("label"),
-            )
-            for span in returned_spans
-        ]
+        [_span_identity(span, normalize_label=False) for span in returned_spans]
         if isinstance(returned_spans, list)
         else []
     )
@@ -480,9 +476,6 @@ def run(args) -> None:
     print(f"Results recorded: {created}")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
 
-    dispositions = {}
-    for r in results:
-        d = r.get("disposition", "unknown")
-        dispositions[d] = dispositions.get(d, 0) + 1
+    dispositions = Counter(r.get("disposition", "unknown") for r in results)
     for d, count in sorted(dispositions.items()):
         print(f"  {d}: {count}")

@@ -46,8 +46,7 @@ from assess.commands.dispatch.work_items import (
     _defer_items,
     _set_rationale,
     _mark_manual,
-    _done,
-    _error,
+    _mark_terminal,
     _reset_stale,
     _retry_errors,
     _requeue,
@@ -236,12 +235,12 @@ def run(args) -> None:
             if not extra:
                 print("Usage: work-buffer done <id> [<id> ...]", file=sys.stderr)
                 sys.exit(1)
-            _done(client, extra)
+            _mark_terminal(client, extra, endpoint="work-items/done", label="done")
         elif action == "error":
             if not extra:
                 print("Usage: work-buffer error <id> [<id> ...]", file=sys.stderr)
                 sys.exit(1)
-            _error(client, extra)
+            _mark_terminal(client, extra, endpoint="work-items/error", label="error")
         elif action == "reset-stale":
             if not extra:
                 print("Usage: work-buffer reset-stale <minutes>", file=sys.stderr)

@@ -7,7 +7,8 @@
 // inventory, never from a loaded window. `GET /request-variants` (the bare list
 // `vigil assess fetch` pages) is not used here.
 
-import { request, type RequestObservation, type RequestVariant } from "./api.ts";
+import { request, type OffsetPage, type RequestObservation, type RequestVariant } from "./api.ts";
+import type { RecordPosition } from "../components/record/recordNavigation.ts";
 
 export type RequestVariantSortKey =
   | "last_seen_at"
@@ -47,13 +48,7 @@ export const EMPTY_REQUEST_VARIANT_FILTERS: RequestVariantFilters = {
   q: "",
 };
 
-export type RequestVariantPage = {
-  total: number;
-  offset: number;
-  count: number;
-  has_more: boolean;
-  items: RequestVariant[];
-};
+export type RequestVariantPage = OffsetPage<RequestVariant>;
 
 export type FacetGroup = {
   values: { value: string; count: number }[];
@@ -73,20 +68,9 @@ export type RequestVariantFacets = {
 };
 
 /** Where a variant sits in the page order; `index` is null when it does not match the filters. */
-export type RequestVariantPosition = {
-  index: number | null;
-  total: number;
-  previous: RequestVariant | null;
-  next: RequestVariant | null;
-};
+export type RequestVariantPosition = RecordPosition<RequestVariant>;
 
-export type RequestObservationPage = {
-  total: number;
-  offset: number;
-  count: number;
-  has_more: boolean;
-  items: RequestObservation[];
-};
+export type RequestObservationPage = OffsetPage<RequestObservation>;
 
 /** Stable identity of a filter set (drives reloads and stale-response checks). */
 export function requestVariantFiltersKey(filters: RequestVariantFilters): string {

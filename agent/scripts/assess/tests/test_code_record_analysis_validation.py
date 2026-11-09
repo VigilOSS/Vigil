@@ -14,6 +14,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_record_analysis
 
@@ -92,16 +93,7 @@ def test_a_well_formed_trigger_block_still_passes_validation(monkeypatch, tmp_pa
     """The one-pass collector must not refuse a payload that is complete."""
     seen: list[dict] = []
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def post(self, _endpoint: str, payload: dict):
             seen.append(payload)
             return {

@@ -52,6 +52,14 @@ def _seed_engagement(client, isolate_settings) -> None:
     assert dispatch.status_code == 201, dispatch.text
 
 
+def _post_tech(client, component: str, version: str, **extra: Any) -> dict[str, Any]:
+    payload: dict[str, Any] = {"component": component, "version": version}
+    payload.update(extra)
+    response = client.post(f"{INTEL_BASE}/tech-components", json=payload)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
 def _summary(client) -> dict[str, int]:
     response = client.get(f"{INTEL_BASE}/summary")
     assert response.status_code == 200, response.text
@@ -1080,12 +1088,9 @@ def test_update_intel_patches_existing_row_and_rejects_unknown_field(
 ):
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
-    )
-    assert created.status_code == 201, created.text
-    intel_id = created.json()["id"]
+    intel_id = _post_tech(
+        client, "vendor-saas-platform", "1.0.0", source_name="wappalyzer"
+    )["id"]
 
     patched = client.patch(
         f"{INTEL_BASE}/tech-components/{intel_id}",
@@ -1108,17 +1113,10 @@ def test_update_intel_patches_existing_row_and_rejects_unknown_field(
 def test_update_intel_natural_key_collision_returns_409(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
 
-    first = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
-    )
-    assert first.status_code == 201, first.text
-    second = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "vendor-saas-platform", "version": "2.0.0", "source_name": "manual"},
-    )
-    assert second.status_code == 201, second.text
-    second_id = second.json()["id"]
+    _post_tech(client, "vendor-saas-platform", "1.0.0", source_name="wappalyzer")
+    second_id = _post_tech(
+        client, "vendor-saas-platform", "2.0.0", source_name="manual"
+    )["id"]
 
     collision = client.patch(
         f"{INTEL_BASE}/tech-components/{second_id}",
@@ -1138,12 +1136,9 @@ def test_supersede_intel_marks_old_row_and_filters_from_list(
 ):
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
-    )
-    assert created.status_code == 201, created.text
-    old_id = created.json()["id"]
+    old_id = _post_tech(
+        client, "vendor-saas-platform", "1.0.0", source_name="wappalyzer"
+    )["id"]
 
     superseded = client.post(
         f"{INTEL_BASE}/tech-components/{old_id}/supersede",
@@ -1184,12 +1179,9 @@ def test_supersede_intel_collision_with_natural_key_returns_409(
 ):
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "vendor-saas-platform", "version": "1.0.0", "source_name": "wappalyzer"},
-    )
-    assert created.status_code == 201, created.text
-    intel_id = created.json()["id"]
+    intel_id = _post_tech(
+        client, "vendor-saas-platform", "1.0.0", source_name="wappalyzer"
+    )["id"]
 
     # Same natural key (component, version) -> service helper raises 409
     # without first upserting the target row.
@@ -1300,12 +1292,7 @@ def test_update_intel_unknown_id_returns_404(client, isolate_settings):
 def test_list_intel_include_superseded_false_filters_old_rows(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "filter-test", "version": "1.0.0"},
-    )
-    assert created.status_code == 201, created.text
-    old_id = created.json()["id"]
+    old_id = _post_tech(client, "filter-test", "1.0.0")["id"]
 
     superseded = client.post(
         f"{INTEL_BASE}/tech-components/{old_id}/supersede",
@@ -1333,11 +1320,7 @@ def test_list_intel_include_superseded_false_filters_old_rows(client, isolate_se
 def test_list_intel_canonical_id_walks_to_leaf(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
 
-    first = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "canonical-test", "version": "1.0.0"},
-    )
-    a_id = first.json()["id"]
+    a_id = _post_tech(client, "canonical-test", "1.0.0")["id"]
     second = client.post(
         f"{INTEL_BASE}/tech-components/{a_id}/supersede",
         json={"payload": {"component": "canonical-test", "version": "2.0.0"}},
@@ -1364,11 +1347,7 @@ def test_list_intel_canonical_id_walks_to_leaf(client, isolate_settings):
 def test_supersede_intel_missing_natural_key_returns_400(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "missing-key-test", "version": "1.0.0"},
-    )
-    intel_id = created.json()["id"]
+    intel_id = _post_tech(client, "missing-key-test", "1.0.0")["id"]
 
     # Omit ``component`` (the natural key) — service must surface 400, not 500.
     bad = client.post(
@@ -1408,11 +1387,7 @@ def test_supersede_intel_self_collision_returns_409(client, isolate_settings):
     """Self-supersede via natural-key collision must surface 409."""
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "self-test", "version": "1.0.0"},
-    )
-    intel_id = created.json()["id"]
+    intel_id = _post_tech(client, "self-test", "1.0.0")["id"]
 
     self_collide = client.post(
         f"{INTEL_BASE}/tech-components/{intel_id}/supersede",
@@ -1425,11 +1400,7 @@ def test_supersede_intel_cycle_returns_409(client, isolate_settings):
     """Supersede A->B then B->A would close a cycle; must surface 409."""
     _seed_engagement(client, isolate_settings)
 
-    a = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "cycle-test", "version": "1.0.0"},
-    )
-    a_id = a.json()["id"]
+    a_id = _post_tech(client, "cycle-test", "1.0.0")["id"]
     ab = client.post(
         f"{INTEL_BASE}/tech-components/{a_id}/supersede",
         json={"payload": {"component": "cycle-test", "version": "2.0.0"}},
@@ -1470,11 +1441,7 @@ def test_supersede_intel_cycle_returns_409(client, isolate_settings):
 def test_supersede_404_messages_differ_for_engagement_type_id(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
 
-    created = client.post(
-        f"{INTEL_BASE}/tech-components",
-        json={"component": "diff-404-test", "version": "1.0.0"},
-    )
-    intel_id = created.json()["id"]
+    intel_id = _post_tech(client, "diff-404-test", "1.0.0")["id"]
 
     # Unknown engagement.
     unknown_engagement = client.patch(
@@ -1603,14 +1570,6 @@ def test_intel_record_schemas_share_auditable_provenance_vocabulary():
 # ──────────────────────────────────────────────────────────────
 # supersede --to-existing (I-15)
 # ──────────────────────────────────────────────────────────────
-
-
-def _post_tech(client, component: str, version: str, **extra: Any) -> dict[str, Any]:
-    payload: dict[str, Any] = {"component": component, "version": version}
-    payload.update(extra)
-    response = client.post(f"{INTEL_BASE}/tech-components", json=payload)
-    assert response.status_code == 201, response.text
-    return response.json()
 
 
 def test_supersede_to_existing_sets_fk_without_mutating_canonical(client, isolate_settings):

@@ -32,8 +32,6 @@ from .runtime import runtime_image_build_state
 # both prebuilt assets and their stamps in every immutable application release.
 BUILD_INPUTS_STAMP = ".vigil-inputs"
 
-_BACKEND_LABEL = "orchestrator backend"
-
 _RUNTIME_IMAGE = "vigil:latest"
 _PROXY_IMAGE = "vigil-proxy:latest"
 _PROXY_CONTAINER = "vigil-proxy"
@@ -59,6 +57,21 @@ CONSUMER_KEYS = (
 # stopped (restarting it is not a remedy for anything), and `missing` is an
 # artifact that was never built (this install did not invalidate it).
 CONSUMER_STATES = ("current", "stale", "unknown", "not-running", "missing")
+
+# The operator-facing name of each consumer, which has one owner here rather
+# than one per branch that happens to report on it.
+_CONSUMER_LABELS = {
+    "cli": "vigil CLI binary",
+    "backend": "orchestrator backend",
+    "frontend": "orchestrator frontend",
+    "report": "report template",
+    "runtime-image": "Kali runtime image",
+    "proxy-image": "mitmproxy image",
+    "runtime-container": "Kali runtime container",
+    "proxy-container": "mitmproxy container",
+    "client-sessions": "client sessions",
+    "agent-tree": "working root",
+}
 
 
 def backend_restart_remedy(workspace: Path, base_url: str) -> str:
@@ -90,6 +103,23 @@ class ConsumerState:
     state: str
     remedy: str
     detail: str
+
+
+def _state(key: str, state: str, *, remedy: str = "", detail: str = "") -> ConsumerState:
+    """One consumer row, labelled from the single table of consumer labels.
+
+    An unlisted key degrades to its own name rather than raising: before the
+    label table existed every caller passed its label inline, so no consumer
+    key could fail to resolve, and a restart manifest is a diagnostic that
+    should still render for an unrecognised consumer.
+    """
+    return ConsumerState(
+        key=key,
+        label=_CONSUMER_LABELS.get(key, key),
+        state=state,
+        remedy=remedy,
+        detail=detail,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -285,7 +315,7 @@ def _write_stamp(stamp: Path, digest: str) -> None:
 
 # --- per-consumer state -------------------------------------------------------
 
-_CLI_LABEL = "vigil CLI binary"
+_CLI_LABEL = _CONSUMER_LABELS["cli"]
 
 
 def _install_remedy(source_root: Path | None) -> str:
@@ -335,24 +365,17 @@ def cli_state(*, source_root: Path | None) -> ConsumerState:
         return _cli_unknown(f"no CLI package at {source_package}")
     source_package = source_package.resolve()
     if source_package == running:
-        return ConsumerState(
-            key="cli",
-            label=_CLI_LABEL,
-            state="current",
-            remedy="",
-            detail=f"running from the source tree ({running})",
-        )
+        return _state("cli", "current", detail=f"running from the source tree ({running})")
     # Both digests label files relative to their own package directory, so an
     # editable checkout and a uv-tool venv copy land in the same label space and
     # only CONTENT can separate them.
     running_digest = _cli_inputs_digest(running)
     source_digest = _cli_inputs_digest(source_package)
     if running_digest == source_digest:
-        return ConsumerState(key="cli", label=_CLI_LABEL, state="current", remedy="", detail="")
-    return ConsumerState(
-        key="cli",
-        label=_CLI_LABEL,
-        state="stale",
+        return _state("cli", "current")
+    return _state(
+        "cli",
+        "stale",
         remedy=_cli_stale_remedy(source_root),
         detail=f"the installed binary at {running} predates {source_package}",
     )
@@ -370,7 +393,7 @@ def _cli_inputs_digest(package: Path) -> str:
 
 def _cli_unknown(detail: str) -> ConsumerState:
     """Cannot prove the binary current — and cannot name a command that helps."""
-    return ConsumerState(key="cli", label=_CLI_LABEL, state="unknown", remedy="", detail=detail)
+    return _state("cli", "unknown", detail=detail)
 
 
 def _running_cli_package() -> Path | None:
@@ -405,8 +428,8 @@ def backend_state(install_root: Path, *, engagement_dir: Path | None = None) -> 
         return _backend_unknown(f"cannot check backend freshness at {base_url}")
     if managed_backend_host(base_url) is None:
         if probe.runtime and probe.runtime.get("restart_required") is True:
-            return ConsumerState("backend", _BACKEND_LABEL, "stale", "",
-                                 "configured remote backend reports changed application inputs")
+            return _state("backend", "stale",
+                          detail="configured remote backend reports changed application inputs")
         return _backend_unknown("remote application release is managed on its owning host")
     return _backend_state_from_probe(install_root, probe)
 
@@ -440,34 +463,25 @@ def _backend_state_from_probe(install_root: Path, probe: BackendProbe) -> Consum
     serving_application = runtime_block.get("application_root")
     application_root = application_root_for_workspace(install_root)
     if not isinstance(serving_application, str) or not serving_application:
-        return ConsumerState(
-            key="backend",
-            label=_BACKEND_LABEL,
-            state="stale",
+        return _state(
+            "backend",
+            "stale",
             remedy="vigil orchestrator restart",
             detail="running a legacy backend without a pinned application release",
         )
     if isinstance(serving_application, str) and Path(serving_application).resolve() != application_root.resolve():
-        return ConsumerState(
-            key="backend",
-            label=_BACKEND_LABEL,
-            state="stale",
+        return _state(
+            "backend",
+            "stale",
             remedy="vigil orchestrator restart",
             detail=f"running retained application release {serving_application}; current release is {application_root}",
         )
     if not runtime_block.get("restart_required"):
-        return ConsumerState(
-            key="backend",
-            label=_BACKEND_LABEL,
-            state="current",
-            remedy="",
-            detail="",
-        )
+        return _state("backend", "current")
     changed = runtime_block.get("changed_inputs")
-    return ConsumerState(
-        key="backend",
-        label=_BACKEND_LABEL,
-        state="stale",
+    return _state(
+        "backend",
+        "stale",
         remedy="vigil orchestrator restart",
         detail=_changed_summary(changed if isinstance(changed, list) else []),
     )
@@ -498,13 +512,7 @@ def _backend_offline_state(install_root: Path, probe: BackendProbe) -> ConsumerS
         # Nothing accepted the connection, no pidfile claims a live process, and
         # nothing holds the port. That is a stopped backend, established rather
         # than assumed.
-        return ConsumerState(
-            key="backend",
-            label=_BACKEND_LABEL,
-            state="not-running",
-            remedy="",
-            detail="",
-        )
+        return _state("backend", "not-running")
     return _backend_unknown(
         _backend_offline_detail(probe, process_running, pid, port_held, host, port)
     )
@@ -558,13 +566,7 @@ def _backend_unknown(detail: str) -> ConsumerState:
     the caller drops it. A backend we reached but could not read is the opposite
     — an open question — so it carries no remedy and gets named as unchecked.
     """
-    return ConsumerState(
-        key="backend",
-        label=_BACKEND_LABEL,
-        state="unknown",
-        remedy="",
-        detail=detail,
-    )
+    return _state("backend", "unknown", detail=detail)
 
 
 def _readyz_backend_runtime(install_root: Path) -> BackendProbe:
@@ -599,10 +601,9 @@ def _backend_probe_from_readiness(readiness: dict[str, object]) -> BackendProbe:
 
 def _frontend_state(install_root: Path) -> ConsumerState:
     state = frontend_build_state(install_root)
-    return ConsumerState(
-        key="frontend",
-        label="orchestrator frontend",
-        state=state,
+    return _state(
+        "frontend",
+        state,
         remedy="" if state in {"current", "missing"} else "vigil orchestrator build",
         detail="built before input stamping" if state == "unknown" else "",
     )
@@ -611,23 +612,16 @@ def _frontend_state(install_root: Path) -> ConsumerState:
 def _report_state(install_root: Path) -> ConsumerState:
     state = report_build_state(install_root)
     if state == "not-packaged":
-        return ConsumerState(
-            key="report",
-            label="report template",
-            state="missing",
-            remedy="",
-            detail="this install has no report package",
-        )
-    return ConsumerState(
-        key="report",
-        label="report template",
-        state=state,
+        return _state("report", "missing", detail="this install has no report package")
+    return _state(
+        "report",
+        state,
         remedy="" if state in {"current", "missing"} else "vigil orchestrator build",
         detail="built before input stamping" if state == "unknown" else "",
     )
 
 
-def _docker_unavailable(key: str, label: str) -> ConsumerState:
+def _docker_unavailable(key: str) -> ConsumerState:
     """What every Docker-backed consumer says when the daemon will not answer.
 
     Not ``missing``: `docker.image_exists` reports False for a wedged daemon
@@ -635,20 +629,14 @@ def _docker_unavailable(key: str, label: str) -> ConsumerState:
     unresponsive Docker Desktop would have `vigil install` quietly report that
     the runtime image was never built.
     """
-    return ConsumerState(
-        key=key,
-        label=label,
-        state="unknown",
-        remedy="",
-        detail="the Docker daemon is not responding",
-    )
+    return _state(key, "unknown", detail="the Docker daemon is not responding")
 
 
 def _runtime_image_state(
     install_root: Path, *, runner: docker.Runner, docker_ok: bool
 ) -> ConsumerState:
     if not docker_ok:
-        return _docker_unavailable("runtime-image", "Kali runtime image")
+        return _docker_unavailable("runtime-image")
     state = runtime_image_build_state(install_root, image=_RUNTIME_IMAGE, runner=runner)
     remedy = "" if state in {"current", "missing"} else "vigil runtime build"
     if remedy and docker.container_running(default_runtime_container(), runner=runner):
@@ -660,10 +648,9 @@ def _runtime_image_state(
         # DEPENDENT action of the build, so it belongs on this remedy rather
         # than waiting for a later status check to discover the new drift.
         remedy = "vigil runtime build && vigil runtime restart"
-    return ConsumerState(
-        key="runtime-image",
-        label="Kali runtime image",
-        state=state,
+    return _state(
+        "runtime-image",
+        state,
         remedy=remedy,
         detail="built before input stamping" if state == "unknown" else "",
     )
@@ -678,20 +665,14 @@ def _proxy_image_state(
     from .mitmproxy import mitmproxy_image_inputs
 
     if not docker_ok:
-        return _docker_unavailable("proxy-image", "mitmproxy image")
+        return _docker_unavailable("proxy-image")
     try:
         inputs = mitmproxy_image_inputs(install_root)
     except SystemExit as exc:
         # The proxy manifest covers the installed canonical scope parser, which
         # a frozen/zipped CLI may not expose as a file. That is a reason to say
         # "cannot tell", never a reason to fail an install summary.
-        return ConsumerState(
-            key="proxy-image",
-            label="mitmproxy image",
-            state="unknown",
-            remedy="",
-            detail=str(exc),
-        )
+        return _state("proxy-image", "unknown", detail=str(exc))
     state = image_freshness.image_inputs_state(
         _PROXY_IMAGE, inputs, root=install_root, runner=runner
     )
@@ -702,10 +683,9 @@ def _proxy_image_state(
         # what a bare `build` cannot: leave the LIVE proxy running the addon and
         # scope parser this install just wrote.
         remedy = "vigil mitmproxy start --build"
-    return ConsumerState(
-        key="proxy-image",
-        label="mitmproxy image",
-        state=state,
+    return _state(
+        "proxy-image",
+        state,
         remedy=remedy,
         detail="built before input stamping" if state == "unknown" else "",
     )
@@ -720,27 +700,14 @@ def _proxy_container_state(*, runner: docker.Runner, docker_ok: bool) -> Consume
     nothing, because the next start picks up the current image.
     """
     if not docker_ok:
-        return _docker_unavailable("proxy-container", "mitmproxy container")
+        return _docker_unavailable("proxy-container")
     if not docker.container_running(_PROXY_CONTAINER, runner=runner):
-        return ConsumerState(
-            key="proxy-container",
-            label="mitmproxy container",
-            state="not-running",
-            remedy="",
-            detail="",
-        )
+        return _state("proxy-container", "not-running")
     if not image_freshness.proxy_image_drift(runner=runner):
-        return ConsumerState(
-            key="proxy-container",
-            label="mitmproxy container",
-            state="current",
-            remedy="",
-            detail="",
-        )
-    return ConsumerState(
-        key="proxy-container",
-        label="mitmproxy container",
-        state="stale",
+        return _state("proxy-container", "current")
+    return _state(
+        "proxy-container",
+        "stale",
         remedy="vigil mitmproxy start",
         detail="running an image the tag has since replaced",
     )
@@ -755,38 +722,21 @@ def _runtime_container_state(*, runner: docker.Runner, docker_ok: bool) -> Consu
     stop printing.
     """
     if not docker_ok:
-        return _docker_unavailable("runtime-container", "Kali runtime container")
+        return _docker_unavailable("runtime-container")
     container = default_runtime_container()
     if not docker.container_running(container, runner=runner):
-        return ConsumerState(
-            key="runtime-container",
-            label="Kali runtime container",
-            state="not-running",
-            remedy="",
-            detail="",
-        )
+        return _state("runtime-container", "not-running")
     running_image = docker.container_image_id(container, runner=runner)
     tagged_image = docker.image_id(_RUNTIME_IMAGE, runner=runner)
     if not running_image or not tagged_image:
-        return ConsumerState(
-            key="runtime-container",
-            label="Kali runtime container",
-            state="unknown",
-            remedy="",
-            detail="docker did not report both image ids",
+        return _state(
+            "runtime-container", "unknown", detail="docker did not report both image ids"
         )
     if running_image == tagged_image:
-        return ConsumerState(
-            key="runtime-container",
-            label="Kali runtime container",
-            state="current",
-            remedy="",
-            detail="",
-        )
-    return ConsumerState(
-        key="runtime-container",
-        label="Kali runtime container",
-        state="stale",
+        return _state("runtime-container", "current")
+    return _state(
+        "runtime-container",
+        "stale",
         remedy="vigil runtime restart",
         detail=f"running an image older than {_RUNTIME_IMAGE}",
     )
@@ -802,35 +752,23 @@ def _agent_tree_state(install_root: Path, *, source_root: Path | None) -> Consum
         staleness = {"state": "unknown"}
     state = str(staleness.get("state") or "unknown")
     if state == "current":
-        return ConsumerState(
-            key="agent-tree",
-            label="working root",
-            state="current",
-            remedy="",
-            detail="",
-        )
+        return _state("agent-tree", "current")
     if state == "stale":
-        return ConsumerState(
-            key="agent-tree",
-            label="working root",
-            state="stale",
+        return _state(
+            "agent-tree",
+            "stale",
             remedy=_install_remedy(source_root),
             detail="installed content differs from the live source",
         )
     if state == "no-stamp":
-        return ConsumerState(
-            key="agent-tree",
-            label="working root",
-            state="unknown",
+        return _state(
+            "agent-tree",
+            "unknown",
             remedy=_install_remedy(source_root),
             detail="this install predates content stamping",
         )
-    return ConsumerState(
-        key="agent-tree",
-        label="working root",
-        state="unknown",
-        remedy="",
-        detail="no local source checkout to compare against",
+    return _state(
+        "agent-tree", "unknown", detail="no local source checkout to compare against"
     )
 
 
@@ -849,16 +787,16 @@ def client_sessions_state(install_root: Path) -> ConsumerState:
 
     sessions = active_client_sessions(install_root)
     if not sessions:
-        return ConsumerState("client-sessions", "client sessions", "not-running", "", "no registered live sessions")
+        return _state("client-sessions", "not-running", detail="no registered live sessions")
     try:
         current = application_provenance(application_root_for_workspace(install_root))
     except (OSError, SystemExit, ValueError) as exc:
-        return ConsumerState("client-sessions", "client sessions", "unknown", "", str(exc))
+        return _state("client-sessions", "unknown", detail=str(exc))
     older = [session for session in sessions if (
         session["application"]["version"], session["application"]["content_sha256"]
     ) != (current["version"], current["content_sha256"])]
     if not older:
-        return ConsumerState("client-sessions", "client sessions", "current", "", f"{len(sessions)} live session(s) use the current application")
+        return _state("client-sessions", "current", detail=f"{len(sessions)} live session(s) use the current application")
     detail = "; ".join(
         f"{session.get('client') or 'client'} is still open for {Path(session['engagement']).name} "
         f"(current prompts and helpers retained; release={session['application']['version']} pid={session['pid']})"
@@ -869,9 +807,10 @@ def client_sessions_state(install_root: Path) -> ConsumerState:
         "--client", str(session.get("client") or "unknown"),
         "--mode", str(session.get("mode") or "web"), "--root", str(install_root),
     ]) for session in older]
-    return ConsumerState("client-sessions", "client sessions", "stale",
-                         "These sessions can continue. When ready to use the updated prompts and helpers, "
-                         "save a handoff, exit the listed clients, then start again: " + "; ".join(commands), detail)
+    return _state("client-sessions", "stale",
+                  remedy="These sessions can continue. When ready to use the updated prompts and helpers, "
+                         "save a handoff, exit the listed clients, then start again: " + "; ".join(commands),
+                  detail=detail)
 
 
 def consumer_states(

@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -26,23 +25,18 @@ def _scripts_root() -> Path:
     return Path(__file__).resolve().parents[3] / "agent" / "scripts"
 
 
-def _load_filter_scope_module():
-    scripts_root = _scripts_root()
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-    module_path = (
-        Path(__file__).resolve().parents[3]
-        / "agent"
-        / "scripts"
-        / "assess"
-        / "commands"
-        / "filter_scope.py"
-    )
-    spec = importlib.util.spec_from_file_location("test_filter_scope_apex_module", module_path)
+def _load_command_module(command: str, module_name: str):
+    """Load an ``assess.commands`` module under a caller-chosen unique name."""
+    module_path = _scripts_root() / "assess" / "commands" / f"{command}.py"
+    spec = importlib.util.spec_from_file_location(module_name, module_path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_filter_scope_module():
+    return _load_command_module("filter_scope", "test_filter_scope_apex_module")
 
 
 def _stub_decided_hosts(monkeypatch, module) -> None:
@@ -82,12 +76,16 @@ def _run_filter_scope(monkeypatch, engagement_dir: Path, lines: list[str], capsy
     return capsys.readouterr()
 
 
-def test_apex_filter_with_wildcard_only_admits_apex(
-    monkeypatch, tmp_path: Path, capsys
-) -> None:
+@pytest.fixture
+def engagement_dir(tmp_path):
+    """An empty engagement directory for the scope-check cases below."""
+    path = tmp_path / "engagement"
+    path.mkdir()
+    return path
+
+
+def test_apex_filter_with_wildcard_only_admits_apex(monkeypatch, capsys, engagement_dir) -> None:
     """Wildcard scope admits the bare apex (HackerOne / Bugcrowd / VDP convention)."""
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
         json.dumps({"hosts": ["*.example.test"]}),
         encoding="utf-8",
@@ -111,7 +109,7 @@ def test_apex_filter_with_wildcard_only_admits_apex(
     ]
 
 
-def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_filter_scope_streams_stdin(monkeypatch, capsys, engagement_dir) -> None:
     """``filter-scope`` reads stdin lazily without buffering the full stream.
 
     A generator-backed StringIO substitute for ``sys.stdin`` exposes the
@@ -120,8 +118,6 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
     the command iterates the file object lazily rather than calling
     ``readlines()``.
     """
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
         json.dumps({"hosts": ["target.example"]}),
         encoding="utf-8",
@@ -182,9 +178,7 @@ def test_filter_scope_streams_stdin(monkeypatch, tmp_path: Path, capsys) -> None
     ]
 
 
-def test_filter_scope_allows_same_file_output(monkeypatch, tmp_path: Path) -> None:
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
+def test_filter_scope_allows_same_file_output(monkeypatch, engagement_dir) -> None:
     (engagement_dir / "scope.json").write_text(
         json.dumps({"hosts": ["target.example"]}),
         encoding="utf-8",
@@ -221,10 +215,8 @@ def test_filter_scope_allows_same_file_output(monkeypatch, tmp_path: Path) -> No
     ]
 
 
-def test_idn_apex_a_label_url_matches_u_label_scope(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_idn_apex_a_label_url_matches_u_label_scope(monkeypatch, capsys, engagement_dir) -> None:
     """U-label scope entries must match A-label (punycode) URLs and vice versa."""
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
     # Scope authored as a U-label; URL arrives as an A-label.
     (engagement_dir / "scope.json").write_text(
         json.dumps({"hosts": ["café.test", "*.café.test"]}),
@@ -248,10 +240,8 @@ def test_idn_apex_a_label_url_matches_u_label_scope(monkeypatch, tmp_path: Path,
     ]
 
 
-def test_idn_apex_u_label_url_matches_a_label_scope(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_idn_apex_u_label_url_matches_a_label_scope(monkeypatch, capsys, engagement_dir) -> None:
     """A-label scope entries must match U-label URLs."""
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
         json.dumps({"hosts": ["xn--caf-dma.test", "*.xn--caf-dma.test"]}),
         encoding="utf-8",
@@ -271,15 +261,13 @@ def test_idn_apex_u_label_url_matches_a_label_scope(monkeypatch, tmp_path: Path,
     assert "https://café.test/" in captured.out
 
 
-def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> None:
+def test_apex_match_with_explicit_entry(monkeypatch, capsys, engagement_dir) -> None:
     """An explicit apex entry alongside the wildcard still reports both entries.
 
     The wildcard entry already admits apex coverage. Listing the apex separately
     keeps a distinct reporting row for that explicit target while filter-scope
     still passes both apex and subdomain URLs.
     """
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
     (engagement_dir / "scope.json").write_text(
         json.dumps({"hosts": ["example.test", "*.example.test"]}),
         encoding="utf-8",
@@ -309,22 +297,7 @@ def test_apex_match_with_explicit_entry(monkeypatch, tmp_path: Path, capsys) -> 
 
 
 def _load_ingest_endpoints_module():
-    scripts_root = _scripts_root()
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-    module_path = (
-        Path(__file__).resolve().parents[3]
-        / "agent"
-        / "scripts"
-        / "assess"
-        / "commands"
-        / "ingest_endpoints.py"
-    )
-    spec = importlib.util.spec_from_file_location("test_ingest_apex_module", module_path)
-    assert spec is not None and spec.loader is not None
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_command_module("ingest_endpoints", "test_ingest_apex_module")
 
 
 class _FakeIngestClient:

@@ -3,6 +3,7 @@ from __future__ import annotations
 import pytest
 
 from vigil_cli import docker, runtime
+from vigil_cli import runtime_images
 
 
 def test_stop_runtime_reports_failed_removal():
@@ -23,8 +24,6 @@ def test_runtime_start_preserves_paused_daemon_detail_and_explains_retry(tmp_pat
 
 
 def test_runtime_recreation_stops_before_start_when_removal_fails(tmp_path, monkeypatch):
-    from vigil_cli import runtime_images
-
     monkeypatch.setattr(runtime_images, 'ensure_runtime_image', lambda *a, **kw: None)
     monkeypatch.setattr(runtime.docker, 'daemon_status', lambda **kw: docker.DaemonStatus(True, False, ''))
     monkeypatch.setattr(runtime.docker, 'image_exists', lambda *a, **kw: True)

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_dispatch
 
@@ -53,16 +54,7 @@ def test_code_dispatch_queue_posts_explicit_initial_mode(
     _install_snapshot_stub(monkeypatch, tmp_path)
     captured: dict[str, object] = {}
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, endpoint: str, payload: dict[str, object], **_options):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
@@ -104,16 +96,7 @@ def test_code_dispatch_queue_posts_explicit_initial_mode(
 def test_code_dispatch_lookup_rejects_unbounded_glob_result(monkeypatch, tmp_path, capsys):
     limit = code_dispatch._MAX_QUEUE_LOOKUP_MATCHES
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, _endpoint: str):
             items = [
                 {"id": file_id, "repo_id": 1, "file_path": f"src/{file_id}.py"}
@@ -176,16 +159,7 @@ def test_code_dispatch_queue_posts_bounded_batches_and_caps_response_snapshots(
     _install_snapshot_stub(monkeypatch, tmp_path)
     posted_sizes: list[int] = []
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, endpoint: str, payload: dict[str, object], **_options):
             assert endpoint == "code/analysis-queue"
             batch = payload["items"]
@@ -226,16 +200,7 @@ def test_code_dispatch_reanalyze_requires_reason_and_posts_auditable_mode(
         path.write_text("{}", encoding="utf-8")
         return path
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, endpoint: str, payload: dict[str, object], **_options):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
@@ -293,16 +258,7 @@ def test_code_dispatch_reanalyze_continues_after_a_batch_conflict(
     _install_snapshot_stub(monkeypatch, tmp_path)
     posted_sizes: list[int] = []
 
-    class FakeClient:
-        def __init__(self, *_args):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint, payload, **_options):
             posted_sizes.append(len(payload["items"]))
             conflict = 1 if len(posted_sizes) == 1 else 0
@@ -333,16 +289,7 @@ def test_code_dispatch_reanalysis_can_omit_backend_owned_priority_and_predecesso
     _install_snapshot_stub(monkeypatch, tmp_path)
     posted = []
 
-    class FakeClient:
-        def __init__(self, *_args):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint, payload):
             posted.append(payload)
             return {
@@ -371,16 +318,7 @@ def test_code_dispatch_queue_rejects_out_of_range_priority_without_clamping(
     )
     posted = False
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint: str, _payload: dict[str, object]):
             nonlocal posted
             posted = True
@@ -433,16 +371,7 @@ def test_code_dispatch_queue_requires_explicit_priority(monkeypatch, tmp_path, c
     queue_path.write_text(json.dumps([{"file_id": 7}]), encoding="utf-8")
     posted = False
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint: str, _payload: dict[str, object]):
             nonlocal posted
             posted = True
@@ -464,16 +393,7 @@ def test_code_dispatch_queue_conflict_exits_nonzero_after_rendering_outcomes(
     queue_path = _queue_file(tmp_path)
     _install_snapshot_stub(monkeypatch, tmp_path)
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint: str, _payload: dict[str, object]):
             return {
                 "mode": "initial",
@@ -510,16 +430,7 @@ def test_code_dispatch_fetch_normalizes_backend_assigned_agent_to_agent_name(
 ):
     snapshots: list[object] = []
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint: str, _payload: dict[str, object]):
             return [
                 {
@@ -563,16 +474,7 @@ def test_code_dispatch_fetch_normalizes_backend_assigned_agent_to_agent_name(
 def test_code_dispatch_empty_fetch_explains_why_no_claim_was_returned(
     monkeypatch, tmp_path, capsys
 ):
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, _endpoint: str):
             return {
                 "total": 0, "offset": 0, "count": 0, "has_more": False,
@@ -609,16 +511,7 @@ def test_code_dispatch_fetch_rejects_redirected_scratch_component(
     redirected.mkdir()
     (scratch_root / "41").symlink_to(redirected, target_is_directory=True)
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint: str, _payload: dict[str, object]):
             return [
                 {
@@ -658,21 +551,12 @@ def test_code_dispatch_heartbeat_rejects_non_positive_single_item_id(
 # --- B8 OPEN-1/OPEN-2: the selector the operator actually holds -------------
 
 
-class _QueueListingClient:
+class _QueueListingClient(StubClient):
     """Answers the queue listing and records every submitted payload."""
 
     rows: list[dict] = []
     posts: list[tuple[str, dict]] = []
     reads: list[str] = []
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def get(self, endpoint: str):
         type(self).reads.append(endpoint)
@@ -876,16 +760,7 @@ def test_queue_submission_scales_its_response_budget_per_batch(
     _install_snapshot_stub(monkeypatch, tmp_path)
     budgets: list[tuple[int, float | None]] = []
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, _endpoint, payload, **options):
             budgets.append((len(payload["items"]), options.get("read_timeout")))
             return {

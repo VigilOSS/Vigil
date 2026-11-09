@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+import pytest
 from test_engagements_api import write_engagement
 
 from app import db
@@ -23,6 +24,16 @@ def _seed(client, isolate_settings):
     assert client.get("/engagements").status_code == 200
 
 
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
+
+
 def _put_identity(client, name="user_a", state=None):
     payload = {"cookies": {"sid": "abc"}, "make_active": True}
     if state is not None:
@@ -30,9 +41,17 @@ def _put_identity(client, name="user_a", state=None):
     return client.put(f"/engagements/{KEY}/credentials/{name}", json=payload)
 
 
-def test_liveness_dead_marks_state_dead(client, isolate_settings):
-    _seed(client, isolate_settings)
-    _put_identity(client)
+@pytest.fixture
+def put_identity(client, seeded_engagement):
+    """Store the default identity the liveness cases below probe.
+
+    Depends on ``seeded_engagement`` so the engagement exists first, keeping
+    the order the per-test ``_seed`` + ``_put_identity`` pair ran in.
+    """
+    return _put_identity(client)
+
+
+def test_liveness_dead_marks_state_dead(client, put_identity):
     resp = client.post(
         f"/engagements/{KEY}/credentials/user_a/liveness",
         json={"verdict": "dead", "probed_at": "2026-07-03T12:00:00Z"},
@@ -51,8 +70,7 @@ def test_liveness_dead_marks_state_dead(client, isolate_settings):
     assert "user_a" in dead_listing["identities"]
 
 
-def test_liveness_live_sets_available_and_clears_stale(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_liveness_live_sets_available_and_clears_stale(client, seeded_engagement):
     # Seed the identity into a `stale` state (as the age backstop would).
     _put_identity(client, state="stale")
     got = client.get(f"/engagements/{KEY}/credentials/user_a").json()
@@ -67,11 +85,7 @@ def test_liveness_live_sets_available_and_clears_stale(client, isolate_settings)
     assert mat["state"] == "available"  # a live probe cleared the stale mark
 
 
-def test_newer_scoped_live_observation_clears_legacy_dead_projection(
-    client, isolate_settings
-):
-    _seed(client, isolate_settings)
-    _put_identity(client)
+def test_newer_scoped_live_observation_clears_legacy_dead_projection(client, put_identity):
     dead = client.post(
         f"/engagements/{KEY}/credentials/user_a/liveness",
         json={"verdict": "dead", "probed_at": "2026-07-03T12:00:00Z"},
@@ -97,10 +111,8 @@ def test_newer_scoped_live_observation_clears_legacy_dead_projection(
 
 
 def test_unscoped_listing_does_not_render_older_dead_beside_available_identity(
-    client, isolate_settings
+    client, put_identity
 ):
-    _seed(client, isolate_settings)
-    _put_identity(client)
     engagement = db.get_engagement_by_key(KEY)
     assert engagement is not None
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -137,10 +149,8 @@ def test_unscoped_listing_does_not_render_older_dead_beside_available_identity(
 
 
 def test_unscoped_listing_drops_available_identity_legacy_dead_when_live_expired(
-    client, isolate_settings
+    client, put_identity
 ):
-    _seed(client, isolate_settings)
-    _put_identity(client)
     engagement = db.get_engagement_by_key(KEY)
     assert engagement is not None
     now = datetime.now(timezone.utc).replace(microsecond=0)
@@ -172,8 +182,7 @@ def test_unscoped_listing_drops_available_identity_legacy_dead_when_live_expired
     assert material["last_probed_at"] is None
 
 
-def test_liveness_unknown_leaves_state_untouched(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_liveness_unknown_leaves_state_untouched(client, seeded_engagement):
     _put_identity(client)  # state=available
     resp = client.post(
         f"/engagements/{KEY}/credentials/user_a/liveness",
@@ -189,8 +198,7 @@ def test_liveness_unknown_leaves_state_untouched(client, isolate_settings):
     assert mat["last_probed_at"]
 
 
-def test_liveness_404_for_unknown_identity(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_liveness_404_for_unknown_identity(client, seeded_engagement):
     resp = client.post(
         f"/engagements/{KEY}/credentials/ghost/liveness",
         json={"verdict": "live", "probed_at": None},
@@ -198,9 +206,7 @@ def test_liveness_404_for_unknown_identity(client, isolate_settings):
     assert resp.status_code == 404
 
 
-def test_liveness_422_for_bad_verdict(client, isolate_settings):
-    _seed(client, isolate_settings)
-    _put_identity(client)
+def test_liveness_422_for_bad_verdict(client, put_identity):
     resp = client.post(
         f"/engagements/{KEY}/credentials/user_a/liveness",
         json={"verdict": "alive-probably", "probed_at": None},
@@ -208,9 +214,7 @@ def test_liveness_422_for_bad_verdict(client, isolate_settings):
     assert resp.status_code == 422
 
 
-def test_liveness_verdict_is_case_insensitive(client, isolate_settings):
-    _seed(client, isolate_settings)
-    _put_identity(client)
+def test_liveness_verdict_is_case_insensitive(client, put_identity):
     resp = client.post(
         f"/engagements/{KEY}/credentials/user_a/liveness",
         json={"verdict": "DEAD", "probed_at": None},
@@ -219,10 +223,7 @@ def test_liveness_verdict_is_case_insensitive(client, isolate_settings):
     assert resp.json()["state"] == "dead"
 
 
-def test_quarantine_preserves_material_and_disables_replay(client, isolate_settings):
-    _seed(client, isolate_settings)
-    _put_identity(client)
-
+def test_quarantine_preserves_material_and_disables_replay(client, put_identity):
     resp = client.post(f"/engagements/{KEY}/credentials/user_a/quarantine")
 
     assert resp.status_code == 200
@@ -234,9 +235,7 @@ def test_quarantine_preserves_material_and_disables_replay(client, isolate_setti
     assert stored["cookies"] == {"sid": "abc"}
 
 
-def test_quarantine_returns_404_for_unknown_identity(client, isolate_settings):
-    _seed(client, isolate_settings)
-
+def test_quarantine_returns_404_for_unknown_identity(client, seeded_engagement):
     resp = client.post(f"/engagements/{KEY}/credentials/ghost/quarantine")
 
     assert resp.status_code == 404
@@ -254,10 +253,8 @@ def _expire_and_probe(isolate_settings, *, expires_at: str, probed_at: str) -> N
 
 
 def test_listing_does_not_carry_a_pre_expiry_live_verdict_past_expires_at(
-    client, isolate_settings
+    client, isolate_settings, put_identity
 ):
-    _seed(client, isolate_settings)
-    _put_identity(client)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     probed_at = (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     expires_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -273,10 +270,8 @@ def test_listing_does_not_carry_a_pre_expiry_live_verdict_past_expires_at(
 
 
 def test_listing_keeps_a_live_verdict_observed_after_expires_at(
-    client, isolate_settings
+    client, isolate_settings, put_identity
 ):
-    _seed(client, isolate_settings)
-    _put_identity(client)
     now = datetime.now(timezone.utc).replace(microsecond=0)
     expires_at = (now - timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
     probed_at = (now - timedelta(hours=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -290,11 +285,7 @@ def test_listing_keeps_a_live_verdict_observed_after_expires_at(
     assert material["last_probed_at"] == probed_at
 
 
-def test_listing_marks_an_unprobed_identity_past_expires_at_expired(
-    client, isolate_settings
-):
-    _seed(client, isolate_settings)
-    _put_identity(client)
+def test_listing_marks_an_unprobed_identity_past_expires_at_expired(client, put_identity):
     engagement = db.get_engagement_by_key(KEY)
     assert engagement is not None
     expires_at = (
@@ -314,10 +305,7 @@ def test_listing_marks_an_unprobed_identity_past_expires_at_expired(
     assert listing["identities"]["user_a"]["liveness_verdict"] == "expired"
 
 
-def test_a_scoped_probe_after_expiry_is_not_overridden_by_expired(
-    client, isolate_settings
-):
-    _seed(client, isolate_settings)
+def test_a_scoped_probe_after_expiry_is_not_overridden_by_expired(client, seeded_engagement):
     assert client.put(
         f"/engagements/{KEY}/credentials/user_a",
         json={"headers": {"Authorization": "Bearer acme"}, "make_active": True},
@@ -351,11 +339,7 @@ def test_a_scoped_probe_after_expiry_is_not_overridden_by_expired(
     assert scoped["identities"]["user_a"]["liveness_verdict"] == "live"
 
 
-def test_a_probe_proven_dead_session_stays_dead_after_expiry(
-    client, isolate_settings
-):
-    _seed(client, isolate_settings)
-    _put_identity(client)
+def test_a_probe_proven_dead_session_stays_dead_after_expiry(client, put_identity):
     now = datetime.now(timezone.utc).replace(microsecond=0)
     probed_at = (now - timedelta(hours=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert client.post(

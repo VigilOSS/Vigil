@@ -65,15 +65,6 @@ def validate_surface_type(surface_type: str) -> None:
         )
 
 
-def validate_surface_status(status: str) -> None:
-    if status not in VALID_STATUSES:
-        valid = ", ".join(sorted(VALID_STATUSES))
-        raise SystemExit(
-            f"invalid surface status: {status}. "
-            f"Valid statuses: {valid}"
-        )
-
-
 def validate_surface_create_status(status: str) -> None:
     if status not in CREATABLE_STATUSES:
         valid = ", ".join(sorted(CREATABLE_STATUSES))
@@ -81,19 +72,4 @@ def validate_surface_create_status(status: str) -> None:
             f"invalid surface create status: {status}. "
             f"Valid create statuses: {valid}; use `vigil assess resolve surface` "
             "for transition-only statuses"
-        )
-
-
-def validate_resolution_status(status: str) -> None:
-    """Reject statuses that are not valid resolutions.
-
-    ``discovered`` is the seed state — operators can only resolve a
-    surface to ``covered``, ``not_applicable``, ``deferred``, or
-    ``partially-covered`` with a follow-up condition.
-    """
-    if status not in RESOLVABLE_STATUSES:
-        valid = ", ".join(sorted(RESOLVABLE_STATUSES))
-        raise SystemExit(
-            f"invalid resolution status: {status}. "
-            f"Valid statuses: {valid}"
         )

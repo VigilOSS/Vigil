@@ -58,6 +58,23 @@ def _create_surface(client) -> dict:
     return response.json()
 
 
+def _seeded_surface(client, isolate_settings) -> tuple[dict, object]:
+    """Seed the engagement and record one surface, with its id."""
+    _seed_engagement(client, isolate_settings)
+    created = _create_surface(client)
+    return created, created["id"]
+
+
+def _patch_surface(client, surface_id, **body):
+    """PATCH one surface by id and return the raw response."""
+    return client.patch(f"{ASSESSMENT_BASE}/surfaces/{surface_id}", json=body)
+
+
+def _link_variant(client, **body):
+    """POST one surface/request-variant link and return the raw response."""
+    return client.post(f"{ASSESSMENT_BASE}/surface-request-variant-links", json=body)
+
+
 def _create_surface_with_descriptor(client, descriptor: str) -> dict:
     payload = {
         "surface_type": "object_reference",
@@ -72,17 +89,13 @@ def _create_surface_with_descriptor(client, descriptor: str) -> dict:
 
 
 def test_patch_surface_resolves_to_covered_with_rationale(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
     assert created["status"] == "discovered"
 
-    patched = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "covered",
-            "rationale": "vulnerability-analyst confirmed coverage on parameter id",
-        },
+    patched = _patch_surface(
+        client, surface_id,
+        status="covered",
+        rationale="vulnerability-analyst confirmed coverage on parameter id",
     )
     assert patched.status_code == 200, patched.text
     body = patched.json()
@@ -99,9 +112,10 @@ def test_recording_existing_surface_preserves_operator_status(
 ):
     _seed_engagement(client, isolate_settings)
     created = _create_surface(client)
-    resolved = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{created['id']}",
-        json={"status": resolved_status, "rationale": "Operator reviewed this surface"},
+    resolved = _patch_surface(
+        client, created["id"],
+        status=resolved_status,
+        rationale="Operator reviewed this surface",
     )
     assert resolved.status_code == 200, resolved.text
 
@@ -125,9 +139,11 @@ def test_patch_surface_accepts_4096_character_followup(client, isolate_settings)
     _seed_engagement(client, isolate_settings)
     created = _create_surface(client)
     followup = "x" * 4096
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{created['id']}",
-        json={"status": "partially-covered", "rationale": "next pass", "followup_condition": followup},
+    response = _patch_surface(
+        client, created["id"],
+        status="partially-covered",
+        rationale="next pass",
+        followup_condition=followup,
     )
     assert response.status_code == 200, response.text
     assert response.json()["followup_condition"] == followup
@@ -158,46 +174,33 @@ def test_patch_surface_rejects_unknown_id(client, isolate_settings):
 
 
 def test_patch_surface_rejects_empty_payload(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={},
-    )
+    created, surface_id = _seeded_surface(client, isolate_settings)
+    response = _patch_surface(client, surface_id)
     assert response.status_code == 400, response.text
 
 
 def test_patch_surface_rejects_invalid_status(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "bogus"},
-    )
+    created, surface_id = _seeded_surface(client, isolate_settings)
+    response = _patch_surface(client, surface_id, status="bogus")
     # Pydantic Literal rejects upstream, returning 422.
     assert response.status_code == 422, response.text
 
 
 def test_patch_surface_supports_deferred_and_not_applicable(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    deferred = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "deferred", "rationale": "low-signal cluster, revisit"},
+    deferred = _patch_surface(
+        client, surface_id,
+        status="deferred",
+        rationale="low-signal cluster, revisit",
     )
     assert deferred.status_code == 200
     assert deferred.json()["status"] == "deferred"
 
-    not_applicable = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "not_applicable",
-            "rationale": "no input vector after retest",
-        },
+    not_applicable = _patch_surface(
+        client, surface_id,
+        status="not_applicable",
+        rationale="no input vector after retest",
     )
     assert not_applicable.status_code == 200
     final_body = not_applicable.json()
@@ -215,12 +218,10 @@ def test_administratively_closed_surface_remains_an_uncovered_obligation(
     _seed_engagement(client, isolate_settings)
     created = _create_surface(client)
 
-    closed = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{created['id']}",
-        json={
-            "status": "administratively-closed",
-            "rationale": "bulk closeout; no specialist evidence",
-        },
+    closed = _patch_surface(
+        client, created["id"],
+        status="administratively-closed",
+        rationale="bulk closeout; no specialist evidence",
     )
 
     assert closed.status_code == 200, closed.text
@@ -240,25 +241,15 @@ def test_administratively_closed_surface_remains_an_uncovered_obligation(
 
 
 def test_patch_surface_rejects_empty_source_name(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"source_name": ""},
-    )
+    created, surface_id = _seeded_surface(client, isolate_settings)
+    response = _patch_surface(client, surface_id, source_name="")
     # Pydantic min_length=1 rejects upstream with 422.
     assert response.status_code == 422, response.text
 
 
 def test_patch_surface_rejects_empty_evidence_ref(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"evidence_ref": ""},
-    )
+    created, surface_id = _seeded_surface(client, isolate_settings)
+    response = _patch_surface(client, surface_id, evidence_ref="")
     assert response.status_code == 422, response.text
 
 
@@ -274,19 +265,19 @@ def _create_request_variant(client, url: str) -> int:
 def test_patch_surface_blocks_regression_to_discovered_from_covered(
     client, isolate_settings
 ):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    covered = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "covered", "rationale": "vulnerability-analyst confirmed"},
+    covered = _patch_surface(
+        client, surface_id,
+        status="covered",
+        rationale="vulnerability-analyst confirmed",
     )
     assert covered.status_code == 200
 
-    regress = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "discovered", "rationale": "operator changed mind"},
+    regress = _patch_surface(
+        client, surface_id,
+        status="discovered",
+        rationale="operator changed mind",
     )
     assert regress.status_code == 409, regress.text
     assert "discovered" in regress.json()["detail"]
@@ -295,69 +286,48 @@ def test_patch_surface_blocks_regression_to_discovered_from_covered(
 def test_patch_surface_blocks_regression_to_discovered_from_not_applicable(
     client, isolate_settings
 ):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    na = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "not_applicable", "rationale": "no input vector"},
-    )
+    na = _patch_surface(client, surface_id, status="not_applicable", rationale="no input vector")
     assert na.status_code == 200
 
-    regress = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "discovered", "rationale": "re-found"},
-    )
+    regress = _patch_surface(client, surface_id, status="discovered", rationale="re-found")
     assert regress.status_code == 409, regress.text
 
 
 def test_patch_surface_allows_not_applicable_to_covered(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    na = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "not_applicable", "rationale": "looked irrelevant"},
-    )
+    na = _patch_surface(client, surface_id, status="not_applicable", rationale="looked irrelevant")
     assert na.status_code == 200
 
-    promote = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "covered", "rationale": "actually relevant on retest"},
+    promote = _patch_surface(
+        client, surface_id,
+        status="covered",
+        rationale="actually relevant on retest",
     )
     assert promote.status_code == 200, promote.text
     assert promote.json()["status"] == "covered"
 
 
 def test_patch_surface_allows_deferred_to_anything(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    deferred = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "deferred", "rationale": "park it"},
-    )
+    deferred = _patch_surface(client, surface_id, status="deferred", rationale="park it")
     assert deferred.status_code == 200
 
-    rediscovered = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "discovered", "rationale": "back on the queue"},
+    rediscovered = _patch_surface(
+        client, surface_id,
+        status="discovered",
+        rationale="back on the queue",
     )
     assert rediscovered.status_code == 200, rediscovered.text
 
 
 def test_patch_surface_requires_rationale_when_changing_status(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "covered"},
-    )
+    response = _patch_surface(client, surface_id, status="covered")
     assert response.status_code == 400, response.text
     assert "rationale" in response.json()["detail"].lower()
 
@@ -365,38 +335,26 @@ def test_patch_surface_requires_rationale_when_changing_status(client, isolate_s
 def test_patch_surface_requires_non_blank_rationale_when_changing_status(
     client, isolate_settings
 ):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "covered", "rationale": "   "},
-    )
+    response = _patch_surface(client, surface_id, status="covered", rationale="   ")
     assert response.status_code == 400, response.text
 
 
 def test_patch_surface_dedups_rationale_substring(client, isolate_settings):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    first = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "covered",
-            "rationale": "vulnerability-analyst confirmed coverage on parameter id",
-        },
+    first = _patch_surface(
+        client, surface_id,
+        status="covered",
+        rationale="vulnerability-analyst confirmed coverage on parameter id",
     )
     assert first.status_code == 200
     rationale_after_first = first.json()["rationale"]
 
     # Submit a substring of the just-appended rationale: should NOT
     # double-append.
-    retry = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"rationale": "vulnerability-analyst confirmed"},
-    )
+    retry = _patch_surface(client, surface_id, rationale="vulnerability-analyst confirmed")
     assert retry.status_code == 200, retry.text
     assert retry.json()["rationale"] == rationale_after_first
 
@@ -404,14 +362,9 @@ def test_patch_surface_dedups_rationale_substring(client, isolate_settings):
 def test_patch_surface_allows_rationale_only_update_when_status_unchanged(
     client, isolate_settings
 ):
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"rationale": "extra audit note appended later"},
-    )
+    response = _patch_surface(client, surface_id, rationale="extra audit note appended later")
     assert response.status_code == 200, response.text
     assert "extra audit note" in response.json()["rationale"]
 
@@ -424,17 +377,13 @@ def test_patch_surface_allows_rationale_only_update_when_status_unchanged(
 def test_patch_surface_resolves_to_partially_covered_with_followup(client, isolate_settings):
     """N7 — discovered → partially-covered with rationale + followup_condition lands the
     new lifecycle state and persists the follow-up condition."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "unauth path tested; admin path still pending auth",
-            "followup_condition": "needs auth re-test once credentials are issued",
-        },
+    response = _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="unauth path tested; admin path still pending auth",
+        followup_condition="needs auth re-test once credentials are issued",
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -447,17 +396,13 @@ def test_partially_covered_surface_not_finding_linked_is_advisory(client, isolat
     linked active finding is ADVISORY, not a hard coverage blocker. It is
     surfaced in ``advisory_surfaces`` so the operator still sees it, but it does
     not flip ``ready`` to False (which would block forever with no escape)."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "unauth path tested; admin path still pending auth",
-            "followup_condition": "needs auth re-test once credentials are issued",
-        },
+    response = _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="unauth path tested; admin path still pending auth",
+        followup_condition="needs auth re-test once credentials are issued",
     )
     assert response.status_code == 200, response.text
 
@@ -474,9 +419,7 @@ def test_partially_covered_surface_linked_to_active_finding_blocks(client, isola
     """L1-2 — a partially-covered surface DOES block when it is linked to an
     active (reportable) finding on the same host: the finding makes the residual
     follow-up load-bearing."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
     finding = {
         "slug": "VA-101",
@@ -492,13 +435,11 @@ def test_partially_covered_surface_linked_to_active_finding_blocks(client, isola
     resp = client.post(f"{ASSESSMENT_BASE}/findings", json=finding)
     assert resp.status_code in {200, 201}, resp.text
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "unauth path tested; admin path still pending auth",
-            "followup_condition": "needs auth re-test once credentials are issued",
-        },
+    response = _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="unauth path tested; admin path still pending auth",
+        followup_condition="needs auth re-test once credentials are issued",
     )
     assert response.status_code == 200, response.text
 
@@ -516,16 +457,12 @@ def test_partially_covered_surface_linked_to_active_finding_blocks(client, isola
 
 def test_patch_surface_partially_covered_requires_followup_condition(client, isolate_settings):
     """N7 — backend rejects partially-covered without followup_condition."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "partial coverage but no follow-up named",
-        },
+    response = _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="partial coverage but no follow-up named",
     )
     assert response.status_code == 400, response.text
     assert "followup_condition" in response.json()["detail"]
@@ -535,24 +472,21 @@ def test_patch_surface_promotes_partially_covered_to_covered_clears_followup(
     client, isolate_settings
 ):
     """N7 — partially-covered → covered clears followup_condition."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    intermediate = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "unauth path tested",
-            "followup_condition": "needs auth re-test",
-        },
+    intermediate = _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="unauth path tested",
+        followup_condition="needs auth re-test",
     )
     assert intermediate.status_code == 200
     assert intermediate.json()["followup_condition"] == "needs auth re-test"
 
-    promote = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "covered", "rationale": "auth re-test confirmed coverage"},
+    promote = _patch_surface(
+        client, surface_id,
+        status="covered",
+        rationale="auth re-test confirmed coverage",
     )
     assert promote.status_code == 200, promote.text
     final_body = promote.json()
@@ -562,21 +496,18 @@ def test_patch_surface_promotes_partially_covered_to_covered_clears_followup(
 
 def test_patch_surface_partially_covered_to_deferred(client, isolate_settings):
     """N7 — partially-covered → deferred is allowed (de-prioritize the follow-up)."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "auth path stalled",
-            "followup_condition": "credentials never issued",
-        },
+    _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="auth path stalled",
+        followup_condition="credentials never issued",
     )
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "deferred", "rationale": "park until next engagement"},
+    response = _patch_surface(
+        client, surface_id,
+        status="deferred",
+        rationale="park until next engagement",
     )
     assert response.status_code == 200, response.text
     assert response.json()["status"] == "deferred"
@@ -585,21 +516,18 @@ def test_patch_surface_partially_covered_to_deferred(client, isolate_settings):
 def test_patch_surface_covered_to_partially_covered_allowed(client, isolate_settings):
     """N7 — covered → partially-covered is regression-with-purpose; allowed when a
     follow-up is required (e.g., regression after deploy invalidated the prior coverage)."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "covered", "rationale": "vulnerability-analyst confirmed"},
+    _patch_surface(
+        client, surface_id,
+        status="covered",
+        rationale="vulnerability-analyst confirmed",
     )
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "deploy invalidated prior coverage",
-            "followup_condition": "re-test after deploy stabilizes",
-        },
+    response = _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="deploy invalidated prior coverage",
+        followup_condition="re-test after deploy stabilizes",
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -609,21 +537,18 @@ def test_patch_surface_covered_to_partially_covered_allowed(client, isolate_sett
 
 def test_patch_surface_partially_covered_to_discovered_blocked(client, isolate_settings):
     """N7 — partially-covered → discovered is blocked (audit context loss)."""
-    _seed_engagement(client, isolate_settings)
-    created = _create_surface(client)
-    surface_id = created["id"]
+    created, surface_id = _seeded_surface(client, isolate_settings)
 
-    client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={
-            "status": "partially-covered",
-            "rationale": "auth path pending",
-            "followup_condition": "needs creds",
-        },
+    _patch_surface(
+        client, surface_id,
+        status="partially-covered",
+        rationale="auth path pending",
+        followup_condition="needs creds",
     )
-    response = client.patch(
-        f"{ASSESSMENT_BASE}/surfaces/{surface_id}",
-        json={"status": "discovered", "rationale": "regress to undecided"},
+    response = _patch_surface(
+        client, surface_id,
+        status="discovered",
+        rationale="regress to undecided",
     )
     assert response.status_code == 409, response.text
 
@@ -638,14 +563,12 @@ def test_create_surface_request_variant_link_success(client, isolate_settings):
     surface = _create_surface(client)
     variant_id = _create_request_variant(client, "https://example.test/api/users/1")
 
-    response = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={
-            "surface_id": surface["id"],
-            "request_variant_id": variant_id,
-            "relation": "primary-endpoint",
-            "evidence_ref": "scans/katana.txt:14",
-        },
+    response = _link_variant(
+        client,
+        surface_id=surface["id"],
+        request_variant_id=variant_id,
+        relation="primary-endpoint",
+        evidence_ref="scans/katana.txt:14",
     )
     assert response.status_code == 201, response.text
     body = response.json()
@@ -659,10 +582,7 @@ def test_create_surface_request_variant_link_404_on_bad_surface_id(client, isola
     _seed_engagement(client, isolate_settings)
     variant_id = _create_request_variant(client, "https://example.test/api/users/2")
 
-    response = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={"surface_id": 9999, "request_variant_id": variant_id},
-    )
+    response = _link_variant(client, surface_id=9999, request_variant_id=variant_id)
     assert response.status_code == 404, response.text
     assert "surface" in response.json()["detail"].lower()
 
@@ -671,10 +591,7 @@ def test_create_surface_request_variant_link_404_on_bad_request_variant_id(clien
     _seed_engagement(client, isolate_settings)
     surface = _create_surface(client)
 
-    response = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={"surface_id": surface["id"], "request_variant_id": 9999},
-    )
+    response = _link_variant(client, surface_id=surface["id"], request_variant_id=9999)
     assert response.status_code == 404, response.text
     assert "request_variant" in response.json()["detail"].lower()
 
@@ -687,16 +604,10 @@ def test_list_surface_request_variant_links_by_surface(client, isolate_settings)
     variant_b = _create_request_variant(client, "https://example.test/api/users/4")
 
     for variant_id in (variant_a, variant_b):
-        response = client.post(
-            f"{ASSESSMENT_BASE}/surface-request-variant-links",
-            json={"surface_id": surface["id"], "request_variant_id": variant_id},
-        )
+        response = _link_variant(client, surface_id=surface["id"], request_variant_id=variant_id)
         assert response.status_code == 201, response.text
     # Link belonging to a different surface must not leak into the list below.
-    response = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={"surface_id": other_surface["id"], "request_variant_id": variant_a},
-    )
+    response = _link_variant(client, surface_id=other_surface["id"], request_variant_id=variant_a)
     assert response.status_code == 201, response.text
 
     listed = client.get(
@@ -717,15 +628,13 @@ def test_list_surface_request_variant_links_by_request_variant(client, isolate_s
     other_variant_id = _create_request_variant(client, "https://example.test/api/users/6")
 
     for surface in (surface_a, surface_b):
-        response = client.post(
-            f"{ASSESSMENT_BASE}/surface-request-variant-links",
-            json={"surface_id": surface["id"], "request_variant_id": variant_id},
-        )
+        response = _link_variant(client, surface_id=surface["id"], request_variant_id=variant_id)
         assert response.status_code == 201, response.text
     # Link belonging to a different request_variant must not leak into the list below.
-    response = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={"surface_id": surface_a["id"], "request_variant_id": other_variant_id},
+    response = _link_variant(
+        client,
+        surface_id=surface_a["id"],
+        request_variant_id=other_variant_id,
     )
     assert response.status_code == 201, response.text
 
@@ -744,26 +653,22 @@ def test_create_surface_request_variant_link_upsert_updates_evidence_ref(client,
     surface = _create_surface(client)
     variant_id = _create_request_variant(client, "https://example.test/api/users/7")
 
-    first = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={
-            "surface_id": surface["id"],
-            "request_variant_id": variant_id,
-            "relation": "primary-endpoint",
-            "evidence_ref": "scans/katana-v1.txt:1",
-        },
+    first = _link_variant(
+        client,
+        surface_id=surface["id"],
+        request_variant_id=variant_id,
+        relation="primary-endpoint",
+        evidence_ref="scans/katana-v1.txt:1",
     )
     assert first.status_code == 201, first.text
     first_id = first.json()["id"]
 
-    second = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={
-            "surface_id": surface["id"],
-            "request_variant_id": variant_id,
-            "relation": "primary-endpoint",
-            "evidence_ref": "scans/katana-v2.txt:9",
-        },
+    second = _link_variant(
+        client,
+        surface_id=surface["id"],
+        request_variant_id=variant_id,
+        relation="primary-endpoint",
+        evidence_ref="scans/katana-v2.txt:9",
     )
     assert second.status_code == 201, second.text
     assert second.json()["id"] == first_id
@@ -788,13 +693,11 @@ def test_create_surface_request_variant_link_distinct_relations_create_separate_
     variant_id = _create_request_variant(client, "https://example.test/api/users/8")
 
     for relation in ("primary-endpoint", "related"):
-        response = client.post(
-            f"{ASSESSMENT_BASE}/surface-request-variant-links",
-            json={
-                "surface_id": surface["id"],
-                "request_variant_id": variant_id,
-                "relation": relation,
-            },
+        response = _link_variant(
+            client,
+            surface_id=surface["id"],
+            request_variant_id=variant_id,
+            relation=relation,
         )
         assert response.status_code == 201, response.text
 
@@ -817,26 +720,23 @@ def test_create_surface_request_variant_link_empty_evidence_ref_does_not_clobber
     surface = _create_surface(client)
     variant_id = _create_request_variant(client, "https://example.test/api/users/9")
 
-    first = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={
-            "surface_id": surface["id"],
-            "request_variant_id": variant_id,
-            "relation": "primary-endpoint",
-            "evidence_ref": "scans/katana.txt:14",
-        },
+    first = _link_variant(
+        client,
+        surface_id=surface["id"],
+        request_variant_id=variant_id,
+        relation="primary-endpoint",
+        evidence_ref="scans/katana.txt:14",
     )
     assert first.status_code == 201, first.text
     first_id = first.json()["id"]
 
-    second = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={
-            "surface_id": surface["id"],
-            "request_variant_id": variant_id,
-            "relation": "primary-endpoint",
-            # evidence_ref omitted -> defaults to "" on the wire.
-        },
+    # evidence_ref omitted -> defaults to "" on the wire, which is what makes
+    # the assertion below (the FIRST link's evidence_ref survives) meaningful.
+    second = _link_variant(
+        client,
+        surface_id=surface["id"],
+        request_variant_id=variant_id,
+        relation="primary-endpoint",
     )
     assert second.status_code == 201, second.text
     assert second.json()["id"] == first_id
@@ -920,10 +820,7 @@ def test_list_surface_request_variant_links_by_surface_does_not_leak_across_enga
 
     surface = _create_surface(client)  # ENGAGEMENT_KEY
     variant_id = _create_request_variant(client, "https://example.test/api/users/12")
-    link = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={"surface_id": surface["id"], "request_variant_id": variant_id},
-    )
+    link = _link_variant(client, surface_id=surface["id"], request_variant_id=variant_id)
     assert link.status_code == 201, link.text
 
     # Same surface_id queried under the OTHER engagement must not see the
@@ -948,10 +845,7 @@ def test_list_surface_request_variant_links_by_request_variant_does_not_leak_acr
 
     surface = _create_surface(client)  # ENGAGEMENT_KEY
     variant_id = _create_request_variant(client, "https://example.test/api/users/13")
-    link = client.post(
-        f"{ASSESSMENT_BASE}/surface-request-variant-links",
-        json={"surface_id": surface["id"], "request_variant_id": variant_id},
-    )
+    link = _link_variant(client, surface_id=surface["id"], request_variant_id=variant_id)
     assert link.status_code == 201, link.text
 
     leaked = client.get(
