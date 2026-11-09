@@ -534,7 +534,9 @@ def _valid_fixture_finding(
     }
 
 
-def test_soft_assertion_miss_emits_warning_does_not_fail(tmp_path: Path) -> None:
+def test_soft_assertion_miss_emits_warning_does_not_fail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A soft assertion that fails must emit a UserWarning and NOT raise.
 
     We point _FIXTURES_DIR at tmp_path so _load_fixture resolves our inline file.
@@ -557,18 +559,12 @@ assertions:
 """
     def_path = _make_def_path(tmp_path, def_yaml, name="soft_miss.yaml")
 
-    # Temporarily redirect _FIXTURES_DIR in this module so _load_fixture
-    # resolves our inline fixture file.
-    orig_fixtures_dir = _THIS_MODULE._FIXTURES_DIR
-    _THIS_MODULE._FIXTURES_DIR = tmp_path
-    try:
-        with pytest.warns(UserWarning, match="SOFT ASSERTION"):
-            _run_definition(def_path)
-    finally:
-        _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir
+    monkeypatch.setattr(_THIS_MODULE, "_FIXTURES_DIR", tmp_path)
+    with pytest.warns(UserWarning, match="SOFT ASSERTION"):
+        _run_definition(def_path)
 
 
-def test_strict_assertion_miss_raises(tmp_path: Path) -> None:
+def test_strict_assertion_miss_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A strict assertion that fails must raise AssertionError."""
     findings = [_valid_fixture_finding(title="Low severity finding", severity="low")]
     fixture_name = "strict_miss_fixture.json"
@@ -584,16 +580,14 @@ assertions:
 """
     def_path = _make_def_path(tmp_path, def_yaml, name="strict_miss.yaml")
 
-    orig_fixtures_dir = _THIS_MODULE._FIXTURES_DIR
-    _THIS_MODULE._FIXTURES_DIR = tmp_path
-    try:
-        with pytest.raises(AssertionError, match="Quality assertion failures"):
-            _run_definition(def_path)
-    finally:
-        _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir
+    monkeypatch.setattr(_THIS_MODULE, "_FIXTURES_DIR", tmp_path)
+    with pytest.raises(AssertionError, match="Quality assertion failures"):
+        _run_definition(def_path)
 
 
-def test_fixture_schema_is_validated_before_scoring(tmp_path: Path) -> None:
+def test_fixture_schema_is_validated_before_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixture_name = "invalid_fixture.json"
     invalid = _valid_fixture_finding()
     del invalid["details"]["evidence"]
@@ -604,16 +598,14 @@ def test_fixture_schema_is_validated_before_scoring(tmp_path: Path) -> None:
         name="invalid_fixture.yaml",
     )
 
-    orig_fixtures_dir = _THIS_MODULE._FIXTURES_DIR
-    _THIS_MODULE._FIXTURES_DIR = tmp_path
-    try:
-        with pytest.raises(AssertionError, match="evidence"):
-            _run_definition(def_path)
-    finally:
-        _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir
+    monkeypatch.setattr(_THIS_MODULE, "_FIXTURES_DIR", tmp_path)
+    with pytest.raises(AssertionError, match="evidence"):
+        _run_definition(def_path)
 
 
-def test_assertion_mode_outside_strict_or_soft_is_rejected(tmp_path: Path) -> None:
+def test_assertion_mode_outside_strict_or_soft_is_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     fixture_name = "valid_fixture.json"
     _make_fixture(tmp_path, [_valid_fixture_finding()], name=fixture_name)
     def_path = _make_def_path(
@@ -625,10 +617,6 @@ def test_assertion_mode_outside_strict_or_soft_is_rejected(tmp_path: Path) -> No
         name="invalid_mode.yaml",
     )
 
-    orig_fixtures_dir = _THIS_MODULE._FIXTURES_DIR
-    _THIS_MODULE._FIXTURES_DIR = tmp_path
-    try:
-        with pytest.raises(AssertionError, match="strict.*soft.*warning"):
-            _run_definition(def_path)
-    finally:
-        _THIS_MODULE._FIXTURES_DIR = orig_fixtures_dir
+    monkeypatch.setattr(_THIS_MODULE, "_FIXTURES_DIR", tmp_path)
+    with pytest.raises(AssertionError, match="strict.*soft.*warning"):
+        _run_definition(def_path)

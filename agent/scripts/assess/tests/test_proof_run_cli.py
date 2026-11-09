@@ -12,9 +12,21 @@ from assess.lib import config, contracts
 from assess.lib.client import AssessError, AssessmentClient
 
 
+@pytest.fixture(autouse=True)
+def _no_backend_probe(monkeypatch):
+    """Every verb in this module reaches the backend through the fake clients
+    installed per test, so the config loader's reachability probe must not run."""
+    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
+
+
 def _engagement(tmp_path):
     (tmp_path / "scope.json").write_text("{}\n", encoding="utf-8")
     return tmp_path
+
+
+def _run_cli(engagement, *argv: str) -> None:
+    """Drive the real root parser, which every proof-run verb is reached through."""
+    cli.main(["--engagement-dir", str(engagement), *argv])
 
 
 def test_proof_run_start_and_finish_use_explicit_durable_transitions(
@@ -22,7 +34,6 @@ def test_proof_run_start_and_finish_use_explicit_durable_transitions(
 ) -> None:
     engagement = _engagement(tmp_path)
     calls: list[tuple[str, str, dict]] = []
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
 
     def post(_client, endpoint: str, payload: dict):
         calls.append(("POST", endpoint, payload))
@@ -50,32 +61,13 @@ def test_proof_run_start_and_finish_use_explicit_durable_transitions(
     monkeypatch.setattr(AssessmentClient, "post", post)
     monkeypatch.setattr(AssessmentClient, "patch", patch)
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "start",
-            "verify-va-047",
-            "--kind",
-            "web",
-            "--agent-id",
-            "VERIFY-1",
-        ]
+    _run_cli(
+        engagement, "proof-run", "start", "verify-va-047", "--kind", "web", "--agent-id",
+        "VERIFY-1",
     )
     assert json.loads(capsys.readouterr().out)["status"] == "running"
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "finish",
-            "17",
-            "--status",
-            "completed",
-        ]
-    )
+    _run_cli(engagement, "proof-run", "finish", "17", "--status", "completed")
     assert json.loads(capsys.readouterr().out)["status"] == "completed"
     assert calls == [
         (
@@ -97,7 +89,6 @@ def test_proof_run_finish_exposes_success_and_failure(
     terminal_status, tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "patch",
@@ -111,17 +102,7 @@ def test_proof_run_finish_exposes_success_and_failure(
         },
     )
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "finish",
-            "23",
-            "--status",
-            terminal_status,
-        ]
-    )
+    _run_cli(engagement, "proof-run", "finish", "23", "--status", terminal_status)
 
     assert json.loads(capsys.readouterr().out)["status"] == terminal_status
 
@@ -130,7 +111,6 @@ def test_proof_run_completed_request_reports_backend_enforced_partial(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "patch",
@@ -150,17 +130,7 @@ def test_proof_run_completed_request_reports_backend_enforced_partial(
         },
     )
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "finish",
-            "23",
-            "--status",
-            "completed",
-        ]
-    )
+    _run_cli(engagement, "proof-run", "finish", "23", "--status", "completed")
 
     captured = capsys.readouterr()
     result = json.loads(captured.out)
@@ -174,7 +144,6 @@ def test_proof_run_completed_request_never_accepts_a_partial_proof_seal(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "patch",
@@ -195,17 +164,7 @@ def test_proof_run_completed_request_never_accepts_a_partial_proof_seal(
     )
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "finish",
-                "23",
-                "--status",
-                "completed",
-            ]
-        )
+        _run_cli(engagement, "proof-run", "finish", "23", "--status", "completed")
 
     assert excinfo.value.code == 1
     assert "did not identify the canonical run" in capsys.readouterr().err
@@ -215,7 +174,6 @@ def test_proof_run_finish_surfaces_the_backend_completion_refusal(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     detail = (
         'proof run 23 cannot complete: 1 imported source is unread (obligation 4). '
         'Read each with `run-audit source-read record`, release one you will not '
@@ -230,17 +188,7 @@ def test_proof_run_finish_surfaces_the_backend_completion_refusal(
     monkeypatch.setattr(AssessmentClient, "patch", refuse)
 
     with pytest.raises(SystemExit) as excinfo:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "finish",
-                "23",
-                "--status",
-                "completed",
-            ]
-        )
+        _run_cli(engagement, "proof-run", "finish", "23", "--status", "completed")
 
     assert excinfo.value.code == 1
     captured = capsys.readouterr()
@@ -253,7 +201,6 @@ def test_proof_run_finish_partial_records_the_operator_reason(
 ) -> None:
     engagement = _engagement(tmp_path)
     calls: list[dict] = []
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
 
     def patch(_client, _endpoint, payload):
         calls.append(payload)
@@ -269,18 +216,9 @@ def test_proof_run_finish_partial_records_the_operator_reason(
 
     monkeypatch.setattr(AssessmentClient, "patch", patch)
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "finish",
-            "23",
-            "--status",
-            "partial",
-            "--reason",
-            "time box ended before the second file",
-        ]
+    _run_cli(
+        engagement, "proof-run", "finish", "23", "--status", "partial", "--reason",
+        "time box ended before the second file",
     )
 
     captured = capsys.readouterr()
@@ -296,7 +234,6 @@ def test_proof_run_get_and_list_validate_canonical_read_shapes(
 ) -> None:
     engagement = _engagement(tmp_path)
     requested: list[str] = []
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
 
     def get(_client, endpoint: str):
         requested.append(endpoint)
@@ -332,21 +269,10 @@ def test_proof_run_get_and_list_validate_canonical_read_shapes(
 
     monkeypatch.setattr(AssessmentClient, "get", get)
 
-    cli.main(
-        ["--engagement-dir", str(engagement), "proof-run", "get", "17"]
-    )
+    _run_cli(engagement, "proof-run", "get", "17")
     assert json.loads(capsys.readouterr().out)["id"] == 17
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "list",
-            "--limit",
-            "1",
-        ]
-    )
+    _run_cli(engagement, "proof-run", "list", "--limit", "1")
     captured = capsys.readouterr()
     assert [row["id"] for row in json.loads(captured.out)] == [17]
     assert "continue with `vigil assess proof-run list --limit 1 --offset 1`" in captured.err
@@ -367,11 +293,10 @@ def test_proof_run_reads_reject_malformed_or_wrong_identity(
     argv, response, tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(AssessmentClient, "get", lambda *_args: response)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(["--engagement-dir", str(engagement), *argv])
+        _run_cli(engagement, *argv)
 
     assert exc.value.code == 1
     assert "proof-run" in capsys.readouterr().err
@@ -381,7 +306,6 @@ def test_proof_run_writes_reject_unbound_success_receipts(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "patch",
@@ -389,17 +313,7 @@ def test_proof_run_writes_reject_unbound_success_receipts(
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "finish",
-                "17",
-                "--status",
-                "completed",
-            ]
-        )
+        _run_cli(engagement, "proof-run", "finish", "17", "--status", "completed")
 
     assert exc.value.code == 1
     stderr = capsys.readouterr().err
@@ -418,7 +332,6 @@ def test_proof_run_start_rejects_success_with_wrong_lifecycle_or_producer(
     response_override, tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     response = {
         "id": 17,
         "run_uuid": "verify-va-047",
@@ -432,18 +345,9 @@ def test_proof_run_start_rejects_success_with_wrong_lifecycle_or_producer(
     monkeypatch.setattr(AssessmentClient, "post", lambda *_args, **_kwargs: response)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "start",
-                "verify-va-047",
-                "--kind",
-                "web",
-                "--agent-id",
-                "VERIFY-1",
-            ]
+        _run_cli(
+            engagement, "proof-run", "start", "verify-va-047", "--kind", "web", "--agent-id",
+            "VERIFY-1",
         )
 
     assert exc.value.code == 1
@@ -480,7 +384,6 @@ def test_proof_run_scan_start_accepts_frozen_identity_and_resume_files(
     generations.write_text('[{"target_key":"service-a","generation":4}]', encoding="utf-8")
     exclusions.write_text('[{"target_key":"service-a","path":"vendor/"}]', encoding="utf-8")
     posted: list[dict] = []
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
 
     def post(_client, _endpoint: str, payload: dict):
         posted.append(payload)
@@ -499,28 +402,10 @@ def test_proof_run_scan_start_accepts_frozen_identity_and_resume_files(
         }
 
     monkeypatch.setattr(AssessmentClient, "post", post)
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "start",
-            "scan-29",
-            "--kind",
-            "code",
-            "--agent-id",
-            "HUNT-1",
-            "--purpose",
-            "scan",
-            "--target-identity-file",
-            str(target),
-            "--source-generations-file",
-            str(generations),
-            "--exclusions-file",
-            str(exclusions),
-            "--resume-from",
-            "11",
-        ]
+    _run_cli(
+        engagement, "proof-run", "start", "scan-29", "--kind", "code", "--agent-id", "HUNT-1",
+        "--purpose", "scan", "--target-identity-file", str(target), "--source-generations-file",
+        str(generations), "--exclusions-file", str(exclusions), "--resume-from", "11",
     )
 
     assert json.loads(capsys.readouterr().out)["status"] == "queued"
@@ -543,7 +428,6 @@ def test_proof_run_begin_owns_queued_to_running_transition(
 ) -> None:
     engagement = _engagement(tmp_path)
     calls: list[tuple[str, dict]] = []
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
 
     def patch(_client, endpoint: str, payload: dict):
         calls.append((endpoint, payload))
@@ -562,7 +446,7 @@ def test_proof_run_begin_owns_queued_to_running_transition(
         }
 
     monkeypatch.setattr(AssessmentClient, "patch", patch)
-    cli.main(["--engagement-dir", str(engagement), "proof-run", "begin", "29"])
+    _run_cli(engagement, "proof-run", "begin", "29")
 
     assert json.loads(capsys.readouterr().out)["status"] == "running"
     assert calls == [("assessment-runs/29", {"status": "running"})]
@@ -590,7 +474,6 @@ def test_proof_run_start_refuses_a_run_the_finding_author_would_own(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "get",
@@ -603,20 +486,9 @@ def test_proof_run_start_refuses_a_run_the_finding_author_would_own(
     monkeypatch.setattr(AssessmentClient, "post", post)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "start",
-                "verify-va-047",
-                "--kind",
-                "web",
-                "--agent-id",
-                "HUNT-RUN-1",
-                "--for-finding",
-                "VA-047",
-            ]
+        _run_cli(
+            engagement, "proof-run", "start", "verify-va-047", "--kind", "web", "--agent-id",
+            "HUNT-RUN-1", "--for-finding", "VA-047",
         )
 
     assert exc.value.code == 1
@@ -630,7 +502,6 @@ def test_proof_run_start_accepts_an_independent_verifier_dispatch(
     tmp_path, monkeypatch, capsys
 ) -> None:
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     get_finding = _findings_get(
         {
             "VA-047": {"slug": "VA-047", "provenance": {"agent_id": "HUNT-RUN-1"}},
@@ -673,22 +544,9 @@ def test_proof_run_start_accepts_an_independent_verifier_dispatch(
 
     monkeypatch.setattr(AssessmentClient, "post", post)
 
-    cli.main(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "proof-run",
-            "start",
-            "verify-va-047",
-            "--kind",
-            "web",
-            "--agent-id",
-            "VERIFY-1",
-            "--for-finding",
-            "VA-047",
-            "--for-finding",
-            "VA-048",
-        ]
+    _run_cli(
+        engagement, "proof-run", "start", "verify-va-047", "--kind", "web", "--agent-id",
+        "VERIFY-1", "--for-finding", "VA-047", "--for-finding", "VA-048",
     )
 
     printed = json.loads(capsys.readouterr().out)
@@ -717,7 +575,6 @@ def test_proof_run_start_refuses_a_finding_with_no_resolvable_author(
     """An authorless finding cannot establish independence at verify time either,
     so the preflight says so here rather than letting the proof run burn."""
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "get",
@@ -732,20 +589,9 @@ def test_proof_run_start_refuses_a_finding_with_no_resolvable_author(
     )
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "start",
-                "verify-va-049",
-                "--kind",
-                "code",
-                "--agent-id",
-                "VERIFY-1",
-                "--for-finding",
-                "VA-049",
-            ]
+        _run_cli(
+            engagement, "proof-run", "start", "verify-va-049", "--kind", "code", "--agent-id",
+            "VERIFY-1", "--for-finding", "VA-049",
         )
 
     assert exc.value.code == 1
@@ -814,7 +660,6 @@ def test_proof_run_start_reports_the_created_run_when_the_association_fails(
     link, and a fresh start would duplicate it.
     """
     engagement = _engagement(tmp_path)
-    monkeypatch.setattr(config, "_verify_backend", lambda _cfg: None)
     monkeypatch.setattr(
         AssessmentClient,
         "get",
@@ -837,20 +682,9 @@ def test_proof_run_start_reports_the_created_run_when_the_association_fails(
     monkeypatch.setattr(AssessmentClient, "post", post)
 
     with pytest.raises(SystemExit) as exc:
-        cli.main(
-            [
-                "--engagement-dir",
-                str(engagement),
-                "proof-run",
-                "start",
-                "verify-va-052",
-                "--kind",
-                "web",
-                "--agent-id",
-                "VERIFY-1",
-                "--for-finding",
-                "VA-052",
-            ]
+        _run_cli(
+            engagement, "proof-run", "start", "verify-va-052", "--kind", "web", "--agent-id",
+            "VERIFY-1", "--for-finding", "VA-052",
         )
 
     assert exc.value.code == 1

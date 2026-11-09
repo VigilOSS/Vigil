@@ -1,4 +1,4 @@
-"""Behaviour pins for the S09 simplification packet.
+"""Pinned behaviour of the intel type tables and the per-run child list routes.
 
 These assert the CURRENT observable behaviour of the intel type tables, the
 intel record/list round trip and the per-run child list routes, so a

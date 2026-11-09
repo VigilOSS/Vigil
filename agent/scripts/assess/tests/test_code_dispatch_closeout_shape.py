@@ -21,6 +21,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import code_dispatch
+from _fake_client import StubClient
 
 
 def _config(tmp_path: Path) -> SimpleNamespace:
@@ -124,16 +125,7 @@ def test_done_names_a_skip_reason_outside_the_standard_set(
 def test_a_clean_close_with_notes_still_reaches_the_backend(monkeypatch, tmp_path, capsys, already_applied):
     posted: dict[str, object] = {}
 
-    class _Client:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def post(self, endpoint: str, payload: dict):
             posted["endpoint"] = endpoint
             posted["payload"] = payload
@@ -210,16 +202,7 @@ _PROGRESS = {
 
 
 def test_progress_prints_the_full_required_family_set(monkeypatch, tmp_path, capsys):
-    class _Client:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, _endpoint: str):
             return _PROGRESS
 
@@ -284,16 +267,7 @@ _LEASED_PAGE = {
 def leased_page(monkeypatch):
     requested: list[str] = []
 
-    class _Client:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, endpoint: str):
             requested.append(endpoint)
             return _LEASED_PAGE
@@ -343,16 +317,7 @@ def test_a_page_with_no_leased_row_says_nothing_about_tokens(
         "items": [item for item in _LEASED_PAGE["items"] if not item["lease_token"]],
     }
 
-    class _Client:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, _endpoint: str):
             return unleased
 

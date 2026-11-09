@@ -28,15 +28,12 @@ from __future__ import annotations
 
 import importlib
 import re
-import sys
 from pathlib import Path
 
 import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
 _SCRIPTS_ROOT = _REPO_ROOT / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
 
 from assess.commands import check_phase_readiness, list_commands, transition_phase  # noqa: E402
 from assess.lib import contracts, kali_audit, phases  # noqa: E402

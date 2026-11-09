@@ -22,14 +22,9 @@ Mirrors the `_classify_buckets()` loader convention in test_classify_precision.p
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 
 def _cb():
-    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     import assess.lib.classify_buckets as cb
 
     return cb

@@ -1,16 +1,17 @@
 """Client diagnostics remain useful without activating any engagement."""
 from __future__ import annotations
 
-import json
 import hashlib
+import json
 import plistlib
 import subprocess
 from pathlib import Path
 
 import pytest
 
-from vigil_cli import main as cli
+from vigil_cli import application as application_module
 from vigil_cli import client_checks
+from vigil_cli import main as cli
 
 
 @pytest.fixture(autouse=True)
@@ -114,7 +115,6 @@ def observed_context(tmp_path, monkeypatch):
         tool.write_text("#!/bin/sh\nexit 0\n")
         tool.chmod(0o755)
         tools[name] = str(tool)
-    from vigil_cli import application as application_module
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(application))
     monkeypatch.setattr(application_module, "application_provenance", lambda path: provenance)
     binding = {"schema_version": 1, "client": "zcode", "mode": "code",

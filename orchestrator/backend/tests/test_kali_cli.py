@@ -40,6 +40,41 @@ def _reload_assess_modules():
 def _import(name: str) -> ModuleType:
     return importlib.import_module(name)
 
+def _patch_kali_exec(monkeypatch, *module_names: str, **result_overrides) -> dict:
+    """Install one capturing ``kali_exec`` stub on each named command module.
+
+    The returned dict records the call's ``cmd`` (as a list) under ``"cmd"``
+    and its keyword arguments under ``"kwargs"``, which is what the argv
+    translation and audit-metadata assertions read. ``result_overrides``
+    replace fields on the ``KaliResult`` the stub hands back.
+    """
+    kali = _import("assess.lib.kali")
+    result_fields: dict = {
+        "run_id": 1,
+        "status": "completed",
+        "return_code": 0,
+        "stdout_path": "/tmp/x.out",
+        "stderr_path": "/tmp/x.err",
+        "duration_ms": 10,
+        "peak_rss_bytes": None,
+        "stdout_preview": "",
+        "stderr_preview": "",
+        "timed_out": False,
+        "partial_results": False,
+    }
+    result_fields.update(result_overrides)
+    captured: dict = {}
+
+    def fake_kali_exec(cmd, **kwargs):
+        captured["cmd"] = list(cmd)
+        captured["kwargs"] = kwargs
+        return kali.KaliResult(**result_fields)
+
+    for module_name in module_names:
+        mod = _import(module_name)
+        monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    return captured
+
 
 # ──────────────────────────────────────────────────────────────────────────
 # argparse round-trip tests
@@ -231,36 +266,14 @@ def test_verb_translates_argv_into_underlying_command(
     monkeypatch, verb, argv, expected_substrings
 ):
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["kwargs"] = kwargs
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
     # Patch kali_exec on every command module that imports it.
-    for module_name in (
+    captured = _patch_kali_exec(
+        monkeypatch,
         "assess.commands.kali_nmap",
         "assess.commands.kali_nuclei",
         "assess.commands.kali_httpx",
         "assess.commands.kali_sqlmap",
-    ):
-        mod = _import(module_name)
-        monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    )
 
     cli.main(["kali", verb, *argv])
     cmd = captured["cmd"]
@@ -280,28 +293,9 @@ def test_nuclei_oob_mode_is_explicit_and_defaults_to_disabled(
     monkeypatch, mode, expected, absent
 ):
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-    mod = _import("assess.commands.kali_nuclei")
-    captured = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["kwargs"] = dict(kwargs)
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=1,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(
+        monkeypatch, "assess.commands.kali_nuclei", duration_ms=1
+    )
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "private.oob.test")
     argv = [
         "kali",
@@ -561,33 +555,12 @@ def test_extra_args_appended_to_underlying_command(
     """argparse accepts --extra-args on typed verbs and the helper splits
     + appends the string to the underlying tool argv."""
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    for module_name in (
+    captured = _patch_kali_exec(
+        monkeypatch,
         "assess.commands.kali_httpx",
         "assess.commands.kali_ffuf",
         "assess.commands.kali_sqlmap",
-    ):
-        mod = _import(module_name)
-        monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    )
 
     cli.main(["kali", verb, *base_argv])
     cmd = captured["cmd"]
@@ -873,28 +846,14 @@ def test_kali_job_rejects_config_key_that_conflicts_with_configured_dir(
 
 def test_kali_exec_passthrough_carries_full_command(monkeypatch):
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["tool_name"] = kwargs.get("tool_name")
-        return kali.KaliResult(
-            run_id=2,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/y.out",
-            stderr_path="/tmp/y.err",
-            duration_ms=5,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_exec")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(
+        monkeypatch,
+        "assess.commands.kali_exec",
+        run_id=2,
+        stdout_path="/tmp/y.out",
+        stderr_path="/tmp/y.err",
+        duration_ms=5,
+    )
 
     cli.main(
         [
@@ -917,7 +876,7 @@ def test_kali_exec_passthrough_carries_full_command(monkeypatch):
         ]
     )
     assert captured["cmd"] == ["curl", "-sS", "https://example.com/health"]
-    assert captured["tool_name"] == "curl"
+    assert captured["kwargs"]["tool_name"] == "curl"
 
 
 # ──────────────────────────────────────────────────────────────────────────
@@ -1025,11 +984,88 @@ def _setup_fake_config(monkeypatch, eng_dir):
     return kali
 
 
-def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engagement):
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
+def _kali_client_harness(monkeypatch, eng_dir) -> tuple[ModuleType, _FakeClient]:
+    """Config, a capturing AssessmentClient and a passing container check.
+
+    Returns ``(kali, fake_client)``. The Popen stub stays at the call site:
+    the tests differ in whether the spawn is allowed, recorded, slow, or must
+    never happen at all.
+    """
+    kali = _setup_fake_config(monkeypatch, eng_dir)
+    fake_client = _FakeClient("http://127.0.0.1:18000", eng_dir.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    return kali, fake_client
+
+
+def _web_scope_kali_harness(monkeypatch, eng_dir) -> tuple[ModuleType, _FakeClient]:
+    """``_kali_client_harness`` over a web-type scope naming example.com."""
+    (eng_dir / "scope.json").write_text(
+        json.dumps(
+            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
+        )
+    )
+    return _kali_client_harness(monkeypatch, eng_dir)
+
+
+def _recon_exec(kali, eng_dir, cmd, intent, *, timeout=60, tool_name="nmap", **overrides):
+    """A RECON-technique ``kali_exec`` call with the audit metadata these
+    wrapper tests repeat verbatim; ``overrides`` reach ``kali_exec`` as-is."""
+    return kali.kali_exec(
+        cmd,
+        technique="RECON",
+        intent=intent,
+        probe_kind="fingerprint",
+        phase="recon",
+        timeout=timeout,
+        agent_name="recon-specialist",
+        engagement_dir=eng_dir,
+        tool_name=tool_name,
+        **overrides,
+    )
+
+
+def _setup_fake_jobs_config(monkeypatch, eng_dir):
+    """Wire kali_jobs.load_config to return a Config rooted at eng_dir."""
+    kali_jobs = _import("assess.lib.kali_jobs")
+    monkeypatch.setattr(
+        kali_jobs,
+        "load_config",
+        lambda flag: SimpleNamespace(
+            base_url="http://127.0.0.1:18000",
+            engagement_dir=str(eng_dir),
+            engagement_key=eng_dir.name,
+            agent_root=str(eng_dir.parent.parent),
+        ),
+    )
+    return kali_jobs
+
+
+def _stop_job_client(eng_dir, *, job_id: int, socket_name: str, **row_extras) -> _FakeClient:
+    """Client for the job-stop paths: one GET row naming the dtach socket.
+
+    ``row_extras`` add keys to that row (a terminal job carries its own
+    ``status``); PATCHes are recorded on the inherited ``patches`` list and
+    echoed back with the requested status.
+    """
+
+    class _StopClient(_FakeClient):
+        def get(self, endpoint):
+            return {
+                "id": job_id,
+                "dtach_socket_path": f"/tmp/vigil-jobs/{socket_name}.sock",
+                **row_extras,
+            }
+
+        def patch(self, endpoint, payload, *, accept_409: bool = False):
+            self.patches.append((endpoint, payload))
+            return {"id": job_id, "status": payload["status"]}
+
+    return _StopClient("http://127.0.0.1:18000", eng_dir.name)
+
+
+def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engagement):
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     popen_call = {}
 
@@ -1098,10 +1134,7 @@ def test_kali_exec_writes_pre_exec_row_then_finalizes(monkeypatch, fake_engageme
 def test_kali_exec_reports_finalize_failure_separately_from_target_success(
     monkeypatch, fake_engagement, capsys
 ):
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0))
     monkeypatch.setattr(kali, "_patch_finalize", lambda *a, **k: (_ for _ in ()).throw(kali.AssessError("backend unavailable")))
 
@@ -1305,10 +1338,7 @@ def test_kali_exec_denied_tool_is_rejected_before_execution(monkeypatch, fake_en
 
 
 def test_kali_exec_normalizes_technique_and_probe_kind_case(monkeypatch, fake_engagement):
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali.subprocess, "Popen", lambda argv, **kw: _FakePopen(returncode=0))
 
     kali.kali_exec(
@@ -1330,10 +1360,7 @@ def test_kali_exec_normalizes_technique_and_probe_kind_case(monkeypatch, fake_en
 
 def test_kali_exec_accepts_previously_missing_vuln_class(monkeypatch, fake_engagement):
     assert "BOLA" in kali_audit_enum_names()
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali.subprocess, "Popen", lambda argv, **kw: _FakePopen(returncode=0))
 
     kali.kali_exec(
@@ -1358,10 +1385,7 @@ def kali_audit_enum_names():
 def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     monkeypatch, fake_engagement
 ):
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     killed_signals: list[int] = []
 
@@ -1392,16 +1416,8 @@ def test_kali_exec_timeout_kills_process_group_and_marks_timed_out(
     out_dir.mkdir(parents=True, exist_ok=True)
     monkeypatch.setattr(kali, "_read_safely", lambda path: "partial bytes captured\n")
 
-    result = kali.kali_exec(
-        ["nuclei", "-l", "hosts.txt"],
-        technique="RECON",
-        intent="long-running sweep",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=1,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nuclei",
+    result = _recon_exec(
+        kali, fake_engagement, ["nuclei", "-l", "hosts.txt"], "long-running sweep", timeout=1, tool_name="nuclei"
     )
     assert result.timed_out is True
     assert result.status == "timed_out"
@@ -1488,10 +1504,7 @@ def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_en
     The pre-exec POST already wrote a status=running row; without the
     finalize PATCH that row stays "running" forever and confuses sweep-orphans.
     The handler must PATCH the row to failed before re-raising AssessError."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     def fake_popen(*_a, **_kw):
         raise FileNotFoundError("[Errno 2] No such file or directory: 'docker'")
@@ -1499,16 +1512,9 @@ def test_filenotfound_finalizes_running_audit_row_to_failed(monkeypatch, fake_en
     monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
 
     with pytest.raises(kali.AssessError, match="docker not found"):
-        kali.kali_exec(
-            ["nmap", "-sV", "10.0.0.1"],
-            technique="RECON",
-            intent="c16 docker-missing",
-            probe_kind="fingerprint",
-            phase="recon",
+        _recon_exec(
+            kali, fake_engagement, ["nmap", "-sV", "10.0.0.1"], "c16 docker-missing",
             timeout=30,
-            agent_name="recon-specialist",
-            engagement_dir=fake_engagement,
-            tool_name="nmap",
         )
 
     # Exactly one pre-exec POST and one finalize PATCH to status=failed.
@@ -1529,10 +1535,7 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
     address the in-container process across the PID namespace boundary, and
     SIGTERM-trapping tools (sqlmap, nuclei) survive the host-side process-group
     kill on timeout."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     captured: dict = {}
 
@@ -1542,16 +1545,8 @@ def test_b1_docker_exec_wrapper_captures_in_container_pid(monkeypatch, fake_enga
 
     monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
 
-    kali.kali_exec(
-        ["nmap", "-sV", "10.0.0.1"],
-        technique="RECON",
-        intent="b1 wrapper shape",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nmap",
+    _recon_exec(
+        kali, fake_engagement, ["nmap", "-sV", "10.0.0.1"], "b1 wrapper shape", timeout=30
     )
     argv = captured["argv"]
     # Shape: docker exec --env ENGAGEMENT_KEY=<key> -w <engagement-mount> <container> sh -c '<wrapper>' sh <user-cmd...>
@@ -1589,10 +1584,7 @@ def test_b1_timeout_cascade_kills_in_container_pid_then_host_pgid(
     when SIGTERM is trapped. The host-side ``os.killpg`` cascade still fires
     as belt-and-braces, and the pid file is removed afterwards so /tmp does
     not accumulate leftovers."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     # Capture the actual pid the wrapper wrote, plus all docker-exec / host-side
     # kill activity so we can assert the full cascade order.
@@ -1662,10 +1654,7 @@ def test_b1_timeout_without_pid_file_uses_host_kill_only(
     the container is gone (read fails), the helper must log a warning and
     still issue the host-side process-group kill cascade rather than crash.
     """
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     monkeypatch.setattr(kali, "_read_container_pid", lambda *a, **k: None)
     docker_kills: list[tuple[str, int]] = []
@@ -1700,16 +1689,8 @@ def test_b1_timeout_without_pid_file_uses_host_kill_only(
     monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _SlowPopen())
     monkeypatch.setattr(kali, "_read_safely", lambda path: "")
 
-    kali.kali_exec(
-        ["nuclei", "-l", "hosts.txt"],
-        technique="RECON",
-        intent="b1 missing pid file fallback",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=1,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nuclei",
+    _recon_exec(
+        kali, fake_engagement, ["nuclei", "-l", "hosts.txt"], "b1 missing pid file fallback", timeout=1, tool_name="nuclei"
     )
 
     err = capsys.readouterr().err
@@ -1894,11 +1875,6 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
         def post(self, endpoint, payload):
             self.posts.append((endpoint, payload))
             return {"id": 9, "superseded_by_id": 8}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1912,16 +1888,8 @@ def test_kali_exec_dedup_warns_and_returns_early_without_force(
 
     monkeypatch.setattr(kali.subprocess, "Popen", _fake_popen)
 
-    result = kali.kali_exec(
-        ["nmap", "-p", "22", "10.0.0.1"],
-        technique="RECON",
-        intent="dup probe",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nmap",
+    result = _recon_exec(
+        kali, fake_engagement, ["nmap", "-p", "22", "10.0.0.1"], "dup probe", timeout=30
     )
     err = capsys.readouterr().err
     assert result.status == "completed", (
@@ -1955,11 +1923,6 @@ def test_dedup_warns_and_continues_by_default(
             # the predecessor via superseded_by_id. Returned id is the NEW
             # row's id so the CLI's finalize PATCH lands on its own row.
             return {"id": NEW_ROW_ID, "superseded_by_id": PREDECESSOR_ID}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -1968,16 +1931,8 @@ def test_dedup_warns_and_continues_by_default(
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
 
-    result = kali.kali_exec(
-        ["nmap", "-p", "80", "10.0.0.2"],
-        technique="RECON",
-        intent="parallel-specialist race",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nmap",
+    result = _recon_exec(
+        kali, fake_engagement, ["nmap", "-p", "80", "10.0.0.2"], "parallel-specialist race", timeout=30
     )
 
     err = capsys.readouterr().err
@@ -2027,11 +1982,6 @@ def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement,
             # superseded_by_id=None even if a predecessor exists.
             sup = None if payload.get("force") else 40
             return {"id": 41, "superseded_by_id": sup}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _ForceClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2040,17 +1990,8 @@ def test_dedup_force_does_not_set_superseded_by_id(monkeypatch, fake_engagement,
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
 
-    result = kali.kali_exec(
-        ["nmap", "-p", "22", "10.0.0.4"],
-        technique="RECON",
-        intent="force retry",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        force=True,
-        tool_name="nmap",
+    result = _recon_exec(
+        kali, fake_engagement, ["nmap", "-p", "22", "10.0.0.4"], "force retry", timeout=30, force=True
     )
 
     assert result.status == "completed"
@@ -2076,11 +2017,6 @@ def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
                 "id": 11,
                 "superseded_by_id": 10 if not payload.get("force") else None,
             }
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _DedupClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2089,17 +2025,8 @@ def test_kali_exec_dedup_force_bypasses_check(monkeypatch, fake_engagement):
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
 
-    result = kali.kali_exec(
-        ["nmap", "-p", "22", "10.0.0.1"],
-        technique="RECON",
-        intent="dup probe",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        force=True,
-        tool_name="nmap",
+    result = _recon_exec(
+        kali, fake_engagement, ["nmap", "-p", "22", "10.0.0.1"], "dup probe", timeout=30, force=True
     )
     assert result.status == "completed"
 
@@ -2110,10 +2037,7 @@ def _kali_exec_with_technique(monkeypatch, fake_engagement, technique: str):
     Returns ``(result, fake_client)``. Used by N10 round-trip tests for the new
     enum members so each test does not duplicate the setup boilerplate.
     """
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
@@ -2245,11 +2169,6 @@ def test_kali_exec_audit_post_failure_writes_marker_and_refuses_execution(
             from assess.lib.client import AssessError
 
             raise AssessError("backend down")
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(
         kali, "AssessmentClient", lambda *a, **k: _BrokenClient("u", "k")
@@ -2261,16 +2180,9 @@ def test_kali_exec_audit_post_failure_writes_marker_and_refuses_execution(
     monkeypatch.setattr(kali.subprocess, "Popen", _unexpected_exec)
 
     with pytest.raises(kali.AssessError, match="required pre-exec audit"):
-        kali.kali_exec(
-            ["nmap", "10.0.0.1"],
-            technique="RECON",
-            intent="probe",
-            probe_kind="fingerprint",
-            phase="recon",
+        _recon_exec(
+            kali, fake_engagement, ["nmap", "10.0.0.1"], "probe",
             timeout=30,
-            agent_name="recon-specialist",
-            engagement_dir=fake_engagement,
-            tool_name="nmap",
         )
     err = capsys.readouterr().err
     assert "audit POST failed" in err
@@ -2286,17 +2198,7 @@ def test_kali_exec_audit_post_failure_writes_marker_and_refuses_execution(
 
 
 def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement):
-    kali_jobs = _import("assess.lib.kali_jobs")
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
     class _JobClient(_FakeClient):
         def post(self, endpoint, payload):
@@ -2314,11 +2216,6 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
             self.patches.append((endpoint, payload))
             self.row.update(payload)
             return self.row.copy()
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _JobClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2389,19 +2286,8 @@ def test_job_start_posts_queued_then_marks_running(monkeypatch, fake_engagement)
 def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
     monkeypatch, fake_engagement
 ):
-    kali_jobs = _import("assess.lib.kali_jobs")
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
     from assess.lib.client import AssessError
-
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
 
     events: list[tuple[str, object]] = []
 
@@ -2416,11 +2302,6 @@ def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
             if payload.get("status") == "running":
                 raise AssessError("backend down during running patch")
             return {"id": 14, "status": "queued", **payload}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2478,32 +2359,9 @@ def test_job_start_persists_paths_and_cleans_up_when_running_patch_fails(
 
 
 def test_job_stop_patches_killed(monkeypatch, fake_engagement):
-    kali_jobs = _import("assess.lib.kali_jobs")
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 22, "dtach_socket_path": "/tmp/vigil-jobs/abc.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 22, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=22, socket_name="abc")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
     monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4343)
@@ -2523,34 +2381,12 @@ def test_job_stop_patches_killed(monkeypatch, fake_engagement):
 
 
 def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
-    kali_jobs = _import("assess.lib.kali_jobs")
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
     from assess.lib.client import AssessError
 
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
+    fake_client = _stop_job_client(
+        fake_engagement, job_id=22, socket_name="abc", status="completed"
     )
-
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 22, "status": "completed", "dtach_socket_path": "/tmp/vigil-jobs/abc.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 22, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
 
     signals: list[tuple] = []
@@ -2564,34 +2400,10 @@ def test_job_stop_rejects_already_terminal_job(monkeypatch, fake_engagement):
 
 
 def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagement):
-    kali_jobs = _import("assess.lib.kali_jobs")
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
     from assess.lib.client import AssessError
 
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
-
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 25, "dtach_socket_path": "/tmp/vigil-jobs/missing-pid.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 25, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=25, socket_name="missing-pid")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
     monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: None)
@@ -2612,33 +2424,9 @@ def test_job_stop_records_stop_failed_when_pid_missing(monkeypatch, fake_engagem
 
 
 def test_job_stop_records_lost_when_container_not_running(monkeypatch, fake_engagement):
-    kali_jobs = _import("assess.lib.kali_jobs")
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
-
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 26, "dtach_socket_path": "/tmp/vigil-jobs/gone.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 26, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=26, socket_name="gone")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: False)
 
@@ -2659,36 +2447,10 @@ def test_job_stop_records_stop_failed_when_docker_unreachable_mid_verify(
     (docker unreachable, liveness unknown), ``job_stop`` must record
     ``stop_failed`` with the 'became unreachable while verifying' message — NOT
     a false ``killed`` on a possibly-still-running job."""
-    kali_jobs = _import("assess.lib.kali_jobs")
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
     from assess.lib.client import AssessError
 
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
-
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 27, "dtach_socket_path": "/tmp/vigil-jobs/unreachable.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 27, "status": payload["status"]}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=27, socket_name="unreachable")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
     monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4444)
@@ -2708,19 +2470,8 @@ def test_job_start_marks_failed_when_running_patch_raises(monkeypatch, fake_enga
     raises, ``start_job`` must mark the backend row ``failed`` (a
     ``{"status": "failed"}`` PATCH) before the error propagates — otherwise the
     row is stuck at 'queued' forever (no sweeper covers assessment_jobs)."""
-    kali_jobs = _import("assess.lib.kali_jobs")
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
     from assess.lib.client import AssessError
-
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
 
     class _FailRunningPatchClient(_FakeClient):
         def post(self, endpoint, payload):
@@ -2732,13 +2483,6 @@ def test_job_start_marks_failed_when_running_patch_raises(monkeypatch, fake_enga
             if payload.get("status") == "running":
                 raise AssessError("backend down during running patch")
             return {"id": 30, "status": "queued", **payload}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _FailRunningPatchClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -2787,18 +2531,7 @@ def test_job_start_marks_failed_when_dtach_spawn_times_out(monkeypatch, fake_eng
     inner ``CalledProcessError`` handler with ``spawned`` still False), ``start_job``
     must still mark the already-created backend row ``failed`` — otherwise it is
     stuck at 'queued' forever (no sweeper covers assessment_jobs)."""
-    kali_jobs = _import("assess.lib.kali_jobs")
-
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
     cleanup_calls: list[str] = []
 
@@ -2810,13 +2543,6 @@ def test_job_start_marks_failed_when_dtach_spawn_times_out(monkeypatch, fake_eng
         def patch(self, endpoint, payload, *, accept_409: bool = False):
             self.patches.append((endpoint, payload))
             return {"id": 31, "status": "queued", **payload}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake_client = _RecordingClient("http://127.0.0.1:18000", fake_engagement.name)
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
@@ -3595,32 +3321,9 @@ def test_kali_job_stop_terminates_with_sigterm_then_sigkill(
 ):
     """P1 #3: stop must SIGTERM, wait, SIGKILL if needed, and only PATCH
     `status=killed` once the in-container PID is confirmed dead."""
-    kali_jobs = _import("assess.lib.kali_jobs")
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 22, "dtach_socket_path": "/tmp/vigil-jobs/abc.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 22, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=22, socket_name="abc")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
     monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 9999)
@@ -3658,32 +3361,9 @@ def test_kali_job_stop_escalates_to_sigkill_when_sigterm_ignored(
 ):
     """P1 #3: when SIGTERM doesn't kill the process inside the 10s grace,
     the helper escalates to SIGKILL."""
-    kali_jobs = _import("assess.lib.kali_jobs")
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 23, "dtach_socket_path": "/tmp/vigil-jobs/def.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 23, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=23, socket_name="def")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
     monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 4242)
@@ -3721,32 +3401,9 @@ def test_kali_job_stop_records_stop_failed_when_sigkill_also_fails(
 ):
     """P1 #3: if the process is still alive after SIGKILL the helper PATCHes
     `status=stop_failed` and surfaces the error to the caller."""
-    kali_jobs = _import("assess.lib.kali_jobs")
-    monkeypatch.setattr(
-        kali_jobs,
-        "load_config",
-        lambda flag: SimpleNamespace(
-            base_url="http://127.0.0.1:18000",
-            engagement_dir=str(fake_engagement),
-            engagement_key=fake_engagement.name,
-            agent_root=str(fake_engagement.parent.parent),
-        ),
-    )
+    kali_jobs = _setup_fake_jobs_config(monkeypatch, fake_engagement)
 
-    class _StopClient(_FakeClient):
-        def get(self, endpoint):
-            return {"id": 24, "dtach_socket_path": "/tmp/vigil-jobs/zzz.sock"}
-
-        def patch(self, endpoint, payload, *, accept_409: bool = False):
-            self.patches.append((endpoint, payload))
-            return {"id": 24, "status": payload["status"]}
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
-    fake_client = _StopClient("http://127.0.0.1:18000", fake_engagement.name)
+    fake_client = _stop_job_client(fake_engagement, job_id=24, socket_name="zzz")
     monkeypatch.setattr(kali_jobs, "AssessmentClient", lambda *a, **k: fake_client)
     monkeypatch.setattr(kali_jobs, "_container_running", lambda name: True)
     monkeypatch.setattr(kali_jobs, "_read_job_pid", lambda *a, **k: 9000)
@@ -3811,16 +3468,8 @@ def test_finalize_409_swallowed_as_success(monkeypatch, fake_engagement):
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
 
-    result = kali.kali_exec(
-        ["nmap", "-sV", "10.0.0.1"],
-        technique="RECON",
-        intent="409 race",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=60,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nmap",
+    result = _recon_exec(
+        kali, fake_engagement, ["nmap", "-sV", "10.0.0.1"], "409 race", timeout=60
     )
     assert result.status == "completed"
 
@@ -4017,10 +3666,7 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
     """P1 narrowing: the wrapper must succeed-or-log-and-still-exec so a
     failed pid-file write (ENOSPC / read-only /tmp) doesn't strand the user
     command. The wrapper shape is `echo $$ > pid && exec "$@" || (echo ...; exec "$@")`."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
 
     captured: dict = {}
 
@@ -4030,16 +3676,8 @@ def test_pre_exec_wrapper_handles_pid_write_failure(monkeypatch, fake_engagement
 
     monkeypatch.setattr(kali.subprocess, "Popen", fake_popen)
 
-    kali.kali_exec(
-        ["nmap", "-sV", "10.0.0.1"],
-        technique="RECON",
-        intent="pid-write race fix shape",
-        probe_kind="fingerprint",
-        phase="recon",
-        timeout=30,
-        agent_name="recon-specialist",
-        engagement_dir=fake_engagement,
-        tool_name="nmap",
+    _recon_exec(
+        kali, fake_engagement, ["nmap", "-sV", "10.0.0.1"], "pid-write race fix shape", timeout=30
     )
     argv = captured["argv"]
     container_index = argv.index("vigil")
@@ -4075,29 +3713,8 @@ def test_asnmap_translates_argv(monkeypatch):
     on the wrapped command argv.
     """
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["kwargs"] = kwargs
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_asnmap")
     mod = _import("assess.commands.kali_asnmap")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
     # Key present → the run proceeds without the auth gate interfering.
     monkeypatch.setattr(mod, "_runtime_has_pdcp_key", lambda *a, **k: True)
 
@@ -4162,23 +3779,11 @@ def test_asnmap_allow_no_key_bypasses_gate(monkeypatch):
     """--allow-no-key runs asnmap without consulting the key probe."""
     cli = _import("assess.cli")
     mod = _import("assess.commands.kali_asnmap")
-    kali = _import("assess.lib.kali")
-
-    captured = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return kali.KaliResult(
-            run_id=1, status="completed", return_code=0,
-            stdout_path="/tmp/x.out", stderr_path="/tmp/x.err",
-            duration_ms=10, peak_rss_bytes=None, stdout_preview="",
-            stderr_preview="", timed_out=False, partial_results=False,
-        )
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_asnmap")
 
     def _boom(*a, **k):  # must NOT be consulted when --allow-no-key is set
         raise AssertionError("key probe should be skipped with --allow-no-key")
 
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
     monkeypatch.setattr(mod, "_runtime_has_pdcp_key", _boom)
 
     cli.main(_asnmap_argv("--allow-no-key"))
@@ -4189,18 +3794,7 @@ def test_asnmap_warns_but_proceeds_when_probe_inconclusive(monkeypatch, capsys):
     """Probe can't run (docker down) → warn and proceed, don't block."""
     cli = _import("assess.cli")
     mod = _import("assess.commands.kali_asnmap")
-    kali = _import("assess.lib.kali")
-
-    captured = {}
-    monkeypatch.setattr(
-        mod, "kali_exec",
-        lambda cmd, **k: captured.__setitem__("cmd", list(cmd)) or kali.KaliResult(
-            run_id=1, status="completed", return_code=0,
-            stdout_path="/tmp/x.out", stderr_path="/tmp/x.err",
-            duration_ms=10, peak_rss_bytes=None, stdout_preview="",
-            stderr_preview="", timed_out=False, partial_results=False,
-        ),
-    )
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_asnmap")
     monkeypatch.setattr(mod, "_runtime_has_pdcp_key", lambda *a, **k: None)
 
     cli.main(_asnmap_argv())
@@ -4247,25 +3841,7 @@ def test_nmap_ports_accepts_documented_shapes(monkeypatch, ports_value):
     range syntax; a wrapper that rejects any of these breaks the methodology.
     """
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    def fake_kali_exec(cmd, **kwargs):
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_nmap")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    _patch_kali_exec(monkeypatch, "assess.commands.kali_nmap")
 
     cli.main(
         [
@@ -4293,29 +3869,7 @@ def test_nmap_accepts_input_list_without_target(monkeypatch):
     """`-iL <file>` is a complete nmap target source; the wrapper must not
     force an extra positional target that changes scan scope."""
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["kwargs"] = kwargs
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_nmap")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_nmap")
 
     cli.main(
         [
@@ -4411,28 +3965,7 @@ def test_alterx_estimate_flag_appended(monkeypatch):
     """F5 — `kali alterx -enrich -estimate` carries the `-estimate` toggle
     through to the underlying alterx invocation."""
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_alterx")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_alterx")
 
     cli.main(
         [
@@ -4463,28 +3996,7 @@ def test_alterx_domain_mode_uses_dash_d(monkeypatch):
     """Single-domain alterx mode must pass `-d <domain>` to alterx; `-l`
     is the list-file flag and treats the domain string as a path."""
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_alterx")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_alterx")
 
     cli.main(
         [
@@ -4517,28 +4029,7 @@ def test_alterx_domain_mode_uses_dash_d(monkeypatch):
 
 def _patch_dnsx_exec(monkeypatch):
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_dnsx")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_dnsx")
     return cli, captured
 
 
@@ -4783,29 +4274,7 @@ def test_cero_input_list_pipes_via_sh_wrapper(monkeypatch):
     The wrapper pipes the file to cero on stdin via a `sh -c 'cat ... | cero ...'`
     construction, with the audit row's tool_name still recorded as `cero`."""
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        captured["kwargs"] = kwargs
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_cero")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_cero")
 
     cli.main(
         [
@@ -4843,28 +4312,7 @@ def test_cero_only_domains_toggle_maps_to_dash_d(monkeypatch):
     toggle (filter results to valid domain names only). argparse must NOT bind
     `-d` directly because cero's `-d` is a toggle, not a target argument."""
     cli = _import("assess.cli")
-    kali = _import("assess.lib.kali")
-
-    captured: dict = {}
-
-    def fake_kali_exec(cmd, **kwargs):
-        captured["cmd"] = list(cmd)
-        return kali.KaliResult(
-            run_id=1,
-            status="completed",
-            return_code=0,
-            stdout_path="/tmp/x.out",
-            stderr_path="/tmp/x.err",
-            duration_ms=10,
-            peak_rss_bytes=None,
-            stdout_preview="",
-            stderr_preview="",
-            timed_out=False,
-            partial_results=False,
-        )
-
-    mod = _import("assess.commands.kali_cero")
-    monkeypatch.setattr(mod, "kali_exec", fake_kali_exec)
+    captured = _patch_kali_exec(monkeypatch, "assess.commands.kali_cero")
 
     cli.main(
         [
@@ -4986,6 +4434,18 @@ def _setup_sweep_test(monkeypatch, fake_engagement, rows):
     return sweep, fake_client
 
 
+def _run_sweep(sweep, eng_dir, *, dry_run: bool = False) -> None:
+    """Invoke sweep-orphans with the argv shape every sweep test passes."""
+    sweep.run(
+        SimpleNamespace(
+            engagement_dir=str(eng_dir),
+            max_age_seconds=3600,
+            container_name="vigil",
+            dry_run=dry_run,
+        )
+    )
+
+
 def test_sweep_orphans_finalizes_dead_rows_to_lost(monkeypatch, fake_engagement):
     """Happy path — a stuck row whose in-container PID is dead is PATCHed
     to status=lost with ended_at set and return_code=null."""
@@ -5005,12 +4465,7 @@ def test_sweep_orphans_finalizes_dead_rows_to_lost(monkeypatch, fake_engagement)
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     assert len(fake_client.patches) == 1
     endpoint, payload = fake_client.patches[0]
@@ -5037,12 +4492,7 @@ def test_sweep_orphans_skips_alive_rows(monkeypatch, fake_engagement):
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     # No PATCH issued because the row was still-running.
     assert fake_client.patches == []
@@ -5077,12 +4527,7 @@ def test_sweep_orphans_dry_run_does_not_patch(monkeypatch, capsys, fake_engageme
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=True,
-    ))
+    _run_sweep(sweep, fake_engagement, dry_run=True)
 
     # Dry-run never writes — finalize PATCH must not be issued.
     assert fake_client.patches == []
@@ -5114,12 +4559,7 @@ def test_sweep_orphans_requests_all_rows_for_pending_terminal_recovery(
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=True,
-    ))
+    _run_sweep(sweep, fake_engagement, dry_run=True)
 
     assert fake_client.gets, "expected at least one GET against command-runs"
     first = fake_client.gets[0]
@@ -5148,14 +4588,7 @@ def test_sweep_orphans_recovers_committed_terminal_pending_output(
     }
     sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
 
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     assert fake_client.patches == [
         (
@@ -5188,14 +4621,7 @@ def test_sweep_orphans_ages_pending_recovery_only_from_server_commit_time(
     }
     sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
 
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     assert [endpoint for endpoint, _ in fake_client.patches] == ["command-runs/92"]
     summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
@@ -5218,14 +4644,7 @@ def test_sweep_orphans_never_falls_back_to_client_time_for_pending_recovery(
     }
     sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
 
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     assert fake_client.patches == []
     captured = capsys.readouterr()
@@ -5258,14 +4677,7 @@ def test_sweep_orphans_surfaces_unverifiable_pending_recovery_baseline(
     }
     sweep, fake_client = _setup_sweep_test(monkeypatch, fake_engagement, [row])
 
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     captured = capsys.readouterr()
     summary = json.loads(captured.out.splitlines()[-1])["summary"]
@@ -5382,14 +4794,7 @@ def test_sweep_orphans_rejects_unproven_pending_recovery(
 
     fake_client.patch = fake_patch
 
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
     assert summary["recovered_pending"] == 0
@@ -5439,14 +4844,7 @@ def test_sweep_orphans_tracks_degraded_pending_recovery(
 
     fake_client.patch = fake_patch
 
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
     assert summary["recovered_pending"] == 1
@@ -5494,14 +4892,7 @@ def test_sweep_orphans_bounds_degraded_recovery_ids(
         }
 
     fake_client.patch = fake_patch
-    sweep.run(
-        SimpleNamespace(
-            engagement_dir=str(fake_engagement),
-            max_age_seconds=3600,
-            container_name="vigil",
-            dry_run=False,
-        )
-    )
+    _run_sweep(sweep, fake_engagement)
 
     summary = json.loads(capsys.readouterr().out.splitlines()[-1])["summary"]
     assert summary["recovered_degraded"] == 25
@@ -5535,12 +4926,7 @@ def test_sweep_orphans_handles_missing_pid_file_as_dead(monkeypatch, fake_engage
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     # Both rows finalized to lost.
     assert {endpoint for endpoint, _ in fake_client.patches} == {
@@ -5567,12 +4953,7 @@ def test_sweep_orphans_skips_when_pid_probe_fails(
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     assert fake_client.patches == []
     out = capsys.readouterr().out
@@ -5597,12 +4978,7 @@ def test_sweep_orphans_skips_when_liveness_probe_fails(
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     assert fake_client.patches == []
     out = capsys.readouterr().out
@@ -5636,12 +5012,7 @@ def test_sweep_orphans_splits_skipped_into_benign_and_unverifiable(
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     # No terminal row was PATCHed; the unverifiable one was NOT finalized as lost.
     assert fake_client.patches == []
@@ -5681,12 +5052,7 @@ def test_sweep_orphans_uses_db_run_uuid_when_present(monkeypatch, fake_engagemen
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     # The cat call must have asked for the DB-column uuid's pid file, not the
     # legacy regex value. This is the load-bearing assertion of the P1 fix.
@@ -5711,12 +5077,7 @@ def test_sweep_orphans_respects_max_age_threshold(monkeypatch, fake_engagement):
 
     monkeypatch.setattr(sweep.subprocess, "run", fake_subprocess_run)
 
-    sweep.run(SimpleNamespace(
-        engagement_dir=str(fake_engagement),
-        max_age_seconds=3600,
-        container_name="vigil",
-        dry_run=False,
-    ))
+    _run_sweep(sweep, fake_engagement)
 
     # No subprocess call (no liveness probe) and no PATCH because the row
     # was below the threshold.
@@ -6104,15 +5465,7 @@ def _command_posts(fake_client):
 
 def test_kali_identity_stamps_auth_context_on_command_and_probe(monkeypatch, fake_engagement):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
@@ -6149,15 +5502,7 @@ def test_kali_without_identity_uses_anonymous_context_without_credential_lookup(
         "resolve_identity",
         lambda *_a, **_k: (_ for _ in ()).throw(AssertionError("unexpected credential lookup")),
     )
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(
         kali.subprocess, "Popen", lambda *a, **k: _FakePopen(returncode=0)
     )
@@ -6182,15 +5527,7 @@ def test_kali_unknown_identity_refuses_anonymous_execution(
     monkeypatch, fake_engagement
 ):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(
         kali.subprocess,
         "Popen",
@@ -6218,15 +5555,7 @@ def test_kali_unknown_identity_refuses_anonymous_execution(
 
 def test_kali_identity_injects_credentials_into_http_command(monkeypatch, fake_engagement):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     captured = {}
 
     def _fake_popen(argv, **kw):
@@ -6257,15 +5586,7 @@ def test_kali_identity_injects_backend_access_token(monkeypatch, fake_engagement
             {"mode": "manual", "tokens": {"access_token": "token-123"}},
         ),
     )
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     captured = {}
 
     def _fake_popen(argv, **kw):
@@ -6290,15 +5611,7 @@ def test_kali_identity_non_http_tool_refuses_anonymous_execution(
     monkeypatch, fake_engagement
 ):
     _write_multi_identity_auth(monkeypatch, fake_engagement)
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(
         kali.subprocess,
         "Popen",
@@ -6332,15 +5645,7 @@ def test_probe_emit_red_engagement_emits(monkeypatch, fake_engagement):
 def test_kali_identity_shell_wrapper_injects_and_stamps(monkeypatch, fake_engagement, capsys):
     """Identity material reaches the inner HTTP stage of a shell wrapper."""
     _write_multi_identity_auth(monkeypatch, fake_engagement)
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    (fake_engagement / "scope.json").write_text(
-        json.dumps(
-            {"hostname": "example.com", "hosts": ["example.com"], "engagement_type": "web"}
-        )
-    )
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _web_scope_kali_harness(monkeypatch, fake_engagement)
     captured = {}
 
     def _fake_popen(argv, **kw):
@@ -6441,10 +5746,7 @@ def test_caller_sigterm_reaps_the_worker_and_finalizes_the_row_killed(
     two-namespace cascade the ``--timeout`` path runs, then finalize the row as
     ``killed``, then die honestly.
     """
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali, "_read_container_pid", lambda *a, **k: 4321)
 
     docker_kills: list[str] = []
@@ -6522,10 +5824,7 @@ def test_signal_handler_does_not_double_finalize_a_completed_row(
     """The handler owns the window between the pre-exec POST and the terminal
     finalize — and only that window. A signal after the row is finalized must
     not issue a second PATCH."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: None)
     monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen())
@@ -6554,10 +5853,7 @@ def test_signal_handler_does_not_double_finalize_a_completed_row(
 
 def test_repeat_signal_during_cleanup_stops_trying(monkeypatch, fake_engagement):
     """A handler that swallows a repeated Ctrl-C would be worse than the bug."""
-    kali = _setup_fake_config(monkeypatch, fake_engagement)
-    fake_client = _FakeClient("http://127.0.0.1:18000", fake_engagement.name)
-    monkeypatch.setattr(kali, "AssessmentClient", lambda *a, **k: fake_client)
-    monkeypatch.setattr(kali, "_check_container_running", lambda name: None)
+    kali, fake_client = _kali_client_harness(monkeypatch, fake_engagement)
     monkeypatch.setattr(kali.os, "killpg", lambda pgid, sig: None)
     monkeypatch.setattr(kali.os, "getpgid", lambda pid: pid)
     monkeypatch.setattr(kali.subprocess, "Popen", lambda *a, **k: _FakePopen())

@@ -26,6 +26,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -116,10 +117,7 @@ def _setup_env(
     (engagement / "scope.json").write_text(json.dumps(scope), encoding="utf-8")
     recorded: list[dict] = []
 
-    class _Client:
-        def __init__(self, *_a, **_k) -> None:
-            pass
-
+    class _Client(StubClient):
         def get(self, path: str):
             if path.startswith("code/readiness?target_phase="):
                 if readiness_error is not None:
@@ -138,12 +136,6 @@ def _setup_env(
         def record_decision(self, payload):
             recorded.append(payload)
             return {"id": len(recorded)}
-
-        def close(self) -> None:
-            return None
-
-        def __enter__(self):
-            return self
 
         def __exit__(self, *_exc):
             self.close()

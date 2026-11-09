@@ -10,15 +10,10 @@ The store itself (merge, persistence, multi-identity activation) is covered by
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "agent" / "scripts"))
-
-from assess.lib import creds_client, identity  # noqa: E402
-from assess.lib.identity import DEFAULT_IDENTITY, normalize_identities  # noqa: E402
+from assess.lib import creds_client, identity
+from assess.lib.identity import DEFAULT_IDENTITY, normalize_identities
 
 
 def _multi() -> dict:
@@ -30,6 +25,14 @@ def _multi() -> dict:
         },
         "active_identity": "user_b",
     }
+
+
+@pytest.fixture
+def eng(tmp_path):
+    """An empty engagement directory for the adapter cases below."""
+    path = tmp_path / "eng"
+    path.mkdir()
+    return path
 
 
 # -- normalize_identities (pure helper) -------------------------------------
@@ -145,9 +148,7 @@ class _Backend:
         return self._data
 
 
-def test_creds_client_resolve_uses_resolve_endpoint(tmp_path, monkeypatch):
-    eng = tmp_path / "eng"
-    eng.mkdir()
+def test_creds_client_resolve_uses_resolve_endpoint(monkeypatch, eng):
     calls = []
 
     class Backend:
@@ -168,9 +169,7 @@ def test_creds_client_resolve_uses_resolve_endpoint(tmp_path, monkeypatch):
     assert calls == [("credentials/resolve", "")]
 
 
-def test_creds_client_resolve_marks_a_read_only_resolve_on_the_wire(
-    tmp_path, monkeypatch
-):
+def test_creds_client_resolve_marks_a_read_only_resolve_on_the_wire(monkeypatch, eng):
     """`record_use=False` must reach the backend, not just the client.
 
     `auth status` without `--probe` only DISPLAYS the record. The backend
@@ -178,8 +177,6 @@ def test_creds_client_resolve_marks_a_read_only_resolve_on_the_wire(
     and 5d purge key off that field — so an inspection that forgets to say so
     keeps an unused session looking fresh forever.
     """
-    eng = tmp_path / "eng"
-    eng.mkdir()
     calls = []
 
     class Backend:
@@ -197,13 +194,9 @@ def test_creds_client_resolve_marks_a_read_only_resolve_on_the_wire(
     assert len(calls) == 2
 
 
-def test_creds_client_resolve_for_replay_does_not_mark_read_only(
-    tmp_path, monkeypatch
-):
+def test_creds_client_resolve_for_replay_does_not_mark_read_only(monkeypatch, eng):
     # The default IS the replay contract; the backend's own default records the
     # use, so the client must not send anything that turns it off.
-    eng = tmp_path / "eng"
-    eng.mkdir()
     calls = []
 
     class Backend:
@@ -220,13 +213,9 @@ def test_creds_client_resolve_for_replay_does_not_mark_read_only(
     assert not any("record_use" in query for query in calls)
 
 
-def test_creds_client_read_only_answer_is_not_reused_for_a_replay(
-    tmp_path, monkeypatch
-):
+def test_creds_client_read_only_answer_is_not_reused_for_a_replay(monkeypatch, eng):
     # The per-process cache would otherwise let one `auth status` swallow the USE
     # of every kali exec that follows it inside the TTL.
-    eng = tmp_path / "eng"
-    eng.mkdir()
     calls = []
 
     class Backend:
@@ -245,9 +234,7 @@ def test_creds_client_read_only_answer_is_not_reused_for_a_replay(
     assert "record_use" not in calls[1]
 
 
-def test_creds_client_resolve_cache_is_short_lived(tmp_path, monkeypatch):
-    eng = tmp_path / "eng"
-    eng.mkdir()
+def test_creds_client_resolve_cache_is_short_lived(monkeypatch, eng):
     clock = {"now": 10.0}
     calls = 0
 
@@ -270,9 +257,7 @@ def test_creds_client_resolve_cache_is_short_lived(tmp_path, monkeypatch):
     assert calls == 2
 
 
-def test_creds_client_resolve_does_not_cache_backend_failure(tmp_path, monkeypatch):
-    eng = tmp_path / "eng"
-    eng.mkdir()
+def test_creds_client_resolve_does_not_cache_backend_failure(monkeypatch, eng):
     calls = 0
 
     class Backend:
@@ -294,9 +279,7 @@ def test_creds_client_resolve_does_not_cache_backend_failure(tmp_path, monkeypat
     assert calls == 2
 
 
-def test_creds_client_resolve_failure_does_not_load_full_credentials(tmp_path, monkeypatch):
-    eng = tmp_path / "eng"
-    eng.mkdir()
+def test_creds_client_resolve_failure_does_not_load_full_credentials(monkeypatch, eng):
     calls = []
 
     class Backend:
@@ -314,13 +297,11 @@ def test_creds_client_resolve_failure_does_not_load_full_credentials(tmp_path, m
     assert calls == [("credentials/resolve", "")]
 
 
-def test_creds_client_warns_on_unimported_legacy_auth_json(tmp_path, monkeypatch, capsys):
+def test_creds_client_warns_on_unimported_legacy_auth_json(monkeypatch, capsys, eng):
     # After centralizing credentials to the backend, a pre-existing on-disk
     # auth.json is NOT auto-imported. An upgraded engagement that has auth.json but
     # zero backend rows must WARN (pointing at `vigil auth import`) instead of
     # silently resolving to anonymous and losing its identities.
-    eng = tmp_path / "eng"
-    eng.mkdir()
     (eng / "auth.json").write_text('{"cookies": {"session": "abc"}}', encoding="utf-8")
     monkeypatch.setattr(
         creds_client, "_client",
@@ -339,10 +320,8 @@ def test_creds_client_warns_on_unimported_legacy_auth_json(tmp_path, monkeypatch
     assert "auth.json" not in capsys.readouterr().err
 
 
-def test_creds_client_no_warn_when_backend_has_identities(tmp_path, monkeypatch, capsys):
+def test_creds_client_no_warn_when_backend_has_identities(monkeypatch, capsys, eng):
     # Backend already has identities -> the legacy file is irrelevant, no WARN.
-    eng = tmp_path / "eng"
-    eng.mkdir()
     (eng / "auth.json").write_text('{"cookies": {"session": "abc"}}', encoding="utf-8")
     monkeypatch.setattr(
         creds_client, "_client",

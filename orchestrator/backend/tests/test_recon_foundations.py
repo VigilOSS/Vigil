@@ -10,20 +10,14 @@ Pure/in-process only — no docker, no network, no tool execution.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-# Match the convention in test_discovery_lib.py: make `assess.lib.*` importable.
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "agent" / "scripts"))
-
-from assess.lib.discovery import (  # noqa: E402
+from assess.lib.discovery import (
     cluster_productive_parents,
     wildcard_parent_candidates,
     wordlist_head,
 )
-from assess.lib import runtime_route as rr  # noqa: E402
+from assess.lib import runtime_route as rr
 
 
 # --------------------------------------------------------------------------- #

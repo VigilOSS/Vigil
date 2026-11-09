@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 import pytest
 from assess.commands import web_discovery
+from _fake_client import StubClient
 
 
 def _cfg(tmp_path: Path) -> SimpleNamespace:
@@ -43,20 +44,12 @@ def _args(tmp_path: Path, hosts_file: Path, **over) -> SimpleNamespace:
     return ns
 
 
-class _Client:
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
 def _install_seams(monkeypatch, tmp_path, *, captured: list[list[str]], live_rows: dict[str, list[str]]):
     """Stub kali_exec to (a) record argv and (b) emulate httpx writing JSONL to
     the -o path. `live_rows` maps a port-list arg → the JSONL lines that pass
     writes for that run, so a test can model 'dead on 80,443, live on 8080'."""
     monkeypatch.setattr(web_discovery, "load_config", lambda d: _cfg(tmp_path))
-    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: StubClient())
     monkeypatch.setattr(
         web_discovery, "ingest_httpx_results",
         lambda *a, **k: {"upserted": 0, "by_class": {}},
@@ -296,7 +289,7 @@ def test_failed_httpx_run_cannot_ingest_or_replace_prior_canonical_output(
     canonical_input.write_text("prior.example.com\n", encoding="utf-8")
     ingested: list[Path] = []
     monkeypatch.setattr(web_discovery, "load_config", lambda d: _cfg(tmp_path))
-    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: StubClient())
     monkeypatch.setattr(
         web_discovery,
         "ingest_httpx_results",
@@ -528,7 +521,7 @@ def test_failed_revalidation_preserves_prior_complete_canonical(monkeypatch, tmp
     )
     canonical_revalidation.write_text("prior.example.com\n", encoding="utf-8")
     monkeypatch.setattr(web_discovery, "load_config", lambda d: _cfg(tmp_path))
-    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: _Client())
+    monkeypatch.setattr(web_discovery, "AssessmentClient", lambda *a, **k: StubClient())
     monkeypatch.setattr(
         web_discovery,
         "ingest_httpx_results",

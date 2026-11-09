@@ -3,11 +3,15 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import subprocess
 from dataclasses import replace
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from rich.cells import cell_len
+from vigil_cli import engagements, term
 from vigil_cli import remediation, restart_manifest
 
 
@@ -97,7 +101,6 @@ def test_join_without_id_selects_only_remediation_projects_then_recent_open_case
     monkeypatch.setenv("ENGAGEMENT_KEY", "acme-web")
     monkeypatch.setattr("builtins.input", lambda *_: "2" if not navigation.selections else "1")
     # Capture the shared engagement picker's rows without launching a native client.
-    from vigil_cli import engagements
     def select(rows):
         navigation.selections.append([row.key for row in rows])
         return rows[1]
@@ -109,7 +112,6 @@ def test_join_without_id_selects_only_remediation_projects_then_recent_open_case
 
 
 def test_join_with_project_skips_project_selection(navigation, monkeypatch):
-    from vigil_cli import engagements
     monkeypatch.setattr(engagements, "_select_engagement", lambda *_: pytest.fail("project was explicit"))
     remediation.run_remediation(arguments("-k", "acme-old", "join"), navigation.root)
     assert navigation.calls == [("join", "acme-old", "27")]
@@ -162,7 +164,6 @@ def test_invalid_backend_identities_do_not_attach(navigation, monkeypatch, inval
 
 
 def test_start_can_choose_among_multiple_projects(navigation, monkeypatch):
-    from vigil_cli import engagements
     monkeypatch.setattr(engagements, "_select_engagement", lambda rows: rows[1])
     remediation.run_remediation(arguments("start"), navigation.root)
     assert navigation.calls == [("start", "acme-new", None)]
@@ -198,7 +199,6 @@ def test_list_quotes_untrusted_multiline_titles_without_losing_text(navigation, 
 
 
 def test_terminal_list_separates_identity_title_and_metadata(navigation, monkeypatch, capsys):
-    from vigil_cli import term
     monkeypatch.setattr(term, "is_terminal", lambda stream: True)
     monkeypatch.setenv("NO_COLOR", "1")
     remediation.run_remediation(arguments("-k", "acme-old", "list"), navigation.root)
@@ -235,7 +235,6 @@ def test_project_fuzzy_picker_failure_never_prompts_or_attaches(navigation, monk
 
 
 def test_project_picker_keeps_untrusted_labels_separate_from_selection_identity(navigation, monkeypatch):
-    from vigil_cli import engagements
     rows = engagements.list_engagements(navigation.root)
     rows[0] = replace(rows[0], target="Acme\n1\tfake project\x1b[2J")
     requests = []
@@ -250,7 +249,6 @@ def test_project_picker_keeps_untrusted_labels_separate_from_selection_identity(
 
 
 def test_terminal_json_list_is_still_full_machine_records(navigation, monkeypatch, capsys):
-    from vigil_cli import term
     monkeypatch.setattr(term, "is_terminal", lambda stream: True)
     remediation.run_remediation(arguments("-k", "acme-old", "list", "--json"), navigation.root)
     assert [case["case_id"] for case in json.loads(capsys.readouterr().out)] == [27, 12, 41]
@@ -270,7 +268,6 @@ def test_fuzzy_picker_rejects_multiple_or_modified_selections(navigation, monkey
 
 @pytest.mark.parametrize("width", [24, 40, 80])
 def test_terminal_case_list_fits_width_and_keeps_literal_full_titles(navigation, monkeypatch, capsys, width):
-    from vigil_cli import term
     monkeypatch.setattr(term, "is_terminal", lambda stream: True)
     monkeypatch.setenv("COLUMNS", str(width))
     monkeypatch.setenv("NO_COLOR", "1")
@@ -284,12 +281,10 @@ def test_terminal_case_list_fits_width_and_keeps_literal_full_titles(navigation,
 
 
 def test_case_picker_preview_uses_literal_details_and_cleans_up(navigation, monkeypatch):
-    from pathlib import Path
     monkeypatch.setattr(remediation.shutil, "which", lambda _: "/usr/bin/fzf")
     monkeypatch.setenv("COLUMNS", "60")
     paths = []
     def choose(argv, **kwargs):
-        import shlex
         assert "down" in argv[argv.index("--preview-window") + 1]
         command = shlex.split(argv[argv.index("--preview") + 1])
         preview_dir = Path(command[-2])
@@ -305,8 +300,6 @@ def test_case_picker_preview_uses_literal_details_and_cleans_up(navigation, monk
 
 @pytest.mark.parametrize("width", [24, 40, 80])
 def test_numbered_project_picker_wraps_full_untrusted_values(navigation, monkeypatch, capsys, width):
-    from vigil_cli import engagements
-    from rich.cells import cell_len
     monkeypatch.setenv("COLUMNS", str(width))
     monkeypatch.setenv("NO_COLOR", "1")
     value = "[blue]" + "界Acme" * 20 + "\x1b[2J"
@@ -318,13 +311,10 @@ def test_numbered_project_picker_wraps_full_untrusted_values(navigation, monkeyp
 
 
 def term_literal(value):
-    from vigil_cli import term
     return "".join(term.single_line(value).split())
 
 
 def test_fuzzy_preview_reader_renders_data_without_shell_evaluation(navigation, monkeypatch):
-    import subprocess
-    from vigil_cli import term
     run = subprocess.run
     payload = "[red]$(printf forged) `printf forged`\nAcme\x1b[2J"
     def choose(argv, **kwargs):
@@ -349,7 +339,6 @@ def test_case_picker_keeps_source_ticket_searchable(navigation, monkeypatch):
 
 
 def test_project_picker_keeps_target_and_phase_searchable(navigation, monkeypatch):
-    from vigil_cli import engagements
     row = replace(engagements.list_engagements(navigation.root)[0], target="api.example.com", current_phase="verification")
     monkeypatch.setattr(engagements.shutil, "which", lambda _: "/usr/bin/fzf")
     def choose(argv, **kwargs):
@@ -362,7 +351,6 @@ def test_project_picker_keeps_target_and_phase_searchable(navigation, monkeypatc
 
 @pytest.mark.parametrize(("key", "label"), [("2026-10-20-123045-Acme", "Acme"), ("2026-10-Acme", "2026-10-Acme"), ("Acme", "Acme")])
 def test_project_picker_leads_with_friendly_name_and_retains_full_identity(navigation, monkeypatch, key, label):
-    from vigil_cli import engagements
     row = replace(engagements.list_engagements(navigation.root)[0], key=key)
     monkeypatch.setattr(engagements.shutil, "which", lambda _: "/usr/bin/fzf")
     def pick(lines, details, **kwargs):
@@ -376,7 +364,6 @@ def test_project_picker_leads_with_friendly_name_and_retains_full_identity(navig
 
 
 def test_remediation_project_selection_fits_narrow_terminal(navigation, monkeypatch, capsys):
-    from rich.cells import cell_len
     monkeypatch.setenv("COLUMNS", "24")
     monkeypatch.setenv("NO_COLOR", "1")
     assert remediation._select_project(remediation._remediation_projects(navigation.root)) == "acme-old"

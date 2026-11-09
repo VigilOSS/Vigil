@@ -1,4 +1,5 @@
 """Consumer contracts for resource checks and safe stack startup."""
+import io
 import json
 import subprocess
 import sys
@@ -6,7 +7,10 @@ from contextlib import redirect_stdout
 
 import pytest
 
+from rich.console import Console
 from vigil_cli import config, docker, runtime, up
+from vigil_cli import main as cli
+from vigil_cli import orchestrator
 from vigil_cli.main import main
 
 
@@ -42,8 +46,6 @@ def test_high_memory_limit_warns_and_allows_startup(tmp_path, capsys, monkeypatc
 
 
 def test_memory_warning_uses_rich_terminal_style(tmp_path, monkeypatch):
-    import io
-    from rich.console import Console
     stream = io.StringIO()
     monkeypatch.setattr(runtime.sys, "stderr", stream)
     monkeypatch.setattr(runtime.term, "console", lambda output: Console(
@@ -56,7 +58,6 @@ def test_memory_warning_uses_rich_terminal_style(tmp_path, monkeypatch):
 
 
 def test_runtime_restart_preserves_container_on_startup_refusal(monkeypatch, tmp_path):
-    from vigil_cli import main as cli
     removals = []
     monkeypatch.setattr(cli, "stop_runtime", lambda: removals.append("removed"))
     monkeypatch.setattr(cli, "start_runtime", lambda *a, **kw: (_ for _ in ()).throw(SystemExit("capacity refused")))
@@ -86,7 +87,6 @@ def test_resource_warning_is_stderr_and_describes_a_limit(tmp_path, capsys, monk
 
 @pytest.mark.parametrize("failure", [False, True])
 def test_up_json_is_one_result_on_success_or_failure(monkeypatch, tmp_path, capsys, failure):
-    from vigil_cli import main as cli
     monkeypatch.setattr(up, "resolve_application_root", lambda *a, **kw: tmp_path)
     monkeypatch.setattr(up, "initialize_workspace", lambda *a, **kw: None)
     def start(*args, **kwargs):
@@ -111,7 +111,6 @@ def test_up_json_is_one_result_on_success_or_failure(monkeypatch, tmp_path, caps
 
 @pytest.mark.parametrize("action", ["_npm_ci", "_build_frontend", "_build_report"])
 def test_ui_build_output_follows_progress_stream(monkeypatch, tmp_path, capfd, action):
-    from vigil_cli import orchestrator
     real_run = subprocess.run
     def emit_build_output(argv, **kwargs):
         return real_run([sys.executable, "-c", "print('acme build progress')"],

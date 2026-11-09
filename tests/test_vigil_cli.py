@@ -11,24 +11,44 @@ from __future__ import annotations
 import io
 import re
 import shutil
+import sqlite3 as _sqlite3
 import subprocess
-import sys
 import urllib.error
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import pytest
 
+from vigil_cli import docker as docker_module
+from vigil_cli import main as main_module
+from vigil_cli import preflight as preflight_module
+from vigil_cli import status as status_module
+from vigil_cli.docker import DockerResult, TIMEOUT_RETURNCODE
+from vigil_cli.install_manifest import install_source_content_sha256
+from vigil_cli.main import main
+from vigil_cli.runtime import (
+    RuntimeOptions,
+    _format_cpus,
+    runtime_status,
+    start_runtime,
+    vigil_runtime_resources,
+)
+from vigil_cli.status import (
+    _database_check,
+    _failed_audit_marker_check,
+    _jj_working_copy_sha,
+    _print_install_staleness_warning,
+    list_failed_audit_markers,
+    source_revision_sha,
+)
+
 REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
 RENDER_SCRIPT = REPO_ROOT / "agent" / "scripts" / "render-operator-prompts.sh"
 STAMP_MARKER = "vigil-prompt-stamp"
 
 
 def test_vigil_runtime_resources_helper_renders_against_stub_container(monkeypatch, capsys):
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.runtime import vigil_runtime_resources
-
     monkeypatch.setenv("VIGIL_RUNTIME_MEMORY_GB", "8")
     monkeypatch.setenv("VIGIL_RUNTIME_CPUS", "4")
 
@@ -55,8 +75,6 @@ def test_vigil_runtime_resources_helper_renders_against_stub_container(monkeypat
 def test_vigil_runtime_resources_helper_handles_real_docker_cli_gracefully(capsys):
     """When docker is on PATH but no `vigil` container is running, the helper
     reports `running=False` and prints `live\tcontainer not running` rather than crashing."""
-    from vigil_cli.runtime import vigil_runtime_resources
-
     vigil_runtime_resources(container_name="vigil-stub-nonexistent")
     output = capsys.readouterr().out
     assert "running=False" in output
@@ -74,8 +92,6 @@ def test_run_command_times_out_returns_failed_result_not_hang(monkeypatch):
     """A wedged daemon makes subprocess.run raise TimeoutExpired; run_command
     must convert that into a non-zero, timeout-tagged DockerResult (never hang,
     never propagate the exception)."""
-    from vigil_cli import docker as docker_module
-
     def fake_run(argv, **kwargs):
         # The call is bounded — a timeout is always passed to subprocess.run.
         assert kwargs.get("timeout"), "run_command must pass a timeout"
@@ -91,10 +107,6 @@ def test_run_command_times_out_returns_failed_result_not_hang(monkeypatch):
 
 
 def test_run_command_timeout_overridable_and_disablable_via_env(monkeypatch):
-    from types import SimpleNamespace
-
-    from vigil_cli import docker as docker_module
-
     captured: dict[str, object] = {}
 
     def fake_run(argv, **kwargs):
@@ -114,8 +126,6 @@ def test_run_command_timeout_overridable_and_disablable_via_env(monkeypatch):
 
 
 def test_daemon_status_flags_timeout_vs_absent_vs_healthy():
-    from vigil_cli import docker as docker_module
-
     timed = docker_module.daemon_status(
         runner=lambda argv, **_: docker_module.DockerResult(docker_module.TIMEOUT_RETURNCODE, "", "timed out")
     )
@@ -137,9 +147,6 @@ def test_start_runtime_surfaces_unresponsive_docker_not_missing_image(tmp_path):
     """When the first metadata probe times out, start_runtime must name the real
     problem (Docker unresponsive + recovery hint), NOT the misleading
     'Missing runtime image'."""
-    from vigil_cli.docker import DockerResult, TIMEOUT_RETURNCODE
-    from vigil_cli.runtime import RuntimeOptions, start_runtime
-
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
 
@@ -158,9 +165,6 @@ def test_start_runtime_surfaces_unresponsive_docker_not_missing_image(tmp_path):
 
 
 def test_runtime_status_reports_docker_unavailable_on_unresponsive_daemon():
-    from vigil_cli.docker import DockerResult, TIMEOUT_RETURNCODE
-    from vigil_cli.runtime import runtime_status
-
     def runner(argv, **_):
         # Both the liveness (`docker ps`) and health (`docker info`) probes time out.
         return DockerResult(TIMEOUT_RETURNCODE, "", "timed out")
@@ -169,9 +173,6 @@ def test_runtime_status_reports_docker_unavailable_on_unresponsive_daemon():
 
 
 def test_runtime_status_reports_stopped_when_daemon_healthy_but_container_absent():
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.runtime import runtime_status
-
     def runner(argv, **_):
         return DockerResult(0, "", "")  # `docker ps` empty, `docker info` ok
 
@@ -192,11 +193,6 @@ def test_doctor_failed_audit(tmp_path, monkeypatch):
     never reached the orchestrator backend, so coverage drifts behind the
     runtime evidence.
     """
-    from vigil_cli.status import (
-        _failed_audit_marker_check,
-        list_failed_audit_markers,
-    )
-
     install_root = tmp_path
     eng_root = install_root / "agent" / "engagements"
     eng_dir = eng_root / "2026-04-28-000000-target"
@@ -230,8 +226,6 @@ def test_doctor_failed_audit(tmp_path, monkeypatch):
 
 def test_doctor_failed_audit_no_engagements_dir(tmp_path):
     """When the install root has no engagements directory yet, the check returns OK."""
-    from vigil_cli.status import _failed_audit_marker_check
-
     result = _failed_audit_marker_check(tmp_path)
     assert result.name == "failed-audit-markers"
     assert result.status == "OK"
@@ -239,8 +233,6 @@ def test_doctor_failed_audit_no_engagements_dir(tmp_path):
 
 def test_readyz_http_error_preserves_readiness_payload(tmp_path, monkeypatch):
     """HTTP 503 from /readyz is a reachable not-ready state, not a transport failure."""
-    from vigil_cli import status as status_module
-
     body = (
         b'{"status":"not_ready","database_connected":true,'
         b'"assessment_schema_ready":false,"code_analysis_schema_ready":true}'
@@ -280,8 +272,6 @@ def test_readyz_http_error_preserves_readiness_payload(tmp_path, monkeypatch):
 
 
 def test_vigil_auth_unknown_verb_points_at_the_assess_sibling(capsys):
-    from vigil_cli.main import main
-
     with pytest.raises(SystemExit) as exc:
         main(["auth", "list"])
 
@@ -294,8 +284,6 @@ def test_vigil_auth_unknown_verb_points_at_the_assess_sibling(capsys):
 
 def test_vigil_auth_valid_verb_is_not_given_the_sibling_hint(capsys, tmp_path):
     """The hint fires only on an unknown subcommand, never on a real error."""
-    from vigil_cli.main import main
-
     with pytest.raises(SystemExit):
         # `--identity` is required for quarantine; this is a normal usage error.
         main(["--root", str(tmp_path), "auth", "quarantine"])
@@ -401,8 +389,6 @@ def test_source_revision_prefers_the_jj_working_copy_over_git_head(tmp_path):
     and `vigil status` then reports `current` while the working root is a commit
     behind. AGENTS.md mandates jj, so that is the normal path, not an edge case.
     """
-    from vigil_cli.status import source_revision_sha
-
     repo = tmp_path / "colocated"
     repo.mkdir()
     _git_init(repo)
@@ -424,8 +410,6 @@ def test_source_revision_prefers_the_jj_working_copy_over_git_head(tmp_path):
 
 def test_source_revision_falls_back_to_git_without_jj(tmp_path):
     """Contributors who never touch jj keep the original behavior."""
-    from vigil_cli.status import source_revision_sha
-
     repo = tmp_path / "gitonly"
     repo.mkdir()
     _git_init(repo)
@@ -437,8 +421,6 @@ def test_source_revision_falls_back_to_git_without_jj(tmp_path):
 
 def test_source_revision_is_none_outside_any_vcs(tmp_path):
     """No git, no jj, no crash — staleness degrades to `unknown`."""
-    from vigil_cli.status import source_revision_sha
-
     plain = tmp_path / "plain"
     plain.mkdir()
     assert source_revision_sha(plain) is None
@@ -451,8 +433,6 @@ def test_jj_revision_read_never_snapshots_the_working_copy(tmp_path):
     Every ordinary jj command snapshots the working copy first, which would make
     `vigil status` and `vigil install` write to the source as a side effect.
     """
-    from vigil_cli.status import _jj_working_copy_sha
-
     repo = tmp_path / "colocated"
     (repo / ".jj").mkdir(parents=True)
     seen: list[list[str]] = []
@@ -522,8 +502,6 @@ def test_install_staleness_tracks_unsnapshotted_source_bytes_not_stale_jj_commit
 def test_install_cli_dry_run_names_plan_and_preserves_destination(
     tmp_path, monkeypatch, capsys, has_stamp: bool, planned_action: str
 ) -> None:
-    from vigil_cli import main as main_module
-
     source = tmp_path / "source"
     (source / "agent").mkdir(parents=True)
     (source / "orchestrator").mkdir()
@@ -560,8 +538,6 @@ def test_install_cli_dry_run_names_plan_and_preserves_destination(
 def test_install_manifest_framing_distinguishes_file_directory_and_absence(
     tmp_path,
 ) -> None:
-    from vigil_cli.install_manifest import install_source_content_sha256
-
     file_tree = tmp_path / "file-tree"
     directory_tree = tmp_path / "directory-tree"
     absent_tree = tmp_path / "absent-tree"
@@ -581,8 +557,6 @@ def test_install_manifest_framing_distinguishes_file_directory_and_absence(
 
 
 def test_install_manifest_length_frames_arbitrary_binary_payloads(tmp_path) -> None:
-    from vigil_cli.install_manifest import install_source_content_sha256
-
     one_file = tmp_path / "one-file"
     two_files = tmp_path / "two-files"
     (one_file / "src").mkdir(parents=True)
@@ -597,8 +571,6 @@ def test_install_manifest_length_frames_arbitrary_binary_payloads(tmp_path) -> N
 
 
 def test_install_manifest_ignores_finder_metadata_at_every_depth(tmp_path) -> None:
-    from vigil_cli.install_manifest import install_source_content_sha256
-
     source = tmp_path / "source"
     (source / "agent" / "scripts").mkdir(parents=True)
     (source / "agent" / "scripts" / "assess.py").write_text(
@@ -683,8 +655,6 @@ def test_legacy_revision_only_install_stamp_keeps_commit_distance(
 def test_assess_stale_warning_explains_unsnapshotted_source_content(
     tmp_path, monkeypatch, capsys
 ) -> None:
-    from vigil_cli import preflight as preflight_module
-
     monkeypatch.setattr(
         preflight_module,
         "install_staleness",
@@ -707,8 +677,6 @@ def test_assess_stale_warning_explains_unsnapshotted_source_content(
 def test_status_stale_warning_is_neutral_without_positive_commit_distance(
     capsys,
 ) -> None:
-    from vigil_cli.status import _print_install_staleness_warning
-
     _print_install_staleness_warning(
         {
             "state": "stale",
@@ -729,10 +697,6 @@ def test_doctor_fails_on_a_corrupt_orchestrator_database(tmp_path):
     Discarding the row made `vigil doctor` report OK on a corrupt database — the
     one condition it exists to rule out.
     """
-    import sqlite3 as _sqlite3
-
-    from vigil_cli.status import _database_check
-
     healthy = tmp_path / "healthy.sqlite3"
     with _sqlite3.connect(str(healthy)) as connection:
         connection.execute("CREATE TABLE t (a INTEGER PRIMARY KEY, b TEXT)")
@@ -758,16 +722,10 @@ def test_doctor_fails_on_a_corrupt_orchestrator_database(tmp_path):
 
 
 def test_doctor_reports_missing_database_without_touching_sqlite(tmp_path):
-    from vigil_cli.status import _database_check
-
     assert _database_check(tmp_path / "absent.sqlite3").status == "MISSING"
 
 
 def test_doctor_bounds_database_integrity_scan(tmp_path):
-    import sqlite3 as _sqlite3
-
-    from vigil_cli.status import _database_check
-
     database = tmp_path / "large.sqlite3"
     with _sqlite3.connect(database) as connection:
         connection.execute("CREATE TABLE rows (value TEXT NOT NULL)")
@@ -784,6 +742,4 @@ def test_doctor_bounds_database_integrity_scan(tmp_path):
 
 @pytest.mark.parametrize(("cpus", "expected"), [(2, "2"), (2.0, "2"), (0.5, "0.5")])
 def test_runtime_cpu_argument_accepts_integer_and_fractional_limits(cpus, expected):
-    from vigil_cli.runtime import _format_cpus
-
     assert _format_cpus(cpus) == expected

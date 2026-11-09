@@ -20,13 +20,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import artifact
 from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE
 from assess.lib.client import DEFAULT_READ_TIMEOUT_SECONDS, AssessError
 
 
-class _RecordingClient:
+class _RecordingClient(StubClient):
     """Bulk-aware fake: registers whatever it is sent, in submission order."""
 
     def __init__(
@@ -109,10 +110,6 @@ class _RecordingClient:
             "outcomes": outcomes,
             "artifacts": artifacts,
         }
-
-    def close(self) -> None:
-        return None
-
 
 @pytest.fixture()
 def engagement(tmp_path: Path) -> Path:

@@ -15,7 +15,6 @@ from __future__ import annotations
 import importlib
 import json
 import sys
-from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlsplit
 
@@ -43,9 +42,6 @@ def operator_checkpoint():
     that). Evicting and re-importing here keeps the module under test, the CLI
     entrypoint, and this test's exception types on one coherent copy.
     """
-    root = str(Path(__file__).resolve().parents[3] / "agent" / "scripts")
-    if root not in sys.path:
-        sys.path.insert(0, root)
     for name in list(sys.modules):
         if name == "assess" or name.startswith("assess."):
             sys.modules.pop(name, None)

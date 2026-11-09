@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import subprocess
-import sys
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,15 +17,14 @@ from urllib.parse import unquote, urlparse
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
+from vigil_cli import engagements
+from vigil_cli.engagements import CreateEngagementOptions
 
 
 # ── _write_report: red family no longer seeds report.md, blue still does ──────
 
 @pytest.mark.parametrize("etype", ["web", "code", "both", "android", "other-fallback"])
 def test_write_report_seeds_nothing_for_red_family(tmp_path, etype):
-    from vigil_cli import engagements
-
     engagements._write_report(
         tmp_path, etype, name="acme", target="https://acme.test",
         repos=[{"path": "/src/acme", "name": "acme"}], date_label="2026-07-06",
@@ -39,8 +37,6 @@ def test_blue_report_body_is_byte_for_byte_the_legacy_scaffold(tmp_path):
     exact scaffold the old branch produced, so blue report-writer dispatch is
     unaffected by retiring the red/code/android branches.
     """
-    from vigil_cli import engagements
-
     engagements._write_report(
         tmp_path, "blue", name="AcmeCorp", target="AcmeCorp:m365",
         repos=[], date_label="2026-07-06",
@@ -63,8 +59,6 @@ def test_blue_report_body_is_byte_for_byte_the_legacy_scaffold(tmp_path):
 # ── ISSUES-AND-ENHANCEMENTS.md ───────────────────────────────────────────────
 
 def test_issues_doc_seeded_and_scopes_to_reusable_lessons(tmp_path):
-    from vigil_cli import engagements
-
     engagements._write_issues_doc(tmp_path)
     doc = tmp_path / "ISSUES-AND-ENHANCEMENTS.md"
     assert doc.exists()
@@ -84,9 +78,6 @@ def _create(tmp_path, monkeypatch, etype, **extra):
     absence, ISSUES presence, blue report.md presence) is exercised through the
     genuine create path rather than the seams alone.
     """
-    from vigil_cli import engagements
-    from vigil_cli.engagements import CreateEngagementOptions
-
     # Seed the canonical installed prompts create_engagement now requires up front,
     # so its precondition stays exercised here rather than stubbed away.
     agent_root = tmp_path / "agent"
@@ -188,8 +179,6 @@ def _stub_render_tools(engagements_mod, tmp_path, monkeypatch):
 
 
 def test_export_pdf_errors_when_nothing_to_render(tmp_path):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     with pytest.raises(SystemExit) as exc:
@@ -201,8 +190,6 @@ def test_export_pdf_errors_when_nothing_to_render(tmp_path):
 
 
 def test_export_pdf_renders_submissions_when_no_report(tmp_path, monkeypatch):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     sub = eng / "submissions" / "va-001-idor"
     sub.mkdir(parents=True)
@@ -231,8 +218,6 @@ def test_export_pdf_prefers_report_md_and_ignores_submissions(tmp_path, monkeypa
     """Blue path preserved: when report.md is present it is the sole render
     source, even if a submissions tree also exists.
     """
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     report = eng / "report.md"
@@ -254,8 +239,6 @@ def test_export_pdf_prefers_report_md_and_ignores_submissions(tmp_path, monkeypa
 def test_export_pdf_preserves_preexisting_paths_with_legacy_temp_names(
     tmp_path, monkeypatch
 ):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     (eng / "report.md").write_text("# Engagement Report\n", encoding="utf-8")
@@ -275,8 +258,6 @@ def test_export_pdf_preserves_preexisting_paths_with_legacy_temp_names(
 
 
 def test_export_pdf_concurrent_runs_use_distinct_render_inputs(tmp_path, monkeypatch):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     (eng / "report.md").write_text("# Engagement Report\n", encoding="utf-8")
@@ -325,8 +306,6 @@ def test_export_pdf_concurrent_runs_use_distinct_render_inputs(tmp_path, monkeyp
 
 
 def test_export_pdf_cleans_render_directory_when_chrome_fails(tmp_path, monkeypatch):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     (eng / "report.md").write_text("# Engagement Report\n", encoding="utf-8")
@@ -361,8 +340,6 @@ def test_export_pdf_cleans_render_directory_when_chrome_fails(tmp_path, monkeypa
 
 
 def test_export_pdf_accepts_complete_pdf_when_chrome_lingers(tmp_path, monkeypatch):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     (eng / "report.md").write_text("# Engagement Report\n", encoding="utf-8")
@@ -384,8 +361,6 @@ def test_export_pdf_accepts_complete_pdf_when_chrome_lingers(tmp_path, monkeypat
 
 
 def test_export_pdf_makes_target_controlled_resources_inert(tmp_path, monkeypatch):
-    from vigil_cli import engagements
-
     eng = tmp_path / "eng"
     eng.mkdir()
     (eng / "report.md").write_text(

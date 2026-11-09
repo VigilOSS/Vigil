@@ -50,6 +50,15 @@ def _script(tmp_path, body: str, name: str = "probe.sh"):
     return path
 
 
+def _attribution_report(argv: list[str], *, tool_name: str, eng) -> dict:
+    """Prepare ``argv`` against ``eng`` and return the attribution report it filled."""
+    report: dict = {}
+    kali.prepare_execution_command(
+        argv, tool_name=tool_name, engagement_dir=eng, report=report
+    )
+    return report
+
+
 # --------------------------------------------------------------------------- #
 # I-155 — a script that cannot carry the mandatory header must not fire.
 # --------------------------------------------------------------------------- #
@@ -58,14 +67,7 @@ def _script(tmp_path, body: str, name: str = "probe.sh"):
 def test_script_referencing_the_header_runs_and_records_verification(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
     _script(eng, '#!/bin/bash\ncurl -H "X-HackerOne: acme-researcher" https://app.example.com/a\n')
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["bash", f"/engagements/{eng.name}/scripts/probe.sh"],
-        tool_name="bash",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["bash", f"/engagements/{eng.name}/scripts/probe.sh"], tool_name="bash", eng=eng)
 
     assert report["required_header_status"] == "referenced_in_script"
 
@@ -75,14 +77,7 @@ def test_script_referencing_only_the_env_carrier_is_accepted(tmp_path):
     the handle into every curl line, so referencing it must count."""
     eng = _engagement(tmp_path, required=_HANDLE)
     _script(eng, '#!/bin/bash\ncurl -H "$VIGIL_REQUIRED_HEADERS" https://app.example.com/a\n')
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["bash", "scripts/probe.sh"],
-        tool_name="bash",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["bash", "scripts/probe.sh"], tool_name="bash", eng=eng)
 
     assert report["required_header_status"] == "referenced_in_script"
 
@@ -116,14 +111,7 @@ def test_header_name_in_comment_does_not_satisfy_script_check(tmp_path):
 
 def test_unreadable_or_out_of_engagement_script_proceeds_as_unknown(tmp_path):
     eng = _engagement(tmp_path, required=_HANDLE)
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["bash", "/etc/probe.sh"],
-        tool_name="bash",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["bash", "/etc/probe.sh"], tool_name="bash", eng=eng)
 
     assert report["required_header_status"] == "unknown_script_unreadable"
 
@@ -152,14 +140,7 @@ def test_script_without_lexically_established_in_scope_request_is_not_refused(
 ):
     eng = _engagement(tmp_path, required=_HANDLE)
     _script(eng, body)
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["bash", "scripts/probe.sh"],
-        tool_name="bash",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["bash", "scripts/probe.sh"], tool_name="bash", eng=eng)
 
     assert report["required_header_status"] in {
         "not_applicable_no_in_scope_url",
@@ -173,14 +154,7 @@ def test_header_reference_does_not_turn_an_offline_script_into_target_proof(tmp_
         eng,
         '#!/bin/bash\nprintf "%s\\n" "$VIGIL_REQUIRED_HEADERS" > report.txt\n',
     )
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["bash", "scripts/probe.sh"],
-        tool_name="bash",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["bash", "scripts/probe.sh"], tool_name="bash", eng=eng)
 
     assert report["required_header_status"] == "not_applicable_no_in_scope_url"
 
@@ -231,14 +205,7 @@ def test_inert_script_request_text_does_not_trigger_required_header_refusal(
         ".rb": "ruby",
         ".sh": "bash",
     }[name[name.rfind(".") :]]
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        [interpreter, f"scripts/{name}"],
-        tool_name=interpreter,
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report([interpreter, f"scripts/{name}"], tool_name=interpreter, eng=eng)
 
     assert report["required_header_status"] == "not_applicable_no_in_scope_url"
 
@@ -269,14 +236,7 @@ def test_supported_script_literal_request_still_requires_header(
 def test_a_program_with_no_required_headers_is_unaffected(tmp_path):
     eng = _engagement(tmp_path)
     _script(eng, "#!/bin/bash\ncurl https://app.example.com/a\n")
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["bash", "scripts/probe.sh"],
-        tool_name="bash",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["bash", "scripts/probe.sh"], tool_name="bash", eng=eng)
 
     assert report["required_header_status"] == "none_required"
 
@@ -286,11 +246,7 @@ def test_a_c_body_still_injects_and_is_never_refused(tmp_path):
     the script text, so it never reaches the script-file check."""
     eng = _engagement(tmp_path, required=_HANDLE)
     cmd = ["bash", "-c", "curl -sS https://app.example.com/a"]
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        cmd, tool_name="curl", engagement_dir=eng, report=report
-    )
+    report = _attribution_report(cmd, tool_name="curl", eng=eng)
 
     assert report["required_header_status"] == "injected"
     assert "X-HackerOne: acme-researcher" in cmd[2]
@@ -312,14 +268,7 @@ def test_inline_interpreter_program_is_not_mistaken_for_a_script_file(
     tmp_path, command
 ) -> None:
     eng = _engagement(tmp_path, required=_HANDLE)
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        command,
-        tool_name=command[0],
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(command, tool_name=command[0], eng=eng)
 
     assert report["required_header_status"] == "warned"
 
@@ -328,14 +277,7 @@ def test_long_inline_interpreter_program_never_reaches_filesystem_path_lookup(
     tmp_path,
 ) -> None:
     eng = _engagement(tmp_path, required=_HANDLE)
-    report: dict = {}
-
-    kali.prepare_execution_command(
-        ["node", "-e", "fetch('https://app.example.com/a');" + ("x" * 10_000)],
-        tool_name="node",
-        engagement_dir=eng,
-        report=report,
-    )
+    report = _attribution_report(["node", "-e", "fetch('https://app.example.com/a');" + ("x" * 10_000)], tool_name="node", eng=eng)
 
     assert report["required_header_status"] == "warned"
 

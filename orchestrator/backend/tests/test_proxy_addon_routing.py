@@ -14,6 +14,8 @@ import sys
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
+import pytest
+
 
 def _scripts_root() -> Path:
     return Path(__file__).resolve().parents[3] / "agent" / "scripts"
@@ -53,6 +55,27 @@ def _load_proxy_addon_module():
     return module
 
 
+@pytest.fixture
+def module():
+    """A freshly loaded addon module per test, so module-level state never leaks."""
+    return _load_proxy_addon_module()
+
+
+def _engagements_root(tmp_path: Path) -> Path:
+    """Create and return the shared engagements root the addon scans."""
+    root = tmp_path / "engagements"
+    root.mkdir()
+    return root
+
+
+def _loaded_collector(module, root: Path):
+    """Point a fresh collector at `root` and load the registry it finds there."""
+    collector = module.CaseCollector()
+    collector.engagements_root = root
+    collector._reload_registry(force=True)
+    return collector
+
+
 def _seed_engagement(
     engagements_root: Path,
     key: str,
@@ -86,8 +109,7 @@ def _seed_engagement(
 # ---------------------------------------------------------------------------
 
 
-def test_load_exposes_only_shared_engagements_root_option() -> None:
-    module = _load_proxy_addon_module()
+def test_load_exposes_only_shared_engagements_root_option(module) -> None:
     collector = module.CaseCollector()
     added: list[tuple] = []
 
@@ -103,31 +125,23 @@ def test_load_exposes_only_shared_engagements_root_option() -> None:
     assert "engagement_dir" not in option_names
 
 
-def test_registry_scans_each_engagement_scope_json(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_registry_scans_each_engagement_scope_json(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example"])
     _seed_engagement(root, "eng-b", hosts=["b.example", "*.b.example"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert set(collector.registry) == {"eng-a", "eng-b"}
     assert collector.registry["eng-b"].scope_patterns == ["b.example", "*.b.example"]
 
 
-def test_match_routes_to_disjoint_engagement_scopes(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_match_routes_to_disjoint_engagement_scopes(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example"])
     _seed_engagement(root, "eng-b", hosts=["b.example"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     a = collector._match_engagement("a.example")
     b = collector._match_engagement("b.example")
@@ -136,15 +150,13 @@ def test_match_routes_to_disjoint_engagement_scopes(tmp_path: Path) -> None:
     assert collector._match_engagement("c.example") is None
 
 
-def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> None:
+def test_match_drops_out_of_scope_carve_out_under_wildcard(module, tmp_path: Path) -> None:
     """An OOS host under an in-scope wildcard must not be captured/routed.
 
     ``*.target.example`` is in scope but ``appointments.example.com`` is an
     explicit out_of_scope carve-out — the denylist wins and the flow is dropped.
     """
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-example",
@@ -152,9 +164,7 @@ def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> No
         out_of_scope=["appointments.example.com"],
     )
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector.registry["eng-example"].out_of_scope_patterns == [
         "appointments.example.com"
@@ -166,8 +176,7 @@ def test_match_drops_out_of_scope_carve_out_under_wildcard(tmp_path: Path) -> No
     assert collector._match_engagement("appointments.example.com") is None
 
 
-def test_out_of_scope_covers_defers_unresolved_cidr() -> None:
-    module = _load_proxy_addon_module()
+def test_out_of_scope_covers_defers_unresolved_cidr(module) -> None:
     patterns = ["10.0.0.0/8"]
     # No resolvable IP: the default is fail-closed; deferral skips the CIDR entry.
     assert module._out_of_scope_covers(patterns, "app.example.com", None) is True
@@ -186,13 +195,11 @@ def test_out_of_scope_covers_defers_unresolved_cidr() -> None:
     )
 
 
-def test_request_time_defers_cidr_so_required_header_injects(tmp_path: Path) -> None:
+def test_request_time_defers_cidr_so_required_header_injects(module, tmp_path: Path) -> None:
     """A required-header engagement that ALSO carries a CIDR out_of_scope entry
     must still match (and inject its attribution header) on in-scope browser
     traffic at request time, when the upstream IP is not yet resolved."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-hdr",
@@ -200,9 +207,7 @@ def test_request_time_defers_cidr_so_required_header_injects(tmp_path: Path) -> 
         out_of_scope=["10.0.0.0/8"],
         required_headers={"X-Bug-Bounty": "researcher"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     host = "app.example.com"
     # Response path (IP unknown) fails closed on the unevaluable CIDR carve-out.
@@ -215,20 +220,16 @@ def test_request_time_defers_cidr_so_required_header_injects(tmp_path: Path) -> 
     assert chosen.required_headers == {"X-Bug-Bounty": "researcher"}
 
 
-def test_match_prefers_literal_over_wildcard(tmp_path: Path) -> None:
+def test_match_prefers_literal_over_wildcard(module, tmp_path: Path) -> None:
     """When engagement A holds the wildcard ``*.example.com`` and B owns the
     literal ``admin.example.com``, a request to admin must route to B even
     though A's wildcard matches too.
     """
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-broad", hosts=["*.example.com"])
     _seed_engagement(root, "eng-focused", hosts=["admin.example.com"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     chosen = collector._match_engagement("admin.example.com")
     assert chosen is not None and chosen.key == "eng-focused"
@@ -237,43 +238,33 @@ def test_match_prefers_literal_over_wildcard(tmp_path: Path) -> None:
     assert chosen is not None and chosen.key == "eng-broad"
 
 
-def test_match_prefers_narrower_wildcard(tmp_path: Path) -> None:
+def test_match_prefers_narrower_wildcard(module, tmp_path: Path) -> None:
     """``*.admin.example.com`` is narrower than ``*.example.com`` and wins."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-broad", hosts=["*.example.com"])
     _seed_engagement(root, "eng-admin", hosts=["*.admin.example.com"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     chosen = collector._match_engagement("portal.admin.example.com")
     assert chosen is not None and chosen.key == "eng-admin"
 
 
-def test_match_uses_scope_priority_for_ties(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_match_uses_scope_priority_for_ties(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-low", hosts=["host.example.com"], scope_priority=1)
     _seed_engagement(root, "eng-high", hosts=["host.example.com"], scope_priority=10)
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     chosen = collector._match_engagement("host.example.com")
     assert chosen is not None and chosen.key == "eng-high"
 
 
 def test_match_leaves_equal_specificity_and_priority_visibly_unattributed(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     older = _seed_engagement(
         root, "eng-older", hosts=["host.example.com"], scope_priority=7
     )
@@ -289,9 +280,7 @@ def test_match_leaves_equal_specificity_and_priority_visibly_unattributed(
 
     warnings: list[str] = []
     module.ctx.log.warn = warnings.append
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector._match_engagement("host.example.com") is None
     assert any(
@@ -302,24 +291,18 @@ def test_match_leaves_equal_specificity_and_priority_visibly_unattributed(
     )
 
 
-def test_no_match_returns_none(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_no_match_returns_none(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector._match_engagement("nope.example") is None
     assert collector._match_engagement("") is None
 
 
-def test_active_global_bypass_binds_unmatched_and_denied_hosts(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_active_global_bypass_binds_unmatched_and_denied_hosts(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-bypass",
@@ -328,19 +311,15 @@ def test_active_global_bypass_binds_unmatched_and_denied_hosts(tmp_path: Path) -
         scope_enforcement="bypass",
     )
     (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector.registry["eng-bypass"].scope_enforcement == "bypass"
     assert collector._match_engagement("outside.example").key == "eng-bypass"
     assert collector._match_engagement("blocked.example").key == "eng-bypass"
 
 
-def test_active_global_bypass_never_steals_normal_hostname_owner(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_active_global_bypass_never_steals_normal_hostname_owner(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-bypass",
@@ -349,22 +328,16 @@ def test_active_global_bypass_never_steals_normal_hostname_owner(tmp_path: Path)
     )
     _seed_engagement(root, "eng-owner", hosts=["owned.example"])
     (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector._match_engagement("owned.example").key == "eng-owner"
 
 
-def test_active_enforced_engagement_does_not_bind_unmatched_host(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_active_enforced_engagement_does_not_bind_unmatched_host(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-enforced", hosts=["target.example"])
     (root / ".active").write_text("eng-enforced\n", encoding="utf-8")
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector._match_engagement("outside.example") is None
 
@@ -374,15 +347,11 @@ def test_active_enforced_engagement_does_not_bind_unmatched_host(tmp_path: Path)
 # ---------------------------------------------------------------------------
 
 
-def test_registry_picks_up_engagement_added_after_initial_load(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_registry_picks_up_engagement_added_after_initial_load(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     assert set(collector.registry) == {"eng-a"}
 
     # Operator creates a new engagement after the proxy was already running.
@@ -393,16 +362,12 @@ def test_registry_picks_up_engagement_added_after_initial_load(tmp_path: Path) -
     assert chosen is not None and chosen.key == "eng-b"
 
 
-def test_registry_drops_engagement_that_vanished(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_registry_drops_engagement_that_vanished(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example"])
     _seed_engagement(root, "eng-b", hosts=["b.example"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     assert set(collector.registry) == {"eng-a", "eng-b"}
 
     # Engagement directory removed (archived, renamed, etc.).
@@ -413,16 +378,12 @@ def test_registry_drops_engagement_that_vanished(tmp_path: Path) -> None:
     assert set(collector.registry) == {"eng-a"}
 
 
-def test_routes_cache_is_written_after_reload(tmp_path: Path) -> None:
+def test_routes_cache_is_written_after_reload(module, tmp_path: Path) -> None:
     """`vigil mitmproxy routes` reads this cache; reload must keep it fresh."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example"], scope_priority=3)
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    _loaded_collector(module, root)
 
     cache_path = root / module.ROUTES_CACHE
     assert cache_path.is_file()
@@ -567,33 +528,25 @@ def _run_request_hook(
     return req
 
 
-def test_request_hook_injects_required_header_on_in_scope_request(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_request_hook_injects_required_header_on_in_scope_request(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
         required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     req = _run_request_hook(collector, "https://app.example.com/dashboard")
     assert req.headers.get("X-Bug-Bounty") == "acme-researcher"
 
 
-def test_request_hook_does_not_overwrite_client_supplied_header(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_request_hook_does_not_overwrite_client_supplied_header(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
         required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # Client already carries the marker (mixed case) — value must be preserved,
     # not clobbered or duplicated.
@@ -605,35 +558,27 @@ def test_request_hook_does_not_overwrite_client_supplied_header(tmp_path: Path) 
     assert list(dict(req.headers)) == ["x-bug-bounty"]  # exactly one, no duplicate
 
 
-def test_request_hook_leaves_out_of_scope_host_untouched(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_request_hook_leaves_out_of_scope_host_untouched(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
         required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # A host no engagement claims must receive nothing.
     req = _run_request_hook(collector, "https://unrelated.test/x")
     assert "x-bug-bounty" not in req.headers
 
 
-def test_request_hook_respects_out_of_scope_carve_out(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_request_hook_respects_out_of_scope_carve_out(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["*.example.com"],
         out_of_scope=["blocked.example.com"],
         required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # In-scope under the wildcard → injected.
     ok = _run_request_hook(collector, "https://ok.example.com/x")
@@ -645,11 +590,9 @@ def test_request_hook_respects_out_of_scope_carve_out(tmp_path: Path) -> None:
 
 
 def test_request_hook_global_bypass_attributes_unmatched_and_denied_hosts(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-bypass",
@@ -659,23 +602,17 @@ def test_request_hook_global_bypass_attributes_unmatched_and_denied_hosts(
         scope_enforcement="bypass",
     )
     (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     for url in ("https://outside.example/x", "https://blocked.example/x"):
         req = _run_request_hook(collector, url)
         assert req.headers.get("X-Bug-Bounty") == "acme-researcher"
 
 
-def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_request_hook_noop_when_engagement_has_no_required_headers(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["app.example.com"])  # no required_headers
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     assert collector._any_required_headers() is False  # fast path short-circuits
     req = _run_request_hook(collector, "https://app.example.com/x")
@@ -683,20 +620,16 @@ def test_request_hook_noop_when_engagement_has_no_required_headers(tmp_path: Pat
 
 
 def test_request_hook_does_not_block_an_off_limits_path(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-a",
         hosts=["app.example.com"],
         off_limits_paths=["/api/send-email"],
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     flow = _FakeFlow(
         _FakeRequest(url="https://app.example.com/api/send-email?to=real-user"),
         None,
@@ -708,11 +641,9 @@ def test_request_hook_does_not_block_an_off_limits_path(
 
 
 def test_request_hook_global_bypass_does_not_block_an_off_limits_path(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-bypass",
@@ -721,9 +652,7 @@ def test_request_hook_global_bypass_does_not_block_an_off_limits_path(
         scope_enforcement="bypass",
     )
     (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     flow = _FakeFlow(
         _FakeRequest(url="https://outside.example/api/send-email"),
         None,
@@ -734,19 +663,15 @@ def test_request_hook_global_bypass_does_not_block_an_off_limits_path(
     assert flow.response is None
 
 
-def test_request_hook_ignores_absolute_off_limits_patterns(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_request_hook_ignores_absolute_off_limits_patterns(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-a",
         hosts=["*.example.com"],
         off_limits_paths=["https://api.example.com/reset/*"],
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     flow = _FakeFlow(_FakeRequest(url="https://www.example.com/reset/alice"), None)
 
     collector.request(flow)
@@ -755,20 +680,16 @@ def test_request_hook_ignores_absolute_off_limits_patterns(tmp_path: Path) -> No
 
 
 def test_request_hook_does_not_block_an_encoded_off_limits_path(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-a",
         hosts=["app.example.com"],
         off_limits_paths=["/admin/delete"],
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     flow = _FakeFlow(
         _FakeRequest(url="https://app.example.com/admin%2525252Fdelete"),
         None,
@@ -779,31 +700,25 @@ def test_request_hook_does_not_block_an_encoded_off_limits_path(
     assert flow.response is None
 
 
-def test_filesystem_registry_parses_required_headers(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_filesystem_registry_parses_required_headers(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
         required_headers={"X-Bug-Bounty": "acme-researcher", "X-Bad": 5, " ": "blank"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # Only str→str pairs survive (shared scope.required_headers coercion).
     assert collector.registry["eng-a"].required_headers == {"X-Bug-Bounty": "acme-researcher"}
 
 
 def test_backend_registry_reads_required_headers_from_scope_json(
-    tmp_path: Path, monkeypatch
+    module, tmp_path: Path, monkeypatch
 ) -> None:
     """The backend /engagements payload does NOT serialize required_headers, so
     the backend registry path must read them from the on-disk scope.json. This is
     the load-bearing production path (backend up → this branch wins)."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     # scope.json on disk declares the marker; the backend row below omits it.
     _seed_engagement(
         root, "eng-from-backend", hosts=["api.example.com"],
@@ -849,17 +764,13 @@ def test_backend_registry_reads_required_headers_from_scope_json(
     assert entries[0].scope_enforcement == "bypass"
 
 
-def test_reload_updates_required_headers_after_scope_edit(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_reload_updates_required_headers_after_scope_edit(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
         required_headers={"X-Bug-Bounty": "old-handle"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     entry_before = collector.registry["eng-a"]
     assert entry_before.required_headers == {"X-Bug-Bounty": "old-handle"}
 
@@ -875,34 +786,26 @@ def test_reload_updates_required_headers_after_scope_edit(tmp_path: Path) -> Non
     assert entry_before.required_headers == {"X-Bug-Bounty": "new-handle"}
 
 
-def test_routes_cache_includes_required_headers(tmp_path: Path) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_routes_cache_includes_required_headers(module, tmp_path: Path) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["app.example.com"],
         required_headers={"X-Bug-Bounty": "acme-researcher"},
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    _loaded_collector(module, root)
 
     payload = json.loads((root / module.ROUTES_CACHE).read_text(encoding="utf-8"))
     rows = {row["key"]: row for row in payload["engagements"]}
     assert rows["eng-a"]["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
 
 
-def test_capture_auth_posts_to_matched_engagement_only(tmp_path: Path) -> None:
+def test_capture_auth_posts_to_matched_engagement_only(module, tmp_path: Path) -> None:
     """Capture for engagement A must post only for A, with the right delta."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
     _seed_engagement(root, "eng-b", hosts=["b.example.com"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
 
     entry_a = collector._match_engagement("a.example.com")
@@ -930,7 +833,7 @@ def test_capture_auth_posts_to_matched_engagement_only(tmp_path: Path) -> None:
 
 
 def test_capture_auth_scope_host_is_captured_host_not_primary_scope(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
     """Multi-host engagement: scope_host must be the host actually captured, not
     the first scope pattern.
@@ -941,14 +844,10 @@ def test_capture_auth_scope_host_is_captured_host_not_primary_scope(
     to a.example.com, silently dropping b's session from every flat-view consumer
     (e.g. ``vigil auth export``). This is the I-22 multi-host regression guard.
     """
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-multi", hosts=["a.example.com", "b.example.com"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
 
     entry = collector._match_engagement("b.example.com")
@@ -973,17 +872,13 @@ def test_capture_auth_scope_host_is_captured_host_not_primary_scope(
     assert kw["scope_host"] == "b.example.com"
 
 
-def test_capture_auth_extracts_bearer_token_from_login_response(tmp_path: Path) -> None:
+def test_capture_auth_extracts_bearer_token_from_login_response(module, tmp_path: Path) -> None:
     """A login JSON response with a token yields an Authorization header + token
     in the posted capture delta."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
     assert entry is not None
@@ -1002,16 +897,12 @@ def test_capture_auth_extracts_bearer_token_from_login_response(tmp_path: Path) 
     assert kw["headers"]["Authorization"] == "Bearer tok123"
 
 
-def test_capture_auth_skips_post_when_nothing_captured(tmp_path: Path) -> None:
+def test_capture_auth_skips_post_when_nothing_captured(module, tmp_path: Path) -> None:
     """No cookies, no token -> no backend call."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
     assert entry is not None
@@ -1028,8 +919,7 @@ def test_capture_auth_skips_post_when_nothing_captured(tmp_path: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_backend_registry_response_seeds_entries(tmp_path: Path, monkeypatch) -> None:
-    module = _load_proxy_addon_module()
+def test_backend_registry_response_seeds_entries(module, tmp_path: Path, monkeypatch) -> None:
     root = tmp_path / "engagements"
     (root / "eng-from-backend").mkdir(parents=True)
 
@@ -1077,10 +967,8 @@ def test_backend_registry_response_seeds_entries(tmp_path: Path, monkeypatch) ->
     assert entry.scope_priority == 7
 
 
-def test_backend_unreachable_falls_back_to_filesystem_scan(tmp_path: Path, monkeypatch) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_backend_unreachable_falls_back_to_filesystem_scan(module, tmp_path: Path, monkeypatch) -> None:
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-fs", hosts=["fs.example"])
 
     collector = module.CaseCollector()
@@ -1095,15 +983,13 @@ def test_backend_unreachable_falls_back_to_filesystem_scan(tmp_path: Path, monke
     assert "eng-fs" in collector.registry
 
 
-def test_filesystem_fallback_skips_non_in_progress_engagements(tmp_path: Path) -> None:
+def test_filesystem_fallback_skips_non_in_progress_engagements(module, tmp_path: Path) -> None:
     """When the backend is unreachable, the filesystem scan must mirror the
     backend's `?status=in_progress` filter — archived/completed engagements
     re-entering routing would steal captures from active engagements with
     overlapping scope.
     """
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     active = _seed_engagement(root, "eng-active", hosts=["target.example"])
     archived = _seed_engagement(root, "eng-archived", hosts=["target.example"])
     # Tag scope.json status explicitly. Active stays default (treated as
@@ -1115,9 +1001,7 @@ def test_filesystem_fallback_skips_non_in_progress_engagements(tmp_path: Path) -
     archived_scope["status"] = "archived"
     (archived / "scope.json").write_text(json.dumps(archived_scope), encoding="utf-8")
 
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # Active routes; archived is filtered out.
     assert "eng-active" in collector.registry
@@ -1125,15 +1009,13 @@ def test_filesystem_fallback_skips_non_in_progress_engagements(tmp_path: Path) -
 
 
 def test_backend_registry_skips_rows_whose_root_is_missing(
-    tmp_path: Path, monkeypatch
+    module, tmp_path: Path, monkeypatch
 ) -> None:
     """A stale backend row pointing at a directory that no longer exists must
     be skipped at registry-build time so `_open_db_for` never hits
     `FileNotFoundError` on `db_path.touch()` and crashes the flow hook.
     """
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     # Only one of the two engagements has an on-disk directory.
     _seed_engagement(root, "eng-present", hosts=["present.example"])
 
@@ -1192,9 +1074,8 @@ def test_backend_registry_skips_rows_whose_root_is_missing(
 # ---------------------------------------------------------------------------
 
 
-def test_is_deletion_set_cookie_f5_apm_deleted_value():
+def test_is_deletion_set_cookie_f5_apm_deleted_value(module):
     """F5/APM CMS logout: value is the literal string 'deleted'."""
-    module = _load_proxy_addon_module()
     # Canonical CMS logout pattern.
     assert module._is_deletion_set_cookie("MRHSession=deleted; path=/; Secure; HttpOnly") is True
     assert module._is_deletion_set_cookie("F5_ST=deleted; path=/") is True
@@ -1203,24 +1084,21 @@ def test_is_deletion_set_cookie_f5_apm_deleted_value():
     assert module._is_deletion_set_cookie("MRHSession=Deleted") is True
 
 
-def test_is_deletion_set_cookie_empty_value():
+def test_is_deletion_set_cookie_empty_value(module):
     """Empty value is a deletion (Max-Age=0 stripped by some stacks before the value)."""
-    module = _load_proxy_addon_module()
     assert module._is_deletion_set_cookie("MRHSession=; path=/") is True
     assert module._is_deletion_set_cookie("MRHSession=") is True
 
 
-def test_is_deletion_set_cookie_max_age_zero():
+def test_is_deletion_set_cookie_max_age_zero(module):
     """Max-Age=0 is the RFC 6265 deletion mechanism."""
-    module = _load_proxy_addon_module()
     assert module._is_deletion_set_cookie("sid=abc; Max-Age=0") is True
     assert module._is_deletion_set_cookie("sid=abc; max-age=0; path=/") is True
     assert module._is_deletion_set_cookie("sid=abc; Max-Age=-1") is True
 
 
-def test_is_deletion_set_cookie_expires_in_past():
+def test_is_deletion_set_cookie_expires_in_past(module):
     """Expires with an epoch / far-past date is a deletion."""
-    module = _load_proxy_addon_module()
     assert module._is_deletion_set_cookie(
         "sid=abc; Expires=Thu, 01 Jan 1970 00:00:00 GMT"
     ) is True
@@ -1229,9 +1107,8 @@ def test_is_deletion_set_cookie_expires_in_past():
     ) is True
 
 
-def test_is_deletion_set_cookie_live_cookie_not_deletion():
+def test_is_deletion_set_cookie_live_cookie_not_deletion(module):
     """A normal session cookie must not be treated as a deletion."""
-    module = _load_proxy_addon_module()
     assert module._is_deletion_set_cookie("MRHSession=abc123valid; path=/; Secure") is False
     assert module._is_deletion_set_cookie("sid=xyz; Max-Age=3600") is False
     # A far-future Expires is not a deletion (timegm >= now).
@@ -1240,9 +1117,8 @@ def test_is_deletion_set_cookie_live_cookie_not_deletion():
     ) is False
 
 
-def test_is_deletion_set_cookie_quoted_empty():
+def test_is_deletion_set_cookie_quoted_empty(module):
     """A quoted-empty logout cookie (MRHSession="") is a deletion sentinel."""
-    module = _load_proxy_addon_module()
     assert module._is_deletion_set_cookie('MRHSession=""; path=/; Secure') is True
     assert module._is_deletion_set_cookie('sid=""') is True
     # A quoted LIVE value is not a deletion.
@@ -1254,8 +1130,7 @@ def test_is_deletion_set_cookie_quoted_empty():
 # ---------------------------------------------------------------------------
 
 
-def test_out_of_scope_covers_url_form_entry():
-    module = _load_proxy_addon_module()
+def test_out_of_scope_covers_url_form_entry(module):
     # URL-form entry reduced to its bare host and matched.
     assert module._out_of_scope_covers(
         ["https://appointments.example.com/book"], "appointments.example.com"
@@ -1266,8 +1141,7 @@ def test_out_of_scope_covers_url_form_entry():
     ) is False
 
 
-def test_out_of_scope_covers_cidr_against_resolved_ip():
-    module = _load_proxy_addon_module()
+def test_out_of_scope_covers_cidr_against_resolved_ip(module):
     # In-range resolved IP → covered (drop).
     assert module._out_of_scope_covers(
         ["10.0.0.0/8"], "internal.example.com", "10.1.2.3"
@@ -1280,19 +1154,17 @@ def test_out_of_scope_covers_cidr_against_resolved_ip():
     assert module._out_of_scope_covers(["10.0.0.0/8"], "10.9.9.9") is True
 
 
-def test_out_of_scope_cidr_without_ip_fails_closed():
+def test_out_of_scope_cidr_without_ip_fails_closed(module):
     """A CIDR carve-out with no resolvable IP is uncertain — fail closed."""
-    module = _load_proxy_addon_module()
     assert module._out_of_scope_covers(["10.0.0.0/8"], "internal.example.com") is True
 
 
-def test_out_of_scope_slash_non_cidr_reduces_to_host_not_drop_all():
+def test_out_of_scope_slash_non_cidr_reduces_to_host_not_drop_all(module):
     """A slash-bearing entry that is NOT a valid CIDR (host/path or bare path) is
     reduced to its host and matched as a host pattern — it must NEVER drop every
     host in the engagement. Regression for the fail-closed-drops-everything bug
     (a single "example.com/admin" or CIDR typo killed the whole engagement's
     capture)."""
-    module = _load_proxy_addon_module()
     # Host/path carve-out denylists ONLY its host...
     assert module._out_of_scope_covers(["example.com/admin"], "example.com") is True
     # ...and does NOT drop unrelated hosts (the bug dropped these too).
@@ -1306,18 +1178,14 @@ def test_out_of_scope_slash_non_cidr_reduces_to_host_not_drop_all():
     assert module._out_of_scope_covers(["://"], "target.example") is False
 
 
-def test_match_engagement_drops_cidr_out_of_scope_with_resolved_ip(tmp_path: Path):
+def test_match_engagement_drops_cidr_out_of_scope_with_resolved_ip(module, tmp_path: Path):
     """A CIDR out_of_scope entry drops a host whose resolved IP is in-range,
     while an out-of-range host still routes."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a", hosts=["*.example.com"], out_of_scope=["10.0.0.0/8"]
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # Internal host resolving into 10/8 is dropped.
     assert (
@@ -1329,21 +1197,17 @@ def test_match_engagement_drops_cidr_out_of_scope_with_resolved_ip(tmp_path: Pat
     assert chosen is not None and chosen.key == "eng-a"
 
 
-def test_match_engagement_path_carve_out_does_not_drop_whole_engagement(tmp_path: Path):
+def test_match_engagement_path_carve_out_does_not_drop_whole_engagement(module, tmp_path: Path):
     """A host/path out_of_scope entry must denylist ONLY its host, never wipe out
     the whole engagement's capture. Regression for the catastrophic
     fail-closed-drops-everything bug."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root, "eng-a",
         hosts=["*.example.com", "*.other.com"],
         out_of_scope=["example.com/admin"],
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     # Unrelated in-scope hosts STILL route (the bug dropped all of these).
     assert collector._match_engagement("shop.example.com", resolved_ip="93.184.216.34").key == "eng-a"
@@ -1352,21 +1216,17 @@ def test_match_engagement_path_carve_out_does_not_drop_whole_engagement(tmp_path
     assert collector._match_engagement("example.com", resolved_ip="93.184.216.34") is None
 
 
-def test_capture_auth_skips_out_of_scope_host(tmp_path: Path):
+def test_capture_auth_skips_out_of_scope_host(module, tmp_path: Path):
     """_capture_auth must NEVER harvest credentials for a host an out_of_scope
     entry could cover (defense in depth, even if routing let it through)."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-a",
         hosts=["*.example.com"],
         out_of_scope=["https://secret.example.com"],
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector.registry["eng-a"]
 
@@ -1385,16 +1245,12 @@ def test_capture_auth_skips_out_of_scope_host(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_capture_auth_bearer_ignores_refresh_and_type_tokens(tmp_path: Path):
+def test_capture_auth_bearer_ignores_refresh_and_type_tokens(module, tmp_path: Path):
     """token_type=Bearer / refresh_token / csrf_token must NOT seed the bearer;
     the access_token wins by priority (not document order)."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
 
@@ -1415,15 +1271,11 @@ def test_capture_auth_bearer_ignores_refresh_and_type_tokens(tmp_path: Path):
     assert kw["tokens"]["refresh_token"] == "r-secret"
 
 
-def test_capture_auth_extracts_nested_bearer_token(tmp_path: Path):
+def test_capture_auth_extracts_nested_bearer_token(module, tmp_path: Path):
     """A bearer nested one level under the login response still enters the store."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
 
@@ -1441,16 +1293,12 @@ def test_capture_auth_extracts_nested_bearer_token(tmp_path: Path):
     assert kw["headers"]["Authorization"] == "Bearer nested-tok"
 
 
-def test_capture_auth_captures_request_authorization_header(tmp_path: Path):
+def test_capture_auth_captures_request_authorization_header(module, tmp_path: Path):
     """A bearer-only session (Authorization on the request, no cookies, no login
     response) must still enter the credential store."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
 
@@ -1467,15 +1315,11 @@ def test_capture_auth_captures_request_authorization_header(tmp_path: Path):
     assert kw["headers"]["Authorization"] == "Bearer live-session-tok"
 
 
-def test_capture_auth_stores_dequoted_set_cookie(tmp_path: Path):
+def test_capture_auth_stores_dequoted_set_cookie(module, tmp_path: Path):
     """A live quoted Set-Cookie value is stored dequoted (no double-quoting)."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     calls = _record_captures(collector)
     entry = collector._match_engagement("a.example.com")
 
@@ -1497,8 +1341,7 @@ def test_capture_auth_stores_dequoted_set_cookie(tmp_path: Path):
 # ---------------------------------------------------------------------------
 
 
-def test_content_type_family_html_before_text():
-    module = _load_proxy_addon_module()
+def test_content_type_family_html_before_text(module):
     assert module._content_type_family("text/html; charset=utf-8") == "html"
     assert module._content_type_family("application/xml") == "xml"
     assert module._content_type_family("text/plain") == "text"
@@ -1512,10 +1355,8 @@ def test_content_type_family_html_before_text():
 # ---------------------------------------------------------------------------
 
 
-def test_post_request_observation_coerces_non_dict_body_schema(tmp_path: Path, monkeypatch):
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_post_request_observation_coerces_non_dict_body_schema(module, tmp_path: Path, monkeypatch):
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
     collector = module.CaseCollector()
     collector.engagements_root = root
@@ -1562,19 +1403,15 @@ def test_post_request_observation_coerces_non_dict_body_schema(tmp_path: Path, m
 # ---------------------------------------------------------------------------
 
 
-def test_request_body_saved_when_response_is_binary(tmp_path: Path):
+def test_request_body_saved_when_response_is_binary(module, tmp_path: Path):
     """A JSON request body answered by an image/png response must still be
     captured: the request-body save is gated on the REQUEST content type, not the
     response type, and the observation is still POSTed despite the binary
     response. The proxy no longer opens SQLite, so the captured request body/params
     ride in the request-observation POST's work_item block."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     posted: list[dict] = []
     collector._capture_auth = lambda *a, **k: None
@@ -1610,11 +1447,9 @@ def test_request_body_saved_when_response_is_binary(tmp_path: Path):
 
 
 def test_response_global_bypass_captures_unmatched_host_for_bound_engagement(
-    tmp_path: Path,
+    module, tmp_path: Path,
 ) -> None:
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(
         root,
         "eng-bypass",
@@ -1623,9 +1458,7 @@ def test_response_global_bypass_captures_unmatched_host_for_bound_engagement(
         scope_enforcement="bypass",
     )
     (root / ".active").write_text("eng-bypass\n", encoding="utf-8")
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
 
     auth_entries: list[str] = []
     observations: list[tuple[str, str]] = []
@@ -1697,14 +1530,10 @@ def _capture_full_flow(collector, entry, flow, **kwargs):
     return posted
 
 
-def test_full_flow_capture_disabled_by_default(tmp_path: Path):
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_full_flow_capture_disabled_by_default(module, tmp_path: Path):
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     entry = collector.registry["eng-a"]
     # No capture-policy.json → policy disabled.
     assert entry.capture_policy["enabled"] is False
@@ -1717,14 +1546,10 @@ def test_full_flow_capture_disabled_by_default(tmp_path: Path):
     assert not (entry.root / "traffic").exists()
 
 
-def test_full_flow_capture_writes_sidecars_index_and_posts(tmp_path: Path):
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_full_flow_capture_writes_sidecars_index_and_posts(module, tmp_path: Path):
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     entry = collector.registry["eng-a"]
     entry.capture_policy = _enabled_policy()
 
@@ -1786,14 +1611,10 @@ def test_full_flow_capture_writes_sidecars_index_and_posts(tmp_path: Path):
     assert json.loads(lines[0])["flow_uid"] == "flow-xyz"
 
 
-def test_full_flow_capture_truncates_and_honors_deny(tmp_path: Path):
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_full_flow_capture_truncates_and_honors_deny(module, tmp_path: Path):
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     entry = collector.registry["eng-a"]
     entry.capture_policy = _enabled_policy(
         max_body_bytes=4, content_type_deny=["image/"]
@@ -1832,15 +1653,11 @@ def test_full_flow_capture_truncates_and_honors_deny(tmp_path: Path):
 
 
 def test_full_flow_capture_write_failure_is_visible_without_false_retention(
-    tmp_path: Path, monkeypatch
+    module, tmp_path: Path, monkeypatch
 ):
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     entry = collector.registry["eng-a"]
     entry.capture_policy = _enabled_policy(capture_response_bodies=False)
     original_write_bytes = Path.write_bytes
@@ -1876,14 +1693,10 @@ def test_full_flow_capture_write_failure_is_visible_without_false_retention(
     assert posted[0]["response_body_capture_status"] == "not_requested"
 
 
-def test_full_flow_capture_records_host_mismatch(tmp_path: Path):
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+def test_full_flow_capture_records_host_mismatch(module, tmp_path: Path):
+    root = _engagements_root(tmp_path)
     _seed_engagement(root, "eng-a", hosts=["a.example.com"])
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     entry = collector.registry["eng-a"]
     entry.capture_policy = _enabled_policy(
         capture_request_bodies=False, capture_response_bodies=False
@@ -1913,12 +1726,10 @@ def test_full_flow_capture_records_host_mismatch(tmp_path: Path):
     assert rec["url_authority"] == "a.example.com"
 
 
-def test_capture_policy_read_from_filesystem_mirror(tmp_path: Path):
+def test_capture_policy_read_from_filesystem_mirror(module, tmp_path: Path):
     """The addon reads the capture policy from the capture-policy.json mirror the
     backend writes next to scope.json (filesystem fallback)."""
-    module = _load_proxy_addon_module()
-    root = tmp_path / "engagements"
-    root.mkdir()
+    root = _engagements_root(tmp_path)
     eng = _seed_engagement(root, "eng-a", hosts=["a.example.com"])
     (eng / "capture-policy.json").write_text(
         json.dumps(
@@ -1934,9 +1745,7 @@ def test_capture_policy_read_from_filesystem_mirror(tmp_path: Path):
         ),
         encoding="utf-8",
     )
-    collector = module.CaseCollector()
-    collector.engagements_root = root
-    collector._reload_registry(force=True)
+    collector = _loaded_collector(module, root)
     policy = collector.registry["eng-a"].capture_policy
     assert policy["enabled"] is True
     assert policy["capture_request_bodies"] is True
@@ -1945,9 +1754,8 @@ def test_capture_policy_read_from_filesystem_mirror(tmp_path: Path):
     assert policy["content_type_allow"] == ["application/json"]
 
 
-def test_capture_policy_from_backend_registry_row(tmp_path: Path, monkeypatch):
+def test_capture_policy_from_backend_registry_row(module, tmp_path: Path, monkeypatch):
     """The registry fetch carries capture_policy from the /engagements payload."""
-    module = _load_proxy_addon_module()
     root = tmp_path / "engagements"
     (root / "eng-a").mkdir(parents=True)
     collector = module.CaseCollector()
@@ -1983,12 +1791,11 @@ def test_capture_policy_from_backend_registry_row(tmp_path: Path, monkeypatch):
 # ---------------------------------------------------------------------------
 
 
-def test_body_capture_deny_honors_mime_wildcard():
+def test_body_capture_deny_honors_mime_wildcard(module):
     """A ``content_type_deny`` of ``image/*`` (the exact value the capture-policy
     API stores) must exclude ``image/png`` — a substring-only check treated
     ``image/*`` as literal text and never matched, so binary responses were still
     captured when ``capture_response_bodies`` was on, bypassing the policy."""
-    module = _load_proxy_addon_module()
     # Deny image/* -> image/png and a bare "image" are excluded; non-image passes.
     assert module._body_capture_allowed("image/png", [], ["image/*"]) is False
     assert module._body_capture_allowed("image/jpeg", [], ["image/*"]) is False
@@ -1996,8 +1803,7 @@ def test_body_capture_deny_honors_mime_wildcard():
     assert module._body_capture_allowed("application/json", [], ["image/*"]) is True
 
 
-def test_body_capture_allow_honors_mime_wildcard_and_substring_still_works():
-    module = _load_proxy_addon_module()
+def test_body_capture_allow_honors_mime_wildcard_and_substring_still_works(module):
     # Allow-list wildcard: only text/* captured.
     assert module._body_capture_allowed("text/html; charset=utf-8", ["text/*"], []) is True
     assert module._body_capture_allowed("application/json", ["text/*"], []) is False

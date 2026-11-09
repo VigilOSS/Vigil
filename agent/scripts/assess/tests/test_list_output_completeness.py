@@ -6,19 +6,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import list_command_runs, list_findings, list_intel
 from assess.lib.client import AssessError
 from assess.lib.list_output import page_from_backend, report_page
 
 
-class _ContextClient:
-    def close(self) -> None:
-        return None
-
-    def __enter__(self):
-        return self
-
+class _ContextClient(StubClient):
     def __exit__(self, *exc):
         self.close()
         return False
@@ -26,6 +21,75 @@ class _ContextClient:
 
 def _config() -> SimpleNamespace:
     return SimpleNamespace(base_url="http://example.test", engagement_key="eng")
+
+
+def _findings_args(**over: object) -> SimpleNamespace:
+    """The `finding list` namespace: every filter unset, pagination overridable."""
+    base: dict[str, object] = dict(
+        engagement_dir="/tmp/eng",
+        severity=None,
+        workflow_status=None,
+        verification_status=None,
+        source_name=None,
+        slug=None,
+        root_cause_slug=None,
+        search=None,
+        holding=False,
+        limit=10,
+        offset=0,
+        json=True,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _intel_args(**over: object) -> SimpleNamespace:
+    """The `intel list` / `intel search` namespace."""
+    base: dict[str, object] = dict(
+        engagement_dir="/tmp/eng",
+        intel_type=None,
+        q="",
+        limit=10,
+        offset=0,
+        as_json=True,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
+
+
+def _command_runs_args(**over: object) -> SimpleNamespace:
+    """The `command-run list` namespace: every selector unset by default."""
+    base: dict[str, object] = dict(
+        engagement_dir="/tmp/eng",
+        q="",
+        sort="",
+        show_matches=False,
+        exact=False,
+        require_all=False,
+        paginate=False,
+        agent_name="",
+        phase="",
+        tool_name="",
+        tool_bin="",
+        target_host="",
+        audit_source="",
+        route="",
+        technique="",
+        probe_kind="",
+        intent_q="",
+        success=False,
+        failed=False,
+        destructive=False,
+        not_destructive=False,
+        timed_out=False,
+        output_attention=False,
+        include_output=False,
+        limit=10,
+        offset=0,
+        as_json=True,
+    )
+    base.update(over)
+    return SimpleNamespace(**base)
 
 
 def _finding(index: int) -> dict[str, object]:
@@ -51,9 +115,6 @@ def test_finding_list_json_bounds_rows_and_points_to_complete_records(
     calls: list[str] = []
 
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, endpoint: str):
             calls.append(endpoint)
             return [_finding(1), _finding(2), _finding(3)]
@@ -62,20 +123,7 @@ def test_finding_list_json_bounds_rows_and_points_to_complete_records(
     monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
 
     list_findings.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            severity=None,
-            workflow_status=None,
-            verification_status=None,
-            source_name=None,
-            slug=None,
-            root_cause_slug=None,
-            search=None,
-            holding=False,
-            limit=2,
-            offset=0,
-            json=True,
-        )
+        _findings_args(limit=2, offset=0, json=True)
     )
 
     captured = capsys.readouterr()
@@ -127,9 +175,6 @@ def test_intel_type_list_is_bounded_at_the_api_and_compacts_json_rows(
     calls: list[tuple[str, str]] = []
 
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get_engagement(self, endpoint: str, query: str = ""):
             calls.append((endpoint, query))
             return [
@@ -147,14 +192,7 @@ def test_intel_type_list_is_bounded_at_the_api_and_compacts_json_rows(
     monkeypatch.setattr(list_intel, "load_config", lambda _path: _config())
 
     list_intel.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            intel_type="note",
-            q="",
-            limit=2,
-            offset=1,
-            as_json=True,
-        )
+        _intel_args(intel_type="note", limit=2, offset=1, as_json=True)
     )
 
     captured = capsys.readouterr()
@@ -171,9 +209,6 @@ def test_human_root_cause_list_marks_finding_prose_untrusted(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, _endpoint: str):
             return {
                 "root": {"slug": "VA-001", "title": "target supplied title"},
@@ -209,9 +244,6 @@ def test_finding_list_rejects_malformed_non_list_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, _endpoint: str):
             return {"message": "not a finding list"}
 
@@ -220,20 +252,7 @@ def test_finding_list_rejects_malformed_non_list_response(
 
     with pytest.raises(AssessError, match="expected a JSON array"):
         list_findings.run(
-            SimpleNamespace(
-                engagement_dir="/tmp/eng",
-                severity=None,
-                workflow_status=None,
-                verification_status=None,
-                source_name=None,
-                slug=None,
-                root_cause_slug=None,
-                search=None,
-                holding=False,
-                limit=2,
-                offset=0,
-                json=True,
-            )
+            _findings_args(limit=2, offset=0, json=True)
         )
 
 
@@ -244,9 +263,6 @@ def test_intel_row_list_rejects_malformed_non_list_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get_engagement(self, _endpoint: str, query: str = ""):
             return {"message": "not an intel row list"}
 
@@ -255,14 +271,7 @@ def test_intel_row_list_rejects_malformed_non_list_response(
 
     with pytest.raises(AssessError, match="expected a JSON array"):
         list_intel.run(
-            SimpleNamespace(
-                engagement_dir="/tmp/eng",
-                intel_type=intel_type,
-                q=query,
-                limit=2,
-                offset=0,
-                as_json=True,
-            )
+            _intel_args(intel_type=intel_type, q=query, limit=2, offset=0, as_json=True)
         )
 
 
@@ -273,9 +282,6 @@ def test_intel_search_pages_and_omits_hydrated_bodies_from_json(
     calls: list[tuple[str, str]] = []
 
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get_engagement(self, endpoint: str, query: str = ""):
             calls.append((endpoint, query))
             return [
@@ -295,14 +301,7 @@ def test_intel_search_pages_and_omits_hydrated_bodies_from_json(
     monkeypatch.setattr(list_intel, "load_config", lambda _path: _config())
 
     list_intel.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            intel_type=None,
-            q="oauth",
-            limit=2,
-            offset=5,
-            as_json=True,
-        )
+        _intel_args(q="oauth", limit=2, offset=5, as_json=True)
     )
 
     captured = capsys.readouterr()
@@ -369,9 +368,6 @@ def test_command_run_paginate_reaches_the_final_page_without_omission(
     calls: list[str] = []
 
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, endpoint: str):
             calls.append(endpoint)
             if "offset=0" in endpoint:
@@ -386,34 +382,8 @@ def test_command_run_paginate_reaches_the_final_page_without_omission(
     monkeypatch.setattr(list_command_runs, "load_config", lambda _path: _config())
 
     list_command_runs.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            q="VA-047 OIDC",
-            sort="",
-            show_matches=False,
-            exact=False,
-            require_all=True,
-            paginate=True,
-            agent_name="",
-            phase="",
-            tool_name="",
-            tool_bin="",
-            target_host="",
-            audit_source="",
-            route="",
-            technique="",
-            probe_kind="",
-            intent_q="",
-            success=False,
-            failed=False,
-            destructive=False,
-            not_destructive=False,
-            timed_out=False,
-            output_attention=False,
-            include_output=False,
-            limit=2,
-            offset=0,
-            as_json=True,
+        _command_runs_args(
+            q="VA-047 OIDC", require_all=True, paginate=True, limit=2, offset=0, as_json=True,
         )
     )
 
@@ -434,9 +404,6 @@ def test_command_run_single_page_uses_lookahead_without_printing_the_extra_row(
     calls: list[str] = []
 
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, endpoint: str):
             calls.append(endpoint)
             return [{"id": 1}, {"id": 2}, {"id": 3}]
@@ -445,35 +412,7 @@ def test_command_run_single_page_uses_lookahead_without_printing_the_extra_row(
     monkeypatch.setattr(list_command_runs, "load_config", lambda _path: _config())
 
     list_command_runs.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            q="",
-            sort="",
-            show_matches=False,
-            exact=False,
-            require_all=False,
-            paginate=False,
-            agent_name="",
-            phase="",
-            tool_name="",
-            tool_bin="",
-            target_host="",
-            audit_source="",
-            route="",
-            technique="",
-            probe_kind="",
-            intent_q="",
-            success=False,
-            failed=False,
-            destructive=False,
-            not_destructive=False,
-            timed_out=False,
-            output_attention=False,
-            include_output=False,
-            limit=2,
-            offset=0,
-            as_json=True,
-        )
+        _command_runs_args(limit=2, offset=0, as_json=True)
     )
 
     captured = capsys.readouterr()
@@ -486,9 +425,6 @@ def test_command_run_list_rejects_malformed_non_list_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, _endpoint: str):
             return {"message": "not a command-run list"}
 
@@ -497,35 +433,7 @@ def test_command_run_list_rejects_malformed_non_list_response(
 
     with pytest.raises(AssessError, match="expected a JSON array"):
         list_command_runs.run(
-            SimpleNamespace(
-                engagement_dir="/tmp/eng",
-                q="",
-                sort="",
-                show_matches=False,
-                exact=False,
-                require_all=False,
-                paginate=False,
-                agent_name="",
-                phase="",
-                tool_name="",
-                tool_bin="",
-                target_host="",
-                audit_source="",
-                route="",
-                technique="",
-                probe_kind="",
-                intent_q="",
-                success=False,
-                failed=False,
-                destructive=False,
-                not_destructive=False,
-                timed_out=False,
-                output_attention=False,
-                include_output=False,
-                limit=2,
-                offset=0,
-                as_json=True,
-            )
+            _command_runs_args(limit=2, offset=0, as_json=True)
         )
 
 
@@ -534,9 +442,6 @@ def test_finding_list_json_rows_carry_creation_time(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, _endpoint: str):
             return [
                 {
@@ -550,20 +455,7 @@ def test_finding_list_json_rows_carry_creation_time(
     monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
 
     list_findings.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            severity=None,
-            workflow_status=None,
-            verification_status=None,
-            source_name=None,
-            slug=None,
-            root_cause_slug=None,
-            search=None,
-            holding=False,
-            limit=10,
-            offset=0,
-            json=True,
-        )
+        _findings_args(limit=10, offset=0, json=True)
     )
 
     rows = json.loads(capsys.readouterr().out)
@@ -576,9 +468,6 @@ def test_human_root_cause_list_applies_common_filters_to_siblings(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
     class _Client(_ContextClient):
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
         def get(self, _endpoint: str):
             return {
                 "root": {"slug": "VA-001", "severity": "low", "title": "Root"},
@@ -605,19 +494,8 @@ def test_human_root_cause_list_applies_common_filters_to_siblings(
     monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
 
     list_findings.run(
-        SimpleNamespace(
-            engagement_dir="/tmp/eng",
-            severity="info",
-            workflow_status=None,
-            verification_status=None,
-            source_name=None,
-            slug=None,
-            root_cause_slug="VA-001",
-            search=None,
-            holding=False,
-            limit=10,
-            offset=0,
-            json=False,
+        _findings_args(
+            severity="info", root_cause_slug="VA-001", limit=10, offset=0, json=False,
         )
     )
 

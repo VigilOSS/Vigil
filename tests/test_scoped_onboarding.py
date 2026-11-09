@@ -1,19 +1,25 @@
 """Task-specific setup and registered-source intake behavior."""
 from __future__ import annotations
 
+import http.client
 import json
+import os
 import ssl
+import subprocess
+import sys
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from vigil_cli import docker, mitmproxy, orchestrator, runtime, runtime_images, service_locks, up
 from vigil_cli import engagements, preflight
 
 
 @pytest.fixture(autouse=True)
 def _isolate_service_locks(tmp_path, monkeypatch):
-    from vigil_cli import service_locks
-
     monkeypatch.setattr(service_locks, '_application_cache', lambda: tmp_path / 'service-cache')
 
 
@@ -52,7 +58,6 @@ def test_code_session_preflight_does_not_query_docker(tmp_path, monkeypatch):
 
 
 def test_session_recovers_only_managed_local_backend(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     engagement = tmp_path / "acme"
     engagement.mkdir()
     (engagement / "scope.json").write_text('{"engagement_type":"code"}')
@@ -74,7 +79,6 @@ def test_session_recovers_only_managed_local_backend(tmp_path, monkeypatch):
 
 
 def test_failed_managed_backend_recovery_refuses_launch(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     engagement = tmp_path / "acme"
     engagement.mkdir()
     (engagement / "scope.json").write_text('{"engagement_type":"code"}')
@@ -150,8 +154,6 @@ def test_transient_backend_sync_failure_warns_without_blocking_launch(tmp_path, 
 def test_reachable_remote_backend_protocol_error_refuses_launch(
     tmp_path, monkeypatch, status_code, body
 ):
-    import http.client
-
     engagement = tmp_path / "acme"
     engagement.mkdir()
     (engagement / "scope.json").write_text('{"engagement_type":"code"}')
@@ -187,11 +189,6 @@ def test_reachable_remote_backend_protocol_error_refuses_launch(
 
 def test_concurrent_backend_starts_share_one_process(tmp_path, monkeypatch):
     """Second engagement waits for startup rather than racing the PID write."""
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-    from types import SimpleNamespace
-    from vigil_cli import orchestrator
-
     first_at_port = threading.Event()
     second_at_port = threading.Event()
     release = threading.Event()
@@ -231,7 +228,6 @@ def test_concurrent_backend_starts_share_one_process(tmp_path, monkeypatch):
 
 
 def test_runtime_start_resolves_default_image_on_demand_without_capture(tmp_path, monkeypatch):
-    from vigil_cli import docker, runtime, runtime_images
     monkeypatch.setattr(runtime.docker, "daemon_status", lambda **_: docker.DaemonStatus(True, False, ""))
     monkeypatch.setattr(runtime.docker, "image_exists", lambda *a, **k: False)
     monkeypatch.setattr(runtime.docker, "container_running", lambda *a, **k: False)
@@ -247,8 +243,6 @@ def test_runtime_start_resolves_default_image_on_demand_without_capture(tmp_path
 
 
 def test_stopped_runtime_refreshes_an_existing_stale_release_image_before_start(tmp_path, monkeypatch):
-    from vigil_cli import docker, runtime, runtime_images
-
     monkeypatch.setattr(runtime.docker, "daemon_status", lambda **_: docker.DaemonStatus(True, False, ""))
     monkeypatch.setattr(runtime.docker, "image_exists", lambda *a, **k: True)
     monkeypatch.setattr(runtime.docker, "container_running", lambda *a, **k: False)
@@ -267,8 +261,6 @@ def test_stopped_runtime_refreshes_an_existing_stale_release_image_before_start(
 
 
 def test_existing_runtime_can_be_reused_after_local_image_update(tmp_path, monkeypatch, capsys):
-    from vigil_cli import docker, runtime, runtime_images
-
     monkeypatch.setattr(runtime_images, "ensure_runtime_image", lambda *a, **k: pytest.fail("running jobs must retain their existing image"))
     monkeypatch.setattr(runtime.docker, "daemon_status", lambda **_: docker.DaemonStatus(True, False, ""))
     monkeypatch.setattr(runtime.docker, "image_exists", lambda *a, **k: True)
@@ -287,7 +279,6 @@ def test_existing_runtime_can_be_reused_after_local_image_update(tmp_path, monke
 
 @pytest.mark.parametrize("no_build", [False, True])
 def test_stack_start_reuses_runtime_started_by_another_engagement(tmp_path, monkeypatch, no_build):
-    from vigil_cli import up
     calls = []
     monkeypatch.setattr(up.docker, "image_exists", lambda *a, **k: True)
     monkeypatch.setattr(up, "start_runtime", lambda options, **kwargs: calls.append((options, kwargs)))
@@ -306,10 +297,6 @@ def test_registered_source_cannot_contain_its_own_engagement_snapshots(tmp_path,
 
 
 def test_concurrent_stack_starts_do_not_restart_shared_capture(tmp_path, monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-    from vigil_cli import up
-
     first_start = threading.Event()
     restarted = threading.Event()
     release = threading.Event()
@@ -344,7 +331,6 @@ def test_concurrent_stack_starts_do_not_restart_shared_capture(tmp_path, monkeyp
 
 
 def test_shared_capture_from_another_working_root_is_not_silently_reused(tmp_path, monkeypatch):
-    from vigil_cli import up
     monkeypatch.setattr(up.docker, "container_running", lambda *a, **k: True)
     monkeypatch.setattr(up.docker, "container_mounts", lambda *a, **k: {"/engagements": str(tmp_path / "other-engagements")})
     monkeypatch.setattr(up, "proxy_image_drift", lambda **k: False)
@@ -354,7 +340,6 @@ def test_shared_capture_from_another_working_root_is_not_silently_reused(tmp_pat
 
 
 def test_on_demand_start_preserves_a_stopped_custom_runtime(tmp_path, monkeypatch):
-    from vigil_cli import docker, runtime
     monkeypatch.setattr(runtime.docker, "daemon_status", lambda **_: docker.DaemonStatus(True, False, ""))
     monkeypatch.setattr(runtime.docker, "image_exists", lambda *a, **k: True)
     monkeypatch.setattr(runtime.docker, "container_running", lambda *a, **k: False)
@@ -371,7 +356,6 @@ def test_on_demand_start_preserves_a_stopped_custom_runtime(tmp_path, monkeypatc
 
 
 def test_no_build_stack_start_requires_an_available_runtime_image(tmp_path, monkeypatch):
-    from vigil_cli import up
     monkeypatch.setattr(up.docker, "image_exists", lambda *a, **k: False)
     monkeypatch.setattr(up, "start_runtime", lambda *a, **k: pytest.fail("no-build must not prepare a missing runtime image"))
     with pytest.raises(SystemExit, match="image|build"):
@@ -379,7 +363,6 @@ def test_no_build_stack_start_requires_an_available_runtime_image(tmp_path, monk
 
 
 def test_no_build_capture_start_uses_available_image_without_building(tmp_path, monkeypatch):
-    from vigil_cli import docker, mitmproxy, up
     running_probes = iter([False, False, True])
     monkeypatch.setattr(docker, "container_running", lambda *a, **k: next(running_probes))
     monkeypatch.setattr(docker, "container_exists", lambda *a, **k: False)
@@ -410,10 +393,6 @@ def test_native_linux_missing_host_recon_tools_are_reported_as_optional(monkeypa
 
 
 def test_stack_runtime_image_preparation_and_start_are_one_serialized_operation(tmp_path, monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-    from vigil_cli import up
-
     first_prepared = threading.Event()
     second_prepared = threading.Event()
     release = threading.Event()
@@ -462,10 +441,6 @@ def test_stack_runtime_image_preparation_and_start_are_one_serialized_operation(
 
 
 def test_shared_service_lock_supports_nested_ownership_without_deadlock(tmp_path):
-    import os
-    import subprocess
-    import sys
-
     script = '''from pathlib import Path
 import sys
 from vigil_cli import service_locks
@@ -482,9 +457,6 @@ with service_locks.service_start_lock('runtime:acme'):
 
 
 def test_service_lock_reentrancy_does_not_reuse_another_process_identity(tmp_path, monkeypatch):
-    import os
-    from vigil_cli import service_locks
-
     monkeypatch.setattr(service_locks, '_application_cache', lambda: tmp_path)
     monkeypatch.setattr(service_locks._held_locks, 'identities', {(os.getpid() + 1, 'runtime:acme')}, raising=False)
     acquired = []
@@ -494,11 +466,6 @@ def test_service_lock_reentrancy_does_not_reuse_another_process_identity(tmp_pat
 
 
 def test_shared_service_lock_excludes_an_independent_process(tmp_path, monkeypatch):
-    import os
-    import subprocess
-    import sys
-    from vigil_cli import service_locks
-
     monkeypatch.setattr(service_locks, '_application_cache', lambda: tmp_path)
     script = '''from pathlib import Path
 import sys
@@ -522,10 +489,6 @@ with service_locks.service_start_lock('runtime:acme'):
 
 @pytest.mark.parametrize('operation', ['build', 'release'])
 def test_image_mutation_waits_for_other_container_startup(tmp_path, monkeypatch, operation):
-    from concurrent.futures import ThreadPoolExecutor
-    import threading
-    from vigil_cli import runtime, runtime_images, service_locks
-
     reached = threading.Event()
 
     def image_operation(*args, **kwargs):
@@ -554,8 +517,6 @@ def test_image_mutation_waits_for_other_container_startup(tmp_path, monkeypatch,
 
 def _scripted_backend(monkeypatch, *, get, post):
     """Patch HTTPConnection so GET/POST each return a status or raise an error."""
-    import http.client
-
     requests = []
 
     class Response:

@@ -162,10 +162,6 @@ def _classify(case_type: str = "unknown", url_path: str = "", **params: str) -> 
     )
 
 
-def _matched(case_type: str = "unknown", url_path: str = "", **params: str) -> list[str]:
-    return _classify(case_type=case_type, url_path=url_path, **params)["matched_buckets"]
-
-
 # ---------------------------------------------------------------------------
 # Baseline sanity: the measured facts this file is built from must still hold.
 # ---------------------------------------------------------------------------

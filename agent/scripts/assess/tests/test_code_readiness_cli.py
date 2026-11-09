@@ -7,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 _REPO_ROOT = Path(__file__).resolve().parents[4]
 
@@ -33,6 +34,24 @@ def _args(target: str | None):
     )
 
 
+def _install_offline(monkeypatch, module, client=None) -> None:
+    """Bind the backend-less config, and ``client`` when given, onto ``module``.
+
+    Each test loads its own copy of ``code_coverage`` through ``_load_module``,
+    so the patches have to be applied to that copy rather than to the import.
+    """
+    if client is not None:
+        monkeypatch.setattr(module, "AssessmentClient", client)
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="eng-code",
+        ),
+    )
+
+
 def _coverage():
     return {
         "total_files": 1,
@@ -53,16 +72,7 @@ def test_default_coverage_shows_next_hard_gate_and_bounded_debt(
     )
     requested = []
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, path):
             requested.append(path)
             if path == "code/coverage":
@@ -126,16 +136,7 @@ def test_code_coverage_can_require_target_transition_readiness(monkeypatch, caps
     module = _load_module("test_code_readiness_cli_blocks")
     requested: list[str] = []
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, path: str):
             requested.append(path)
             if path == "code/coverage":
@@ -152,15 +153,7 @@ def test_code_coverage_can_require_target_transition_readiness(monkeypatch, caps
                 "quality_gate": {"passed": False, "warnings": ["effort below target"]},
             }
 
-    monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng-code",
-        ),
-    )
+    _install_offline(monkeypatch, module, _Client)
 
     with pytest.raises(SystemExit) as exc:
         module.run(_args("hunt"))
@@ -179,16 +172,7 @@ def test_code_coverage_can_require_target_transition_readiness(monkeypatch, caps
 def test_quality_failure_does_not_fail_transition_readiness_requirement(monkeypatch, capsys):
     module = _load_module("test_code_readiness_cli_quality_separate")
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, path: str):
             if path == "code/coverage":
                 return _coverage()
@@ -199,15 +183,7 @@ def test_quality_failure_does_not_fail_transition_readiness_requirement(monkeypa
                 "quality_gate": {"passed": False, "warnings": ["effort below target"]},
             }
 
-    monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng-code",
-        ),
-    )
+    _install_offline(monkeypatch, module, _Client)
 
     module.run(_args("verify-variant"))
 
@@ -221,16 +197,7 @@ def test_structural_gate_failure_does_not_fail_quality_only_requirement(monkeypa
     args = _args(None)
     args.require_gate_pass = True
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, path: str):
             assert path == "code/coverage"
             return {
@@ -243,15 +210,7 @@ def test_structural_gate_failure_does_not_fail_quality_only_requirement(monkeypa
                 },
             }
 
-    monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng-code",
-        ),
-    )
+    _install_offline(monkeypatch, module, _Client)
 
     module.run(args)
 
@@ -264,16 +223,7 @@ def test_cwe_matrix_does_not_bypass_transition_readiness(monkeypatch):
     args.cwe_matrix = True
     rendered: list[bool] = []
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, path: str):
             assert path == "code/readiness?target_phase=hunt&include_debt_paths=true"
             return {
@@ -289,14 +239,7 @@ def test_cwe_matrix_does_not_bypass_transition_readiness(monkeypatch):
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.setattr(module, "_run_cwe_matrix", lambda *_args: rendered.append(True))
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng-code",
-        ),
-    )
+    _install_offline(monkeypatch, module)
 
     with pytest.raises(SystemExit) as exc:
         module.run(args)

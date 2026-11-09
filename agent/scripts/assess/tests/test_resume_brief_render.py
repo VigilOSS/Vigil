@@ -9,10 +9,12 @@ that Per-Input Coverage renders AFTER Attempts.
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
 from assess.commands import operator_checkpoint, resume_brief
+from _fake_client import StubClient
 
 
 # Every boundary `str.splitlines()` recognises. Containment's claim is that
@@ -32,6 +34,66 @@ _LINE_SEPARATORS = [
     ("\u2028", "unicode-line-separator"),
     ("\u2029", "unicode-paragraph-separator"),
 ]
+
+# The namespace `vigil assess resume-brief` hands `resume_brief.run`, minus the
+# per-test `engagement_dir` the fixture fills in from `tmp_path`.
+_RESUME_ARGS: dict[str, object] = {
+    "q": "",
+    "finding": "",
+    "agent_id": "",
+    "since": "",
+    "max_age_hours": None,
+    "per_input_limit": None,
+    "all_cells": False,
+    "as_json": True,
+}
+
+
+@pytest.fixture
+def hydration(monkeypatch, tmp_path):
+    """The offline harness the `resume_brief.run` hydration tests share.
+
+    Installs the backend-less config and a read-only client whose reads land on
+    `.events` as `("get", endpoint)` — the same list a test's `fake_sweep`
+    records into, so the ORDER of sweep-then-backend-read stays assertable. A
+    test supplies only its own sweep output through `patch_sweep` and then
+    drives the real command with `run_brief`.
+    """
+    events: list[tuple[str, object]] = []
+
+    class FakeClient(StubClient):
+        def get(self, endpoint):
+            events.append(("get", endpoint))
+            return {"engagement": {"key": "eng"}}
+
+    monkeypatch.setattr(
+        resume_brief,
+        "load_config",
+        lambda _d: type(
+            "Cfg",
+            (),
+            {
+                "base_url": "http://backend",
+                "engagement_key": "eng",
+                "engagement_dir": str(tmp_path),
+            },
+        )(),
+    )
+    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
+
+    def patch_sweep(fake_sweep) -> None:
+        monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
+
+    def run_brief(**overrides) -> None:
+        resume_brief.run(
+            type(
+                "Args",
+                (),
+                {"engagement_dir": str(tmp_path), **_RESUME_ARGS, **overrides},
+            )()
+        )
+
+    return SimpleNamespace(events=events, patch_sweep=patch_sweep, run_brief=run_brief)
 
 
 def test_command_output_truth_surfaces_incomplete_measurement_states():
@@ -118,61 +180,17 @@ def test_code_resume_labels_transition_gate_and_queue_coverage_by_tier():
 
 
 def test_resume_hydration_observes_orphans_read_only_before_backend_read(
-    monkeypatch, tmp_path, capsys
+    hydration, tmp_path, capsys
 ):
-    events: list[tuple[str, object]] = []
-    monkeypatch.setattr(
-        resume_brief,
-        "load_config",
-        lambda _d: type(
-            "Cfg",
-            (),
-            {
-                "base_url": "http://backend",
-                "engagement_key": "eng",
-                "engagement_dir": str(tmp_path),
-            },
-        )(),
-    )
+    events = hydration.events
 
     def fake_sweep(ns):
         events.append(("sweep", ns))
         print("internal sweep output")
 
-    class FakeClient:
-        def __init__(self, *_a, **_k):
-            pass
+    hydration.patch_sweep(fake_sweep)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-        def get(self, endpoint):
-            events.append(("get", endpoint))
-            return {"engagement": {"key": "eng"}}
-
-    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
-    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
-
-    resume_brief.run(
-        type(
-            "Args",
-            (),
-            {
-                "engagement_dir": str(tmp_path),
-                "q": "",
-                "finding": "",
-                "agent_id": "",
-                "since": "",
-                "max_age_hours": None,
-                "per_input_limit": None,
-                "all_cells": False,
-                "as_json": True,
-            },
-        )()
-    )
+    hydration.run_brief()
 
     assert [name for name, _ in events] == ["sweep", "get"]
     sweep_args = events[0][1]
@@ -186,22 +204,8 @@ def test_resume_hydration_observes_orphans_read_only_before_backend_read(
 
 
 def test_resume_hydration_surfaces_bounded_orphan_attention_summary(
-    monkeypatch, tmp_path, capsys
+    hydration, capsys
 ):
-    monkeypatch.setattr(
-        resume_brief,
-        "load_config",
-        lambda _d: type(
-            "Cfg",
-            (),
-            {
-                "base_url": "http://backend",
-                "engagement_key": "eng",
-                "engagement_dir": str(tmp_path),
-            },
-        )(),
-    )
-
     def fake_sweep(_ns):
         print("still-running id=1 lots of internal detail")
         # command_runs carries a huge BENIGN skipped_already_terminal (the
@@ -216,39 +220,9 @@ def test_resume_hydration_surfaces_bounded_orphan_attention_summary(
             '"scope":"all"}'
         )
 
-    class FakeClient:
-        def __init__(self, *_a, **_k):
-            pass
+    hydration.patch_sweep(fake_sweep)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-        def get(self, _endpoint):
-            return {"engagement": {"key": "eng"}}
-
-    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
-    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
-
-    resume_brief.run(
-        type(
-            "Args",
-            (),
-            {
-                "engagement_dir": str(tmp_path),
-                "q": "",
-                "finding": "",
-                "agent_id": "",
-                "since": "",
-                "max_age_hours": None,
-                "per_input_limit": None,
-                "all_cells": False,
-                "as_json": True,
-            },
-        )()
-    )
+    hydration.run_brief()
 
     captured = capsys.readouterr()
     assert "lots of internal detail" not in captured.out
@@ -266,24 +240,11 @@ def test_resume_hydration_surfaces_bounded_orphan_attention_summary(
 
 
 def test_resume_hydration_no_warning_when_skips_are_all_benign(
-    monkeypatch, tmp_path, capsys
+    hydration, capsys
 ):
     """A sweep dominated by already-terminal rows (the backend ?status=running
     blind spot pages thousands of them) must produce NO orphan WARN — they are
     benign, their outcome is already recorded (I-05)."""
-    monkeypatch.setattr(
-        resume_brief,
-        "load_config",
-        lambda _d: type(
-            "Cfg",
-            (),
-            {
-                "base_url": "http://backend",
-                "engagement_key": "eng",
-                "engagement_dir": str(tmp_path),
-            },
-        )(),
-    )
 
     def fake_sweep(_ns):
         print(
@@ -295,39 +256,9 @@ def test_resume_hydration_no_warning_when_skips_are_all_benign(
             '"scope":"all"}'
         )
 
-    class FakeClient:
-        def __init__(self, *_a, **_k):
-            pass
+    hydration.patch_sweep(fake_sweep)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-        def get(self, _endpoint):
-            return {"engagement": {"key": "eng"}}
-
-    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
-    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
-
-    resume_brief.run(
-        type(
-            "Args",
-            (),
-            {
-                "engagement_dir": str(tmp_path),
-                "q": "",
-                "finding": "",
-                "agent_id": "",
-                "since": "",
-                "max_age_hours": None,
-                "per_input_limit": None,
-                "all_cells": False,
-                "as_json": True,
-            },
-        )()
-    )
+    hydration.run_brief()
 
     assert "orphan reconciliation needs attention" not in capsys.readouterr().err
 
@@ -612,25 +543,12 @@ def test_render_markdown_reports_returned_and_lower_bound_totals() -> None:
 
 
 def test_dry_run_would_finalize_rows_still_raise_the_orphan_warning(
-    monkeypatch, tmp_path, capsys
+    hydration, capsys
 ):
     """The main actionable orphan under a dry run is a row the sweep WOULD
     finalize to lost. The wet sweep reported that as `finalized`; the dry run
     reports the same counter for the would-write, so the attention extraction
     has to key on it or the read-only switch would silently stop warning."""
-    monkeypatch.setattr(
-        resume_brief,
-        "load_config",
-        lambda _d: type(
-            "Cfg",
-            (),
-            {
-                "base_url": "http://backend",
-                "engagement_key": "eng",
-                "engagement_dir": str(tmp_path),
-            },
-        )(),
-    )
 
     def fake_sweep(_ns):
         print(
@@ -643,39 +561,9 @@ def test_dry_run_would_finalize_rows_still_raise_the_orphan_warning(
             '"dry_run":true,"scope":"all"}'
         )
 
-    class FakeClient:
-        def __init__(self, *_a, **_k):
-            pass
+    hydration.patch_sweep(fake_sweep)
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-        def get(self, _endpoint):
-            return {"engagement": {"key": "eng"}}
-
-    monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", fake_sweep)
-    monkeypatch.setattr(resume_brief, "AssessmentClient", FakeClient)
-
-    resume_brief.run(
-        type(
-            "Args",
-            (),
-            {
-                "engagement_dir": str(tmp_path),
-                "q": "",
-                "finding": "",
-                "agent_id": "",
-                "since": "",
-                "max_age_hours": None,
-                "per_input_limit": None,
-                "all_cells": False,
-                "as_json": True,
-            },
-        )()
-    )
+    hydration.run_brief()
 
     err = capsys.readouterr().err
     assert "command_runs:recovered_pending=1,finalized=2" in err
@@ -1053,16 +941,7 @@ def test_resume_brief_passes_session_mode_to_backend(monkeypatch, tmp_path):
     monkeypatch.setattr(resume_brief.kali_sweep_orphans, "run", lambda *_: None)
     requested = []
 
-    class FakeClient:
-        def __init__(self, *_a, **_k):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def get(self, endpoint):
             requested.append(endpoint)
             return {"engagement": {"key": "eng"}}

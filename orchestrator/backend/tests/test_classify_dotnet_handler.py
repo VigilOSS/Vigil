@@ -10,16 +10,11 @@ loader + ``classify_from_fields`` call shape).
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 
 def _classify_buckets():
     """Import the real ``assess.lib.classify_buckets`` module (same loader as the
     sibling bucket suites)."""
-    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     import assess.lib.classify_buckets as cb
 
     return cb

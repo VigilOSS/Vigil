@@ -1,7 +1,8 @@
-"""Behaviour pins for simplification packet S17.
+"""Pinned surface of the assess CLI tree, contract corpus and dispatch refusals.
 
-Each test here asserts the observable behaviour of code this packet refactors,
-and was run green against the unmodified tree before any edit.
+The argparse signature, the rendered contract corpus, the `--engagement-dir`
+prepass refusals and every `code-dispatch` option refusal are operator-visible
+strings with no other direct coverage. Each test asserts what the code emits.
 """
 from __future__ import annotations
 

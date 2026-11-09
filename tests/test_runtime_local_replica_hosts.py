@@ -13,17 +13,13 @@ from __future__ import annotations
 
 import json
 import socket
-import sys
 import threading
 import time
 from pathlib import Path
 
-SRC = str(Path(__file__).resolve().parents[1] / "src")
-if SRC not in sys.path:
-    sys.path.insert(0, SRC)
-
-from vigil_cli.docker import DockerResult  # noqa: E402
-from vigil_cli import runtime  # noqa: E402
+from vigil_cli import docker
+from vigil_cli import runtime
+from vigil_cli.docker import DockerResult
 
 
 def _write_scope(install_root: Path, key: str, scope: dict) -> None:
@@ -144,8 +140,6 @@ def test_warn_lists_missing_local_hosts_and_names_restart(tmp_path: Path, capsys
 
 
 def test_container_extra_hosts_parses_host_labels() -> None:
-    from vigil_cli import docker
-
     def runner(argv, **kwargs):
         return DockerResult(0, "a.com.local:host-gateway\nhost.docker.internal:host-gateway\n", "")
 
@@ -156,8 +150,6 @@ def test_container_extra_hosts_parses_host_labels() -> None:
 
 
 def test_container_extra_hosts_empty_on_inspect_failure() -> None:
-    from vigil_cli import docker
-
     assert docker.container_extra_hosts("vigil", runner=lambda argv, **k: DockerResult(1, "", "no such container")) == set()
 
 
@@ -175,23 +167,21 @@ def test_container_extra_hosts_empty_on_inspect_failure() -> None:
 
 def _fake_getaddrinfo(answers: dict[str, list[str]]):
     """A `socket.getaddrinfo` stand-in driven by a host -> addresses map."""
-    import socket as socket_module
-
     def getaddrinfo(host, *_args, **_kwargs):
         addresses = answers.get(str(host))
         if not addresses:
-            raise socket_module.gaierror(-2, "Name or service not known")
+            raise socket.gaierror(-2, "Name or service not known")
         out = []
         for address in addresses:
             if ":" in address:
                 out.append(
-                    (socket_module.AF_INET6, socket_module.SOCK_STREAM,
-                     socket_module.IPPROTO_TCP, "", (address, 0, 0, 0))
+                    (socket.AF_INET6, socket.SOCK_STREAM,
+                     socket.IPPROTO_TCP, "", (address, 0, 0, 0))
                 )
             else:
                 out.append(
-                    (socket_module.AF_INET, socket_module.SOCK_STREAM,
-                     socket_module.IPPROTO_TCP, "", (address, 0))
+                    (socket.AF_INET, socket.SOCK_STREAM,
+                     socket.IPPROTO_TCP, "", (address, 0))
                 )
         return out
 

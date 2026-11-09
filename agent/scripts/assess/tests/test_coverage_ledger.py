@@ -19,7 +19,7 @@ from types import SimpleNamespace
 from assess.lib import coverage_checks as cc
 from assess.commands import coverage as coverage_cmd
 from assess.lib.config import Config
-from _fake_client import FakeAssessmentClient, host_of
+from _fake_client import FakeAssessmentClient, StubClient, host_of
 
 
 # --------------------------------------------------------------------------- #
@@ -399,7 +399,7 @@ def test_summary_counts_each_state():
 # --------------------------------------------------------------------------- #
 
 
-class FakeClient:
+class FakeClient(StubClient):
     def __init__(self, *, per_host_payload, dispatches=None):
         self._per_host_payload = per_host_payload
         self._dispatches = dispatches or []
@@ -408,12 +408,6 @@ class FakeClient:
         # ``load_route_stats_by_host`` → ``get_all_pages("work-items")``.
         self._rows: list[dict] = []
         self._next_id = 0
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
 
     def add_row(self, **fields) -> dict:
         row = dict(fields)

@@ -241,6 +241,13 @@ def _verify_finding(
     assert verified.status_code == 200, verified.text
 
 
+def _export(client, **body):
+    """POST the report-export door for the fixture engagement."""
+    return client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json=body
+    )
+
+
 def _add_finding(client, payload: dict) -> None:
     _record_finding(client, payload)
     _verify_finding(client, str(payload["slug"]))
@@ -252,9 +259,7 @@ def test_report_export_writes_injected_report_and_registers_artifact(
     _seed(client, isolate_settings)
     _add_finding(client, _finding("VA-001", "Missing authorization on admin API"))
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["mode"] == "draft"
@@ -293,9 +298,7 @@ def test_report_export_escapes_script_breakout_in_finding_title(
         _finding("VA-013", "Broken </script><script>alert(1)</script> auth guard"),
     )
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     body = response.json()
 
@@ -326,9 +329,7 @@ def test_report_export_escapes_html_comment_script_double_escape(
     _seed(client, isolate_settings)
     _add_finding(client, _finding("VA-014", "Stored XSS via <!--<script> comment smuggling"))
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     contents = (
         isolate_settings["engagements_dir"]
@@ -361,12 +362,8 @@ def test_report_export_same_second_exports_are_distinct_artifacts(
     _seed(client, isolate_settings)
     _add_finding(client, _finding("VA-001", "Missing authorization on admin API"))
 
-    first = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
-    second = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    first = _export(client, mode="draft")
+    second = _export(client, mode="draft")
     assert first.status_code == 200 and second.status_code == 200
     a, b = first.json(), second.json()
     assert a["relative_path"] != b["relative_path"]
@@ -572,9 +569,7 @@ def test_report_export_final_mode_blocked_when_not_ready(
         },
     )
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "final"}
-    )
+    response = _export(client, mode="final")
     assert response.status_code == 409, response.text
     detail = response.json()["detail"]
     assert detail["ready"] is False
@@ -587,9 +582,7 @@ def test_report_export_missing_template_returns_503(client, isolate_settings, tm
     original = settings.report_template_path
     object.__setattr__(settings, "report_template_path", missing)
     try:
-        response = client.post(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-        )
+        response = _export(client, mode="draft")
     finally:
         object.__setattr__(settings, "report_template_path", original)
     assert response.status_code == 503, response.text
@@ -602,9 +595,7 @@ def test_report_export_download_serves_html_and_404s_for_wrong_id(
     _seed(client, isolate_settings)
     _add_finding(client, _finding("VA-001", "Missing authorization on admin API"))
 
-    export = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    export = _export(client, mode="draft")
     assert export.status_code == 200, export.text
     artifact_id = export.json()["artifact_id"]
 
@@ -628,9 +619,7 @@ def test_report_export_download_rejects_modified_artifact(
 ):
     _seed(client, isolate_settings)
     _add_finding(client, _finding("VA-001", "Missing authorization on admin API"))
-    export = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    export = _export(client, mode="draft")
     assert export.status_code == 200, export.text
     artifact = export.json()
     report_path = (
@@ -805,9 +794,7 @@ def test_report_payload_carries_only_the_fields_the_template_renders(
     payload_in["provenance"]["evidence_quote"] = "PROVENANCE-MARKER"
     _add_finding(client, payload_in)
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     relative_path = response.json()["relative_path"]
     payload = _injected_payload(isolate_settings, relative_path)
@@ -879,16 +866,12 @@ def test_report_payload_omits_readiness_from_a_final_export(
     )
     _add_finding(client, backed)
 
-    final = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "final"}
-    )
+    final = _export(client, mode="final")
     assert final.status_code == 200, final.text
     payload = _injected_payload(isolate_settings, final.json()["relative_path"])
     assert set(payload) == _PAYLOAD_KEYS - {"report_readiness"}
 
-    draft = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    draft = _export(client, mode="draft")
     assert draft.status_code == 200, draft.text
     draft_payload = _injected_payload(isolate_settings, draft.json()["relative_path"])
     assert set(draft_payload["report_readiness"]) == _declared_fields("ReportReadiness")
@@ -931,9 +914,7 @@ def test_report_payload_carries_attack_chain_steps_in_recorded_order(
     )
     assert chain.status_code == 201, chain.text
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     relative_path = response.json()["relative_path"]
     payload = _injected_payload(isolate_settings, relative_path)
@@ -986,9 +967,7 @@ def test_report_payload_carries_every_root_cause_group_key(
     # group never forms.
     _verify_finding(client, "VA-091", attempt="relinked")
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     payload = _injected_payload(isolate_settings, response.json()["relative_path"])
 
@@ -1038,9 +1017,7 @@ def test_report_summary_counts_exactly_the_findings_the_report_contains(
     _record_finding(client, _finding("VA-102", "FALSE-POSITIVE-MARKER suspicion"))
     _verify_finding(client, "VA-102", disposition="false_positive")
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     relative_path = response.json()["relative_path"]
     payload = _injected_payload(isolate_settings, relative_path)
@@ -1100,9 +1077,7 @@ def test_report_summary_keeps_the_engagement_rollups_that_are_not_triage_state(
     _seed(client, isolate_settings)
     _add_finding(client, _finding("VA-110", "Missing authorization on admin API"))
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     payload = _injected_payload(isolate_settings, response.json()["relative_path"])
 
@@ -1165,9 +1140,7 @@ def test_the_delivered_report_carries_the_operator_authority_stamp_whole(
     _record_finding(client, proven)
     _verify_finding(client, "VA-081")
 
-    response = client.post(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/report-export", json={"mode": "draft"}
-    )
+    response = _export(client, mode="draft")
     assert response.status_code == 200, response.text
     payload = _injected_payload(isolate_settings, response.json()["relative_path"])
     records = {

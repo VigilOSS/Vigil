@@ -20,13 +20,14 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import agent
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 
 
-class _Client:
+class _Client(StubClient):
     def __init__(self) -> None:
         self.writes: list[dict] = []
 
@@ -36,10 +37,6 @@ class _Client:
         packet["sha256"] = hashlib.sha256(packet.get("rendered_prompt", "").encode()).hexdigest()
         return {"id": 11, **payload, "status": "in-progress", "prompt_packet": packet,
                 "launch_required": True, "idempotent_replay": False}
-
-    def close(self) -> None:
-        pass
-
 
 def _start_args(monkeypatch, tmp_path, *, role="code-vuln-hunter", mode="code", scope=None,
                 prompt_context=None):

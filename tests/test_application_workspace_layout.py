@@ -1,12 +1,22 @@
 from __future__ import annotations
 
-from pathlib import Path
 import json
+import os
+import subprocess
+import sys
 import tomllib
+from contextlib import contextmanager
+from pathlib import Path
 
 import pytest
 
+from vigil_cli import auth, client_sessions, install, main, status
 from vigil_cli import paths
+from vigil_cli.application import application_provenance
+from vigil_cli.docker import DockerResult
+from vigil_cli.install import InstallOptions, install_from_source
+from vigil_cli.status import Check, _print_install_staleness_warning, install_staleness
+from vigil_cli.workspace import initialize_workspace
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
@@ -62,8 +72,6 @@ def test_invalid_explicit_application_override_fails_closed(tmp_path, monkeypatc
 
 
 def test_initialize_fresh_workspace_creates_only_private_data(tmp_path):
-    from vigil_cli.workspace import initialize_workspace
-
     root = tmp_path / "workspace"
     metadata = initialize_workspace(root, REPO_ROOT)
     assert metadata["schema_version"] == 1
@@ -75,8 +83,6 @@ def test_initialize_fresh_workspace_creates_only_private_data(tmp_path):
 
 
 def test_adoption_registers_existing_state_without_copying_or_rewriting_data(tmp_path):
-    from vigil_cli.workspace import initialize_workspace
-
     engagement = tmp_path / "agent" / "engagements" / "acme"
     data = tmp_path / "orchestrator" / "backend" / "data"
     engagement.mkdir(parents=True)
@@ -105,8 +111,6 @@ def test_adoption_registers_existing_state_without_copying_or_rewriting_data(tmp
 
 
 def test_workspace_metadata_symlink_is_rejected_without_touching_destination(tmp_path):
-    from vigil_cli.workspace import initialize_workspace
-
     outside = tmp_path / "outside.json"
     outside.write_text("retained outside bytes")
     workspace = tmp_path / "workspace"
@@ -118,8 +122,6 @@ def test_workspace_metadata_symlink_is_rejected_without_touching_destination(tmp
 
 
 def test_install_initializes_workspace_without_copying_application(tmp_path, monkeypatch):
-    from vigil_cli.install import InstallOptions, install_from_source
-
     application = tmp_path / "application"
     root = tmp_path / "workspace"
     (application / "agent").mkdir(parents=True)
@@ -133,8 +135,6 @@ def test_install_initializes_workspace_without_copying_application(tmp_path, mon
 
 
 def test_install_adopts_without_rewriting_live_client_entrypoints(tmp_path):
-    from vigil_cli.install import InstallOptions, install_from_source
-
     application = tmp_path / "application"
     (application / "agent").mkdir(parents=True)
     (application / "orchestrator").mkdir()
@@ -153,9 +153,6 @@ def test_install_adopts_without_rewriting_live_client_entrypoints(tmp_path):
 
 
 def test_workspace_staleness_compares_release_content_not_private_data(tmp_path, monkeypatch):
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.status import install_staleness
-
     application = tmp_path / "application"
     workspace = tmp_path / "workspace"
     (application / "agent").mkdir(parents=True)
@@ -171,9 +168,6 @@ def test_workspace_staleness_compares_release_content_not_private_data(tmp_path,
 
 
 def test_doctor_uses_release_assets_and_private_workspace_state(tmp_path, monkeypatch):
-    from vigil_cli import status
-    from vigil_cli.status import Check
-
     app = tmp_path / "application"
     workspace = tmp_path / "workspace"
     (app / "agent").mkdir(parents=True)
@@ -189,7 +183,6 @@ def test_doctor_uses_release_assets_and_private_workspace_state(tmp_path, monkey
 
 
 def test_release_health_checks_work_without_git_or_node(tmp_path, monkeypatch):
-    from vigil_cli import status
     monkeypatch.setattr(status, '_binary_check', lambda name: status.Check(name, 'MISSING'))
     rows = {row.name: row for row in status.collect_doctor_checks(tmp_path)}
     assert rows['application'].status == 'OK'
@@ -197,9 +190,6 @@ def test_release_health_checks_work_without_git_or_node(tmp_path, monkeypatch):
 
 
 def test_automatic_initialization_is_current_without_legacy_install_stamp(tmp_path, monkeypatch):
-    from vigil_cli.workspace import initialize_workspace
-    from vigil_cli.status import install_staleness
-
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(REPO_ROOT))
     initialize_workspace(tmp_path, REPO_ROOT)
     assert not (tmp_path / ".vigil-install-meta.json").exists()
@@ -207,10 +197,6 @@ def test_automatic_initialization_is_current_without_legacy_install_stamp(tmp_pa
 
 
 def test_explicit_client_maintenance_refuses_live_old_release_before_rewrites(tmp_path, monkeypatch):
-    from vigil_cli import client_sessions
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.application import application_provenance
-
     engagement = tmp_path / "workspace" / "engagements" / "acme"
     engagement.mkdir(parents=True)
     (engagement / "scope.json").write_text("{}")
@@ -226,9 +212,6 @@ def test_explicit_client_maintenance_refuses_live_old_release_before_rewrites(tm
 
 
 def test_status_exposes_application_identity_and_retained_session_restart(tmp_path, monkeypatch):
-    from vigil_cli import status, client_sessions
-    from vigil_cli.docker import DockerResult
-
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(REPO_ROOT))
     monkeypatch.setattr(status, "_orchestrator_readyz_bundle", lambda _: {"healthy": False, "readiness": {"reachable": False}})
     monkeypatch.setattr(status, "orchestrator_status", lambda _: "stopped")
@@ -244,10 +227,6 @@ def test_status_exposes_application_identity_and_retained_session_restart(tmp_pa
 
 
 def test_explicit_maintenance_rechecks_release_binding_inside_bootstrap_lock(tmp_path, monkeypatch):
-    from contextlib import contextmanager
-    from vigil_cli import client_sessions, install
-    from vigil_cli.application import application_provenance
-
     workspace = tmp_path / "workspace"
     engagement = workspace / "engagements" / "acme"
     engagement.mkdir(parents=True)
@@ -276,8 +255,6 @@ def test_explicit_maintenance_rechecks_release_binding_inside_bootstrap_lock(tmp
 
 
 def test_stale_workspace_notice_explains_matched_release_without_source_copy(capsys):
-    from vigil_cli.status import _print_install_staleness_warning
-
     _print_install_staleness_warning({"state": "stale", "installed_sha": "a" * 40,
         "current_source_sha": "b" * 40, "behind_count": 1})
     message = capsys.readouterr().out
@@ -286,9 +263,6 @@ def test_stale_workspace_notice_explains_matched_release_without_source_copy(cap
 
 
 def test_release_provenance_does_not_probe_git(tmp_path, monkeypatch):
-    import subprocess
-    from vigil_cli import status
-
     (tmp_path / "bundle.json").write_text("{}")
     probes = []
     def probe(argv, **kwargs):
@@ -301,9 +275,6 @@ def test_release_provenance_does_not_probe_git(tmp_path, monkeypatch):
 
 
 def test_direct_finding_renderer_bridge_uses_application_without_checkout_discovery():
-    import subprocess
-    import sys
-
     script = """
 import sys
 from vigil_cli import paths, engagements
@@ -314,19 +285,12 @@ for name in list(sys.modules):
         del sys.modules[name]
 assert engagements._finding_render().string_list(['Acme']) == ['Acme']
 """
-    import os
-
     result = subprocess.run([sys.executable, "-c", script], text=True, capture_output=True,
                             env={**os.environ, "PYTHONPATH": str(REPO_ROOT / "src"), "VIGIL_APPLICATION_DIR": str(REPO_ROOT)})
     assert result.returncode == 0, result.stderr
 
 
 def test_auth_dispatch_pins_explicit_workspace_for_external_engagements(tmp_path, monkeypatch, capsys):
-    import json
-    import os
-    from vigil_cli import auth, main
-    from vigil_cli.workspace import initialize_workspace
-
     workspace = tmp_path / "workspace"
     metadata = initialize_workspace(workspace, REPO_ROOT)
     engagement = tmp_path / "external" / "acme"
@@ -344,9 +308,6 @@ def test_auth_dispatch_pins_explicit_workspace_for_external_engagements(tmp_path
 
 
 def test_doctor_reports_application_identity_and_old_client_restart(tmp_path, monkeypatch):
-    from vigil_cli import status, client_sessions
-    from vigil_cli.status import Check
-
     monkeypatch.setenv("VIGIL_APPLICATION_DIR", str(REPO_ROOT))
     monkeypatch.setattr(status, "_binary_check", lambda name: Check(name, "MISSING"))
     monkeypatch.setattr(status, "orchestrator_status", lambda *_args: "stopped")

@@ -9,19 +9,9 @@ from __future__ import annotations
 
 import importlib
 import sys
-from pathlib import Path
 from types import ModuleType, SimpleNamespace
 
 import pytest
-
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-
-
-@pytest.fixture(scope="module", autouse=True)
-def _scripts_on_path():
-    if str(_SCRIPTS_ROOT) not in sys.path:
-        sys.path.insert(0, str(_SCRIPTS_ROOT))
-    yield
 
 
 @pytest.fixture(autouse=True)
@@ -36,6 +26,14 @@ def _import(name: str) -> ModuleType:
     return importlib.import_module(name)
 
 
+@pytest.fixture
+def gf(monkeypatch):
+    """``assess.commands.kali_gf`` with the container check stubbed out."""
+    module = _import("assess.commands.kali_gf")
+    monkeypatch.setattr(module, "_check_container_running", lambda c: None)
+    return module
+
+
 def test_gf_registered_and_in_maint_roster(capsys):
     cli = _import("assess.cli")
     with pytest.raises(SystemExit):
@@ -48,10 +46,7 @@ def test_gf_registered_and_in_maint_roster(capsys):
     assert contracts.get_contract("kali gf") is not None
 
 
-def test_gf_runs_without_audit_flags(monkeypatch, tmp_path, capsys):
-    gf = _import("assess.commands.kali_gf")
-    monkeypatch.setattr(gf, "_check_container_running", lambda c: None)
-
+def test_gf_runs_without_audit_flags(monkeypatch, tmp_path, capsys, gf):
     corpus = tmp_path / "urls.txt"
     corpus.write_text(
         "https://x/?url=1\nhttps://x/static.js\nhttps://x/?redirect=2\n",
@@ -82,9 +77,7 @@ def test_gf_runs_without_audit_flags(monkeypatch, tmp_path, capsys):
     assert '"matched_count": 1' in err
 
 
-def test_gf_to_stdout_when_no_output(monkeypatch, tmp_path, capsys):
-    gf = _import("assess.commands.kali_gf")
-    monkeypatch.setattr(gf, "_check_container_running", lambda c: None)
+def test_gf_to_stdout_when_no_output(monkeypatch, tmp_path, capsys, gf):
     corpus = tmp_path / "urls.txt"
     corpus.write_text("https://x/?id=1\n", encoding="utf-8")
     monkeypatch.setattr(
@@ -96,9 +89,7 @@ def test_gf_to_stdout_when_no_output(monkeypatch, tmp_path, capsys):
     assert "https://x/?id=1" in out
 
 
-def test_gf_list_patterns(monkeypatch, capsys):
-    gf = _import("assess.commands.kali_gf")
-    monkeypatch.setattr(gf, "_check_container_running", lambda c: None)
+def test_gf_list_patterns(monkeypatch, capsys, gf):
     monkeypatch.setattr(
         gf, "_list_runtime_patterns",
         lambda c: SimpleNamespace(returncode=0, stdout="ssrf\nidor\nsqli\n", stderr=""),
@@ -108,9 +99,7 @@ def test_gf_list_patterns(monkeypatch, capsys):
     assert "ssrf" in out and "idor" in out
 
 
-def test_gf_rejects_unsafe_pattern_name(monkeypatch, tmp_path):
-    gf = _import("assess.commands.kali_gf")
-    monkeypatch.setattr(gf, "_check_container_running", lambda c: None)
+def test_gf_rejects_unsafe_pattern_name(tmp_path, gf):
     corpus = tmp_path / "urls.txt"
     corpus.write_text("https://x/\n", encoding="utf-8")
     # cli.main catches the AssessError and exits non-zero.
@@ -120,17 +109,13 @@ def test_gf_rejects_unsafe_pattern_name(monkeypatch, tmp_path):
         )
 
 
-def test_gf_missing_input_errors(monkeypatch):
-    gf = _import("assess.commands.kali_gf")
-    monkeypatch.setattr(gf, "_check_container_running", lambda c: None)
+def test_gf_missing_input_errors(gf):
     with pytest.raises(SystemExit):
         _import("assess.cli").main(["kali", "gf", "ssrf"])
 
 
-def test_gf_empty_bucket_is_not_an_error(monkeypatch, tmp_path, capsys):
+def test_gf_empty_bucket_is_not_an_error(monkeypatch, tmp_path, capsys, gf):
     """gf exits 1 when grep finds nothing — that is an empty bucket, not failure."""
-    gf = _import("assess.commands.kali_gf")
-    monkeypatch.setattr(gf, "_check_container_running", lambda c: None)
     corpus = tmp_path / "urls.txt"
     corpus.write_text("https://x/static.js\n", encoding="utf-8")
     out = tmp_path / "ssrf.txt"

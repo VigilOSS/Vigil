@@ -15,6 +15,7 @@ import pytest
 
 from assess.commands import code_dispatch
 from assess.lib import contracts
+from _fake_client import StubClient
 
 
 def _config(tmp_path: Path) -> SimpleNamespace:
@@ -114,20 +115,11 @@ _PROGRESS = {
 }
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     requested: list[str] = []
     posted: list[tuple[str, dict]] = []
     get_payload: object = _STALE_PAGE
     post_payload: object = _ADOPTED
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def get(self, endpoint: str):
         type(self).requested.append(endpoint)

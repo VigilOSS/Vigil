@@ -13,6 +13,8 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from _fake_client import StubClient
+
 from assess.commands import export_findings
 
 
@@ -23,15 +25,9 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self, findings: list[dict]) -> None:
         self._findings = findings
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
 
     def get(self, endpoint: str):
         if endpoint == "findings":
@@ -66,12 +62,9 @@ def test_only_report_durable_findings_reach_findings_md(tmp_path, monkeypatch) -
         tmp_path,
         monkeypatch,
         [
-            _finding("VA-001", "confirmed"),
-            _finding("VA-002", "downgraded", workflow="exploited"),
-            _finding("VA-003", "unreviewed"),
-            _finding("VA-004", "disputed"),
-            _finding("VA-005", "pending_runtime_proof"),
-            _finding("VA-006", "blocked"),
+            _finding("VA-001", "confirmed"), _finding("VA-002", "downgraded", workflow="exploited"),
+            _finding("VA-003", "unreviewed"), _finding("VA-004", "disputed"),
+            _finding("VA-005", "pending_runtime_proof"), _finding("VA-006", "blocked"),
             _finding("VA-007", "false_positive", workflow="false_positive"),
             _finding("VA-008", "confirmed", workflow="draft"),
             _finding("VA-009", "confirmed", workflow="merged"),
@@ -89,8 +82,7 @@ def test_the_finding_count_header_counts_what_was_rendered(tmp_path, monkeypatch
         tmp_path,
         monkeypatch,
         [
-            _finding("VA-001", "confirmed"),
-            _finding("VA-002", "unreviewed"),
+            _finding("VA-001", "confirmed"), _finding("VA-002", "unreviewed"),
             _finding("VA-003", "pending_runtime_proof"),
         ],
     )

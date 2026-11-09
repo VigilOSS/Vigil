@@ -1,4 +1,4 @@
-"""Observable-behaviour pins for the S21 simplification packet.
+"""Observable-behaviour pins for the restart manifest and operator CLI surfaces.
 
 Each test here snapshots the exact strings a consolidation is about to move —
 consumer rows, rendered CLI blocks, argparse option surfaces, scope/manifest

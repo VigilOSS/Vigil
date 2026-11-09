@@ -22,26 +22,28 @@ production `assess.lib.classify_buckets` module.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
+
+import pytest
 
 
 def _classify_buckets():
     """Import the real `assess.lib.classify_buckets` module (shared convention)."""
-    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     import assess.lib.classify_buckets as cb
 
     return cb
 
 
+@pytest.fixture
+def cb():
+    """The classifier module, imported per test as the cases below do."""
+    return _classify_buckets()
+
+
 # ---------------------------------------------------------------------------
 # (i) no-context call is byte-identical to before
 # ---------------------------------------------------------------------------
-def test_no_context_avatar_file_is_byte_identical():
+def test_no_context_avatar_file_is_byte_identical(cb):
     """The pinned `/api/users/avatar` + `file` case is unchanged with no url."""
-    cb = _classify_buckets()
     assignment = cb.classify_from_fields(
         case_type="unknown",
         url_path="/api/users/avatar",
@@ -55,9 +57,8 @@ def test_no_context_avatar_file_is_byte_identical():
     assert assignment["terminal_reason"] is None
 
 
-def test_no_context_matches_default_kwargs_explicitly_none():
+def test_no_context_matches_default_kwargs_explicitly_none(cb):
     """Passing url/source/live_status=None is identical to omitting them."""
-    cb = _classify_buckets()
     base = cb.classify_from_fields(
         case_type="unknown",
         url_path="/api/users/avatar",
@@ -77,8 +78,7 @@ def test_no_context_matches_default_kwargs_explicitly_none():
 # ---------------------------------------------------------------------------
 # (ii) host_root rescue on a nonprod/admin host
 # ---------------------------------------------------------------------------
-def test_host_root_dev_host_scores_15_cluster_unchanged():
-    cb = _classify_buckets()
+def test_host_root_dev_host_scores_15_cluster_unchanged(cb):
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -91,9 +91,8 @@ def test_host_root_dev_host_scores_15_cluster_unchanged():
     assert assignment["matched_buckets"] == []
 
 
-def test_host_root_prod_host_stays_zero():
+def test_host_root_prod_host_stays_zero(cb):
     """A plain prod host_root is NOT rescued (precision-negative)."""
-    cb = _classify_buckets()
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -103,9 +102,8 @@ def test_host_root_prod_host_stays_zero():
     assert assignment["cluster_key"] == "type:host_root"
 
 
-def test_host_label_boundary_precision():
+def test_host_label_boundary_precision(cb):
     """`development.example.com` must NOT match the `dev` host label."""
-    cb = _classify_buckets()
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -114,9 +112,8 @@ def test_host_label_boundary_precision():
     assert assignment["priority_score"] == 0
 
 
-def test_host_label_internal_hyphen_boundary():
+def test_host_label_internal_hyphen_boundary(cb):
     """`api-qa.example.com` matches `qa` at a `-` boundary."""
-    cb = _classify_buckets()
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -128,8 +125,7 @@ def test_host_label_internal_hyphen_boundary():
 # ---------------------------------------------------------------------------
 # (iii) port / source / live bonuses add their increment and STACK
 # ---------------------------------------------------------------------------
-def test_nondefault_port_bonus():
-    cb = _classify_buckets()
+def test_nondefault_port_bonus(cb):
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -138,8 +134,7 @@ def test_nondefault_port_bonus():
     assert assignment["priority_score"] == 5
 
 
-def test_source_analysis_bonus():
-    cb = _classify_buckets()
+def test_source_analysis_bonus(cb):
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -149,8 +144,7 @@ def test_source_analysis_bonus():
     assert assignment["priority_score"] == 5
 
 
-def test_js_extract_source_bonus():
-    cb = _classify_buckets()
+def test_js_extract_source_bonus(cb):
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -160,8 +154,7 @@ def test_js_extract_source_bonus():
     assert assignment["priority_score"] == 5
 
 
-def test_live_status_bonus():
-    cb = _classify_buckets()
+def test_live_status_bonus(cb):
     for live in ("live", "200"):
         assignment = cb.classify_from_fields(
             case_type="host_root",
@@ -172,9 +165,8 @@ def test_live_status_bonus():
         assert assignment["priority_score"] == 5, live
 
 
-def test_context_bonuses_stack():
+def test_context_bonuses_stack(cb):
     """dev host (+15) + non-default port (+5) + source (+5) + live (+5) = 30."""
-    cb = _classify_buckets()
     assignment = cb.classify_from_fields(
         case_type="host_root",
         url_path="/",
@@ -186,9 +178,8 @@ def test_context_bonuses_stack():
     assert assignment["cluster_key"] == "type:host_root"
 
 
-def test_context_bonus_helper_never_negative():
+def test_context_bonus_helper_never_negative(cb):
     """`_context_bonus` is always >= 0 (boost-only invariant), incl. junk url."""
-    cb = _classify_buckets()
     assert cb._context_bonus(None, None, None) == 0
     assert cb._context_bonus("not a url", "gau-archive", "dead") == 0
     assert cb._context_bonus("http://[bad:port/") >= 0
@@ -198,9 +189,8 @@ def test_context_bonus_helper_never_negative():
 # ---------------------------------------------------------------------------
 # (iv) bonus boosts a matched/floor/fallback score without perturbing routing
 # ---------------------------------------------------------------------------
-def test_matched_bucket_score_is_boosted_routing_unchanged():
+def test_matched_bucket_score_is_boosted_routing_unchanged(cb):
     """A matched bucket on a dev host: score boosted by 15, reason/cluster fixed."""
-    cb = _classify_buckets()
     base = cb.classify_from_fields(
         case_type="unknown",
         url_path="/api/users/avatar",
@@ -219,9 +209,8 @@ def test_matched_bucket_score_is_boosted_routing_unchanged():
     assert boosted["matched_buckets"] == base["matched_buckets"]
 
 
-def test_floor_score_is_boosted_routing_unchanged():
+def test_floor_score_is_boosted_routing_unchanged(cb):
     """A type-floor row (`api` → gf:api/20) is boosted but keeps its cluster."""
-    cb = _classify_buckets()
     base = cb.classify_from_fields(case_type="api", url_path="/foo/bar")
     boosted = cb.classify_from_fields(
         case_type="api",
@@ -234,9 +223,8 @@ def test_floor_score_is_boosted_routing_unchanged():
     assert boosted["cluster_key"] == base["cluster_key"]
 
 
-def test_path_fallback_score_is_boosted():
+def test_path_fallback_score_is_boosted(cb):
     """An unmatched, unfloored row gets the bonus on the path:* fallback."""
-    cb = _classify_buckets()
     base = cb.classify_from_fields(case_type="unknown", url_path="/static/brochure")
     boosted = cb.classify_from_fields(
         case_type="unknown",
@@ -249,9 +237,8 @@ def test_path_fallback_score_is_boosted():
     assert boosted["priority_reason"] == base["priority_reason"]
 
 
-def test_dead_archive_context_is_neutral_not_terminal():
+def test_dead_archive_context_is_neutral_not_terminal(cb):
     """Archive provenance and a dead verdict never become a hidden skip gate."""
-    cb = _classify_buckets()
     base = cb.classify_from_fields(
         case_type="unknown",
         url_path="/static/brochure",
@@ -267,9 +254,8 @@ def test_dead_archive_context_is_neutral_not_terminal():
     assert dead_archive["terminal_reason"] is None
 
 
-def test_inert_and_sourcemap_never_boosted():
+def test_inert_and_sourcemap_never_boosted(cb):
     """Inert + sourcemap branches stay fixed even on a nonprod host."""
-    cb = _classify_buckets()
     inert = cb.classify_from_fields(
         case_type="image",
         url_path="/logo.png",

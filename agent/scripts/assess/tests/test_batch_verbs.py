@@ -18,6 +18,7 @@ import json
 from pathlib import Path
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import (
     link_finding,
@@ -34,7 +35,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     """Records post/patch/put/delete calls; ``fail_on`` forces a per-call error."""
 
     def __init__(self, fail_on: set[str] | None = None) -> None:
@@ -97,16 +98,6 @@ class _FakeClient:
         self.deletes.append(endpoint)
         return {"endpoint": endpoint, "deleted": True}
 
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
-
-
 def _install(monkeypatch, module, tmp_path, fake: _FakeClient) -> None:
     monkeypatch.setattr(module, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
     monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
@@ -148,9 +139,7 @@ def test_verify_batch_applies_same_payload_to_each(tmp_path, monkeypatch, capsys
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1", "VA-2", "VA-3",
-            "--status", "confirmed",
-            "--reason", "reproduced",
+            "verify", "VA-1", "VA-2", "VA-3", "--status", "confirmed", "--reason", "reproduced",
             "--proof-receipt-id", "17",
         ],
         tmp_path,
@@ -199,10 +188,8 @@ def test_verify_partial_failure_tally_and_nonzero_exit(tmp_path, monkeypatch, ca
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1", "VA-2",
-            "--status", "confirmed",
-            "--reason", "r",
-            "--proof-receipt-id", "17",
+            "verify", "VA-1", "VA-2", "--status", "confirmed", "--reason", "r", "--proof-receipt-id",
+            "17",
         ],
         tmp_path,
     )
@@ -222,10 +209,7 @@ def test_verify_single_slug_prints_single_json(tmp_path, monkeypatch, capsys):
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1",
-            "--status", "confirmed",
-            "--reason", "r",
-            "--proof-receipt-id", "17",
+            "verify", "VA-1", "--status", "confirmed", "--reason", "r", "--proof-receipt-id", "17",
         ],
         tmp_path,
     )
@@ -252,9 +236,7 @@ def test_verify_false_positive_batch(tmp_path, monkeypatch, capsys):
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1", "VA-2",
-            "--status", "false_positive",
-            "--reason", "r",
+            "verify", "VA-1", "VA-2", "--status", "false_positive", "--reason", "r",
             "--counter-check-file", str(counter_check_path),
         ],
         tmp_path,
@@ -328,11 +310,7 @@ def test_resolve_coverage_item_batch(tmp_path, monkeypatch, capsys):
 def test_link_finding_batch_many_siblings_one_root(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, link_finding, tmp_path, fake)
-    args = _parse(
-        link_finding,
-        ["link", "VA-2", "VA-3", "VA-4", "--root-cause", "VA-1"],
-        tmp_path,
-    )
+    args = _parse(link_finding, ["link", "VA-2", "VA-3", "VA-4", "--root-cause", "VA-1"], tmp_path)
     link_finding.run(args)
     assert [ep for ep, _ in fake.puts] == [
         "findings/VA-2/root-cause",
@@ -506,11 +484,7 @@ def test_update_payload_file_is_single_slug_and_requires_row_version(
         json.dumps({"summary": "working copy", "expected_row_version": 4}),
         encoding="utf-8",
     )
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", "VA-2", "--payload-file", str(payload_path)],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", "VA-2", "--payload-file", str(payload_path)], tmp_path)
     with pytest.raises(SystemExit) as exc:
         update_finding.run(args)
     assert exc.value.code == 1
@@ -523,11 +497,7 @@ def test_update_rejects_expected_row_version_without_a_mutation(
 ):
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", "--expected-row-version", "4"],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", "--expected-row-version", "4"], tmp_path)
 
     with pytest.raises(SystemExit) as exc:
         update_finding.run(args)
@@ -555,11 +525,7 @@ def test_update_payload_file_rejects_only_concurrency_and_mode_controls(
     _install(monkeypatch, update_finding, tmp_path, fake)
     payload_path = tmp_path / "patch.json"
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", "--payload-file", str(payload_path)],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
 
     with pytest.raises(SystemExit) as exc:
         update_finding.run(args)
@@ -577,14 +543,8 @@ def test_update_rejects_transition_metadata_without_a_mutation(
     args = _parse(
         update_finding,
         [
-            "update",
-            "VA-1",
-            "--reason-code",
-            "checkpoint",
-            "--reason",
-            "No finding field changed.",
-            "--artifact-ref",
-            "evidence/no-op.txt",
+            "update", "VA-1", "--reason-code", "checkpoint", "--reason", "No finding field changed.",
+            "--artifact-ref", "evidence/no-op.txt",
         ],
         tmp_path,
     )
@@ -625,11 +585,7 @@ def test_update_payload_file_rejects_null_and_empty_merge_noops(
     _install(monkeypatch, update_finding, tmp_path, fake)
     payload_path = tmp_path / "patch.json"
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", "--payload-file", str(payload_path)],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
 
     with pytest.raises(SystemExit) as exc:
         update_finding.run(args)
@@ -657,11 +613,7 @@ def test_update_allows_intentional_empty_replacements_with_cas(
 ):
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", *clear_args, "--expected-row-version", "4"],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", *clear_args, "--expected-row-version", "4"], tmp_path)
 
     update_finding.run(args)
 
@@ -674,13 +626,8 @@ def test_update_exposes_notes_rotation_with_cas(tmp_path, monkeypatch):
     args = _parse(
         update_finding,
         [
-            "update",
-            "VA-1",
-            "--notes",
-            "new working notes",
-            "--notes-rotate",
-            "--expected-row-version",
-            "4",
+            "update", "VA-1", "--notes", "new working notes", "--notes-rotate",
+            "--expected-row-version", "4",
         ],
         tmp_path,
     )
@@ -776,13 +723,8 @@ def test_destructive_replace_flags_carry_expected_row_version(
     args = _parse(
         update_finding,
         [
-            "update",
-            "VA-1",
-            "--details-inline",
-            '{"impact":"replacement"}',
-            "--details-replace",
-            "--expected-row-version",
-            "7",
+            "update", "VA-1", "--details-inline", '{"impact":"replacement"}', "--details-replace",
+            "--expected-row-version", "7",
         ],
         tmp_path,
     )
@@ -854,11 +796,7 @@ def test_payload_file_rejects_explicit_empty_content_flags(
         encoding="utf-8",
     )
     action = "update" if module is update_finding else "verify"
-    args = _parse(
-        module,
-        [action, "VA-1", "--payload-file", str(payload_path), *content_flag],
-        tmp_path,
-    )
+    args = _parse(module, [action, "VA-1", "--payload-file", str(payload_path), *content_flag], tmp_path)
 
     with pytest.raises(SystemExit) as exc:
         module.run(args)
@@ -975,16 +913,8 @@ def test_verify_rejects_narrative_artifact_receipt_without_canonical_identity(
     args = _parse(
         verify_finding,
         [
-            "verify",
-            "VA-1",
-            "--status",
-            "confirmed",
-            "--reason",
-            "reproduced",
-            "--proof-receipt-id",
-            "17",
-            "--narrative",
-            str(narrative),
+            "verify", "VA-1", "--status", "confirmed", "--reason", "reproduced", "--proof-receipt-id",
+            "17", "--narrative", str(narrative),
         ],
         tmp_path,
     )
@@ -1008,16 +938,8 @@ def test_verify_reports_committed_verification_when_narrative_registration_fails
     args = _parse(
         verify_finding,
         [
-            "verify",
-            "VA-1",
-            "--status",
-            "confirmed",
-            "--reason",
-            "reproduced",
-            "--proof-receipt-id",
-            "17",
-            "--narrative",
-            str(narrative),
+            "verify", "VA-1", "--status", "confirmed", "--reason", "reproduced", "--proof-receipt-id",
+            "17", "--narrative", str(narrative),
         ],
         tmp_path,
     )
@@ -1054,8 +976,7 @@ def test_verify_payload_file_treats_proof_receipt_as_a_content_flag(
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1", "--payload-file", str(payload_path),
-            "--proof-receipt-id", "18",
+            "verify", "VA-1", "--payload-file", str(payload_path), "--proof-receipt-id", "18",
         ],
         tmp_path,
     )
@@ -1199,9 +1120,7 @@ def test_update_validates_details_against_the_record_contract(
         args = _parse(
             update_finding,
             [
-                "update",
-                "VA-1",
-                "--details-inline",
+                "update", "VA-1", "--details-inline",
                 json.dumps({"steps_to_reproduce": steps, "vrt_category": "broken_access_control.idor"}),
             ],
             tmp_path,
@@ -1232,11 +1151,8 @@ def test_verify_forwards_new_severity_on_any_terminal_status(
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1",
-            "--status", "confirmed",
-            "--reason", "reproduced",
-            "--proof-receipt-id", "17",
-            "--new-severity", "critical",
+            "verify", "VA-1", "--status", "confirmed", "--reason", "reproduced", "--proof-receipt-id",
+            "17", "--new-severity", "critical",
         ],
         tmp_path,
     )
@@ -1256,9 +1172,7 @@ def test_verify_rejects_new_severity_on_a_non_terminal_status(
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1",
-            "--status", "disputed",
-            "--reason", "needs a second look",
+            "verify", "VA-1", "--status", "disputed", "--reason", "needs a second look",
             "--new-severity", "low",
         ],
         tmp_path,
@@ -1288,9 +1202,7 @@ def test_verify_new_severity_rejection_names_every_slug_in_the_batch(
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1", "VA-2", "VA-3",
-            "--status", "disputed",
-            "--reason", "needs a second look",
+            "verify", "VA-1", "VA-2", "VA-3", "--status", "disputed", "--reason", "needs a second look",
             "--new-severity", "low",
         ],
         tmp_path,
@@ -1311,11 +1223,8 @@ def test_verify_downgraded_still_forwards_new_severity(tmp_path, monkeypatch, ca
     args = _parse(
         verify_finding,
         [
-            "verify", "VA-1",
-            "--status", "downgraded",
-            "--reason", "over-scored",
-            "--proof-receipt-id", "17",
-            "--new-severity", "medium",
+            "verify", "VA-1", "--status", "downgraded", "--reason", "over-scored", "--proof-receipt-id",
+            "17", "--new-severity", "medium",
         ],
         tmp_path,
     )
@@ -1355,11 +1264,7 @@ def test_a_refused_details_key_is_routed_to_its_real_home(
     """
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", "--details-inline", json.dumps({key: value})],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", "--details-inline", json.dumps({key: value})], tmp_path)
 
     with pytest.raises(SystemExit) as exc:
         update_finding.run(args)
@@ -1430,11 +1335,7 @@ def test_the_update_door_accepts_the_provenance_keys_the_skills_prescribe(
     """
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
-    args = _parse(
-        update_finding,
-        ["update", "VA-1", "--provenance-inline", json.dumps(provenance)],
-        tmp_path,
-    )
+    args = _parse(update_finding, ["update", "VA-1", "--provenance-inline", json.dumps(provenance)], tmp_path)
 
     update_finding.run(args)
     capsys.readouterr()

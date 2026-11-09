@@ -23,6 +23,7 @@ import hashlib
 import json
 import sqlite3
 
+import pytest
 from app import db as db_module
 from app.services import state_manager
 from app.services.state_manager._common import VERIFICATION_STATUSES, VerificationStatus
@@ -48,6 +49,16 @@ def _seed(client, isolate_settings) -> None:
         },
     )
     assert author.status_code == 201, author.text
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _finding_payload(slug, *, workflow_status="active", details=None, **overrides) -> dict:
@@ -153,8 +164,7 @@ def test_blocked_is_a_member_of_the_complete_verification_status_axis():
 # ---------------------------------------------------------------------------
 
 
-def test_verify_blocked_requires_block_reason(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_verify_blocked_requires_block_reason(client, seeded_engagement):
     _create_finding(client, "VA-001")
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
@@ -164,8 +174,7 @@ def test_verify_blocked_requires_block_reason(client, isolate_settings):
     assert "block_reason" in resp.json()["detail"]
 
 
-def test_verify_blocked_with_block_reason_in_request_succeeds(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_verify_blocked_with_block_reason_in_request_succeeds(client, seeded_engagement):
     _create_finding(client, "VA-001")
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
@@ -187,8 +196,7 @@ def test_verify_blocked_with_block_reason_in_request_succeeds(client, isolate_se
     assert finding["verification_status"] == "blocked"
 
 
-def test_verify_blocked_accepts_block_reason_already_on_finding(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_verify_blocked_accepts_block_reason_already_on_finding(client, seeded_engagement):
     # block_reason recorded on the finding itself, not in the verify request.
     _create_finding(
         client, "VA-001",
@@ -202,8 +210,7 @@ def test_verify_blocked_accepts_block_reason_already_on_finding(client, isolate_
     assert resp.json()["finding"]["verification_status"] == "blocked"
 
 
-def test_verify_blocked_rejects_oversized_block_reason(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_verify_blocked_rejects_oversized_block_reason(client, seeded_engagement):
     _create_finding(client, "VA-001")
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
@@ -217,8 +224,7 @@ def test_verify_blocked_rejects_oversized_block_reason(client, isolate_settings)
     assert "500" in resp.json()["detail"]
 
 
-def test_create_finding_cannot_bypass_blocked_verification_gate(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_create_finding_cannot_bypass_blocked_verification_gate(client, seeded_engagement):
     resp = client.post(
         f"{BASE}/findings",
         json=_finding_payload(
@@ -231,8 +237,7 @@ def test_create_finding_cannot_bypass_blocked_verification_gate(client, isolate_
     assert resp.json()["detail"][0]["loc"] == ["body", "verification_status"]
 
 
-def test_verified_blocked_finding_with_reason_is_unreported(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_verified_blocked_finding_with_reason_is_unreported(client, seeded_engagement):
     engagement_id = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()["id"]
     _create_finding(client, "VA-011")
     resp = client.post(
@@ -254,8 +259,7 @@ def test_verified_blocked_finding_with_reason_is_unreported(client, isolate_sett
 # ---------------------------------------------------------------------------
 
 
-def test_blocked_finding_absent_from_both_report_modes(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_blocked_finding_absent_from_both_report_modes(client, seeded_engagement):
     engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
     engagement_id = engagement["id"]
 
@@ -288,11 +292,10 @@ def test_blocked_finding_absent_from_both_report_modes(client, isolate_settings)
     assert "VA-002" not in blocker_slugs
 
 
-def test_resume_brief_finding_summary_projects_block_reason(client, isolate_settings):
+def test_resume_brief_finding_summary_projects_block_reason(client, seeded_engagement):
     # A blocked-for-provisioning finding leaves the unreviewed queue but still
     # awaits the missing prerequisite. Its active summary must carry the reason so the
     # CLI can render "BLOCKED: ..." without the operator opening the finding.
-    _seed(client, isolate_settings)
     _create_finding(client, "VA-030")
     assert client.post(
         f"{BASE}/findings/VA-030/verify",
@@ -310,8 +313,9 @@ def test_resume_brief_finding_summary_projects_block_reason(client, isolate_sett
     assert "VA-030" not in {row["slug"] for row in brief["findings"]["verified"]}
 
 
-def test_resume_brief_finding_summary_block_reason_empty_for_normal_finding(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_resume_brief_finding_summary_block_reason_empty_for_normal_finding(
+    client, seeded_engagement
+):
     _create_finding(client, "VA-031")  # unreviewed, no block_reason
     brief = client.get(f"{BASE}/resume-brief").json()
     unreviewed = {row["slug"]: row for row in brief["findings"]["unreviewed"]}
@@ -339,8 +343,7 @@ def _command_payload(**overrides) -> dict:
     return payload
 
 
-def test_command_run_finding_id_round_trip(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_command_run_finding_id_round_trip(client, seeded_engagement):
     finding = _create_finding(client, "VA-001")
     finding_id = finding["id"]
 
@@ -353,14 +356,12 @@ def test_command_run_finding_id_round_trip(client, isolate_settings):
     assert got["finding_id"] == finding_id
 
 
-def test_command_run_unknown_finding_id_is_404(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_command_run_unknown_finding_id_is_404(client, seeded_engagement):
     resp = client.post(f"{BASE}/command-runs", json=_command_payload(finding_id=999999))
     assert resp.status_code == 404, resp.text
 
 
-def test_command_run_finding_id_defaults_null(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_command_run_finding_id_defaults_null(client, seeded_engagement):
     created = client.post(f"{BASE}/command-runs", json=_command_payload()).json()
     assert created["finding_id"] is None
 
@@ -432,8 +433,7 @@ def _probe_payload(**overrides) -> dict:
     return payload
 
 
-def test_record_probe_run_same_target_different_lens_is_two_rows(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_probe_run_same_target_different_lens_is_two_rows(client, seeded_engagement):
     r1 = client.post(f"{BASE}/probe-runs", json=_probe_payload(lens="mindset-A"))
     r2 = client.post(f"{BASE}/probe-runs", json=_probe_payload(lens="mindset-B"))
     assert r1.status_code == 201 and r2.status_code == 201, (r1.text, r2.text)
@@ -444,8 +444,7 @@ def test_record_probe_run_same_target_different_lens_is_two_rows(client, isolate
     assert {"mindset-A", "mindset-B"} <= lenses
 
 
-def test_record_probe_run_same_lens_dedupes(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_probe_run_same_lens_dedupes(client, seeded_engagement):
     r1 = client.post(f"{BASE}/probe-runs", json=_probe_payload(lens="mindset-A"))
     r2 = client.post(f"{BASE}/probe-runs", json=_probe_payload(lens="mindset-A"))
     assert r1.json()["id"] == r2.json()["id"]  # same probe_key → upsert
@@ -456,8 +455,7 @@ def test_record_probe_run_same_lens_dedupes(client, isolate_settings):
 # ---------------------------------------------------------------------------
 
 
-def test_record_attempt_non_covering_status_with_lens_and_finding(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_attempt_non_covering_status_with_lens_and_finding(client, seeded_engagement):
     finding = _create_finding(client, "VA-001")
     finding_id = finding["id"]
     for result_status in ("attempted", "blocked", "no-signal"):
@@ -477,8 +475,7 @@ def test_record_attempt_non_covering_status_with_lens_and_finding(client, isolat
         assert row["finding_id"] == finding_id
 
 
-def test_record_attempt_finding_backfills_on_rerun(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_attempt_finding_backfills_on_rerun(client, seeded_engagement):
     finding = _create_finding(client, "VA-001")
     first = client.post(f"{BASE}/probe-runs", json=_probe_payload(lens="L")).json()
     assert first["finding_id"] is None
@@ -490,8 +487,7 @@ def test_record_attempt_finding_backfills_on_rerun(client, isolate_settings):
     assert second["finding_id"] == finding["id"]
 
 
-def test_record_attempt_unknown_finding_id_is_404(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_record_attempt_unknown_finding_id_is_404(client, seeded_engagement):
     resp = client.post(f"{BASE}/probe-runs", json=_probe_payload(lens="L", finding_id=999999))
     assert resp.status_code == 404, resp.text
 

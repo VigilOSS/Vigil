@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,9 +14,6 @@ def _scripts_root() -> Path:
 
 
 def _load_ingest_httpx():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
     spec = importlib.util.spec_from_file_location(
         "ingest_httpx_under_test",
         Path(__file__).resolve().parents[3] / "agent" / "scripts" / "assess" / "commands" / "ingest_httpx.py",

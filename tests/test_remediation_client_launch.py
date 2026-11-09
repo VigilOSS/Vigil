@@ -2,18 +2,27 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import plistlib
+import shlex
+import stat
 import subprocess
+import sys
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from vigil_cli import install_fs
+from vigil_cli import remediation_sessions as sessions
+from vigil_cli.client_sessions import historical_client_starts
+from vigil_cli.remediation import register_remediation_parser
+from vigil_cli.remediation_clients import _prepare_zcode_plugin
+
 
 @pytest.fixture
 def launch(tmp_path, monkeypatch):
-    from vigil_cli import remediation_sessions as sessions
-    from pathlib import Path
-
     # System applications are not fixtures; exercise only each test's temporary app.
     actual_is_file = Path.is_file
     monkeypatch.setattr(Path, 'is_file', lambda path: False if str(path) ==
@@ -60,8 +69,6 @@ def start(launch, client, **options):
 
 @pytest.mark.parametrize("client", ["opencode", "zcode"])
 def test_parser_accepts_repository_context_clients(client):
-    from vigil_cli.remediation import register_remediation_parser
-
     parser = argparse.ArgumentParser()
     register_remediation_parser(parser.add_subparsers(dest="command"))
     assert parser.parse_args(["remediation", "-k", "acme", "start", "--client", client]).client == client
@@ -78,7 +85,6 @@ def test_opencode_starts_native_tui_with_release_command_and_preserves_configura
     assert config["permission"] == "ask"
     assert config["command"]["vigil-remediate"]["template"] == "Read the profile. $ARGUMENTS\n"
     assert options["env"]["VIGIL_CLIENT_NAME"] == "opencode"
-    from vigil_cli.client_sessions import historical_client_starts
     starts, _ = historical_client_starts(launch.root)
     assert [(row["client"], row["mode"], row["event"]) for row in starts] == [("opencode", "remediation", "launch_requested")]
     assert str(launch.project["_profile_path"]) in argv[2]
@@ -152,9 +158,6 @@ def test_opencode_probe_timeout_is_actionable_and_bounded(launch, monkeypatch, p
 
 
 def test_zcode_prepares_context_plugin_and_opens_repository_without_false_session_receipt(launch, monkeypatch, tmp_path, capsys):
-    import sys
-    from pathlib import Path
-
     monkeypatch.setattr(sys, "platform", "darwin")
     app = tmp_path / "Applications/ZCode.app"
     info = app / "Contents/Info.plist"
@@ -164,7 +167,6 @@ def test_zcode_prepares_context_plugin_and_opens_repository_without_false_sessio
     assert start(launch, "zcode") == 0
     argv, options = launch.calls[-1]
     assert argv == ["open", "-a", str(app), str(launch.repository)]
-    from vigil_cli.client_sessions import historical_client_starts
     starts, _ = historical_client_starts(launch.root)
     assert [(row["client"], row["event"]) for row in starts] == [("zcode", "workspace_opened")]
     assert options["cwd"] == launch.repository
@@ -180,8 +182,6 @@ def test_zcode_prepares_context_plugin_and_opens_repository_without_false_sessio
 
 
 def test_zcode_missing_app_fails_without_preparing_plugin(launch, monkeypatch, tmp_path):
-    import sys
-    from pathlib import Path
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     with pytest.raises(SystemExit, match="ZCode"):
@@ -190,9 +190,6 @@ def test_zcode_missing_app_fails_without_preparing_plugin(launch, monkeypatch, t
 
 
 def test_zcode_node_probe_timeout_is_actionable_and_bounded(launch, monkeypatch, tmp_path):
-    import sys
-    from pathlib import Path
-
     monkeypatch.setattr(sys, "platform", "darwin")
     app = tmp_path / "Applications/ZCode.app"
     info = app / "Contents/Info.plist"
@@ -228,8 +225,6 @@ def test_opencode_runtime_command_collision_preserves_owner_configuration(launch
 
 
 def test_zcode_invalid_metadata_is_actionable_not_an_uncaught_exception(launch, monkeypatch, tmp_path):
-    import sys
-    from pathlib import Path
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     info = tmp_path / "Applications/ZCode.app/Contents/Info.plist"
@@ -241,8 +236,6 @@ def test_zcode_invalid_metadata_is_actionable_not_an_uncaught_exception(launch, 
 
 
 def test_zcode_preparation_refuses_symlinked_remediation_directory(launch, monkeypatch, tmp_path):
-    import sys
-    from pathlib import Path
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     info = tmp_path / "Applications/ZCode.app/Contents/Info.plist"
@@ -276,8 +269,6 @@ def test_route_rejects_unsupported_coordinator_before_pending_mutation(launch, c
 
 
 def test_prepared_plugins_have_distinct_context_bound_native_identity(launch):
-    from vigil_cli.remediation_clients import _prepare_zcode_plugin
-
     first = _prepare_zcode_plugin(launch.root / "agent", launch.engagement, launch.repository, launch.project, "acme", install_root=launch.root)
     second = _prepare_zcode_plugin(launch.root / "agent", launch.engagement, launch.repository, launch.project, "acme-other", install_root=launch.root)
     first_name = json.loads((first / ".zcode-plugin/plugin.json").read_text())["name"]
@@ -288,9 +279,6 @@ def test_prepared_plugins_have_distinct_context_bound_native_identity(launch):
 
 
 def test_prepared_plugin_rejects_nonregular_collision_before_reading(launch, monkeypatch):
-    import os
-    from vigil_cli.remediation_clients import _prepare_zcode_plugin
-
     root = _prepare_zcode_plugin(launch.root / "agent", launch.engagement, launch.repository, launch.project, "acme", install_root=launch.root)
     target = root / "vigil-context.json"
     target.unlink()
@@ -303,7 +291,6 @@ def test_prepared_plugin_rejects_nonregular_collision_before_reading(launch, mon
     monkeypatch.setattr(os, "open", checked_open)
     real_fdopen = os.fdopen
     def fdopen(descriptor, *args, **kwargs):
-        import stat
         assert stat.S_ISREG(os.fstat(descriptor).st_mode), "Nonregular collision reached potentially blocking read"
         return real_fdopen(descriptor, *args, **kwargs)
     monkeypatch.setattr(os, "fdopen", fdopen)
@@ -312,9 +299,6 @@ def test_prepared_plugin_rejects_nonregular_collision_before_reading(launch, mon
 
 
 def test_concurrent_plugin_preparation_publishes_same_complete_context(launch):
-    from concurrent.futures import ThreadPoolExecutor
-    from vigil_cli.remediation_clients import _prepare_zcode_plugin
-
     def prepare(_):
         return _prepare_zcode_plugin(launch.root / "agent", launch.engagement, launch.repository, launch.project, "acme", install_root=launch.root)
     with ThreadPoolExecutor(max_workers=8) as executor:
@@ -324,9 +308,6 @@ def test_concurrent_plugin_preparation_publishes_same_complete_context(launch):
 
 
 def test_interrupted_plugin_preparation_can_retry_without_partial_published_file(launch, monkeypatch):
-    from vigil_cli import install_fs
-    from vigil_cli.remediation_clients import _prepare_zcode_plugin
-
     original_write = install_fs.os.write
     calls = 0
     def interrupted(descriptor, data):
@@ -345,8 +326,6 @@ def test_interrupted_plugin_preparation_can_retry_without_partial_published_file
 
 @pytest.mark.parametrize("kind", ["file", "symlink"])
 def test_plugin_collision_preserves_operator_data(launch, tmp_path, kind):
-    from vigil_cli.remediation_clients import _prepare_zcode_plugin
-
     root = _prepare_zcode_plugin(launch.root / "agent", launch.engagement, launch.repository, launch.project, "acme", install_root=launch.root)
     target = root / "vigil-context.json"
     operator = tmp_path / "owner-context.json"
@@ -375,8 +354,6 @@ def test_route_selects_actual_client_and_deduplicates_same_case(launch, client):
 
 @pytest.mark.parametrize("version", ["3.6.4", "3.14.2", "2.99.0", "4.0.0"])
 def test_zcode_refuses_unsupported_release_before_node_probe_or_plugin_preparation(launch, monkeypatch, tmp_path, version):
-    import sys
-    from pathlib import Path
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     info = tmp_path / "Applications/ZCode.app/Contents/Info.plist"
@@ -389,9 +366,6 @@ def test_zcode_refuses_unsupported_release_before_node_probe_or_plugin_preparati
 
 
 def test_zcode_nondefault_private_root_is_explicit_in_context_and_bootstrap(launch, monkeypatch, tmp_path, capsys):
-    import sys
-    from pathlib import Path
-    import shlex
     monkeypatch.setattr(sys, "platform", "darwin")
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
     info = tmp_path / "Applications/ZCode.app/Contents/Info.plist"
@@ -408,8 +382,6 @@ def test_zcode_nondefault_private_root_is_explicit_in_context_and_bootstrap(laun
 
 
 def test_plugin_lock_creation_lookup_race_retries_on_attached_directory(launch, monkeypatch):
-    import os
-    from vigil_cli.remediation_clients import _prepare_zcode_plugin
     original_open = os.open
     injected = False
     def open_with_race(path, flags, *args, **kwargs):

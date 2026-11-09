@@ -52,11 +52,20 @@ def _source_obligation(client, run: dict, source: dict) -> dict:
     return obligation
 
 
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
+
+
 @pytest.mark.parametrize("closing_status", ["resolved", "accepted_gap"])
 def test_manual_closure_cannot_retire_an_unread_source(
-    client, isolate_settings, closing_status
+    client, closing_status, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid=f"unread-{closing_status}")
     receipt_id = _recovery_receipt(
         client, run, slug=f"unread-{closing_status}", observed="guard absent"
@@ -79,10 +88,7 @@ def test_manual_closure_cannot_retire_an_unread_source(
     assert _source_obligation(client, run, source)["status"] == "open"
 
 
-def test_recording_a_closed_source_read_obligation_is_refused(
-    client, isolate_settings
-) -> None:
-    _seed(client, isolate_settings)
+def test_recording_a_closed_source_read_obligation_is_refused(client, seeded_engagement) -> None:
     run = _recovery_parent_run(client, run_uuid="recorded-source-closure")
     receipt_id = _recovery_receipt(
         client, run, slug="recorded-source-closure", observed="guard absent"
@@ -139,9 +145,8 @@ def _obligation_digest(client, run: dict) -> str:
 
 
 def test_producer_release_closes_an_unread_source_with_an_audited_reason(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="release-unread")
     _recovery_receipt(client, run, slug="release-unread", observed="guard absent")
     [source] = _import(client, run, 1)
@@ -187,9 +192,8 @@ def test_producer_release_closes_an_unread_source_with_an_audited_reason(
 
 
 def test_release_rejects_a_different_reason_for_an_already_released_source(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="release-immutable")
     [source] = _import(client, run, 1)
     obligation = _source_obligation(client, run, source)
@@ -224,9 +228,8 @@ def _second_dispatch(client) -> None:
     "case", ["scan", "other_kind", "other_agent", "blank_reason", "sealed"]
 )
 def test_release_is_refused_outside_a_producer_proof_source_release(
-    client, isolate_settings, case
+    client, case, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     agent_id = "HUNT-RUN-1"
     reason = "generated fixture outside the claimed request path"
     if case == "scan":
@@ -269,8 +272,7 @@ def test_release_is_refused_outside_a_producer_proof_source_release(
     assert [event["to_status"] for event in after] == ["open"]
 
 
-def test_resumed_proof_run_inherits_a_released_source(client, isolate_settings) -> None:
-    _seed(client, isolate_settings)
+def test_resumed_proof_run_inherits_a_released_source(client, seeded_engagement) -> None:
     parent = _recovery_parent_run(client, run_uuid="release-parent")
     _recovery_receipt(client, parent, slug="release-parent", observed="guard absent")
     [source] = _import(client, parent, 1)
@@ -300,9 +302,8 @@ def test_resumed_proof_run_inherits_a_released_source(client, isolate_settings) 
 
 
 def test_existing_obligation_history_gains_a_nullable_release_actor(
-    client, isolate_settings
+    client, isolate_settings, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="release-upgrade")
     [source] = _import(client, run, 1)
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
@@ -327,9 +328,8 @@ def test_existing_obligation_history_gains_a_nullable_release_actor(
 
 
 def test_proof_run_completion_is_refused_while_imported_sources_are_unread(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="unread-completion")
     _recovery_receipt(client, run, slug="unread-completion", observed="guard absent")
     sources = _import(client, run, 3)
@@ -374,9 +374,8 @@ def test_proof_run_completion_is_refused_while_imported_sources_are_unread(
 
 
 def test_proof_run_refusal_names_other_blockers_after_unread_sources(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="unread-and-unproved")
     [source] = _import(client, run, 1)
     obligation_id = _source_obligation(client, run, source)["id"]
@@ -392,10 +391,7 @@ def test_proof_run_refusal_names_other_blockers_after_unread_sources(
     assert "Proof run has no recorded evidence receipt." in detail
 
 
-def test_proof_run_can_still_seal_its_truthful_partial_outcome(
-    client, isolate_settings
-) -> None:
-    _seed(client, isolate_settings)
+def test_proof_run_can_still_seal_its_truthful_partial_outcome(client, seeded_engagement) -> None:
     run = _recovery_parent_run(client, run_uuid="explicit-partial")
     _import(client, run, 2)
 
@@ -413,9 +409,8 @@ def test_proof_run_can_still_seal_its_truthful_partial_outcome(
 
 
 def test_scan_completion_with_an_unread_source_still_seals_partial(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _create_scan(client, run_uuid="scan-unread")
     assert client.patch(
         f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
@@ -457,9 +452,8 @@ def _close_by_legacy_write(obligation: dict, status_value: str, *, hard: bool = 
 
 
 def test_a_legacy_accepted_gap_source_is_released_by_its_proof_run_producer(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="legacy-accepted-gap")
     _recovery_receipt(client, run, slug="legacy-accepted-gap", observed="guard absent")
     [source] = _import(client, run, 1)
@@ -484,9 +478,8 @@ def test_a_legacy_accepted_gap_source_is_released_by_its_proof_run_producer(
 
 
 def test_a_legacy_accepted_gap_source_on_a_scan_is_still_refused(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _create_scan(client, run_uuid="legacy-accepted-gap-scan")
     assert client.patch(
         f"{BASE}/assessment-runs/{run['id']}", json={"status": "running"}
@@ -505,9 +498,8 @@ def test_a_legacy_accepted_gap_source_on_a_scan_is_still_refused(
     "status_value, hard", [("resolved", True), ("released", True), ("accepted_gap", False)]
 )
 def test_other_closed_source_obligations_stay_immutable(
-    client, isolate_settings, status_value, hard
+    client, status_value, hard, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid=f"legacy-{status_value}-{hard}")
     [source] = _import(client, run, 1)
     obligation = _source_obligation(client, run, source)
@@ -524,9 +516,8 @@ def test_other_closed_source_obligations_stay_immutable(
 
 
 def test_the_completion_refusal_offers_only_moves_each_listed_obligation_allows(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid="refusal-accuracy")
     receipt_id = _recovery_receipt(client, run, slug="refusal-accuracy", observed="guard absent")
     [source] = _import(client, run, 1)
@@ -571,12 +562,11 @@ def test_the_completion_refusal_offers_only_moves_each_listed_obligation_allows(
 
 @pytest.mark.parametrize("parked_status", ["deferred", "blocked", "accepted_gap"])
 def test_a_full_read_resolves_a_parked_source_read(
-    client, isolate_settings, parked_status
+    client, parked_status, seeded_engagement
 ) -> None:
     # A deferred or blocked source is still unread, and an accepted gap recorded
     # before releases existed still blocks the run; complete byte coverage is the
     # proof each of them is waiting for.
-    _seed(client, isolate_settings)
     run = _recovery_parent_run(client, run_uuid=f"parked-{parked_status}")
     content = b"VALUE = 1\n"
     [source] = client.post(

@@ -10,6 +10,7 @@ import subprocess
 import sys
 import time
 import uuid
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -71,6 +72,43 @@ def _isolate_orchestrator_url(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ORCHESTRATOR_BASE_URL", "http://127.0.0.1:9")
 
 
+@pytest.fixture
+def install_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """An install root whose agent tree is a copy of the repository fixture, with the URL isolated.
+
+    Performs exactly what the tests requesting it used to open with, in the same order.
+    """
+    _isolate_orchestrator_url(monkeypatch)
+    root = tmp_path / "install"
+    _copy_agent_fixture(repo_root / "agent", root)
+    return root
+
+
+class _FakeAssessClient:
+    """Base for the inline fake assessment clients that accept any constructor and close cleanly."""
+
+    def __init__(self, *_args: object, **_kwargs: object) -> None:
+        pass
+
+    def close(self) -> None:
+        return None
+
+
+class _ContextFakeClient(_FakeAssessClient):
+    """``_FakeAssessClient`` for the fakes the commands enter as a context manager.
+
+    Kept separate so a fake that is never entered keeps raising on ``with`` exactly as it does
+    today rather than silently gaining the protocol.
+    """
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
 def _write_blue_scope(eng_dir: Path) -> None:
     eng_dir.mkdir(parents=True, exist_ok=True)
     (eng_dir / "scope.json").write_text(
@@ -89,18 +127,68 @@ def _write_blue_scope(eng_dir: Path) -> None:
     )
 
 
+def _blue_capture_assess(
+    monkeypatch: pytest.MonkeyPatch, blue_module, eng_dir: Path
+) -> list[list[str]]:
+    """Resolve the blue engagement to ``eng_dir`` and capture the argv each command hands assess."""
+    calls: list[list[str]] = []
+    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    monkeypatch.setattr(
+        blue_module,
+        "_run_assess",
+        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
+    )
+    return calls
+
+
+def _pin_containment_decision(
+    monkeypatch: pytest.MonkeyPatch, blue_module, **payload: object
+) -> None:
+    """Stub the resolved containment proposal row ``blue contain`` reads.
+
+    ``payload`` entries precede the shared action/target/platform trio so the stubbed row keeps
+    the key order every call site wrote by hand.
+    """
+    monkeypatch.setattr(
+        blue_module,
+        "_fetch_containment_decision",
+        lambda *_args, **_kwargs: {
+            "id": 7,
+            "resolved": True,
+            "payload": {
+                **payload,
+                "action": "revoke_session",
+                "target": "alex@example.com",
+                "platform": "gws",
+            },
+        },
+    )
+
+
+def _contain_args(**overrides: object) -> SimpleNamespace:
+    """Build the ``blue contain`` argument namespace; call sites override only what they vary."""
+    fields: dict[str, object] = {
+        "finding_slug": "FIND-001",
+        "proposal": "7",
+        "proof_artifact": None,
+        "command_run_id": None,
+        "action": None,
+        "target": None,
+        "engagement_key": None,
+        "select": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
+
+
 def test_engagement_create_web_writes_scope_launchers_and_list_entry(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli.engagements import (
         CreateEngagementOptions,
         create_engagement,
         list_engagements,
     )
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     created = create_engagement(
         CreateEngagementOptions(
@@ -200,13 +288,9 @@ def test_engagement_create_blue_points_to_canonical_blue_operator_prompt(
 
 
 def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     for flag, value in (("--exploit-policy", "selected"), ("--auth-mode", "manual")):
         with pytest.raises(SystemExit):
@@ -229,15 +313,11 @@ def test_engagement_create_does_not_accept_exploit_policy_or_auth_mode_flags(
 
 
 def test_engagement_create_emits_post_create_footer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import docker as docker_mod
     from vigil_cli import oob as oob_mod
     from vigil_cli.engagements import CreateEngagementOptions, create_engagement
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: False)
     monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "stopped"})
@@ -260,15 +340,11 @@ def test_engagement_create_emits_post_create_footer(
 
 
 def test_engagement_create_footer_suppresses_hints_when_services_running(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import docker as docker_mod
     from vigil_cli import oob as oob_mod
     from vigil_cli.engagements import CreateEngagementOptions, create_engagement
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(docker_mod, "container_running", lambda *_a, **_k: True)
     monkeypatch.setattr(oob_mod, "oob_status", lambda *_a, **_k: {"state": "running"})
@@ -289,7 +365,7 @@ def test_engagement_create_footer_suppresses_hints_when_services_running(
 
 
 def test_engagement_create_android_uses_artifact_only_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli.engagements import (
         CreateEngagementOptions,
@@ -297,9 +373,6 @@ def test_engagement_create_android_uses_artifact_only_scope(
         list_engagements,
     )
 
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
     apk_path = tmp_path / "keeper.xapk"
 
     created = create_engagement(
@@ -333,13 +406,9 @@ def test_engagement_create_android_uses_artifact_only_scope(
 
 
 def test_engagement_create_android_cli_accepts_package_positional(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(
         [
@@ -363,13 +432,10 @@ def test_engagement_create_android_cli_accepts_package_positional(
 
 
 def test_engagement_create_android_cli_infers_apk_without_interactive_prompt(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
 
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
     apk_path = tmp_path / "keeper.apk"
 
     class _InteractiveStdin:
@@ -447,13 +513,10 @@ def _created_path_from_stdout(out: str) -> Path:
 
 
 def test_engagement_create_cli_merges_host_flags_and_hosts_file(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
 
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
     hosts_file = tmp_path / "hosts.txt"
     hosts_file.write_text(
         "# extra scope\nc.example.com\n\na.example.com\n",
@@ -484,13 +547,9 @@ def test_engagement_create_cli_merges_host_flags_and_hosts_file(
 
 
 def test_engagement_create_cli_missing_hosts_file_fails_with_clear_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     with pytest.raises(SystemExit, match="hosts-file"):
         main_module.main(
@@ -509,13 +568,9 @@ def test_engagement_create_cli_missing_hosts_file_fails_with_clear_error(
 
 
 def test_engagement_create_cli_echoes_inferred_type(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(
         [
@@ -537,13 +592,9 @@ def test_engagement_create_cli_echoes_inferred_type(
 
 
 def test_engagement_create_cli_ambiguous_type_requires_explicit_flag(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     with pytest.raises(SystemExit, match="--type"):
         main_module.main(
@@ -560,13 +611,10 @@ def test_engagement_create_cli_ambiguous_type_requires_explicit_flag(
 
 
 def test_engagement_create_cli_repo_flag_requires_explicit_remediation_type(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
 
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
     repository = tmp_path / "acme"
     subprocess.run(["git", "init", str(repository)], check=True, capture_output=True)
 
@@ -602,13 +650,9 @@ def test_engagement_create_cli_repo_flag_requires_explicit_remediation_type(
 
 
 def test_engagement_create_cli_repo_plus_web_target_rejects_mixed_workflows(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     with pytest.raises(SystemExit, match="remediation"):
         main_module.main(
@@ -622,13 +666,9 @@ def test_engagement_create_cli_repo_plus_web_target_rejects_mixed_workflows(
 
 
 def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
     # target, attribution-header (blank = none), out-of-scope (blank = none), confirm.
@@ -647,13 +687,9 @@ def test_engagement_create_wizard_prompts_on_stderr_keep_stdout_path_only(
 
 
 def test_engagement_create_bare_invocation_runs_full_wizard_with_confirmation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
     # type choice (1 = web), target, attribution (blank=none), out-of-scope (blank), confirmation.
@@ -672,13 +708,9 @@ def test_engagement_create_bare_invocation_runs_full_wizard_with_confirmation(
 
 
 def test_engagement_create_wizard_confirmation_decline_aborts_without_writing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
     # target, attribution (blank=none), out-of-scope (blank), decline confirm.
@@ -691,13 +723,9 @@ def test_engagement_create_wizard_confirmation_decline_aborts_without_writing(
 
 
 def test_engagement_create_wizard_reprompts_on_empty_required_answer(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
     # empty (reprompt), target, attribution (blank=none), out-of-scope (blank), confirm.
@@ -712,13 +740,9 @@ def test_engagement_create_wizard_reprompts_on_empty_required_answer(
 
 
 def test_engagement_create_interactive_with_complete_flags_skips_wizard(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
     monkeypatch.setattr(
@@ -757,17 +781,13 @@ def test_engagement_create_interactive_with_complete_flags_skips_wizard(
 
 
 def test_engagement_create_persists_header_and_rate_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     # --header (repeatable) + --rate-limit both land in scope.json for a web
     # engagement. The cap is a per-invocation / GLOBAL req/s ceiling (bounds
     # per-host as a side effect); the recon pipeline's bulk web stages read it
     # back via assess.lib.scope.rate_limit / rate_caps_for_dir.
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(
         [
@@ -797,15 +817,11 @@ def test_engagement_create_persists_header_and_rate_limit(
 
 
 def test_engagement_create_omits_rate_limit_when_unset(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     # Unset --rate-limit must leave scope.json with NO rate_limit key, so the
     # accessor returns None and recon stages keep their per-tool defaults.
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(
         [
@@ -849,16 +865,12 @@ def test_resolve_rate_limit_accessor() -> None:
 
 
 def test_engagement_create_rejects_sub1_rate_limit(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     # A sub-1 --rate-limit must be rejected at create: httpx -rate-limit /
     # katana -rl take an integer req/s, so a 0.5 cap would floor UP to 1 (2x the
     # intended ceiling). Reject it rather than silently doubling the cap.
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     with pytest.raises(SystemExit) as exc:
         main_module.main(
@@ -881,15 +893,11 @@ def test_engagement_create_rejects_sub1_rate_limit(
 
 
 def test_engagement_create_rate_limit_rejected_for_code_engagement(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     # --rate-limit is HTTP-target only; a code engagement must reject it with a
     # clear error rather than silently writing it into a non-HTTP scope.
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     with pytest.raises(SystemExit) as exc:
         main_module.main(
@@ -910,13 +918,9 @@ def test_engagement_create_rate_limit_rejected_for_code_engagement(
 
 
 def test_engagement_create_cli_json_output_replaces_bare_path(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(
         [
@@ -939,13 +943,9 @@ def test_engagement_create_cli_json_output_replaces_bare_path(
 
 
 def test_engagement_create_interactive_dry_run_skips_creation_confirmation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     monkeypatch.setattr(main_module.sys, "stdin", _TTYStdin())
     # target + attribution (blank=none) + out-of-scope (blank). A
@@ -965,13 +965,10 @@ def test_engagement_create_interactive_dry_run_skips_creation_confirmation(
 
 @pytest.mark.skipif(os.geteuid() == 0, reason="permission checks are bypassed when running as root")
 def test_engagement_create_cli_unreadable_hosts_file_fails_with_clear_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
 
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
     hosts_file = tmp_path / "hosts.txt"
     hosts_file.write_text("a.example.com\n", encoding="utf-8")
     hosts_file.chmod(0o000)
@@ -996,13 +993,10 @@ def test_engagement_create_cli_unreadable_hosts_file_fails_with_clear_error(
 
 
 def test_engagement_create_cli_dry_run_writes_nothing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
 
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
     data_dir = install_root / "orchestrator" / "backend" / "data"
     _write_marker_database(data_dir / "orchestrator.sqlite3", "untouched")
     monkeypatch.delenv("VIGIL_DATA_DIR", raising=False)
@@ -1031,13 +1025,9 @@ def test_engagement_create_cli_dry_run_writes_nothing(
 
 
 def test_engagement_create_cli_dry_run_text_keeps_stdout_empty(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(
         [
@@ -1059,13 +1049,9 @@ def test_engagement_create_cli_dry_run_text_keeps_stdout_empty(
 
 
 def test_engagement_create_dry_run_still_validates_required_fields(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     with pytest.raises(SystemExit, match="require"):
         main_module.main(
@@ -1109,17 +1095,13 @@ def test_prompt_choice_reprompts_on_invalid_then_accepts(
 
 
 def test_plan_engagement_scope_matches_created_scope(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, install_root: Path
 ) -> None:
     from vigil_cli.engagements import (
         CreateEngagementOptions,
         create_engagement,
         plan_engagement,
     )
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     options = CreateEngagementOptions(
         install_root=install_root,
@@ -2990,7 +2972,6 @@ def _prepared_runtime_image(monkeypatch):
 
 @pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
@@ -2998,19 +2979,7 @@ def test_runtime_start_uses_expected_docker_mounts(tmp_path: Path) -> None:
     (install_root / ".runtime-data").mkdir()
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "ps", "-a"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(install_root, commands=commands)
 
     start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
 
@@ -3052,7 +3021,6 @@ def test_runtime_start_missing_image_uses_matched_release_resolver(tmp_path: Pat
 def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
     """B2: runtime diagnostic tooling needs CAP_SYS_PTRACE; the docker-run argv
     must request it explicitly so ptrace operations do not fail with EPERM."""
-    from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
@@ -3060,19 +3028,7 @@ def test_runtime_start_grants_sys_ptrace_capability(tmp_path: Path) -> None:
     (install_root / ".runtime-data").mkdir()
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "ps", "-a"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(install_root, commands=commands)
 
     start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
 
@@ -3092,21 +3048,12 @@ def test_runtime_start_retries_without_host_gateway_when_docker_rejects_flag(tmp
     (install_root / ".runtime-data").mkdir()
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "ps", "-a"]:
-            return DockerResult(0, "", "")
+    def _reject_host_gateway(argv: list[str]) -> DockerResult | None:
         if argv[:3] == ["docker", "run", "-d"] and "--add-host=host.docker.internal:host-gateway" in argv:
             return DockerResult(125, "", "invalid host-gateway")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
+        return None
+
+    runner = _runtime_runner(install_root, commands=commands, extra=_reject_host_gateway)
 
     start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
 
@@ -3916,12 +3863,8 @@ def test_assess_kali_help_lists_every_typed_verb(capsys: pytest.CaptureFixture[s
         assert verb in out, f"verb {verb} missing from kali --help"
 
 
-def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_main_assess_passthrough_only_applies_to_top_level_command(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, install_root: Path) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     def fail_execv(path: str, argv: list[str]) -> None:
         raise AssertionError(f"unexpected assess passthrough to {path}: {argv}")
@@ -3969,7 +3912,6 @@ def test_main_assess_passthrough_execs_assess_script(tmp_path: Path, monkeypatch
 
 @pytest.mark.usefixtures("_prepared_runtime_image")
 def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
@@ -3981,19 +3923,7 @@ def test_runtime_start_applies_resource_limits(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("VIGIL_RUNTIME_SHM_SIZE", "2g")
     commands: list[list[str]] = []
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        commands.append(argv)
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "ps", "-a"]:
-            return DockerResult(0, "", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(install_root, commands=commands)
 
     start_runtime(RuntimeOptions(install_root=install_root, recreate=False), runner=runner, validate_tools=False)
 
@@ -4018,22 +3948,9 @@ def test_runtime_start_rejects_already_running_container_with_clear_message(tmp_
     (install_root / "agent" / "engagements").mkdir(parents=True)
     (install_root / ".runtime-data").mkdir()
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(
-                0,
-                f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n",
-                "",
-            )
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
-            return DockerResult(0, "1048576\nunlimited\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(
+        install_root, running="vigil\n", ulimits=DockerResult(0, "1048576\nunlimited\n", "")
+    )
 
     with pytest.raises(SystemExit) as excinfo:
         start_runtime(RuntimeOptions(install_root=install_root), runner=runner, validate_tools=False)
@@ -4053,18 +3970,9 @@ def test_check_runtime_ulimits_warns_when_below_threshold(tmp_path: Path, capsys
     (install_root / "agent" / "engagements").mkdir(parents=True)
     (install_root / ".runtime-data").mkdir()
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
-            return DockerResult(0, "8192\n4096\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(
+        install_root, running="vigil\n", ulimits=DockerResult(0, "8192\n4096\n", "")
+    )
 
     start_runtime(
         RuntimeOptions(install_root=install_root, recreate=False),
@@ -4086,18 +3994,9 @@ def test_check_runtime_ulimits_silent_when_limits_ok(tmp_path: Path, capsys: pyt
     (install_root / "agent" / "engagements").mkdir(parents=True)
     (install_root / ".runtime-data").mkdir()
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
-            return DockerResult(0, "1048576\nunlimited\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(
+        install_root, running="vigil\n", ulimits=DockerResult(0, "1048576\nunlimited\n", "")
+    )
 
     start_runtime(
         RuntimeOptions(install_root=install_root, recreate=False),
@@ -4116,18 +4015,9 @@ def test_check_runtime_ulimits_silent_on_exec_failure(tmp_path: Path, capsys: py
     (install_root / "agent" / "engagements").mkdir(parents=True)
     (install_root / ".runtime-data").mkdir()
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, f"{install_root / '.runtime-data'} -> /data\n{install_root / 'agent' / 'engagements'} -> /engagements\n", "")
-        if argv[:2] == ["docker", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "exec", "vigil"] and argv[-1] == "ulimit -n; ulimit -u":
-            return DockerResult(1, "", "exec failed")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(
+        install_root, running="vigil\n", ulimits=DockerResult(1, "", "exec failed")
+    )
 
     start_runtime(
         RuntimeOptions(install_root=install_root, recreate=False),
@@ -4259,12 +4149,8 @@ def test_runtime_shell_exec_strips_separator_and_quotes_multiple_parts(monkeypat
     assert calls == [["docker", "exec", "vigil", "sh", "-lc", "printf %s 'a b'"]]
 
 
-def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_engagement_create_infers_localhost_url_as_web(tmp_path: Path, install_root: Path) -> None:
     from vigil_cli import main as main_module
-
-    _isolate_orchestrator_url(monkeypatch)
-    install_root = tmp_path / "install"
-    _copy_agent_fixture(repo_root / "agent", install_root)
 
     main_module.main(["--root", str(install_root), "engagement", "create", "http://localhost:8080", "--no-prompt"])
 
@@ -4309,26 +4195,14 @@ def test_engagement_select_preserves_fuzzy_selection_identity(tmp_path: Path, mo
 
 
 def test_runtime_start_rejects_running_container_with_wrong_mount(tmp_path: Path) -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.runtime import RuntimeOptions, start_runtime
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        if argv[:4] == ["docker", "inspect", "-f", "{{.Image}}"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:4] == ["docker", "image", "inspect", "-f"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, "/wrong/data -> /data\n/wrong/engagements -> /engagements\n", "")
-        if argv[:3] == ["docker", "exec", "vigil"]:
-            return DockerResult(0, "", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(
+        install_root, running="vigil\n", mounts="/wrong/data -> /data\n/wrong/engagements -> /engagements\n"
+    )
 
     with pytest.raises(SystemExit, match="mount drift"):
         start_runtime(RuntimeOptions(install_root=install_root), runner=runner)
@@ -4468,19 +4342,13 @@ def test_doctor_skips_docker_checks_when_docker_cli_missing(
 
 def test_status_json_reports_runtime_mount_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from vigil_cli import main as main_module
-    from vigil_cli.docker import DockerResult
 
     install_root = tmp_path / "install"
     (install_root / "agent" / "engagements").mkdir(parents=True)
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        if argv[:3] == ["docker", "image", "inspect"]:
-            return DockerResult(0, "sha256:image\n", "")
-        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
-            return DockerResult(0, "/wrong/data -> /data\n/wrong/engagements -> /engagements\n", "")
-        return DockerResult(0, "", "")
+    runner = _runtime_runner(
+        install_root, running="vigil\n", mounts="/wrong/data -> /data\n/wrong/engagements -> /engagements\n"
+    )
 
     monkeypatch.setattr(main_module, "docker_run_command", runner)
 
@@ -5476,8 +5344,58 @@ def test_verify_oob_channel_unverified_when_runtime_is_down(
     assert "Kali runtime is not running" in result.reason
 
 
+def _runtime_runner(
+    install_root: Path,
+    *,
+    commands: list[list[str]] | None = None,
+    running: str = "",
+    mounts: str | None = None,
+    ulimits: object = None,
+    extra: Callable[[list[str]], object] | None = None,
+):
+    """The docker reply chain the runtime start/status tests share, in its original branch order.
+
+    ``extra`` is consulted first so a test can add its own branch (and return ``None`` to fall
+    through); ``ulimits`` is absent unless a test supplies the ``ulimit`` reply, which keeps the
+    catch-all answering ``docker exec`` exactly as it does for the tests that never stub it.
+    """
+    from vigil_cli.docker import DockerResult
+
+    mount_listing = mounts if mounts is not None else (
+        f"{install_root / '.runtime-data'} -> /data\n"
+        f"{install_root / 'agent' / 'engagements'} -> /engagements\n"
+    )
+
+    def runner(argv: list[str], **_: object) -> DockerResult:
+        if commands is not None:
+            commands.append(argv)
+        if extra is not None:
+            reply = extra(argv)
+            if reply is not None:
+                return reply
+        if argv[:3] == ["docker", "image", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if argv[:3] == ["docker", "ps", "--format"]:
+            return DockerResult(0, running, "")
+        if argv[:3] == ["docker", "ps", "-a"]:
+            return DockerResult(0, "", "")
+        if argv[:3] == ["docker", "inspect", "-f"] and "{{range .Mounts}}" in argv[3]:
+            return DockerResult(0, mount_listing, "")
+        if argv[:2] == ["docker", "inspect"]:
+            return DockerResult(0, "sha256:image\n", "")
+        if (
+            ulimits is not None
+            and argv[:3] == ["docker", "exec", "vigil"]
+            and argv[-1] == "ulimit -n; ulimit -u"
+        ):
+            return ulimits
+        return DockerResult(0, "", "")
+
+    return runner
+
+
 def _channel_probe_runner(
-    probes: list[str], *, dns_fails: bool = False, marker: str = ""
+    probes: list[str], *, dns_fails: bool = False, marker: str = "", host: str = "host"
 ):
     """Runner that records each channel-verification round trip it is asked for."""
     from vigil_cli.docker import DockerResult
@@ -5496,7 +5414,7 @@ def _channel_probe_runner(
         if command.startswith("curl "):
             return DockerResult(0, "200", "")
         if command.startswith("grep "):
-            return DockerResult(0, f"[{marker}.host] HTTP\n", "")
+            return DockerResult(0, f"[{marker}.{host}] HTTP\n", "")
         raise AssertionError(f"unexpected command: {command}")
 
     return runner
@@ -5785,21 +5703,7 @@ def test_oob_poll_zero_match_reports_channel_verified(
     Otherwise `matched 0` from a live channel and from a broken one are
     byte-identical — and an OOB negative is used as evidence.
     """
-    from vigil_cli.docker import DockerResult
-
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        command = argv[-1]
-        if command.startswith("dig "):
-            return DockerResult(0, "203.0.113.10\n", "")
-        if command.startswith("curl "):
-            return DockerResult(0, "200", "")
-        if command.startswith("grep "):
-            return DockerResult(
-                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
-            )
-        raise AssertionError(f"unexpected command: {command}")
+    runner = _channel_probe_runner([], host=_oob_poll_payload_host())
 
     _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=runner)
 
@@ -5821,19 +5725,7 @@ def test_oob_poll_loop_does_not_reprove_the_channel_every_empty_poll(
     """
     from vigil_cli.docker import DockerResult
 
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        command = argv[-1]
-        if command.startswith("dig "):
-            return DockerResult(0, "203.0.113.10\n", "")
-        if command.startswith("curl "):
-            return DockerResult(0, "200", "")
-        if command.startswith("grep "):
-            return DockerResult(
-                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
-            )
-        raise AssertionError(f"unexpected command: {command}")
+    runner = _channel_probe_runner([], host=_oob_poll_payload_host())
 
     def refuses(argv: list[str], **_: object) -> DockerResult:
         raise AssertionError(f"second poll must not re-prove the channel: {argv[-1]}")
@@ -5856,21 +5748,7 @@ def test_oob_poll_text_output_says_how_the_channel_verdict_was_obtained(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     """Text mode carries the same freshness the JSON does — a cached verdict says so."""
-    from vigil_cli.docker import DockerResult
-
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        command = argv[-1]
-        if command.startswith("dig "):
-            return DockerResult(0, "203.0.113.10\n", "")
-        if command.startswith("curl "):
-            return DockerResult(0, "200", "")
-        if command.startswith("grep "):
-            return DockerResult(
-                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
-            )
-        raise AssertionError(f"unexpected command: {command}")
+    runner = _channel_probe_runner([], host=_oob_poll_payload_host())
 
     _run_oob_poll(monkeypatch, tmp_path, log="", probes=[], runner=runner, as_json=False)
     assert "channel\tverified" in capsys.readouterr().out
@@ -5921,21 +5799,7 @@ def test_oob_poll_does_not_report_its_own_verification_markers(
     life of the client — the check manufacturing the evidence it exists to
     qualify.
     """
-    from vigil_cli.docker import DockerResult
-
-    def runner(argv: list[str], **_: object) -> DockerResult:
-        if argv[:3] == ["docker", "ps", "--format"]:
-            return DockerResult(0, "vigil\n", "")
-        command = argv[-1]
-        if command.startswith("dig "):
-            return DockerResult(0, "203.0.113.10\n", "")
-        if command.startswith("curl "):
-            return DockerResult(0, "200", "")
-        if command.startswith("grep "):
-            return DockerResult(
-                0, f"[{_self_test_marker('cafebabe')}.{_oob_poll_payload_host()}] HTTP\n", ""
-            )
-        raise AssertionError(f"unexpected command: {command}")
+    runner = _channel_probe_runner([], host=_oob_poll_payload_host())
 
     host = _oob_poll_payload_host()
     log = (
@@ -7068,7 +6932,7 @@ def _load_assess_main():
     return assess_main
 
 
-class _FakeWorkBufferClient:
+class _FakeWorkBufferClient(_ContextFakeClient):
     """In-memory AssessmentClient stand-in for the backend work buffer.
 
     The per-engagement local ``cases.db`` ``work_items`` table was folded into
@@ -7127,16 +6991,6 @@ class _FakeWorkBufferClient:
         # done / error / mark-manual / defer-cluster / reset-stale / retry-errors
         # all just need a numeric ack the CLI echoes back.
         return {"affected": len(payload.get("ids") or [])}
-
-    def close(self) -> None:
-        return None
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-        return False
 
 
 def test_resolve_surface_requires_rationale(capsys: pytest.CaptureFixture[str]) -> None:
@@ -7200,33 +7054,15 @@ def test_resolve_surface_accepts_partially_covered_with_followup_condition(
 
     captured: dict[str, dict] = {}
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def patch(self, path: str, payload: dict) -> dict:
             captured["path"] = path
             captured["payload"] = payload
             return {"id": 42, "status": payload["status"], **payload}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(tmp_path),
-            engagement_key="eng-test",
-            agent_root=str(tmp_path),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(tmp_path), engagement_key="eng-test", agent_root=str(tmp_path),
     )
 
     module.run(
@@ -7264,17 +7100,8 @@ def test_transition_phase_resolves_engagement_dir_from_cwd(
         encoding="utf-8",
     )
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
+    class _Client(_ContextFakeClient):
+        pass
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     monkeypatch.delenv("ENGAGEMENT_DIR", raising=False)
@@ -7304,31 +7131,14 @@ def test_transition_phase_backend_error_blocks_precondition_check(
         encoding="utf-8",
     )
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, _path: str) -> dict:
             raise RuntimeError("backend unavailable")
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement),
-            engagement_key=engagement.name,
-            agent_root=str(tmp_path / "agent"),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
+        agent_root=str(tmp_path / "agent"),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -7362,10 +7172,7 @@ def test_transition_phase_both_engagement_advances_code_track_separately(
         encoding="utf-8",
     )
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, path: str) -> dict:
             assert path == "code/readiness?target_phase=classify-map"
             return {
@@ -7375,24 +7182,10 @@ def test_transition_phase_both_engagement_advances_code_track_separately(
                 "quality_gate": {"passed": True, "warnings": []},
             }
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement),
-            engagement_key=engagement.name,
-            agent_root=str(tmp_path / "agent"),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
+        agent_root=str(tmp_path / "agent"),
     )
 
     module.run(
@@ -7452,15 +7245,9 @@ def test_transition_phase_both_missing_code_phase_requires_supported_repair(
         json.dumps({"engagement_type": "both", "current_phase": "collect"}),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement),
-            engagement_key=engagement.name,
-            agent_root=str(tmp_path / "agent"),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
+        agent_root=str(tmp_path / "agent"),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -7500,15 +7287,9 @@ def test_transition_phase_both_completes_only_after_each_track(
         ),
         encoding="utf-8",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement),
-            engagement_key=engagement.name,
-            agent_root=str(tmp_path / "agent"),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
+        agent_root=str(tmp_path / "agent"),
     )
     monkeypatch.setattr(module, "_check_preconditions", lambda *_args, **_kwargs: [])
 
@@ -7571,10 +7352,7 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
     }
     captured_paths: list[str] = []
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, path: str):
             captured_paths.append(path)
             if path == "findings":
@@ -7583,24 +7361,10 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
                 return [older_variant_dispatch]
             return []
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement),
-            engagement_key=engagement.name,
-            agent_root=str(tmp_path / "agent"),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
+        agent_root=str(tmp_path / "agent"),
     )
 
     module.run(
@@ -7637,10 +7401,7 @@ def _setup_transition_env(
     decisions: list[dict] = []
     decisions_by_kind = decisions_by_kind or {}
 
-    class _Client:
-        def __init__(self, *_a, **_k) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get_all_pages(self, endpoint: str, *, page_size: int = 5000):
             # The work buffer now lives in the backend (assessment_work_items);
             # the consumption advisory / work-buffer gates read it via
@@ -7673,26 +7434,10 @@ def _setup_transition_env(
             decisions.append(payload)
             return {"id": len(decisions)}
 
-        def close(self) -> None:
-            return None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement),
-            engagement_key=engagement.name,
-            agent_root=str(tmp_path / "agent"),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
+        agent_root=str(tmp_path / "agent"),
     )
     return engagement, decisions
 
@@ -8056,9 +7801,7 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
     (eng / "scope.json").write_text(
         json.dumps({"engagement_type": "code", "current_phase": "fuzz"}), encoding="utf-8")
 
-    class _Client:
-        def __init__(self, *_a, **_k) -> None:
-            pass
+    class _Client(_ContextFakeClient):
         def get(self, path: str):
             queried.append(path)
             if path == "code/readiness?target_phase=complete":
@@ -8071,14 +7814,12 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
             if path == "findings":
                 return []
             return []
-        def close(self): return None
-        def __enter__(self): return self
         def __exit__(self, *_e): return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(module, "load_config", lambda *_a, **_k: SimpleNamespace(
-        base_url="http://example.test", engagement_dir=str(eng),
-        engagement_key=eng.name, agent_root=str(tmp_path / "agent")))
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(eng), engagement_key=eng.name, agent_root=str(tmp_path / "agent"),
+    )
 
     module.run(_transition_args(eng, "complete"))
     assert "code/readiness?target_phase=complete" in queried
@@ -8211,10 +7952,7 @@ def test_transition_chain_gate_requests_full_completed_exploit_dev_page(
         encoding="utf-8",
     )
 
-    class _Client:
-        def __init__(self, *_a, **_k) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, path: str):
             captured.append(path)
             if path == "findings":
@@ -8229,15 +7967,12 @@ def test_transition_chain_gate_requests_full_completed_exploit_dev_page(
             if path.startswith("dispatches"):
                 return [{"agent_role": "exploit-developer", "status": "completed"}]
             return []
-
-        def close(self): return None
-        def __enter__(self): return self
         def __exit__(self, *_e): return False
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(module, "load_config", lambda *_a, **_k: SimpleNamespace(
-        base_url="http://example.test", engagement_dir=str(eng),
-        engagement_key=eng.name, agent_root=str(tmp_path / "agent")))
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(eng), engagement_key=eng.name, agent_root=str(tmp_path / "agent"),
+    )
 
     module.run(_transition_args(eng, "report"))
     chain_queries = [
@@ -8312,10 +8047,7 @@ def test_check_phase_readiness_reports_partially_covered_surfaces(
         "high_risk_deferred_surfaces": [],
     }
 
-    class _Client:
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, path: str) -> dict:
             if path.startswith("phase-readiness"):
                 return {
@@ -8344,24 +8076,9 @@ def test_check_phase_readiness_reports_partially_covered_surfaces(
         def list_all_decisions(self, **_filters):
             return []
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(tmp_path),
-            engagement_key="eng-test",
-            agent_root=str(tmp_path),
-        ),
+    _pin_assess_config(
+        monkeypatch, module, engagement_dir=str(tmp_path), engagement_key="eng-test", agent_root=str(tmp_path),
     )
     (tmp_path / "scope.json").write_text(json.dumps({"hosts": []}), encoding="utf-8")
 
@@ -8406,6 +8123,21 @@ def _load_assess_module(name: str, relative: str):
     return module
 
 
+def _pin_assess_config(monkeypatch: pytest.MonkeyPatch, module: object, **fields: object) -> None:
+    """Patch ``module.load_config`` with ``base_url`` plus exactly the fields the caller supplies.
+
+    Nothing but ``base_url`` is defaulted: a command that reads a config attribute its own test
+    never supplied must keep raising exactly as it does today, so every call site states its own
+    field set. ``engagement_dir`` is part of the real ``Config``, and ``register`` canonicalizes
+    the submitted path against it, so a call site exercising that path must pass it here.
+    """
+    monkeypatch.setattr(
+        module,
+        "load_config",
+        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", **fields),
+    )
+
+
 def test_assess_log_accepts_structured_metadata_inline(monkeypatch: pytest.MonkeyPatch) -> None:
     module = _load_assess_module(
         "log_entry_command_module_metadata",
@@ -8414,10 +8146,7 @@ def test_assess_log_accepts_structured_metadata_inline(monkeypatch: pytest.Monke
     posts: list[tuple[str, dict]] = []
     events: list[dict] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post_engagement(self, endpoint: str, payload: dict) -> dict:
             posts.append((endpoint, payload))
             return {"id": 1, **payload}
@@ -8426,20 +8155,8 @@ def test_assess_log_accepts_structured_metadata_inline(monkeypatch: pytest.Monke
             events.append(payload)
             return {"id": 2}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module.run(
         SimpleNamespace(
@@ -8481,10 +8198,7 @@ def test_assess_log_accepts_structured_metadata_file(
     metadata_path.write_text('{"finding_slug":"FIND-001","proposal_id":"7"}', encoding="utf-8")
     posts: list[tuple[str, dict]] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post_engagement(self, endpoint: str, payload: dict) -> dict:
             posts.append((endpoint, payload))
             return {"id": 1, **payload}
@@ -8492,20 +8206,8 @@ def test_assess_log_accepts_structured_metadata_file(
         def post_event(self, _payload: dict) -> dict:
             return {"id": 2}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module.run(
         SimpleNamespace(
@@ -8532,15 +8234,9 @@ def test_blue_verify_requires_verifier_dispatch_unless_forced(
     _write_blue_scope(eng_dir)
     proof_path = tmp_path / "proof.json"
     proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
     monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     with pytest.raises(SystemExit, match="incident-verifier"):
         blue_module._cmd_verify(
@@ -8573,15 +8269,9 @@ def test_blue_verify_rejects_non_blue_engagement_before_mutation(
         json.dumps({"engagement_type": "web", "current_phase": "verify"}),
         encoding="utf-8",
     )
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
     monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     with pytest.raises(SystemExit, match="only works on blue engagements"):
         blue_module._cmd_verify(
@@ -8612,15 +8302,9 @@ def test_blue_verify_force_bypasses_missing_verifier_dispatch(
     _write_blue_scope(eng_dir)
     proof_path = tmp_path / "proof.json"
     proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
     monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_args, **_kwargs: False)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     blue_module._cmd_verify(
         SimpleNamespace(
@@ -8711,15 +8395,9 @@ def test_blue_verify_false_positive_uses_canonical_finding_verify(
         }),
         encoding="utf-8",
     )
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
     monkeypatch.setattr(blue_module, "_has_verifier_dispatch_for", lambda *_args, **_kwargs: True)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     blue_module._cmd_verify(
         SimpleNamespace(
@@ -8784,39 +8462,12 @@ def test_blue_contain_logs_structured_activity_metadata(
     _write_blue_scope(eng_dir)
     proof_path = tmp_path / "proof.json"
     proof_path.write_text('{"revoked":true}\n', encoding="utf-8")
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
+    _pin_containment_decision(monkeypatch, blue_module)
 
     blue_module._cmd_contain(
-        SimpleNamespace(
-            finding_slug="FIND-001",
-            proposal="7",
-            proof_artifact=str(proof_path),
-            command_run_id=None,
-            action=None,
-            target=None,
-            engagement_key=None,
-            select=False,
-        ),
+        _contain_args(proof_artifact=str(proof_path)),
         tmp_path,
     )
 
@@ -8840,41 +8491,13 @@ def test_blue_contain_requires_proof_artifact_or_command_run_id(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "finding_slug": "FIND-001",
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
+    _pin_containment_decision(monkeypatch, blue_module, finding_slug="FIND-001")
 
     with pytest.raises(SystemExit, match="requires --proof-artifact or --command-run-id"):
         blue_module._cmd_contain(
-            SimpleNamespace(
-                finding_slug="FIND-001",
-                proposal="7",
-                proof_artifact=None,
-                command_run_id=None,
-                action=None,
-                target=None,
-                engagement_key=None,
-                select=False,
-            ),
+            _contain_args(),
             tmp_path,
         )
 
@@ -8893,20 +8516,7 @@ def test_blue_contain_aborts_when_only_proof_artifact_registration_fails(
     calls: list[list[str]] = []
 
     monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "finding_slug": "FIND-001",
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
+    _pin_containment_decision(monkeypatch, blue_module, finding_slug="FIND-001")
 
     def fake_run(_install_root: Path, _eng_dir: Path, assess_args: list[str], **_kwargs: object) -> int:
         calls.append(assess_args)
@@ -8916,16 +8526,7 @@ def test_blue_contain_aborts_when_only_proof_artifact_registration_fails(
 
     with pytest.raises(SystemExit):
         blue_module._cmd_contain(
-            SimpleNamespace(
-                finding_slug="FIND-001",
-                proposal="7",
-                proof_artifact=str(proof_path),
-                command_run_id=None,
-                action=None,
-                target=None,
-                engagement_key=None,
-                select=False,
-            ),
+            _contain_args(proof_artifact=str(proof_path)),
             tmp_path,
         )
 
@@ -8949,23 +8550,9 @@ def test_blue_contain_accepts_command_run_id_as_execution_proof(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "finding_slug": "FIND-001",
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
+    _pin_containment_decision(monkeypatch, blue_module, finding_slug="FIND-001")
     monkeypatch.setattr(
         blue_module,
         "_fetch_command_run",
@@ -8981,23 +8568,9 @@ def test_blue_contain_accepts_command_run_id_as_execution_proof(
         },
     )
     monkeypatch.setattr(blue_module, "_fetch_containment_finding", lambda *_args: {"id": 11, "slug": "FIND-001"})
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     blue_module._cmd_contain(
-        SimpleNamespace(
-            finding_slug="FIND-001",
-            proposal="7",
-            proof_artifact=None,
-            command_run_id=42,
-            action=None,
-            target=None,
-            engagement_key=None,
-            select=False,
-        ),
+        _contain_args(command_run_id=42),
         tmp_path,
     )
 
@@ -9014,42 +8587,14 @@ def test_blue_contain_rejects_unknown_command_run_id(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "finding_slug": "FIND-001",
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
+    _pin_containment_decision(monkeypatch, blue_module, finding_slug="FIND-001")
     monkeypatch.setattr(blue_module, "_fetch_command_run", lambda *_args, **_kwargs: None)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     with pytest.raises(SystemExit, match="command run id 999999 not found"):
         blue_module._cmd_contain(
-            SimpleNamespace(
-                finding_slug="FIND-001",
-                proposal="7",
-                proof_artifact=None,
-                command_run_id=999999,
-                action=None,
-                target=None,
-                engagement_key=None,
-                select=False,
-            ),
+            _contain_args(command_run_id=999999),
             tmp_path,
         )
 
@@ -9111,23 +8656,9 @@ def test_blue_contain_rejects_non_containment_command_run_proof(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "finding_slug": "FIND-001",
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
+    _pin_containment_decision(monkeypatch, blue_module, finding_slug="FIND-001")
     monkeypatch.setattr(blue_module, "_fetch_command_run", lambda *_args, **_kwargs: {
         "finding_id": 11,
         "intent": "containment proposal=7 action=revoke_session",
@@ -9135,24 +8666,10 @@ def test_blue_contain_rejects_non_containment_command_run_proof(
         **command_row,
     })
     monkeypatch.setattr(blue_module, "_fetch_containment_finding", lambda *_args: {"id": 11, "slug": "FIND-001"})
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
 
     with pytest.raises(SystemExit, match=message):
         blue_module._cmd_contain(
-            SimpleNamespace(
-                finding_slug="FIND-001",
-                proposal="7",
-                proof_artifact=None,
-                command_run_id=42,
-                action=None,
-                target=None,
-                engagement_key=None,
-                select=False,
-            ),
+            _contain_args(command_run_id=42),
             tmp_path,
         )
 
@@ -9255,41 +8772,13 @@ def test_blue_contain_rejects_proposal_for_different_finding(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_fetch_containment_decision",
-        lambda *_args, **_kwargs: {
-            "id": 7,
-            "resolved": True,
-            "payload": {
-                "finding_slug": "FIND-A",
-                "action": "revoke_session",
-                "target": "alex@example.com",
-                "platform": "gws",
-            },
-        },
-    )
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
+    _pin_containment_decision(monkeypatch, blue_module, finding_slug="FIND-A")
 
     with pytest.raises(SystemExit, match="belongs to finding 'FIND-A'"):
         blue_module._cmd_contain(
-            SimpleNamespace(
-                finding_slug="FIND-B",
-                proposal="7",
-                proof_artifact=None,
-                command_run_id=42,
-                action=None,
-                target=None,
-                engagement_key=None,
-                select=False,
-            ),
+            _contain_args(finding_slug="FIND-B", command_run_id=42),
             tmp_path,
         )
 
@@ -9645,14 +9134,8 @@ def test_blue_alert_record_body_file_stdin_reads_piped_alert(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
     body = '{"alert_id":"AL-9","actor":"sam@example.com"}\n'
     monkeypatch.setattr(
         blue_module.sys,
@@ -9725,14 +9208,8 @@ def test_blue_alert_record_body_file_updates_scope_and_registers_artifact(
     _write_blue_scope(eng_dir)
     body_path = tmp_path / "alert.json"
     body_path.write_text('{"alert_id":"AL-1","actor":"alex@example.com"}\n', encoding="utf-8")
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
 
     blue_module._cmd_alert_record(
         SimpleNamespace(
@@ -9854,14 +9331,8 @@ def test_blue_closeout_dispatches_report_writer_for_closure_summary(
 
     eng_dir = tmp_path / "engagement"
     _write_blue_scope(eng_dir)
-    calls: list[list[str]] = []
 
-    monkeypatch.setattr(blue_module, "_resolve_blue_engagement", lambda *_args, **_kwargs: eng_dir)
-    monkeypatch.setattr(
-        blue_module,
-        "_run_assess",
-        lambda _install_root, _eng_dir, assess_args, **_kwargs: calls.append(assess_args) or 0,
-    )
+    calls = _blue_capture_assess(monkeypatch, blue_module, eng_dir)
 
     blue_module._cmd_closeout(
         SimpleNamespace(engagement_key=None, select=False, agent_id=None),
@@ -9955,10 +9426,7 @@ def test_link_finding_intel_preserves_details_related_intel_ids(
     )
     patches: list[tuple[str, dict]] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str) -> dict:
             assert endpoint == "findings/FIND-001"
             return {"slug": "FIND-001", "details": {"related_intel_ids": [1]}}
@@ -9972,20 +9440,8 @@ def test_link_finding_intel_preserves_details_related_intel_ids(
                 }
             }
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module.run(
         SimpleNamespace(
@@ -10014,6 +9470,29 @@ def test_link_finding_intel_preserves_details_related_intel_ids(
             "details": {"related_intel_ids": [1, 2]},
         }
     }
+
+
+def _host_exec_args(engagement_dir: object, **overrides: object) -> SimpleNamespace:
+    """Build the ``host_exec`` argparse namespace with the values every call site shares.
+
+    Only fields that are byte-identical across every site are defaulted here. ``agent_name``,
+    ``require_audit``, ``finding``, ``identity`` and ``identity_scope`` are deliberately absent:
+    the sites that omit one exercise the missing-attribute path, so each site states its own.
+    """
+    fields: dict[str, object] = {
+        "engagement_dir": engagement_dir,
+        "from_json": None,
+        "technique": "T0000",
+        "phase": "investigate",
+        "target_host": "",
+        "scope_host": "",
+        "cwd": None,
+        "timeout": 30,
+        "audit_source": "argv",
+        "allow_destructive": False,
+    }
+    fields.update(overrides)
+    return SimpleNamespace(**fields)
 
 
 def _host_finalize_response(payload: dict, **fields: object) -> dict:
@@ -10081,10 +9560,7 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
     posts: list[tuple[str, dict]] = []
     events: list[str] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient, _HostAuditReceiptMixin):
         def post(self, endpoint: str, payload: dict) -> dict:
             events.append("audit")
             posts.append((endpoint, payload))
@@ -10094,26 +9570,10 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
             events.append("finalize")
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setenv("AGENT_NAME", "investigator")
     monkeypatch.delenv("VIGIL_AGENT_NAME", raising=False)
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     process_kwargs: dict[str, object] = {}
 
     def _fake_run_host_process(*_args: object, **kwargs: object):
@@ -10144,20 +9604,12 @@ def test_host_exec_uses_agent_name_env_for_audit_payload(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="test audit attribution",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 scope_host="acme",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 identity="member",
             )
         )
@@ -10199,10 +9651,7 @@ def test_host_exec_replays_pre_exec_post_after_lost_response_before_execution(
     posts: list[tuple[str, dict]] = []
     events: list[str] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, endpoint: str, payload: dict) -> dict:
             events.append("audit")
             posts.append((endpoint, dict(payload)))
@@ -10216,19 +9665,8 @@ def test_host_exec_replays_pre_exec_post_after_lost_response_before_execution(
             assert endpoint == "command-runs/42"
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            return None
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(
         module,
         "prepare_execution_command",
@@ -10243,20 +9681,12 @@ def test_host_exec_replays_pre_exec_post_after_lost_response_before_execution(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="test lost response recovery",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 scope_host="acme",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
                 finding="",
                 identity=None,
@@ -10280,10 +9710,7 @@ def test_host_exec_explicit_finding_resolution_failure_stops_before_process(
     )
     events: list[str] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def get(self, endpoint: str) -> dict:
             events.append(f"resolve:{endpoint}")
             raise module.AssessError("finding VA-MISSING not found")
@@ -10296,19 +9723,8 @@ def test_host_exec_explicit_finding_resolution_failure_stops_before_process(
             events.append("finalize")
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
     monkeypatch.setattr(
         module,
@@ -10319,21 +9735,12 @@ def test_host_exec_explicit_finding_resolution_failure_stops_before_process(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="require explicit finding linkage",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=False,
                 finding="VA-MISSING",
                 identity=None,
@@ -10357,10 +9764,7 @@ def test_host_exec_backend_rejection_with_finding_never_retries_unlinked(
     posts: list[dict] = []
     events: list[str] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def get(self, endpoint: str) -> dict:
             events.append(f"resolve:{endpoint}")
             return {"id": 7}
@@ -10376,19 +9780,8 @@ def test_host_exec_backend_rejection_with_finding_never_retries_unlinked(
             events.append("finalize")
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
     monkeypatch.setattr(
         module,
@@ -10399,21 +9792,12 @@ def test_host_exec_backend_rejection_with_finding_never_retries_unlinked(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="preserve explicit finding linkage",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=False,
                 finding="VA-007",
                 identity=None,
@@ -10816,10 +10200,7 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
     attacker_output_dir = tmp_path / "attacker-host-exec"
     attacker_output_dir.mkdir()
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, payload: dict) -> dict:
             posted_paths["stdout"] = Path(payload["stdout_path"])
             posted_paths["stderr"] = Path(payload["stderr_path"])
@@ -10835,9 +10216,6 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
                 output_cleanup_status="complete",
             )
 
-        def close(self) -> None:
-            pass
-
     class _Proc:
         pid = 4321
         returncode = 0
@@ -10852,15 +10230,7 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
             return None, None
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc(**k))
@@ -10870,21 +10240,12 @@ def test_host_exec_precreated_descriptors_survive_parent_directory_symlink_swap(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="pin host output descriptors",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -10907,7 +10268,7 @@ def test_host_exec_spill_identity_claims_reject_leaf_swap_before_post(
     moved_metadata: dict[str, os.stat_result] = {}
     posted: list[dict] = []
 
-    class _Client(_HostAuditReceiptMixin):
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def __init__(self, *_args: object, **_kwargs: object) -> None:
             output_dir = tmp_path / "scans" / "host-exec"
             for path in output_dir.iterdir():
@@ -10922,19 +10283,8 @@ def test_host_exec_spill_identity_claims_reject_leaf_swap_before_post(
                 "HTTP 409:\nbackend rejected spill identity mismatch"
             )
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -10945,21 +10295,12 @@ def test_host_exec_spill_identity_claims_reject_leaf_swap_before_post(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="bind spill identity before post",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -11524,19 +10865,13 @@ def test_host_exec_records_lost_when_group_cannot_be_quiesced(
     )
     patches: list[dict] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
         def patch(self, _endpoint: str, payload: dict, **_kwargs: object) -> dict:
             patches.append(payload)
             return self._finalize_response(payload)
-
-        def close(self) -> None:
-            pass
 
     class _Proc:
         pid = 4321
@@ -11546,15 +10881,7 @@ def test_host_exec_records_lost_when_group_cannot_be_quiesced(
             return None, None
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(module.subprocess, "Popen", lambda *a, **k: _Proc())
@@ -11562,21 +10889,12 @@ def test_host_exec_records_lost_when_group_cannot_be_quiesced(
     monkeypatch.setattr(module.host_processes, "register_owned_process", lambda *a, **k: None)
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["example"],
                 tool="example",
                 intent="verify output quiescence",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -11599,10 +10917,7 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
     patches: list[tuple[str, dict]] = []
     spill_paths: dict[str, Path] = {}
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, payload: dict) -> dict:
             spill_paths["stdout"] = Path(payload["stdout_path"])
             spill_paths["stderr"] = Path(payload["stderr_path"])
@@ -11616,19 +10931,8 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
             patches.append((endpoint, payload))
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -11638,21 +10942,12 @@ def test_host_exec_process_failure_finalizes_pre_exec_audit(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="audit process setup failure",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -11674,10 +10969,7 @@ def test_host_exec_process_setup_append_failure_still_finalizes_audit(
     )
     patches: list[tuple[str, dict]] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -11685,19 +10977,8 @@ def test_host_exec_process_setup_append_failure_still_finalizes_audit(
             patches.append((endpoint, payload))
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -11714,21 +10995,12 @@ def test_host_exec_process_setup_append_failure_still_finalizes_audit(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="audit setup and spill failure",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -11750,10 +11022,7 @@ def test_host_exec_accepts_exact_terminal_row_after_committed_response_loss(
     )
     patches: list[tuple[dict, bool]] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -11783,19 +11052,8 @@ def test_host_exec_accepts_exact_terminal_row_after_committed_response_loss(
                 "output_integrity_status": "verified",
             }
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
     monkeypatch.setattr(
         module,
@@ -11806,21 +11064,12 @@ def test_host_exec_accepts_exact_terminal_row_after_committed_response_loss(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="recover exact finalize response",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -11840,10 +11089,7 @@ def test_host_exec_rejects_conflicting_terminal_row_after_finalize_retry(
     )
     patches: list[tuple[dict, bool]] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -11869,19 +11115,8 @@ def test_host_exec_rejects_conflicting_terminal_row_after_finalize_retry(
                 "output_integrity_status": "verified",
             }
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "member")
     monkeypatch.setattr(
         module,
@@ -11892,21 +11127,12 @@ def test_host_exec_rejects_conflicting_terminal_row_after_finalize_retry(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="reject conflicting finalize response",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -11924,34 +11150,13 @@ def test_host_exec_policy_refusal_uses_terminal_inline_audit_without_spills(
     )
     posts: list[tuple[str, dict]] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post(self, endpoint: str, payload: dict) -> dict:
             posts.append((endpoint, payload))
             return {"id": 42}
 
-        def close(self) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(
         module.scope_lib,
@@ -11969,21 +11174,12 @@ def test_host_exec_policy_refusal_uses_terminal_inline_audit_without_spills(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "blocked"],
                 tool="echo",
                 intent="verify policy refusal audit",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
                 identity=None,
                 identity_scope="",
@@ -12029,34 +11225,13 @@ def test_host_exec_refuses_container_namespace_script_path(
     )
     posts: list[tuple[str, dict]] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post(self, endpoint: str, payload: dict) -> dict:
             posts.append((endpoint, payload))
             return {"id": 42}
 
-        def close(self) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(engagement_dir))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(
         module,
@@ -12066,21 +11241,12 @@ def test_host_exec_refuses_container_namespace_script_path(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(engagement_dir),
-                from_json=None,
+            _host_exec_args(
+                str(engagement_dir),
                 command=["python3", f"/engagements/{container_key}/probe.py"],
                 tool="python3",
                 intent="cross-engagement script path",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
                 identity=None,
                 identity_scope="",
@@ -12101,10 +11267,7 @@ def test_host_exec_emits_nonblocking_recency_advisory_after_pre_exec_audit(
     )
     events: list[str] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             events.append("audit")
             return self._pre_exec_response(_payload)
@@ -12113,19 +11276,8 @@ def test_host_exec_emits_nonblocking_recency_advisory_after_pre_exec_audit(
             events.append("finalize")
             return self._finalize_response(payload)
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(
         module,
         "emit_foreign_lane_recency",
@@ -12143,9 +11295,8 @@ def test_host_exec_emits_nonblocking_recency_advisory_after_pre_exec_audit(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["curl", "https://target.example/health"],
                 tool="curl",
                 intent="host liveness",
@@ -12153,11 +11304,6 @@ def test_host_exec_emits_nonblocking_recency_advisory_after_pre_exec_audit(
                 phase="recon",
                 target_host="target.example",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -12182,31 +11328,12 @@ def test_host_exec_fails_closed_when_pre_exec_audit_record_fails(
         "agent/scripts/assess/commands/host_exec.py",
     )
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             raise RuntimeError("backend down")
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(
         module,
         "_run_host_process",
@@ -12216,21 +11343,14 @@ def test_host_exec_fails_closed_when_pre_exec_audit_record_fails(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="test required audit",
-                technique="T0000",
                 phase="respond",
-                target_host="",
                 agent_name=None,
                 scope_host="acme",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=require_audit,
             )
         )
@@ -12259,10 +11379,7 @@ def test_host_exec_require_audit_rejects_untrustworthy_output_status(
         "agent/scripts/assess/commands/host_exec.py",
     )
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -12277,19 +11394,8 @@ def test_host_exec_require_audit_rejects_untrustworthy_output_status(
             response[status_field] = untrustworthy_status
             return response
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -12300,21 +11406,12 @@ def test_host_exec_require_audit_rejects_untrustworthy_output_status(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="require trustworthy audit cleanup",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -12334,10 +11431,7 @@ def test_host_exec_require_audit_rejects_deferred_physical_cleanup(
         "agent/scripts/assess/commands/host_exec.py",
     )
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -12349,19 +11443,8 @@ def test_host_exec_require_audit_rejects_deferred_physical_cleanup(
                 output_integrity_status="not_applicable",
             )
 
-        def close(self) -> None:
-            pass
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -12372,21 +11455,12 @@ def test_host_exec_require_audit_rejects_deferred_physical_cleanup(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="report deferred cleanup",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -12406,10 +11480,7 @@ def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
     patches: list[dict] = []
     warnings: list[str] = []
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -12420,9 +11491,6 @@ def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
                 output_cleanup_status="not_required",
                 output_integrity_status="verified",
             )
-
-        def close(self) -> None:
-            pass
 
     class _BrokenStdout:
         def write(self, _value: str) -> None:
@@ -12439,15 +11507,7 @@ def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
             pass
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -12463,21 +11523,12 @@ def test_host_exec_console_write_failure_cannot_strand_a_quiesced_audit_row(
 
     with pytest.raises(SystemExit) as exc_info:
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="finalize despite console closure",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -12505,10 +11556,7 @@ def test_host_exec_client_close_failure_still_closes_both_retained_spill_fds(
         retained_descriptors.extend(descriptors)
         return descriptors
 
-    class _Client(_HostAuditReceiptMixin):
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient, _HostAuditReceiptMixin):
         def post(self, _endpoint: str, _payload: dict) -> dict:
             return self._pre_exec_response(_payload)
 
@@ -12524,15 +11572,7 @@ def test_host_exec_client_close_failure_still_closes_both_retained_spill_fds(
 
     monkeypatch.setattr(module, "_create_output_spills", capture_output_spills)
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "prepare_execution_command", lambda *_a, **_k: "anonymous")
     monkeypatch.setattr(module.scope_lib, "enforce_execution_policy", lambda *_a, **_k: {})
     monkeypatch.setattr(
@@ -12543,21 +11583,12 @@ def test_host_exec_client_close_failure_still_closes_both_retained_spill_fds(
 
     with pytest.raises(RuntimeError, match="client close failed"):
         module.run(
-            SimpleNamespace(
-                engagement_dir=str(tmp_path),
-                from_json=None,
+            _host_exec_args(
+                str(tmp_path),
                 command=["echo", "ok"],
                 tool="echo",
                 intent="close retained descriptors",
-                technique="T0000",
-                phase="investigate",
-                target_host="",
                 agent_name=None,
-                scope_host="",
-                cwd=None,
-                timeout=30,
-                audit_source="argv",
-                allow_destructive=False,
                 require_audit=True,
             )
         )
@@ -12577,10 +11608,7 @@ def test_approve_proposal_rejects_non_containment_decision(
     )
     updates: list[tuple[int, dict]] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def list_decisions(self, **_filters: object) -> list[dict]:
             return [{"id": 7, "kind": "scope_decision", "resolved": False}]
 
@@ -12591,20 +11619,8 @@ def test_approve_proposal_rejects_non_containment_decision(
             updates.append((decision_id, patch))
             return {"id": decision_id, **patch}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     with pytest.raises(SystemExit):
         module.run(
@@ -12629,10 +11645,7 @@ def test_approve_proposal_searches_all_decision_pages(
     )
     updates: list[tuple[int, dict]] = []
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def list_decisions(self, **_filters: object) -> list[dict]:
             raise AssertionError("single-page lookup must not be used for approval")
 
@@ -12643,20 +11656,8 @@ def test_approve_proposal_searches_all_decision_pages(
             updates.append((decision_id, patch))
             return {"id": decision_id, "kind": "containment_proposal", **patch}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module.run(
         SimpleNamespace(
@@ -12678,20 +11679,13 @@ def test_blue_phase_gate_requires_expected_role_for_completed_tier() -> None:
         "agent/scripts/assess/commands/transition_phase.py",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "draft"}]
             if endpoint == "dispatches?status=completed&limit=1000&offset=0":
                 return [{"agent_role": "investigator", "tier": "L1", "status": "completed"}]
             return []
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_triage_to_investigate(_Client())
 
@@ -12705,7 +11699,7 @@ def test_blue_phase_gate_pages_completed_dispatches() -> None:
     )
     calls: list[str] = []
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
             if endpoint == "dispatches?status=completed&limit=1000&offset=0":
@@ -12722,13 +11716,6 @@ def test_blue_phase_gate_pages_completed_dispatches() -> None:
                     }
                 ]
             return []
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     count = module._blue_count_completed_dispatches(_Client(), "L1", "alert-triage-specialist")
 
@@ -12746,7 +11733,7 @@ def test_blue_investigate_gate_rejects_legacy_free_text_auto_close() -> None:
     )
     calls: list[str] = []
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
             if endpoint == "findings":
@@ -12759,13 +11746,6 @@ def test_blue_investigate_gate_rejects_legacy_free_text_auto_close() -> None:
                     }
                 ]
             return []
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_investigate_to_verify(_Client())
 
@@ -12780,7 +11760,7 @@ def test_blue_investigate_gate_accepts_independent_structured_false_positive() -
     )
     calls: list[str] = []
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
             if endpoint == "findings":
@@ -12801,16 +11781,6 @@ def test_blue_investigate_gate_accepts_independent_structured_false_positive() -
                 ]
             return []
 
-        def close(self) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     blockers = module._blue_check_investigate_to_verify(_Client())
 
     assert blockers == []
@@ -12823,7 +11793,7 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
         "agent/scripts/assess/commands/transition_phase.py",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint == "findings":
                 return [
@@ -12850,13 +11820,6 @@ def test_blue_respond_gate_does_not_treat_approval_as_containment() -> None:
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             return {"items": []}
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_respond_to_report(_Client())
 
@@ -12882,7 +11845,7 @@ def test_blue_intake_gate_missing_tenant_file_is_advisory_not_block(
         encoding="utf-8",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             assert endpoint == "artifacts/search?kind=alert_intake&limit=1&offset=0"
             return [{"id": 9, "kind": "alert_intake"}]
@@ -12890,13 +11853,6 @@ def test_blue_intake_gate_missing_tenant_file_is_advisory_not_block(
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             return {"items": [{"action": "alert_intake"}]}
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_intake_to_triage(_Client(), str(eng_dir))
 
@@ -12931,7 +11887,7 @@ def test_blue_intake_gate_recorded_alert_passes_without_redundant_metadata(
         encoding="utf-8",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             assert endpoint == "artifacts/search?kind=alert_intake&limit=1&offset=0"
             return [{"id": 9, "kind": "alert_intake", "relative_path": "ir/alerts/AL-1.txt"}]
@@ -12939,13 +11895,6 @@ def test_blue_intake_gate_recorded_alert_passes_without_redundant_metadata(
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             return {"items": [{"action": "alert_intake"}]}
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_intake_to_triage(_Client(), str(eng_dir))
 
@@ -12989,7 +11938,7 @@ def test_blue_investigate_gate_missing_mitre_is_advisory_not_block() -> None:
         "agent/scripts/assess/commands/transition_phase.py",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint == "findings":
                 return [
@@ -13013,13 +11962,6 @@ def test_blue_investigate_gate_missing_mitre_is_advisory_not_block() -> None:
                     }
                 ]
             return []
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_investigate_to_verify(_Client())
 
@@ -13036,7 +11978,7 @@ def test_blue_respond_gate_single_finding_no_containment_closes() -> None:
         "agent/scripts/assess/commands/transition_phase.py",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint == "findings":
                 return [
@@ -13061,13 +12003,6 @@ def test_blue_respond_gate_single_finding_no_containment_closes() -> None:
                     }
                 ]
             }
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_respond_to_report(_Client())
 
@@ -13081,7 +12016,7 @@ def test_blue_phase_gate_pages_activity_entries() -> None:
     )
     calls: list[str] = []
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get_engagement(self, endpoint: str, query: str = ""):
             assert endpoint == "activity-entries"
             calls.append(query)
@@ -13090,13 +12025,6 @@ def test_blue_phase_gate_pages_activity_entries() -> None:
             if query == "limit=1000&offset=1000":
                 return {"items": [{"action": "alert_intake"}]}
             return {"items": []}
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     rows = module._blue_list_activity_entries(_Client())
 
@@ -13110,20 +12038,13 @@ def test_blue_complete_gate_accepts_closeout_artifact() -> None:
         "agent/scripts/assess/commands/transition_phase.py",
     )
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint == "artifacts/search?limit=1000&offset=0":
                 return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
             return []
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_report_to_complete(_Client())
 
@@ -13137,7 +12058,7 @@ def test_blue_complete_gate_pages_until_closeout_artifact() -> None:
     )
     calls: list[str] = []
 
-    class _Client:
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
             if endpoint == "artifacts/search?limit=1000&offset=0":
@@ -13150,13 +12071,6 @@ def test_blue_complete_gate_pages_until_closeout_artifact() -> None:
             if endpoint == "findings":
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
             return []
-        def close(self) -> None:
-            pass
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     blockers = module._blue_check_report_to_complete(_Client())
 
@@ -13183,10 +12097,7 @@ def test_blue_direct_phase_jump_runs_intermediate_gates(
     scope["alert_metadata"] = {"raw_body": None, "parsed": None}
     scope_path.write_text(json.dumps(scope), encoding="utf-8")
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, _endpoint: str):
             return []
 
@@ -13194,24 +12105,8 @@ def test_blue_direct_phase_jump_runs_intermediate_gates(
             assert endpoint == "activity-entries"
             return {"items": []}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(eng_dir),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(eng_dir))
 
     with pytest.raises(SystemExit):
         module.run(SimpleNamespace(engagement_dir=str(eng_dir), target_phase="report", force=False, track="auto"))
@@ -13235,10 +12130,7 @@ def test_transition_phase_complete_marks_blue_scope_completed(
     scope["status"] = "in_progress"
     scope_path.write_text(json.dumps(scope), encoding="utf-8")
 
-    class _Client:
-        def __init__(self, *_args: object, **_kwargs: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint == "artifacts/search?limit=1000&offset=0":
                 return [{"kind": "ir_closeout", "relative_path": "closeout.md"}]
@@ -13246,24 +12138,8 @@ def test_transition_phase_complete_marks_blue_scope_completed(
                 return [{"slug": "FIND-001", "workflow_status": "false_positive"}]
             return []
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(eng_dir),
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir=str(eng_dir))
 
     module.run(SimpleNamespace(engagement_dir=str(eng_dir), target_phase="complete", force=False, track="auto"))
 
@@ -13291,15 +12167,7 @@ def _run_dispatch_action(
     )
     fake = _FakeWorkBufferClient(rows, fetch_response=fetch_response)
     monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir="/tmp/eng",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir="/tmp/eng")
     module.run(
         SimpleNamespace(
             action=action,
@@ -13329,15 +12197,7 @@ def _run_list_clusters_action(
     )
     fake = _FakeWorkBufferClient(rows)
     monkeypatch.setattr(module, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir="/tmp/eng",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir="/tmp/eng")
     module.run(
         SimpleNamespace(
             engagement_dir=None,
@@ -13606,11 +12466,8 @@ def test_supersede_intel_requires_natural_key_before_request(
 
     captured: dict[str, object] = {}
 
-    class _StubClient:
+    class _StubClient(_ContextFakeClient):
         _engagement_prefix = "/engagements/test"
-
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
 
         def _request(self, method: str, path: str, body: bytes | None = None):
             captured["method"] = method
@@ -13618,24 +12475,10 @@ def test_supersede_intel_requires_natural_key_before_request(
             captured["body"] = body
             return 200, json.dumps({"id": 5, "validation_status": "exploited"})
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
-    monkeypatch.setattr(
-        supersede_module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(tmp_path),
-            engagement_key="eng-test",
-            agent_root=str(tmp_path),
-        ),
+    _pin_assess_config(
+        monkeypatch, supersede_module, engagement_dir=str(tmp_path), engagement_key="eng-test",
+        agent_root=str(tmp_path),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -13669,11 +12512,8 @@ def test_supersede_intel_to_existing_sends_fk_body(
 
     captured: dict[str, object] = {}
 
-    class _StubClient:
+    class _StubClient(_ContextFakeClient):
         _engagement_prefix = "/engagements/test"
-
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
 
         def post_engagement(self, endpoint: str, payload: dict):
             captured["method"] = "POST"
@@ -13684,24 +12524,10 @@ def test_supersede_intel_to_existing_sends_fk_body(
                 "current": {"id": 7},
             }
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
-    monkeypatch.setattr(
-        supersede_module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(tmp_path),
-            engagement_key="eng-test",
-            agent_root=str(tmp_path),
-        ),
+    _pin_assess_config(
+        monkeypatch, supersede_module, engagement_dir=str(tmp_path), engagement_key="eng-test",
+        agent_root=str(tmp_path),
     )
 
     supersede_module.run(
@@ -13734,33 +12560,19 @@ def test_supersede_intel_to_existing_rejects_payload_client_side(
     )
     sent: dict[str, object] = {}
 
-    class _StubClient:
+    class _StubClient(_ContextFakeClient):
         _engagement_prefix = "/engagements/test"
-
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
 
         def _request(self, *_a: object, **_k: object):
             sent["called"] = True
             return 201, "{}"
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
         def __exit__(self, *exc):
             return False
 
     monkeypatch.setattr(supersede_module, "AssessmentClient", _StubClient)
-    monkeypatch.setattr(
-        supersede_module,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(tmp_path),
-            engagement_key="eng-test",
-            agent_root=str(tmp_path),
-        ),
+    _pin_assess_config(
+        monkeypatch, supersede_module, engagement_dir=str(tmp_path), engagement_key="eng-test",
+        agent_root=str(tmp_path),
     )
 
     with pytest.raises(SystemExit) as exc:
@@ -14091,10 +12903,7 @@ def _stub_render_handoff_environment(
 ) -> None:
     """Wire a fake AssessmentClient + load_config into the dispatch module."""
 
-    class _StubClient:
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
-
+    class _StubClient(_ContextFakeClient):
         def get(self, endpoint: str):
             if endpoint.startswith("findings/"):
                 slug = endpoint.split("/", 1)[1]
@@ -14118,24 +12927,10 @@ def _stub_render_handoff_environment(
         def get_dispatch(self, agent_id: str):
             return dispatch_row
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module.handoff_renderer, "AssessmentClient", _StubClient)
-    monkeypatch.setattr(
-        module.handoff_renderer,
-        "load_config",
-        lambda *_args, **_kwargs: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(engagement_dir),
-            engagement_key=engagement_dir.name,
-            agent_root=str(engagement_dir.parent),
-        ),
+    _pin_assess_config(
+        monkeypatch, module.handoff_renderer, engagement_dir=str(engagement_dir), engagement_key=engagement_dir.name,
+        agent_root=str(engagement_dir.parent),
     )
 
 
@@ -14397,7 +13192,7 @@ def test_render_handoff_missing_slug_distinct_from_fetch_error(
 # ---------------------------------------------------------------------------
 
 
-class _CapturingClient:
+class _CapturingClient(_ContextFakeClient):
     """Minimal AssessmentClient stand-in for CLI smoke tests."""
 
     def __init__(self, *_: object, **__: object) -> None:
@@ -14465,14 +13260,6 @@ class _CapturingClient:
         self.handoffs_by_id[agent_id] = existing
         return existing
 
-    def close(self) -> None:
-        return None
-    def __enter__(self):
-        return self
-    def __exit__(self, *exc):
-        self.close()
-        return False
-
 
 def test_resume_brief_cli_requests_targeted_json(
     monkeypatch: pytest.MonkeyPatch,
@@ -14484,28 +13271,13 @@ def test_resume_brief_cli_requests_targeted_json(
     )
     calls: list[str] = []
 
-    class _Client:
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
             return {"engagement": {"key": "eng"}, "recommended_next_actions": []}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module.run(SimpleNamespace(engagement_dir="/tmp/eng", q="OIDC state", finding="VA047", agent_id="AG-1", as_json=True))
 
@@ -14618,33 +13390,13 @@ def test_artifact_cli_registers_payload(
     )
     posts: list[tuple[str, dict]] = []
 
-    class _Client:
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post(self, endpoint: str, payload: dict):
             posts.append((endpoint, payload))
             return {"id": 7, "present": True, "relative_path": payload["path"], "kind": payload["kind"]}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        # `engagement_dir` is part of the real `Config`; register canonicalizes the
-        # submitted path against it before POSTing so the response comparison is
-        # canonical-vs-canonical.
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test", engagement_key="eng", engagement_dir="/tmp/eng"
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng", engagement_dir="/tmp/eng")
 
     module._run_register(
         SimpleNamespace(
@@ -14688,28 +13440,13 @@ def test_artifact_cli_refresh_posts_endpoint(
     )
     posts: list[tuple[str, dict]] = []
 
-    class _Client:
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def post(self, endpoint: str, payload: dict):
             posts.append((endpoint, payload))
             return {"refreshed": 3, "present": 2, "missing": 1}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module._run_refresh(SimpleNamespace(engagement_dir="/tmp/eng", as_json=False))
 
@@ -14727,10 +13464,7 @@ def test_artifact_cli_targeted_refresh_and_unlink_use_exact_id(
     )
     calls: list[tuple[str, str, dict | None]] = []
 
-    class _Client:
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
-
+    class _Client(_FakeAssessClient):
         def post(self, endpoint: str, payload: dict):
             calls.append(("post", endpoint, payload))
             return {"refreshed": 1, "present": 1, "missing": 0}
@@ -14739,15 +13473,8 @@ def test_artifact_cli_targeted_refresh_and_unlink_use_exact_id(
             calls.append(("delete", endpoint, None))
             return {"id": 7, "relative_path": "notes/a.md", "related_finding_slug": None}
 
-        def close(self) -> None:
-            return None
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module._run_refresh(SimpleNamespace(engagement_dir="/tmp/eng", artifact_id=7, as_json=False))
     module._run_unlink_finding(SimpleNamespace(engagement_dir="/tmp/eng", artifact_id=7, as_json=True))
@@ -14769,28 +13496,13 @@ def test_list_command_runs_cli_sends_fuzzy_search_flags(
     )
     calls: list[str] = []
 
-    class _Client:
-        def __init__(self, *_: object, **__: object) -> None:
-            pass
-
+    class _Client(_ContextFakeClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
             return []
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_key="eng")
 
     module.run(
         SimpleNamespace(
@@ -15189,61 +13901,8 @@ def _run_dispatch_verb(monkeypatch, action: str, *, extra=None, **flags):
     module = _load_dispatch_module()
     fake = _CapturingClient()
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
-    args_dict = {
-        "db_path": action,
-        "action": "",
-        "extra": list(extra or []),
-        "reason": "",
-        "by": "status",
-        "max_lines": 40,
-        "include_evidence": False,
-        "engagement_dir": None,
-        "agent_id": None,
-        "agent_role": None,
-        "task": None,
-        "application_unit_id": None,
-        "dispatch_model": None,
-        "reasoning": None,
-        "dispatch_mode_arg": None,
-        "from_json": None,
-        "check_overlap": False,
-        "dispatch_status": None,
-        "completed_at": None,
-        "finding_slugs": None,
-        "filter_role": None,
-        "filter_since": None,
-        "task_q": None,
-        "dispatch_limit": None,
-        "decision_kind": None,
-        "payload_json": None,
-        "surfaced_to_user": False,
-        "decision_host": None,
-        "decision_vendor": None,
-        "decision_choice": None,
-        "decision_note": None,
-        "decision_phase": None,
-        "hf_summary": None,
-        "hf_confidence": None,
-        "hf_next_steps": None,
-        "hf_coverage_gaps": None,
-        "hf_runtime_issues": None,
-        "hf_working_artifacts": None,
-        "hf_open_questions": None,
-        "hf_recommended_next_agent": None,
-        "hf_extras_json": None,
-    }
-    args_dict.update(flags)
-    _invoke_backend_lifecycle(module, action, SimpleNamespace(**args_dict))
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
+    _invoke_backend_lifecycle(module, action, _dispatch_args(action, extra=extra, **flags))
     return fake
 
 
@@ -15465,16 +14124,7 @@ def test_dispatch_done_finding_slugs_append_to_the_rows_existing_scope(
         "finding_slugs": ["VA-001"],
     }
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
 
     module.agent._update_dispatch_status(
         _dispatch_args(
@@ -15642,16 +14292,7 @@ def test_dispatch_register_overlap_check_is_default_on(
 
     fake.list_dispatches = _tracking_list  # type: ignore[assignment]
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
 
     _invoke_backend_lifecycle(
         module,
@@ -15687,16 +14328,7 @@ def test_dispatch_register_warns_on_structured_overlap(
         "task": "Older exploitation attempt",
     }
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
 
     _invoke_backend_lifecycle(
         module,
@@ -15849,16 +14481,7 @@ def test_dispatch_register_does_not_warn_for_shared_unit_mode_only(
         "task": "Review password reset flows",
     }
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
 
     _invoke_backend_lifecycle(
         module,
@@ -15897,16 +14520,7 @@ def test_dispatch_abort_duplicate_marks_row_and_records_decision(
         "status": "in-progress",
     }
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
 
     _invoke_backend_lifecycle(
         module,
@@ -15986,39 +14600,11 @@ def test_dispatch_list_emits_jsonl(
                 {"id": 1, "agent_id": "L1", "agent_role": "recon-specialist"},
                 {"id": 2, "agent_id": "L2", "agent_role": "vulnerability-analyst"},
             ]
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     fake = _ListClient()
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
-    module.agent._list_dispatches(SimpleNamespace(
-        db_path="list", action="", extra=[], reason="", by="status",
-        max_lines=40, include_evidence=False, engagement_dir=None,
-        agent_id=None, agent_role=None, task=None, application_unit_id=None,
-        dispatch_model=None, reasoning=None,
-        dispatch_mode_arg=None,
-        from_json=None, dispatch_status=None, completed_at=None, finding_slugs=None,
-        filter_role=None, filter_since=None, task_q=None, dispatch_limit=None,
-        decision_kind=None, payload_json=None, surfaced_to_user=False,
-        decision_host=None, decision_vendor=None, decision_choice=None,
-        decision_note=None, decision_phase=None,
-        hf_summary=None, hf_confidence=None, hf_next_steps=None,
-        hf_coverage_gaps=None, hf_runtime_issues=None, hf_working_artifacts=None,
-        hf_open_questions=None, hf_recommended_next_agent=None, hf_extras_json=None,
-    ))
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
+    module.agent._list_dispatches(_dispatch_args("list"))
     out = capsys.readouterr().out
     lines = [line for line in out.strip().split("\n") if line.strip()]
     assert len(lines) == 2
@@ -16181,16 +14767,7 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
     # One fake shared across all three calls so handoffs_by_id persists.
     shared_fake = _CapturingClient()
     monkeypatch.setattr(module.agent, "AssessmentClient", lambda *a, **k: shared_fake)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir="/tmp/eng",
-            engagement_key="eng",
-            agent_root="/tmp",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module.agent, engagement_dir="/tmp/eng", engagement_key="eng", agent_root="/tmp")
 
     payload_v1 = {
         "agent_id": "HF-CHECKPOINT",
@@ -16219,49 +14796,9 @@ def test_dispatch_record_handoff_is_idempotent_for_repeat_calls(
     p3.write_text(json.dumps(payload_v3), encoding="utf-8")
 
     def _invoke(path: Path) -> None:
-        args_dict = {
-            "db_path": "record-handoff",
-            "action": "",
-            "extra": [],
-            "reason": "",
-            "by": "status",
-            "max_lines": 40,
-            "include_evidence": False,
-            "engagement_dir": None,
-            "agent_id": "HF-CHECKPOINT",
-            "agent_role": None,
-            "task": None,
-            "application_unit_id": None,
-            "dispatch_model": None,
-            "reasoning": None,
-            "dispatch_mode_arg": None,
-            "from_json": str(path),
-            "dispatch_status": None,
-            "completed_at": None,
-            "finding_slugs": None,
-            "filter_role": None,
-            "filter_since": None,
-            "task_q": None,
-            "dispatch_limit": None,
-            "decision_kind": None,
-            "payload_json": None,
-            "surfaced_to_user": False,
-            "decision_host": None,
-            "decision_vendor": None,
-            "decision_choice": None,
-            "decision_note": None,
-            "decision_phase": None,
-            "hf_summary": None,
-            "hf_confidence": None,
-            "hf_next_steps": None,
-            "hf_coverage_gaps": None,
-            "hf_runtime_issues": None,
-            "hf_working_artifacts": None,
-            "hf_open_questions": None,
-            "hf_recommended_next_agent": None,
-            "hf_extras_json": None,
-        }
-        module.agent._record_handoff(SimpleNamespace(**args_dict))
+        module.agent._record_handoff(
+            _dispatch_args("record-handoff", agent_id="HF-CHECKPOINT", from_json=str(path))
+        )
 
     _invoke(p1)
     _invoke(p2)
@@ -16951,20 +15488,12 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
         },
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(eng_dir),
-            engagement_key="eng-c42a",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_dir=str(eng_dir), engagement_key="eng-c42a")
 
     # Stub the AssessmentClient so last_auth_probe lookup does not require a
     # live backend; return one fake AUTH-technique row. Stubs `.get` because
     # /command-runs is an assessment-scoped endpoint.
-    class _FakeAuthClient:
+    class _FakeAuthClient(_ContextFakeClient):
         def __init__(self, *_: object, **__: object) -> None:
             self.base_url = "http://example.test"
             self.engagement_key = "eng-c42a"
@@ -16982,14 +15511,6 @@ def test_auth_status_reports_bearer_token_and_recommends_refresh(
                     }
                 ]
             }
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _FakeAuthClient)
 
@@ -17034,31 +15555,15 @@ def test_auth_status_flags_expired_token(
         },
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(eng_dir),
-            engagement_key="eng-expired",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_dir=str(eng_dir), engagement_key="eng-expired")
 
-    class _NoProbeClient:
+    class _NoProbeClient(_ContextFakeClient):
         def __init__(self, *_: object, **__: object) -> None:
             self.base_url = "http://example.test"
             self.engagement_key = "eng-expired"
 
         def get(self, endpoint: str):
             return {"items": []}
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _NoProbeClient)
 
@@ -17101,17 +15606,9 @@ def test_auth_status_last_probe_uses_assessment_scoped_route(
         },
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(eng_dir),
-            engagement_key="eng-route",
-        ),
-    )
+    _pin_assess_config(monkeypatch, module, engagement_dir=str(eng_dir), engagement_key="eng-route")
 
-    class _RouteAssertingClient:
+    class _RouteAssertingClient(_ContextFakeClient):
         """Fails loudly if production hits the non-assessment route."""
 
         def __init__(self, *_: object, **__: object) -> None:
@@ -17137,14 +15634,6 @@ def test_auth_status_last_probe_uses_assessment_scoped_route(
                 "_last_auth_probe routed through .get_engagement(); "
                 "/command-runs lives under the assessment router so it must use .get()"
             )
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", _RouteAssertingClient)
 
@@ -17256,7 +15745,7 @@ def test_agent_start_does_not_write_scope_rejection_decision(
     module = _load_dispatch_module()
     recorded_decisions: list[dict] = []
 
-    class _DecisionCapturingClient:
+    class _DecisionCapturingClient(_ContextFakeClient):
         def __init__(self, *_: object, **__: object) -> None:
             self.base_url = "http://example.test"
             self.engagement_key = "eng"
@@ -17265,24 +15754,9 @@ def test_agent_start_does_not_write_scope_rejection_decision(
             recorded_decisions.append(body)
             return {"id": 1, **body}
 
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module.agent, "AssessmentClient", _DecisionCapturingClient)
-    monkeypatch.setattr(
-        module.agent,
-        "load_config",
-        lambda *_a, **_k: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_dir=str(eng_dir),
-            engagement_key="eng",
-            agent_root=str(tmp_path),
-        ),
+    _pin_assess_config(
+        monkeypatch, module.agent, engagement_dir=str(eng_dir), engagement_key="eng", agent_root=str(tmp_path),
     )
 
     payload = module._build_register_payload(

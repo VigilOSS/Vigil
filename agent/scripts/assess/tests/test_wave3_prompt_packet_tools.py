@@ -77,16 +77,10 @@ def test_prompt_census_reports_structure_cost_and_partial_read_without_blocking(
     )
     read_bytes = complete.read_bytes().index(b"agent/shared.md") + 3
 
-    _run_cli(
-        [
-            "prompt-census",
-            "--prompt-root",
-            str(prompt_root),
-            "--read-bytes",
-            str(read_bytes),
-            "--json",
-        ]
-    )
+    _run_cli([
+        "prompt-census", "--prompt-root", str(prompt_root), "--read-bytes", str(read_bytes),
+        "--json",
+    ])
 
     payload = json.loads(capsys.readouterr().out)
     assert payload["blocking"] is False
@@ -119,16 +113,7 @@ def test_blind_triage_packet_uses_exact_canonical_inputs_and_truthful_manifest(
     (engagement / "ENGAGEMENT.md").write_bytes(brief_bytes)
     _write_submission(submission_dir, submission_bytes)
 
-    _run_cli(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "export",
-            "triage-packet",
-            "VA-001",
-            "--json",
-        ]
-    )
+    _run_cli(["--engagement-dir", str(engagement), "export", "triage-packet", "VA-001", "--json"])
 
     result = json.loads(capsys.readouterr().out)
     packet_dir = Path(result["packet_dir"])
@@ -149,31 +134,13 @@ def test_blind_triage_packet_uses_exact_canonical_inputs_and_truthful_manifest(
         encoding="utf-8"
     )
 
-    _run_cli(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "export",
-            "triage-packet",
-            "VA-001",
-            "--json",
-        ]
-    )
+    _run_cli(["--engagement-dir", str(engagement), "export", "triage-packet", "VA-001", "--json"])
     repeated = json.loads(capsys.readouterr().out)
     assert repeated["packet_id"] == result["packet_id"]
 
     revised_bytes = submission_bytes + b"Additional canonical evidence.\n"
     _write_submission(submission_dir, revised_bytes)
-    _run_cli(
-        [
-            "--engagement-dir",
-            str(engagement),
-            "export",
-            "triage-packet",
-            "VA-001",
-            "--json",
-        ]
-    )
+    _run_cli(["--engagement-dir", str(engagement), "export", "triage-packet", "VA-001", "--json"])
     revised = json.loads(capsys.readouterr().out)
     assert revised["packet_id"] != result["packet_id"]
     assert (Path(revised["packet_dir"]) / "submission.md").read_bytes() == revised_bytes

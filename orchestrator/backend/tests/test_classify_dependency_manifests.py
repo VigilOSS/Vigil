@@ -14,25 +14,17 @@ The move is additive: every URL that scored `debug_logic` before still does.
 from __future__ import annotations
 
 import json
-import sys
-from pathlib import Path
 
 import pytest
 
 
 def _classify_buckets():
-    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     import assess.lib.classify_buckets as cb
 
     return cb
 
 
 def _dependency_manifests():
-    scripts = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts) not in sys.path:
-        sys.path.insert(0, str(scripts))
     import assess.lib.dependency_manifests as dm
 
     return dm

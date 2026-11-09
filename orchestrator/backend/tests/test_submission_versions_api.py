@@ -156,14 +156,12 @@ def _write_workspace(
         json.dumps(context, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={
-            "path": submission_path,
-            "kind": "submission",
-            "media_type": "text/markdown",
-            "related_finding_slug": slug,
-        },
+    registered = _artifact(
+        client,
+        path=submission_path,
+        kind="submission",
+        media_type="text/markdown",
+        related_finding_slug=slug,
     )
     assert registered.status_code == 201, registered.text
     if rehearsed:
@@ -171,6 +169,36 @@ def _write_workspace(
     if reviewed and b"\xff" not in markdown:
         _approve_packet(client, isolate_settings, slug)
     return submission_path, context_path
+
+
+def _recover(client, **body):
+    """POST the submission recovery door and return the raw response."""
+    return client.post(f"{BASE}/submissions/recover", json=body)
+
+
+def _artifact(client, **body):
+    """POST one artifact registration and return the raw response."""
+    return client.post(f"{BASE}/artifacts", json=body)
+
+
+def _break_publish(monkeypatch, submission_versions):
+    """Make the atomic publish fail, handing back the original for restore."""
+    original_publish = submission_versions._atomic_publish
+
+    def fail_publish(*args, **kwargs):
+        raise OSError("synthetic publish interruption")
+
+    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    return original_publish
+
+
+def _seeded_workspace(client, isolate_settings, **overrides):
+    """A reportable finding plus the submission workspace written for it."""
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(
+        client, isolate_settings, finding, **overrides
+    )
+    return finding, submission_path, context_path
 
 
 def _export(
@@ -198,10 +226,7 @@ def _export(
 def test_export_without_attachments_is_an_immutable_markdown_version(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
 
     response = _export(client, "VA-001", submission_path, context_path)
 
@@ -438,17 +463,12 @@ def test_successful_export_and_recovery_broadcast_submission_updates(
 ) -> None:
     from app.api import submissions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     publish = AsyncMock()
     monkeypatch.setattr(submissions.broadcaster, "publish", publish)
 
     exported = _export(client, "VA-001", submission_path, context_path)
-    recovered = client.post(
-        f"{BASE}/submissions/recover", json={"actor_surface": "web-ui"}
-    )
+    recovered = _recover(client, actor_surface="web-ui")
 
     assert exported.status_code == 201, exported.text
     assert recovered.status_code == 200, recovered.text
@@ -503,12 +523,12 @@ def test_submission_detail_exposes_current_publication_gates(
     attachment = root / "evidence" / "response.json"
     attachment.parent.mkdir(parents=True, exist_ok=True)
     attachment.write_bytes(b'{"status": 200}\n')
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={
-            "path": "evidence/response.json", "kind": "proof",
-            "media_type": "application/json", "related_finding_slug": "VA-001",
-        },
+    registered = _artifact(
+        client,
+        path="evidence/response.json",
+        kind="proof",
+        media_type="application/json",
+        related_finding_slug="VA-001",
     )
     assert registered.status_code == 201, registered.text
     artifact_id = registered.json()["id"]
@@ -647,13 +667,11 @@ def test_submission_detail_paginates_all_eligible_attachments_deterministically(
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative_path, encoding="utf-8")
-        response = client.post(
-            f"{BASE}/artifacts",
-            json={
-                "path": relative_path,
-                "kind": "attachment",
-                "related_finding_slug": "VA-001",
-            },
+        response = _artifact(
+            client,
+            path=relative_path,
+            kind="attachment",
+            related_finding_slug="VA-001",
         )
         assert response.status_code == 201, response.text
         registered.append(response.json())
@@ -730,12 +748,7 @@ def test_submission_detail_bounds_completed_and_pending_version_history(
     second = _export(client, "VA-001", submission_path, context_path)
     assert second.status_code == 201, second.text
 
-    original_publish = submission_versions._atomic_publish
-
-    def fail_publish(*args, **kwargs):
-        raise OSError("synthetic publish interruption")
-
-    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    original_publish = _break_publish(monkeypatch, submission_versions)
     for markdown in (b"# Pending three\n", b"# Pending four\n"):
         submission_path, context_path = _write_workspace(
             client, isolate_settings, finding, markdown=markdown
@@ -790,14 +803,12 @@ def test_attachment_export_is_deterministic_and_manifested(
         path = root / relative_path
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_bytes(content)
-        registered = client.post(
-            f"{BASE}/artifacts",
-            json={
-                "path": relative_path,
-                "kind": "proof",
-                "media_type": "application/json",
-                "related_finding_slug": "VA-001",
-            },
+        registered = _artifact(
+            client,
+            path=relative_path,
+            kind="proof",
+            media_type="application/json",
+            related_finding_slug="VA-001",
         )
         assert registered.status_code == 201, registered.text
         attachments.append(registered.json())
@@ -863,19 +874,13 @@ def test_attachment_export_is_deterministic_and_manifested(
 def test_attachment_zip_member_is_portable_while_manifest_keeps_original_path(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     relative_path = "evidence/x\\..\\..\\evil.txt"
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     attachment = root / relative_path
     attachment.parent.mkdir(parents=True, exist_ok=True)
     attachment.write_text("portable archive member\n", encoding="utf-8")
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={"path": relative_path, "kind": "proof"},
-    )
+    registered = _artifact(client, path=relative_path, kind="proof")
     assert registered.status_code == 201, registered.text
 
     _approve_packet(client, isolate_settings, "VA-001", [registered.json()])
@@ -908,10 +913,7 @@ def test_attachment_total_limit_stops_before_reading_later_artifacts(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     reads = []
 
     def read_attachment(_engagement_id, _root, artifact_id, *, record_mismatch):
@@ -951,21 +953,16 @@ def test_attachment_total_limit_stops_before_reading_later_artifacts(
 def test_submission_version_has_no_operator_data_suppression_metadata(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     attachment = root / "evidence" / "credential-capture.txt"
     attachment.parent.mkdir(parents=True, exist_ok=True)
     attachment.write_text("Authorization: Bearer exact-token\n", encoding="utf-8")
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={
-            "path": "evidence/credential-capture.txt",
-            "kind": "proof",
-            "related_finding_slug": "VA-001",
-        },
+    registered = _artifact(
+        client,
+        path="evidence/credential-capture.txt",
+        kind="proof",
+        related_finding_slug="VA-001",
     )
     assert registered.status_code == 201, registered.text
     assert "sensitive" not in registered.json()
@@ -992,10 +989,7 @@ def test_submission_version_has_no_operator_data_suppression_metadata(
 def test_changed_reviewed_bytes_allocate_a_new_version_and_preserve_the_old_one(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     first = _export(client, "VA-001", submission_path, context_path)
     assert first.status_code == 201, first.text
 
@@ -1022,18 +1016,12 @@ def test_changed_reviewed_bytes_allocate_a_new_version_and_preserve_the_old_one(
 def test_export_rejects_changed_or_unregistered_attachments(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     attachment = root / "evidence" / "capture.txt"
     attachment.parent.mkdir(parents=True, exist_ok=True)
     attachment.write_text("registered bytes\n", encoding="utf-8")
-    registered = client.post(
-        f"{BASE}/artifacts",
-        json={"path": "evidence/capture.txt", "kind": "proof"},
-    )
+    registered = _artifact(client, path="evidence/capture.txt", kind="proof")
     assert registered.status_code == 201, registered.text
     attachment.write_text("changed after registration\n", encoding="utf-8")
 
@@ -1112,10 +1100,7 @@ def test_export_rejects_accepted_attachment_after_changed_bytes_are_reregistered
 def test_completed_versions_are_database_immutable_and_report_staleness(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     response = _export(client, "VA-001", submission_path, context_path)
     assert response.status_code == 201, response.text
     version = response.json()
@@ -1152,10 +1137,7 @@ def test_completed_versions_are_database_immutable_and_report_staleness(
 def test_idempotent_replay_rejects_missing_published_bytes(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     exported = _export(client, "VA-001", submission_path, context_path)
     assert exported.status_code == 201, exported.text
     published = (
@@ -1176,10 +1158,7 @@ def test_finding_change_during_finalization_never_completes_the_version(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     original_complete = submission_versions._complete_version
 
     def mutate_then_complete(engagement_id, row):
@@ -1209,10 +1188,7 @@ def test_proof_health_change_during_finalization_never_completes_the_version(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     original_complete = submission_versions._complete_version
 
     def break_proof_then_complete(engagement_id, row):
@@ -1244,10 +1220,7 @@ def test_package_change_during_artifact_registration_never_completes_the_version
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     original_register = submission_versions.artifact_index.register_artifact
 
@@ -1275,10 +1248,7 @@ def test_package_change_during_artifact_registration_never_completes_the_version
 def test_completed_versions_allow_the_explicit_engagement_delete_cascade(
     client, isolate_settings
 ) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     exported = _export(client, "VA-001", submission_path, context_path)
     assert exported.status_code == 201, exported.text
 
@@ -1299,16 +1269,8 @@ def test_atomic_publish_failure_is_recovered_without_allocating_a_new_version(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
-    original_publish = submission_versions._atomic_publish
-
-    def fail_publish(*args, **kwargs):
-        raise OSError("synthetic publish interruption")
-
-    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
+    original_publish = _break_publish(monkeypatch, submission_versions)
     failed = _export(client, "VA-001", submission_path, context_path)
     assert failed.status_code == 500, failed.text
     assert "staged for recovery" in failed.json()["detail"]
@@ -1320,9 +1282,7 @@ def test_atomic_publish_failure_is_recovered_without_allocating_a_new_version(
     assert tuple(row) == (1, "staging")
 
     monkeypatch.setattr(submission_versions, "_atomic_publish", original_publish)
-    recovered = client.post(
-        f"{BASE}/submissions/recover", json={"actor_surface": "web-ui"}
-    )
+    recovered = _recover(client, actor_surface="web-ui")
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["recovered_version_ids"]
     assert recovered.json()["failed_version_ids"] == []
@@ -1339,23 +1299,13 @@ def test_recovery_retains_the_validated_actor_surface(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
-    original_publish = submission_versions._atomic_publish
-
-    def fail_publish(*args, **kwargs):
-        raise OSError("synthetic publish interruption")
-
-    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
+    original_publish = _break_publish(monkeypatch, submission_versions)
     failed = _export(client, "VA-001", submission_path, context_path)
     assert failed.status_code == 500, failed.text
     monkeypatch.setattr(submission_versions, "_atomic_publish", original_publish)
 
-    recovered = client.post(
-        f"{BASE}/submissions/recover", json={"actor_surface": "web-ui"}
-    )
+    recovered = _recover(client, actor_surface="web-ui")
 
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["actor_surface"] == "web-ui"
@@ -1390,10 +1340,7 @@ def test_recovery_pages_orphaned_staging_paths_with_a_stable_cursor(
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(relative_path, encoding="utf-8")
 
-    first = client.post(
-        f"{BASE}/submissions/recover",
-        json={"actor_surface": "web-ui", "orphan_limit": 2},
-    )
+    first = _recover(client, actor_surface="web-ui", orphan_limit=2)
 
     assert first.status_code == 200, first.text
     assert first.json()["orphaned_staging_paths"] == orphaned[:2]
@@ -1404,13 +1351,11 @@ def test_recovery_pages_orphaned_staging_paths_with_a_stable_cursor(
         "next_after": orphaned[1],
     }
 
-    second = client.post(
-        f"{BASE}/submissions/recover",
-        json={
-            "actor_surface": "vigil-assess",
-            "orphan_limit": 2,
-            "orphan_after": orphaned[1],
-        },
+    second = _recover(
+        client,
+        actor_surface="vigil-assess",
+        orphan_limit=2,
+        orphan_after=orphaned[1],
     )
 
     assert second.status_code == 200, second.text
@@ -1429,12 +1374,7 @@ def test_recovery_bounds_failed_version_projection(
     from app.services import submission_versions
 
     finding = _seed_reportable_finding(client, isolate_settings)
-    original_publish = submission_versions._atomic_publish
-
-    def fail_publish(*args, **kwargs):
-        raise OSError("synthetic publish interruption")
-
-    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    original_publish = _break_publish(monkeypatch, submission_versions)
     for markdown in (b"# Failed one\n", b"# Failed two\n"):
         submission_path, context_path = _write_workspace(
             client, isolate_settings, finding, markdown=markdown
@@ -1453,10 +1393,7 @@ def test_recovery_bounds_failed_version_projection(
     for staging_path in staging_paths:
         (root / staging_path).unlink()
 
-    failed_recovery = client.post(
-        f"{BASE}/submissions/recover",
-        json={"actor_surface": "web-ui", "failed_version_limit": 1},
-    )
+    failed_recovery = _recover(client, actor_surface="web-ui", failed_version_limit=1)
 
     assert failed_recovery.status_code == 200, failed_recovery.text
     payload = failed_recovery.json()
@@ -1476,10 +1413,7 @@ def test_partial_stage_write_does_not_poison_identical_retry(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     original_write = submission_versions.os.write
     write_calls = 0
 
@@ -1521,10 +1455,7 @@ def test_initial_stage_fstat_failure_closes_and_removes_transient_file(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     original_open = submission_versions.os.open
     original_fstat = submission_versions.os.fstat
     transient_descriptor: int | None = None
@@ -1563,16 +1494,8 @@ def test_failed_recovery_returns_actionable_reservation_details(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
-    original_publish = submission_versions._atomic_publish
-
-    def fail_publish(*args, **kwargs):
-        raise OSError("synthetic publish interruption")
-
-    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
+    original_publish = _break_publish(monkeypatch, submission_versions)
     failed_export = _export(client, "VA-001", submission_path, context_path)
     assert failed_export.status_code == 500, failed_export.text
     monkeypatch.setattr(submission_versions, "_atomic_publish", original_publish)
@@ -1585,9 +1508,7 @@ def test_failed_recovery_returns_actionable_reservation_details(
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     (root / reservation["staging_relative_path"]).unlink()
 
-    recovered = client.post(
-        f"{BASE}/submissions/recover", json={"actor_surface": "web-ui"}
-    )
+    recovered = _recover(client, actor_surface="web-ui")
 
     assert recovered.status_code == 200, recovered.text
     payload = recovered.json()
@@ -1616,9 +1537,7 @@ def test_failed_recovery_returns_actionable_reservation_details(
     assert listing.json()["failed_count"] == 1
     assert listing.json()["findings"][0]["failed_version_count"] == 1
 
-    repeated = client.post(
-        f"{BASE}/submissions/recover", json={"actor_surface": "vigil-assess"}
-    )
+    repeated = _recover(client, actor_surface="vigil-assess")
     assert repeated.status_code == 200, repeated.text
     assert repeated.json()["failed_version_ids"] == [reservation["id"]]
     assert repeated.json()["failed_versions"] == payload["failed_versions"]
@@ -1629,16 +1548,8 @@ def test_recovery_rejects_a_traversing_staging_reservation_without_moving_bytes(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
-    original_publish = submission_versions._atomic_publish
-
-    def fail_publish(*args, **kwargs):
-        raise OSError("synthetic publish interruption")
-
-    monkeypatch.setattr(submission_versions, "_atomic_publish", fail_publish)
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
+    original_publish = _break_publish(monkeypatch, submission_versions)
     failed_export = _export(client, "VA-001", submission_path, context_path)
     assert failed_export.status_code == 500, failed_export.text
     monkeypatch.setattr(submission_versions, "_atomic_publish", original_publish)
@@ -1651,9 +1562,7 @@ def test_recovery_rejects_a_traversing_staging_reservation_without_moving_bytes(
             "SET staging_relative_path = '../outside-package.md'"
         )
 
-    recovered = client.post(
-        f"{BASE}/submissions/recover", json={"actor_surface": "web-ui"}
-    )
+    recovered = _recover(client, actor_surface="web-ui")
 
     assert recovered.status_code == 200, recovered.text
     assert recovered.json()["failed_versions"][0]["status"] == "failed"
@@ -1672,10 +1581,7 @@ def test_new_export_directories_fsync_each_created_parent(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     root = (isolate_settings["engagements_dir"] / ENGAGEMENT_KEY).resolve()
     synced_parents = []
     original_fsync_parent = submission_versions._fsync_parent_directory
@@ -1701,10 +1607,7 @@ def test_prepositioned_package_leaf_symlink_is_rejected(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     attacker_target = root / "attacker-controlled-existing.md"
     attacker_target.write_bytes(b"# Reviewed submission\n\nExact approved bytes.\n")
@@ -1738,10 +1641,7 @@ def test_prepositioned_dangling_staging_symlink_is_rejected_as_a_conflict(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     root = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     original_reserve = submission_versions._reserve_version
 
@@ -1767,10 +1667,7 @@ def test_retry_after_metadata_finalization_failure_removes_recreated_stage(
 ) -> None:
     from app.services import submission_versions
 
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     original_complete = submission_versions._complete_version
     calls = 0
 
@@ -1795,10 +1692,7 @@ def test_retry_after_metadata_finalization_failure_removes_recreated_stage(
 
 
 def test_export_rejects_stale_or_unverified_workspace(client, isolate_settings) -> None:
-    finding = _seed_reportable_finding(client, isolate_settings)
-    submission_path, context_path = _write_workspace(
-        client, isolate_settings, finding
-    )
+    finding, submission_path, context_path = _seeded_workspace(client, isolate_settings)
     with get_connection() as connection:
         connection.execute(
             "UPDATE assessment_findings SET verification_status = 'unreviewed', "

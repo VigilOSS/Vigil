@@ -4,22 +4,14 @@ import json
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import record_intel, supersede_intel, update_intel
 from assess.lib.client import AssessError, AssessmentClient
 
 
-class _MalformedIntelResponseClient:
+class _MalformedIntelResponseClient(StubClient):
     posts: list[tuple[str, dict]] = []
-
-    def __init__(self, *_args):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post_engagement(self, endpoint: str, payload: dict) -> dict:
         self.posts.append((endpoint, payload))
@@ -29,16 +21,7 @@ class _MalformedIntelResponseClient:
         raise AssertionError("a malformed write response must not emit a success event")
 
 
-class _SuccessfulNoteClient:
-    def __init__(self, *_args):
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
+class _SuccessfulNoteClient(StubClient):
     def post_engagement(self, _endpoint: str, _payload: dict) -> dict:
         return {"id": 7, "title": "Durable note", "write_outcome": "updated"}
 

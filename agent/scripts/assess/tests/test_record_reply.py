@@ -27,6 +27,7 @@ from assess.lib.reply_render import (
     REPLY_RENDERER_VERSION,
     render_outbound_reply_bytes,
 )
+from _fake_client import StubClient
 
 _NOW = "2026-07-17T12:00:00Z"
 
@@ -38,7 +39,7 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self, finding: dict) -> None:
         self._finding = finding
         self.gets: list[str] = []
@@ -94,15 +95,6 @@ class _FakeClient:
                 "idempotent_replay": False,
             },
         }
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 def _reply(seq, *, body="answered", ask="an ask", platform="hackerone", sent=False, sent_at=None, created="2026-07-16T00:00:00Z"):

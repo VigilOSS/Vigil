@@ -21,7 +21,6 @@ real engagement runtime.
 """
 from __future__ import annotations
 
-import sys
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -33,22 +32,15 @@ def _scripts_root() -> Path:
     return Path(__file__).resolve().parents[3] / "agent" / "scripts"
 
 
-def _ensure_scripts_path() -> None:
-    """Add agent/scripts to sys.path so `from assess.lib...` works.
-
-    Same pattern test_aith_cli.py uses to import the agent CLI library.
-    Cleaning previously-imported `assess.*` modules guards against test
-    isolation issues when the import order interacts with other test files.
-    """
-    scripts_root = _scripts_root()
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
-
-
 def _load_pipeline_lib():
-    _ensure_scripts_path()
     from assess.lib import gau_pipeline  # type: ignore[import-not-found]
     return gau_pipeline
+
+
+@pytest.fixture
+def lib():
+    """The gau-pipeline library module under test."""
+    return _load_pipeline_lib()
 
 
 def _make_paths(tmp_path: Path, *, target: str = "example.com", cache_key: str | None = None):
@@ -284,9 +276,8 @@ def test_cache_miss_when_meta_lacks_cache_key(tmp_path: Path) -> None:
     assert "cache_key" in decision.reason
 
 
-def test_gau_cache_key_is_stable() -> None:
+def test_gau_cache_key_is_stable(lib) -> None:
     """The same flags must always produce the same key (deterministic, no order dependence)."""
-    lib = _load_pipeline_lib()
     a = lib.gau_cache_key(subs=True, providers="wayback,otx")
     b = lib.gau_cache_key(subs=True, providers="wayback,otx")
     assert a == b
@@ -319,9 +310,8 @@ def test_pipeline_paths_namespace_by_target_and_cache_key(tmp_path: Path) -> Non
     assert p1.cache_key_slug != p2.cache_key_slug
 
 
-def test_pipeline_paths_target_slug_is_filesystem_safe(tmp_path: Path) -> None:
+def test_pipeline_paths_target_slug_is_filesystem_safe(lib) -> None:
     """Targets with weird characters (URLs, ports, paths) must produce safe slugs."""
-    lib = _load_pipeline_lib()
     weird_targets = [
         "https://example.com:8443/admin/",
         "*.example.com",
@@ -404,23 +394,20 @@ def test_cache_meta_atomic_write(tmp_path: Path) -> None:
 # ─── LinkFinder regex extraction ───────────────────────────────────────
 
 
-def test_extract_js_endpoints_finds_absolute_urls() -> None:
-    lib = _load_pipeline_lib()
+def test_extract_js_endpoints_finds_absolute_urls(lib) -> None:
     js = "var x = 'https://api.example.com/v2/users';"
     out = lib.extract_js_endpoints(js)
     assert "https://api.example.com/v2/users" in out
 
 
-def test_extract_js_endpoints_finds_relative_paths() -> None:
-    lib = _load_pipeline_lib()
+def test_extract_js_endpoints_finds_relative_paths(lib) -> None:
     js = "fetch('/api/v1/admin/delete'); call('/api/v1/admin/users');"
     out = lib.extract_js_endpoints(js)
     assert "/api/v1/admin/delete" in out
     assert "/api/v1/admin/users" in out
 
 
-def test_extract_js_endpoints_finds_rest_shape() -> None:
-    lib = _load_pipeline_lib()
+def test_extract_js_endpoints_finds_rest_shape(lib) -> None:
     js = "const route = 'users/profile/edit';"
     out = lib.extract_js_endpoints(js)
     # Either as the bare REST shape or as a slash-prefixed variant — the
@@ -428,28 +415,25 @@ def test_extract_js_endpoints_finds_rest_shape() -> None:
     assert any("users/profile/edit" in ep for ep in out)
 
 
-def test_extract_js_endpoints_dedupes() -> None:
-    lib = _load_pipeline_lib()
+def test_extract_js_endpoints_dedupes(lib) -> None:
     js = "fetch('/api/x'); fetch('/api/x'); call('/api/x');"
     out = lib.extract_js_endpoints(js)
     assert out.count("/api/x") == 1
 
 
-def test_extract_js_endpoints_handles_versioned_paths() -> None:
+def test_extract_js_endpoints_handles_versioned_paths(lib) -> None:
     """Versioned paths like /v1.2/users.json must not be truncated at the dot in 'v1.2'.
 
     The third alternative's resource segment includes the dot character so
     paths with embedded version dots survive intact.
     """
-    lib = _load_pipeline_lib()
     js = "fetch('api/v1.2/users.json'); fetch('lib/v3.4/admin/keys.json');"
     out = lib.extract_js_endpoints(js)
     assert any("v1.2/users.json" in ep for ep in out)
     assert any("v3.4/admin/keys.json" in ep for ep in out)
 
 
-def test_extract_js_endpoints_drops_static_assets() -> None:
-    lib = _load_pipeline_lib()
+def test_extract_js_endpoints_drops_static_assets(lib) -> None:
     js = "url('/static/img/logo.png'); url('/static/fonts/main.woff2');"
     out = lib.extract_js_endpoints(js)
     # png/woff2 are in the drop list
@@ -460,32 +444,27 @@ def test_extract_js_endpoints_drops_static_assets() -> None:
 # ─── Endpoint resolution ───────────────────────────────────────────────
 
 
-def test_resolve_absolute_url_passthrough() -> None:
-    lib = _load_pipeline_lib()
+def test_resolve_absolute_url_passthrough(lib) -> None:
     out = lib.resolve_js_endpoint("https://api.example.com/x", base_url="https://other.com/")
     assert out == "https://api.example.com/x"
 
 
-def test_resolve_protocol_relative_inherits_scheme() -> None:
-    lib = _load_pipeline_lib()
+def test_resolve_protocol_relative_inherits_scheme(lib) -> None:
     out = lib.resolve_js_endpoint("//cdn.example.com/asset", base_url="https://target.example/app.js")
     assert out == "https://cdn.example.com/asset"
 
 
-def test_resolve_absolute_path_joins_origin() -> None:
-    lib = _load_pipeline_lib()
+def test_resolve_absolute_path_joins_origin(lib) -> None:
     out = lib.resolve_js_endpoint("/api/users", base_url="https://target.example/static/app.js")
     assert out == "https://target.example/api/users"
 
 
-def test_resolve_relative_path_joins_directory() -> None:
-    lib = _load_pipeline_lib()
+def test_resolve_relative_path_joins_directory(lib) -> None:
     out = lib.resolve_js_endpoint("users.json", base_url="https://target.example/static/app.js")
     assert out == "https://target.example/static/users.json"
 
 
-def test_resolve_returns_none_for_invalid_base() -> None:
-    lib = _load_pipeline_lib()
+def test_resolve_returns_none_for_invalid_base(lib) -> None:
     out = lib.resolve_js_endpoint("/api/x", base_url="not a url")
     assert out is None
 
@@ -495,7 +474,6 @@ def test_resolve_returns_none_for_invalid_base() -> None:
 
 def test_gau_endpoints_shell_command_quotes_dynamic_args() -> None:
     import argparse
-    _ensure_scripts_path()
     from assess.commands import gau_endpoints  # type: ignore[import-not-found]
     args = argparse.Namespace(
         subs=True,
@@ -514,7 +492,6 @@ def test_gau_endpoints_shell_command_quotes_dynamic_args() -> None:
 
 
 def test_gau_secrets_gau_command_uses_pipefail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _ensure_scripts_path()
     from assess.commands import gau_secrets  # type: ignore[import-not-found]
 
     captured: dict[str, list[str]] = {}
@@ -546,7 +523,6 @@ def test_gau_secrets_gau_command_uses_pipefail(tmp_path: Path, monkeypatch: pyte
 
 
 def test_gau_js_host_match_requires_exact_host_or_subdomain() -> None:
-    _ensure_scripts_path()
     from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
     assert gau_js_endpoints._host_matches_target("example.com", "example.com")
     assert gau_js_endpoints._host_matches_target("api.example.com", "example.com")
@@ -558,7 +534,6 @@ def test_gau_js_host_match_requires_exact_host_or_subdomain() -> None:
 
 
 def test_gau_js_source_url_uses_http_scheme_hint_from_body_name(tmp_path: Path) -> None:
-    _ensure_scripts_path()
     from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
 
     body = tmp_path / "http-example.com-response.txt"
@@ -568,7 +543,6 @@ def test_gau_js_source_url_uses_http_scheme_hint_from_body_name(tmp_path: Path) 
 
 
 def test_gau_js_max_bodies_applies_to_suffix_matches(tmp_path: Path) -> None:
-    _ensure_scripts_path()
     from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
 
     for index in range(3):
@@ -578,7 +552,6 @@ def test_gau_js_max_bodies_applies_to_suffix_matches(tmp_path: Path) -> None:
 
 
 def test_gau_body_reuse_checks_require_files(tmp_path: Path) -> None:
-    _ensure_scripts_path()
     from assess.commands import gau_js_endpoints, gau_secrets  # type: ignore[import-not-found]
 
     (tmp_path / "nested").mkdir()
@@ -595,7 +568,6 @@ def test_gau_body_reuse_checks_require_files(tmp_path: Path) -> None:
 
 def test_gau_endpoints_registers(tmp_path: Path) -> None:
     import argparse
-    _ensure_scripts_path()
     from assess.commands import gau_endpoints  # type: ignore[import-not-found]
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
@@ -610,7 +582,6 @@ def test_gau_endpoints_registers(tmp_path: Path) -> None:
 
 def test_gau_secrets_registers() -> None:
     import argparse
-    _ensure_scripts_path()
     from assess.commands import gau_secrets  # type: ignore[import-not-found]
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
@@ -624,7 +595,6 @@ def test_gau_secrets_registers() -> None:
 def test_gau_secrets_verify_opt_in() -> None:
     """--verify must be opt-in; default must keep trufflehog in --no-verification."""
     import argparse
-    _ensure_scripts_path()
     from assess.commands import gau_secrets  # type: ignore[import-not-found]
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
@@ -637,7 +607,6 @@ def test_gau_secrets_verify_opt_in() -> None:
 
 def test_gau_js_endpoints_registers() -> None:
     import argparse
-    _ensure_scripts_path()
     from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()
@@ -664,7 +633,6 @@ def test_gau_js_endpoints_does_not_expose_cache_reuse_flags() -> None:
     re-execute gau from this verb, which is not the case.
     """
     import argparse
-    _ensure_scripts_path()
     from assess.commands import gau_js_endpoints  # type: ignore[import-not-found]
     parser = argparse.ArgumentParser()
     sub = parser.add_subparsers()

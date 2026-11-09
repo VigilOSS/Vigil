@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import importlib.util
 import json
-import sys
 from io import StringIO
 from pathlib import Path
 from types import SimpleNamespace
@@ -32,30 +31,23 @@ def _scripts_root() -> Path:
     return Path(__file__).resolve().parents[3] / "agent" / "scripts"
 
 
-def _load_lib():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
+def _load_script_module(module_name: str, *relative: str):
+    """Load one agent script under a caller-chosen unique module name."""
     spec = importlib.util.spec_from_file_location(
-        "anomaly_ut",
-        _scripts_root() / "assess" / "lib" / "anomaly.py",
+        module_name,
+        _scripts_root().joinpath(*relative),
     )
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _load_lib():
+    return _load_script_module("anomaly_ut", "assess", "lib", "anomaly.py")
 
 
 def _load_cmd():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
-    spec = importlib.util.spec_from_file_location(
-        "anomaly_score_cmd_ut",
-        _scripts_root() / "assess" / "commands" / "anomaly_score.py",
-    )
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
+    return _load_script_module("anomaly_score_cmd_ut", "assess", "commands", "anomaly_score.py")
 
 
 # ---------------------------------------------------------------------------
@@ -103,6 +95,12 @@ def _build_population(n_normal: int = 9) -> list[dict]:
     return records
 
 
+@pytest.fixture
+def population():
+    """The nine-normal baseline population the scoring cases below rank."""
+    return _build_population(9)
+
+
 # ---------------------------------------------------------------------------
 # (a) Clear outlier ranks #1
 # ---------------------------------------------------------------------------
@@ -111,8 +109,7 @@ class TestClearOutlier:
     def setup_method(self):
         self.mod = _load_lib()
 
-    def test_outlier_is_first(self):
-        population = _build_population(9)
+    def test_outlier_is_first(self, population):
         ranked = self.mod.score_population(population)
         assert ranked, "Expected non-empty ranking"
         top = ranked[0]
@@ -120,8 +117,7 @@ class TestClearOutlier:
             f"Expected outlier URL at #1, got {top['url']}"
         )
 
-    def test_outlier_has_highest_score(self):
-        population = _build_population(9)
+    def test_outlier_has_highest_score(self, population):
         ranked = self.mod.score_population(population)
         top_score = ranked[0]["anomaly_score"]
         assert top_score > 0.0, "Outlier must have a positive anomaly score"
@@ -129,8 +125,7 @@ class TestClearOutlier:
         for rec in ranked[1:]:
             assert rec["anomaly_score"] <= top_score
 
-    def test_outlier_has_anomalous_attributes(self):
-        population = _build_population(9)
+    def test_outlier_has_anomalous_attributes(self, population):
         ranked = self.mod.score_population(population)
         attrs = ranked[0].get("anomalous_attributes", [])
         assert len(attrs) >= 1, "Outlier should report at least one anomalous attribute"
@@ -139,13 +134,11 @@ class TestClearOutlier:
             f"Expected 'status' in anomalous attributes, got: {attrs}"
         )
 
-    def test_all_records_returned(self):
-        population = _build_population(9)
+    def test_all_records_returned(self, population):
         ranked = self.mod.score_population(population)
         assert len(ranked) == 10
 
-    def test_output_is_sorted_descending(self):
-        population = _build_population(9)
+    def test_output_is_sorted_descending(self, population):
         ranked = self.mod.score_population(population)
         scores = [r["anomaly_score"] for r in ranked]
         assert scores == sorted(scores, reverse=True), "Ranking must be descending by score"
@@ -399,9 +392,6 @@ class TestSparseAttributeDenominator:
 class TestAnomalyScoreCLI:
     def setup_method(self):
         self.cmd = _load_cmd()
-        root = str(_scripts_root())
-        if root not in sys.path:
-            sys.path.insert(0, root)
 
     # ------ register ------
 
@@ -432,8 +422,7 @@ class TestAnomalyScoreCLI:
 
     # ------ file input ------
 
-    def test_file_input_json_array(self, tmp_path, capsys):
-        population = _build_population(9)
+    def test_file_input_json_array(self, tmp_path, capsys, population):
         infile = tmp_path / "pop.json"
         infile.write_text(json.dumps(population), encoding="utf-8")
         self.cmd.run(SimpleNamespace(records_file=str(infile), top=5, as_json=False))
@@ -452,8 +441,7 @@ class TestAnomalyScoreCLI:
         out = capsys.readouterr().out
         assert "https://example.com/broken" in out
 
-    def test_file_input_json_output(self, tmp_path, capsys):
-        population = _build_population(9)
+    def test_file_input_json_output(self, tmp_path, capsys, population):
         infile = tmp_path / "pop.json"
         infile.write_text(json.dumps(population), encoding="utf-8")
         self.cmd.run(SimpleNamespace(records_file=str(infile), top=5, as_json=True))
@@ -468,8 +456,7 @@ class TestAnomalyScoreCLI:
             assert "anomaly_score" in rec
             assert "anomalous_attributes" in rec
 
-    def test_file_input_top_n_limits_output(self, tmp_path, capsys):
-        population = _build_population(9)
+    def test_file_input_top_n_limits_output(self, tmp_path, capsys, population):
         infile = tmp_path / "pop.json"
         infile.write_text(json.dumps(population), encoding="utf-8")
         self.cmd.run(SimpleNamespace(records_file=str(infile), top=3, as_json=True))
@@ -477,8 +464,7 @@ class TestAnomalyScoreCLI:
         data = json.loads(raw)
         assert len(data) == 3
 
-    def test_file_input_top_zero_returns_all(self, tmp_path, capsys):
-        population = _build_population(9)
+    def test_file_input_top_zero_returns_all(self, tmp_path, capsys, population):
         infile = tmp_path / "pop.json"
         infile.write_text(json.dumps(population), encoding="utf-8")
         self.cmd.run(SimpleNamespace(records_file=str(infile), top=0, as_json=True))
@@ -488,8 +474,7 @@ class TestAnomalyScoreCLI:
 
     # ------ stdin input ------
 
-    def test_stdin_input_json_array(self, monkeypatch, capsys):
-        population = _build_population(9)
+    def test_stdin_input_json_array(self, monkeypatch, capsys, population):
         fake_stdin = StringIO(json.dumps(population))
         monkeypatch.setattr("sys.stdin", fake_stdin)
         self.cmd.run(SimpleNamespace(records_file=None, top=5, as_json=False))

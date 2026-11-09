@@ -9,17 +9,10 @@ longer applies.
 """
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
 import pytest
 
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
-
-from app.services.state_manager import finding_change_policy  # noqa: E402
-from assess.lib import contract_registry, contracts  # noqa: E402
+from app.services.state_manager import finding_change_policy
+from assess.lib import contract_registry, contracts
 
 
 def test_documented_change_effects_mirror_the_policy_table():

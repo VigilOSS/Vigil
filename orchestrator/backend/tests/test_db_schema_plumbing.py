@@ -1,4 +1,4 @@
-"""Behaviour pins for ``app.db`` schema plumbing (packet S16).
+"""Behaviour pins for ``app.db`` schema plumbing.
 
 Two areas carried no direct coverage before this file:
 

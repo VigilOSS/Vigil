@@ -1,13 +1,14 @@
 """Project identity survives GUI shells without selecting application code from CWD."""
-import json
 import hashlib
+import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
+from vigil_cli import client_checks
 from vigil_cli import main as cli
 from vigil_cli.assessment_clients import prepare_workspace
 
@@ -167,7 +168,6 @@ def test_real_cli_uses_project_identity_without_a_launch(project, operation):
 
 
 def test_bare_client_check_uses_project_workflow(project, monkeypatch, capsys):
-    from vigil_cli import client_checks
     _, engagement, _, binding = project
     captured = {}
     monkeypatch.setattr(client_checks, "collect_client_checks", lambda client, **kwargs:
@@ -179,7 +179,6 @@ def test_bare_client_check_uses_project_workflow(project, monkeypatch, capsys):
 
 
 def test_client_check_defaults_to_verified_project_client(project, monkeypatch, capsys):
-    from vigil_cli import client_checks
     _, engagement, _, binding = project
     captured = {}
     monkeypatch.setattr(client_checks, "collect_client_checks", lambda client, **kwargs:
@@ -201,7 +200,6 @@ def test_client_check_outside_project_requests_a_client(project, monkeypatch, ca
 
 
 def test_explicit_context_diagnostics_keep_their_own_mode_filter(project, monkeypatch, capsys):
-    from vigil_cli import client_checks
     install, engagement, workspace, binding = project
     monkeypatch.setenv("VIGIL_CLIENT_CONTEXT", str(workspace / ".vigil-client-context.json"))
     monkeypatch.setenv("VIGIL_SESSION_ENGAGEMENT_DIR", str(engagement))
@@ -216,7 +214,6 @@ def test_explicit_context_diagnostics_keep_their_own_mode_filter(project, monkey
 
 @pytest.mark.parametrize("inspection", ["explicit-key", "outside-project"])
 def test_diagnostic_mode_default_requires_implicit_project_selection(project, monkeypatch, capsys, inspection):
-    from vigil_cli import client_checks
     install, engagement, _, binding = project
     key = [engagement.name] if inspection == "explicit-key" else []
     if inspection == "outside-project":

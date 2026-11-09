@@ -1,20 +1,25 @@
 from __future__ import annotations
 
 import argparse
-from contextlib import contextmanager
-from concurrent.futures import ThreadPoolExecutor
 import json
-from pathlib import Path
 import subprocess
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from assess.lib import remediation_vcs
+from vigil_cli import application, term
+from vigil_cli import remediation_sessions as sessions
+from vigil_cli.client_sessions import historical_client_starts
+from vigil_cli.remediation import register_remediation_parser
+from vigil_cli.remediation_sessions import normalize_references, route_context
+
 
 def test_route_accepts_ticket_references_without_a_ticket_flag() -> None:
-    from vigil_cli.remediation import register_remediation_parser
-
     parser = argparse.ArgumentParser()
     register_remediation_parser(parser.add_subparsers(dest="command"))
     args = parser.parse_args([
@@ -31,8 +36,6 @@ def test_route_accepts_ticket_references_without_a_ticket_flag() -> None:
      ["https://tracker.example.com/issues/12"]),
 ])
 def test_reference_routing_deduplicates_without_claiming_retrieval(references, expected) -> None:
-    from vigil_cli.remediation_sessions import normalize_references
-
     inputs = normalize_references(references)
     assert [item["identity_hint"] for item in inputs] == expected
     assert all(item["resolved"] is False for item in inputs)
@@ -41,24 +44,18 @@ def test_reference_routing_deduplicates_without_claiming_retrieval(references, e
 
 @pytest.mark.parametrize("reference", ["", "$(touch /tmp/marker)", "SEC-123\nSEC-124", "file:///report", "report text"])
 def test_reference_routing_rejects_non_reference_data(reference) -> None:
-    from vigil_cli.remediation_sessions import normalize_references
-
     with pytest.raises(ValueError):
         normalize_references([reference])
 
 
 @pytest.mark.parametrize("reference", ["123", "#123", "1bb41c53-1c3e-4738-bf68-a85fd4bda2f5", "acme:report_12"])
 def test_reference_routing_supports_non_jira_ticket_identifiers(reference) -> None:
-    from vigil_cli.remediation_sessions import normalize_references
-
     assert normalize_references([reference])[0]["identity_hint"] == reference
 
 
 @pytest.mark.parametrize("inputs, role", [(["SEC-123", "https://jira.example.com/browse/SEC-123"], "developer"),
                                          (["SEC-123", "SEC-124"], "coordinator")])
 def test_route_preserves_pending_inputs_and_returns_only_selected_role(tmp_path, inputs, role) -> None:
-    from vigil_cli.remediation_sessions import route_context
-
     result = route_context(tmp_path / "install", tmp_path / "engagement", {"repository": "/acme"}, inputs)
     assert result["role"] == role
     assert Path(result["instructions"]).name == f"remediation-{role}.md"
@@ -69,8 +66,6 @@ def test_route_preserves_pending_inputs_and_returns_only_selected_role(tmp_path,
 
 @pytest.fixture
 def prepared(tmp_path, monkeypatch):
-    from vigil_cli import remediation_sessions as sessions
-
     monkeypatch.setattr(sessions.os, "environ", {"PATH": "/usr/bin"})
     installation = tmp_path / "installation"
     command = installation / "agent/.claude/commands/vigil-remediate.md"
@@ -144,7 +139,6 @@ def test_start_hosts_and_attaches_same_native_conversation_with_repository_confi
     assert opts["env"].get("CLAUDECODE") is None
     assert opts["env"]["ENGAGEMENT_DIR"] == str(prepared.engagement)
     assert prepared.calls[-1][0] == ["claude", "attach", "job1"]
-    from vigil_cli.client_sessions import historical_client_starts
     history, _ = historical_client_starts(prepared.installation)
     assert [(row["client"], row["mode"], row["event"]) for row in history] == [
         ("claude", "remediation", "launch_requested")]
@@ -286,7 +280,6 @@ def test_worker_binding_is_idempotent_and_join_attaches_exact_job(prepared) -> N
 
 
 def test_join_progress_stops_before_native_terminal_handoff(prepared, monkeypatch):
-    from vigil_cli import term
     run_case(prepared)
     events = []
     active = []
@@ -337,11 +330,9 @@ def test_case_lock_wait_is_bounded(prepared):
 
 
 def test_join_resolves_application_once_for_environment_and_workspace(prepared, monkeypatch):
-    from vigil_cli import application
     from vigil_cli.remediation_vcs import adapter
     run_case(prepared)
     monkeypatch.syspath_prepend(str(Path(__file__).resolve().parents[1] / "agent/scripts"))
-    from assess.lib import remediation_vcs
     monkeypatch.setattr(remediation_vcs, "registered", lambda root, path: path == prepared.workspace)
     monkeypatch.setattr(remediation_vcs, "branch_matches", lambda path, branch: True)
     monkeypatch.setattr(prepared.module, "adapter", adapter)
@@ -548,8 +539,6 @@ def test_parallel_workers_share_command_overlay_without_creation_race(prepared, 
 
 
 def test_source_arguments_never_become_shell_code(tmp_path, monkeypatch) -> None:
-    from vigil_cli import remediation_sessions as sessions
-
     monkeypatch.setattr(sessions.subprocess, "run", lambda *args, **kwargs: pytest.fail("route must not run any process"))
     reference = "https://tracker.example.com/issues/12?note=$(touch%20marker)"
     args = argparse.Namespace(remediation_command="route", references=[reference])

@@ -20,7 +20,6 @@ import contextlib
 import importlib.util
 import io
 import json
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -36,9 +35,6 @@ def _scripts_root() -> Path:
 
 
 def _load_script_module(name: str, relative_path: str):
-    scripts_root = _scripts_root()
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     module_path = Path(__file__).resolve().parents[3] / relative_path
     spec = importlib.util.spec_from_file_location(name, module_path)
     assert spec is not None and spec.loader is not None

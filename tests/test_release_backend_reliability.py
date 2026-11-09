@@ -2,10 +2,15 @@ import http.client
 import json
 import ssl
 from contextlib import contextmanager
+from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
+from assess.lib.client import AssessError
+from vigil_cli import application, orchestrator, paths, restart_manifest, status
 from vigil_cli import engagements, preflight, main, docker, mitmproxy
+from vigil_cli.paths import add_assess_import_path
 
 
 @pytest.mark.parametrize(('stage', 'exc', 'expected'), [
@@ -36,9 +41,7 @@ def test_backend_transport_classification_closes_connection(tmp_path, monkeypatc
 
 
 def test_proof_request_refusal_is_clean_system_exit(tmp_path, monkeypatch):
-    from vigil_cli.paths import add_assess_import_path
     add_assess_import_path(tmp_path)
-    from assess.lib.client import AssessError
     @contextmanager
     def connect(*a):
         raise AssessError('work is blocked')
@@ -72,7 +75,6 @@ def test_proxy_unavailable_daemon_is_unknown_not_missing(tmp_path):
 
 
 def test_stale_pid_receipt_does_not_claim_reused_process(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     directory = tmp_path / 'state/runtime/pids'
     directory.mkdir(parents=True)
     (directory / 'orchestrator.pid').write_text('4242\n')
@@ -87,7 +89,6 @@ def test_stale_pid_receipt_does_not_claim_reused_process(tmp_path, monkeypatch):
 
 
 def test_live_listener_without_owned_receipt_is_not_stopped(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: True)
     monkeypatch.setattr(orchestrator, '_port_listener_pid', lambda *a: None)
     monkeypatch.setattr(engagements, 'inspect_backend_ownership', lambda *a, **k: engagements.BackendOwnership(engagements.BackendInstallRootStatus.OWNERSHIP_UNVERIFIED, 'http://127.0.0.1:18000'))
@@ -95,7 +96,6 @@ def test_live_listener_without_owned_receipt_is_not_stopped(tmp_path, monkeypatc
 
 
 def test_status_unavailable_docker_does_not_claim_images_absent(tmp_path, monkeypatch):
-    from vigil_cli import status
     monkeypatch.setattr(status, '_orchestrator_readyz_bundle', lambda *a: {})
     monkeypatch.setattr(status, 'orchestrator_status', lambda *a: 'stopped')
     calls = []
@@ -115,7 +115,6 @@ def test_status_unavailable_docker_does_not_claim_images_absent(tmp_path, monkey
     ('http://[::1]:18000', '::1'),
 ])
 def test_managed_loopback_endpoint_starts_compatible_listener(tmp_path, monkeypatch, url, host):
-    from vigil_cli import orchestrator
     monkeypatch.setattr(preflight, 'resolve_orchestrator_base_url', lambda *a: url)
     monkeypatch.setattr(preflight, 'orchestrator_status', lambda *a: 'stopped')
     monkeypatch.setattr(engagements, 'inspect_backend_ownership', lambda *a: engagements.BackendOwnership(engagements.BackendInstallRootStatus.UNREACHABLE, url))
@@ -128,7 +127,6 @@ def test_managed_loopback_endpoint_starts_compatible_listener(tmp_path, monkeypa
 
 
 def test_foreign_backend_refuses_before_start(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     url = 'http://127.0.0.1:18000'
     monkeypatch.setattr(preflight, 'resolve_orchestrator_base_url', lambda *a: url)
     monkeypatch.setattr(preflight, 'orchestrator_status', lambda *a: 'stopped')
@@ -142,7 +140,6 @@ def test_foreign_backend_refuses_before_start(tmp_path, monkeypatch):
 
 
 def test_stale_backend_refuses_client_with_quoted_restart_command(tmp_path, monkeypatch):
-    from vigil_cli import application
     url = 'http://127.0.0.1:18000'
     monkeypatch.setattr(preflight, 'resolve_orchestrator_base_url', lambda *a: url)
     monkeypatch.setattr(preflight, 'orchestrator_status', lambda *a: 'running')
@@ -155,7 +152,6 @@ def test_stale_backend_refuses_client_with_quoted_restart_command(tmp_path, monk
 
 
 def test_create_allocates_directory_atomically_when_another_creator_wins(tmp_path, monkeypatch):
-    from pathlib import Path
     monkeypatch.setattr(engagements, '_install_client_kind', lambda *a: 'none')
     original = Path.mkdir
     winner = []
@@ -195,7 +191,6 @@ def test_create_json_preserves_committed_identity_on_sync_failure(tmp_path, monk
 
 
 def test_owned_orphan_listener_can_be_recovered_only_with_process_identity(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     monkeypatch.setattr(orchestrator, '_backend_responsiveness', lambda _url: (True, True, ''))
     monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: True)
     monkeypatch.setattr(orchestrator, '_port_listener_pid', lambda *a: 4242)
@@ -210,7 +205,6 @@ def test_owned_orphan_listener_can_be_recovered_only_with_process_identity(tmp_p
 
 
 def test_receipt_from_copied_workspace_never_authorizes_restore(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     directory = tmp_path / 'state/runtime/pids'
     directory.mkdir(parents=True)
     (directory / 'orchestrator.pid').write_text('4242\n')
@@ -222,8 +216,6 @@ def test_receipt_from_copied_workspace_never_authorizes_restore(tmp_path, monkey
 
 @pytest.mark.parametrize('stage', ['health', 'readiness'])
 def test_startup_exit_names_code_and_log_instead_of_timeout(tmp_path, monkeypatch, stage):
-    from types import SimpleNamespace
-    from vigil_cli import orchestrator
     monkeypatch.setattr(orchestrator, 'application_root_for_workspace', lambda *a: tmp_path)
     monkeypatch.setattr(orchestrator, '_frontend_build_needed', lambda *a, **k: False)
     monkeypatch.setattr(orchestrator, '_report_build_needed', lambda *a, **k: False)
@@ -246,7 +238,6 @@ def test_pi_nonremediation_refuses_before_backend_side_effect(tmp_path, monkeypa
 
 @pytest.mark.parametrize('state', ['unknown', 'foreign'])
 def test_restart_manifest_does_not_clear_unknown_ownership_as_stopped(tmp_path, monkeypatch, state):
-    from vigil_cli import orchestrator, restart_manifest
     monkeypatch.setattr(orchestrator, 'orchestrator_status_payload', lambda *a, **k: {'state': state, 'pid': None, 'port_in_use': False, 'detail': 'ownership cannot be established'})
     result = restart_manifest.backend_state_from_readiness(tmp_path, {'reachable': False, 'unreachable_reason': 'refused'})
     assert result.state == 'unknown'
@@ -254,9 +245,6 @@ def test_restart_manifest_does_not_clear_unknown_ownership_as_stopped(tmp_path, 
 
 
 def test_owned_legacy_backend_process_can_match_workspace_application(tmp_path, monkeypatch):
-    from pathlib import Path
-    from types import SimpleNamespace
-    from vigil_cli import orchestrator
     original_is_dir = Path.is_dir
     monkeypatch.setattr(Path, 'is_dir', lambda path: False if path == Path('/proc') else original_is_dir(path))
     monkeypatch.setattr(orchestrator, 'application_root_for_workspace', lambda *a: tmp_path / 'new-release')
@@ -267,7 +255,6 @@ def test_owned_legacy_backend_process_can_match_workspace_application(tmp_path, 
 
 
 def test_owned_receipt_with_invalid_endpoint_is_unknown_instead_of_traceback(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     directory = tmp_path / 'state/runtime/pids'
     directory.mkdir(parents=True)
     (directory / 'orchestrator.pid').write_text('4242\n')
@@ -279,7 +266,6 @@ def test_owned_receipt_with_invalid_endpoint_is_unknown_instead_of_traceback(tmp
 
 @pytest.mark.parametrize('endpoint', ['http://192.0.2.10:18000', 'http://host.docker.internal:18000'])
 def test_unreachable_remote_configuration_does_not_block_local_lifecycle(tmp_path, monkeypatch, endpoint):
-    from vigil_cli import orchestrator, paths
     monkeypatch.setattr(paths, 'resolve_orchestrator_base_url', lambda *a: endpoint)
     monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
     monkeypatch.setattr(engagements, 'inspect_backend_ownership', lambda *a, **kw: engagements.BackendOwnership(engagements.BackendInstallRootStatus.UNREACHABLE, endpoint))
@@ -287,7 +273,6 @@ def test_unreachable_remote_configuration_does_not_block_local_lifecycle(tmp_pat
 
 
 def test_legacy_pid_reused_by_unrelated_process_does_not_block_local_start(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     directory = tmp_path / 'state/runtime/pids'
     directory.mkdir(parents=True)
     (directory / 'orchestrator.pid').write_text('4242\n')
@@ -299,7 +284,6 @@ def test_legacy_pid_reused_by_unrelated_process_does_not_block_local_start(tmp_p
 
 
 def test_legacy_backend_starting_without_listener_has_actionable_status(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator
     directory = tmp_path / 'state/runtime/pids'
     directory.mkdir(parents=True)
     (directory / 'orchestrator.pid').write_text('4242\n')
@@ -313,7 +297,6 @@ def test_legacy_backend_starting_without_listener_has_actionable_status(tmp_path
 
 
 def test_unreachable_remote_configuration_preserves_restore_uncertainty(tmp_path, monkeypatch):
-    from vigil_cli import orchestrator, paths
     endpoint = 'http://backend.example:18000'
     monkeypatch.setattr(paths, 'resolve_orchestrator_base_url', lambda *a: endpoint)
     monkeypatch.setattr(orchestrator, '_port_in_use', lambda *a: False)
@@ -329,8 +312,6 @@ def test_unreachable_remote_configuration_preserves_restore_uncertainty(tmp_path
 
 @pytest.mark.parametrize('endpoint', ['http://192.0.2.10:18000', 'http://host.docker.internal:18000'])
 def test_explicit_start_uses_local_endpoint_despite_remote_client_url(tmp_path, monkeypatch, endpoint):
-    from types import SimpleNamespace
-    from vigil_cli import orchestrator, paths
     monkeypatch.setattr(paths, 'resolve_orchestrator_base_url', lambda *a: endpoint)
     monkeypatch.setattr(orchestrator, 'application_root_for_workspace', lambda *a: tmp_path)
     monkeypatch.setattr(orchestrator, '_frontend_build_needed', lambda *a, **k: False)

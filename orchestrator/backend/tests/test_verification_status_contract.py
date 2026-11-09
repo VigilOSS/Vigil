@@ -23,6 +23,16 @@ def _seed(client, isolate_settings) -> None:
         assert response.status_code == 201, response.text
 
 
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
+
+
 def _finding_payload(slug: str, **overrides) -> dict:
     payload = {
         "slug": slug,
@@ -89,10 +99,8 @@ def _verify_with_proof(client, slug: str, verification_status: str = "confirmed"
 
 
 def test_api_uses_only_the_seven_value_verification_status_contract(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
-
     created = client.post(f"{BASE}/findings", json=_finding_payload("VA-001"))
 
     assert created.status_code == 201, created.text
@@ -115,9 +123,8 @@ def test_api_uses_only_the_seven_value_verification_status_contract(
 
 
 def test_verification_endpoint_and_history_emit_versioned_status(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     assert client.post(f"{BASE}/findings", json=_finding_payload("VA-010")).status_code == 201
 
     verified = client.post(
@@ -147,9 +154,8 @@ def test_verification_endpoint_and_history_emit_versioned_status(
     ),
 )
 def test_material_edits_invalidate_verification_but_notes_and_title_wording_do_not(
-    client, isolate_settings, material_patch
+    client, material_patch, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     created = client.post(
         f"{BASE}/findings",
         json=_finding_payload("VA-020"),
@@ -187,9 +193,8 @@ def test_material_edits_invalidate_verification_but_notes_and_title_wording_do_n
 
 
 def test_summary_edit_keeps_verdict_but_requires_claim_equivalence_review(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     assert client.post(f"{BASE}/findings", json=_finding_payload("VA-023")).status_code == 201
     verified = _verify_with_proof(client, "VA-023")
     assert verified.status_code == 200, verified.text
@@ -212,9 +217,8 @@ def test_summary_edit_keeps_verdict_but_requires_claim_equivalence_review(
 
 
 def test_record_again_with_revised_summary_requires_claim_review(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     assert client.post(f"{BASE}/findings", json=_finding_payload("VA-028")).status_code == 201
     assert _verify_with_proof(client, "VA-028").status_code == 200
 
@@ -237,9 +241,8 @@ def test_record_again_with_revised_summary_requires_claim_review(
 
 
 def test_record_again_with_changed_defect_invalidates_verification(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     assert client.post(f"{BASE}/findings", json=_finding_payload("VA-029")).status_code == 201
     assert _verify_with_proof(client, "VA-029").status_code == 200
 
@@ -254,8 +257,7 @@ def test_record_again_with_changed_defect_invalidates_verification(
     assert transition["action"] == "verification_invalidated"
 
 
-def test_empty_summary_patch_is_noop_for_claim_review(client, isolate_settings) -> None:
-    _seed(client, isolate_settings)
+def test_empty_summary_patch_is_noop_for_claim_review(client, seeded_engagement) -> None:
     assert client.post(f"{BASE}/findings", json=_finding_payload("VA-030")).status_code == 201
     assert _verify_with_proof(client, "VA-030").status_code == 200
 
@@ -271,9 +273,8 @@ def test_empty_summary_patch_is_noop_for_claim_review(client, isolate_settings) 
 
 
 def test_same_band_cvss_reduction_keeps_confirmed_and_audits_scores(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     finding = _finding_payload("VA-024")
     finding["details"].update({
         "cvss_score": 8.2,
@@ -299,9 +300,8 @@ def test_same_band_cvss_reduction_keeps_confirmed_and_audits_scores(
 
 
 def test_claim_equivalence_decision_is_bound_to_current_claim_and_independent_dispatch(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     assert client.post(f"{BASE}/findings", json=_finding_payload("VA-025")).status_code == 201
     assert _verify_with_proof(client, "VA-025").status_code == 200
     edited = client.patch(
@@ -365,9 +365,8 @@ def test_claim_equivalence_decision_is_bound_to_current_claim_and_independent_di
 
 
 def test_inbound_contradiction_surfaces_review_cue_without_resetting_verdict(
-    client, isolate_settings
+    client, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     for slug in ("VA-026", "VA-027"):
         assert client.post(f"{BASE}/findings", json=_finding_payload(slug)).status_code == 201
     assert _verify_with_proof(client, "VA-026").status_code == 200
@@ -391,9 +390,8 @@ def test_inbound_contradiction_surfaces_review_cue_without_resetting_verdict(
 
 @pytest.mark.parametrize("verification_status", ("confirmed", "downgraded"))
 def test_replace_removing_material_details_invalidates_verification(
-    client, isolate_settings, verification_status
+    client, verification_status, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     created = client.post(
         f"{BASE}/findings",
         json=_finding_payload("VA-021"),
@@ -425,9 +423,8 @@ def test_replace_removing_material_details_invalidates_verification(
 
 @pytest.mark.parametrize("verification_status", ("confirmed", "downgraded"))
 def test_claim_retraction_invalidates_terminal_verification_and_attributes_the_actor(
-    client, isolate_settings, verification_status
+    client, verification_status, seeded_engagement
 ) -> None:
-    _seed(client, isolate_settings)
     created = client.post(
         f"{BASE}/findings",
         json=_finding_payload("VA-022"),

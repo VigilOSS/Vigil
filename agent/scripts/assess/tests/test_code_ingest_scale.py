@@ -8,6 +8,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_ingest
 from assess.lib.client import AssessError
@@ -30,9 +31,7 @@ def _args(repo: Path, engagement: Path, **overrides) -> SimpleNamespace:
 def test_git_status_timeout_can_be_configured_without_skipping_provenance(monkeypatch):
     parser = argparse.ArgumentParser()
     code_ingest.register(parser.add_subparsers(dest="command"))
-    parsed = parser.parse_known_args([
-        "code-ingest", "/repo", "--git-status-timeout", "300",
-    ])[0]
+    parsed = parser.parse_known_args(["code-ingest", "/repo", "--git-status-timeout", "300"])[0]
     assert getattr(parsed, "git_status_timeout", None) == 300
     calls = []
 
@@ -170,16 +169,7 @@ def test_ingest_commit_budget_scales_without_retrying_large_publication(monkeypa
     monkeypatch.setattr(code_ingest, "_setup_ctags", lambda *_args, **kwargs: {"available": False, **kwargs})
     commits = []
 
-    class Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class Client(StubClient):
         def post(self, endpoint, payload, **options):
             if endpoint == "code/repos/refresh/start":
                 return {"repo_id": 7, "refresh_token": "token"}
@@ -212,16 +202,7 @@ def test_dry_run_reports_full_hashing_progress_and_preserves_content_comparison(
     ))
     monkeypatch.setattr(code_ingest, "_SCAN_PROGRESS_FILES", 2, raising=False)
 
-    class Client:
-        def __init__(self, *_args, **_kwargs):
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class Client(StubClient):
         def post(self, endpoint, payload):
             assert endpoint == "code/repos/refresh/preview"
             assert len(payload["files"]) == 3

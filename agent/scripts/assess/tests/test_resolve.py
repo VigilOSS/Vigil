@@ -15,6 +15,7 @@ import argparse
 import pytest
 
 from assess.commands import resolve
+from _fake_client import StubClient
 
 
 class _Cfg:
@@ -24,22 +25,13 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
-class _FakeClient:
+class _FakeClient(StubClient):
     def __init__(self) -> None:
         self.patches: list[tuple[str, dict]] = []
 
     def patch(self, endpoint: str, payload: dict) -> dict:
         self.patches.append((endpoint, payload))
         return {"id": int(endpoint.rsplit("/", 1)[-1]), "status": payload.get("status")}
-
-    def __enter__(self) -> "_FakeClient":
-        return self
-
-    def __exit__(self, *exc) -> bool:
-        return False
-
-    def close(self) -> None:  # pragma: no cover - trivial
-        pass
 
 
 def _parser():

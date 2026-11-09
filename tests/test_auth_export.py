@@ -20,12 +20,18 @@ from __future__ import annotations
 
 import sys
 import types
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+import pytest
 
-from vigil_cli import auth  # noqa: E402  (src must be on sys.path first)
+from vigil_cli import auth
+
+
+@pytest.fixture
+def eng(tmp_path):
+    """One engagement directory under a throwaway install root."""
+    directory = tmp_path / "agent" / "engagements" / "eng"
+    directory.mkdir(parents=True)
+    return directory
 
 
 def _material() -> dict[str, object]:
@@ -68,9 +74,7 @@ def _stub_assess_identity(monkeypatch) -> None:
     monkeypatch.setitem(sys.modules, "assess.lib.identity", identity_mod)
 
 
-def test_export_without_host_renders_only_flat_cookie_view(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_export_without_host_renders_only_flat_cookie_view(eng, monkeypatch):
     monkeypatch.setattr(auth, "_active_material", lambda _d: _material())
 
     out = auth.export_curl_args(eng)
@@ -80,9 +84,7 @@ def test_export_without_host_renders_only_flat_cookie_view(tmp_path, monkeypatch
     assert "-H 'X-Api: K'" in out
 
 
-def test_export_with_host_uses_that_hosts_bucket_alone(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_export_with_host_uses_that_hosts_bucket_alone(eng, monkeypatch):
     monkeypatch.setattr(auth, "_active_material", lambda _d: _material())
     _stub_assess_identity(monkeypatch)
 
@@ -94,12 +96,10 @@ def test_export_with_host_uses_that_hosts_bucket_alone(tmp_path, monkeypatch):
     assert "flat=F" not in out
 
 
-def test_export_with_host_that_has_no_bucket_omits_cookies(tmp_path, monkeypatch):
+def test_export_with_host_that_has_no_bucket_omits_cookies(eng, monkeypatch):
     # BUG 2 regression: buckets EXIST (for b) but none match the target host (c).
     # The flat ``cookies`` union must NOT be routed onto c — cookies are omitted
     # entirely rather than leaked cross-host.
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
     monkeypatch.setattr(auth, "_active_material", lambda _d: _material())
     _stub_assess_identity(monkeypatch)
 
@@ -111,11 +111,9 @@ def test_export_with_host_that_has_no_bucket_omits_cookies(tmp_path, monkeypatch
     assert "-H 'X-Api: K'" in out  # non-cookie headers still exported
 
 
-def test_export_with_no_buckets_falls_back_to_flat_view(tmp_path, monkeypatch):
+def test_export_with_no_buckets_falls_back_to_flat_view(eng, monkeypatch):
     # Legacy/manual identity with NO per-host buckets: the flat view is the only
     # cookie view, so the gated fallback still renders it (backwards compatible).
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
     monkeypatch.setattr(
         auth, "_active_material", lambda _d: {"cookies": {"flat": "F"}, "headers": {}}
     )
@@ -126,13 +124,11 @@ def test_export_with_no_buckets_falls_back_to_flat_view(tmp_path, monkeypatch):
     assert "flat=F" in out  # no buckets → flat fallback fires
 
 
-def test_export_with_host_drops_other_hosts_union_cookies(tmp_path, monkeypatch):
+def test_export_with_host_drops_other_hosts_union_cookies(eng, monkeypatch):
     # BUG 2 regression (sharpest form): the flat ``cookies`` field is a UNION
     # across hosts a and b. Exporting for host a must carry ONLY a's cookie; b's
     # uniquely-named cookie must not survive from the union into the printed
     # ``-H 'Cookie: …'``.
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
     material = {
         "cookies": {"asess": "A", "bsess": "B"},  # capture-time UNION across a + b
         "host_cookies": [
@@ -166,9 +162,7 @@ def _multi_host_material() -> dict:
     }
 
 
-def test_authed_probe_headers_use_matching_bucket_alone(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_authed_probe_headers_use_matching_bucket_alone(eng, monkeypatch):
     _stub_assess_identity(monkeypatch)
 
     headers = auth._authed_request_headers(eng, _multi_host_material(), "a.example.com")
@@ -177,11 +171,9 @@ def test_authed_probe_headers_use_matching_bucket_alone(tmp_path, monkeypatch):
     assert "bsess=B" not in headers["Cookie"]  # b's cookie must not ride an a probe
 
 
-def test_authed_probe_headers_omit_cookies_on_bucket_miss(tmp_path, monkeypatch):
+def test_authed_probe_headers_omit_cookies_on_bucket_miss(eng, monkeypatch):
     # BUG 1 regression: buckets EXIST (a, b) but none match the probed host (c).
     # The flat union must NOT be injected — no Cookie header at all.
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
     _stub_assess_identity(monkeypatch)
 
     headers = auth._authed_request_headers(eng, _multi_host_material(), "c.example.com")
@@ -189,11 +181,9 @@ def test_authed_probe_headers_omit_cookies_on_bucket_miss(tmp_path, monkeypatch)
     assert "Cookie" not in headers  # cross-host union NOT leaked onto c
 
 
-def test_authed_probe_headers_flat_fallback_without_buckets(tmp_path, monkeypatch):
+def test_authed_probe_headers_flat_fallback_without_buckets(eng, monkeypatch):
     # Legacy/manual identity (no per-host buckets): flat view is the only cookie
     # source, so the gated fallback still injects it (backwards compatible).
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
     _stub_assess_identity(monkeypatch)
 
     headers = auth._authed_request_headers(eng, {"cookies": {"S": "1"}}, "any.example.com")
@@ -244,9 +234,7 @@ def test_csrf_export_arg_not_emitted_when_operator_header_present():
     assert auth._csrf_export_arg(mat, mat["cookies"], "POST") == ""
 
 
-def test_export_curl_args_includes_csrf_on_post_only(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_export_curl_args_includes_csrf_on_post_only(eng, monkeypatch):
     monkeypatch.setattr(auth, "_active_material", lambda _d: _csrf_material_export())
 
     post = auth.export_curl_args(eng, method="POST")
@@ -379,9 +367,7 @@ def _identity_with_liveness(**liveness):
     return {"cookies": {"S": "1"}, "liveness": liveness}
 
 
-def test_probe_liveness_live_on_authed_marker_and_status(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_live_on_authed_marker_and_status(eng, monkeypatch):
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
@@ -397,9 +383,7 @@ def test_probe_liveness_live_on_authed_marker_and_status(tmp_path, monkeypatch):
     assert "S=1" in (_FakeConn.requests[0]["headers"].get("Cookie", ""))
 
 
-def test_probe_liveness_dead_on_login_redirect_not_followed(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_dead_on_login_redirect_not_followed(eng, monkeypatch):
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
@@ -416,9 +400,7 @@ def test_probe_liveness_dead_on_login_redirect_not_followed(tmp_path, monkeypatc
     assert len(_FakeConn.requests) == 1  # 302 classified, never chased
 
 
-def test_probe_liveness_dead_on_dead_marker_in_body(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_dead_on_dead_marker_in_body(eng, monkeypatch):
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(dead_marker="Please log in"),
@@ -430,9 +412,7 @@ def test_probe_liveness_dead_on_dead_marker_in_body(tmp_path, monkeypatch):
     assert result["http_status"] == 200
 
 
-def test_probe_liveness_unknown_on_unexplained_status_mismatch(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_unknown_on_unexplained_status_mismatch(eng, monkeypatch):
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
@@ -447,9 +427,7 @@ def test_probe_liveness_unknown_on_unexplained_status_mismatch(tmp_path, monkeyp
     assert result["http_status"] == 500
 
 
-def test_probe_liveness_dead_on_auth_challenge_status(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_dead_on_auth_challenge_status(eng, monkeypatch):
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(authed_marker="Sign out", expect_status=200),
@@ -462,9 +440,7 @@ def test_probe_liveness_dead_on_auth_challenge_status(tmp_path, monkeypatch):
     assert result["http_status"] == 401
 
 
-def test_probe_liveness_unknown_without_liveness_signature(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_unknown_without_liveness_signature(eng, monkeypatch):
     # No material.liveness configured -> classifier cannot decide -> unknown.
     monkeypatch.setattr(auth, "_active_material", lambda _d: {"cookies": {"S": "1"}})
     _install_fake_conn(monkeypatch, 200, body=b"anything at all")
@@ -475,9 +451,7 @@ def test_probe_liveness_unknown_without_liveness_signature(tmp_path, monkeypatch
     assert "no liveness signature" in result["reason"]
 
 
-def test_probe_liveness_unknown_on_transport_error(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_unknown_on_transport_error(eng, monkeypatch):
     monkeypatch.setattr(
         auth, "_active_material",
         lambda _d: _identity_with_liveness(authed_marker="Sign out"),
@@ -492,9 +466,7 @@ def test_probe_liveness_unknown_on_transport_error(tmp_path, monkeypatch):
     assert result["error"]
 
 
-def test_scoped_alias_transport_error_still_returns_resolved_identity(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_scoped_alias_transport_error_still_returns_resolved_identity(eng, monkeypatch):
     monkeypatch.setattr(
         auth,
         "_api",
@@ -517,9 +489,7 @@ def test_scoped_alias_transport_error_still_returns_resolved_identity(tmp_path, 
     assert result["identity_name"] == "cap-member-v2"
 
 
-def test_missing_scoped_alias_is_not_probed_anonymously(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_missing_scoped_alias_is_not_probed_anonymously(eng, monkeypatch):
     monkeypatch.setattr(auth, "_api", lambda *_args, **_kwargs: {})
 
     def unexpected_connection(*_args, **_kwargs):
@@ -539,9 +509,7 @@ def test_missing_scoped_alias_is_not_probed_anonymously(tmp_path, monkeypatch):
     assert "identity" in result["error"]
 
 
-def test_probe_liveness_rejects_non_http_url_without_network(tmp_path, monkeypatch):
-    eng = tmp_path / "agent" / "engagements" / "eng"
-    eng.mkdir(parents=True)
+def test_probe_liveness_rejects_non_http_url_without_network(eng, monkeypatch):
     monkeypatch.setattr(auth, "_active_material", lambda _d: {"cookies": {"S": "1"}})
     # No connection is installed; an invalid URL must be rejected before any network.
     result = auth.probe_liveness(eng, "ftp://portal.example.com/x")

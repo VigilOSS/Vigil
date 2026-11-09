@@ -18,6 +18,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_classify, code_coverage, code_dispatch
 
@@ -112,19 +113,13 @@ def test_readiness_blocker_names_its_repo_and_repair_verb(capsys):
 # --- code-dispatch --------------------------------------------------------
 
 
-class _StubClient:
+class _StubClient(StubClient):
     def __init__(self, response):
         self._response = response
         self.posts: list[tuple[str, dict]] = []
 
     def __call__(self, *args, **kwargs):
         return self
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
 
     def get(self, path):
         return self._response
@@ -235,23 +230,11 @@ def test_canonicalization_applies_to_both_payload_shapes():
     ]
 
 
-class _ClassifyClient:
+class _ClassifyClient(StubClient):
     """Drives `code-record classify` end to end over a recorded response."""
 
     response: dict | None = None
     posts: list[tuple[str, dict, dict]] = []
-
-    def __init__(self, *_args) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
-
-    def close(self) -> None:
-        return None
 
     def post(self, endpoint: str, payload: dict, **options):
         type(self).posts.append((endpoint, payload, options))
@@ -539,16 +522,7 @@ def test_inherited_from_is_a_read_labelled_as_inherited(monkeypatch, tmp_path, c
     """Unchanged-hash files keep a readable prior verdict; never a currency claim."""
     requested: list[str] = []
 
-    class _Client:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class _Client(StubClient):
         def get(self, endpoint: str):
             requested.append(endpoint)
             return {

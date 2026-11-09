@@ -13,15 +13,16 @@ test that can produce a meaningful automated pass or failure in this suite.
 """
 from __future__ import annotations
 
-import sys
+import argparse
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
-
-from vigil_cli import oob  # noqa: E402
+from vigil_cli import main as main_module
+from vigil_cli import oob
+from vigil_cli.docker import DockerResult
 
 
 # ── nonce minting ────────────────────────────────────────────────────────
@@ -284,8 +285,6 @@ def test_parse_ignores_empty_host_line():
 
 
 def test_read_client_log_reverse_scans_bounded_interaction_records():
-    from vigil_cli.docker import DockerResult
-
     seen = {}
 
     def runner(argv, **_):
@@ -306,8 +305,6 @@ def test_read_client_log_reverse_scans_bounded_interaction_records():
 
 
 def test_read_client_log_rejects_unbounded_interaction_windows():
-    from vigil_cli.docker import DockerResult
-
     def runner(argv, **_):
         return DockerResult(0, "", "")
 
@@ -342,8 +339,6 @@ def test_interaction_candidate_window_survives_verbose_dns_burst():
 
 
 def test_read_client_log_sanitizes_name():
-    from vigil_cli.docker import DockerResult
-
     seen = {}
 
     def runner(argv, **_):
@@ -360,8 +355,6 @@ def test_read_client_log_sanitizes_name():
 
 
 def test_oob_runtime_preflight_includes_interaction_window_tools():
-    from vigil_cli.docker import DockerResult
-
     commands = []
 
     def runner(argv, **_):
@@ -375,10 +368,6 @@ def test_oob_runtime_preflight_includes_interaction_window_tools():
 
 
 def test_oob_poll_record_limit_is_positive_and_bounded():
-    import argparse
-
-    from vigil_cli import main as main_module
-
     assert main_module._oob_poll_record_limit("1") == 1
     assert main_module._oob_poll_record_limit("10000") == 10000
     with pytest.raises(argparse.ArgumentTypeError, match="between 1 and 10000"):
@@ -394,7 +383,6 @@ def test_client_payload_host_greps_whole_log_not_a_tail():
     # The artifact: the one-time registration banner sits near the TOP of a busy
     # client log; the old tail-400 read scrolled past it and reported the client
     # unregistered ("flapping"). client_payload_host must now grep the whole log.
-    from vigil_cli.docker import DockerResult
 
     banner = "[\x1b[34mINF\x1b[0m] d94fse55eevoh891fnf06hfqfqio1sgry.oob.example.com"
     seen = {}
@@ -413,8 +401,6 @@ def test_client_payload_host_greps_whole_log_not_a_tail():
 
 
 def test_read_client_registration_log_greps_domain_over_whole_file():
-    from vigil_cli.docker import DockerResult
-
     seen = {}
 
     def runner(argv, **_):
@@ -462,8 +448,6 @@ def _seed_engagement_dir(install_root: Path, key: str) -> Path:
 
 
 def _mint_args(key, **over):
-    import argparse
-
     base = dict(
         engagement=key,
         select=False,
@@ -481,8 +465,6 @@ def _mint_args(key, **over):
 
 
 def test_oob_mint_cli_binds_nonce_under_running_client(monkeypatch, tmp_path, capsys):
-    from vigil_cli import main as main_module
-
     install_root = tmp_path
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     key = "2026-05-30-120000-shop"
@@ -520,8 +502,6 @@ def test_oob_mint_cli_binds_nonce_under_running_client(monkeypatch, tmp_path, ca
 
 
 def test_oob_mint_cli_honors_explicit_client(monkeypatch, tmp_path, capsys):
-    from vigil_cli import main as main_module
-
     install_root = tmp_path
     key = "2026-05-30-120000-shop"
     _seed_engagement_dir(install_root, key)
@@ -547,8 +527,6 @@ def test_oob_mint_cli_honors_explicit_client(monkeypatch, tmp_path, capsys):
 
 
 def test_oob_mint_cli_errors_when_no_client_running(monkeypatch, tmp_path):
-    from vigil_cli import main as main_module
-
     install_root = tmp_path
     key = "2026-05-30-120000-shop"
     _seed_engagement_dir(install_root, key)
@@ -562,8 +540,6 @@ def test_oob_mint_cli_errors_when_no_client_running(monkeypatch, tmp_path):
 
 
 def test_oob_mint_cli_errors_when_multiple_clients_and_no_selection(monkeypatch, tmp_path):
-    from vigil_cli import main as main_module
-
     install_root = tmp_path
     key = "2026-05-30-120000-shop"
     _seed_engagement_dir(install_root, key)
@@ -579,7 +555,6 @@ def test_oob_mint_cli_errors_when_multiple_clients_and_no_selection(monkeypatch,
 
 def test_oob_mint_cli_errors_when_explicit_client_not_running(monkeypatch, tmp_path):
     # The operator's most likely mistake: a typo'd or stopped --client name.
-    from vigil_cli import main as main_module
 
     install_root = tmp_path
     key = "2026-05-30-120000-shop"
@@ -595,8 +570,6 @@ def test_oob_mint_cli_errors_when_explicit_client_not_running(monkeypatch, tmp_p
 
 
 def test_oob_mint_cli_errors_when_client_unregistered(monkeypatch, tmp_path):
-    from vigil_cli import main as main_module
-
     install_root = tmp_path
     key = "2026-05-30-120000-shop"
     _seed_engagement_dir(install_root, key)
@@ -611,9 +584,6 @@ def test_oob_mint_cli_errors_when_client_unregistered(monkeypatch, tmp_path):
 
 
 def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, capsys):
-    from vigil_cli import main as main_module
-    from vigil_cli.docker import DockerResult
-
     install_root = tmp_path
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     key = "2026-05-30-120000-poll"
@@ -645,8 +615,6 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
         lambda *_, **__: "client-id.oob.example.com",
     )
 
-    import argparse
-
     args = argparse.Namespace(engagement=key, select=False, client="agent-1", lines=2000, json=False)
     options = main_module._oob_options(install_root)
     main_module._oob_poll(args, install_root, options)
@@ -667,9 +635,6 @@ def test_oob_poll_cli_correlates_matched_and_unmatched(monkeypatch, tmp_path, ca
 def test_oob_poll_cli_does_not_post_probe_owned_by_another_client(
     monkeypatch, tmp_path, capsys
 ):
-    from vigil_cli import main as main_module
-    from vigil_cli.docker import DockerResult
-
     key = "2026-05-30-120000-poll"
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     _seed_engagement_dir(tmp_path, key)
@@ -699,7 +664,6 @@ def test_oob_poll_cli_does_not_post_probe_owned_by_another_client(
 
     poll_client = _PollClient()
     monkeypatch.setattr(main_module, "_build_assessment_client", lambda *_: poll_client)
-    import argparse
 
     args = argparse.Namespace(
         engagement=key,
@@ -756,8 +720,6 @@ def test_assess_health_down_when_stopped():
 
 
 def _status_runner(scenario):
-    from vigil_cli.docker import DockerResult
-
     def runner(argv, **_):
         cmd = argv[-1]
         if "tmux has-session -t oob-server" in cmd:
@@ -972,8 +934,6 @@ def test_oob_status_shallow_skips_probes_and_does_not_false_degrade(monkeypatch)
 
 
 def test_print_oob_status_exits_nonzero_and_warns_on_degraded(capsys):
-    from vigil_cli import main as main_module
-
     payload = {
         "state": "running", "health": "degraded", "server": True, "frpc": True,
         "clients": ["a"], "running": ["a"], "client_health": [{"name": "a", "registered": False}],
@@ -988,8 +948,6 @@ def test_print_oob_status_exits_nonzero_and_warns_on_degraded(capsys):
 
 
 def test_print_oob_status_ok_exits_zero_and_reports_health(capsys):
-    from vigil_cli import main as main_module
-
     payload = {
         "state": "running", "health": "ok", "server": True, "frpc": True,
         "clients": ["a"], "running": ["a"], "client_health": [{"name": "a", "registered": True}],
@@ -1044,7 +1002,6 @@ def test_select_prunable_oob_clients_ignores_paths_outside_clients_dir():
 
 
 def test_clean_oob_clients_removes_selected_and_spares_running_and_fresh(monkeypatch):
-    from vigil_cli.docker import DockerResult
     monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
     now = 1_700_000_000
     d = oob.OOB_CLIENTS_DIR
@@ -1078,7 +1035,6 @@ def test_clean_oob_clients_removes_selected_and_spares_running_and_fresh(monkeyp
 
 
 def test_clean_oob_clients_dry_run_selects_but_does_not_delete(monkeypatch):
-    from vigil_cli.docker import DockerResult
     monkeypatch.setattr(oob.docker, "container_running", lambda *a, **k: True)
     now = 1_700_000_000
     listing = f"NOW {now}\n{now - 100 * _DAY} {oob.OOB_CLIENTS_DIR}/ancient.log\n"
@@ -1116,9 +1072,6 @@ def _interaction_hash(nonce, protocol, remote_address, query_type, observed_at, 
     string so an attacker who controls a free-text field (e.g. ``raw_request``)
     cannot shift a ``|`` to forge a colliding key and suppress a real callback.
     """
-    import hashlib
-    import json
-
     return hashlib.sha256(
         json.dumps(
             [nonce, protocol, remote_address, query_type, observed_at, raw_request],

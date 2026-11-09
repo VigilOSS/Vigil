@@ -31,6 +31,16 @@ def _seed(client, isolate_settings) -> int:
     return int(response.json()["id"])
 
 
+@pytest.fixture
+def eng_id(client, isolate_settings):
+    """The engagement id the readiness cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
+
+
 def test_stable_function_names_unchanged():
     """The four behind-the-front-door functions keep their names (safety invariant)."""
     for name in ("coverage_readiness", "report_readiness", "per_host_coverage", "depth_ledger"):
@@ -70,9 +80,8 @@ def test_normalize_phase_resolves_the_short_consume_alias():
         ("report", {"report_readiness", "intel"}),
     ],
 )
-def test_phase_composition(client, isolate_settings, phase, expect_keys):
+def test_phase_composition(phase, expect_keys, eng_id):
     """Each phase assembles exactly the gates depth-gate §6 specifies."""
-    eng_id = _seed(client, isolate_settings)
     payload = state_manager.phase_readiness(eng_id, phase)
     assert payload["phase"] == phase
     assert payload["track"] == "web"
@@ -82,15 +91,13 @@ def test_phase_composition(client, isolate_settings, phase, expect_keys):
         assert key in payload, f"{phase} should compose {key}; got {sorted(payload)}"
 
 
-def test_collect_phase_omits_depth_and_intel(client, isolate_settings):
-    eng_id = _seed(client, isolate_settings)
+def test_collect_phase_omits_depth_and_intel(eng_id):
     payload = state_manager.phase_readiness(eng_id, "collect")
     assert "depth_ledger" not in payload
     assert "intel" not in payload
 
 
-def test_endpoint_serves_phase_readiness(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_endpoint_serves_phase_readiness(client, eng_id):
     resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "consume-test"})
     assert resp.status_code == 200, resp.text
     body = resp.json()
@@ -99,22 +106,19 @@ def test_endpoint_serves_phase_readiness(client, isolate_settings):
     assert "coverage" in body and "depth_ledger" in body and "intel" in body
 
 
-def test_endpoint_unknown_phase_is_422(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_endpoint_unknown_phase_is_422(client, eng_id):
     resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "bogus"})
     assert resp.status_code == 422, resp.text
 
 
-def test_endpoint_short_consume_alias_resolves_to_the_canonical_phase(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_endpoint_short_consume_alias_resolves_to_the_canonical_phase(client, eng_id):
     resp = client.get(f"{ASSESSMENT_BASE}/phase-readiness", params={"phase": "consume"})
     assert resp.status_code == 200, resp.text
     assert resp.json()["phase"] == "consume-test"
 
 
-def test_stable_routes_still_present(client, isolate_settings):
+def test_stable_routes_still_present(client, eng_id):
     """The old readiness routes remain reachable (safety invariant — KEEP)."""
-    _seed(client, isolate_settings)
     for route in ("coverage-readiness", "report-readiness", "coverage-readiness/by-host"):
         resp = client.get(f"{ASSESSMENT_BASE}/{route}")
         assert resp.status_code == 200, f"{route}: {resp.text}"
@@ -122,11 +126,6 @@ def test_stable_routes_still_present(client, isolate_settings):
 
 def _load_cpr_module():
     """Load the check-phase-readiness CLI command module (lives in the agent tree)."""
-    import sys
-    from pathlib import Path
-    scripts_root = Path(__file__).resolve().parents[3] / "agent" / "scripts"
-    if str(scripts_root) not in sys.path:
-        sys.path.insert(0, str(scripts_root))
     return importlib.import_module("assess.commands.check_phase_readiness")
 
 
@@ -239,13 +238,12 @@ def _seed_clean_recon_pipeline(eng_id: int) -> None:
         _seed_command_run(eng_id, command=command, status="completed", return_code=0)
 
 
-def test_stage_audit_flags_timed_out_crawl_and_never_run_historical(client, isolate_settings):
+def test_stage_audit_flags_timed_out_crawl_and_never_run_historical(eng_id):
     """A recon ledger with a timed-out katana AND no gau run flags BOTH gaps.
 
     This is the exact false-GREEN the audit exists to catch: katana timed out
     (partial corpus) and gau never ran, yet the durable-state gate was green.
     """
-    eng_id = _seed(client, isolate_settings)
     # Stages that ran cleanly so they are NOT flagged.
     _seed_command_run(eng_id, command="dnsx -l hosts.txt", status="completed", return_code=0)
     _seed_command_run(eng_id, command="httpx -l hosts.txt", status="completed", return_code=0)
@@ -268,9 +266,8 @@ def test_stage_audit_flags_timed_out_crawl_and_never_run_historical(client, isol
     assert set(audit["satisfied_stages"]) == {"subdomain_enum", "http_liveness", "secret_mining"}
 
 
-def test_stage_audit_clean_ledger_has_no_gaps(client, isolate_settings):
+def test_stage_audit_clean_ledger_has_no_gaps(eng_id):
     """When every EXPECTED recon stage ran cleanly the audit reports no gaps."""
-    eng_id = _seed(client, isolate_settings)
     _seed_clean_recon_pipeline(eng_id)
     audit = pr_mod.stage_completion_audit(eng_id, "recon")
     assert audit["applicable"] is True
@@ -279,14 +276,13 @@ def test_stage_audit_clean_ledger_has_no_gaps(client, isolate_settings):
     assert set(audit["satisfied_stages"]) == set(pr_mod.PHASE_EXPECTED_STAGES["recon"])
 
 
-def test_stage_audit_flags_partial_results(client, isolate_settings):
+def test_stage_audit_flags_partial_results(eng_id):
     """A completed-but-partial katana is a crawl gap with disposition partial_results.
 
     ``partial_results`` is only settable via the finalize PATCH, so the row is
     recorded (running) then finalized completed-with-partial — mirroring a real
     job that finished but truncated its output corpus.
     """
-    eng_id = _seed(client, isolate_settings)
     _seed_command_run(eng_id, command="dnsx -l hosts.txt", status="completed", return_code=0)
     _seed_command_run(eng_id, command="httpx -l hosts.txt", status="completed", return_code=0)
     _seed_command_run(eng_id, command="gau app.example.com", status="completed", return_code=0)
@@ -309,18 +305,16 @@ def test_stage_audit_flags_partial_results(client, isolate_settings):
     assert int(running["id"]) in gaps["crawl"]["command_run_ids"]
 
 
-def test_stage_audit_not_applicable_for_phase_without_expected_stages(client, isolate_settings):
+def test_stage_audit_not_applicable_for_phase_without_expected_stages(eng_id):
     """Phases with no EXPECTED-STAGE checklist (verify) report applicable=False."""
-    eng_id = _seed(client, isolate_settings)
     audit = pr_mod.stage_completion_audit(eng_id, "verify")
     assert audit["applicable"] is False
     assert audit["gaps"] == []
     assert audit["expected_stages"] == []
 
 
-def test_phase_readiness_folds_stage_audit_into_recon_and_collect_only(client, isolate_settings):
+def test_phase_readiness_folds_stage_audit_into_recon_and_collect_only(eng_id):
     """The assembly carries ``stage_audit`` exactly on the pipeline phases."""
-    eng_id = _seed(client, isolate_settings)
     for phase in ("recon", "collect"):
         payload = state_manager.phase_readiness(eng_id, phase)
         assert "stage_audit" in payload, phase

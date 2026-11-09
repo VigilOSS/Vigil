@@ -1,13 +1,7 @@
 """Tests for the shared reachability verdict helper (lib/reachability.py)."""
 from __future__ import annotations
 
-import sys
-from pathlib import Path
-
-
-sys.path.insert(0, str(Path(__file__).resolve().parents[3] / "agent" / "scripts"))
-
-from assess.lib.reachability import (  # noqa: E402
+from assess.lib.reachability import (
     BLACKHOLED,
     CURL_WRITE_FORMAT,
     LIVE,

@@ -17,6 +17,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_history, code_ingest
 from assess.lib.code_snapshot import SnapshotBuilder
@@ -126,17 +127,8 @@ def _seal(engagement: Path, repo: Path, git: dict) -> SimpleNamespace:
     )
 
 
-class _Client:
+class _Client(StubClient):
     repo: dict = {}
-
-    def __init__(self, *_a, **_k) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def get(self, endpoint: str):
         assert endpoint == f"code/repos/{_REPO_ID}"

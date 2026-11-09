@@ -2,14 +2,14 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from pathlib import Path
 
 import pytest
 
-
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+from vigil_cli import main as main_module
+from vigil_cli import status as status_module
+from vigil_cli.paths import resolve_orchestrator_data_dir
+from vigil_cli.status import print_status
 
 
 def _minimal_status(write_check: dict[str, object]) -> dict[str, object]:
@@ -42,8 +42,6 @@ def _seed_database(install_root: Path) -> Path:
 
 
 def test_database_write_check_rolls_back_probe_table_and_row(tmp_path: Path) -> None:
-    from vigil_cli import status as status_module
-
     install_root = tmp_path / "install"
     path = _seed_database(install_root)
 
@@ -58,10 +56,7 @@ def test_database_write_check_rolls_back_probe_table_and_row(tmp_path: Path) -> 
 
 
 def test_database_write_check_missing_database_does_not_create_it(tmp_path: Path) -> None:
-    from vigil_cli import status as status_module
-
     install_root = tmp_path / "install"
-    from vigil_cli.paths import resolve_orchestrator_data_dir
     path = resolve_orchestrator_data_dir(install_root) / "orchestrator.sqlite3"
 
     result = status_module.database_write_check(install_root, timeout_seconds=0.01)
@@ -72,8 +67,6 @@ def test_database_write_check_missing_database_does_not_create_it(tmp_path: Path
 
 
 def test_database_write_check_reports_busy_without_waiting_for_writer(tmp_path: Path) -> None:
-    from vigil_cli import status as status_module
-
     install_root = tmp_path / "install"
     path = _seed_database(install_root)
     holder = sqlite3.connect(path)
@@ -100,8 +93,6 @@ def test_database_write_check_classifies_storage_failures(
     sqlite_code: int,
     expected_status: str,
 ) -> None:
-    from vigil_cli import status as status_module
-
     error = sqlite3.OperationalError("synthetic sqlite failure")
     error.sqlite_errorcode = sqlite_code
     error.sqlite_errorname = "SYNTHETIC"
@@ -120,8 +111,6 @@ def test_database_write_check_classifies_storage_failures(
 def test_status_write_check_json_and_text_expose_probe_result(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from vigil_cli.status import print_status
-
     result = {"status": "ok", "database": "/vigil/db.sqlite3", "detail": "write rolled back"}
     payload = _minimal_status(result)
 
@@ -135,8 +124,6 @@ def test_status_write_check_json_and_text_expose_probe_result(
 def test_status_missing_code_phase_names_supported_repair_command(
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from vigil_cli.status import print_status
-
     payload = _minimal_status({"status": "not_requested"})
     payload["legacy_both_missing_code_phase"] = ["legacy-both"]
 
@@ -152,8 +139,6 @@ def test_status_write_check_cli_requests_probe_and_fails_nonzero_on_failure(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from vigil_cli import main as main_module
-
     seen: list[bool] = []
     failure = {
         "status": "read_only",
@@ -180,8 +165,6 @@ def test_status_without_write_check_keeps_probe_not_requested(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from vigil_cli import main as main_module
-
     seen: list[bool] = []
     not_requested = {"status": "not_requested", "database": None, "detail": ""}
 

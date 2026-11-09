@@ -9,6 +9,8 @@ state untouched (recording never auto-mutates it).
 """
 import json
 
+import pytest
+
 ENGAGEMENT_KEY = "2026-07-08-000000-probedrain"
 BASE = f"/engagements/{ENGAGEMENT_KEY}/assessment"
 
@@ -21,6 +23,16 @@ def _seed(client, isolate_settings) -> None:
         encoding="utf-8",
     )
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
+
+
+@pytest.fixture
+def seeded_engagement(client, isolate_settings):
+    """Seed the engagement the cases below run against.
+
+    Requested last by each test so the seed happens after that test's other
+    fixtures, exactly where the per-test ``_seed(...)`` call used to run.
+    """
+    return _seed(client, isolate_settings)
 
 
 def _make_work_item(client, url: str, case_type: str = "api") -> int:
@@ -59,8 +71,7 @@ def _probe_payload(**overrides) -> dict:
     return base
 
 
-def test_probe_run_drains_work_items(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_probe_run_drains_work_items(client, seeded_engagement):
     a = _make_work_item(client, "https://app.example/api/a")
     b = _make_work_item(client, "https://app.example/api/b")
     assert _pending_count(client) == 2
@@ -75,8 +86,7 @@ def test_probe_run_drains_work_items(client, isolate_settings):
     assert {row["id"] for row in done_rows} == {a, b}
 
 
-def test_probe_run_unknown_work_item_id_is_skipped(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_probe_run_unknown_work_item_id_is_skipped(client, seeded_engagement):
     a = _make_work_item(client, "https://app.example/api/only")
 
     resp = client.post(
@@ -96,8 +106,7 @@ def test_probe_run_unknown_work_item_id_is_skipped(client, isolate_settings):
     assert _pending_count(client) == 0
 
 
-def test_probe_run_without_work_item_ids_leaves_buffer(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_probe_run_without_work_item_ids_leaves_buffer(client, seeded_engagement):
     _make_work_item(client, "https://app.example/api/a")
     assert _pending_count(client) == 1
 
@@ -126,8 +135,7 @@ def _make_surface(client, descriptor: str) -> int:
     return int(body["id"])
 
 
-def test_probe_run_opt_in_resolves_surface(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_probe_run_opt_in_resolves_surface(client, seeded_engagement):
     sid = _make_surface(client, "app.example/api/orders/{id}")
 
     resp = client.post(
@@ -138,8 +146,7 @@ def test_probe_run_opt_in_resolves_surface(client, isolate_settings):
     assert resp.json()["surface_resolved"]["status"] == "partially-covered"
 
 
-def test_probe_run_without_resolve_surface_leaves_surface_untouched(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_probe_run_without_resolve_surface_leaves_surface_untouched(client, seeded_engagement):
     sid = _make_surface(client, "app.example/api/carts/{id}")
 
     resp = client.post(f"{BASE}/probe-runs", json=_probe_payload(target_path="/api/carts/1"))
@@ -187,14 +194,15 @@ def _link_surface(client, surface_id: int, request_variant_id: int) -> None:
     assert resp.status_code == 201, resp.text
 
 
-def test_covering_probe_default_drains_and_advances_and_keeps_coverage_item(client, isolate_settings):
+def test_covering_probe_default_drains_and_advances_and_keeps_coverage_item(
+    client, seeded_engagement
+):
     """The Tier-1 invariant: recording ONE covering record-probe carrying a
     --coverage-item-id (a) drains the FK-linked work-items and (b) advances the
     FK-linked surface to partially-covered BY DEFAULT (no --work-item-ids /
     --resolve-surface), WHILE the coverage-item status stays un-promoted (never
     auto-`covered`). So the work-buffer, surface, and probe ledgers agree without
     extra verbs, but the human `covered` verdict is never self-attested."""
-    _seed(client, isolate_settings)
     obs = _make_linked_observation(client, "https://app.example/api/orders")
     wi_id = int(obs["work_item"]["id"])
     cov_id = int(obs["work_item"]["coverage_item_id"])
@@ -235,11 +243,10 @@ def test_covering_probe_default_drains_and_advances_and_keeps_coverage_item(clie
     assert _coverage_item_status(client, cov_id) == "pending"
 
 
-def test_noncovering_probe_does_not_cascade_by_default(client, isolate_settings):
+def test_noncovering_probe_does_not_cascade_by_default(client, seeded_engagement):
     """The covering gate: a non-covering attempt (blocked) carrying the SAME FK
     links must NOT auto-drain or auto-advance — only whitelisted tested/signal
     counts; a wall is a lead, not coverage."""
-    _seed(client, isolate_settings)
     obs = _make_linked_observation(client, "https://app.example/api/carts")
     cov_id = int(obs["work_item"]["coverage_item_id"])
     rv_id = int(obs["request_variant"]["id"])
@@ -266,10 +273,9 @@ def test_noncovering_probe_does_not_cascade_by_default(client, isolate_settings)
 
 
 def test_signal_without_outcome_assertion_is_demoted_and_does_not_cascade(
-    client, isolate_settings
+    client, seeded_engagement
 ):
     """Direct API callers cannot manufacture coverage from HTTP status alone."""
-    _seed(client, isolate_settings)
     obs = _make_linked_observation(client, "https://app.example/api/channels")
     cov_id = int(obs["work_item"]["coverage_item_id"])
     rv_id = int(obs["request_variant"]["id"])
@@ -297,8 +303,7 @@ def test_signal_without_outcome_assertion_is_demoted_and_does_not_cascade(
     assert _pending_count(client) == 1
 
 
-def test_signal_with_outcome_assertion_remains_covering(client, isolate_settings):
-    _seed(client, isolate_settings)
+def test_signal_with_outcome_assertion_remains_covering(client, seeded_engagement):
     obs = _make_linked_observation(client, "https://app.example/api/channels")
     cov_id = int(obs["work_item"]["coverage_item_id"])
 
@@ -318,10 +323,7 @@ def test_signal_with_outcome_assertion_remains_covering(client, isolate_settings
     assert body["work_items_done"]["affected"] == 1
 
 
-def test_probe_readjudication_clears_stale_positive_assertion(
-    client, isolate_settings
-):
-    _seed(client, isolate_settings)
+def test_probe_readjudication_clears_stale_positive_assertion(client, seeded_engagement):
     first = client.post(
         f"{BASE}/probe-runs",
         json=_probe_payload(
@@ -347,10 +349,9 @@ def test_probe_readjudication_clears_stale_positive_assertion(
     assert second.json()["outcome_assertion"] == ""
 
 
-def test_no_drain_suppresses_the_default_cascade(client, isolate_settings):
+def test_no_drain_suppresses_the_default_cascade(client, seeded_engagement):
     """--no-drain suppresses BOTH halves of the default cascade even for a
     covering probe with FK links; the probe row is still written."""
-    _seed(client, isolate_settings)
     obs = _make_linked_observation(client, "https://app.example/api/items")
     cov_id = int(obs["work_item"]["coverage_item_id"])
     rv_id = int(obs["request_variant"]["id"])
@@ -376,10 +377,9 @@ def test_no_drain_suppresses_the_default_cascade(client, isolate_settings):
     assert by_id[sid]["status"] == "discovered"
 
 
-def test_default_advance_never_regresses_a_resolved_surface(client, isolate_settings):
+def test_default_advance_never_regresses_a_resolved_surface(client, seeded_engagement):
     """The default advance only touches DISCOVERED surfaces — a human verdict
     (covered) FK-linked to the variant is left untouched (no regression)."""
-    _seed(client, isolate_settings)
     obs = _make_linked_observation(client, "https://app.example/api/users")
     cov_id = int(obs["work_item"]["coverage_item_id"])
     rv_id = int(obs["request_variant"]["id"])
@@ -409,10 +409,9 @@ def test_default_advance_never_regresses_a_resolved_surface(client, isolate_sett
     assert by_id[sid]["status"] == "covered"
 
 
-def test_explicit_work_item_ids_override_the_default_derivation(client, isolate_settings):
+def test_explicit_work_item_ids_override_the_default_derivation(client, seeded_engagement):
     """Explicit --work-item-ids NARROWS the drain to those exact ids instead of
     the coverage-item-derived set (and fires regardless of the covering gate)."""
-    _seed(client, isolate_settings)
     obs_a = _make_linked_observation(client, "https://app.example/api/a")
     obs_b = _make_linked_observation(client, "https://app.example/api/b")
     cov_a = int(obs_a["work_item"]["coverage_item_id"])

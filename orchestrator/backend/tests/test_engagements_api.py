@@ -163,6 +163,61 @@ def _record_terminal_finding(client, payload: dict):
     )
 
 
+def _create_finding(
+    client,
+    *,
+    title: str,
+    severity: str,
+    defect_family: str,
+    root_cause_key: str,
+    canonical_location: str,
+    summary: str,
+    details: dict[str, object],
+    slug: str | None = None,
+    notes: str | None = None,
+    workflow_status: str = "active",
+    auth_context: str = "anonymous",
+    evidence_ref: str = "findings.md",
+    source_name: str = "vulnerability-analyst",
+    agent_name: str = "vulnerability-analyst",
+    provenance_slug: str | None = None,
+    provenance: dict[str, object] | None = None,
+    key: str = "2026-03-30-120000-example",
+):
+    """POST one unreviewed fixture finding and return the raw response.
+
+    Every field the fixture findings share is defaulted here; a caller that
+    differs on one passes it explicitly. ``provenance`` replaces the authored
+    provenance wholesale for the callers that record no author dispatch.
+    """
+    payload: dict[str, object] = {
+        "title": title,
+        "severity": severity,
+        "workflow_status": workflow_status,
+        "verification_status": "unreviewed",
+        "defect_family": defect_family,
+        "root_cause_key": root_cause_key,
+        "auth_context": auth_context,
+        "canonical_location": canonical_location,
+        "summary": summary,
+        "evidence_ref": evidence_ref,
+        "source_name": source_name,
+        "details": details,
+        "provenance": provenance
+        if provenance is not None
+        else {
+            **_author_provenance(client, provenance_slug or str(slug), key=key),
+            "agent_name": agent_name,
+        },
+        "links": [],
+    }
+    if slug is not None:
+        payload["slug"] = slug
+    if notes is not None:
+        payload["notes"] = notes
+    return client.post(f"/engagements/{key}/assessment/findings", json=payload)
+
+
 def write_engagement(engagements_dir: Path, key: str = "2026-03-30-120000-example") -> Path:
     engagement_dir = engagements_dir / key
     (engagement_dir / "sessions" / "session-a" / "proposals").mkdir(parents=True, exist_ok=True)
@@ -1658,31 +1713,19 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
     )
     assert create_surface.status_code == 201
 
-    create_finding = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-009",
-            "title": "Unreviewed IDOR in orders",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "idor",
-            "root_cause_key": "orders-idor-unreviewed",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/orders/9",
-            "summary": "Order data can be accessed cross-tenant.",
-            "evidence_ref": "findings.md",
-            "notes": "Needs verification.",
-            "source_name": "vulnerability-analyst",
-            "details": {
-                "evidence": "GET /orders/9 returns order for user B when authenticated as user A",
-                "impact": "cross-tenant access",
-            },
-            "provenance": {
-                **_author_provenance(client, "VA-009"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
+    create_finding = _create_finding(
+        client,
+        slug="VA-009",
+        title="Unreviewed IDOR in orders",
+        severity="high",
+        defect_family="idor",
+        root_cause_key="orders-idor-unreviewed",
+        canonical_location="https://example.com/orders/9",
+        summary="Order data can be accessed cross-tenant.",
+        notes="Needs verification.",
+        details={
+            "evidence": "GET /orders/9 returns order for user B when authenticated as user A",
+            "impact": "cross-tenant access",
         },
     )
     assert create_finding.status_code == 201
@@ -2013,31 +2056,20 @@ def test_repeat_request_observation_preserves_stronger_coverage_status(client, i
 def test_findings_verify_updates_existing_finding_and_records_transition(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-001",
-            "title": "IDOR in orders",
-            "severity": "medium",
-            "workflow_status": "draft",
-            "verification_status": "unreviewed",
-            "defect_family": "idor",
-            "root_cause_key": "orders-idor",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/orders/7",
-            "summary": "Order data can be accessed cross-tenant.",
-            "evidence_ref": "findings.md",
-            "notes": "Initial triage.",
-            "source_name": "vulnerability-analyst",
-            "details": {
-                "evidence": "Initial request/response pair",
-                "impact": "Potential cross-tenant access",
-            },
-            "provenance": {
-                **_author_provenance(client, "VA-001"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
+    created = _create_finding(
+        client,
+        slug="VA-001",
+        title="IDOR in orders",
+        severity="medium",
+        defect_family="idor",
+        root_cause_key="orders-idor",
+        canonical_location="https://example.com/orders/7",
+        summary="Order data can be accessed cross-tenant.",
+        notes="Initial triage.",
+        workflow_status="draft",
+        details={
+            "evidence": "Initial request/response pair",
+            "impact": "Potential cross-tenant access",
         },
     )
     assert created.status_code == 201
@@ -2084,33 +2116,21 @@ def test_findings_verify_updates_existing_finding_and_records_transition(client,
 def test_findings_verify_pending_runtime_proof_roundtrips_and_holds(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-050",
-            "title": "Static state replay (runtime proof pending)",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "static-state-replay",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/login",
-            "summary": "Static OIDC state appears replayable from code review.",
-            "evidence_ref": "findings.md",
-            "notes": "Static evidence captured.",
-            "source_name": "vulnerability-analyst",
-            "details": {
-                "evidence": "state param is not bound to a nonce in handler",
-                "impact": "Potential account takeover pending runtime confirmation",
-                "chain_required": True,
-                "chain_rationale": "Only reaches takeover once a runtime pass proves the state is replayable against a live session.",
-            },
-            "provenance": {
-                **_author_provenance(client, "VA-050"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
+    created = _create_finding(
+        client,
+        slug="VA-050",
+        title="Static state replay (runtime proof pending)",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="static-state-replay",
+        canonical_location="https://example.com/login",
+        summary="Static OIDC state appears replayable from code review.",
+        notes="Static evidence captured.",
+        details={
+            "evidence": "state param is not bound to a nonce in handler",
+            "impact": "Potential account takeover pending runtime confirmation",
+            "chain_required": True,
+            "chain_rationale": "Only reaches takeover once a runtime pass proves the state is replayable against a live session.",
         },
     )
     assert created.status_code == 201
@@ -2214,28 +2234,16 @@ def test_pending_runtime_proof_is_sticky_against_bare_none_rerecord(client, isol
 def test_pending_runtime_proof_yields_to_confirmed(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-052",
-            "title": "Pending then confirmed",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "pending-then-confirmed",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/yields",
-            "summary": "Held then proven.",
-            "evidence_ref": "findings.md",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {
-                **_author_provenance(client, "VA-052"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    created = _create_finding(
+        client,
+        slug="VA-052",
+        title="Pending then confirmed",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="pending-then-confirmed",
+        canonical_location="https://example.com/yields",
+        summary="Held then proven.",
+        details={"evidence": "code review", "impact": "pending runtime"},
     )
     assert created.status_code == 201
 
@@ -2277,28 +2285,17 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(
 ):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-053",
-            "title": "Held finding stays out of report and exploit queue",
-            "severity": "high",
-            "workflow_status": workflow_status,
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "held-excluded",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/held",
-            "summary": "Strong-but-unproven, must not pass readiness.",
-            "evidence_ref": "findings.md",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {
-                **_author_provenance(client, "VA-053"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    created = _create_finding(
+        client,
+        slug="VA-053",
+        title="Held finding stays out of report and exploit queue",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="held-excluded",
+        canonical_location="https://example.com/held",
+        summary="Strong-but-unproven, must not pass readiness.",
+        workflow_status=workflow_status,
+        details={"evidence": "code review", "impact": "pending runtime"},
     )
     assert created.status_code == 201
 
@@ -2348,28 +2345,16 @@ def test_pending_runtime_proof_blocks_report_readiness_and_exploit_candidates(
 def test_verification_narrative_artifact_registers_and_is_searchable(client, isolate_settings):
     engagement_dir = write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-060",
-            "title": "Finding with a persisted debate narrative",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "narrative-finding",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/narrative",
-            "summary": "Has an Ideator-vs-Tracer debate doc.",
-            "evidence_ref": "findings.md",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {
-                **_author_provenance(client, "VA-060"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    created = _create_finding(
+        client,
+        slug="VA-060",
+        title="Finding with a persisted debate narrative",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="narrative-finding",
+        canonical_location="https://example.com/narrative",
+        summary="Has an Ideator-vs-Tracer debate doc.",
+        details={"evidence": "code review", "impact": "pending runtime"},
     )
     assert created.status_code == 201
 
@@ -2787,31 +2772,19 @@ def test_findings_patch_append_evidence_preserves_terminal_verification(
 def test_findings_patch_rejects_direct_verification_bypass(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "CH-010",
-            "title": "Direct patch bypass",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "idor",
-            "root_cause_key": "direct-patch-bypass",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/items/7",
-            "summary": "Patch should not be able to persist verifier outcomes.",
-            "evidence_ref": "findings.md",
-            "notes": "Initial triage.",
-            "source_name": "vulnerability-analyst",
-            "details": {
-                "evidence": "Initial request/response pair",
-                "impact": "Potential unauthorized access",
-            },
-            "provenance": {
-                **_author_provenance(client, "CH-010"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
+    created = _create_finding(
+        client,
+        slug="CH-010",
+        title="Direct patch bypass",
+        severity="medium",
+        defect_family="idor",
+        root_cause_key="direct-patch-bypass",
+        canonical_location="https://example.com/items/7",
+        summary="Patch should not be able to persist verifier outcomes.",
+        notes="Initial triage.",
+        details={
+            "evidence": "Initial request/response pair",
+            "impact": "Potential unauthorized access",
         },
     )
     assert created.status_code == 201
@@ -2830,29 +2803,17 @@ def test_findings_patch_rejects_direct_verification_bypass(client, isolate_setti
 def test_findings_patch_allows_explicit_workflow_rollback(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "CH-011",
-            "title": "Workflow rollback candidate",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "idor",
-            "root_cause_key": "workflow-rollback-candidate",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/items/rollback",
-            "summary": "Active finding should be movable back to draft.",
-            "evidence_ref": "findings.md",
-            "notes": "Initial triage.",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "Initial request/response pair"},
-            "provenance": {
-                **_author_provenance(client, "CH-011"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    created = _create_finding(
+        client,
+        slug="CH-011",
+        title="Workflow rollback candidate",
+        severity="medium",
+        defect_family="idor",
+        root_cause_key="workflow-rollback-candidate",
+        canonical_location="https://example.com/items/rollback",
+        summary="Active finding should be movable back to draft.",
+        notes="Initial triage.",
+        details={"evidence": "Initial request/response pair"},
     )
     assert created.status_code == 201
 
@@ -2994,26 +2955,20 @@ def test_false_positive_findings_are_suppressed_but_semantically_sticky(client, 
     assert report_findings.json()["groups"] == []
     assert report_findings.json()["standalone"] == []
 
-    rediscovered = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "title": "Header length overflow in parser",
-            "severity": "critical",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "integer-overflow",
-            "root_cause_key": "header-length-overflow",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/src/parser.c?line=128",
-            "summary": "Rediscovery attempt from later analysis pass.",
-            "evidence_ref": "tools/analysis-state/rediscovery.json",
-            "notes": "Re-raised by later LLM pass.",
-            "source_name": "code-vuln-hunter",
-            "details": {
-                "impact": "Potential heap corruption",
-            },
-            "provenance": {"agent_name": "code-vuln-hunter"},
-            "links": [],
+    rediscovered = _create_finding(
+        client,
+        title="Header length overflow in parser",
+        severity="critical",
+        defect_family="integer-overflow",
+        root_cause_key="header-length-overflow",
+        canonical_location="https://example.com/src/parser.c?line=128",
+        summary="Rediscovery attempt from later analysis pass.",
+        evidence_ref="tools/analysis-state/rediscovery.json",
+        notes="Re-raised by later LLM pass.",
+        source_name="code-vuln-hunter",
+        provenance={"agent_name": "code-vuln-hunter"},
+        details={
+            "impact": "Potential heap corruption",
         },
     )
     assert rediscovered.status_code == 201
@@ -3062,30 +3017,22 @@ def test_false_positive_title_fallback_does_not_suppress_distinct_finding(client
     )
     assert original.status_code == 200
 
-    distinct = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "title": "Shared parser bug title",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "buffer-overflow",
-            "root_cause_key": "overflow-b",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/src/parser.c?line=128",
-            "summary": "Different defect family at the same location.",
-            "evidence_ref": "tools/analysis-state/b.json",
-            "notes": "Newly verified buffer overwrite path.",
-            "source_name": "code-vuln-hunter",
-            "details": {
-                "evidence": "memcpy() uses unchecked attacker length.",
-                "impact": "Heap corruption",
-            },
-            "provenance": {
-                **_author_provenance(client, "CH-020-DISTINCT"),
-                "agent_name": "code-vuln-hunter",
-            },
-            "links": [],
+    distinct = _create_finding(
+        client,
+        title="Shared parser bug title",
+        severity="high",
+        defect_family="buffer-overflow",
+        root_cause_key="overflow-b",
+        canonical_location="https://example.com/src/parser.c?line=128",
+        summary="Different defect family at the same location.",
+        evidence_ref="tools/analysis-state/b.json",
+        notes="Newly verified buffer overwrite path.",
+        source_name="code-vuln-hunter",
+        agent_name="code-vuln-hunter",
+        provenance_slug="CH-020-DISTINCT",
+        details={
+            "evidence": "memcpy() uses unchecked attacker length.",
+            "impact": "Heap corruption",
         },
     )
     assert distinct.status_code == 201
@@ -3141,25 +3088,19 @@ def test_root_cause_free_false_positive_findings_stay_semantically_sticky(client
     )
     assert original.status_code == 200
 
-    rediscovered = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "title": "Shared parser size bug",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "integer-overflow",
-            "root_cause_key": "",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/src/parser.c?line=150",
-            "summary": "Rediscovered without a root cause key.",
-            "evidence_ref": "tools/analysis-state/rediscovered.json",
-            "notes": "Later analysis pass re-raised the same parser concern.",
-            "source_name": "code-vuln-hunter",
-            "details": {"impact": "Potential heap corruption"},
-            "provenance": {"agent_name": "code-vuln-hunter"},
-            "links": [],
-        },
+    rediscovered = _create_finding(
+        client,
+        title="Shared parser size bug",
+        severity="high",
+        defect_family="integer-overflow",
+        root_cause_key="",
+        canonical_location="https://example.com/src/parser.c?line=150",
+        summary="Rediscovered without a root cause key.",
+        evidence_ref="tools/analysis-state/rediscovered.json",
+        notes="Later analysis pass re-raised the same parser concern.",
+        source_name="code-vuln-hunter",
+        provenance={"agent_name": "code-vuln-hunter"},
+        details={"impact": "Potential heap corruption"},
     )
     assert rediscovered.status_code == 201
     assert rediscovered.json()["finding"]["slug"] == "CH-025"
@@ -3427,31 +3368,21 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
 def test_findings_verify_downgrade_records_previous_severity_transition(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "CH-040",
-            "title": "Privilege escalation via export endpoint",
-            "severity": "critical",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "access-control",
-            "root_cause_key": "export-privesc",
-            "auth_context": "user",
-            "canonical_location": "https://example.com/api/export",
-            "summary": "Privilege escalation path needs verification.",
-            "evidence_ref": "tools/analysis-state/export.json",
-            "notes": "Initial hunt output.",
-            "source_name": "vulnerability-analyst",
-            "details": {
-                "evidence": "Role claim appears attacker-controlled.",
-                "impact": "Potential admin export access.",
-            },
-            "provenance": {
-                **_author_provenance(client, "CH-040"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
+    created = _create_finding(
+        client,
+        slug="CH-040",
+        title="Privilege escalation via export endpoint",
+        severity="critical",
+        defect_family="access-control",
+        root_cause_key="export-privesc",
+        auth_context="user",
+        canonical_location="https://example.com/api/export",
+        summary="Privilege escalation path needs verification.",
+        evidence_ref="tools/analysis-state/export.json",
+        notes="Initial hunt output.",
+        details={
+            "evidence": "Role claim appears attacker-controlled.",
+            "impact": "Potential admin export access.",
         },
     )
     assert created.status_code == 201
@@ -3615,31 +3546,22 @@ def test_finding_update_source_name_is_actor_not_discovery_attribution(
 def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "CH-041",
-            "title": "Ambiguous parser state confusion",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "state-confusion",
-            "root_cause_key": "parser-state-confusion",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/src/parser.c?line=411",
-            "summary": "Verifier could not conclusively settle exploitability.",
-            "evidence_ref": "tools/analysis-state/parser-state.json",
-            "notes": "Needs further operator review.",
-            "source_name": "code-vuln-hunter",
-            "details": {
-                "evidence": "State machine enters the suspicious branch with malformed input.",
-                "impact": "Potential parse confusion with unclear reachability.",
-            },
-            "provenance": {
-                **_author_provenance(client, "CH-041"),
-                "agent_name": "code-vuln-hunter",
-            },
-            "links": [],
+    created = _create_finding(
+        client,
+        slug="CH-041",
+        title="Ambiguous parser state confusion",
+        severity="medium",
+        defect_family="state-confusion",
+        root_cause_key="parser-state-confusion",
+        canonical_location="https://example.com/src/parser.c?line=411",
+        summary="Verifier could not conclusively settle exploitability.",
+        evidence_ref="tools/analysis-state/parser-state.json",
+        notes="Needs further operator review.",
+        source_name="code-vuln-hunter",
+        agent_name="code-vuln-hunter",
+        details={
+            "evidence": "State machine enters the suspicious branch with malformed input.",
+            "impact": "Potential parse confusion with unclear reachability.",
         },
     )
     assert created.status_code == 201
@@ -3674,29 +3596,20 @@ def test_findings_verify_disputed_keeps_finding_live(client, isolate_settings):
 def test_findings_verify_rejects_records_merged_after_validation(client, isolate_settings, monkeypatch):
     write_engagement(isolate_settings["engagements_dir"])
 
-    created = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "CH-042",
-            "title": "Verify/merge race candidate",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "verify-merge-race",
-            "auth_context": "user",
-            "canonical_location": "https://example.com/api/export",
-            "summary": "Verify should fail if the finding is merged after validation.",
-            "evidence_ref": "findings.md",
-            "notes": "Created for stale verify race coverage.",
-            "source_name": "code-vuln-hunter",
-            "details": {"evidence": "Export endpoint skips tenant check", "impact": "Cross-tenant export"},
-            "provenance": {
-                **_author_provenance(client, "CH-042"),
-                "agent_name": "code-vuln-hunter",
-            },
-            "links": [],
-        },
+    created = _create_finding(
+        client,
+        slug="CH-042",
+        title="Verify/merge race candidate",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="verify-merge-race",
+        auth_context="user",
+        canonical_location="https://example.com/api/export",
+        summary="Verify should fail if the finding is merged after validation.",
+        notes="Created for stale verify race coverage.",
+        source_name="code-vuln-hunter",
+        agent_name="code-vuln-hunter",
+        details={"evidence": "Export endpoint skips tenant check", "impact": "Cross-tenant export"},
     )
     assert created.status_code == 201
 
@@ -4052,28 +3965,16 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
     write_engagement(isolate_settings["engagements_dir"])
 
     # A genuinely confirmed finding that MUST remain in the draft projection.
-    confirmed = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-070",
-            "title": "Confirmed durable finding",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "confirmed-durable",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/confirmed",
-            "summary": "Proven and durable.",
-            "evidence_ref": "findings.md",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "code review", "impact": "account takeover"},
-            "provenance": {
-                **_author_provenance(client, "VA-070"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    confirmed = _create_finding(
+        client,
+        slug="VA-070",
+        title="Confirmed durable finding",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="confirmed-durable",
+        canonical_location="https://example.com/confirmed",
+        summary="Proven and durable.",
+        details={"evidence": "code review", "impact": "account takeover"},
     )
     assert confirmed.status_code == 201
     confirmed_verify = _verify_with_fixture_proof(
@@ -4090,28 +3991,16 @@ def test_pending_runtime_proof_absent_from_draft_report_findings(client, isolate
     assert confirmed_verify.status_code == 200
 
     # A strong-but-unproven HOLDING finding that MUST be excluded from the report.
-    held = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-071",
-            "title": "Held finding pending runtime proof",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "held-pending-runtime",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/held-report",
-            "summary": "Strong static evidence, runtime proof outstanding.",
-            "evidence_ref": "findings.md",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {
-                **_author_provenance(client, "VA-071"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    held = _create_finding(
+        client,
+        slug="VA-071",
+        title="Held finding pending runtime proof",
+        severity="high",
+        defect_family="auth-bypass",
+        root_cause_key="held-pending-runtime",
+        canonical_location="https://example.com/held-report",
+        summary="Strong static evidence, runtime proof outstanding.",
+        details={"evidence": "code review", "impact": "pending runtime"},
     )
     assert held.status_code == 201
     held_verify = client.post(
@@ -4155,28 +4044,16 @@ def test_markdown_tree_draft_projection_excludes_pending_runtime_proof(client, i
     # durable report finding. This guards the exact data the CLI consumes.
     write_engagement(isolate_settings["engagements_dir"])
 
-    held = client.post(
-        "/engagements/2026-03-30-120000-example/assessment/findings",
-        json={
-            "slug": "VA-072",
-            "title": "Held finding for markdown-tree projection",
-            "severity": "critical",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "defect_family": "auth-bypass",
-            "root_cause_key": "held-markdown-tree",
-            "auth_context": "anonymous",
-            "canonical_location": "https://example.com/held-tree",
-            "summary": "Held; must fall back in markdown-tree.",
-            "evidence_ref": "findings.md",
-            "source_name": "vulnerability-analyst",
-            "details": {"evidence": "code review", "impact": "pending runtime"},
-            "provenance": {
-                **_author_provenance(client, "VA-072"),
-                "agent_name": "vulnerability-analyst",
-            },
-            "links": [],
-        },
+    held = _create_finding(
+        client,
+        slug="VA-072",
+        title="Held finding for markdown-tree projection",
+        severity="critical",
+        defect_family="auth-bypass",
+        root_cause_key="held-markdown-tree",
+        canonical_location="https://example.com/held-tree",
+        summary="Held; must fall back in markdown-tree.",
+        details={"evidence": "code review", "impact": "pending runtime"},
     )
     assert held.status_code == 201
     held_verify = client.post(

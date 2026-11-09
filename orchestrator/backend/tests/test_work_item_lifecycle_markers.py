@@ -17,7 +17,7 @@ def _seed(client, isolate_settings) -> None:
     eng = isolate_settings["engagements_dir"] / ENGAGEMENT_KEY
     (eng / "sessions").mkdir(parents=True, exist_ok=True)
     (eng / "scope.json").write_text(
-        json.dumps({"engagement_name": "PinS11", "targets": ["https://app.example"]}),
+        json.dumps({"engagement_name": "AcmeWorkItems", "targets": ["https://app.example"]}),
         encoding="utf-8",
     )
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200

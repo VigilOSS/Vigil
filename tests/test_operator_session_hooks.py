@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import tomllib
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -491,22 +492,45 @@ def _captured(capture: Path) -> list[dict]:
     return [json.loads(line) for line in capture.read_text().splitlines() if line]
 
 
+SessionEnd = Callable[..., tuple[subprocess.CompletedProcess[str], list[dict]]]
+
+
+@pytest.fixture
+def session_end(tmp_path: Path) -> SessionEnd:
+    """Drive the real session-end hook against a fake `vigil` on PATH.
+
+    ``run(payload, cwd=..., exit_code=..., stdin=..., **env)`` returns the
+    hook's CompletedProcess and the receipts the launcher captured so far. The
+    launcher's exit code stays a per-call parameter, so a test can still drive
+    a failing backend and then a working one against the same capture file.
+    """
+    bin_dir = tmp_path / "bin"
+    capture = tmp_path / "capture.jsonl"
+
+    def run(
+        payload: object, *, cwd: Path, exit_code: int = 0, stdin: str | None = None, **env: str
+    ) -> tuple[subprocess.CompletedProcess[str], list[dict]]:
+        _fake_vigil(bin_dir, capture, exit_code=exit_code)
+        result = _run_hook(
+            SESSION_END, payload, cwd=cwd, env=_session_end_env(bin_dir, **env), stdin=stdin
+        )
+        return result, _captured(capture)
+
+    return run
+
+
 def test_session_end_records_one_activity_receipt_with_an_explicit_engagement_selector(
-    tmp_path: Path,
+    tmp_path: Path, session_end: SessionEnd
 ) -> None:
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    result = _run_hook(
-        SESSION_END,
+    result, calls = session_end(
         {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin", VIGIL_CLIENT_NAME="claude"),
+        VIGIL_CLIENT_NAME="claude",
     )
 
     assert result.returncode == 0
-    calls = _captured(capture)
     assert len(calls) == 1
     argv = calls[0]["argv"]
     assert argv[:2] == ["assess", "--engagement-dir"]
@@ -526,24 +550,20 @@ def test_session_end_records_one_activity_receipt_with_an_explicit_engagement_se
 
 
 def test_session_end_receipt_is_factual_and_does_not_replace_operator_intent(
-    tmp_path: Path,
+    tmp_path: Path, session_end: SessionEnd
 ) -> None:
     """The hook records only the client lifecycle fact in normal activity.
 
     The operator checkpoint remains the current human-meaningful resume pointer.
     """
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    _run_hook(
-        SESSION_END,
+    _result, calls = session_end(
         {"session_id": "s-1", "reason": "clear", "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin"),
     )
 
-    argv = _captured(capture)[0]["argv"]
+    argv = calls[0]["argv"]
     assert argv[3:6] == ["--actor-kind", "hook", "log"]
     assert "reason=clear" in argv[8]
     assert "operator-checkpoint" not in argv
@@ -551,29 +571,25 @@ def test_session_end_receipt_is_factual_and_does_not_replace_operator_intent(
         assert guessed not in argv
 
 
-def test_session_end_is_idempotent_for_a_repeated_event(tmp_path: Path) -> None:
+def test_session_end_is_idempotent_for_a_repeated_event(
+    tmp_path: Path, session_end: SessionEnd
+) -> None:
     """A duplicate row in an immutable operator-facing record is worse than a
     missing one."""
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
     payload = {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)}
 
-    first = _run_hook(
-        SESSION_END, payload, cwd=engagement_dir, env=_session_end_env(tmp_path / "bin")
-    )
-    second = _run_hook(
-        SESSION_END, payload, cwd=engagement_dir, env=_session_end_env(tmp_path / "bin")
-    )
+    first, _first_calls = session_end(payload, cwd=engagement_dir)
+    second, calls = session_end(payload, cwd=engagement_dir)
 
     assert first.returncode == 0
     assert second.returncode == 0
-    assert len(_captured(capture)) == 1
+    assert len(calls) == 1
     assert (engagement_dir / ".hook_session_end_seen").is_file()
 
 
 def test_session_end_missing_ids_are_idempotent_per_normalized_client(
-    tmp_path: Path,
+    tmp_path: Path, session_end: SessionEnd
 ) -> None:
     """A missing client session id must not merge different client exits.
 
@@ -582,19 +598,11 @@ def test_session_end_missing_ids_are_idempotent_per_normalized_client(
     identical, while each client's own repeat is still bounded.
     """
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
     payload = {"reason": "other", "cwd": str(engagement_dir)}
 
     for client in ("claude", "codex"):
-        _run_hook(
-            SESSION_END,
-            payload,
-            cwd=engagement_dir,
-            env=_session_end_env(tmp_path / "bin", VIGIL_CLIENT_NAME=client),
-        )
+        _result, calls = session_end(payload, cwd=engagement_dir, VIGIL_CLIENT_NAME=client)
 
-    calls = _captured(capture)
     assert len(calls) == 2
     assert {call["argv"][8].split()[0] for call in calls} == {
         "client=claude",
@@ -606,53 +614,38 @@ def test_session_end_missing_ids_are_idempotent_per_normalized_client(
     ]
 
 
-def test_session_end_distinguishes_clear_from_the_eventual_exit(tmp_path: Path) -> None:
+def test_session_end_distinguishes_clear_from_the_eventual_exit(
+    tmp_path: Path, session_end: SessionEnd
+) -> None:
     """`/clear` and the real exit are different events of one session; both are
     worth a marker, and neither is a duplicate of the other."""
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
     for reason in ("clear", "other"):
-        _run_hook(
-            SESSION_END,
+        _result, calls = session_end(
             {"session_id": "s-1", "reason": reason, "cwd": str(engagement_dir)},
             cwd=engagement_dir,
-            env=_session_end_env(tmp_path / "bin"),
         )
 
-    calls = _captured(capture)
     assert len(calls) == 2
 
 
 def test_session_end_exits_zero_and_retries_later_when_the_backend_is_down(
-    tmp_path: Path,
+    tmp_path: Path, session_end: SessionEnd
 ) -> None:
     """A failing checkpoint must neither error the exit nor consume the marker."""
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture, exit_code=1)
+    payload = {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)}
 
-    result = _run_hook(
-        SESSION_END,
-        {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)},
-        cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin"),
-    )
+    result, _calls = session_end(payload, cwd=engagement_dir, exit_code=1)
 
     assert result.returncode == 0
     seen = engagement_dir / ".hook_session_end_seen"
     assert not seen.exists() or "s-1|other" not in seen.read_text()
 
     # The claim was released, so a later event for the same session can record.
-    _fake_vigil(tmp_path / "bin", capture, exit_code=0)
-    _run_hook(
-        SESSION_END,
-        {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)},
-        cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin"),
-    )
-    assert len(_captured(capture)) == 2
+    _retry, calls = session_end(payload, cwd=engagement_dir, exit_code=0)
+    assert len(calls) == 2
 
 
 def test_session_end_exits_zero_with_no_runner_available(tmp_path: Path) -> None:
@@ -704,89 +697,70 @@ def test_session_end_is_a_silent_no_op_when_jq_is_unusable(tmp_path: Path) -> No
 
 @pytest.mark.parametrize("stdin_text", ["", "garbage", "{"])
 def test_session_end_exits_zero_on_a_malformed_payload(
-    tmp_path: Path, stdin_text: str
+    tmp_path: Path, session_end: SessionEnd, stdin_text: str
 ) -> None:
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    result = _run_hook(
-        SESSION_END,
-        None,
-        cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin"),
-        stdin=stdin_text,
-    )
+    result, _calls = session_end(None, cwd=engagement_dir, stdin=stdin_text)
     assert result.returncode == 0
 
 
-def test_session_end_does_not_checkpoint_a_closed_engagement(tmp_path: Path) -> None:
+def test_session_end_does_not_checkpoint_a_closed_engagement(
+    tmp_path: Path, session_end: SessionEnd
+) -> None:
     """Reopening a client in a finished engagement must not grow new rows."""
     engagement_dir = _engagement(tmp_path, status="completed")
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    result = _run_hook(
-        SESSION_END,
+    result, calls = session_end(
         {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin"),
     )
     assert result.returncode == 0
-    assert _captured(capture) == []
+    assert calls == []
 
 
-def test_session_end_outside_any_engagement_is_a_silent_no_op(tmp_path: Path) -> None:
+def test_session_end_outside_any_engagement_is_a_silent_no_op(
+    tmp_path: Path, session_end: SessionEnd
+) -> None:
     elsewhere = tmp_path / "not-an-engagement"
     elsewhere.mkdir()
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    result = _run_hook(
-        SESSION_END,
-        {"session_id": "s-1", "reason": "other"},
-        cwd=elsewhere,
-        env=_session_end_env(tmp_path / "bin"),
-    )
+    result, calls = session_end({"session_id": "s-1", "reason": "other"}, cwd=elsewhere)
     assert result.returncode == 0
     assert result.stderr == ""
-    assert _captured(capture) == []
+    assert calls == []
 
 
-def test_session_end_drops_an_unrecognized_client_name(tmp_path: Path) -> None:
+def test_session_end_drops_an_unrecognized_client_name(
+    tmp_path: Path, session_end: SessionEnd
+) -> None:
     """`--client-name` is a closed set in the verb; an unknown label must not
     cost the whole checkpoint to an argparse rejection."""
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    _run_hook(
-        SESSION_END,
+    _result, calls = session_end(
         {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin", VIGIL_CLIENT_NAME="something-else"),
+        VIGIL_CLIENT_NAME="something-else",
     )
 
-    argv = _captured(capture)[0]["argv"]
+    argv = calls[0]["argv"]
     assert "--client-name" not in argv
 
 
 @pytest.mark.parametrize("client", ["claude", "codex", "goose", "kimi", "opencode", "pi"])
 def test_session_end_records_every_launcher_client_name(
-    tmp_path: Path, client: str
+    tmp_path: Path, session_end: SessionEnd, client: str
 ) -> None:
     engagement_dir = _engagement(tmp_path)
-    capture = tmp_path / "capture.jsonl"
-    _fake_vigil(tmp_path / "bin", capture)
 
-    _run_hook(
-        SESSION_END,
+    _result, calls = session_end(
         {"session_id": "s-1", "reason": "other", "cwd": str(engagement_dir)},
         cwd=engagement_dir,
-        env=_session_end_env(tmp_path / "bin", VIGIL_CLIENT_NAME=client),
+        VIGIL_CLIENT_NAME=client,
     )
 
-    argv = _captured(capture)[0]["argv"]
+    argv = calls[0]["argv"]
     assert f"client={client}" in argv[8]
 
 

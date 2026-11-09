@@ -11,6 +11,52 @@ from pathlib import Path
 
 import pytest
 
+import vigil_cli.oob_relay as relay
+from vigil_cli import main as main_module
+from vigil_cli import status as status_module
+from vigil_cli import up
+from vigil_cli.docker import DockerResult
+from vigil_cli.install import InstallOptions, install_from_source
+from vigil_cli.oob import (
+    OobOptions,
+    _client_metadata_matches_options,
+    _read_oob_client_metadata,
+    _render_runtime_files,
+    _runtime_relay_route,
+    interactions_for_domain,
+    match_interactions_to_nonces,
+    oob_options,
+    parse_client_payload_host,
+    parse_interactsh_log,
+    poll_client_payload_host,
+    start_oob_client,
+)
+from vigil_cli.oob_relay import (
+    LEGACY_RELAY_METADATA_FILENAME,
+    PORT_BLOCK_START,
+    RELAY_METADATA_FILENAME,
+    allocate_relay_route,
+    has_pre_routing_oob_state,
+    initialize_relay_route,
+    load_relay_route,
+    oob_state_dir,
+    reconcile_relay_route_registry,
+    render_edge_routing,
+)
+from vigil_cli.status import _oob_relay_check
+from vigil_cli.workspace import WORKSPACE_FILENAME
+
+
+def _install(source_root: Path, install_root: Path) -> object:
+    """``vigil install`` from a prepared source tree, image verification off."""
+    return install_from_source(
+        InstallOptions(
+            source_root=source_root,
+            install_root=install_root,
+            verify_docker_image=False,
+        )
+    )
+
 
 def test_oob_relay_module_imports_when_fcntl_is_unavailable() -> None:
     script = """
@@ -36,8 +82,6 @@ import vigil_cli.oob_relay
 def test_windows_file_lock_backend_locks_a_real_byte(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import vigil_cli.oob_relay as relay
-
     class FakeMsvcrt:
         LK_LOCK = 1
         LK_UNLCK = 2
@@ -60,8 +104,6 @@ def test_windows_file_lock_backend_locks_a_real_byte(
 
 
 def test_fresh_slot_allocation_is_sanitized_stable_and_persisted(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import RELAY_METADATA_FILENAME, allocate_relay_route, oob_state_dir
-
     install_root = tmp_path / "Customer Alpha"
     registry = tmp_path / "allocations.json"
 
@@ -91,8 +133,6 @@ def test_fresh_slot_allocation_is_sanitized_stable_and_persisted(tmp_path: Path)
 
 @pytest.mark.parametrize("slot", ["", "   ", ".", "../escape", "a/b", "🔥"])
 def test_slot_allocation_rejects_malformed_identity(tmp_path: Path, slot: str) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     with pytest.raises(SystemExit, match="relay slot identity"):
         allocate_relay_route(
             tmp_path / "install",
@@ -102,8 +142,6 @@ def test_slot_allocation_rejects_malformed_identity(tmp_path: Path, slot: str) -
 
 
 def test_colliding_candidate_slot_moves_to_next_free_block(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     registry = tmp_path / "allocations.json"
     one = allocate_relay_route(
         tmp_path / "one",
@@ -127,8 +165,6 @@ def test_colliding_candidate_slot_moves_to_next_free_block(tmp_path: Path) -> No
 
 
 def test_duplicate_install_identity_cannot_overwrite_another_slot(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     registry = tmp_path / "allocations.json"
     first = allocate_relay_route(
         tmp_path / "one", slot_name="one", registry_path=registry,
@@ -144,8 +180,6 @@ def test_duplicate_install_identity_cannot_overwrite_another_slot(tmp_path: Path
 
 
 def test_concurrent_allocation_of_one_install_returns_one_identity(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     install_root = tmp_path / "shared"
     registry = tmp_path / "allocations.json"
     identities = iter(f"identity-{index}" for index in range(20))
@@ -170,8 +204,6 @@ def test_live_oob_state_without_metadata_pins_legacy_route_and_preserves_clients
     tmp_path: Path,
 ) -> None:
     """Per-client correlation state is what the legacy pin protects."""
-    from vigil_cli.oob_relay import initialize_relay_route
-
     install_root = tmp_path / "existing"
     legacy_client = install_root / ".runtime-data/oob/clients/ssrf.session"
     legacy_client.parent.mkdir(parents=True)
@@ -200,8 +232,6 @@ def test_an_interrupted_allocations_leftovers_are_not_mistaken_for_live_oob(
     start` writes to. Counting those as live OOB state would strand the retry
     on the shared 53/8443 route for a root that never routed anything.
     """
-    from vigil_cli.oob_relay import initialize_relay_route
-
     install_root = tmp_path / "interrupted"
     oob_dir = install_root / ".runtime-data/oob"
     oob_dir.mkdir(parents=True)
@@ -222,17 +252,15 @@ def test_an_interrupted_allocations_leftovers_are_not_mistaken_for_live_oob(
 
 
 def test_failed_metadata_publish_rolls_back_registry_allocation(tmp_path: Path) -> None:
-    import vigil_cli.oob_relay as relay_module
-
     registry = tmp_path / "allocations.json"
 
     def fail_metadata(path: Path, payload: dict[str, object]) -> None:
         if path.name == "relay-routing.json":
             raise OSError("disk full")
-        relay_module._atomic_write_json_real(path, payload)
+        relay._atomic_write_json_real(path, payload)
 
     with pytest.raises(OSError, match="disk full"):
-        relay_module.allocate_relay_route(
+        relay.allocate_relay_route(
             tmp_path / "broken",
             slot_name="broken",
             registry_path=registry,
@@ -242,13 +270,11 @@ def test_failed_metadata_publish_rolls_back_registry_allocation(tmp_path: Path) 
     payload = json.loads(registry.read_text())
     assert payload["allocations"] == {}
     assert not (
-        relay_module.oob_state_dir(tmp_path / "broken") / relay_module.RELAY_METADATA_FILENAME
+        relay.oob_state_dir(tmp_path / "broken") / relay.RELAY_METADATA_FILENAME
     ).exists()
 
 
 def test_relay_metadata_rejects_corrupt_or_silently_changed_routing(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import RELAY_METADATA_FILENAME, load_relay_route, oob_state_dir
-
     install_root = tmp_path / "install"
     path = oob_state_dir(install_root) / RELAY_METADATA_FILENAME
     path.parent.mkdir(parents=True)
@@ -274,8 +300,6 @@ def test_relay_metadata_rejects_corrupt_or_silently_changed_routing(tmp_path: Pa
 
 
 def test_edge_routing_config_is_deterministic_and_slot_specific(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route, render_edge_routing
-
     route = allocate_relay_route(
         tmp_path / "slot",
         slot_name="Acme",
@@ -300,10 +324,6 @@ def test_edge_routing_config_is_deterministic_and_slot_specific(tmp_path: Path) 
 def test_oob_options_and_assess_environment_consume_resolved_relay_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli import main as main_module
-    from vigil_cli.oob import oob_options
-    from vigil_cli.oob_relay import allocate_relay_route
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     install_root = tmp_path / "slot"
     route = allocate_relay_route(
@@ -330,9 +350,6 @@ def test_oob_options_and_assess_environment_consume_resolved_relay_metadata(
 def test_external_domain_override_cannot_replace_persisted_vigil_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.oob import oob_options
-    from vigil_cli.oob_relay import allocate_relay_route
-
     install_root = tmp_path / "slot"
     route = allocate_relay_route(
         install_root, slot_name="Acme", registry_path=tmp_path / "allocations.json",
@@ -349,9 +366,6 @@ def test_external_domain_override_cannot_replace_persisted_vigil_route(
 def test_fresh_install_accepts_ambient_value_as_its_persisted_base_domain(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob import oob_options
-
     source_root = tmp_path / "source"
     install_root = tmp_path / "fresh"
     (source_root / "agent").mkdir(parents=True)
@@ -360,13 +374,7 @@ def test_fresh_install_accepts_ambient_value_as_its_persisted_base_domain(
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "custom.example.test")
 
-    install_from_source(
-        InstallOptions(
-            source_root=source_root,
-            install_root=install_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source_root, install_root)
 
     options = oob_options(install_root)
     assert options.relay_route is not None
@@ -377,9 +385,6 @@ def test_fresh_install_accepts_ambient_value_as_its_persisted_base_domain(
 def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     caller_root = tmp_path / "caller"
     config_path = caller_root / "config" / "vigil.json"
     config_path.parent.mkdir(parents=True)
@@ -400,13 +405,7 @@ def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
     monkeypatch.chdir(caller_root)
     monkeypatch.setenv("VIGIL_CONFIG", "config/vigil.json")
 
-    install_from_source(
-        InstallOptions(
-            source_root=source_root,
-            install_root=install_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source_root, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None
@@ -422,9 +421,7 @@ def test_install_reads_relative_config_from_caller_context_before_pinning_cwd(
 def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
     from vigil_cli.oob import oob_options, start_oob
-    from vigil_cli.oob_relay import load_relay_route
 
     source_root = tmp_path / "source"
     install_root = tmp_path / "fresh"
@@ -435,13 +432,7 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     monkeypatch.delenv("VIGIL_FRP_HOST", raising=False)
 
-    install_from_source(
-        InstallOptions(
-            source_root=source_root,
-            install_root=install_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source_root, install_root)
 
     assert load_relay_route(install_root) is None
     options = oob_options(install_root)
@@ -468,9 +459,6 @@ def test_fresh_install_without_oob_configuration_does_not_persist_owner_defaults
 def test_fresh_install_allocates_route_but_live_oob_state_pins_legacy_route(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     source_root = tmp_path / "source"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.test")
@@ -478,9 +466,7 @@ def test_fresh_install_allocates_route_but_live_oob_state_pins_legacy_route(
     (source_root / "orchestrator").mkdir(exist_ok=True)
     (source_root / "agent/README").write_text("managed", encoding="utf-8")
     fresh_root = tmp_path / "fresh-slot"
-    fresh = install_from_source(
-        InstallOptions(source_root=source_root, install_root=fresh_root, verify_docker_image=False)
-    )
+    fresh = _install(source_root, fresh_root)
     fresh_route = load_relay_route(fresh_root)
     assert fresh.is_upgrade is False
     assert fresh_route is not None and fresh_route.legacy is False
@@ -490,9 +476,7 @@ def test_fresh_install_allocates_route_but_live_oob_state_pins_legacy_route(
     correlation = upgrade_root / ".runtime-data/oob/clients/a.session"
     correlation.parent.mkdir(parents=True)
     correlation.write_text("keep", encoding="utf-8")
-    upgraded = install_from_source(
-        InstallOptions(source_root=source_root, install_root=upgrade_root, verify_docker_image=False)
-    )
+    upgraded = _install(source_root, upgrade_root)
     upgrade_route = load_relay_route(upgrade_root)
     assert upgraded.is_upgrade is True
     assert upgrade_route is not None and upgrade_route.legacy is True
@@ -500,9 +484,6 @@ def test_fresh_install_allocates_route_but_live_oob_state_pins_legacy_route(
 
 
 def test_runtime_frp_and_client_metadata_use_relay_route(tmp_path: Path) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, _render_runtime_files, start_oob_client
-
     commands: list[str] = []
     runtime_route = json.dumps(
         {
@@ -546,9 +527,6 @@ def test_runtime_frp_and_client_metadata_use_relay_route(tmp_path: Path) -> None
 
 
 def test_oob_poll_refuses_client_owned_by_another_engagement(tmp_path: Path) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, poll_client_payload_host
-
     metadata = json.dumps(
         {
             "name": "agent-a",
@@ -588,9 +566,7 @@ def test_oob_poll_refuses_client_owned_by_another_engagement(tmp_path: Path) -> 
 def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
-    from vigil_cli.oob_relay import allocate_relay_route
 
     commands: list[str] = []
 
@@ -642,9 +618,6 @@ def test_oob_start_refuses_route_switch_while_unverifiable_client_is_running(
 def test_oob_client_start_refuses_mismatched_runtime_route_before_writing_metadata(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, start_oob_client
-
     commands: list[str] = []
     old_route = json.dumps(
         {
@@ -685,9 +658,6 @@ def test_oob_client_start_refuses_mismatched_runtime_route_before_writing_metada
 def test_oob_client_start_never_overwrites_mismatched_running_session_metadata(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, start_oob_client
-
     commands: list[str] = []
     requested_route = {
         "version": 1,
@@ -747,9 +717,6 @@ def test_oob_client_start_never_overwrites_mismatched_running_session_metadata(
 def test_oob_client_start_reuses_exact_running_session_without_mutation(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, start_oob_client
-
     commands: list[str] = []
     route = {
         "version": 1,
@@ -802,9 +769,6 @@ def test_oob_client_start_reuses_exact_running_session_without_mutation(
 def test_oob_client_start_reuses_constrained_pre_wave2_legacy_metadata_without_mutation(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, start_oob_client
-
     commands: list[str] = []
     route = {
         "version": 1,
@@ -854,7 +818,6 @@ def test_oob_client_start_reuses_constrained_pre_wave2_legacy_metadata_without_m
 def test_oob_start_admits_constrained_pre_wave2_legacy_client_ownership(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.oob import OobOptions, start_oob
 
     commands: list[str] = []
@@ -946,9 +909,6 @@ def test_oob_client_start_rejects_pre_wave2_metadata_outside_legacy_constraints(
     options_kwargs: dict[str, object],
     metadata_server: str,
 ) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, start_oob_client
-
     commands: list[str] = []
     route = {"version": 1, **options_kwargs}
     route["oob_domain"] = options_kwargs["oob_domain"]
@@ -985,10 +945,7 @@ def test_oob_client_start_rejects_pre_wave2_metadata_outside_legacy_constraints(
 
 
 def test_health_status_and_doctor_surface_relay_routing(tmp_path: Path) -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.oob import oob_status
-    from vigil_cli.oob_relay import allocate_relay_route
-    from vigil_cli.status import _oob_relay_check
 
     route = allocate_relay_route(
         tmp_path / "slot", slot_name="Acme", registry_path=tmp_path / "allocations.json",
@@ -1016,9 +973,6 @@ def test_health_status_and_doctor_surface_relay_routing(tmp_path: Path) -> None:
 def test_oob_routing_cli_emits_deployment_metadata_without_mutating_services(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
-    from vigil_cli import main as main_module
-    from vigil_cli.oob_relay import allocate_relay_route
-
     install_root = tmp_path / "slot"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     route = allocate_relay_route(
@@ -1035,14 +989,6 @@ def test_oob_routing_cli_emits_deployment_metadata_without_mutating_services(
 
 
 def test_cross_slot_client_payload_and_correlation_are_isolated(tmp_path: Path) -> None:
-    from vigil_cli.oob import (
-        interactions_for_domain,
-        match_interactions_to_nonces,
-        parse_client_payload_host,
-        parse_interactsh_log,
-    )
-    from vigil_cli.oob_relay import allocate_relay_route
-
     registry = tmp_path / "allocations.json"
     alpha = allocate_relay_route(
         tmp_path / "alpha", slot_name="alpha", registry_path=registry,
@@ -1067,8 +1013,6 @@ def test_cross_slot_client_payload_and_correlation_are_isolated(tmp_path: Path) 
 
 def test_slot_filter_admits_compact_interactsh_client_callback() -> None:
     """Current interactsh -v logs omit the configured domain from callback brackets."""
-    from vigil_cli.oob import interactions_for_domain, parse_interactsh_log
-
     callback = parse_interactsh_log(
         "[eng-probe.client-correlation-id] Received DNS interaction (A) "
         "from 192.0.2.2 at 2026-07-16T21:35:00Z\n"
@@ -1085,8 +1029,6 @@ def test_slot_filter_admits_compact_interactsh_client_callback() -> None:
 
 def test_slot_filter_rejects_compact_callback_for_another_client() -> None:
     """A short callback has no slot suffix and must match the selected client."""
-    from vigil_cli.oob import interactions_for_domain, parse_interactsh_log
-
     callback = parse_interactsh_log(
         "[alpha-probe.beta-client-id] Received DNS interaction (A) "
         "from 192.0.2.2 at 2026-07-16T21:35:00Z\n"
@@ -1104,8 +1046,6 @@ def test_slot_filter_rejects_compact_callback_for_another_client() -> None:
 def test_existing_route_repairs_missing_registry_entry_before_new_allocation(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     registry = tmp_path / "allocations.json"
     original = allocate_relay_route(
         tmp_path / "original",
@@ -1139,8 +1079,6 @@ def test_existing_route_repairs_missing_registry_entry_before_new_allocation(
 
 
 def test_copied_live_install_metadata_is_rejected_by_registry(tmp_path: Path) -> None:
-    from vigil_cli.oob_relay import RELAY_METADATA_FILENAME, allocate_relay_route, oob_state_dir
-
     registry = tmp_path / "allocations.json"
     original_root = tmp_path / "original"
     clone_root = tmp_path / "clone"
@@ -1168,8 +1106,6 @@ def test_copied_live_install_metadata_is_rejected_by_registry(tmp_path: Path) ->
     ["", ".", "*.example.test", "bad_domain.test", "evil.test\n}\nattacker {"],
 )
 def test_allocator_rejects_non_dns_base_domains(tmp_path: Path, domain: str) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     with pytest.raises(SystemExit, match="domain"):
         allocate_relay_route(
             tmp_path / "install",
@@ -1182,8 +1118,6 @@ def test_allocator_rejects_non_dns_base_domains(tmp_path: Path, domain: str) -> 
 def test_allocator_rejects_base_domain_when_slot_domain_exceeds_dns_limit(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     base_domain = f"{'a' * 63}.{'b' * 63}.{'c' * 63}.{'d' * 61}"
     assert len(base_domain) == 253
     with pytest.raises(SystemExit, match="domain"):
@@ -1200,9 +1134,6 @@ def test_allocator_rejects_base_domain_when_slot_domain_exceeds_dns_limit(
 def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     source_root = tmp_path / "source"
     install_root = tmp_path / "upgrade"
     (source_root / "agent").mkdir(parents=True)
@@ -1217,13 +1148,7 @@ def test_upgrade_pins_ambient_domain_that_was_effective_before_metadata(
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "legacy.custom.test")
 
-    install_from_source(
-        InstallOptions(
-            source_root=source_root,
-            install_root=install_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source_root, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None and route.legacy
@@ -1234,8 +1159,6 @@ def test_install_root_record_dir_symlink_cannot_escape_install_root(
     tmp_path: Path
 ) -> None:
     """The `.runtime-data/oob` fallback stays anchored to the install root."""
-    from vigil_cli.oob_relay import allocate_relay_route
-
     install_root = tmp_path / "install"
     _register_fresh_workspace(install_root)
     outside = tmp_path / "outside"
@@ -1255,13 +1178,6 @@ def test_install_root_record_dir_symlink_cannot_escape_install_root(
 def test_metadata_file_symlink_is_rejected(
     tmp_path: Path, location: str
 ) -> None:
-    from vigil_cli.oob_relay import (
-        RELAY_METADATA_FILENAME,
-        allocate_relay_route,
-        load_relay_route,
-        oob_state_dir,
-    )
-
     source_root = tmp_path / "source"
     source = allocate_relay_route(
         source_root,
@@ -1288,8 +1204,6 @@ def test_metadata_file_symlink_is_rejected(
 def test_atomic_writer_tolerates_unsupported_directory_fsync(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import vigil_cli.oob_relay as relay
-
     real_open = relay.os.open
 
     def portable_open(path: object, flags: int, *args: object) -> int:
@@ -1307,8 +1221,6 @@ def test_atomic_writer_tolerates_unsupported_directory_fsync(
 def test_atomic_writer_does_not_follow_predictable_temporary_symlink(
     tmp_path: Path,
 ) -> None:
-    import vigil_cli.oob_relay as relay
-
     destination = tmp_path / "routing.json"
     victim = tmp_path / "victim.txt"
     victim.write_text("keep", encoding="utf-8")
@@ -1325,9 +1237,6 @@ def test_atomic_writer_does_not_follow_predictable_temporary_symlink(
 def test_frp_proxy_names_are_stable_and_derived_from_slot_not_container(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, _render_runtime_files
-
     commands: list[str] = []
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -1348,7 +1257,6 @@ def test_frp_proxy_names_are_stable_and_derived_from_slot_not_container(
 
 
 def test_oob_status_degrades_when_live_runtime_belongs_to_another_slot() -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.oob import oob_status
 
     runtime_route = json.dumps(
@@ -1386,7 +1294,6 @@ def test_oob_status_degrades_when_live_runtime_belongs_to_another_slot() -> None
 
 
 def test_oob_status_treats_malformed_runtime_marker_as_route_mismatch() -> None:
-    from vigil_cli.docker import DockerResult
     from vigil_cli.oob import oob_status
 
     def runner(argv: list[str], **_: object) -> DockerResult:
@@ -1409,9 +1316,6 @@ def test_oob_status_treats_malformed_runtime_marker_as_route_mismatch() -> None:
 def test_up_refuses_to_reuse_active_oob_sessions_from_another_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli import up
-    from vigil_cli.oob import OobOptions
-
     monkeypatch.setattr(
         up,
         "_oob_options",
@@ -1447,9 +1351,6 @@ def test_up_skips_oob_for_an_install_that_never_reserved_a_relay_slot(
     orchestrator and proxy are already up by this point, and OOB is one optional
     service — a non-zero exit would claim the whole bring-up failed.
     """
-    from vigil_cli import up
-    from vigil_cli.oob import OobOptions
-
     monkeypatch.setattr(
         up,
         "_oob_options",
@@ -1489,9 +1390,6 @@ def test_doctor_names_the_real_remedy_when_oob_domain_is_unset(
     `vigil install`" sends them round a loop that cannot clear the warning.
     Name the missing input instead.
     """
-    from vigil_cli import status as status_module
-    from vigil_cli.status import _oob_relay_check
-
     monkeypatch.setattr(status_module, "get_config_value", lambda *_a, **_k: None)
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
 
@@ -1510,9 +1408,6 @@ def test_doctor_still_points_at_install_when_domain_is_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With a domain set, `vigil install` IS the remedy — keep saying so."""
-    from vigil_cli import status as status_module
-    from vigil_cli.status import _oob_relay_check
-
     monkeypatch.setattr(
         status_module,
         "get_config_value",
@@ -1536,8 +1431,6 @@ def test_install_says_why_it_allocated_no_oob_route(
     falls back to the globally contended legacy ports, and re-running install
     pins that fallback rather than fixing it. Say it out loud instead.
     """
-    from vigil_cli.install import InstallOptions, install_from_source
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     source = tmp_path / "source"
@@ -1546,13 +1439,7 @@ def test_install_says_why_it_allocated_no_oob_route(
     (source / "orchestrator" / "backend" / "data").mkdir(parents=True)
     (source / "README.md").write_text("managed source\n", encoding="utf-8")
 
-    install_from_source(
-        InstallOptions(
-            source_root=source,
-            install_root=tmp_path / "install",
-            verify_docker_image=False,
-        )
-    )
+    _install(source, tmp_path / "install")
 
     err = capsys.readouterr().err
     assert "oob.domain" in err, "must name the unset setting"
@@ -1570,9 +1457,7 @@ def test_up_skip_message_names_every_key_oob_start_requires(
     domain, so a checklist that names only two of the three sends the operator
     to `vigil oob start` to be refused again.
     """
-    from vigil_cli import up as up_module
-
-    up_module._print_oob_configuration_help()
+    up._print_oob_configuration_help()
 
     out = capsys.readouterr().out
     for key in ("oob.frp_host", "oob.domain", "oob.frp_token"):
@@ -1581,8 +1466,6 @@ def test_up_skip_message_names_every_key_oob_start_requires(
 
 def test_doctor_missing_token_says_how_to_set_it() -> None:
     """A bare `MISSING oob.frp_token` row tells the operator nothing actionable."""
-    from vigil_cli import status as status_module
-
     check = status_module._oob_token_check()
 
     assert check.status == "MISSING"
@@ -1604,8 +1487,6 @@ def _pre_rename_record(payload: dict[str, object]) -> dict[str, object]:
 
 
 def _allocated_route(tmp_path: Path, install_root: Path):
-    from vigil_cli.oob_relay import allocate_relay_route
-
     return allocate_relay_route(
         install_root,
         slot_name="Acme",
@@ -1619,8 +1500,6 @@ def _allocated_route(tmp_path: Path, install_root: Path):
 def test_load_relay_route_reads_pre_rename_metadata_without_rewriting_it(
     tmp_path: Path,
 ) -> None:
-    from vigil_cli.oob_relay import LEGACY_RELAY_METADATA_FILENAME, load_relay_route
-
     install_root = tmp_path / "install"
     route = _allocated_route(tmp_path, install_root)
     legacy_path = route.metadata_path.with_name(LEGACY_RELAY_METADATA_FILENAME)
@@ -1646,8 +1525,6 @@ def test_load_relay_route_reads_pre_rename_metadata_without_rewriting_it(
 
 def test_pre_rename_metadata_keeps_its_route_through_allocation(tmp_path: Path) -> None:
     """A pre-rename install must never be handed a second, different slot."""
-    from vigil_cli.oob_relay import LEGACY_RELAY_METADATA_FILENAME, allocate_relay_route
-
     install_root = tmp_path / "install"
     registry = tmp_path / "allocations.json"
     route = _allocated_route(tmp_path, install_root)
@@ -1672,12 +1549,6 @@ def test_pre_rename_metadata_keeps_its_route_through_allocation(tmp_path: Path) 
 
 def test_allocation_registry_accepts_pre_rename_rows(tmp_path: Path) -> None:
     """A pre-rename row must reconcile as-is, and new rows use the current key."""
-    from vigil_cli.oob_relay import (
-        allocate_relay_route,
-        load_relay_route,
-        reconcile_relay_route_registry,
-    )
-
     install_root = tmp_path / "install"
     registry = tmp_path / "allocations.json"
     route = _allocated_route(tmp_path, install_root)
@@ -1714,9 +1585,6 @@ def test_allocation_registry_accepts_pre_rename_rows(tmp_path: Path) -> None:
 def test_install_honours_pre_rename_oob_tenant_config_key(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps({"oob.domain": "oob.example.test", "oob.tenant": "pre-rename-slot"}),
@@ -1729,13 +1597,7 @@ def test_install_honours_pre_rename_oob_tenant_config_key(
     install_root = tmp_path / "install"
     monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
 
-    install_from_source(
-        InstallOptions(
-            source_root=source_root,
-            install_root=install_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source_root, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None
@@ -1746,9 +1608,6 @@ def test_install_honours_pre_rename_oob_tenant_config_key(
 def test_current_oob_slot_config_key_wins_over_the_pre_rename_one(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps(
@@ -1767,13 +1626,7 @@ def test_current_oob_slot_config_key_wins_over_the_pre_rename_one(
     install_root = tmp_path / "install"
     monkeypatch.setenv("VIGIL_CONFIG", str(config_path))
 
-    install_from_source(
-        InstallOptions(
-            source_root=source_root,
-            install_root=install_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source_root, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None
@@ -1784,8 +1637,6 @@ def test_assess_environment_still_exports_the_pre_rename_variable(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """`vigil assess` execs the INSTALLED agent tree, which may predate the rename."""
-    from vigil_cli import main as main_module
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     install_root = tmp_path / "install"
     route = _allocated_route(tmp_path, install_root)
@@ -1797,9 +1648,6 @@ def test_assess_environment_still_exports_the_pre_rename_variable(
 
 
 def test_runtime_route_marker_falls_back_to_the_pre_rename_file_and_key() -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import _runtime_relay_route
-
     commands: list[str] = []
     legacy_marker = json.dumps(
         {
@@ -1832,9 +1680,6 @@ def test_runtime_route_marker_falls_back_to_the_pre_rename_file_and_key() -> Non
 
 
 def test_client_metadata_falls_back_to_the_pre_rename_route_key() -> None:
-    from vigil_cli.docker import DockerResult
-    from vigil_cli.oob import OobOptions, _client_metadata_matches_options, _read_oob_client_metadata
-
     legacy_metadata = json.dumps(
         {
             "name": "demo",
@@ -1872,8 +1717,6 @@ def test_client_metadata_falls_back_to_the_pre_rename_route_key() -> None:
 
 def _quiet_oob_runner(commands: list[str]):
     """A `docker exec` runner that lets `start_oob` reach the end unchanged."""
-    from vigil_cli.docker import DockerResult
-
     def runner(argv: list[str], **_: object) -> DockerResult:
         command = argv[-1] if argv else ""
         commands.append(command)
@@ -1895,8 +1738,6 @@ def _quiet_oob_runner(commands: list[str]):
 
 def _unreserved_oob_options(install_root: Path):
     """What `oob_options` resolves for a configured domain with no routing record."""
-    from vigil_cli.oob import OobOptions
-
     return OobOptions(
         install_root=install_root,
         frp_host="frp.example.test",
@@ -1946,7 +1787,6 @@ def test_a_refused_oob_start_leaves_vigil_install_free_to_allocate_a_slot(
 ) -> None:
     """The remedy the refusal names has to actually work afterwards."""
     from vigil_cli.oob import start_oob
-    from vigil_cli.oob_relay import initialize_relay_route
 
     with pytest.raises(SystemExit):
         start_oob(
@@ -1996,7 +1836,6 @@ def test_start_oob_is_quiet_when_a_slot_is_reserved(
 ) -> None:
     """A reserved slot is the normal state and earns no warning."""
     from vigil_cli.oob import OobOptions, start_oob
-    from vigil_cli.oob_relay import allocate_relay_route
 
     route = allocate_relay_route(
         tmp_path,
@@ -2061,9 +1900,6 @@ def test_configuring_oob_after_the_first_install_allocates_a_dedicated_slot(
     still. The retry has to reserve this install its own slot rather than pin
     the shared 53/8443 route every other install would also land on.
     """
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import PORT_BLOCK_START, load_relay_route
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     source = tmp_path / "source"
@@ -2074,21 +1910,13 @@ def test_configuring_oob_after_the_first_install_allocates_a_dedicated_slot(
     install_root = tmp_path / "install"
 
     # First install: no domain configured, so no route is written.
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
     assert load_relay_route(install_root) is None
     assert "oob.domain" in capsys.readouterr().err
 
     # Operator now follows the guidance: configure the domain, re-run install.
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None
@@ -2117,9 +1945,6 @@ def test_install_preserves_the_legacy_route_of_a_root_that_already_ran_oob(
     the base domain and those ports. Moving them to a fresh slot would break
     in-flight correlation for a running engagement.
     """
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     source = tmp_path / "source"
@@ -2128,11 +1953,7 @@ def test_install_preserves_the_legacy_route_of_a_root_that_already_ran_oob(
     (source / "README.md").write_text("managed\n", encoding="utf-8")
     install_root = tmp_path / "install"
 
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
 
     # What a pre-routing `vigil oob start` leaves behind on this host.
     oob_state = install_root / ".runtime-data" / "oob"
@@ -2141,11 +1962,7 @@ def test_install_preserves_the_legacy_route_of_a_root_that_already_ran_oob(
     (oob_state / "clients" / "ssrf.session").write_text("correlation", encoding="utf-8")
 
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None
@@ -2166,9 +1983,6 @@ def test_relocated_runtime_data_dir_still_proves_a_live_legacy_oob_install(
     outside the install root. Looking only there would read a live legacy
     install as never-configured and move its ports.
     """
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     data_dir = tmp_path / "elsewhere"
@@ -2182,11 +1996,7 @@ def test_relocated_runtime_data_dir_still_proves_a_live_legacy_oob_install(
     (data_dir / "oob" / "clients").mkdir(parents=True)
     (data_dir / "oob" / "frpc.log").write_text("start proxy success\n", encoding="utf-8")
 
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
 
     route = load_relay_route(install_root)
     assert route is not None
@@ -2198,9 +2008,6 @@ def test_deferred_configuration_leaves_an_allocated_slot_untouched(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Once a slot exists, further installs reconcile it and change nothing."""
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import load_relay_route, oob_state_dir
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example.com")
     source = tmp_path / "source"
@@ -2209,11 +2016,7 @@ def test_deferred_configuration_leaves_an_allocated_slot_untouched(
     (source / "README.md").write_text("managed\n", encoding="utf-8")
     install_root = tmp_path / "install"
 
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
     allocated = load_relay_route(install_root)
     assert allocated is not None and allocated.legacy is False
 
@@ -2222,11 +2025,7 @@ def test_deferred_configuration_leaves_an_allocated_slot_untouched(
     (oob_state_dir(install_root) / "frpc.log").write_text(
         "start proxy success\n", encoding="utf-8"
     )
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=install_root, verify_docker_image=False
-        )
-    )
+    _install(source, install_root)
 
     assert load_relay_route(install_root) == allocated
     registry = json.loads(
@@ -2245,9 +2044,6 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     record rather than mint a second one, and the pre-rename config key must
     still name the slot when nothing has been allocated yet.
     """
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import LEGACY_RELAY_METADATA_FILENAME, load_relay_route
-
     config_path = tmp_path / "config.json"
     config_path.write_text(
         json.dumps({"oob.domain": "oob.example.test", "oob.tenant": "pre-rename-slot"}),
@@ -2271,13 +2067,7 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     )
     existing.metadata_path.unlink()
 
-    install_from_source(
-        InstallOptions(
-            source_root=source,
-            install_root=pre_rename_root,
-            verify_docker_image=False,
-        )
-    )
+    _install(source, pre_rename_root)
 
     kept = load_relay_route(pre_rename_root)
     assert kept is not None
@@ -2291,11 +2081,7 @@ def test_deferred_configuration_keeps_a_pre_rename_record_and_slot_key(
     fresh_root = tmp_path / "fresh"
     fresh_root.mkdir()
     (fresh_root / ".runtime-data").mkdir()
-    install_from_source(
-        InstallOptions(
-            source_root=source, install_root=fresh_root, verify_docker_image=False
-        )
-    )
+    _install(source, fresh_root)
 
     allocated = load_relay_route(fresh_root)
     assert allocated is not None
@@ -2310,8 +2096,6 @@ def _seed_live_oob_state(install_root: Path) -> None:
     A rendered ``frpc.toml`` is the discriminator ``has_pre_routing_oob_state``
     reads; routing records are bookkeeping and deliberately do not count.
     """
-    from vigil_cli.oob_relay import oob_state_dir
-
     state_dir = oob_state_dir(install_root)
     state_dir.mkdir(parents=True, exist_ok=True)
     (state_dir / "frpc.toml").write_text("[common]\n", encoding="utf-8")
@@ -2325,8 +2109,6 @@ def test_doctor_route_row_omits_the_legacy_reassurance_on_a_fresh_root(
     `install.py` already makes the equivalent sentence conditional; the doctor
     row has to agree, or the two halves of the same answer contradict each other.
     """
-    from vigil_cli.status import _oob_relay_check
-
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     install_root = tmp_path / "fresh"
     install_root.mkdir()
@@ -2341,8 +2123,6 @@ def test_doctor_route_row_omits_the_legacy_reassurance_on_a_fresh_root(
 def test_doctor_route_row_keeps_the_legacy_reassurance_for_a_root_running_oob(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.status import _oob_relay_check
-
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     install_root = tmp_path / "legacy"
     install_root.mkdir()
@@ -2358,8 +2138,6 @@ def test_doctor_metadata_row_names_allocation_or_pinning_but_never_both(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """With a domain set, the remedy depends on whether callbacks are already live."""
-    from vigil_cli.status import _oob_relay_check
-
     monkeypatch.setenv("VIGIL_OOB_DOMAIN", "oob.example")
     fresh = tmp_path / "fresh"
     fresh.mkdir()
@@ -2385,8 +2163,6 @@ def test_doctor_metadata_row_names_allocation_or_pinning_but_never_both(
 
 def _register_fresh_workspace(install_root: Path) -> Path:
     """Register the fresh layout's runtime state, as `vigil install` does."""
-    from vigil_cli.workspace import WORKSPACE_FILENAME
-
     runtime_state = install_root / "state" / "runtime"
     runtime_state.mkdir(parents=True)
     (install_root / WORKSPACE_FILENAME).write_text(
@@ -2408,8 +2184,6 @@ def _install_source(tmp_path: Path) -> Path:
 def test_fresh_workspace_keeps_its_relay_record_in_runtime_state(
     tmp_path: Path, registered: bool
 ) -> None:
-    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
-
     install_root = tmp_path / "install"
     install_root.mkdir()
     if registered:
@@ -2431,8 +2205,6 @@ def test_fresh_workspace_keeps_its_relay_record_in_runtime_state(
 def test_relay_record_follows_a_runtime_data_dir_outside_the_install_root(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route, load_relay_route
-
     data_dir = tmp_path / "elsewhere"
     monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(data_dir))
     install_root = tmp_path / "install"
@@ -2453,8 +2225,6 @@ def test_relay_record_follows_a_runtime_data_dir_outside_the_install_root(
 def test_relay_record_dir_symlink_cannot_escape_the_runtime_data_dir(
     tmp_path: Path
 ) -> None:
-    from vigil_cli.oob_relay import allocate_relay_route
-
     install_root = tmp_path / "install"
     runtime_state = _register_fresh_workspace(install_root)
     outside = tmp_path / "outside"
@@ -2473,8 +2243,6 @@ def test_relay_record_dir_symlink_cannot_escape_the_runtime_data_dir(
 def test_live_oob_state_in_fresh_runtime_state_pins_the_legacy_route_there(
     tmp_path: Path
 ) -> None:
-    from vigil_cli.oob_relay import has_pre_routing_oob_state, initialize_relay_route
-
     install_root = tmp_path / "install"
     oob_state = _register_fresh_workspace(install_root) / "oob"
     oob_state.mkdir()
@@ -2505,9 +2273,6 @@ def test_install_moves_a_record_left_beside_the_install_root_without_reallocatin
     was. Reads fall back to it so no command treats the install as unrouted, and
     `vigil install` moves it, byte for byte, to where the live OOB state is.
     """
-    from vigil_cli.install import InstallOptions, install_from_source
-    from vigil_cli.oob_relay import allocate_relay_route, load_relay_route
-
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
     monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
     source = _install_source(tmp_path)
@@ -2571,8 +2336,6 @@ def _allocate_beside_install_root(
     monkeypatch: pytest.MonkeyPatch, install_root: Path, registry: Path, identity: str, slot: int
 ):
     """Allocate the way a release that ignored the runtime data directory did."""
-    from vigil_cli.oob_relay import allocate_relay_route
-
     monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(install_root / ".runtime-data"))
     try:
         return allocate_relay_route(
@@ -2595,8 +2358,6 @@ def test_shared_runtime_data_dir_never_hands_one_install_anothers_slot(
     Once A's record moves into the shared `oob/`, B finds it before its own.
     Using it would send B's callbacks through A's subdomain and ports.
     """
-    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
-
     registry = tmp_path / "oob-allocations.json"  # beside $VIGIL_CONFIG
     alpha = _allocate_beside_install_root(monkeypatch, tmp_path / "alpha", registry, "alpha-id", 1)
     beta = _allocate_beside_install_root(monkeypatch, tmp_path / "beta", registry, "beta-id", 2)
@@ -2624,8 +2385,6 @@ def test_shared_runtime_data_dir_never_hands_one_install_anothers_slot(
 def test_an_install_without_a_record_never_adopts_another_installs_slot(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
-
     registry = tmp_path / "oob-allocations.json"
     monkeypatch.setenv("VIGIL_RUNTIME_DATA_DIR", str(tmp_path / "shared"))
     (tmp_path / "alpha").mkdir()
@@ -2644,8 +2403,6 @@ def test_an_install_without_a_record_never_adopts_another_installs_slot(
 
 def test_a_moved_install_root_still_reads_its_own_slot(tmp_path: Path) -> None:
     """A registry row naming a root that no longer exists is a moved install."""
-    from vigil_cli.oob_relay import initialize_relay_route, load_relay_route
-
     registry = tmp_path / "oob-allocations.json"
     route = initialize_relay_route(
         tmp_path / "before", base_domain="oob.example.test", registry_path=registry
@@ -2666,8 +2423,6 @@ def test_a_record_moved_mid_read_is_still_found(
     The move runs right after the reader's first probe finds a location empty,
     which is the interleaving that would otherwise see neither file.
     """
-    from vigil_cli.oob_relay import load_relay_route
-
     install_root = tmp_path / "install"
     runtime_state = _register_fresh_workspace(install_root)
     seeded = _allocate_beside_install_root(

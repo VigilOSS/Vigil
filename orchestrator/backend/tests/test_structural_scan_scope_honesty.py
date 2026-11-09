@@ -37,6 +37,21 @@ UNSCANNED_SCOPE_DIMENSIONS = sorted(
 )
 
 
+def _signal_counts(**overrides: int) -> dict[str, int]:
+    """Structural signal counts, zero unless the caller names a dimension."""
+    return {"entry_points": 0, "imports": 0, "security_sinks": 0, "security_sources": 0, **overrides}
+
+
+def _whole_file_span(file_row: dict) -> dict[str, object]:
+    """The manual-review span that covers an entire file."""
+    return {
+        "file_id": file_row["id"],
+        "start_line": 1,
+        "end_line": file_row["loc"],
+        "label": "whole-file manual review",
+    }
+
+
 def _structural_payload(client, engagement_key, repo, files, *, parser_update):
     base = f"/engagements/{engagement_key}/assessment/code"
     binding = client.get(f"{base}/repos/{repo['id']}").json()
@@ -126,12 +141,7 @@ def _file_scope_signal_update() -> dict[str, object]:
     return {
         "total_entry_points": 1,
         "total_sinks": 1,
-        "structural_signal_counts": {
-            "entry_points": 1,
-            "imports": 3,
-            "security_sinks": 1,
-            "security_sources": 1,
-        },
+        "structural_signal_counts": _signal_counts(entry_points=1, imports=3, security_sinks=1, security_sources=1),
     }
 
 
@@ -164,12 +174,7 @@ def test_a_zero_callable_file_measured_at_file_scope_publishes_complete(
     [
         pytest.param(_file_scope_signal_update(), id="file-scope-signals"),
         pytest.param(
-            {"structural_signal_counts": {
-                "entry_points": 0,
-                "imports": 4,
-                "security_sinks": 0,
-                "security_sources": 0,
-            }},
+            {"structural_signal_counts": _signal_counts(imports=4)},
             id="imports-only",
         ),
         pytest.param({}, id="no-signal"),
@@ -220,14 +225,7 @@ def test_a_partial_span_cannot_review_a_parsed_zero_callable_file(
             claim,
             queue_item_id=claim["id"],
             disposition="clean",
-            reviewed_spans=[
-                {
-                    "file_id": parser["id"],
-                    "start_line": 1,
-                    "end_line": parser["loc"],
-                    "label": "whole-file manual review",
-                }
-            ],
+            reviewed_spans=[_whole_file_span(parser)],
             evidence="Every sealed source line was read by hand.",
         ),
     )
@@ -320,14 +318,7 @@ def test_a_partial_span_cannot_review_a_file_whose_scope_was_never_scanned(
             claim,
             queue_item_id=claim["id"],
             disposition="clean",
-            reviewed_spans=[
-                {
-                    "file_id": parser["id"],
-                    "start_line": 1,
-                    "end_line": parser["loc"],
-                    "label": "whole-file manual review",
-                }
-            ],
+            reviewed_spans=[_whole_file_span(parser)],
             evidence="Every sealed source line was read by hand.",
         ),
     )
@@ -401,14 +392,7 @@ def test_a_partial_span_cannot_review_a_script_scope_file_without_callables(
             claim,
             queue_item_id=claim["id"],
             disposition="clean",
-            reviewed_spans=[
-                {
-                    "file_id": script["id"],
-                    "start_line": 1,
-                    "end_line": script["loc"],
-                    "label": "whole-file manual review",
-                }
-            ],
+            reviewed_spans=[_whole_file_span(script)],
             evidence="Every sealed source line was read by hand.",
         ),
     )
@@ -475,12 +459,7 @@ def _complete_artifact(**overrides) -> dict:
         "unavailable_dimensions": [],
         "artifact_truncated": False,
         "truncated_dimensions": [],
-        "signal_counts": {
-            "entry_points": 0,
-            "imports": 0,
-            "security_sinks": 0,
-            "security_sources": 0,
-        },
+        "signal_counts": _signal_counts(),
     }
     artifact.update(overrides)
     return artifact
@@ -491,14 +470,7 @@ def _complete_artifact(**overrides) -> dict:
     [
         pytest.param({"total_exports": 2}, id="exports"),
         pytest.param(
-            {
-                "signal_counts": {
-                    "entry_points": 0,
-                    "imports": 3,
-                    "security_sinks": 0,
-                    "security_sources": 0,
-                }
-            },
+            {"signal_counts": _signal_counts(imports=3)},
             id="imports",
         ),
     ],

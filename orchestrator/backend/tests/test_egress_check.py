@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import base64
 import importlib.util
-import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -15,9 +14,6 @@ def _scripts_root() -> Path:
 
 
 def _load():
-    root = str(_scripts_root())
-    if root not in sys.path:
-        sys.path.insert(0, root)
     spec = importlib.util.spec_from_file_location(
         "egress_check_ut",
         Path(__file__).resolve().parents[3] / "agent" / "scripts" / "assess" / "commands" / "egress_check.py",
@@ -25,6 +21,12 @@ def _load():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.fixture
+def mod():
+    """The ``egress_check`` command module under test."""
+    return _load()
 
 
 ENG_KEY = "eng"
@@ -100,8 +102,7 @@ def _args(tmp_path, **over):
     return SimpleNamespace(**base)
 
 
-def test_cluster_blackholed_records_decision(monkeypatch, tmp_path, capsys):
-    mod = _load()
+def test_cluster_blackholed_records_decision(monkeypatch, tmp_path, capsys, mod):
     probe = (
         "example.com 200 0.040000 1.2.3.4\n"     # control: live
         "a.example.com 000 0.000000 \n"          # blackholed (no connect, no ip)
@@ -129,8 +130,7 @@ def test_cluster_blackholed_records_decision(monkeypatch, tmp_path, capsys):
     assert "destinations" not in recorded["exec_kwargs"]
 
 
-def test_control_failure_records_inconclusive_observation(monkeypatch, tmp_path, capsys):
-    mod = _load()
+def test_control_failure_records_inconclusive_observation(monkeypatch, tmp_path, capsys, mod):
     probe = (
         "example.com 000 0.000000 \n"            # control DOWN → transient/global, not a cluster block
         "a.example.com 000 0.000000 \n"
@@ -151,8 +151,7 @@ def test_control_failure_records_inconclusive_observation(monkeypatch, tmp_path,
     assert payload["provenance"]["artifact_id"] == 91
 
 
-def test_unclassified_sample_records_inconclusive_observation(monkeypatch, tmp_path, capsys):
-    mod = _load()
+def test_unclassified_sample_records_inconclusive_observation(monkeypatch, tmp_path, capsys, mod):
     probe = (
         "example.com 200 0.040000 1.2.3.4\n"
         "a.example.com 200 0.030000 5.6.7.8\n"
@@ -177,9 +176,8 @@ def test_unclassified_sample_records_inconclusive_observation(monkeypatch, tmp_p
 
 
 def test_sparse_blackhole_output_cannot_establish_a_cluster_verdict(
-    monkeypatch, tmp_path, capsys
+    monkeypatch, tmp_path, capsys, mod
 ):
-    mod = _load()
     hosts = ",".join(f"host-{index}.example.com" for index in range(10))
     probe = (
         "example.com 200 0.040000 1.2.3.4\n"
@@ -200,8 +198,7 @@ def test_sparse_blackhole_output_cannot_establish_a_cluster_verdict(
     assert not (tmp_path / "blocked.txt").exists()
 
 
-def test_artifact_write_response_must_identify_registered_probe(monkeypatch, tmp_path):
-    mod = _load()
+def test_artifact_write_response_must_identify_registered_probe(monkeypatch, tmp_path, mod):
     probe = (
         "example.com 000 0.000000 \n"
         "a.example.com 000 0.000000 \n"
@@ -226,8 +223,7 @@ def test_artifact_write_response_must_identify_registered_probe(monkeypatch, tmp
     assert "decision" not in recorded
 
 
-def test_reachable_with_000_proxy_artifact(monkeypatch, tmp_path, capsys):
-    mod = _load()
+def test_reachable_with_000_proxy_artifact(monkeypatch, tmp_path, capsys, mod):
     # http_code 000 but a remote_ip is present → TCP completed → live, NOT blackholed
     # (the §9 CONNECT-proxy-artifact lesson). So the cluster is reachable.
     probe = (
@@ -246,10 +242,7 @@ def test_reachable_with_000_proxy_artifact(monkeypatch, tmp_path, capsys):
     )
 
 
-def test_edge_block_response_is_inconclusive_not_reachable(
-    monkeypatch, tmp_path, capsys
-):
-    mod = _load()
+def test_edge_block_response_is_inconclusive_not_reachable(monkeypatch, tmp_path, capsys, mod):
     probe = "".join(
         [
             _captured_probe_line(
@@ -302,8 +295,7 @@ def test_edge_block_response_is_inconclusive_not_reachable(
     ]["a.example.com"]
 
 
-def test_garbled_sample_line_does_not_inflate_blocked_pct(monkeypatch, tmp_path, capsys):
-    mod = _load()
+def test_garbled_sample_line_does_not_inflate_blocked_pct(monkeypatch, tmp_path, capsys, mod):
     # 2 blackholed + 1 host with NO probe line is only 67% of the requested
     # sample, so it cannot satisfy the 80% cluster threshold.
     probe = (
@@ -322,8 +314,7 @@ def test_garbled_sample_line_does_not_inflate_blocked_pct(monkeypatch, tmp_path,
     assert not (tmp_path / "blocked.txt").exists()
 
 
-def test_no_record_skips_decision_but_writes_blocked_file(monkeypatch, tmp_path):
-    mod = _load()
+def test_no_record_skips_decision_but_writes_blocked_file(monkeypatch, tmp_path, mod):
     probe = "example.com 200 0.04 1.2.3.4\na.example.com 000 0.0 \nb.example.com 000 0.0 \n"
     recorded = _wire(monkeypatch, mod, tmp_path, probe)
     mod.run(_args(tmp_path, no_record=True))

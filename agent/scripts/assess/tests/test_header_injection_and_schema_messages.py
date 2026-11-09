@@ -1,7 +1,6 @@
-"""Behaviour pins captured before the S19 simplification packet.
+"""Pinned output of required-header injection and schema-validation messages.
 
-Each case asserts an output this packet's refactors must reproduce byte for
-byte. They are ordinary regressions: they describe what the code emits today,
+Each case asserts an output the owning helpers must reproduce byte for byte. They are ordinary regressions: they describe what the code emits today,
 not that anything was removed.
 """
 from __future__ import annotations

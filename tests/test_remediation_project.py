@@ -1,7 +1,12 @@
 import json
+import subprocess
+
 import pytest
+
+from vigil_cli import main
 from vigil_cli import remediation
 from vigil_cli.engagements import CreateEngagementOptions, _write_remediation_project_notes
+from vigil_cli.engagements import plan_engagement
 
 
 def test_scaffold_has_one_repository_owned_project(tmp_path):
@@ -49,8 +54,6 @@ def test_project_loader_invalid_header_reports_clean_error(tmp_path, monkeypatch
 
 
 def test_create_accepts_project_frontmatter_without_writing_on_dry_run(tmp_path, capsys):
-    import subprocess
-    from vigil_cli import main
     repo = tmp_path / 'repo'
     subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
     project = repo / 'PROJECT.md'
@@ -74,8 +77,6 @@ def test_scaffold_preserves_existing_shared_project(tmp_path):
 
 
 def test_plan_rejects_project_repository_mismatch_before_writes(tmp_path):
-    import subprocess
-    from vigil_cli.engagements import plan_engagement
     repo = tmp_path / 'repo'
     subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
     source = repo / 'PROJECT.md'
@@ -86,8 +87,6 @@ def test_plan_rejects_project_repository_mismatch_before_writes(tmp_path):
 
 
 def test_plan_snapshot_records_existing_project_configuration(tmp_path):
-    import subprocess
-    from vigil_cli.engagements import plan_engagement
     repo = tmp_path / 'repo'
     subprocess.run(['git', 'init', str(repo)], check=True, capture_output=True)
     (repo / 'PROJECT.md').write_text('+++\nrepository = "."\ndevelopment_url = "https://dev.example"\n+++\n')

@@ -6,6 +6,8 @@ import re
 import sys
 from pathlib import Path
 
+import pytest
+
 
 def _load_schema_generator_module():
     repo_root = Path(__file__).resolve().parents[3]
@@ -19,9 +21,13 @@ def _load_schema_generator_module():
     return module
 
 
-def test_generated_agent_schemas_match_committed_bundle():
-    module = _load_schema_generator_module()
+@pytest.fixture
+def module():
+    """The schema-generator module under test."""
+    return _load_schema_generator_module()
 
+
+def test_generated_agent_schemas_match_committed_bundle(module):
     bundle = module.build_schema_bundle()
 
     assert "session-proposal.schema.json" not in bundle
@@ -30,18 +36,14 @@ def test_generated_agent_schemas_match_committed_bundle():
         assert actual == expected
 
 
-def test_schema_generator_check_mode_passes_for_committed_bundle(capsys):
-    module = _load_schema_generator_module()
-
+def test_schema_generator_check_mode_passes_for_committed_bundle(capsys, module):
     exit_code = module.main(["--check"])
 
     assert exit_code == 0
     assert "in sync" in capsys.readouterr().out.lower()
 
 
-def test_required_schema_properties_are_not_described_as_optional():
-    module = _load_schema_generator_module()
-
+def test_required_schema_properties_are_not_described_as_optional(module):
     contradictions: list[str] = []
 
     def walk(node: object, path: str) -> None:
@@ -67,9 +69,7 @@ def test_required_schema_properties_are_not_described_as_optional():
     assert contradictions == []
 
 
-def test_finding_record_accepts_lifecycle_analysis_detail_keys():
-    module = _load_schema_generator_module()
-
+def test_finding_record_accepts_lifecycle_analysis_detail_keys(module):
     schema = module.build_schema_bundle()["finding-record.schema.json"]
     properties = schema["properties"]["details"]["properties"]
 
@@ -82,9 +82,7 @@ def test_finding_record_accepts_lifecycle_analysis_detail_keys():
         assert key in properties
 
 
-def test_finding_record_schema_exposes_reserved_code_snapshot_contract():
-    module = _load_schema_generator_module()
-
+def test_finding_record_schema_exposes_reserved_code_snapshot_contract(module):
     schema = module.build_schema_bundle()["finding-record.schema.json"]
     code_snapshot = schema["properties"]["provenance"]["properties"]["code_snapshot"]
 
@@ -102,9 +100,7 @@ def test_finding_record_schema_exposes_reserved_code_snapshot_contract():
     assert digest["pattern"] == "^[0-9a-f]{64}$"
 
 
-def test_finding_record_schema_requires_snapshot_binding_for_file_findings():
-    module = _load_schema_generator_module()
-
+def test_finding_record_schema_requires_snapshot_binding_for_file_findings(module):
     schema = module.build_schema_bundle()["finding-record.schema.json"]
 
     assert {
@@ -126,9 +122,7 @@ def test_finding_record_schema_requires_snapshot_binding_for_file_findings():
     } in schema["allOf"]
 
 
-def test_finding_record_file_examples_carry_complete_snapshot_binding():
-    module = _load_schema_generator_module()
-
+def test_finding_record_file_examples_carry_complete_snapshot_binding(module):
     schema = module.build_schema_bundle()["finding-record.schema.json"]
     file_examples = [
         example
@@ -144,8 +138,7 @@ def test_finding_record_file_examples_carry_complete_snapshot_binding():
         assert re.fullmatch(r"[0-9a-f]{64}", binding["source_manifest_digest"])
 
 
-def test_fuzz_schemas_expose_canonical_lists_and_conditional_invariants():
-    module = _load_schema_generator_module()
+def test_fuzz_schemas_expose_canonical_lists_and_conditional_invariants(module):
     bundle = module.build_schema_bundle()
 
     decision = bundle["code-fuzz-decision.schema.json"]
@@ -184,9 +177,7 @@ def test_fuzz_schemas_expose_canonical_lists_and_conditional_invariants():
     } in campaign["allOf"]
 
 
-def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession():
-    module = _load_schema_generator_module()
-
+def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession(module):
     schema = module.build_schema_bundle()["code-analysis-result.schema.json"]
 
     assert schema["properties"]["disposition"]["enum"] == [
@@ -212,13 +203,12 @@ def test_code_analysis_result_schema_exposes_skip_and_explicit_supersession():
         assert incomplete_dimension in reviewed_spans["description"]
 
 
-def test_finding_record_schema_carries_the_blue_annotation_vocabulary():
+def test_finding_record_schema_carries_the_blue_annotation_vocabulary(module):
     """``vigil blue`` writes these, and ``details`` is a closed allow-list.
 
     The generated schema is what the CLI validator enforces, so a blue key
     missing here is a blue verb that exits non-zero having written nothing.
     """
-    module = _load_schema_generator_module()
 
     details = module.build_schema_bundle()["finding-record.schema.json"][
         "properties"
@@ -248,9 +238,8 @@ def test_finding_record_schema_carries_the_blue_annotation_vocabulary():
         assert details[key]["x-vigil-extension"] == "blue/v1"
 
 
-def test_finding_record_schema_carries_the_keys_the_renderers_read():
+def test_finding_record_schema_carries_the_keys_the_renderers_read(module):
     """A key a renderer reads but no door can write is permanently unset."""
-    module = _load_schema_generator_module()
 
     details = module.build_schema_bundle()["finding-record.schema.json"][
         "properties"
@@ -267,13 +256,12 @@ def test_finding_record_schema_carries_the_keys_the_renderers_read():
     assert replay["items"] == {"type": "integer", "minimum": 1}
 
 
-def test_finding_detail_aliases_route_names_that_are_not_homeless():
+def test_finding_detail_aliases_route_names_that_are_not_homeless(module):
     """Projected from the backend table so both doors quote one sentence.
 
     An alias may never name a key that IS registered: the suggester only reaches
     the table for a REFUSED key, so an alias for a live key is dead text.
     """
-    module = _load_schema_generator_module()
 
     details = module.build_schema_bundle()["finding-record.schema.json"][
         "properties"
@@ -289,7 +277,7 @@ def test_finding_detail_aliases_route_names_that_are_not_homeless():
         assert name not in details["properties"], name
 
 
-def test_finding_record_schema_closes_provenance_on_one_vocabulary():
+def test_finding_record_schema_closes_provenance_on_one_vocabulary(module):
     """Both doors, one list.
 
     The record door refused four keys the update door accepted, the backend
@@ -298,7 +286,6 @@ def test_finding_record_schema_closes_provenance_on_one_vocabulary():
     because the code-snapshot attestation is read back off an incoming
     provenance to mark a copied binding.
     """
-    module = _load_schema_generator_module()
 
     provenance = module.build_schema_bundle()["finding-record.schema.json"][
         "properties"

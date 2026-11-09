@@ -19,6 +19,11 @@ def _seed(client, isolate_settings):
 STABLE_SID = "sess-value-abcdef0123456789"
 
 
+def _capture(client, **body):
+    """POST one proxy capture for the fixture engagement."""
+    return client.post(f"/engagements/{KEY}/credentials/capture", json=body)
+
+
 def _identity_names(client):
     listing = client.get(f"/engagements/{KEY}/credentials").json()
     return sorted(listing["identities"])
@@ -135,24 +140,20 @@ def test_capture_merges_cookies_across_calls(client, isolate_settings):
     _seed(client, isolate_settings)
     # Two captures of the SAME login (same session-anchor cookie + bearer) across
     # two hosts must coalesce to ONE derived identity and merge their cookies.
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "example.com",
-            "scope_host": "example.com",
-            "cookies": {"sid": STABLE_SID},
-            "headers": {"Authorization": "Bearer t"},
-        },
+    _capture(
+        client,
+        host="example.com",
+        scope_host="example.com",
+        cookies={"sid": STABLE_SID},
+        headers={"Authorization": "Bearer t"},
     )
     # Second capture adds another cookie on a subdomain — same anchor -> refresh.
-    mat = client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "app.example.com",
-            "scope_host": "example.com",
-            "cookies": {"sid": STABLE_SID, "csrf": "2"},
-            "headers": {"Authorization": "Bearer t"},
-        },
+    mat = _capture(
+        client,
+        host="app.example.com",
+        scope_host="example.com",
+        cookies={"sid": STABLE_SID, "csrf": "2"},
+        headers={"Authorization": "Bearer t"},
     ).json()
     assert mat["mode"] == "proxy_capture"
     # Flat cookies include both in-scope hosts.
@@ -200,27 +201,18 @@ def test_capture_preserves_existing_raw_json_extras(client, isolate_settings):
     # raw column to {} and silently drop custom token/session shapes.
     _seed(client, isolate_settings)
     # Establish the derived identity via a capture, then attach a custom field.
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "example.com",
-            "scope_host": "example.com",
-            "cookies": {"sid": STABLE_SID},
-        },
-    )
+    _capture(client, host="example.com", scope_host="example.com", cookies={"sid": STABLE_SID})
     name, _ = _sole_identity(client)
     client.put(
         f"/engagements/{KEY}/credentials/{name}",
         json={"cookies": {"sid": STABLE_SID}, "custom_weird_field": {"x": 1}},
     )
     # A later refresh of the same login (same anchor) must preserve the extras.
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "example.com",
-            "scope_host": "example.com",
-            "cookies": {"sid": STABLE_SID, "csrf": "2"},
-        },
+    _capture(
+        client,
+        host="example.com",
+        scope_host="example.com",
+        cookies={"sid": STABLE_SID, "csrf": "2"},
     )
     got = client.get(f"/engagements/{KEY}/credentials/{name}").json()
     assert got.get("custom_weird_field") == {"x": 1}  # raw extras preserved
@@ -258,26 +250,22 @@ def test_capture_logout_deleted_value_is_a_noop(client, isolate_settings):
     """
     _seed(client, isolate_settings)
     # 1. Seed a live session (MRHSession is a session-hint cookie -> anchor).
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "abc123valid-session", "F5_ST": "ST2of2id9876"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "abc123valid-session", "F5_ST": "ST2of2id9876"},
     )
     name, before = _sole_identity(client)
     assert before["cookies"]["MRHSession"] == "abc123valid-session"
     assert before["cookies"]["F5_ST"] == "ST2of2id9876"
 
     # 2. Simulate a logout — deletion-value cookies only.
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "deleted", "F5_ST": "deleted"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "deleted", "F5_ST": "deleted"},
     )
 
     # 3. The stored session is unchanged and no new identity was minted.
@@ -294,23 +282,19 @@ def test_capture_logout_deleted_value_is_a_noop(client, isolate_settings):
 def test_capture_empty_value_is_a_noop(client, isolate_settings):
     """A cookie with empty value (RFC 6265 deletion) is also a no-op."""
     _seed(client, isolate_settings)
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "alive-session-value"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "alive-session-value"},
     )
     name, _ = _sole_identity(client)
     # Empty-value capture (simulates Max-Age=0 / Expires-past).
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": ""},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": ""},
     )
     assert _identity_names(client) == [name]
     after = client.get(f"/engagements/{KEY}/credentials/{name}").json()
@@ -327,23 +311,19 @@ def test_capture_fresh_login_appends_new_identity(client, isolate_settings):
     holds both sessions simultaneously for cross-account IDOR/BOLA testing.
     """
     _seed(client, isolate_settings)
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "old-session-value-1"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "old-session-value-1"},
     )
     old_name, _ = _sole_identity(client)
     # New login delivers a fresh valid session cookie (distinct value).
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "brand-new-session-value-2"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "brand-new-session-value-2"},
     )
     names = _identity_names(client)
     assert len(names) == 2, "a distinct session anchor must append a new identity"
@@ -362,26 +342,22 @@ def test_capture_mixed_deletion_and_live_within_one_identity(client, isolate_set
     """Within one login (stable anchor cookie), a per-cookie deletion in the delta
     must NOT evict a stored cookie, while a genuinely-new live cookie is added."""
     _seed(client, isolate_settings)
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "keep-me-16chars-xx", "F5_ST": "tokenvalue-16chars"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "keep-me-16chars-xx", "F5_ST": "tokenvalue-16chars"},
     )
     name, _ = _sole_identity(client)
     # Same anchor (MRHSession unchanged) -> refresh; F5_ST deletion is filtered.
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {
-                "MRHSession": "keep-me-16chars-xx",
-                "F5_ST": "deleted",
-                "new_cookie": "fresh",
-            },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={
+            "MRHSession": "keep-me-16chars-xx",
+            "F5_ST": "deleted",
+            "new_cookie": "fresh",
         },
     )
     assert _identity_names(client) == [name]
@@ -400,22 +376,18 @@ def test_capture_quoted_empty_cookie_is_a_noop(client, isolate_settings):
     unquoted-empty value is recognized and the live session is preserved.
     """
     _seed(client, isolate_settings)
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": "alive-session-value"},
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": "alive-session-value"},
     )
     name, _ = _sole_identity(client)
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"MRHSession": '""'},  # quoted-empty logout
-        },
+    _capture(
+        client,
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"MRHSession": '""'},
     )
     assert _identity_names(client) == [name]
     after = client.get(f"/engagements/{KEY}/credentials/{name}").json()
@@ -428,14 +400,12 @@ def test_capture_quoted_live_cookie_stored_dequoted(client, isolate_settings):
     """A live quoted cookie value must be STORED without its surrounding quotes
     so a later injection does not double-quote it."""
     _seed(client, isolate_settings)
-    mat = client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "identity_name": "default",
-            "host": "portal.acme-agency.example",
-            "scope_host": "portal.acme-agency.example",
-            "cookies": {"sid": '"abc123"'},
-        },
+    mat = _capture(
+        client,
+        identity_name="default",
+        host="portal.acme-agency.example",
+        scope_host="portal.acme-agency.example",
+        cookies={"sid": '"abc123"'},
     ).json()
     assert mat["cookies"]["sid"] == "abc123", "quoted value must be stored dequoted"
 
@@ -447,23 +417,19 @@ def test_capture_flat_cookies_union_across_hosts(client, isolate_settings):
     """
     _seed(client, isolate_settings)
     # Capture on host A — shared session cookie (the anchor) + a host-A-only cookie.
-    client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "a.example.com",
-            "scope_host": "a.example.com",
-            "cookies": {"sid": STABLE_SID, "a_only": "a-value-16chars-xxxx"},
-        },
+    _capture(
+        client,
+        host="a.example.com",
+        scope_host="a.example.com",
+        cookies={"sid": STABLE_SID, "a_only": "a-value-16chars-xxxx"},
     )
     # Capture on an UNRELATED host B with scope_host=B — same anchor -> one
     # identity. The legacy scope-filtered flat view would have dropped host A here.
-    mat = client.post(
-        f"/engagements/{KEY}/credentials/capture",
-        json={
-            "host": "b.other.com",
-            "scope_host": "b.other.com",
-            "cookies": {"sid": STABLE_SID, "b_only": "b-value-16chars-xxxx"},
-        },
+    mat = _capture(
+        client,
+        host="b.other.com",
+        scope_host="b.other.com",
+        cookies={"sid": STABLE_SID, "b_only": "b-value-16chars-xxxx"},
     ).json()
     # One derived identity spans both hosts.
     assert len(_identity_names(client)) == 1

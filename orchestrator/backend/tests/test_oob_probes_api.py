@@ -57,6 +57,11 @@ def _mint_probe(client, *, nonce="abc123def456ghij", **overrides) -> dict:
     return response.json()
 
 
+def _interaction(client, **body):
+    """POST one out-of-band probe interaction and return the raw response."""
+    return client.post(f"{ASSESSMENT_BASE}/oob-probes/interactions", json=body)
+
+
 def test_existing_probe_table_migrates_client_binding_columns() -> None:
     connection = sqlite3.connect(":memory:")
     connection.execute(
@@ -148,18 +153,16 @@ def test_correlate_interaction_rejects_unknown_engagement(client, isolate_settin
 def test_correlate_interaction_matches_and_flips_status(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     probe = _mint_probe(client)
-    response = client.post(
-        f"{ASSESSMENT_BASE}/oob-probes/interactions",
-        json={
-            "nonce": probe["nonce"],
-            "protocol": "dns",
-            "remote_address": "203.0.113.9",
-            "query_type": "A",
-            "raw_request": "[abc123def456ghij.oob.security.example] Received DNS interaction (A) from 203.0.113.9",
-            "observed_at": "2026-05-30 12:00:00",
-            "client_name": CLIENT_NAME,
-            "client_payload_host": CLIENT_PAYLOAD_HOST,
-        },
+    response = _interaction(
+        client,
+        nonce=probe["nonce"],
+        protocol="dns",
+        remote_address="203.0.113.9",
+        query_type="A",
+        raw_request="[abc123def456ghij.oob.security.example] Received DNS interaction (A) from 203.0.113.9",
+        observed_at="2026-05-30 12:00:00",
+        client_name=CLIENT_NAME,
+        client_payload_host=CLIENT_PAYLOAD_HOST,
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -197,15 +200,13 @@ def test_correlate_interaction_dedupes_identical_callback(client, isolate_settin
 
 def test_correlate_unknown_nonce_reports_unmatched_not_404(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
-    response = client.post(
-        f"{ASSESSMENT_BASE}/oob-probes/interactions",
-        json={
-            "nonce": "neverminted0000",
-            "protocol": "dns",
-            "remote_address": "203.0.113.50",
-            "client_name": CLIENT_NAME,
-            "client_payload_host": CLIENT_PAYLOAD_HOST,
-        },
+    response = _interaction(
+        client,
+        nonce="neverminted0000",
+        protocol="dns",
+        remote_address="203.0.113.50",
+        client_name=CLIENT_NAME,
+        client_payload_host=CLIENT_PAYLOAD_HOST,
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -222,15 +223,13 @@ def test_correlate_rejects_callback_from_wrong_client(client, isolate_settings):
         client_payload_host="client-a.oob.security.example",
     )
 
-    response = client.post(
-        f"{ASSESSMENT_BASE}/oob-probes/interactions",
-        json={
-            "nonce": probe["nonce"],
-            "client_name": "ssrf-b",
-            "client_payload_host": "client-b.oob.security.example",
-            "protocol": "dns",
-            "remote_address": "203.0.113.50",
-        },
+    response = _interaction(
+        client,
+        nonce=probe["nonce"],
+        client_name="ssrf-b",
+        client_payload_host="client-b.oob.security.example",
+        protocol="dns",
+        remote_address="203.0.113.50",
     )
 
     assert response.status_code == 200, response.text
@@ -250,16 +249,14 @@ def test_list_probes_embeds_interaction_count(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     probe = _mint_probe(client)
     _mint_probe(client, nonce="secondnonce99999", technique="blind-xss")
-    client.post(
-        f"{ASSESSMENT_BASE}/oob-probes/interactions",
-        json={
-            "nonce": probe["nonce"],
-            "protocol": "dns",
-            "remote_address": "203.0.113.1",
-            "observed_at": "2026-05-30 13:00:00",
-            "client_name": CLIENT_NAME,
-            "client_payload_host": CLIENT_PAYLOAD_HOST,
-        },
+    _interaction(
+        client,
+        nonce=probe["nonce"],
+        protocol="dns",
+        remote_address="203.0.113.1",
+        observed_at="2026-05-30 13:00:00",
+        client_name=CLIENT_NAME,
+        client_payload_host=CLIENT_PAYLOAD_HOST,
     )
 
     listed = client.get(f"{ASSESSMENT_BASE}/oob-probes")
@@ -276,15 +273,13 @@ def test_list_probes_status_filter(client, isolate_settings):
     _seed_engagement(client, isolate_settings)
     fired = _mint_probe(client)
     _mint_probe(client, nonce="stillpending0001")
-    client.post(
-        f"{ASSESSMENT_BASE}/oob-probes/interactions",
-        json={
-            "nonce": fired["nonce"],
-            "protocol": "dns",
-            "remote_address": "203.0.113.2",
-            "client_name": CLIENT_NAME,
-            "client_payload_host": CLIENT_PAYLOAD_HOST,
-        },
+    _interaction(
+        client,
+        nonce=fired["nonce"],
+        protocol="dns",
+        remote_address="203.0.113.2",
+        client_name=CLIENT_NAME,
+        client_payload_host=CLIENT_PAYLOAD_HOST,
     )
 
     pending = client.get(f"{ASSESSMENT_BASE}/oob-probes", params={"status": "pending"})

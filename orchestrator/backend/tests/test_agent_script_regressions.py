@@ -14,6 +14,56 @@ from urllib.parse import parse_qs
 import pytest
 
 
+class _FakeClientBase:
+    """Constructor and context-manager scaffolding for `AssessmentClient` stand-ins.
+
+    Subclasses declare only the request methods the command under test is meant
+    to call, so a request the test did not configure still fails loudly.
+    """
+
+    def __init__(self, *args, **kwargs) -> None:
+        pass
+
+    def close(self) -> None:
+        return None
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+        return False
+
+
+_ECHO_ENGAGEMENT_DIR = object()
+
+
+def _patch_load_config(
+    monkeypatch,
+    module,
+    *,
+    engagement_dir: object = None,
+    base_url: str = "http://example.test",
+    engagement_key: str = "eng",
+    raising: bool = True,
+) -> None:
+    """Install a `load_config` stand-in carrying the attributes commands read.
+
+    `engagement_dir=_ECHO_ENGAGEMENT_DIR` echoes the directory the command
+    passes in; leaving it unset omits the attribute entirely.
+    """
+
+    def _load_config(*args, **kwargs):
+        attrs: dict[str, object] = {"base_url": base_url, "engagement_key": engagement_key}
+        if engagement_dir is _ECHO_ENGAGEMENT_DIR:
+            attrs["engagement_dir"] = str(args[0] if args else kwargs.get("engagement_dir"))
+        elif engagement_dir is not None:
+            attrs["engagement_dir"] = engagement_dir
+        return SimpleNamespace(**attrs)
+
+    monkeypatch.setattr(module, "load_config", _load_config, raising=raising)
+
+
 def _scripts_root() -> Path:
     return Path(__file__).resolve().parents[3] / "agent" / "scripts"
 
@@ -106,31 +156,14 @@ def test_get_command_run_accepts_json_flag(monkeypatch, tmp_path: Path, capsys) 
         "test_get_command_run_module",
         "agent/scripts/assess/commands/get_command_run.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
     captured_endpoints: list[str] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             captured_endpoints.append(endpoint)
             return {"id": 123, "stdout_preview": "ok"}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -158,20 +191,9 @@ def test_get_command_run_live_reads_current_on_disk_tails(
     stderr = output_dir / "run.err"
     stdout.write_text("still running\nlatest stdout\n", encoding="utf-8")
     stderr.write_text("latest stderr\n", encoding="utf-8")
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, *args):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             return {
                 "id": 123,
@@ -180,12 +202,6 @@ def test_get_command_run_live_reads_current_on_disk_tails(
                 "stderr_path": str(stderr),
                 "stdout_preview": "old preview",
             }
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     parser = argparse.ArgumentParser()
@@ -210,28 +226,11 @@ def test_get_command_run_live_refuses_paths_outside_engagement(
     )
     outside = tmp_path.parent / "outside-secret.txt"
     outside.write_text("must not leak", encoding="utf-8")
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
 
-    class FakeClient:
-        def __init__(self, *args):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             return {"id": 123, "stdout_path": str(outside), "stderr_path": None}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     parser = argparse.ArgumentParser()
@@ -646,20 +645,9 @@ def test_fetch_fails_when_an_unregistered_envelope_page_is_incomplete(
         "test_fetch_module_unregistered_envelope",
         "agent/scripts/assess/commands/fetch.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
 
-    class FakeClient:
-        def __init__(self, *args):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             return {
                 "total": 9,
@@ -668,12 +656,6 @@ def test_fetch_fails_when_an_unregistered_envelope_page_is_incomplete(
                 "has_more": True,
                 "items": [{"id": index} for index in range(4)],
             }
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -716,29 +698,12 @@ def test_fetch_names_the_resume_offset_on_a_bounded_code_file_page(
         "test_fetch_module_bounded_notice",
         "agent/scripts/assess/commands/fetch.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
 
-    class FakeClient:
-        def __init__(self, *args):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             rows = [{"id": index} for index in range(module._DEFAULT_PAGE_SIZE)]
             return _code_file_page(rows, offset=0, total=28_152)
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -815,10 +780,7 @@ def test_code_index_sync_scales_its_structural_write_budget(
     payloads = [_payload(big), _payload(small)]
     read_timeouts: list[float | None] = []
 
-    class FakeClient:
-        def __init__(self, *args):
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             assert endpoint == "code/repos"
             return [{"id": 7, "repo_key": "acme-api"}]
@@ -835,22 +797,8 @@ def test_code_index_sync_scales_its_structural_write_budget(
                 "updated": len(payload["updates"]),
             }
 
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(tmp_path),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "_load_manifest", lambda _path: {"repos": {}})
     monkeypatch.setattr(
         module,
@@ -922,31 +870,13 @@ def test_export_surfaces_fetches_all_pages(monkeypatch, tmp_path: Path) -> None:
         "test_export_surfaces_module_all_pages",
         "agent/scripts/assess/commands/export_surfaces.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     calls: list[str] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get_all_pages(self, endpoint: str):
             calls.append(endpoint)
             return [{"id": 1}, {"id": 2}]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1010,22 +940,11 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
         "test_list_findings_module",
         "agent/scripts/assess/commands/list_findings.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
     captured: list[str] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             captured.append(endpoint)
             return [
@@ -1040,12 +959,6 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
                     "title": "Filtered result",
                 }
             ]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     module.run(
@@ -1081,20 +994,9 @@ def test_list_findings_does_not_repeat_backend_search_filter(
         "test_list_findings_no_duplicate_filter_module",
         "agent/scripts/assess/commands/list_findings.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             assert endpoint == "findings?search=parser&limit=11&offset=0"
             return [
@@ -1106,12 +1008,6 @@ def test_list_findings_does_not_repeat_backend_search_filter(
                     "title": "Backend-selected result",
                 }
             ]
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1157,34 +1053,14 @@ def test_list_intel_search_uses_canonical_entity_type(monkeypatch, tmp_path: Pat
         "agent/scripts/assess/commands/list_intel.py",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
     captured: list[tuple[str, str]] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get_engagement(self, endpoint: str, query: str = ""):
             captured.append((endpoint, query))
             return []
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1210,27 +1086,10 @@ def test_list_intel_filters_use_server_side_search(monkeypatch, tmp_path: Path, 
         "test_list_intel_filter_module",
         "agent/scripts/assess/commands/list_intel.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     captured: list[tuple[str, str]] = []
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(_FakeClientBase):
         def get_engagement(self, endpoint: str, query: str = ""):
             captured.append((endpoint, query))
             return []
@@ -1325,15 +1184,7 @@ def test_filter_scope_keeps_in_scope_hosts(monkeypatch, tmp_path: Path, capsys) 
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir=None: SimpleNamespace(
-            engagement_dir=str(engagement_dir),
-            engagement_key="eng",
-            base_url="http://example.test",
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     # These assertions are about which hosts scope admits, not about the
     # Vendor-SaaS decision fetch. Unstubbed, `_vendor_saas_decided_hosts`
     # builds a real `AssessmentClient` against the fake `base_url` above and
@@ -1389,15 +1240,7 @@ def test_filter_scope_excludes_out_of_scope_carve_out(monkeypatch, tmp_path: Pat
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir=None: SimpleNamespace(
-            engagement_dir=str(engagement_dir),
-            engagement_key="eng",
-            base_url="http://example.test",
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     # These assertions are about which hosts scope admits, not about the
     # Vendor-SaaS decision fetch. Unstubbed, `_vendor_saas_decided_hosts`
     # builds a real `AssessmentClient` against the fake `base_url` above and
@@ -1455,24 +1298,12 @@ def test_ingest_candidates_preserve_metadata_and_route(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        ingest_module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, ingest_module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     monkeypatch.setattr(ingest_module, "auth_active_context", lambda _eng_dir: "anonymous")
 
     posts: list[tuple[str, dict[str, object]]] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict[str, object]):
             if endpoint == "request-observations/bulk":
                 records = []
@@ -1482,14 +1313,6 @@ def test_ingest_candidates_preserve_metadata_and_route(
                 return {"count": len(records), "records": records}
             posts.append((endpoint, payload))
             return _request_observation_receipt(payload, 701)
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(ingest_module, "AssessmentClient", FakeClient)
 
@@ -1589,20 +1412,12 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        ingest_module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, ingest_module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     monkeypatch.setattr(ingest_module, "auth_active_context", lambda _eng_dir: "anonymous")
 
     posts: list[dict[str, object]] = []
 
-    class FakeClient:
+    class FakeClient(_FakeClientBase):
         def __init__(self, base_url: str, engagement_key: str) -> None:
             self.base_url = base_url
             self.engagement_key = engagement_key
@@ -1618,14 +1433,6 @@ def test_ingest_candidates_route_real_bia_candidate_shapes(
                 return {"count": len(records), "records": records}
             self.next_id += 1
             return _request_observation_receipt(payload, self.next_id)
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(ingest_module, "AssessmentClient", FakeClient)
 
@@ -1695,23 +1502,11 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
     repo_dir.mkdir()
     (repo_dir / "service.py").write_text("def parse(data):\n    return data\n", encoding="utf-8")
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
     calls: list[tuple[str, dict[str, object]]] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
             if endpoint == "code/repos/refresh/start":
@@ -1736,14 +1531,6 @@ def test_code_ingest_posts_backend_contract_fields(monkeypatch, tmp_path: Path) 
                 assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
                 return _lsp_publish_response(41, payload)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1785,22 +1572,11 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
     engagement_dir = tmp_path / "eng"
     engagement_dir.mkdir()
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir_arg: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement_dir))
 
     calls: list[tuple[str, dict[str, object]]] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            return None
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
             if endpoint == "code/repos/refresh/start":
@@ -1825,14 +1601,6 @@ def test_code_ingest_records_skipped_minified_manifest(monkeypatch, tmp_path: Pa
                 assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
                 return _lsp_publish_response(41, payload)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1887,22 +1655,11 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
     engagement_dir = tmp_path / "eng"
     engagement_dir.mkdir()
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir_arg: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement_dir))
 
     calls: list[tuple[str, dict[str, object]]] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            return None
-
+    class FakeClient(_FakeClientBase):
         def post(self, endpoint: str, payload: dict[str, object]):
             calls.append((endpoint, payload))
             if endpoint == "code/repos/refresh/start":
@@ -1927,14 +1684,6 @@ def test_code_ingest_include_path_can_queue_security_relevant_build_artifact(mon
                 assert payload["lsp_config"]["ctags"]["source_manifest_digest"] == "d" * 64
                 return _lsp_publish_response(42, payload)
             raise AssertionError(f"unexpected endpoint: {endpoint}")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -1966,22 +1715,10 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     monkeypatch.setattr(module, "load_scope", lambda engagement_dir, **kwargs: {"engagement_name": "Demo Engagement"})
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "finding-groups":
                 return []
@@ -2013,14 +1750,6 @@ def test_export_findings_uses_canonical_findings_and_renders_details(monkeypatch
                     },
                 },
             ]
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2055,22 +1784,10 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     monkeypatch.setattr(module, "load_scope", lambda engagement_dir, **kwargs: {"engagement_name": "Demo"})
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint == "finding-groups":
                 return []
@@ -2096,16 +1813,6 @@ def test_export_findings_separates_sections_with_blank_line(monkeypatch, tmp_pat
                 },
             ]
 
-        def close(self) -> None:
-            return None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            self.close()
-            return False
-
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
     module.run(SimpleNamespace(engagement_dir=engagement_dir))
@@ -2126,18 +1833,10 @@ def test_list_report_findings_uses_grouped_projection(monkeypatch, tmp_path: Pat
 
     engagement_dir = tmp_path / "engagement"
     engagement_dir.mkdir()
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(base_url="http://backend", engagement_key="demo"),
-    )
+    _patch_load_config(monkeypatch, module, base_url="http://backend", engagement_key="demo")
     requested: list[str] = []
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             requested.append(endpoint)
             return {
@@ -2164,14 +1863,6 @@ def test_list_report_findings_uses_grouped_projection(monkeypatch, tmp_path: Pat
                 ],
                 "standalone": [],
             }
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2469,32 +2160,12 @@ def test_code_index_sync_rejects_legacy_unbound_manifest(monkeypatch, tmp_path: 
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             assert endpoint == "code/repos"
             return [{"id": 1}, {"id": 2}]
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2550,23 +2221,11 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
+    class FakeClient(_FakeClientBase):
         posts: list[tuple[str, dict[str, object]]] = []
         file_requests: list[str] = []
-
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
 
         def get(self, endpoint: str):
             if endpoint == "code/repos":
@@ -2593,14 +2252,6 @@ def test_code_index_sync_repo_id_scopes_aggregate_to_matching_manifest(
                     "structural_index_schema",
                 )
             } | {"updated": len(payload["updates"])}
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     FakeClient.posts = []
     FakeClient.file_requests = []
@@ -2708,21 +2359,10 @@ def test_code_index_sync_rejects_late_repo_debt_shape_before_any_post(
     binding["analysis_mode"] = "none"
     repo_b_manifest_path.write_text(json.dumps(repo_b_manifest), encoding="utf-8")
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
+    class FakeClient(_FakeClientBase):
         posts: list[tuple[str, dict[str, object]]] = []
-
-        def __init__(self, *_args, **_kwargs) -> None:
-            pass
 
         def get(self, endpoint: str):
             if endpoint == "code/repos":
@@ -2743,12 +2383,6 @@ def test_code_index_sync_rejects_late_repo_debt_shape_before_any_post(
                     "structural_index_schema",
                 )
             } | {"updated": len(payload["updates"])}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
 
     FakeClient.posts = []
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
@@ -2805,35 +2439,15 @@ def test_code_index_sync_rejects_mismatched_repo_id_and_repo_key(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             assert endpoint == "code/repos"
             return [
                 {"id": 1, "repo_key": "repo-a", "name": "repo-a"},
                 {"id": 2, "repo_key": "repo-b", "name": "repo-b"},
             ]
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2870,35 +2484,15 @@ def test_code_record_modules_rejects_auto_derived_key_collisions(monkeypatch, tm
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             assert endpoint == "code/modules?repo_id=5"
             return []
 
         def post(self, endpoint: str, payload: dict[str, object]):
             raise AssertionError("should not post when derived keys collide")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2933,34 +2527,14 @@ def test_code_record_modules_rejects_generic_auto_pattern_labels(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             raise AssertionError("should reject before fetching existing modules")
 
         def post(self, endpoint: str, payload: dict[str, object]):
             raise AssertionError("should reject before posting")
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2998,23 +2572,11 @@ def test_code_record_modules_accepts_meaningful_labels(
         encoding="utf-8",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
     posted: dict = {}
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             return []
 
@@ -3025,14 +2587,6 @@ def test_code_record_modules_accepts_meaningful_labels(
                 {"id": 1, "repo_id": 5, "module_key": "auth_login", "name": "Authentication and login flow"},
                 {"id": 2, "repo_id": 5, "module_key": "payment_settlement", "name": "Payment settlement"},
             ]
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -3176,15 +2730,7 @@ def test_review_exploits_lists_backend_candidates(monkeypatch, tmp_path: Path, c
         "agent/scripts/assess/commands/review_exploits.py",
     )
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     monkeypatch.setattr(
         module,
         "load_scope",
@@ -3254,21 +2800,9 @@ def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
         "test_check_phase_readiness_report_module",
         "agent/scripts/assess/commands/check_phase_readiness.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            self.base_url = base_url
-            self.engagement_key = engagement_key
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             if endpoint.startswith("phase-readiness"):
                 return {
@@ -3291,14 +2825,6 @@ def _run_phase_report(monkeypatch, tmp_path: Path, payload: dict):
             return {"applicable": False, "engagement_type": "red",
                     "open_high_cves": [], "open_leads": [],
                     "exploited_unlinked_cves": [], "dangling_links": []}
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -3883,30 +3409,11 @@ def _run_resume_brief(monkeypatch, tmp_path, body, *, as_json):
         "resume_brief_regression",
         "agent/scripts/assess/commands/resume_brief.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             return body
-
-        def close(self) -> None:
-            return None
-        def __enter__(self):
-            return self
-        def __exit__(self, *exc):
-            self.close()
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
     module.run(
@@ -3927,15 +3434,7 @@ def test_list_report_findings_409_is_concise(monkeypatch, tmp_path: Path, capsys
         "test_list_report_findings_module",
         "agent/scripts/assess/commands/list_report_findings.py",
     )
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
 
     detail = {
         "detail": {
@@ -3948,18 +3447,9 @@ def test_list_report_findings_409_is_concise(monkeypatch, tmp_path: Path, capsys
         }
     }
 
-    class FakeClient:
-        def __init__(self, base_url: str, engagement_key: str) -> None:
-            pass
-
+    class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
             raise module.AssessError(f"HTTP 409:\n{json.dumps(detail)}")
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -4325,20 +3815,12 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
     spec_path = tmp_path / "spec.json"
     spec_path.write_text(json.dumps(spec), encoding="utf-8")
 
-    monkeypatch.setattr(
-        module,
-        "load_config",
-        lambda engagement_dir=None: SimpleNamespace(
-            base_url="http://example.test",
-            engagement_key="eng",
-            engagement_dir=str(engagement_dir),
-        ),
-    )
+    _patch_load_config(monkeypatch, module, engagement_dir=_ECHO_ENGAGEMENT_DIR)
     monkeypatch.setattr(module, "auth_active_context", lambda _eng_dir: "anonymous")
 
     posts: list[dict] = []
 
-    class FakeClient:
+    class FakeClient(_FakeClientBase):
         def __init__(self, *a, **k) -> None:
             self._next_id = 200
 
@@ -4356,15 +3838,6 @@ def _run_ingest_spec(monkeypatch, tmp_path: Path, spec: dict, scope: dict):
             posts.append(payload)
             self._next_id += 1
             return _request_observation_receipt(payload, self._next_id)
-
-        def close(self) -> None:
-            return None
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *exc):
-            return False
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 

@@ -47,14 +47,12 @@ def _seed(client, isolate_settings) -> int:
     response = client.get(f"/engagements/{ENGAGEMENT_KEY}")
     assert response.status_code == 200, response.text
     engagement_id = int(response.json()["id"])
-    author = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": SEED_AUTHOR_AGENT_ID,
-            "agent_role": "fixture-finding-author",
-            "task": "Record dispatch API fixture findings",
-            "dispatched_at": "2020-01-01T00:00:00Z",
-        },
+    author = _dispatch(
+        client,
+        agent_id=SEED_AUTHOR_AGENT_ID,
+        agent_role="fixture-finding-author",
+        task="Record dispatch API fixture findings",
+        dispatched_at="2020-01-01T00:00:00Z",
     )
     assert author.status_code == 201, author.text
     for slug in ("VA-001", "VA-002"):
@@ -75,6 +73,11 @@ def _seed(client, isolate_settings) -> int:
         )
         assert finding.status_code == 201, finding.text
     return engagement_id
+
+
+def _dispatch(client, **body):
+    """POST one dispatch for the fixture engagement and return the response."""
+    return client.post(f"{BASE}/dispatches", json=body)
 
 
 def _application_unit(engagement_id: int) -> int:
@@ -180,14 +183,12 @@ def test_dispatch_patch_finding_slugs_replaces_the_stored_set(
     — if this route ever starts appending, the CLI's union is doing it twice.
     """
     _seed(client, isolate_settings)
-    created = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-SLUG-SCOPE",
-            "agent_role": "vulnerability-analyst",
-            "task": "Validate the Acme input scope",
-            "finding_slugs": ["VA-001"],
-        },
+    created = _dispatch(
+        client,
+        agent_id="AG-SLUG-SCOPE",
+        agent_role="vulnerability-analyst",
+        task="Validate the Acme input scope",
+        finding_slugs=["VA-001"],
     )
     assert created.status_code == 201, created.text
 
@@ -232,13 +233,11 @@ def test_dispatch_terminal_update_uses_atomic_compare_and_swap(
     from app.services import state_manager
 
     engagement_id = _seed(client, isolate_settings)
-    created = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-RACE",
-            "agent_role": "vulnerability-analyst",
-            "task": "Finish concurrently with timeout reconciliation",
-        },
+    created = _dispatch(
+        client,
+        agent_id="AG-RACE",
+        agent_role="vulnerability-analyst",
+        task="Finish concurrently with timeout reconciliation",
     ).json()
 
     with db_module.get_connection() as connection:
@@ -322,23 +321,19 @@ def test_terminal_dispatch_create_and_update_always_stamp_completed_at(
 ) -> None:
     _seed(client, isolate_settings)
 
-    created_terminal = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-CREATED-DONE",
-            "agent_role": "vulnerability-analyst",
-            "status": "completed",
-        },
+    created_terminal = _dispatch(
+        client,
+        agent_id="AG-CREATED-DONE",
+        agent_role="vulnerability-analyst",
+        status="completed",
     )
     assert created_terminal.status_code == 201, created_terminal.text
     assert created_terminal.json()["completed_at"]
 
-    created_active = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-PATCHED-DONE",
-            "agent_role": "vulnerability-analyst",
-        },
+    created_active = _dispatch(
+        client,
+        agent_id="AG-PATCHED-DONE",
+        agent_role="vulnerability-analyst",
     )
     assert created_active.status_code == 201, created_active.text
     assert not created_active.json()["completed_at"]
@@ -354,13 +349,7 @@ def test_terminal_dispatch_create_and_update_always_stamp_completed_at(
 
 def test_in_progress_dispatch_rejects_completed_at(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
-    created = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-ACTIVE-TIMESTAMP",
-            "agent_role": "vulnerability-analyst",
-        },
-    )
+    created = _dispatch(client, agent_id="AG-ACTIVE-TIMESTAMP", agent_role="vulnerability-analyst")
     assert created.status_code == 201, created.text
 
     response = client.patch(
@@ -415,21 +404,23 @@ def test_dispatch_list_filters(client, isolate_settings) -> None:
 def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     # Bad status enum
-    bad = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "BAD-1",
-        "agent_role": "recon-specialist",
-        "status": "in_progress",  # underscore instead of hyphen
-        "skills": "subdomain-enumeration",
-    })
+    bad = _dispatch(
+        client,
+        agent_id="BAD-1",
+        agent_role="recon-specialist",
+        status="in_progress",  # underscore instead of hyphen
+        skills="subdomain-enumeration",
+    )
     assert bad.status_code == 422
 
     # Unknown field (extra="forbid")
-    bad = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "BAD-2",
-        "agent_role": "recon-specialist",
-        "garbage_key": "nope",
-        "skills": "subdomain-enumeration",
-    })
+    bad = _dispatch(
+        client,
+        agent_id="BAD-2",
+        agent_role="recon-specialist",
+        garbage_key="nope",
+        skills="subdomain-enumeration",
+    )
     assert bad.status_code == 422
 
 
@@ -439,10 +430,7 @@ def test_dispatch_without_skills_is_accepted(client, isolate_settings) -> None:
     dispatch runs. Requiring it up front would force the operator to name a
     vulnerability class before the hunt."""
     _seed(client, isolate_settings)
-    resp = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "ADHOC-1",
-        "agent_role": "vulnerability-analyst",
-    })
+    resp = _dispatch(client, agent_id="ADHOC-1", agent_role="vulnerability-analyst")
     assert resp.status_code == 201, resp.text
     assert resp.json()["agent_id"] == "ADHOC-1"
 
@@ -450,17 +438,15 @@ def test_dispatch_without_skills_is_accepted(client, isolate_settings) -> None:
 @pytest.mark.parametrize("role", ["exploit-developer", "source-analyzer"])
 def test_mixed_role_dispatch_requires_explicit_assessment_mode(client, isolate_settings, role) -> None:
     _seed(client, isolate_settings)
-    missing = client.post(f"{BASE}/dispatches", json={
-        "agent_id": f"MIXED-{role}",
-        "agent_role": role,
-    })
+    missing = _dispatch(client, agent_id=f"MIXED-{role}", agent_role=role)
     assert missing.status_code == 422, missing.text
 
-    created = client.post(f"{BASE}/dispatches", json={
-        "agent_id": f"MIXED-{role}-WEB",
-        "agent_role": role,
-        "assessment_mode": "web",
-    })
+    created = _dispatch(
+        client,
+        agent_id=f"MIXED-{role}-WEB",
+        agent_role=role,
+        assessment_mode="web",
+    )
     assert created.status_code == 201, created.text
     assert created.json()["assessment_mode"] == "web"
     assert client.get(f"{BASE}/dispatches/MIXED-{role}-WEB").json()["assessment_mode"] == "web"
@@ -470,12 +456,13 @@ def test_dispatch_unknown_dispatch_mode_stored_as_text(client, isolate_settings)
     """L2-4: a newly-coined dispatch_mode is stored as free text rather than
     422'd by a closed enum."""
     _seed(client, isolate_settings)
-    resp = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "NEWMODE-1",
-        "agent_role": "vulnerability-analyst",
-        "skills": "idor-testing",
-        "dispatch_mode": "freshly-coined-mode",
-    })
+    resp = _dispatch(
+        client,
+        agent_id="NEWMODE-1",
+        agent_role="vulnerability-analyst",
+        skills="idor-testing",
+        dispatch_mode="freshly-coined-mode",
+    )
     assert resp.status_code == 201, resp.text
     assert resp.json()["dispatch_mode"] == "freshly-coined-mode"
     fetched = client.get(f"{BASE}/dispatches/NEWMODE-1")
@@ -486,10 +473,7 @@ def test_dispatch_unknown_dispatch_mode_stored_as_text(client, isolate_settings)
 def test_dispatch_operator_role_skills_optional(client, isolate_settings) -> None:
     """Operator coordinates phases and is exempt from the skills requirement."""
     _seed(client, isolate_settings)
-    resp = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "OP-1",
-        "agent_role": "operator",
-    })
+    resp = _dispatch(client, agent_id="OP-1", agent_role="operator")
     assert resp.status_code == 201, resp.text
     assert resp.json()["skills"] is None
 
@@ -497,10 +481,7 @@ def test_dispatch_operator_role_skills_optional(client, isolate_settings) -> Non
 def test_dispatch_operator_role_skills_optional_case_insensitive(client, isolate_settings) -> None:
     """Operator role casing should not accidentally turn operators into specialists."""
     _seed(client, isolate_settings)
-    resp = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "OP-CASE",
-        "agent_role": "Operator",
-    })
+    resp = _dispatch(client, agent_id="OP-CASE", agent_role="Operator")
     assert resp.status_code == 201, resp.text
     assert resp.json()["agent_role"] == "Operator"
     assert resp.json()["skills"] is None
@@ -509,11 +490,12 @@ def test_dispatch_operator_role_skills_optional_case_insensitive(client, isolate
 def test_dispatch_skills_round_trip(client, isolate_settings) -> None:
     """skills value is persisted through POST and surfaces unchanged on GET."""
     _seed(client, isolate_settings)
-    resp = client.post(f"{BASE}/dispatches", json={
-        "agent_id": "SK-1",
-        "agent_role": "surface-collector",
-        "skills": "surface-collection,gau-triage",
-    })
+    resp = _dispatch(
+        client,
+        agent_id="SK-1",
+        agent_role="surface-collector",
+        skills="surface-collection,gau-triage",
+    )
     assert resp.status_code == 201, resp.text
     assert resp.json()["skills"] == "surface-collection,gau-triage"
     fetched = client.get(f"{BASE}/dispatches/SK-1")
@@ -524,16 +506,14 @@ def test_dispatch_skills_round_trip(client, isolate_settings) -> None:
 def test_dispatch_requested_actual_fields_post_get_list(client, isolate_settings) -> None:
     """requested_* / actual_* model and reasoning fields round-trip via POST / GET / LIST."""
     _seed(client, isolate_settings)
-    resp = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "RQ-ACT-1",
-            "agent_role": "vulnerability-analyst",
-            "skills": "auth-bypass",
-            "requested_model": "gpt-test-a",
-            "requested_reasoning": "high",
-            "dispatch_mode": "hypothesis-driven",
-        },
+    resp = _dispatch(
+        client,
+        agent_id="RQ-ACT-1",
+        agent_role="vulnerability-analyst",
+        skills="auth-bypass",
+        requested_model="gpt-test-a",
+        requested_reasoning="high",
+        dispatch_mode="hypothesis-driven",
     )
     assert resp.status_code == 201, resp.text
     posted = resp.json()
@@ -623,13 +603,11 @@ def test_dispatch_rejects_application_unit_from_another_engagement(
     assert other.status_code == 200, other.text
     foreign_unit_id = _application_unit(int(other.json()["id"]))
 
-    response = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-FOREIGN-UNIT",
-            "agent_role": "vulnerability-analyst",
-            "application_unit_id": foreign_unit_id,
-        },
+    response = _dispatch(
+        client,
+        agent_id="AG-FOREIGN-UNIT",
+        agent_role="vulnerability-analyst",
+        application_unit_id=foreign_unit_id,
     )
     assert response.status_code == 400, response.text
     assert "this engagement" in response.json()["detail"]
@@ -638,13 +616,11 @@ def test_dispatch_rejects_application_unit_from_another_engagement(
 def test_dispatch_structured_depth_metadata_optional(client, isolate_settings) -> None:
     """The new fields are optional — a dispatch without them stores NULL."""
     _seed(client, isolate_settings)
-    resp = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-DEPTH-2",
-            "agent_role": "vulnerability-analyst",
-            "skills": "sql-injection",
-        },
+    resp = _dispatch(
+        client,
+        agent_id="AG-DEPTH-2",
+        agent_role="vulnerability-analyst",
+        skills="sql-injection",
     )
     assert resp.status_code == 201, resp.text
     row = resp.json()
@@ -657,17 +633,15 @@ def test_dispatch_persists_exact_emitted_prompt_packet(client, isolate_settings)
     """A continuation must recover the exact prompt a dispatched specialist saw."""
     _seed(client, isolate_settings)
     rendered = "## Dispatch Context\ncredential_id: token-123\n"
-    response = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-PACKET-1",
-            "agent_role": "vulnerability-analyst",
-            "task": "Validate the export route",
-            "prompt_packet": {
-                "schema": "dispatch-prompt/v1",
-                "context": {"target": "https://example.com/export", "credential_id": "token-123"},
-                "rendered_prompt": rendered,
-            },
+    response = _dispatch(
+        client,
+        agent_id="AG-PACKET-1",
+        agent_role="vulnerability-analyst",
+        task="Validate the export route",
+        prompt_packet={
+            "schema": "dispatch-prompt/v1",
+            "context": {"target": "https://example.com/export", "credential_id": "token-123"},
+            "rendered_prompt": rendered,
         },
     )
     assert response.status_code == 201, response.text
@@ -693,13 +667,11 @@ def test_dispatch_rejects_continuation_parent_from_another_engagement(
     )
     assert other.status_code == 201, other.text
 
-    response = client.post(
-        f"{BASE}/dispatches",
-        json={
-            "agent_id": "AG-FOREIGN-PARENT",
-            "agent_role": "vulnerability-analyst",
-            "continued_from_dispatch_id": other.json()["id"],
-        },
+    response = _dispatch(
+        client,
+        agent_id="AG-FOREIGN-PARENT",
+        agent_role="vulnerability-analyst",
+        continued_from_dispatch_id=other.json()["id"],
     )
     assert response.status_code == 400, response.text
     assert "this engagement" in response.json()["detail"]

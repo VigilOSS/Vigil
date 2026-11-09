@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import asyncio
+import json
+import socket
 import subprocess
+import tempfile
+from pathlib import Path
 
 import pytest
 
 from vigil_cli import remediation
+from vigil_cli.remediation_browser import BrowseSession
 
 
 def test_browser_parser_defaults_to_subscription_driven_browse():
@@ -30,8 +36,6 @@ def test_pr_content_accepts_reviewed_browse_evidence():
 
 
 def test_browse_executes_local_commands_and_retains_transcript_without_keys(tmp_path, monkeypatch):
-    import asyncio
-    import json
     execute = getattr(remediation, '_execute_browse', None)
     assert callable(execute), 'local subscription-driven browse runner is missing'
     script = tmp_path / 'script.py'
@@ -51,7 +55,6 @@ def test_browse_executes_local_commands_and_retains_transcript_without_keys(tmp_
 
 
 def test_browse_failed_command_cannot_be_swallowed_by_rehearsal(tmp_path, monkeypatch):
-    import asyncio
     script = tmp_path / 'script.py'
     script.write_text('async def run(browser, output_dir):\n    try:\n        await browser.command("snapshot")\n    except SystemExit:\n        pass\n    return {"status": "passed"}\n')
     monkeypatch.setattr('vigil_cli.remediation_browser.subprocess.run', lambda argv, **kw: subprocess.CompletedProcess(argv, 1, '', 'No page'))
@@ -60,7 +63,6 @@ def test_browse_failed_command_cannot_be_swallowed_by_rehearsal(tmp_path, monkey
 
 
 def test_browse_rehearsal_requires_more_than_cleanup(tmp_path, monkeypatch):
-    import asyncio
     script = tmp_path / 'script.py'
     script.write_text('async def run(browser, output_dir):\n    await browser.command("stop")\n    return {"status": "passed"}\n')
     monkeypatch.setattr('vigil_cli.remediation_browser.subprocess.run', lambda argv, **kw: subprocess.CompletedProcess(argv, 0, '', ''))
@@ -69,12 +71,6 @@ def test_browse_rehearsal_requires_more_than_cleanup(tmp_path, monkeypatch):
 
 
 def test_browse_session_fits_unix_socket_path_on_macos(tmp_path, monkeypatch):
-    import asyncio
-    import socket
-    import tempfile
-    from pathlib import Path
-    from vigil_cli.remediation_browser import BrowseSession
-
     with tempfile.TemporaryDirectory(prefix='vigil-socket-', dir='/tmp') as temporary:
         parent = Path(temporary)
         runtime = parent / ('s' * (70 - len(str(parent)) - 1))
@@ -90,8 +86,6 @@ def test_browse_session_fits_unix_socket_path_on_macos(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('flags', [('open', 'http://localhost', '--remote'), ('snapshot', '--session', 'other')])
 def test_browse_keeps_configured_local_target_and_session(tmp_path, flags, monkeypatch):
-    import asyncio
-    from vigil_cli.remediation_browser import BrowseSession
     monkeypatch.setattr("vigil_cli.remediation_browser.subprocess.run", lambda argv, **kw: subprocess.CompletedProcess(argv, 0, "", ""))
     with pytest.raises(SystemExit, match='target and session'):
         asyncio.run(BrowseSession(tmp_path).command(*flags))
@@ -99,7 +93,6 @@ def test_browse_keeps_configured_local_target_and_session(tmp_path, flags, monke
 
 @pytest.mark.parametrize('script_failure', [False, True])
 def test_browse_cleanup_stops_only_its_named_managed_session(tmp_path, monkeypatch, script_failure):
-    import asyncio
     script = tmp_path / 'script.py'
     script.write_text('async def run(browser, output_dir):\n    await browser.command("snapshot")\n' + ('    raise ValueError("rehearsal failed")\n' if script_failure else '    return {"status": "passed"}\n'))
     calls = []
@@ -118,8 +111,6 @@ def test_browse_cleanup_stops_only_its_named_managed_session(tmp_path, monkeypat
 
 
 def test_browse_cleanup_failure_is_recorded_and_cannot_claim_pass(tmp_path, monkeypatch):
-    import asyncio
-    import json
     script = tmp_path / 'script.py'
     script.write_text('async def run(browser, output_dir):\n    await browser.command("snapshot")\n    return {"status": "passed"}\n')
     def run(argv, **kwargs):
@@ -132,8 +123,6 @@ def test_browse_cleanup_failure_is_recorded_and_cannot_claim_pass(tmp_path, monk
 
 
 def test_browse_cleanup_preserves_original_failure_when_cleanup_also_fails(tmp_path, monkeypatch):
-    import asyncio
-    import json
     script = tmp_path / 'script.py'
     script.write_text('async def run(browser, output_dir):\n    await browser.command("snapshot")\n    raise ValueError("original rehearsal failure")\n')
     monkeypatch.setattr('vigil_cli.remediation_browser.subprocess.run', lambda argv, **kw: subprocess.CompletedProcess(argv, 1 if argv[1] == 'stop' else 0, '', 'cleanup failed'))
@@ -143,6 +132,5 @@ def test_browse_cleanup_preserves_original_failure_when_cleanup_also_fails(tmp_p
 
 
 def test_browse_refuses_external_cdp_until_vendor_supports_safe_disconnect(tmp_path):
-    from vigil_cli.remediation_browser import BrowseSession
     with pytest.raises(SystemExit, match='closes externally attached Chrome'):
         BrowseSession(tmp_path, 'http://127.0.0.1:9222')

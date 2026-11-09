@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from _fake_client import StubClient
 
 from assess.commands import code_dispatch
 
@@ -38,16 +39,7 @@ def _install_snapshot_stub(monkeypatch, tmp_path: Path) -> None:
 def _install_client(monkeypatch, response: dict) -> dict:
     captured: dict[str, object] = {}
 
-    class FakeClient:
-        def __init__(self, *_args) -> None:
-            pass
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
+    class FakeClient(StubClient):
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload

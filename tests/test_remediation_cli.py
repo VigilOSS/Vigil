@@ -1,20 +1,28 @@
 from __future__ import annotations
 
-import json
 import argparse
 import base64
+import json
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from vigil_cli import main as cli
+from vigil_cli import remediation
 from vigil_cli.engagements import CreateEngagementOptions, plan_engagement
+from vigil_cli.remediation import (
+    _pr_body,
+    _release_plan,
+    _required_reviewed_evidence_lines,
+    register_remediation_parser,
+    validate_production_stagehand_policy,
+    validate_stagehand_result,
+)
 
 
 @pytest.mark.parametrize("environment", ["test", "production"])
 def test_deployment_parser_only_accepts_development(environment: str, capsys: pytest.CaptureFixture[str]) -> None:
-    from vigil_cli.remediation import register_remediation_parser
-
     parser = argparse.ArgumentParser()
     register_remediation_parser(parser.add_subparsers(dest="command"))
     args = ["remediation", "-k", "project", "deployment", "1", "--workflow", "develop.yml",
@@ -76,8 +84,6 @@ def test_remediation_engagement_rejects_missing_or_non_git_repository(tmp_path: 
 
 
 def test_pr_requires_final_production_canary_decision() -> None:
-    from vigil_cli.remediation import _release_plan
-
     with pytest.raises(SystemExit, match="final canary decision"):
         _release_plan({"release_plan": {
             "production_canary_decision": "defer",
@@ -88,8 +94,6 @@ def test_pr_requires_final_production_canary_decision() -> None:
 
 
 def test_prepare_pr_refuses_stale_approval_and_revision(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     case = {"approval_current": False, "worktree_path": str(tmp_path), "worktree_revision": "reviewed"}
     with pytest.raises(SystemExit, match="no current approval"):
         remediation._approved_current(case, tmp_path)
@@ -101,8 +105,6 @@ def test_prepare_pr_refuses_stale_approval_and_revision(monkeypatch: pytest.Monk
 
 
 def test_import_preserves_snapshot_and_attachments(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     source = tmp_path / "issue.json"
@@ -130,8 +132,6 @@ def test_import_preserves_snapshot_and_attachments(monkeypatch: pytest.MonkeyPat
 
 
 def test_finding_intake_names_destination_without_fabricating_external_source(monkeypatch, tmp_path):
-    from vigil_cli import remediation
-
     calls = []
     monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {}))
     monkeypatch.setattr(remediation, "_api", lambda *args: calls.append(args) or {"id": 7})
@@ -141,8 +141,6 @@ def test_finding_intake_names_destination_without_fabricating_external_source(mo
 
 
 def test_create_pr_requires_current_approval_before_push(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     body = tmp_path / "body.md"
@@ -159,8 +157,6 @@ def test_create_pr_requires_current_approval_before_push(monkeypatch: pytest.Mon
 
 
 def test_stagehand_happy_path_requires_screenshot_and_observed_steps(tmp_path: Path) -> None:
-    from vigil_cli.remediation import validate_stagehand_result
-
     with pytest.raises(SystemExit, match="observed UI steps"):
         validate_stagehand_result({"status": "passed", "observed": "worked", "proved": "happy path"}, tmp_path, "happy-path")
     (tmp_path / "screen.png").write_bytes(b"png")
@@ -173,8 +169,6 @@ def test_stagehand_happy_path_requires_screenshot_and_observed_steps(tmp_path: P
 
 
 def test_pr_gate_refuses_uncommitted_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     case = {"approval_current": True, "worktree_path": str(tmp_path), "worktree_revision": "abc"}
     monkeypatch.setattr(remediation, "_require_case_worktree", lambda *_: tmp_path)
     monkeypatch.setattr(remediation, "_revision", lambda _: "abc")
@@ -184,8 +178,6 @@ def test_pr_gate_refuses_uncommitted_worktree(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_pr_content_needs_explicit_verification_requirements() -> None:
-    from vigil_cli.remediation import _required_reviewed_evidence_lines
-
     case = {"approvals": [{"evidence_cutoff_id": 3}], "evidence": [
         {"id": index, "kind": kind} for index, kind in enumerate(("red-test", "green-test", "stagehand"), 1)
     ]}
@@ -194,8 +186,6 @@ def test_pr_content_needs_explicit_verification_requirements() -> None:
 
 
 def test_pr_body_requires_production_decision_and_monitoring() -> None:
-    from vigil_cli.remediation import _pr_body
-
     evidence = [{"id": index, "kind": kind, "method": "Laravel" if kind != "stagehand" else "stagehand",
                  "environment": "local" if kind != "stagehand" else "development",
                  "observed": "observed", "proved": "proved"}
@@ -213,8 +203,6 @@ def test_pr_body_requires_production_decision_and_monitoring() -> None:
 
 
 def test_pr_body_includes_reviewed_evidence_environments() -> None:
-    from vigil_cli.remediation import _pr_body, _required_reviewed_evidence_lines
-
     evidence = [{"id": index, "kind": kind, "method": method, "environment": environment,
                  "revision": "sha", "observed": "observed", "proved": "proved"}
                 for index, (kind, method, environment) in enumerate((
@@ -238,9 +226,6 @@ def test_pr_body_includes_reviewed_evidence_environments() -> None:
 
 
 def test_compose_identity_requires_served_source_mount(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-    import subprocess
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     compose = worktree / "compose.yml"
@@ -266,9 +251,6 @@ def test_compose_identity_requires_served_source_mount(monkeypatch: pytest.Monke
 def test_compose_identity_accepts_proven_mount_or_image_revision(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mount_source: str, image_revision: str,
 ) -> None:
-    from vigil_cli import remediation
-    import subprocess
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     compose = worktree / "compose.yml"
@@ -293,9 +275,6 @@ def test_compose_identity_accepts_proven_mount_or_image_revision(
 
 
 def test_compose_identity_unproven_when_no_container_or_case_revision_changes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-    import subprocess
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     compose = worktree / "compose.yml"
@@ -309,9 +288,6 @@ def test_compose_identity_unproven_when_no_container_or_case_revision_changes(mo
 
 
 def test_compose_overlay_mount_overrides_worktree_and_image_label(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-    import subprocess
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     compose = worktree / "compose.yml"
@@ -337,9 +313,6 @@ def test_compose_overlay_mount_overrides_worktree_and_image_label(monkeypatch: p
 
 
 def test_compose_nested_external_mount_blocks_root_match(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-    import subprocess
-
     worktree = tmp_path / "worktree"
     worktree.mkdir()
     compose = worktree / "compose.yml"
@@ -365,8 +338,6 @@ def test_compose_nested_external_mount_blocks_root_match(monkeypatch: pytest.Mon
 
 
 def test_stagehand_failed_status_cannot_claim_happy_path(tmp_path: Path) -> None:
-    from vigil_cli.remediation import validate_stagehand_result
-
     (tmp_path / "screen.png").write_bytes(base64.b64decode("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVQIHWP4z8DwHwAFgAI/ScLttAAAAABJRU5ErkJggg=="))
     result = {"status": "failed", "observed": "form visible", "proved": "nothing", "steps": [{"action": "open", "observation": "visible"}]}
     with pytest.raises(SystemExit, match="passed status"):
@@ -377,8 +348,6 @@ def test_stagehand_failed_status_cannot_claim_happy_path(tmp_path: Path) -> None
 def test_stagehand_checks_case_before_browser_actions(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, case_response: dict | None,
 ) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     script = tmp_path / "rehearsal.py"
@@ -409,8 +378,6 @@ def test_stagehand_checks_case_before_browser_actions(
 
 
 def test_production_stagehand_requires_decision_and_evidence_policy(tmp_path: Path) -> None:
-    from vigil_cli.remediation import validate_production_stagehand_policy
-
     args = argparse.Namespace(environment="production", purpose="bad-path", production_decision="Owner approved", production_evidence_policy=None)
     with pytest.raises(SystemExit, match="evidence policy"):
         validate_production_stagehand_policy(args, tmp_path)
@@ -421,8 +388,6 @@ def test_production_stagehand_requires_decision_and_evidence_policy(tmp_path: Pa
 
 
 def test_import_registration_failure_exposes_resume_case_id(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     source = tmp_path / "issue.json"
@@ -442,8 +407,6 @@ def test_import_registration_failure_exposes_resume_case_id(monkeypatch: pytest.
 
 
 def test_worktree_retry_reuses_existing_case_branch(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/3/worktree"
     repo = tmp_path / "source"
@@ -464,8 +427,6 @@ def test_worktree_retry_reuses_existing_case_branch(monkeypatch: pytest.MonkeyPa
 
 
 def test_worktree_retry_rejects_matching_branch_from_unrelated_repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     source = tmp_path / "source"
     foreign = tmp_path / "foreign"
     worktree = tmp_path / "eng/remediation/cases/3/worktree"
@@ -488,8 +449,6 @@ def test_worktree_retry_rejects_matching_branch_from_unrelated_repository(monkey
 
 
 def test_worktree_retry_rejects_case_path_symlink_to_another_registered_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     source = tmp_path / "source"
     other_worktree = tmp_path / "other-worktree"
     case_worktree = tmp_path / "eng/remediation/cases/3/worktree"
@@ -512,8 +471,6 @@ def test_worktree_retry_rejects_case_path_symlink_to_another_registered_worktree
 
 
 def test_sync_revision_records_clean_case_worktree_head(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/3/worktree"
     worktree.mkdir(parents=True)
@@ -533,8 +490,6 @@ def test_sync_revision_records_clean_case_worktree_head(monkeypatch: pytest.Monk
 
 
 def test_sync_revision_rejects_replaced_worktree_from_unrelated_repository(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     source = tmp_path / "source"
     foreign = tmp_path / "foreign"
     worktree = tmp_path / "eng/remediation/cases/3/worktree"
@@ -561,8 +516,6 @@ def test_sync_revision_rejects_replaced_worktree_from_unrelated_repository(monke
 def test_case_operation_rejects_different_branch_in_registered_worktree(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, command: str,
 ) -> None:
-    from vigil_cli import remediation
-
     repo = tmp_path / "source"
     worktree = tmp_path / "eng/remediation/cases/3/worktree"
     subprocess.run(["git", "init", str(repo)], check=True, capture_output=True)
@@ -584,8 +537,6 @@ def test_case_operation_rejects_different_branch_in_registered_worktree(
 
 
 def test_create_pr_rejects_replaced_foreign_worktree_with_same_revision(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     source = tmp_path / "source"
     foreign = tmp_path / "foreign"
     worktree = tmp_path / "eng/remediation/cases/3/worktree"
@@ -615,8 +566,6 @@ def test_create_pr_rejects_replaced_foreign_worktree_with_same_revision(monkeypa
 
 @pytest.mark.parametrize("dirty", [" M app.php", "?? new.php"])
 def test_sync_revision_rejects_dirty_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, dirty: str) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/3/worktree"
     worktree.mkdir(parents=True)
@@ -636,8 +585,6 @@ def test_sync_revision_rejects_dirty_worktree(monkeypatch: pytest.MonkeyPatch, t
 
 
 def test_sync_revision_rejects_foreign_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     foreign = tmp_path / "foreign"
     foreign.mkdir()
@@ -651,10 +598,8 @@ def test_sync_revision_rejects_foreign_worktree(monkeypatch: pytest.MonkeyPatch,
 
 
 def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
     monkeypatch.setattr(remediation, "_github_repository", lambda *_: None)
     monkeypatch.setattr(remediation, "_record_publication", lambda *_: None)
-    import subprocess
 
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/1/worktree"
@@ -726,7 +671,6 @@ def test_create_pr_reconciles_existing_draft_without_second_push(monkeypatch: py
 
 
 def test_existing_draft_pr_rejects_remote_head_that_differs_from_case_worktree(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
     monkeypatch.setattr(remediation, "_github_repository", lambda *_: None)
 
     worktree = tmp_path / "worktree"
@@ -751,7 +695,6 @@ def test_existing_draft_pr_rejects_remote_head_that_differs_from_case_worktree(m
 
 
 def test_create_pr_creates_and_verifies_new_draft_before_transition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
     monkeypatch.setattr(remediation, "_github_repository", lambda *_: None)
     monkeypatch.setattr(remediation, "_record_publication", lambda *_: None)
 
@@ -827,8 +770,6 @@ def test_create_pr_creates_and_verifies_new_draft_before_transition(monkeypatch:
 
 
 def test_cli_approval_sends_instruction_and_reviewed_digest(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     worktree = eng / "remediation/cases/1/worktree"
     worktree.mkdir(parents=True)
@@ -846,8 +787,6 @@ def test_cli_approval_sends_instruction_and_reviewed_digest(monkeypatch: pytest.
 
 
 def test_development_handoff_rechecks_worktree_before_transition(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {
         "repository": str(tmp_path), "deployment_workflow": "develop.yml",
     }))
@@ -870,8 +809,6 @@ def test_development_handoff_rechecks_worktree_before_transition(monkeypatch: py
 
 @pytest.mark.parametrize(("status", "command"), [("pr_draft", "create-pr"), ("development", "development-handoff")])
 def test_generic_transition_rejects_dedicated_handoff_states(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, status: str, command: str) -> None:
-    from vigil_cli import remediation
-
     monkeypatch.setattr(remediation, "_project", lambda *_: (tmp_path, {}))
     monkeypatch.setattr(remediation, "_api", lambda *_args: pytest.fail("generic transition must not record a handoff state"))
     args = argparse.Namespace(engagement_key="project", remediation_command="transition", case_id="3", status=status, actor="owner", reason="Ready")
@@ -881,8 +818,6 @@ def test_generic_transition_rejects_dedicated_handoff_states(monkeypatch: pytest
 
 
 def test_red_test_evidence_requires_laravel_output_and_outcome(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     monkeypatch.setattr(remediation, "_project", lambda *_: (eng, {}))
@@ -892,8 +827,6 @@ def test_red_test_evidence_requires_laravel_output_and_outcome(monkeypatch: pyte
 
 
 def test_ordinary_evidence_sends_explicit_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     monkeypatch.setattr(remediation, "_project", lambda *_: (eng, {}))
@@ -910,8 +843,6 @@ def test_ordinary_evidence_sends_explicit_environment(monkeypatch: pytest.Monkey
 @pytest.mark.parametrize(("kind", "outcome"), [("red-test", "failed_as_expected"), ("green-test", "passed")])
 @pytest.mark.parametrize("revision", [None, " "])
 def test_typed_test_evidence_requires_revision(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, revision: str | None, kind: str, outcome: str) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     artifact = eng / "remediation/cases/1/tests/red.txt"
     artifact.parent.mkdir(parents=True)
@@ -925,8 +856,6 @@ def test_typed_test_evidence_requires_revision(monkeypatch: pytest.MonkeyPatch, 
 
 
 def test_prepare_pr_retains_and_indexes_reviewed_body(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    from vigil_cli import remediation
-
     eng = tmp_path / "eng"
     eng.mkdir()
     case = {
@@ -950,8 +879,6 @@ def test_prepare_pr_retains_and_indexes_reviewed_body(monkeypatch: pytest.Monkey
 
 
 def test_evidence_command_option_does_not_replace_the_cli_command(monkeypatch, tmp_path) -> None:
-    from vigil_cli import main as cli
-
     received = []
     monkeypatch.setattr(cli, "resolve_install_root", lambda *_args, **_kwargs: tmp_path)
     monkeypatch.setattr(cli.remediation_module, "run_remediation", lambda args, _root: received.append(args))

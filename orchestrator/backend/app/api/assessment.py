@@ -2846,12 +2846,6 @@ _RUN_CHILD_LISTERS: tuple[tuple[str, str, Callable[..., dict[str, Any]]], ...] =
     ("comparisons", "get_assessment_run_comparisons", state_manager.list_run_comparisons),
 )
 
-for _run_child_suffix, _run_child_name, _run_child_lister in _RUN_CHILD_LISTERS:
-    router.get(f"/assessment-runs/{{run_id}}/{_run_child_suffix}")(
-        _make_run_child_lister(_run_child_name, _run_child_lister)
-    )
-
-
 @router.post(
     "/assessment-runs/{run_id}/sources", status_code=status.HTTP_201_CREATED
 )
@@ -3114,6 +3108,16 @@ def record_assessment_run_comparison(
         engagement.id,
         run_id=run_id,
         baseline_run_id=request.baseline_run_id,
+    )
+
+
+# Registered AFTER the sibling POST handlers above, not beside the table: FastAPI
+# builds the OpenAPI `paths` mapping in route-registration order, so each path key
+# must be created by its POST and each path item must list `post` before `get`,
+# exactly as the per-handler decorators did.
+for _run_child_suffix, _run_child_name, _run_child_lister in _RUN_CHILD_LISTERS:
+    router.get(f"/assessment-runs/{{run_id}}/{_run_child_suffix}")(
+        _make_run_child_lister(_run_child_name, _run_child_lister)
     )
 
 

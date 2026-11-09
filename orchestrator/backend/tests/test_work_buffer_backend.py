@@ -63,6 +63,11 @@ def _seed_scoped(client, isolate_settings, *, hosts) -> None:
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
 
 
+def _fetch_by_unit(client, **body):
+    """POST the fetch-by-unit claim door and return the raw response."""
+    return client.post(f"{BASE}/work-items/fetch-by-unit", json=body)
+
+
 def _ev_rank(unit) -> tuple:
     """The claim path's unit ORDER BY, as a Python sort key."""
     return (
@@ -190,10 +195,7 @@ def test_app_unit_scoring_links_work_items_and_fetch_claims_coherent_unit(
         for unit in client.get(f"{BASE}/application-units").json()
         if unit["path_prefix"] == "/shop"
     )
-    response = client.post(
-        f"{BASE}/work-items/fetch-by-unit",
-        json={"unit_id": shop_unit["id"], "agent": "auto", "limit": 3},
-    )
+    response = _fetch_by_unit(client, unit_id=shop_unit["id"], agent="auto", limit=3)
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["unit"]["id"] == shop_unit["id"]
@@ -224,9 +226,7 @@ def test_fetch_by_unit_routes_low_signal_unknown_tail(
     pending = client.get(f"{BASE}/work-items?status=pending").json()
     assert pending and all(row["application_unit_id"] is not None for row in pending)
 
-    body = client.post(
-        f"{BASE}/work-items/fetch-by-unit", json={"agent": "auto"}
-    ).json()
+    body = _fetch_by_unit(client, agent="auto").json()
     assert body["claimed"]
     assert body["unit"] is not None
     assert all(
@@ -285,10 +285,7 @@ def test_bare_ev_fetch_selects_highest_unsatisfied_unit_and_derives_limit(
     engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
     state_manager.score_application_units(int(engagement["id"]))
 
-    response = client.post(
-        f"{BASE}/work-items/fetch-by-unit",
-        json={"agent": "auto", "path": "/api", "work_class": "api"},
-    )
+    response = _fetch_by_unit(client, agent="auto", path="/api", work_class="api")
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["selection"] == "highest-ev-unsatisfied"
@@ -311,10 +308,7 @@ def test_fetch_by_unit_path_treats_sql_wildcards_as_literal(client, isolate_sett
     engagement = client.get(f"/engagements/{ENGAGEMENT_KEY}").json()
     state_manager.score_application_units(int(engagement["id"]))
 
-    response = client.post(
-        f"{BASE}/work-items/fetch-by-unit",
-        json={"agent": "auto", "path": "/shop%", "work_class": "api"},
-    )
+    response = _fetch_by_unit(client, agent="auto", path="/shop%", work_class="api")
     assert response.status_code == 200, response.text
     assert response.json()["claimed"] == []
     assert response.json()["error"] == "no-unsatisfied-unit"
@@ -661,9 +655,7 @@ def test_fetch_by_unit_skips_unit_whose_pending_work_is_out_of_scope(client, iso
         out_of_scope=["cotenant.example"],
     )
 
-    body = client.post(
-        f"{BASE}/work-items/fetch-by-unit", json={"agent": "auto", "work_class": "api"}
-    ).json()
+    body = _fetch_by_unit(client, agent="auto", work_class="api").json()
 
     assert body["unit"] is not None, body
     assert body["unit"]["host"] == "app.example"

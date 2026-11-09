@@ -106,6 +106,52 @@ def _base_payload(**overrides):
     return payload
 
 
+def _finalize_run(client, run_id, **overrides):
+    """PATCH the terminal finalize body onto ``run_id`` and return the response.
+
+    The body carries the measured truth a kali finalize PATCH reports. On every
+    route but host_exec the backend keeps these columns as sent, so a caller
+    testing host_exec cannot assume what it writes is what it reads back.
+    """
+    return client.patch(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{run_id}",
+        json={
+            "status": "completed",
+            "return_code": 0,
+            "ended_at": "2026-04-17T12:00:05Z",
+            **overrides,
+        },
+    )
+
+
+def _host_exec_spill_paths(engagement_dir: Path, run_uuid: str) -> tuple[Path, Path, Path]:
+    """The host-exec spill directory plus the stdout and stderr spill paths."""
+    output_dir = engagement_dir / "scans" / "host-exec"
+    output_dir.mkdir(parents=True)
+    return output_dir, output_dir / f"{run_uuid}.out", output_dir / f"{run_uuid}.err"
+
+
+def _pre_exec_payload(run_uuid: str, stdout_path, stderr_path, **overrides):
+    """The running-state host-exec body a pre-exec registration starts from.
+
+    The server owns the route, so it is declared inert here; the terminal
+    fields stay unset until the finalize PATCH records them.
+    """
+    return _base_payload(
+        route="ignored-by-server",
+        run_uuid=run_uuid,
+        status="running",
+        return_code=None,
+        success=None,
+        completed_at="",
+        stdout="",
+        stderr="",
+        stdout_path=str(stdout_path),
+        stderr_path=str(stderr_path),
+        **overrides,
+    )
+
+
 def _unique_run_uuid_indexes(connection: sqlite3.Connection) -> list[str]:
     names: list[str] = []
     for row in connection.execute("PRAGMA index_list(assessment_command_runs)"):
@@ -671,26 +717,14 @@ def test_host_exec_pre_exec_exact_replay_returns_the_committed_row(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-preexec-lost-response"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"")
     stderr_path.write_bytes(b"")
-    payload = _base_payload(
+    payload = _pre_exec_payload(
+        run_uuid, stdout_path, stderr_path,
         command="echo safe",
         argv=["echo", "safe"],
         tool_name="echo",
-        route="ignored-by-server",
-        run_uuid=run_uuid,
-        status="running",
-        return_code=None,
-        success=None,
-        completed_at="",
-        stdout="",
-        stderr="",
-        stdout_path=str(stdout_path),
-        stderr_path=str(stderr_path),
         notes='{"intent":"lost response recovery"}',
     )
     endpoint = (
@@ -720,26 +754,14 @@ def test_host_exec_replay_identity_uses_serialized_argv_not_display_command(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-preexec-argv-identity"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"")
     stderr_path.write_bytes(b"")
-    payload = _base_payload(
+    payload = _pre_exec_payload(
+        run_uuid, stdout_path, stderr_path,
         command="printf a b",
         argv=["printf", "a b"],
         tool_name="printf",
-        route="ignored-by-server",
-        run_uuid=run_uuid,
-        status="running",
-        return_code=None,
-        success=None,
-        completed_at="",
-        stdout="",
-        stderr="",
-        stdout_path=str(stdout_path),
-        stderr_path=str(stderr_path),
     )
     endpoint = f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec"
 
@@ -831,29 +853,17 @@ def test_host_exec_suppression_erases_spills_and_removes_artifact_index_rows(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-run"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.touch(mode=0o600)
     stderr_path.touch(mode=0o600)
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     suppressed = b"https://example.com/logo.png\n" * 100
@@ -869,14 +879,7 @@ def test_host_exec_suppression_erases_spills_and_removes_artifact_index_rows(
     assert leaked_index.status_code == 201, leaked_index.text
     assert "logo.png" in leaked_index.json()["preview_text"]
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     finalized = response.json()
@@ -938,10 +941,7 @@ def test_host_exec_suppression_preserves_bytes_when_index_cleanup_fails_before_c
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-index-rollback"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_bytes = b"https://example.com/logo.png\n"
     stderr_bytes = b"warning before cleanup\n"
     stdout_path.write_bytes(stdout_bytes)
@@ -949,20 +949,11 @@ def test_host_exec_suppression_preserves_bytes_when_index_cleanup_fails_before_c
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
@@ -974,14 +965,7 @@ def test_host_exec_suppression_preserves_bytes_when_index_cleanup_fails_before_c
     )
 
     with pytest.raises(RuntimeError, match="artifact index unavailable"):
-        client.patch(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-            json={
-                "status": "completed",
-                "return_code": 0,
-                "ended_at": "2026-04-17T12:00:05Z",
-            },
-        )
+        _finalize_run(client, created["id"])
 
     assert stdout_path.read_bytes() == stdout_bytes
     assert stderr_path.read_bytes() == stderr_bytes
@@ -997,30 +981,18 @@ def test_host_exec_suppression_cleanup_failure_keeps_committed_terminal_truth(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-cleanup-warning"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_bytes = b"https://example.com/logo.png\n"
     stdout_path.write_bytes(stdout_bytes)
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     monkeypatch.setattr(
@@ -1029,14 +1001,7 @@ def test_host_exec_suppression_cleanup_failure_keeps_committed_terminal_truth(
         lambda _spills: (_ for _ in ()).throw(OSError("simulated cleanup failure")),
     )
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     finalized = response.json()
@@ -1052,10 +1017,7 @@ def test_host_exec_suppression_never_truncates_a_hardlinked_inode(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-hardlink"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     original = b"https://example.com/logo.png\n"
     stdout_path.write_bytes(original)
     stderr_path.write_bytes(b"")
@@ -1064,31 +1026,15 @@ def test_host_exec_suppression_never_truncates_a_hardlinked_inode(
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     finalized = response.json()
@@ -1103,10 +1049,7 @@ def test_host_exec_suppression_detects_same_inode_content_change_before_cleanup(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-content-change"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     original = b"https://example.com/logo.png\n"
     changed = b"X" * len(original)
     stdout_path.write_bytes(original)
@@ -1114,20 +1057,11 @@ def test_host_exec_suppression_detects_same_inode_content_change_before_cleanup(
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     real_cleanup = command_runs_service._cleanup_suppressed_host_exec_spills
@@ -1142,14 +1076,7 @@ def test_host_exec_suppression_detects_same_inode_content_change_before_cleanup(
         mutate_then_cleanup,
     )
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     finalized = response.json()
@@ -1163,29 +1090,17 @@ def test_host_exec_suppression_cleanup_never_unlinks_a_mutable_name(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-no-unlink"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("https://example.com/logo.png\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
@@ -1194,14 +1109,7 @@ def test_host_exec_suppression_cleanup_never_unlinks_a_mutable_name(
 
     monkeypatch.setattr(command_runs_service.os, "unlink", fail_if_unlinked)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     assert stdout_path.is_file()
@@ -1215,43 +1123,24 @@ def test_host_exec_suppression_only_requires_read_access_to_spills(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-read-only"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("https://example.com/logo.png\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     script = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created_response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {script}",
             argv=["sh", "-c", script],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     )
     assert created_response.status_code == 201, created_response.text
     os.chmod(stdout_path, 0o400)
     os.chmod(stderr_path, 0o400)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created_response.json()['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created_response.json()["id"])
 
     assert response.status_code == 200, response.text
     assert response.json()["output_cleanup_status"] == "deferred"
@@ -1263,29 +1152,17 @@ def test_host_exec_suppression_crash_leaves_durable_cleanup_pending_state(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppressed-cleanup-crash"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("https://example.com/logo.png\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
@@ -1351,28 +1228,16 @@ def test_host_exec_integrity_pending_recovers_after_postcommit_worker_crash(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = f"host-integrity-postcommit-crash-{int(recovery_error)}"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"trusted retained output\n")
     stderr_path.write_bytes(b"")
     created_response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo retained",
             argv=["echo", "retained"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     )
     assert created_response.status_code == 201, created_response.text
@@ -1444,30 +1309,18 @@ def test_host_exec_retained_artifact_path_is_bound_to_hashed_bytes(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-retained-path-pin"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     original = b"trusted compiler output\n"
     replacement = b"attacker replacement\n"
     stdout_path.write_bytes(original)
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="cmake --build build",
             argv=["cmake", "--build", "build"],
             tool_name="cmake",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     real_register = artifact_index.register_verified_command_output
@@ -1485,14 +1338,7 @@ def test_host_exec_retained_artifact_path_is_bound_to_hashed_bytes(
         artifact_index, "register_verified_command_output", swap_original_then_register
     )
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     finalized = response.json()
@@ -1520,28 +1366,16 @@ def test_host_exec_snapshot_publication_fsyncs_directory_metadata(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-snapshot-directory-fsync"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"durable evidence\n")
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo durable",
             argv=["echo", "durable"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     real_fsync = command_runs_service.os.fsync
@@ -1555,14 +1389,7 @@ def test_host_exec_snapshot_publication_fsyncs_directory_metadata(
 
     monkeypatch.setattr(command_runs_service.os, "fsync", track_fsync)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     assert directory_syncs >= 2
@@ -1585,31 +1412,15 @@ def test_host_exec_publication_failure_never_deletes_preexisting_snapshot(
     preexisting.write_text("preexisting evidence must survive\n", encoding="utf-8")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo trusted",
             argv=["echo", "trusted"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 409, response.text
     assert preexisting.read_text(encoding="utf-8") == "preexisting evidence must survive\n"
@@ -1624,28 +1435,16 @@ def test_host_exec_postcommit_snapshot_identity_check_clears_swapped_ref(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-snapshot-final-gap"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("trusted output A\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo trusted",
             argv=["echo", "trusted"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     real_fstat = os.fstat
@@ -1677,14 +1476,7 @@ def test_host_exec_postcommit_snapshot_identity_check_clears_swapped_ref(
     monkeypatch.setattr(artifact_index, "register_verified_command_output", mark_registered)
     monkeypatch.setattr(command_runs_service.os, "fstat", swap_after_path_stat)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert swapped is True
     assert response.status_code == 409, response.text
@@ -1711,39 +1503,20 @@ def test_verified_snapshot_get_and_refresh_reject_path_replacement(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-snapshot-readthrough"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     original = b"trusted output\n"
     stdout_path.write_bytes(original)
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo trusted",
             argv=["echo", "trusted"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
-    finalized = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    ).json()
+    finalized = _finalize_run(client, created["id"]).json()
     snapshot = Path(finalized["stdout_artifact_ref"])
     artifacts = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/artifacts/search",
@@ -1849,40 +1622,21 @@ def test_generic_upsert_cannot_rebind_verified_snapshot_metadata_or_provenance(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-verified-upsert-race"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"trusted evidence\n")
     stderr_path.write_bytes(b"")
     created_response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo trusted",
             argv=["echo", "trusted"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     )
     assert created_response.status_code == 201, created_response.text
     created = created_response.json()
-    finalized_response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    finalized_response = _finalize_run(client, created["id"])
     assert finalized_response.status_code == 200, finalized_response.text
     relative_path = Path(finalized_response.json()["stdout_artifact_ref"]).relative_to(
         engagement_dir.resolve()
@@ -1937,29 +1691,17 @@ def test_concurrent_host_finalizers_share_canonical_output_truth(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-concurrent-finalize-owner"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("https://example.com/logo.png\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     real_apply = command_runs_service._apply_host_exec_spill_retention
@@ -2029,29 +1771,17 @@ def test_host_exec_suppression_rejects_entry_swapped_before_unlink(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-suppression-swap"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("https://example.com/logo.png\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     secret = engagement_dir / "secret.txt"
@@ -2075,14 +1805,7 @@ def test_host_exec_suppression_rejects_entry_swapped_before_unlink(
 
     monkeypatch.setattr(command_runs_service.os, "stat", swap_before_lstat)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert swapped is True
     assert response.status_code == 200, response.text
@@ -2107,29 +1830,17 @@ def test_host_exec_suppression_uses_retained_parent_dirfd_after_directory_swap(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-parent-dir-swap"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("https://example.com/logo.png\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     attacker_dir = engagement_dir / "attacker-output"
@@ -2155,14 +1866,7 @@ def test_host_exec_suppression_uses_retained_parent_dirfd_after_directory_swap(
         swap_parent_then_cleanup,
     )
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     assert swapped is True
@@ -2181,30 +1885,18 @@ def test_host_exec_suppression_never_enters_a_check_then_truncate_race(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-unlink-swap"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     original = b"https://example.com/logo.png\n"
     stdout_path.write_bytes(original)
     stderr_path.write_bytes(b"")
     command = "cat urls | grep -viE '\\.(jpg|jpeg|png|gif|webp|svg|ico|woff2?|ttf|eot)'"
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command=f"sh -c {command}",
             argv=["sh", "-c", command],
             tool_name="execute_command",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     hardlink_victim = engagement_dir / "late-hardlink-victim.txt"
@@ -2216,14 +1908,7 @@ def test_host_exec_suppression_never_enters_a_check_then_truncate_race(
 
     monkeypatch.setattr(command_runs_service.os, "ftruncate", exploit_if_truncated)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 200, response.text
     finalized = response.json()
@@ -2293,28 +1978,16 @@ def test_host_exec_empty_spill_fallback_respects_configured_preview_byte_budget(
     monkeypatch.setenv("COMMAND_RUN_RETENTION_CONFIG", str(retention_config))
     state_manager._retention_config.cache_clear()
     run_uuid = "host-fallback-preview-cap"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"")
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo fallback",
             argv=["echo", "fallback"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
@@ -2349,40 +2022,21 @@ def test_host_exec_spill_preview_never_expands_past_byte_budget_on_decode(
     monkeypatch.setenv("COMMAND_RUN_RETENTION_CONFIG", str(retention_config))
     state_manager._retention_config.cache_clear()
     run_uuid = "host-invalid-utf8-preview-cap"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_bytes(b"\xff" * 20)
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="printf invalid",
             argv=["printf", "invalid"],
             tool_name="printf",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
 
     try:
-        response = client.patch(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-            json={
-                "status": "completed",
-                "return_code": 0,
-                "ended_at": "2026-04-17T12:00:05Z",
-            },
-        )
+        response = _finalize_run(client, created["id"])
     finally:
         state_manager._retention_config.cache_clear()
 
@@ -2624,10 +2278,7 @@ def test_host_exec_finalize_retains_recorded_spill_files_without_inline_output(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-retention-run"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_bytes = b"HEAD\n" + (b"x" * (128 * 1024)) + b"\nTAIL\n"
     stderr_bytes = b"compiler warning\n"
     stdout_path.touch(mode=0o600)
@@ -2635,20 +2286,11 @@ def test_host_exec_finalize_retains_recorded_spill_files_without_inline_output(
 
     created_response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="cmake --build build",
             argv=["cmake", "--build", "build"],
             tool_name="cmake",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     )
     assert created_response.status_code == 201, created_response.text
@@ -2671,16 +2313,12 @@ def test_host_exec_finalize_retains_recorded_spill_files_without_inline_output(
 
     # This is the real host-exec transport shape: previews are bounded and the
     # full output is never copied into the finalize request body.
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_preview": "HEAD\n... output omitted ...\nTAIL\n",
-            "stderr_preview": "compiler warning\n",
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_preview="HEAD\n... output omitted ...\nTAIL\n",
+        stderr_preview="compiler warning\n",
     )
 
     assert response.status_code == 200, response.text
@@ -2744,20 +2382,11 @@ def test_host_exec_finalize_rejects_spill_path_outside_engagement(
     stderr_path.touch(mode=0o600)
     response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            "host-escape-run", outside, stderr_path,
             command="echo escaped",
             argv=["echo", "escaped"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid="host-escape-run",
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(outside),
-            stderr_path=str(stderr_path),
         ),
     )
 
@@ -2784,14 +2413,10 @@ def test_command_run_finalize_rejects_unbounded_inline_output_fields(
         ),
     ).json()
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "stdout": "A" * (128 * 1024),
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        stdout="A" * (128 * 1024),
     )
 
     assert response.status_code == 422
@@ -2873,20 +2498,11 @@ def test_host_exec_pre_exec_request_rejects_inline_output_and_unbounded_argv(
     run_uuid = "bounded-host-request"
     output_dir = engagement_dir / "scans" / "host-exec"
     output_dir.mkdir(parents=True)
-    payload = _base_payload(
+    payload = _pre_exec_payload(
+        run_uuid, output_dir / f"{run_uuid}.out", output_dir / f"{run_uuid}.err",
         command="echo safe",
         argv=["echo", "safe"],
         tool_name="echo",
-        route="ignored-by-server",
-        run_uuid=run_uuid,
-        status="running",
-        return_code=None,
-        success=None,
-        completed_at="",
-        stdout="",
-        stderr="",
-        stdout_path=str(output_dir / f"{run_uuid}.out"),
-        stderr_path=str(output_dir / f"{run_uuid}.err"),
     )
     payload.update(overrides)
 
@@ -3008,28 +2624,16 @@ def test_unquiesced_host_process_is_terminal_lost_without_claiming_output(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-unquiesced-lost"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("still mutable output\n", encoding="utf-8")
     stderr_path.write_text("child escaped termination\n", encoding="utf-8")
     created_response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="sh -c background-child",
             argv=["sh", "-c", "background-child"],
             tool_name="sh",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     )
     assert created_response.status_code == 201, created_response.text
@@ -3078,20 +2682,11 @@ def test_host_exec_finalize_rejects_missing_recorded_spill(client, isolate_setti
     stderr_path.write_bytes(b"")
     response = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, missing_path, stderr_path,
             command="echo missing",
             argv=["echo", "missing"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(missing_path),
-            stderr_path=str(stderr_path),
         ),
     )
 
@@ -3106,28 +2701,16 @@ def test_host_exec_finalize_resists_symlink_swap_at_open(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-swap-run"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.touch(mode=0o600)
     stderr_path.touch(mode=0o600)
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo safe",
             argv=["echo", "safe"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     stdout_path.write_text("safe output\n", encoding="utf-8")
@@ -3150,14 +2733,7 @@ def test_host_exec_finalize_resists_symlink_swap_at_open(
 
     monkeypatch.setattr(command_runs_service.os, "open", swap_before_open)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert swapped is True
     assert response.status_code == 400
@@ -3174,28 +2750,16 @@ def test_host_exec_finalize_rejects_parent_directory_symlink_redirect(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-parent-symlink"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.write_text("trusted output\n", encoding="utf-8")
     stderr_path.write_bytes(b"")
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo safe",
             argv=["echo", "safe"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     moved_dir = engagement_dir / "trusted-output-moved"
@@ -3208,14 +2772,7 @@ def test_host_exec_finalize_rejects_parent_directory_symlink_redirect(
     output_dir.replace(moved_dir)
     output_dir.symlink_to(attacker_dir, target_is_directory=True)
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    response = _finalize_run(client, created["id"])
 
     assert response.status_code == 400
     assert "symlink" in response.text.lower()
@@ -3233,28 +2790,16 @@ def test_host_exec_finalize_rolls_back_when_verified_artifact_indexing_fails(
 ):
     engagement_dir = _write_engagement(isolate_settings["engagements_dir"])
     run_uuid = "host-index-rollback"
-    output_dir = engagement_dir / "scans" / "host-exec"
-    output_dir.mkdir(parents=True)
-    stdout_path = output_dir / f"{run_uuid}.out"
-    stderr_path = output_dir / f"{run_uuid}.err"
+    output_dir, stdout_path, stderr_path = _host_exec_spill_paths(engagement_dir, run_uuid)
     stdout_path.touch(mode=0o600)
     stderr_path.touch(mode=0o600)
     created = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/host-exec",
-        json=_base_payload(
+        json=_pre_exec_payload(
+            run_uuid, stdout_path, stderr_path,
             command="echo transactional",
             argv=["echo", "transactional"],
             tool_name="echo",
-            route="ignored-by-server",
-            run_uuid=run_uuid,
-            status="running",
-            return_code=None,
-            success=None,
-            completed_at="",
-            stdout="",
-            stderr="",
-            stdout_path=str(stdout_path),
-            stderr_path=str(stderr_path),
         ),
     ).json()
     stdout_path.write_text("transactional\n", encoding="utf-8")
@@ -3270,14 +2815,7 @@ def test_host_exec_finalize_rolls_back_when_verified_artifact_indexing_fails(
     )
 
     with pytest.raises(RuntimeError, match="artifact index unavailable"):
-        client.patch(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-            json={
-                "status": "completed",
-                "return_code": 0,
-                "ended_at": "2026-04-17T12:00:05Z",
-            },
-        )
+        _finalize_run(client, created["id"])
 
     refetched = client.get(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}"
@@ -3769,20 +3307,16 @@ def test_finalize_patch_transitions_status(client, isolate_settings):
         ),
     ).json()
     assert created["status"] == "running"
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_preview": "scan complete",
-            "timed_out": False,
-            "partial_results": False,
-            "peak_rss_bytes": 12_345_678,
-            "cpu_user_seconds": 1.25,
-            "cpu_system_seconds": 0.75,
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_preview="scan complete",
+        timed_out=False,
+        partial_results=False,
+        peak_rss_bytes=12_345_678,
+        cpu_user_seconds=1.25,
+        cpu_system_seconds=0.75,
     )
     assert response.status_code == 200, response.text
     updated = response.json()
@@ -3901,15 +3435,11 @@ def test_finalize_patch_queued_to_terminal_succeeds(client, isolate_settings):
     ).json()
     assert created["status"] == "queued"
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_preview": "queued worker completed",
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_preview="queued worker completed",
     )
     assert response.status_code == 200, response.text
     updated = response.json()
@@ -4015,15 +3545,11 @@ def test_finalize_patch_terminal_to_terminal_returns_409(client, isolate_setting
     silently overwrites the first's status, return_code, and duration_ms."""
     _write_engagement(isolate_settings["engagements_dir"])
     created = _post(client, _base_payload(status="running")).json()
-    first = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_preview": "first finalize",
-        },
+    first = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_preview="first finalize",
     )
     assert first.status_code == 200, first.text
     first_body = first.json()
@@ -4136,15 +3662,11 @@ def test_finalize_patch_running_to_terminal_succeeds(client, isolate_settings):
     to a terminal state and the DB row reflects the PATCH payload."""
     _write_engagement(isolate_settings["engagements_dir"])
     created = _post(client, _base_payload(status="running")).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 1234,
-            "stdout_preview": "ok",
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=1234,
+        stdout_preview="ok",
     )
     assert response.status_code == 200, response.text
     body = response.json()
@@ -4230,14 +3752,7 @@ def test_dedup_does_not_link_after_finalize(client, isolate_settings):
         status="running",
     )
     first = _post(client, payload).json()
-    finalize = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{first['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    finalize = _finalize_run(client, first["id"])
     assert finalize.status_code == 200
     second = _post(client, payload)
     assert second.status_code == 201
@@ -4258,14 +3773,7 @@ def test_dedup_links_to_latest_in_flight_duplicate_peer(client, isolate_settings
     second = _post(client, payload).json()
     assert second["superseded_by_id"] == first["id"]
 
-    finalize = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{first['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-        },
-    )
+    finalize = _finalize_run(client, first["id"])
     assert finalize.status_code == 200
 
     third = _post(client, payload)
@@ -4331,14 +3839,7 @@ def test_finalize_broadcasts_via_websocket(client, isolate_settings):
         f"/ws/engagements/{ENGAGEMENT_KEY}",
         headers={"origin": "http://127.0.0.1:18000"},
     ) as websocket:
-        response = client.patch(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-            json={
-                "status": "completed",
-                "return_code": 0,
-                "ended_at": "2026-04-17T12:00:05Z",
-            },
-        )
+        response = _finalize_run(client, created["id"])
         assert response.status_code == 200
         payload = websocket.receive_json()
         assert payload["type"] == "assessment.updated"
@@ -4703,22 +4204,18 @@ def test_kali_route_finalize_records_the_wrapper_measured_output_truth(
     assert created["output_retention_status"] == "empty"
 
     digest = "a" * 64
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_preview": "22/tcp open ssh",
-            "stderr_preview": "",
-            "stdout_bytes": 4096,
-            "stderr_bytes": 0,
-            "stdout_sha256": digest,
-            "stderr_sha256": "",
-            "timed_out": False,
-            "partial_results": False,
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_preview="22/tcp open ssh",
+        stderr_preview="",
+        stdout_bytes=4096,
+        stderr_bytes=0,
+        stdout_sha256=digest,
+        stderr_sha256="",
+        timed_out=False,
+        partial_results=False,
     )
     assert response.status_code == 200, response.text
     updated = response.json()
@@ -4740,15 +4237,11 @@ def test_kali_route_finalize_with_preview_but_no_byte_truth_marks_preview_only(
             status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
         ),
     ).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_preview": "22/tcp open ssh",
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_preview="22/tcp open ssh",
     )
     assert response.status_code == 200, response.text
     updated = response.json()
@@ -4768,14 +4261,10 @@ def test_kali_route_finalize_without_preview_or_byte_truth_marks_unmeasured(
             status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
         ),
     ).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
     )
     assert response.status_code == 200, response.text
     updated = response.json()
@@ -4797,18 +4286,14 @@ def test_kali_route_finalize_with_no_output_records_empty_retention(
             status="running", route="vigil assess kali/curl", stdout="", stderr=""
         ),
     ).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "duration_ms": 5000,
-            "stdout_bytes": 0,
-            "stderr_bytes": 0,
-            "stdout_sha256": "",
-            "stderr_sha256": "",
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        duration_ms=5000,
+        stdout_bytes=0,
+        stderr_bytes=0,
+        stdout_sha256="",
+        stderr_sha256="",
     )
     assert response.status_code == 200, response.text
     updated = response.json()
@@ -4828,16 +4313,12 @@ def test_kali_route_finalize_rejects_false_empty_measurement_claim(
             status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
         ),
     ).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "stdout_preview": "observed output",
-            "stdout_bytes": 0,
-            "stderr_bytes": 0,
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        stdout_preview="observed output",
+        stdout_bytes=0,
+        stderr_bytes=0,
     )
 
     assert response.status_code == 200, response.text
@@ -4857,15 +4338,11 @@ def test_kali_route_finalize_marks_partial_stream_measurement(
             status="running", route="vigil assess kali/nmap_scan", stdout="", stderr=""
         ),
     ).json()
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "stdout_bytes": 17,
-            "stdout_sha256": "a" * 64,
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        stdout_bytes=17,
+        stdout_sha256="a" * 64,
     )
 
     assert response.status_code == 200, response.text
@@ -4892,15 +4369,11 @@ def test_kali_route_omitted_output_fields_preserve_existing_measured_truth(
     assert created["stdout_bytes"] == len("already measured")
     assert created["output_retention_status"] == "retained"
 
-    response = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created['id']}",
-        json={
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "stdout_preview": "",
-            "stderr_preview": "",
-        },
+    response = _finalize_run(
+        client,
+        created["id"],
+        stdout_preview="",
+        stderr_preview="",
     )
 
     assert response.status_code == 200, response.text
@@ -4972,21 +4445,15 @@ def test_finalize_indexes_the_output_files_the_run_actually_wrote(
     stdout_path.write_bytes(stdout_bytes)
     stderr_path.write_bytes(b"")
 
-    finalized = client.patch(
-        f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created.json()['id']}",
-        json={
-            # The measured truth the kali finalize PATCH carries; on every route
-            # but host_exec the backend keeps these columns as sent.
-            "status": "completed",
-            "return_code": 0,
-            "ended_at": "2026-04-17T12:00:05Z",
-            "stdout_bytes": len(stdout_bytes),
-            "stdout_sha256": hashlib.sha256(stdout_bytes).hexdigest(),
-            "stderr_bytes": 0,
-            "stderr_sha256": "",
-            "stdout_preview": stdout_bytes.decode("utf-8"),
-            "stderr_preview": "",
-        },
+    finalized = _finalize_run(
+        client,
+        created.json()["id"],
+        stdout_bytes=len(stdout_bytes),
+        stdout_sha256=hashlib.sha256(stdout_bytes).hexdigest(),
+        stderr_bytes=0,
+        stderr_sha256="",
+        stdout_preview=stdout_bytes.decode("utf-8"),
+        stderr_preview="",
     )
     assert finalized.status_code == 200, finalized.text
     assert finalized.json()["stdout_sha256"] == hashlib.sha256(stdout_bytes).hexdigest()
@@ -5045,15 +4512,11 @@ def test_finalize_survives_an_output_file_it_cannot_read(client, isolate_setting
     stderr_path.write_bytes(b"")
     os.chmod(stdout_path, 0o000)
     try:
-        finalized = client.patch(
-            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs/{created.json()['id']}",
-            json={
-                "status": "completed",
-                "return_code": 0,
-                "ended_at": "2026-04-17T12:00:05Z",
-                "stdout_preview": "uid=33(www-data)",
-                "stderr_preview": "",
-            },
+        finalized = _finalize_run(
+            client,
+            created.json()["id"],
+            stdout_preview="uid=33(www-data)",
+            stderr_preview="",
         )
     finally:
         os.chmod(stdout_path, 0o600)

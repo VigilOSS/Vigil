@@ -32,6 +32,57 @@ def _seed(client, isolate_settings) -> Path:
     return engagement_dir
 
 
+_COMMAND_RUN_META = {
+    "return_code": 0,
+    "timed_out": False,
+    "success": True,
+    "started_at": "2026-09-09T12:00:00Z",
+    "completed_at": "2026-09-09T12:00:01Z",
+    "duration_ms": 1000,
+    "stderr": "",
+}
+
+
+def _finding(client, slug: str, *, title: str, **overrides) -> dict:
+    """Create one analyst-authored finding and return the created row."""
+
+    body: dict = {
+        "slug": slug,
+        "title": title,
+        "severity": "medium",
+        "workflow_status": "active",
+        "verification_status": "unreviewed",
+        "source_name": "vulnerability-analyst",
+        "provenance": {"agent_id": "HUNT-1"},
+    }
+    body.update(overrides)
+    response = client.post(f"{BASE}/findings", json=body)
+    assert response.status_code == 201, response.text
+    return response.json()
+
+
+def _verify(
+    client,
+    slug: str,
+    *,
+    reason_text: str,
+    receipt_id: int,
+    confirm: bool = True,
+    **overrides,
+):
+    """POST a confirmed verification for ``slug`` and return the raw response."""
+
+    body: dict = {
+        "verification_status": "confirmed",
+        "reason_text": reason_text,
+        "proof_receipt_ids": [receipt_id],
+    }
+    if confirm:
+        body["confirm_check"] = completed_confirm_check(receipt_id)
+    body.update(overrides)
+    return client.post(f"{BASE}/findings/{slug}/verify", json=body)
+
+
 def _run(client, agent_id: str = "VERIFY-1") -> dict:
     response = client.post(
         f"{BASE}/assessment-runs",
@@ -227,21 +278,13 @@ def test_legacy_derivative_receipt_keeps_migration_provenance_without_controls(
 
 
 def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, dict]:
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": slug,
-            "title": f"{slug} command-backed finding",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": f"https://example.test/{slug}",
-            "summary": "The command output independently reproduced the defect.",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
+    _finding(
+        client,
+        slug,
+        title=f"{slug} command-backed finding",
+        canonical_location=f"https://example.test/{slug}",
+        summary="The command output independently reproduced the defect.",
     )
-    assert finding.status_code == 201, finding.text
     run = _run(client)
     _link_run(client, run, slug)
     command = client.post(
@@ -252,12 +295,7 @@ def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, 
             "tool_name": "python",
             "agent_name": "VERIFY-1",
             "phase": "verify",
-            "return_code": 0,
-            "timed_out": False,
-            "success": True,
-            "started_at": "2026-09-09T12:00:00Z",
-            "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000,
+            **_COMMAND_RUN_META,
             "stdout": stdout,
             "stderr": "",
             "run_uuid": f"command-{slug.lower()}",
@@ -275,14 +313,11 @@ def _verified_command_finding(client, *, slug: str, stdout: str) -> tuple[dict, 
     )
     assert receipt.status_code == 201, receipt.text
     _complete_run(client, run)
-    verified = client.post(
-        f"{BASE}/findings/{slug}/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "Independent command proof reproduced the defect.",
-            "proof_receipt_ids": [receipt.json()["id"]],
-            "confirm_check": completed_confirm_check(receipt.json()["id"]),
-        },
+    verified = _verify(
+        client,
+        slug,
+        reason_text="Independent command proof reproduced the defect.",
+        receipt_id=receipt.json()["id"],
     )
     assert verified.status_code == 200, verified.text
     return command.json(), receipt.json()
@@ -503,12 +538,7 @@ def test_command_receipt_requires_and_exposes_an_actual_recorded_execution(
             "tool_name": "python",
             "agent_name": "VERIFY-1",
             "phase": "verify",
-            "return_code": 0,
-            "timed_out": False,
-            "success": True,
-            "started_at": "2026-09-09T12:00:00Z",
-            "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000,
+            **_COMMAND_RUN_META,
             "stdout": "compiled",
             "stderr": "",
             "run_uuid": "proof-command-1",
@@ -579,19 +609,9 @@ def test_command_verification_rejects_execution_owned_by_a_different_dispatch(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-913",
-            "title": "Verifier must independently reproduce this finding",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
+    _finding(
+        client, "VA-913", title="Verifier must independently reproduce this finding"
     )
-    assert finding.status_code == 201, finding.text
     run = _run(client)
     author_command = client.post(
         f"{BASE}/command-runs",
@@ -601,12 +621,7 @@ def test_command_verification_rejects_execution_owned_by_a_different_dispatch(
             "tool_name": "python",
             "agent_name": "HUNT-1",
             "phase": "exploit",
-            "return_code": 0,
-            "timed_out": False,
-            "success": True,
-            "started_at": "2026-09-09T12:00:00Z",
-            "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000,
+            **_COMMAND_RUN_META,
             "stdout": "author observed the defect",
             "stderr": "",
             "run_uuid": "proof-command-author-1",
@@ -626,13 +641,12 @@ def test_command_verification_rejects_execution_owned_by_a_different_dispatch(
     assert receipt.status_code == 201, receipt.text
     _complete_run(client, run)
 
-    verified = client.post(
-        f"{BASE}/findings/VA-913/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "The verifier claims the author's command as independent proof.",
-            "proof_receipt_ids": [receipt.json()["id"]],
-        },
+    verified = _verify(
+        client,
+        "VA-913",
+        reason_text="The verifier claims the author's command as independent proof.",
+        receipt_id=receipt.json()["id"],
+        confirm=False,
     )
 
     assert verified.status_code == 409, verified.text
@@ -643,19 +657,9 @@ def test_source_verification_rejects_read_owned_by_a_different_dispatch(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-914",
-            "title": "Verifier must independently read the decisive source",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
+    _finding(
+        client, "VA-914", title="Verifier must independently read the decisive source"
     )
-    assert finding.status_code == 201, finding.text
     run = _run(client)
     receipt = _source_observation(
         client,
@@ -665,13 +669,12 @@ def test_source_verification_rejects_read_owned_by_a_different_dispatch(
     )
     _complete_run(client, run)
 
-    verified = client.post(
-        f"{BASE}/findings/VA-914/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "The verifier claims the author's read as independent proof.",
-            "proof_receipt_ids": [receipt["id"]],
-        },
+    verified = _verify(
+        client,
+        "VA-914",
+        reason_text="The verifier claims the author's read as independent proof.",
+        receipt_id=receipt["id"],
+        confirm=False,
     )
 
     assert verified.status_code == 409, verified.text
@@ -681,19 +684,9 @@ def test_artifact_verification_rejects_artifact_owned_by_a_different_dispatch(
     client, isolate_settings
 ) -> None:
     engagement_dir = _seed(client, isolate_settings)
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-915",
-            "title": "Verifier must independently capture the decisive artifact",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
+    _finding(
+        client, "VA-915", title="Verifier must independently capture the decisive artifact"
     )
-    assert finding.status_code == 201, finding.text
     run = _run(client)
     author_artifact = _artifact(
         client,
@@ -714,13 +707,12 @@ def test_artifact_verification_rejects_artifact_owned_by_a_different_dispatch(
     assert receipt.status_code == 201, receipt.text
     _complete_run(client, run)
 
-    verified = client.post(
-        f"{BASE}/findings/VA-915/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "The verifier claims the author's artifact as independent proof.",
-            "proof_receipt_ids": [receipt.json()["id"]],
-        },
+    verified = _verify(
+        client,
+        "VA-915",
+        reason_text="The verifier claims the author's artifact as independent proof.",
+        receipt_id=receipt.json()["id"],
+        confirm=False,
     )
 
     assert verified.status_code == 409, verified.text
@@ -737,13 +729,12 @@ def test_artifact_verification_rejects_artifact_owned_by_a_different_dispatch(
     assert relabeled.status_code == 409, relabeled.text
     assert "producer agent/command attribution is immutable" in relabeled.json()["detail"]
 
-    still_rejected = client.post(
-        f"{BASE}/findings/VA-915/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "Relabeling existing author evidence cannot make it independent.",
-            "proof_receipt_ids": [receipt.json()["id"]],
-        },
+    still_rejected = _verify(
+        client,
+        "VA-915",
+        reason_text="Relabeling existing author evidence cannot make it independent.",
+        receipt_id=receipt.json()["id"],
+        confirm=False,
     )
     assert still_rejected.status_code == 409, still_rejected.text
     assert "was not produced by the verifier dispatch" in still_rejected.json()["detail"]
@@ -791,9 +782,8 @@ def test_artifact_receipt_with_verifier_command_producer_passes_ownership_check(
         json={
             "command": "cat proof/command-owned.txt", "argv": ["cat", "proof/command-owned.txt"],
             "tool_name": "cat", "agent_name": "VERIFY-1", "phase": "verify",
-            "return_code": 0, "timed_out": False, "success": True,
-            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000, "stdout": "observed", "stderr": "",
+            **_COMMAND_RUN_META,
+            "stdout": "observed", "stderr": "",
             "run_uuid": "proof-artifact-command-1",
         },
     )
@@ -928,33 +918,18 @@ def test_resumed_run_summary_preserves_parent_linked_findings(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-902",
-            "title": "Finding survives run recovery",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
-    )
-    assert finding.status_code == 201, finding.text
+    _finding(client, "VA-902", title="Finding survives run recovery")
     parent = _run(client)
     _link_run(client, parent, "VA-902")
     receipt = _source_observation(
         client, parent, "independent review reproduced the finding"
     )
     _complete_run(client, parent)
-    verified = client.post(
-        f"{BASE}/findings/VA-902/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "independent review",
-            "proof_receipt_ids": [receipt["id"]],
-            "confirm_check": completed_confirm_check(receipt["id"]),
-        },
+    verified = _verify(
+        client,
+        "VA-902",
+        reason_text="independent review",
+        receipt_id=receipt["id"],
     )
     assert verified.status_code == 200, verified.text
 
@@ -1042,33 +1017,18 @@ def test_legacy_proof_links_gain_nullable_transition_without_losing_evidence(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    created = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-777",
-            "title": "Legacy proof link",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
-    )
-    assert created.status_code == 201, created.text
+    _finding(client, "VA-777", title="Legacy proof link")
     run = _run(client)
     _link_run(client, run, "VA-777")
     receipt = _source_observation(
         client, run, "independent review reproduced the finding"
     )
     _complete_run(client, run)
-    verified = client.post(
-        f"{BASE}/findings/VA-777/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "independent review",
-            "proof_receipt_ids": [receipt["id"]],
-            "confirm_check": completed_confirm_check(receipt["id"]),
-        },
+    verified = _verify(
+        client,
+        "VA-777",
+        reason_text="independent review",
+        receipt_id=receipt["id"],
     )
     assert verified.status_code == 200, verified.text
 
@@ -1210,28 +1170,21 @@ def test_degraded_decision_receipt_blocks_readiness_without_artifact_refresh(
     client, isolate_settings
 ) -> None:
     engagement_dir = _seed(client, isolate_settings)
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-901",
-            "title": "Proof health follows immutable receipt",
-            "severity": "high",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "canonical_location": "https://example.test/proof",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-            "details": {
-                "cvss_score": 8.1,
-                "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
-                "steps_to_reproduce": ["Run the independent check"],
-                "remediation": "Enforce authorization",
-                "impact": "Unauthorized data modification",
-                "evidence": "See the linked proof receipt",
-            },
+    _finding(
+        client,
+        "VA-901",
+        title="Proof health follows immutable receipt",
+        severity="high",
+        canonical_location="https://example.test/proof",
+        details={
+            "cvss_score": 8.1,
+            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N",
+            "steps_to_reproduce": ["Run the independent check"],
+            "remediation": "Enforce authorization",
+            "impact": "Unauthorized data modification",
+            "evidence": "See the linked proof receipt",
         },
     )
-    assert finding.status_code == 201, finding.text
     run = _run(client)
     _link_run(client, run, "VA-901")
     artifact = _artifact(
@@ -1252,16 +1205,13 @@ def test_degraded_decision_receipt_blocks_readiness_without_artifact_refresh(
     assert receipt_response.status_code == 201, receipt_response.text
     receipt_id = receipt_response.json()["id"]
     _complete_run(client, run)
-    verified = client.post(
-        f"{BASE}/findings/VA-901/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "Independent proof reproduced the claim.",
-            "proof_receipt_ids": [receipt_id],
-            "confirm_check": completed_confirm_check(receipt_id),
-            "artifact_ref": "evidence/decision.txt",
-            "source_name": "code-vuln-verifier",
-        },
+    verified = _verify(
+        client,
+        "VA-901",
+        reason_text="Independent proof reproduced the claim.",
+        receipt_id=receipt_id,
+        artifact_ref="evidence/decision.txt",
+        source_name="code-vuln-verifier",
     )
     assert verified.status_code == 200, verified.text
 
@@ -1462,19 +1412,7 @@ def test_a_for_finding_association_shows_on_runs_and_receipts_apart_from_verific
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings)
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": "VA-903",
-            "title": "Associated before any verification",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
-    )
-    assert finding.status_code == 201, finding.text
+    _finding(client, "VA-903", title="Associated before any verification")
     run = _run(client)
     _link_run(client, run, "VA-903")
     receipt = _source_observation(client, run, "independent review reproduced the finding")
@@ -1487,14 +1425,11 @@ def test_a_for_finding_association_shows_on_runs_and_receipts_apart_from_verific
     ]
 
     _complete_run(client, run)
-    verified = client.post(
-        f"{BASE}/findings/VA-903/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "independent review",
-            "proof_receipt_ids": [receipt["id"]],
-            "confirm_check": completed_confirm_check(receipt["id"]),
-        },
+    verified = _verify(
+        client,
+        "VA-903",
+        reason_text="independent review",
+        receipt_id=receipt["id"],
     )
     assert verified.status_code == 200, verified.text
     read = client.get(f"{BASE}/assessment-runs/{run['id']}").json()
@@ -1540,9 +1475,8 @@ def _role_command_artifact_receipt(
         json={
             "command": f"cat {path}", "argv": ["cat", path],
             "tool_name": "cat", "agent_name": command_agent_name, "phase": "verify",
-            "return_code": 0, "timed_out": False, "success": True,
-            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000, "stdout": "observed", "stderr": "",
+            **_COMMAND_RUN_META,
+            "stdout": "observed", "stderr": "",
             "run_uuid": run_uuid,
         },
     )
@@ -1572,19 +1506,7 @@ def _role_command_artifact_receipt(
 
 
 def _authored_finding(client, slug: str) -> None:
-    finding = client.post(
-        f"{BASE}/findings",
-        json={
-            "slug": slug,
-            "title": "Verifier evidence attribution",
-            "severity": "medium",
-            "workflow_status": "active",
-            "verification_status": "unreviewed",
-            "source_name": "vulnerability-analyst",
-            "provenance": {"agent_id": "HUNT-1"},
-        },
-    )
-    assert finding.status_code == 201, finding.text
+    _finding(client, slug, title="Verifier evidence attribution")
 
 
 def test_role_attributed_command_output_is_flagged_at_receipt_create(
@@ -1615,14 +1537,11 @@ def test_role_attributed_command_output_is_flagged_at_receipt_create(
     assert "'vulnerability-analyst'" in issue
     assert "`--agent-id VERIFY-1` and no `--agent-name`" in issue
 
-    verified = client.post(
-        f"{BASE}/findings/VA-916/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "Role-labelled command output is not verifier evidence.",
-            "proof_receipt_ids": [receipt["id"]],
-            "confirm_check": completed_confirm_check(receipt["id"]),
-        },
+    verified = _verify(
+        client,
+        "VA-916",
+        reason_text="Role-labelled command output is not verifier evidence.",
+        receipt_id=receipt["id"],
     )
     assert verified.status_code == 409, verified.text
     assert issue in verified.json()["detail"]
@@ -1656,9 +1575,8 @@ def test_verifier_reregistration_cannot_relabel_role_labelled_author_output(
         json={
             "command": f"cat {path}", "argv": ["cat", path],
             "tool_name": "cat", "agent_name": "vulnerability-analyst", "phase": "verify",
-            "return_code": 0, "timed_out": False, "success": True,
-            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000, "stdout": "observed", "stderr": "",
+            **_COMMAND_RUN_META,
+            "stdout": "observed", "stderr": "",
             "run_uuid": "proof-author-role-command-1",
         },
     )
@@ -1685,14 +1603,11 @@ def test_verifier_reregistration_cannot_relabel_role_labelled_author_output(
     assert receipt.json()["verifier_attribution_issue"]
     _complete_run(client, run)
 
-    verified = client.post(
-        f"{BASE}/findings/VA-918/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "Relabelled author output must not confirm.",
-            "proof_receipt_ids": [receipt.json()["id"]],
-            "confirm_check": completed_confirm_check(receipt.json()["id"]),
-        },
+    verified = _verify(
+        client,
+        "VA-918",
+        reason_text="Relabelled author output must not confirm.",
+        receipt_id=receipt.json()["id"],
     )
 
     assert verified.status_code == 409, verified.text
@@ -1741,9 +1656,8 @@ def test_role_attributed_command_receipt_names_attribution_and_recovery(
         json={
             "command": "python reproduce.py", "argv": ["python", "reproduce.py"],
             "tool_name": "python", "agent_name": "code-vuln-verifier", "phase": "exploit",
-            "return_code": 0, "timed_out": False, "success": True,
-            "started_at": "2026-09-09T12:00:00Z", "completed_at": "2026-09-09T12:00:01Z",
-            "duration_ms": 1000, "stdout": "reproduced", "stderr": "",
+            **_COMMAND_RUN_META,
+            "stdout": "reproduced", "stderr": "",
             "run_uuid": "proof-role-command-receipt-1",
         },
     )
@@ -1758,14 +1672,11 @@ def test_role_attributed_command_receipt_names_attribution_and_recovery(
     assert receipt.status_code == 201, receipt.text
     _complete_run(client, run)
 
-    verified = client.post(
-        f"{BASE}/findings/VA-917/verify",
-        json={
-            "verification_status": "confirmed",
-            "reason_text": "A role-attributed command cannot identify the verifier lane.",
-            "proof_receipt_ids": [receipt.json()["id"]],
-            "confirm_check": completed_confirm_check(receipt.json()["id"]),
-        },
+    verified = _verify(
+        client,
+        "VA-917",
+        reason_text="A role-attributed command cannot identify the verifier lane.",
+        receipt_id=receipt.json()["id"],
     )
 
     assert verified.status_code == 409, verified.text

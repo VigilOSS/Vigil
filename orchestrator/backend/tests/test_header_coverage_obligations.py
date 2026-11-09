@@ -49,6 +49,38 @@ def _variant(
     return result["request_variant"]
 
 
+def _tenant_header_item(engagement_id: int, variant: dict) -> dict:
+    """The ``header:x-tenant-id`` obligation materialized for ``variant``."""
+    return next(
+        row
+        for row in state_manager.list_coverage_items(engagement_id)
+        if row["request_variant_id"] == variant["id"]
+        and row["input_slot"] == "header:x-tenant-id"
+    )
+
+
+def _probe_tenant_header(engagement_id: int, variant: dict, auth: str, notes: str) -> None:
+    """Record the write-leg probe the identity-header gate counts principals from."""
+    state_manager.record_probe_run(
+        engagement_id,
+        request_variant_id=variant["id"],
+        service_id=None,
+        coverage_item_id=None,
+        auth_context=auth,
+        input_slot="header:x-tenant-id",
+        attack_family="identity-header-review",
+        payload_family="cross-principal",
+        payload_value=auth,
+        tool_name="browser",
+        agent_name="vulnerability-analyst",
+        result_status="tested",
+        observed_http_status=403,
+        signal_type="",
+        evidence_ref=f"scans/{auth}.json",
+        notes=notes,
+    )
+
+
 def test_observed_trust_header_materializes_name_only_obligation(client, isolate_settings):
     engagement_id = _seed(client, isolate_settings, "2026-07-15-100000-headers")
     variant = _variant(engagement_id, auth="alice")
@@ -79,34 +111,9 @@ def test_identity_header_covered_requires_two_principals_on_write_leg(client, is
                 "cookies": {"sid": identity_name},
             },
         )
-    items = state_manager.list_coverage_items(engagement_id)
-    alice_item = next(
-        row for row in items
-        if row["request_variant_id"] == alice["id"]
-        and row["input_slot"] == "header:x-tenant-id"
-    )
+    alice_item = _tenant_header_item(engagement_id, alice)
 
-    def probe(variant, auth):
-        state_manager.record_probe_run(
-            engagement_id,
-            request_variant_id=variant["id"],
-            service_id=None,
-            coverage_item_id=None,
-            auth_context=auth,
-            input_slot="header:x-tenant-id",
-            attack_family="identity-header-review",
-            payload_family="cross-principal",
-            payload_value=auth,
-            tool_name="browser",
-            agent_name="vulnerability-analyst",
-            result_status="tested",
-            observed_http_status=403,
-            signal_type="",
-            evidence_ref=f"scans/{auth}.json",
-            notes="write request tested",
-        )
-
-    probe(alice, "alice")
+    _probe_tenant_header(engagement_id, alice, "alice", "write request tested")
     with pytest.raises(HTTPException) as exc:
         state_manager.update_coverage_item_status(
             engagement_id,
@@ -117,7 +124,7 @@ def test_identity_header_covered_requires_two_principals_on_write_leg(client, is
     assert exc.value.status_code == 409
     assert "two distinct principals" in str(exc.value.detail)
 
-    probe(bob, "bob")
+    _probe_tenant_header(engagement_id, bob, "bob", "write request tested")
     covered = state_manager.update_coverage_item_status(
         engagement_id,
         coverage_item_id=alice_item["id"],
@@ -142,31 +149,9 @@ def test_identity_aliases_for_one_principal_do_not_satisfy_two_principal_gate(
                 "cookies": {"sid": identity_name},
             },
         )
-    item = next(
-        row
-        for row in state_manager.list_coverage_items(engagement_id)
-        if row["request_variant_id"] == alice_web["id"]
-        and row["input_slot"] == "header:x-tenant-id"
-    )
+    item = _tenant_header_item(engagement_id, alice_web)
     for variant, auth in ((alice_web, "alice-web"), (alice_mobile, "alice-mobile")):
-        state_manager.record_probe_run(
-            engagement_id,
-            request_variant_id=variant["id"],
-            service_id=None,
-            coverage_item_id=None,
-            auth_context=auth,
-            input_slot="header:x-tenant-id",
-            attack_family="identity-header-review",
-            payload_family="cross-principal",
-            payload_value=auth,
-            tool_name="browser",
-            agent_name="vulnerability-analyst",
-            result_status="tested",
-            observed_http_status=403,
-            signal_type="",
-            evidence_ref=f"scans/{auth}.json",
-            notes="write request tested",
-        )
+        _probe_tenant_header(engagement_id, variant, auth, "write request tested")
 
     with pytest.raises(HTTPException) as exc:
         state_manager.update_coverage_item_status(
@@ -185,31 +170,9 @@ def test_unanchored_auth_context_labels_do_not_satisfy_two_principal_gate(
     engagement_id = _seed(client, isolate_settings, "2026-07-15-100001-header-label-gate")
     first = _variant(engagement_id, auth="fake-one")
     second = _variant(engagement_id, auth="fake-two")
-    item = next(
-        row
-        for row in state_manager.list_coverage_items(engagement_id)
-        if row["request_variant_id"] == first["id"]
-        and row["input_slot"] == "header:x-tenant-id"
-    )
+    item = _tenant_header_item(engagement_id, first)
     for variant, auth in ((first, "fake-one"), (second, "fake-two")):
-        state_manager.record_probe_run(
-            engagement_id,
-            request_variant_id=variant["id"],
-            service_id=None,
-            coverage_item_id=None,
-            auth_context=auth,
-            input_slot="header:x-tenant-id",
-            attack_family="identity-header-review",
-            payload_family="cross-principal",
-            payload_value=auth,
-            tool_name="browser",
-            agent_name="vulnerability-analyst",
-            result_status="tested",
-            observed_http_status=403,
-            signal_type="",
-            evidence_ref=f"scans/{auth}.json",
-            notes="free-form label is not a durable principal",
-        )
+        _probe_tenant_header(engagement_id, variant, auth, "free-form label is not a durable principal")
 
     with pytest.raises(HTTPException) as exc:
         state_manager.update_coverage_item_status(
@@ -239,31 +202,9 @@ def test_cookie_only_identities_without_principal_ids_do_not_satisfy_gate(
             identity_name,
             {"principal_id": "", "cookies": {"sid": identity_name}},
         )
-    item = next(
-        row
-        for row in state_manager.list_coverage_items(engagement_id)
-        if row["request_variant_id"] == first["id"]
-        and row["input_slot"] == "header:x-tenant-id"
-    )
+    item = _tenant_header_item(engagement_id, first)
     for variant, auth in ((first, "cap-aaaa"), (second, "cap-bbbb")):
-        state_manager.record_probe_run(
-            engagement_id,
-            request_variant_id=variant["id"],
-            service_id=None,
-            coverage_item_id=None,
-            auth_context=auth,
-            input_slot="header:x-tenant-id",
-            attack_family="identity-header-review",
-            payload_family="cross-principal",
-            payload_value=auth,
-            tool_name="browser",
-            agent_name="vulnerability-analyst",
-            result_status="tested",
-            observed_http_status=403,
-            signal_type="",
-            evidence_ref=f"scans/{auth}.json",
-            notes="cookie-only session, no durable principal",
-        )
+        _probe_tenant_header(engagement_id, variant, auth, "cookie-only session, no durable principal")
 
     with pytest.raises(HTTPException) as exc:
         state_manager.update_coverage_item_status(
@@ -279,11 +220,7 @@ def test_cookie_only_identities_without_principal_ids_do_not_satisfy_gate(
 def test_identity_header_read_only_variant_cannot_be_marked_covered(client, isolate_settings):
     engagement_id = _seed(client, isolate_settings, "2026-07-15-100002-header-read")
     variant = _variant(engagement_id, auth="alice", method="GET")
-    item = next(
-        row for row in state_manager.list_coverage_items(engagement_id)
-        if row["request_variant_id"] == variant["id"]
-        and row["input_slot"] == "header:x-tenant-id"
-    )
+    item = _tenant_header_item(engagement_id, variant)
     with pytest.raises(HTTPException) as exc:
         state_manager.update_coverage_item_status(
             engagement_id,
@@ -355,21 +292,9 @@ def test_identity_header_evidence_cannot_cross_port_or_scheme(
     wrong_bob = _variant(
         engagement_id, auth="wrong-b", url="http://app.example:8080/api/transfer"
     )
-    item = next(
-        row for row in state_manager.list_coverage_items(engagement_id)
-        if row["request_variant_id"] == target["id"]
-        and row["input_slot"] == "header:x-tenant-id"
-    )
+    item = _tenant_header_item(engagement_id, target)
     for variant, auth in ((wrong_alice, "wrong-a"), (wrong_bob, "wrong-b")):
-        state_manager.record_probe_run(
-            engagement_id,
-            request_variant_id=variant["id"], service_id=None, coverage_item_id=None,
-            auth_context=auth, input_slot="header:x-tenant-id",
-            attack_family="identity-header-review", payload_family="cross-principal",
-            payload_value=auth, tool_name="browser", agent_name="vulnerability-analyst",
-            result_status="tested", observed_http_status=403, signal_type="",
-            evidence_ref=f"scans/{auth}.json", notes="wrong service write request",
-        )
+        _probe_tenant_header(engagement_id, variant, auth, "wrong service write request")
     with pytest.raises(HTTPException) as exc:
         state_manager.update_coverage_item_status(
             engagement_id,

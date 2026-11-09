@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest import mock
 
 import pytest
+from _fake_client import StubClient
 
 from assess import cli
 from assess.commands import agent, artifact
@@ -22,6 +23,18 @@ from assess.lib.tenant_references import (
     TenantReferenceError,
     validate_tenant_reference_paths,
 )
+
+
+def _contract(name: str):
+    """The registered contract for ``name``, with its presence asserted here."""
+    contract = contracts.get_contract(name)
+    assert contract is not None, f"contract lookup for {name!r} returned None"
+    return contract
+
+
+def _contract_notes(name: str) -> str:
+    """One string carrying every note ``name``'s contract publishes."""
+    return " ".join(_contract(name).notes)
 
 
 def _artifact_parser() -> argparse.ArgumentParser:
@@ -95,9 +108,7 @@ def test_canonical_contracts_have_one_cli_shape() -> None:
 
 
 def test_host_exec_contract_exposes_the_authoritative_cli_shapes() -> None:
-    contract = contracts.get_contract("host-exec")
-
-    assert contract is not None
+    contract = _contract("host-exec")
     assert contract.name == "host-exec"
     assert contract.schema_name == "argparse + HostExecRecord/CommandRunFinalize"
     assert contract.preferred_invocations == (
@@ -110,7 +121,7 @@ def test_host_exec_contract_exposes_the_authoritative_cli_shapes() -> None:
     assert "--finding" in rendered
 
 
-class _DispatchClient:
+class _DispatchClient(StubClient):
     def list_dispatches(self, **_filters) -> list[dict]:
         return []
 
@@ -119,10 +130,6 @@ class _DispatchClient:
         if packet:
             packet["sha256"] = hashlib.sha256(packet["rendered_prompt"].encode()).hexdigest()
         return {"id": 7, **payload, "status": "in-progress", "prompt_packet": packet, "launch_required": True}
-
-    def close(self) -> None:
-        pass
-
 
 def test_agent_start_output_explains_record_then_launch_flow(
     monkeypatch, capsys, tmp_path
@@ -317,8 +324,7 @@ def test_agent_start_swarm_has_parser_and_introspectable_contract(tmp_path) -> N
     assert args.action == "start-swarm"
     assert args.swarm_workers == 3
     assert args.swarm_batch_size == 4
-    contract = contracts.get_contract("agent start-swarm")
-    assert contract is not None
+    contract = _contract("agent start-swarm")
     assert contract.name == "agent start-swarm"
     rendered = contracts.render_contract("agent start-swarm")
     assert "--workers" in rendered
@@ -1123,9 +1129,7 @@ def test_inline_documented_namespace_action_resolves_to_its_parent(name: str) ->
     # `contract <parent> <action>`; returning "Unknown contract" there made the
     # parent's own pointer a dead end.
     parent = name.rsplit(" ", 1)[0] if name.startswith("kali job") else name.split(" ")[0]
-    contract = contracts.get_contract(name)
-
-    assert contract is not None, f"contract lookup for {name!r} returned None"
+    contract = _contract(name)
     assert contract.name == parent
 
 
@@ -1268,8 +1272,7 @@ def _handoff_update():
 
 
 def _handoff_payload_example() -> dict:
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     payloads = [example for example in contract.examples if "agent_id" in example]
     assert len(payloads) == 1, (
         "exactly one `agent handoff` example must be a payload; the others are "
@@ -1279,8 +1282,7 @@ def _handoff_payload_example() -> dict:
 
 
 def test_agent_handoff_contract_publishes_every_handoff_create_field() -> None:
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     documented = {name for name, _domain, _meaning in contract.top_level_fields}
     writable = set(_handoff_create().model_fields) | set(_handoff_update().model_fields)
 
@@ -1297,8 +1299,7 @@ def test_agent_handoff_contract_publishes_every_handoff_create_field() -> None:
 
 
 def test_agent_handoff_contract_marks_the_fields_the_model_requires() -> None:
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     domains = {name: domain for name, domain, _meaning in contract.top_level_fields}
 
     for name, field in _handoff_create().model_fields.items():
@@ -1313,8 +1314,7 @@ def test_agent_handoff_contract_documents_each_nested_entry_shape() -> None:
     # The backend stores each entry opaquely, so these keys are a convention the
     # renderer and the next dispatch read rather than a validated sub-schema —
     # which is exactly why the contract has to print them.
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     meanings = {name: meaning for name, _domain, meaning in contract.top_level_fields}
 
     for field, keys in (
@@ -1368,8 +1368,7 @@ def test_agent_handoff_example_covers_the_whole_documented_shape() -> None:
 def test_agent_handoff_documents_the_read_version_guard() -> None:
     """The guard is the only way to refuse a concurrent write, and it is
     create-forbidden — so the contract has to say which write takes it."""
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     meanings = {name: meaning for name, _domain, meaning in contract.top_level_fields}
     domains = {name: domain for name, domain, _meaning in contract.top_level_fields}
 
@@ -1398,8 +1397,7 @@ def test_agent_handoff_states_which_artifact_paths_read_present() -> None:
     """An absolute path INSIDE the engagement resolves and reads `present`; the
     contract said it reads `missing`, which would push a specialist to rewrite a
     correct path or drop a real artifact entry."""
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     meanings = {name: meaning for name, _domain, meaning in contract.top_level_fields}
     artifacts = meanings["working_artifacts"]
 
@@ -1424,8 +1422,7 @@ _CODE_DISPATCH_ACTION_RE = re.compile(r"vigil assess code-dispatch ([a-z][a-z0-9
 
 
 def _contract_command_text(name: str) -> list[str]:
-    contract = contracts.get_contract(name)
-    assert contract is not None
+    contract = _contract(name)
     return list(contract.preferred_invocations) + [
         str(example["command"]) for example in contract.examples if "command" in example
     ]
@@ -1491,8 +1488,7 @@ def test_code_record_classify_examples_validate_against_their_schema() -> None:
     # skip_reason the schema has not declared is a 400 an agent would copy.
     from assess.lib.schema_validation import collect_validation_errors, load_schema
 
-    contract = contracts.get_contract("code-record classify")
-    assert contract is not None
+    contract = _contract("code-record classify")
     schema = load_schema(contract.schema_name)
 
     for example in contract.examples:
@@ -1536,8 +1532,7 @@ _DECISION_FLAG_PAYLOAD_KEYS = ("host", "vendor", "choice", "note", "reason", "ph
 
 
 def test_agent_decision_documents_compose_then_flags_win() -> None:
-    contract = contracts.get_contract("agent decision")
-    assert contract is not None
+    contract = _contract("agent decision")
     rendered = contracts.render_contract("agent decision")
 
     assert "WINS OUTRIGHT" not in rendered, (
@@ -1600,9 +1595,7 @@ def test_the_decision_flags_the_contract_names_are_the_ones_that_compose() -> No
 
 
 def test_agent_start_notes_the_prompt_context_merge_rule() -> None:
-    contract = contracts.get_contract("agent start")
-    assert contract is not None
-    notes = " ".join(contract.notes)
+    notes = _contract_notes("agent start")
 
     assert "prompt_context" in notes
     assert "merge" in notes.lower(), (
@@ -1615,9 +1608,7 @@ def test_agent_start_notes_the_prompt_context_merge_rule() -> None:
 def test_agent_start_notes_the_non_canonical_vuln_class_refusal() -> None:
     from assess.lib.vuln_taxonomy import is_valid_class
 
-    contract = contracts.get_contract("agent start")
-    assert contract is not None
-    notes = " ".join(contract.notes)
+    notes = _contract_notes("agent start")
 
     assert "--vuln-classes" in notes
     assert "nearest" in notes.lower(), (
@@ -1635,9 +1626,7 @@ def test_agent_start_notes_the_non_canonical_vuln_class_refusal() -> None:
 
 
 def test_agent_start_notes_the_unregistered_role_refusal() -> None:
-    contract = contracts.get_contract("agent start")
-    assert contract is not None
-    notes = " ".join(contract.notes)
+    notes = _contract_notes("agent start")
 
     assert "agent/agents/" in notes, (
         "the refusal is about a missing role prompt; name where it is looked for"
@@ -1649,9 +1638,7 @@ def test_agent_start_notes_the_unregistered_role_refusal() -> None:
 
 
 def test_agent_start_notes_the_per_slug_obligation_advisory() -> None:
-    contract = contracts.get_contract("agent start")
-    assert contract is not None
-    notes = " ".join(contract.notes)
+    notes = _contract_notes("agent start")
 
     assert "role_specific_additions" in notes
     assert "per-slug" in notes.lower()
@@ -1694,8 +1681,7 @@ def test_code_ingest_names_the_repository_listing_read() -> None:
 
 
 def test_code_dispatch_describes_the_two_way_empty_fetch_diagnostic() -> None:
-    contract = contracts.get_contract("code-dispatch")
-    assert contract is not None
+    contract = _contract("code-dispatch")
     empty = [note for note in contract.notes if "empty fetch" in note.lower()]
     assert len(empty) == 1, f"expected one empty-fetch note, found {len(empty)}"
     note = empty[0]
@@ -1740,8 +1726,7 @@ def test_code_dispatch_describes_the_two_way_empty_fetch_diagnostic() -> None:
 
 
 def _proof_run_note(predicate) -> str:
-    contract = contracts.get_contract("proof-run")
-    assert contract is not None
+    contract = _contract("proof-run")
     matches = [note for note in contract.notes if predicate(note)]
     assert len(matches) == 1, f"expected one matching note, found {len(matches)}"
     return matches[0]
@@ -1796,8 +1781,7 @@ def test_the_backend_refusals_use_the_contract_verb_spelling() -> None:
 
 
 def _payload_file_note() -> str:
-    contract = contracts.get_contract("finding update")
-    assert contract is not None
+    contract = _contract("finding update")
     matches = [note for note in contract.notes if "--payload-file accepts" in note]
     assert len(matches) == 1, f"expected one --payload-file note, found {len(matches)}"
     return matches[0]
@@ -1881,8 +1865,7 @@ def test_the_expected_row_version_field_states_the_backend_requirement() -> None
     demands the token for the replacement modes only."""
     from app.api.assessment import FindingPatchRequest
 
-    contract = contracts.get_contract("finding update")
-    assert contract is not None
+    contract = _contract("finding update")
     meanings = {name: meaning for name, _domain, meaning in contract.top_level_fields}
     guard = meanings["expected_row_version"]
 
@@ -1912,8 +1895,7 @@ def _code_dispatch_cli():
 
 
 def _list_rows_note() -> str:
-    contract = contracts.get_contract("code-dispatch")
-    assert contract is not None
+    contract = _contract("code-dispatch")
     matches = [note for note in contract.notes if "`list` row carries" in note]
     assert len(matches) == 1, f"expected one list-row note, found {len(matches)}"
     return matches[0]
@@ -2111,8 +2093,7 @@ def _handoff_renderer():
 
 
 def test_the_extras_field_names_the_key_render_handoff_reads() -> None:
-    contract = contracts.get_contract("agent handoff")
-    assert contract is not None
+    contract = _contract("agent handoff")
     meanings = {name: meaning for name, _domain, meaning in contract.top_level_fields}
     key = _handoff_renderer().HANDOFF_SKILLS_KEY
 
@@ -2146,9 +2127,7 @@ def test_the_reserved_key_accepts_the_shapes_the_contract_promises(
 
 def test_agent_start_documents_the_stamped_authorized_phase() -> None:
     cli_agent = _agent_module()
-    contract = contracts.get_contract("agent start")
-    assert contract is not None
-    notes = " ".join(contract.notes)
+    notes = _contract_notes("agent start")
 
     assert cli_agent._UNSET_AUTHORIZED_PHASE in notes, (
         "the code role gates stop on this exact token; the contract must spell "
@@ -2163,8 +2142,7 @@ def test_agent_start_documents_the_stamped_authorized_phase() -> None:
 
 
 def test_the_launch_receipt_description_lists_the_stamped_phase() -> None:
-    contract = contracts.get_contract("agent start")
-    assert contract is not None
+    contract = _contract("agent start")
     receipt_notes = [note for note in contract.notes if "Success receipts identify" in note]
     assert len(receipt_notes) == 1, receipt_notes
 
@@ -2215,8 +2193,7 @@ _RESOLVE_COMPOUND_RE = re.compile(r"\bresolve-[a-z][a-z-]*\b")
 
 
 def _resolve_contract_text() -> str:
-    contract = contracts.get_contract("resolve")
-    assert contract is not None
+    contract = _contract("resolve")
     parts = [contract.summary or "", *contract.notes, *contract.author_supplied_fields]
     parts += [f"{trigger} {fix}" for trigger, fix in contract.common_mistakes]
     return " ".join(parts)

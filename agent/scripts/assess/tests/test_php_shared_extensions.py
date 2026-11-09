@@ -17,6 +17,7 @@ from assess.commands import code_ingest
 from assess.lib.code_languages import detect_language, structural_language_for_file
 from assess.lib.treesitter_index import index_file
 from test_code_ingest_vendored_minified import _args, _offline_ingest, _write
+from _fake_client import StubClient
 
 PHP_FRAGMENTS = {
     "includes/common.inc": "<?php\nfunction acme_common() {}\n",
@@ -52,17 +53,8 @@ def test_a_shared_extension_without_a_php_tag_is_not_php(path: str, header: str)
     assert detect_language(path, header=header) is None
 
 
-class _PreviewClient:
+class _PreviewClient(StubClient):
     payloads: list[dict] = []
-
-    def __init__(self, *_args, **_kwargs) -> None:
-        pass
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *_exc):
-        return False
 
     def post(self, endpoint: str, payload: dict, **_options):
         assert endpoint == "code/repos/refresh/preview"

@@ -8,15 +8,25 @@ from __future__ import annotations
 
 import fcntl
 import json
-import sys
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0, str(REPO_ROOT / "src"))
+from vigil_cli import engagements, main
+from vigil_cli.engagements import (
+    CreateEngagementOptions,
+    add_out_of_scope,
+    plan_engagement,
+    remove_out_of_scope,
+    resolve_out_of_scope,
+    resolve_required_headers,
+    set_engagement_header,
+    unset_engagement_header,
+)
+from vigil_cli.paths import agent_root
 
 
 # --------------------------------------------------------------------------- #
@@ -25,15 +35,11 @@ sys.path.insert(0, str(REPO_ROOT / "src"))
 
 
 def test_preset_expands_to_program_header():
-    from vigil_cli.engagements import resolve_required_headers
-
     assert resolve_required_headers("bugcrowd", "acme-researcher", []) == {"X-Bug-Bounty": "acme-researcher"}
     assert resolve_required_headers("hackerone", "acme-researcher", []) == {"X-HackerOne": "acme-researcher"}
 
 
 def test_custom_headers_and_override():
-    from vigil_cli.engagements import resolve_required_headers
-
     assert resolve_required_headers(None, None, ["X-A: 1", "X-B: two words"]) == {
         "X-A": "1",
         "X-B": "two words",
@@ -45,8 +51,6 @@ def test_custom_headers_and_override():
 
 
 def test_none_is_empty():
-    from vigil_cli.engagements import resolve_required_headers
-
     assert resolve_required_headers(None, None, []) == {}
 
 
@@ -61,8 +65,6 @@ def test_none_is_empty():
     ],
 )
 def test_required_headers_validation(program, researcher, headers, needle):
-    from vigil_cli.engagements import resolve_required_headers
-
     with pytest.raises(SystemExit) as exc:
         resolve_required_headers(program, researcher, headers)
     assert needle in str(exc.value)
@@ -74,8 +76,6 @@ def test_required_headers_validation(program, researcher, headers, needle):
 
 
 def test_out_of_scope_normalizes_and_dedups():
-    from vigil_cli.engagements import resolve_out_of_scope
-
     assert resolve_out_of_scope(
         ["appointments.example.com", "*.MOBILE.example.com", "Dup.com", "dup.com"]
     ) == ["appointments.example.com", "*.mobile.example.com", "dup.com"]
@@ -83,8 +83,6 @@ def test_out_of_scope_normalizes_and_dedups():
 
 
 def test_out_of_scope_rejects_whitespace():
-    from vigil_cli.engagements import resolve_out_of_scope
-
     with pytest.raises(SystemExit):
         resolve_out_of_scope(["two hosts.com"])
 
@@ -95,8 +93,6 @@ def test_out_of_scope_rejects_whitespace():
 
 
 def _web_opts(**kw):
-    from vigil_cli.engagements import CreateEngagementOptions
-
     base = dict(
         install_root=Path("/tmp"),
         engagement_type="web",
@@ -108,8 +104,6 @@ def _web_opts(**kw):
 
 
 def test_plan_wires_scope_for_web():
-    from vigil_cli.engagements import plan_engagement
-
     plan = plan_engagement(
         _web_opts(required_headers={"X-Bug-Bounty": "acme-researcher"}, out_of_scope=["a.target.example"])
     )
@@ -118,16 +112,12 @@ def test_plan_wires_scope_for_web():
 
 
 def test_plan_omits_keys_when_unused():
-    from vigil_cli.engagements import plan_engagement
-
     plan = plan_engagement(_web_opts())
     assert "required_headers" not in plan.scope
     assert "out_of_scope" not in plan.scope
 
 
 def test_plan_rejects_headers_on_code_engagement():
-    from vigil_cli.engagements import CreateEngagementOptions, plan_engagement
-
     opts = CreateEngagementOptions(
         install_root=Path("/tmp"),
         engagement_type="code",
@@ -140,8 +130,6 @@ def test_plan_rejects_headers_on_code_engagement():
 
 @pytest.mark.parametrize("engagement_type", ["code", "android"])
 def test_new_scope_does_not_write_legacy_repository_keys(engagement_type):
-    from vigil_cli.engagements import CreateEngagementOptions, plan_engagement
-
     opts = CreateEngagementOptions(
         install_root=Path("/tmp"),
         engagement_type=engagement_type,
@@ -173,8 +161,6 @@ def _make_engagement(tmp_path: Path) -> Path:
 
 
 def test_set_and_unset_header_roundtrip(tmp_path):
-    from vigil_cli.engagements import set_engagement_header, unset_engagement_header
-
     eng = _make_engagement(tmp_path)
     assert set_engagement_header(tmp_path, "eng1", "X-Bug-Bounty: acme-researcher") == {"X-Bug-Bounty": "acme-researcher"}
     assert json.loads((eng / "scope.json").read_text())["required_headers"] == {"X-Bug-Bounty": "acme-researcher"}
@@ -184,8 +170,6 @@ def test_set_and_unset_header_roundtrip(tmp_path):
 
 
 def test_add_and_remove_oos_roundtrip(tmp_path):
-    from vigil_cli.engagements import add_out_of_scope, remove_out_of_scope
-
     eng = _make_engagement(tmp_path)
     merged = add_out_of_scope(tmp_path, "eng1", ["a.target.example", "*.m.target.example", "a.target.example"])
     assert merged == ["a.target.example", "*.m.target.example"]
@@ -194,8 +178,6 @@ def test_add_and_remove_oos_roundtrip(tmp_path):
 
 
 def test_add_track_preserves_existing_phase_and_initializes_only_new_track(tmp_path):
-    from vigil_cli import engagements
-
     assert hasattr(engagements, "add_engagement_track"), "explicit add-track operation is missing"
     add_engagement_track = engagements.add_engagement_track
     engagements_root = engagements.engagements_root
@@ -232,8 +214,6 @@ def test_add_track_preserves_existing_phase_and_initializes_only_new_track(tmp_p
 def test_add_track_refreshes_a_present_codex_compaction_contract(
     tmp_path, monkeypatch
 ):
-    from vigil_cli import engagements
-
     eng = _make_engagement(tmp_path)
     codex_dir = eng / ".codex"
     codex_dir.mkdir()
@@ -249,13 +229,10 @@ def test_add_track_refreshes_a_present_codex_compaction_contract(
 
     engagements.add_engagement_track(tmp_path, "eng1", "code")
 
-    from vigil_cli.paths import agent_root
     assert refreshes == [(agent_root(tmp_path), eng / ".codex")]
 
 
 def test_add_track_rejects_a_symlinked_codex_config_before_scope_changes(tmp_path):
-    from vigil_cli import engagements
-
     eng = _make_engagement(tmp_path)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -271,8 +248,6 @@ def test_add_track_rejects_a_symlinked_codex_config_before_scope_changes(tmp_pat
 
 
 def test_add_track_is_idempotent_but_rejects_unrelated_transitions(tmp_path):
-    from vigil_cli import engagements
-
     assert hasattr(engagements, "add_engagement_track"), "explicit add-track operation is missing"
     add_engagement_track = engagements.add_engagement_track
     engagements_root = engagements.engagements_root
@@ -298,8 +273,6 @@ def test_add_track_is_idempotent_but_rejects_unrelated_transitions(tmp_path):
 
 
 def test_repair_track_state_requires_explicit_both_legacy_shape(tmp_path):
-    from vigil_cli import engagements
-
     assert hasattr(engagements, "repair_engagement_tracks"), "supported track repair is missing"
     repair_engagement_tracks = engagements.repair_engagement_tracks
     engagements_root = engagements.engagements_root
@@ -322,8 +295,6 @@ def test_repair_track_state_requires_explicit_both_legacy_shape(tmp_path):
 
 
 def test_add_host_and_set_rate_limit_use_canonical_scope_state(tmp_path):
-    from vigil_cli import engagements
-
     assert hasattr(engagements, "add_engagement_hosts"), "canonical add-host is missing"
     assert hasattr(engagements, "set_engagement_rate_limit"), "canonical set-rate-limit is missing"
     add_engagement_hosts = engagements.add_engagement_hosts
@@ -472,8 +443,6 @@ def test_adding_live_traffic_roe_is_gated_on_declared_hosts_not_engagement_type(
     """A required header and a carve-out describe traffic to declared hosts.
     With none declared the refusal names the mutation and the command that fixes
     it, instead of a headers/out-of-scope type lecture."""
-    from vigil_cli import engagements
-
     _make_typed_engagement(
         tmp_path,
         "code1",
@@ -504,8 +473,6 @@ def test_roe_state_written_at_create_stays_mutable_with_no_declared_hosts(
     delete a header they already set. Removing ROE state, and tightening the
     rate ceiling (which has no removal verb at all), are gated on the engagement
     type alone."""
-    from vigil_cli import engagements
-
     eng = _make_typed_engagement(
         tmp_path,
         "android1",
@@ -540,13 +507,6 @@ def test_android_created_with_roe_and_no_hosts_can_still_remove_it(tmp_path):
     this honest: if `create` ever stops writing ROE state on a host-less
     android engagement, this test stops proving anything and says so.
     """
-    from vigil_cli.engagements import (
-        CreateEngagementOptions,
-        plan_engagement,
-        remove_out_of_scope,
-        unset_engagement_header,
-    )
-
     plan = plan_engagement(
         CreateEngagementOptions(
             install_root=tmp_path,
@@ -582,8 +542,6 @@ def test_no_roe_mutation_reaches_an_engagement_without_host_scope(
 ):
     """Blue incident work carries no offensive host scope at all, so every ROE
     mutation is refused on the TYPE, not on what it happens to declare."""
-    from vigil_cli import engagements
-
     _make_typed_engagement(
         tmp_path,
         "blue1",
@@ -653,8 +611,6 @@ def test_android_backend_hosts_are_declared_host_scope(tmp_path):
 def test_cli_exposes_canonical_scope_mutations(
     monkeypatch, tmp_path, capsys, argv, helper, expected
 ):
-    from vigil_cli import main
-
     called = []
 
     def fake(*args, **_kwargs):
@@ -680,8 +636,6 @@ def test_cli_exposes_canonical_scope_mutations(
 def test_scope_mutation_reports_retryable_backend_sync_partial(
     monkeypatch, tmp_path
 ):
-    from vigil_cli import main
-
     monkeypatch.setattr(
         main,
         "add_engagement_track",
@@ -706,8 +660,6 @@ def test_scope_mutation_reports_retryable_backend_sync_partial(
 
 
 def test_scope_management_waits_for_shared_scope_json_lock(tmp_path):
-    from vigil_cli.engagements import set_engagement_header
-
     eng = _make_engagement(tmp_path)
     lock_path = eng / ".locks" / "scope-json.lock"
     lock_path.parent.mkdir(parents=True)
@@ -750,8 +702,6 @@ def test_management_rejects_an_engagement_with_no_host_scope(tmp_path):
 
 
 def test_unset_missing_header_errors(tmp_path):
-    from vigil_cli.engagements import set_engagement_header, unset_engagement_header
-
     _make_engagement(tmp_path)
     set_engagement_header(tmp_path, "eng1", "X-A: 1")
     with pytest.raises(SystemExit):
@@ -764,8 +714,6 @@ def test_unset_missing_header_errors(tmp_path):
 
 
 def test_cli_dry_run_json_wires_scope(capsys):
-    from vigil_cli import main
-
     try:
         main.main(
             [
@@ -791,8 +739,6 @@ def test_cli_dry_run_json_wires_scope(capsys):
 def _interactive_scope(monkeypatch, capsys, answers, extra_argv=()):
     """Drive `vigil engagement create` interactively with scripted answers and
     return the resolved scope dict from a --dry-run --json run."""
-    from vigil_cli import main
-
     monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
     it = iter(answers)
     monkeypatch.setattr("builtins.input", lambda: next(it))
@@ -852,9 +798,6 @@ def test_interactive_header_via_flag_still_asks_oos(monkeypatch, capsys):
 def _drive_create(monkeypatch, answers, confirm, tmp_path, extra_argv=()):
     """Run a NON-dry-run interactive create with a stubbed create_engagement and
     _confirm, returning (captured_options_or_None, raised_or_None)."""
-    from types import SimpleNamespace
-    from vigil_cli import main
-
     monkeypatch.setattr(main.sys.stdin, "isatty", lambda: True)
     it = iter(answers)
     monkeypatch.setattr("builtins.input", lambda: next(it))

@@ -13,6 +13,7 @@ import pytest
 from assess.commands import code_index
 from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
 from assess.lib.treesitter_index import language_for_file
+from _fake_client import StubClient
 
 
 def _acme_sources() -> dict[str, bytes]:
@@ -62,22 +63,13 @@ def acme_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     repo = {"id": 7, "repo_key": "acme", "repo_path": str(snapshot.source_path),
             "active_generation": 1, "source_manifest_digest": "d" * 64}
 
-    class Client:
-        def __init__(self, *_args):
-            pass
-
+    class Client(StubClient):
         def get(self, endpoint):
             if endpoint == "code/repos/7":
                 return repo
             assert endpoint == "code/files?limit=5000&offset=0&repo_id=7"
             return {"items": rows, "total": len(rows), "offset": 0, "count": len(rows),
                     "has_more": False}
-
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_args):
-            return False
 
     monkeypatch.setattr(code_index, "AssessmentClient", Client)
     monkeypatch.setattr(code_index, "load_config", lambda *_: SimpleNamespace(
