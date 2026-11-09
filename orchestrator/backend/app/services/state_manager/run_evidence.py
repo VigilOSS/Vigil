@@ -20,6 +20,7 @@ from .run_accounting import (
     _CODE_RECEIPT_TABLES,
     _discovery_receipts_match_dispatch,
     _exact_run_source_generation,
+    _insert_row,
     _invalid,
     _json_text,
     _json_value,
@@ -270,58 +271,42 @@ def record_run_tool_signal(
             "state": "open",
             "finding_slug": "",
         }
-        candidate_cursor = connection.execute(
-            """
-            INSERT INTO assessment_run_candidates (
-                engagement_id, run_id, identity_key, target_key, source_id,
-                source_anchor, vulnerability_family, hypothesis,
-                originating_result_id, originating_signal_id, dispatch_id,
-                proof_receipt_ids_json, state, finding_slug, record_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, 'open', '', ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                candidate_identity,
-                target_key,
-                source_id,
-                source_anchor,
-                vulnerability_family,
-                hypothesis,
-                int(dispatch["id"]),
-                _json_text(receipt_ids),
-                _sha256(candidate_record),
-            ),
-        )
+        candidate_cursor = _insert_row(connection, "assessment_run_candidates", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "identity_key": candidate_identity,
+            "target_key": target_key,
+            "source_id": source_id,
+            "source_anchor": source_anchor,
+            "vulnerability_family": vulnerability_family,
+            "hypothesis": hypothesis,
+            "originating_result_id": None,
+            "originating_signal_id": None,
+            "dispatch_id": int(dispatch["id"]),
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+            "state": "open",
+            "finding_slug": "",
+            "record_sha256": _sha256(candidate_record),
+        })
         candidate_id = int(candidate_cursor.lastrowid)
-        signal_cursor = connection.execute(
-            """
-            INSERT INTO assessment_run_tool_signals (
-                engagement_id, run_id, identity_key, signal_kind, dispatch_id,
-                target_key, source_id, source_anchor, vulnerability_family,
-                hypothesis, observed_signature, exact_input_sha256,
-                command_run_id, proof_receipt_ids_json, candidate_id, record_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                identity_key,
-                signal_kind,
-                int(dispatch["id"]),
-                target_key,
-                source_id,
-                source_anchor,
-                vulnerability_family,
-                hypothesis,
-                observed_signature,
-                exact_input_sha256,
-                command_run_id,
-                _json_text(receipt_ids),
-                candidate_id,
-                record_sha256,
-            ),
-        )
+        signal_cursor = _insert_row(connection, "assessment_run_tool_signals", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "identity_key": identity_key,
+            "signal_kind": signal_kind,
+            "dispatch_id": int(dispatch["id"]),
+            "target_key": target_key,
+            "source_id": source_id,
+            "source_anchor": source_anchor,
+            "vulnerability_family": vulnerability_family,
+            "hypothesis": hypothesis,
+            "observed_signature": observed_signature,
+            "exact_input_sha256": exact_input_sha256,
+            "command_run_id": command_run_id,
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+            "candidate_id": candidate_id,
+            "record_sha256": record_sha256,
+        })
         signal_id = int(signal_cursor.lastrowid)
         candidate_record["originating_signal_id"] = signal_id
         connection.execute(
@@ -331,21 +316,15 @@ def record_run_tool_signal(
             """,
             (signal_id, _sha256(candidate_record), candidate_id),
         )
-        connection.execute(
-            """
-            INSERT INTO assessment_run_candidate_events (
-                engagement_id, run_id, candidate_id, from_state, to_state,
-                reason, proof_receipt_ids_json
-            ) VALUES (?, ?, ?, NULL, 'open', ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                candidate_id,
-                f"created from typed tool signal {signal_kind}",
-                _json_text(receipt_ids),
-            ),
-        )
+        _insert_row(connection, "assessment_run_candidate_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "candidate_id": candidate_id,
+            "from_state": None,
+            "to_state": "open",
+            "reason": f"created from typed tool signal {signal_kind}",
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+        })
         row = connection.execute(
             "SELECT * FROM assessment_run_tool_signals WHERE id = ?", (signal_id,)
         ).fetchone()
@@ -516,28 +495,18 @@ def record_run_discovery_pass(
             "proof_receipt_ids": receipt_ids,
         }
         record_sha256 = _sha256(record)
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_run_discovery_passes (
-                engagement_id, run_id, identity_key, dispatch_id,
-                frontier_identity_sha256, terminal_reason,
-                candidate_identity_keys_json, candidate_delta,
-                proof_receipt_ids_json, record_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                identity_key,
-                int(dispatch["id"]),
-                frontier_identity_sha256,
-                terminal_reason,
-                _json_text(candidate_identity_keys),
-                candidate_delta,
-                _json_text(receipt_ids),
-                record_sha256,
-            ),
-        )
+        cursor = _insert_row(connection, "assessment_run_discovery_passes", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "identity_key": identity_key,
+            "dispatch_id": int(dispatch["id"]),
+            "frontier_identity_sha256": frontier_identity_sha256,
+            "terminal_reason": terminal_reason,
+            "candidate_identity_keys_json": _json_text(candidate_identity_keys),
+            "candidate_delta": candidate_delta,
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+            "record_sha256": record_sha256,
+        })
         row = connection.execute(
             "SELECT * FROM assessment_run_discovery_passes WHERE id = ?",
             (int(cursor.lastrowid),),
@@ -848,46 +817,28 @@ def record_run_code_receipt_link(
                 obligation_id,
             ),
         )
-        connection.execute(
-            """
-            INSERT INTO assessment_run_obligation_events (
-                engagement_id, run_id, obligation_id, from_status,
-                to_status, resolution, proof_receipt_ids_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                obligation_id,
-                current_obligation_status,
-                obligation_status,
-                resolution,
-                _json_text(receipt_ids),
-            ),
-        )
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_run_code_receipt_links (
-                engagement_id, run_id, receipt_kind, receipt_id, target_key,
-                obligation_id,
-                candidate_ids_json, signal_ids_json, proof_receipt_ids_json,
-                obligation_status, record_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                receipt_kind,
-                receipt_id,
-                target_key,
-                obligation_id,
-                _json_text(candidate_ids),
-                _json_text(signal_ids),
-                _json_text(receipt_ids),
-                obligation_status,
-                record_sha256,
-            ),
-        )
+        _insert_row(connection, "assessment_run_obligation_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "obligation_id": obligation_id,
+            "from_status": current_obligation_status,
+            "to_status": obligation_status,
+            "resolution": resolution,
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+        })
+        cursor = _insert_row(connection, "assessment_run_code_receipt_links", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "receipt_kind": receipt_kind,
+            "receipt_id": receipt_id,
+            "target_key": target_key,
+            "obligation_id": obligation_id,
+            "candidate_ids_json": _json_text(candidate_ids),
+            "signal_ids_json": _json_text(signal_ids),
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+            "obligation_status": obligation_status,
+            "record_sha256": record_sha256,
+        })
         row = connection.execute(
             "SELECT * FROM assessment_run_code_receipt_links WHERE id = ?",
             (int(cursor.lastrowid),),

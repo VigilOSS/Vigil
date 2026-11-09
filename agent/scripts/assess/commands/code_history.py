@@ -438,7 +438,9 @@ def _publish(binding: HistoryBinding, name: str, receipt: dict[str, Any], data: 
     return {**receipt, "receipt_path": receipt_path.relative_to(binding.engagement_dir).as_posix()}
 
 
-def _unavailable(kind: str, binding: HistoryBinding, history: History, **fields: Any) -> dict[str, Any]:
+def _receipt_base(kind: str, binding: HistoryBinding, history: History) -> dict[str, Any]:
+    # History already defaults reason=None / detail="" / git_version=None, so the
+    # available and unavailable receipts both read straight off it.
     return {
         "schema": RECEIPT_SCHEMA,
         "kind": kind,
@@ -446,7 +448,13 @@ def _unavailable(kind: str, binding: HistoryBinding, history: History, **fields:
         "history_status": history.status,
         "unavailable_reason": history.reason,
         "detail": history.detail,
-        "git_version": None,
+        "git_version": history.git_version,
+    }
+
+
+def _unavailable(kind: str, binding: HistoryBinding, history: History, **fields: Any) -> dict[str, Any]:
+    return {
+        **_receipt_base(kind, binding, history),
         **fields,
         "output": None,
         "receipt_path": None,
@@ -590,13 +598,7 @@ def _walk(
     name = f"commits-{request_digest({'kind': 'commits', 'head': binding.head, **inputs, **budgets})}.jsonl"
     path = binding.artifact_dir() / name
     receipt = {
-        "schema": RECEIPT_SCHEMA,
-        "kind": "commits",
-        "binding": binding.receipt(),
-        "history_status": history.status,
-        "unavailable_reason": None,
-        "detail": "",
-        "git_version": history.git_version,
+        **_receipt_base("commits", binding, history),
         "inputs": inputs,
         "budgets": budgets,
         "truncation": {
@@ -715,13 +717,7 @@ def _diff(
     else:
         diff_status, trees = "first_parent_unavailable", []
     receipt: dict[str, Any] = {
-        "schema": RECEIPT_SCHEMA,
-        "kind": "diff",
-        "binding": binding.receipt(),
-        "history_status": history.status,
-        "unavailable_reason": None,
-        "detail": "",
-        "git_version": history.git_version,
+        **_receipt_base("diff", binding, history),
         "commit": commit,
         "parents": list(item.parents),
         "first_parent": first_parent,

@@ -4,12 +4,28 @@ from __future__ import annotations
 import difflib
 import json
 import re
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 
 class SchemaValidationError(ValueError):
     """Raised when a payload does not satisfy the bundled schema."""
+
+
+# One owner per JSON type predicate, so the ``type`` keyword check and the
+# multi-type (``type: [...]``) selection cannot disagree about whether a bool is
+# an integer. The nouns are the scalar mismatch messages, kept verbatim.
+_JSON_TYPE_PREDICATES: dict[str, Callable[[Any], bool]] = {
+    "object": lambda value: isinstance(value, dict),
+    "array": lambda value: isinstance(value, list),
+    "string": lambda value: isinstance(value, str),
+    "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+    "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+    "boolean": lambda value: isinstance(value, bool),
+    "null": lambda value: value is None,
+}
+_JSON_TYPE_NOUNS = {"integer": "an integer", "number": "a number", "boolean": "a boolean"}
 
 
 _SCHEMA_DIR = Path(__file__).resolve().parents[3] / "schemas"
@@ -158,16 +174,8 @@ def collect_patch_validation_errors(
     if not isinstance(payload, dict):
         errors.append(f"{path} must be an object")
         return errors
-    properties = schema.get("properties", {}) if isinstance(schema, dict) else {}
-    additional_properties = schema.get("additionalProperties", True) if isinstance(schema, dict) else True
-    if additional_properties is False:
-        for key in payload:
-            if key not in properties:
-                errors.append(_unknown_field_error(path, key, schema, properties))
-    for key, child_value in payload.items():
-        child_schema = properties.get(key) if isinstance(properties, dict) else None
-        if isinstance(child_schema, dict):
-            _validate_value(child_value, child_schema, f"{path}.{key}", errors)
+    if isinstance(schema, dict):
+        _validate_object_keywords(payload, schema, path, errors, check_required=False)
     return errors
 
 
@@ -192,7 +200,8 @@ def _schema_passes(value: Any, schema: dict[str, Any], path: str) -> bool:
 
 
 def _validate_object_keywords(
-    value: dict[str, Any], schema: dict[str, Any], path: str, errors: list[str]
+    value: dict[str, Any], schema: dict[str, Any], path: str, errors: list[str],
+    *, check_required: bool = True,
 ) -> None:
     """Apply ``required``/``additionalProperties``/``properties`` to an object.
 
@@ -200,11 +209,15 @@ def _validate_object_keywords(
     a typeless object subschema — e.g. intel-cve's ``then`` block (L4-5), which
     declares ``required``/``properties`` without a ``type`` keyword. Per JSON
     Schema, these keywords apply to any object instance regardless of ``type``.
+
+    ``check_required=False`` is the partial-update door
+    (:func:`collect_patch_validation_errors`): it checks the fields that ARE
+    present without demanding the ones that are not.
     """
-    required = schema.get("required", [])
-    for key in required:
-        if key not in value:
-            errors.append(f"{path}.{key} is required")
+    if check_required:
+        for key in schema.get("required", []):
+            if key not in value:
+                errors.append(f"{path}.{key} is required")
     properties = schema.get("properties", {})
     additional_properties = schema.get("additionalProperties", True)
     if additional_properties is False:
@@ -313,17 +326,9 @@ def _validate_value(value: Any, schema: dict[str, Any], path: str, errors: list[
         max_length = schema.get("maxLength")
         if max_length is not None and len(value) > int(max_length):
             errors.append(f"{path} must be at most {max_length} characters")
-    elif expected_type == "integer":
-        if isinstance(value, bool) or not isinstance(value, int):
-            errors.append(f"{path} must be an integer")
-            return
-    elif expected_type == "number":
-        if isinstance(value, bool) or not isinstance(value, (int, float)):
-            errors.append(f"{path} must be a number")
-            return
-    elif expected_type == "boolean":
-        if not isinstance(value, bool):
-            errors.append(f"{path} must be a boolean")
+    elif expected_type in _JSON_TYPE_NOUNS:
+        if not _matches_json_type(value, expected_type):
+            errors.append(f"{path} must be {_JSON_TYPE_NOUNS[expected_type]}")
             return
 
     # String assertion keywords apply to string instances even when a
@@ -396,18 +401,5 @@ def _validate_applicators(value: Any, schema: dict[str, Any], path: str, errors:
 
 
 def _matches_json_type(value: Any, expected_type: str) -> bool:
-    if expected_type == "object":
-        return isinstance(value, dict)
-    if expected_type == "array":
-        return isinstance(value, list)
-    if expected_type == "string":
-        return isinstance(value, str)
-    if expected_type == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
-    if expected_type == "number":
-        return isinstance(value, (int, float)) and not isinstance(value, bool)
-    if expected_type == "boolean":
-        return isinstance(value, bool)
-    if expected_type == "null":
-        return value is None
-    return False
+    predicate = _JSON_TYPE_PREDICATES.get(expected_type)
+    return predicate is not None and predicate(value)

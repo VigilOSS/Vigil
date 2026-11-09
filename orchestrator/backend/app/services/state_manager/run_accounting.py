@@ -75,6 +75,37 @@ def _invalid(name: str, value: str, allowed: Iterable[str]) -> HTTPException:
     )
 
 
+def _insert_row(
+    connection: sqlite3.Connection, table: str, values: dict[str, Any]
+) -> sqlite3.Cursor:
+    """Insert one row, naming each column once beside the value it carries.
+
+    The column list, its placeholder run and the parameter order all come from
+    the one mapping, so they cannot drift apart. The cursor is returned, so a
+    caller that needs the new row's id reads ``lastrowid`` off it exactly as it
+    would off ``connection.execute``.
+    """
+    columns = tuple(values)
+    return connection.execute(
+        f"INSERT INTO {table} ({', '.join(columns)}) "
+        f"VALUES ({', '.join('?' for _ in columns)})",
+        tuple(values.values()),
+    )
+
+
+def _blocker(
+    code: str, message: str, object_type: str, object_id: int | str, action: str
+) -> dict[str, Any]:
+    """One live blocker, in the key order every blocker reader reads it in."""
+    return {
+        "code": code,
+        "message": message,
+        "object_type": object_type,
+        "object_id": object_id,
+        "action": action,
+    }
+
+
 def _json_text(value: Any) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
@@ -884,26 +915,22 @@ def _current_blockers(
         )
     if str(run["run_purpose"]) == "scan":
         if not _json_value(run["target_identity_json"], {}):
-            blockers.append(
-                {
-                    "code": "target_identity_missing",
-                    "message": "Scan target identity is missing.",
-                    "object_type": "run",
-                    "object_id": run_id,
-                    "action": "record exact scan target identity before completion",
-                }
-            )
+            blockers.append(_blocker(
+                "target_identity_missing",
+                "Scan target identity is missing.",
+                "run",
+                run_id,
+                "record exact scan target identity before completion",
+            ))
         source_generations = _json_value(run["source_generations_json"], [])
         if not source_generations:
-            blockers.append(
-                {
-                    "code": "source_generation_missing",
-                    "message": "Scan source generation identity is missing.",
-                    "object_type": "run",
-                    "object_id": run_id,
-                    "action": "record source generation and manifest digests",
-                }
-            )
+            blockers.append(_blocker(
+                "source_generation_missing",
+                "Scan source generation identity is missing.",
+                "run",
+                run_id,
+                "record source generation and manifest digests",
+            ))
         else:
             generation_targets: set[str] = set()
             for index, generation in enumerate(source_generations):
@@ -933,35 +960,25 @@ def _current_blockers(
                     )
                 )
                 if not valid_generation:
-                    blockers.append(
-                        {
-                            "code": "source_generation_invalid",
-                            "message": (
-                                f"Source generation record {index} lacks exact target, "
-                                "generation, or manifest digest identity."
-                            ),
-                            "object_type": "source_generation",
-                            "object_id": target_key or index,
-                            "action": (
-                                "record target_key, nonnegative generation, and lowercase "
-                                "SHA-256 manifest_digest"
-                            ),
-                        }
-                    )
+                    blockers.append(_blocker(
+                        "source_generation_invalid",
+                        f"Source generation record {index} lacks exact target, "
+                        "generation, or manifest digest identity.",
+                        "source_generation",
+                        target_key or index,
+                        "record target_key, nonnegative generation, and lowercase "
+                        "SHA-256 manifest_digest",
+                    ))
                     continue
                 if target_key in generation_targets:
-                    blockers.append(
-                        {
-                            "code": "source_generation_duplicate",
-                            "message": (
-                                f"Source generation target {target_key} is declared more "
-                                "than once."
-                            ),
-                            "object_type": "source_generation",
-                            "object_id": target_key,
-                            "action": "declare exactly one inventory commitment per target",
-                        }
-                    )
+                    blockers.append(_blocker(
+                        "source_generation_duplicate",
+                        f"Source generation target {target_key} is declared more "
+                        "than once.",
+                        "source_generation",
+                        target_key,
+                        "declare exactly one inventory commitment per target",
+                    ))
                     continue
                 generation_targets.add(target_key)
                 expected_version = generation.get("inventory_commitment_version")
@@ -978,21 +995,15 @@ def _current_blockers(
                     )
                 )
                 if not valid_commitment:
-                    blockers.append(
-                        {
-                            "code": "source_inventory_commitment_missing",
-                            "message": (
-                                f"Source generation {target_key} lacks a valid exact "
-                                "inventory count and digest commitment."
-                            ),
-                            "object_type": "source_generation",
-                            "object_id": target_key,
-                            "action": (
-                                "record inventory_commitment_version=v1, inventory_count, "
-                                "and lowercase SHA-256 inventory_digest before the run"
-                            ),
-                        }
-                    )
+                    blockers.append(_blocker(
+                        "source_inventory_commitment_missing",
+                        f"Source generation {target_key} lacks a valid exact "
+                        "inventory count and digest commitment.",
+                        "source_generation",
+                        target_key,
+                        "record inventory_commitment_version=v1, inventory_count, "
+                        "and lowercase SHA-256 inventory_digest before the run",
+                    ))
                     continue
                 recorded_sources = connection.execute(
                     """
@@ -1006,31 +1017,23 @@ def _current_blockers(
                     actual["inventory_count"] != expected_count
                     or actual["inventory_digest"] != expected_digest
                 ):
-                    blockers.append(
-                        {
-                            "code": "source_inventory_incomplete",
-                            "message": (
-                                f"Source generation {target_key} expected {expected_count} "
-                                f"inventory rows but recorded {actual['inventory_count']}; "
-                                "the exact inventory digest does not match."
-                            ),
-                            "object_type": "source_generation",
-                            "object_id": target_key,
-                            "action": (
-                                "resume bounded inventory import until count and digest match"
-                            ),
-                        }
-                    )
+                    blockers.append(_blocker(
+                        "source_inventory_incomplete",
+                        f"Source generation {target_key} expected {expected_count} "
+                        f"inventory rows but recorded {actual['inventory_count']}; "
+                        "the exact inventory digest does not match.",
+                        "source_generation",
+                        target_key,
+                        "resume bounded inventory import until count and digest match",
+                    ))
         if counts["inventory_total"] == 0:
-            blockers.append(
-                {
-                    "code": "inventory_missing",
-                    "message": "Scan has no source inventory.",
-                    "object_type": "sources",
-                    "object_id": run_id,
-                    "action": "publish every included, excluded, and missing source",
-                }
-            )
+            blockers.append(_blocker(
+                "inventory_missing",
+                "Scan has no source inventory.",
+                "sources",
+                run_id,
+                "publish every included, excluded, and missing source",
+            ))
         else:
             declared_targets = {
                 str(generation.get("target_key") or "").strip()
@@ -1049,19 +1052,13 @@ def _current_blockers(
                 ).fetchall()
             }
             for target_key in sorted(declared_targets - represented_targets):
-                blockers.append(
-                    {
-                        "code": "source_inventory_missing",
-                        "message": (
-                            f"Declared source generation {target_key} has no inventory rows."
-                        ),
-                        "object_type": "source_generation",
-                        "object_id": target_key,
-                        "action": (
-                            "publish included, excluded, and missing rows for this target"
-                        ),
-                    }
-                )
+                blockers.append(_blocker(
+                    "source_inventory_missing",
+                    f"Declared source generation {target_key} has no inventory rows.",
+                    "source_generation",
+                    target_key,
+                    "publish included, excluded, and missing rows for this target",
+                ))
         if str(run["run_kind"]) == "code":
             discovery = connection.execute(
                 """
@@ -1075,34 +1072,24 @@ def _current_blockers(
                 (engagement_id, run_id),
             ).fetchone()
             if discovery is None:
-                blockers.append(
-                    {
-                        "code": "discovery_terminal_missing",
-                        "message": "Code scan has no terminal discovery pass.",
-                        "object_type": "discovery_passes",
-                        "object_id": run_id,
-                        "action": (
-                            "record an evidence-backed discovery pass with the current "
-                            "frontier outcome"
-                        ),
-                    }
-                )
+                blockers.append(_blocker(
+                    "discovery_terminal_missing",
+                    "Code scan has no terminal discovery pass.",
+                    "discovery_passes",
+                    run_id,
+                    "record an evidence-backed discovery pass with the current "
+                    "frontier outcome",
+                ))
             elif str(discovery["terminal_reason"]) not in DISCOVERY_COMPLETE_REASONS:
-                blockers.append(
-                    {
-                        "code": "discovery_unresolved",
-                        "message": (
-                            "Latest discovery pass ended "
-                            f"{str(discovery['terminal_reason'])}."
-                        ),
-                        "object_type": "discovery_pass",
-                        "object_id": int(discovery["id"]),
-                        "action": (
-                            "resume discovery until the recorded frontier is exhausted, "
-                            "or has no new candidates; retain cap-reached work as unresolved"
-                        ),
-                    }
-                )
+                blockers.append(_blocker(
+                    "discovery_unresolved",
+                    "Latest discovery pass ended "
+                    f"{str(discovery['terminal_reason'])}.",
+                    "discovery_pass",
+                    int(discovery["id"]),
+                    "resume discovery until the recorded frontier is exhausted, "
+                    "or has no new candidates; retain cap-reached work as unresolved",
+                ))
             else:
                 discovery_receipt_ids = _json_value(
                     discovery["proof_receipt_ids_json"], []
@@ -1114,28 +1101,22 @@ def _current_blockers(
                     dispatch_agent_id=str(discovery["dispatch_agent_id"]),
                     receipt_ids=discovery_receipt_ids,
                 ):
-                    blockers.append(
-                        {
-                            "code": "discovery_proof_unhealthy",
-                            "message": (
-                                "Latest terminal discovery pass no longer has healthy "
-                                "evidence attributable to its dispatch."
-                            ),
-                            "object_type": "discovery_pass",
-                            "object_id": int(discovery["id"]),
-                            "action": "record a fresh evidence-backed discovery pass",
-                        }
-                    )
+                    blockers.append(_blocker(
+                        "discovery_proof_unhealthy",
+                        "Latest terminal discovery pass no longer has healthy "
+                        "evidence attributable to its dispatch.",
+                        "discovery_pass",
+                        int(discovery["id"]),
+                        "record a fresh evidence-backed discovery pass",
+                    ))
     elif sum(effective_proof_health.values()) == 0:
-        blockers.append(
-            {
-                "code": "proof_missing",
-                "message": "Proof run has no recorded evidence receipt.",
-                "object_type": "proof_receipts",
-                "object_id": run_id,
-                "action": "record the observed proof before completion",
-            }
-        )
+        blockers.append(_blocker(
+            "proof_missing",
+            "Proof run has no recorded evidence receipt.",
+            "proof_receipts",
+            run_id,
+            "record the observed proof before completion",
+        ))
     # The counts use the same predicates as these row queries, so a zero count
     # proves an empty result without asking again.
     obligation_rows = connection.execute(
@@ -1150,40 +1131,34 @@ def _current_blockers(
     ).fetchall() if counts["open_hard_obligations"] else []
     for row in obligation_rows:
         if str(row["obligation_kind"]) == "source_read":
-            blockers.append(
-                {
-                    "code": "unread_source",
-                    "message": (
-                        f"Imported source {row['object_key']} is unread ({row['status']})."
-                    ),
-                    "object_type": "obligation",
-                    "object_id": int(row["id"]),
-                    "action": (
-                        "read it fully with run-audit source-read record, or release "
-                        "it with run-audit obligation release when it will not be read"
-                        if str(run["run_purpose"]) == "proof"
-                        else "read it fully with run-audit source-read record or "
-                        "retain a partial run"
-                    ),
-                }
-            )
-            continue
-        blockers.append(
-            {
-                "code": "unresolved_obligation",
-                "message": f"Hard obligation {row['identity_key']} is {row['status']}.",
-                "object_type": "obligation",
-                "object_id": int(row["id"]),
-                # An accepted gap is closed and immutable, so only a partial
-                # outcome reports it truthfully.
-                "action": (
-                    "an accepted gap is closed and cannot be resolved; retain a "
-                    "partial run"
-                    if str(row["status"]) == "accepted_gap"
-                    else "resolve with recorded evidence or retain a partial run"
+            blockers.append(_blocker(
+                "unread_source",
+                f"Imported source {row['object_key']} is unread ({row['status']}).",
+                "obligation",
+                int(row["id"]),
+                (
+                    "read it fully with run-audit source-read record, or release "
+                    "it with run-audit obligation release when it will not be read"
+                    if str(run["run_purpose"]) == "proof"
+                    else "read it fully with run-audit source-read record or "
+                    "retain a partial run"
                 ),
-            }
-        )
+            ))
+            continue
+        blockers.append(_blocker(
+            "unresolved_obligation",
+            f"Hard obligation {row['identity_key']} is {row['status']}.",
+            "obligation",
+            int(row["id"]),
+            # An accepted gap is closed and immutable, so only a partial
+            # outcome reports it truthfully.
+            (
+                "an accepted gap is closed and cannot be resolved; retain a "
+                "partial run"
+                if str(row["status"]) == "accepted_gap"
+                else "resolve with recorded evidence or retain a partial run"
+            ),
+        ))
     candidate_rows = connection.execute(
         """
         SELECT id, identity_key, state FROM assessment_run_candidates
@@ -1193,15 +1168,13 @@ def _current_blockers(
         (engagement_id, run_id),
     ).fetchall() if counts["open_candidates"] else []
     for row in candidate_rows:
-        blockers.append(
-            {
-                "code": "unresolved_candidate",
-                "message": f"Candidate {row['identity_key']} is {row['state']}.",
-                "object_type": "candidate",
-                "object_id": int(row["id"]),
-                "action": "record a supported terminal candidate disposition",
-            }
-        )
+        blockers.append(_blocker(
+            "unresolved_candidate",
+            f"Candidate {row['identity_key']} is {row['state']}.",
+            "candidate",
+            int(row["id"]),
+            "record a supported terminal candidate disposition",
+        ))
     promoted_rows = connection.execute(
         """
         SELECT candidates.id, candidates.finding_slug,
@@ -1221,31 +1194,23 @@ def _current_blockers(
     for row in promoted_rows:
         finding_slug = str(row["finding_slug"])
         verification_status = str(row["verification_status"] or "missing")
-        blockers.append(
-            {
-                "code": "promoted_finding_unverified",
-                "message": (
-                    f"Promoted finding {finding_slug} is {verification_status}."
-                ),
-                "object_type": "finding",
-                "object_id": finding_slug,
-                "action": (
-                    "complete independent verification as confirmed, downgraded, "
-                    "or false positive"
-                ),
-            }
-        )
+        blockers.append(_blocker(
+            "promoted_finding_unverified",
+            f"Promoted finding {finding_slug} is {verification_status}.",
+            "finding",
+            finding_slug,
+            "complete independent verification as confirmed, downgraded, "
+            "or false positive",
+        ))
     for health, count in effective_proof_health.items():
         if health != "healthy" and count:
-            blockers.append(
-                {
-                    "code": f"proof_{health}",
-                    "message": f"{count} proof receipt(s) are {health}.",
-                    "object_type": "proof_receipts",
-                    "object_id": run_id,
-                    "action": "restore or replace the proof before completion",
-                }
-            )
+            blockers.append(_blocker(
+                f"proof_{health}",
+                f"{count} proof receipt(s) are {health}.",
+                "proof_receipts",
+                run_id,
+                "restore or replace the proof before completion",
+            ))
     return blockers
 
 
@@ -1641,19 +1606,13 @@ def create_assessment_run(
             ),
         )
         run_id = int(cursor.lastrowid)
-        connection.execute(
-            """
-            INSERT INTO assessment_run_lifecycle_events (
-                engagement_id, run_id, from_status, to_status, reason
-            ) VALUES (?, ?, NULL, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                initial_status,
-                _RESUME_REASON if resumed_from_run_id is not None else "created",
-            ),
-        )
+        _insert_row(connection, "assessment_run_lifecycle_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "from_status": None,
+            "to_status": initial_status,
+            "reason": _RESUME_REASON if resumed_from_run_id is not None else "created",
+        })
         relevant_repositories = target_identity.get("security_relevant_repositories", [])
         if relevant_repositories:
             if (
@@ -1699,33 +1658,23 @@ def create_assessment_run(
                 "SELECT * FROM assessment_run_sources WHERE run_id = ? ORDER BY id",
                 (resumed_from_run_id,),
             ).fetchall():
-                copied = connection.execute(
-                    """
-                    INSERT INTO assessment_run_sources (
-                        engagement_id, run_id, target_key, declared_root, path,
-                        content_sha256, byte_size, line_count, encoding,
-                        inventory_status, exclusion_reason, parser_status,
-                        parser_error, identity_sha256, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        source["target_key"],
-                        source["declared_root"],
-                        source["path"],
-                        source["content_sha256"],
-                        source["byte_size"],
-                        source["line_count"],
-                        source["encoding"],
-                        source["inventory_status"],
-                        source["exclusion_reason"],
-                        source["parser_status"],
-                        source["parser_error"],
-                        source["identity_sha256"],
-                        source["created_at"],
-                    ),
-                )
+                copied = _insert_row(connection, "assessment_run_sources", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "target_key": source["target_key"],
+                    "declared_root": source["declared_root"],
+                    "path": source["path"],
+                    "content_sha256": source["content_sha256"],
+                    "byte_size": source["byte_size"],
+                    "line_count": source["line_count"],
+                    "encoding": source["encoding"],
+                    "inventory_status": source["inventory_status"],
+                    "exclusion_reason": source["exclusion_reason"],
+                    "parser_status": source["parser_status"],
+                    "parser_error": source["parser_error"],
+                    "identity_sha256": source["identity_sha256"],
+                    "created_at": source["created_at"],
+                })
                 source_id_map[int(source["id"])] = int(copied.lastrowid)
             source_reads = connection.execute(
                 "SELECT * FROM assessment_run_source_reads WHERE run_id = ? ORDER BY id",
@@ -1807,50 +1756,34 @@ def create_assessment_run(
                 if read_fingerprint in copied_read_fingerprints:
                     continue
                 copied_read_fingerprints.add(read_fingerprint)
-                connection.execute(
-                    """
-                    INSERT INTO assessment_run_source_reads (
-                        engagement_id, run_id, source_id, dispatch_id, attempt,
-                        byte_start, byte_end, line_start, line_end,
-                        proof_receipt_id, read_fingerprint, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        copied_source_id,
-                        source_read["dispatch_id"],
-                        source_read["attempt"],
-                        source_read["byte_start"],
-                        source_read["byte_end"],
-                        source_read["line_start"],
-                        source_read["line_end"],
-                        copied_receipt_id,
-                        read_fingerprint,
-                        source_read["created_at"],
-                    ),
-                )
+                _insert_row(connection, "assessment_run_source_reads", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "source_id": copied_source_id,
+                    "dispatch_id": source_read["dispatch_id"],
+                    "attempt": source_read["attempt"],
+                    "byte_start": source_read["byte_start"],
+                    "byte_end": source_read["byte_end"],
+                    "line_start": source_read["line_start"],
+                    "line_end": source_read["line_end"],
+                    "proof_receipt_id": copied_receipt_id,
+                    "read_fingerprint": read_fingerprint,
+                    "created_at": source_read["created_at"],
+                })
             if dropped_source_read_receipt_ids:
                 # Source reads have no per-row event table, so the run's own
                 # lifecycle history carries the drop; it is returned on every
                 # run read, so the resuming agent sees it without a second call.
-                connection.execute(
-                    """
-                    INSERT INTO assessment_run_lifecycle_events (
-                        engagement_id, run_id, from_status, to_status, reason
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        initial_status,
-                        initial_status,
-                        _resume_reason(
-                            dropped_source_read_receipt_ids,
-                            "parent source-read proof bindings",
-                        ),
+                _insert_row(connection, "assessment_run_lifecycle_events", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "from_status": initial_status,
+                    "to_status": initial_status,
+                    "reason": _resume_reason(
+                        dropped_source_read_receipt_ids,
+                        "parent source-read proof bindings",
                     ),
-                )
+                })
             for obligation in obligations:
                 obligation_kind = str(obligation["obligation_kind"])
                 identity_key = str(obligation["identity_key"])
@@ -1897,51 +1830,34 @@ def create_assessment_run(
                         "proof_receipt_ids": copied_receipt_ids,
                     }
                 )
-                copied = connection.execute(
-                    """
-                    INSERT INTO assessment_run_obligations (
-                        engagement_id, run_id, identity_key, obligation_kind,
-                        object_type, object_key, hard, status, resolution,
-                        proof_receipt_ids_json, record_sha256, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        identity_key,
-                        obligation_kind,
-                        obligation["object_type"],
-                        obligation["object_key"],
-                        obligation["hard"],
-                        copied_status,
-                        copied_resolution,
-                        _json_text(copied_receipt_ids),
-                        obligation_record_sha256,
-                        obligation["created_at"],
-                        obligation["updated_at"],
+                copied = _insert_row(connection, "assessment_run_obligations", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "identity_key": identity_key,
+                    "obligation_kind": obligation_kind,
+                    "object_type": obligation["object_type"],
+                    "object_key": obligation["object_key"],
+                    "hard": obligation["hard"],
+                    "status": copied_status,
+                    "resolution": copied_resolution,
+                    "proof_receipt_ids_json": _json_text(copied_receipt_ids),
+                    "record_sha256": obligation_record_sha256,
+                    "created_at": obligation["created_at"],
+                    "updated_at": obligation["updated_at"],
+                })
+                _insert_row(connection, "assessment_run_obligation_events", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "obligation_id": int(copied.lastrowid),
+                    "from_status": parent_status,
+                    "to_status": copied_status,
+                    "resolution": _resume_reason(
+                        dropped_receipt_ids,
+                        f"parent status={parent_status!r} "
+                        f"resolution={parent_resolution!r}",
                     ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO assessment_run_obligation_events (
-                        engagement_id, run_id, obligation_id, from_status,
-                        to_status, resolution, proof_receipt_ids_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        int(copied.lastrowid),
-                        parent_status,
-                        copied_status,
-                        _resume_reason(
-                            dropped_receipt_ids,
-                            f"parent status={parent_status!r} "
-                            f"resolution={parent_resolution!r}",
-                        ),
-                        _json_text(parent_receipt_ids),
-                    ),
-                )
+                    "proof_receipt_ids_json": _json_text(parent_receipt_ids),
+                })
             for candidate in candidates:
                 copied_source_id = (
                     source_id_map[int(candidate["source_id"])]
@@ -1984,57 +1900,38 @@ def create_assessment_run(
                         "finding_slug": copied_finding_slug,
                     }
                 )
-                copied = connection.execute(
-                    """
-                    INSERT INTO assessment_run_candidates (
-                        engagement_id, run_id, identity_key, target_key, source_id,
-                        source_anchor, vulnerability_family, hypothesis,
-                        originating_result_id, originating_signal_id, dispatch_id,
-                        proof_receipt_ids_json,
-                        state, finding_slug, record_sha256, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        candidate["identity_key"],
-                        candidate["target_key"],
-                        copied_source_id,
-                        candidate["source_anchor"],
-                        candidate["vulnerability_family"],
-                        candidate["hypothesis"],
-                        candidate["originating_result_id"],
-                        candidate["originating_signal_id"],
-                        candidate["dispatch_id"],
-                        _json_text(copied_receipt_ids),
-                        copied_state,
-                        copied_finding_slug,
-                        copied_record_sha256,
-                        candidate["created_at"],
-                        candidate["updated_at"],
+                copied = _insert_row(connection, "assessment_run_candidates", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "identity_key": candidate["identity_key"],
+                    "target_key": candidate["target_key"],
+                    "source_id": copied_source_id,
+                    "source_anchor": candidate["source_anchor"],
+                    "vulnerability_family": candidate["vulnerability_family"],
+                    "hypothesis": candidate["hypothesis"],
+                    "originating_result_id": candidate["originating_result_id"],
+                    "originating_signal_id": candidate["originating_signal_id"],
+                    "dispatch_id": candidate["dispatch_id"],
+                    "proof_receipt_ids_json": _json_text(copied_receipt_ids),
+                    "state": copied_state,
+                    "finding_slug": copied_finding_slug,
+                    "record_sha256": copied_record_sha256,
+                    "created_at": candidate["created_at"],
+                    "updated_at": candidate["updated_at"],
+                })
+                _insert_row(connection, "assessment_run_candidate_events", {
+                    "engagement_id": engagement.id,
+                    "run_id": run_id,
+                    "candidate_id": int(copied.lastrowid),
+                    "from_state": parent_state,
+                    "to_state": copied_state,
+                    "reason": _resume_reason(
+                        dropped_receipt_ids,
+                        f"parent state={parent_state!r} "
+                        f"finding_slug={parent_finding_slug!r}",
                     ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO assessment_run_candidate_events (
-                        engagement_id, run_id, candidate_id, from_state, to_state,
-                        reason, proof_receipt_ids_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        engagement.id,
-                        run_id,
-                        int(copied.lastrowid),
-                        parent_state,
-                        copied_state,
-                        _resume_reason(
-                            dropped_receipt_ids,
-                            f"parent state={parent_state!r} "
-                            f"finding_slug={parent_finding_slug!r}",
-                        ),
-                        _json_text(parent_receipt_ids),
-                    ),
-                )
+                    "proof_receipt_ids_json": _json_text(parent_receipt_ids),
+                })
         row = _run_or_404(connection, engagement.id, run_id)
         return _serialize_run(connection, row)
 
@@ -2135,14 +2032,13 @@ def transition_assessment_run(
                         detail=_proof_completion_refusal(run, blockers),
                     )
                 effective = "partial"
-        lifecycle_cursor = connection.execute(
-            """
-            INSERT INTO assessment_run_lifecycle_events (
-                engagement_id, run_id, from_status, to_status, reason
-            ) VALUES (?, ?, ?, ?, ?)
-            """,
-            (engagement.id, run_id, current, effective, str(reason or "")),
-        )
+        lifecycle_cursor = _insert_row(connection, "assessment_run_lifecycle_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "from_status": current,
+            "to_status": effective,
+            "reason": str(reason or ""),
+        })
         lifecycle_event = connection.execute(
             """
             SELECT id, from_status, to_status, reason, created_at
@@ -2427,42 +2323,32 @@ def record_run_candidate(
             if str(existing["record_sha256"]) != record_sha256:
                 raise HTTPException(status_code=409, detail="candidate identity already has different content")
             return _serialize_candidate(existing)
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_run_candidates (
-                engagement_id, run_id, identity_key, target_key, source_id,
-                source_anchor, vulnerability_family, hypothesis,
-                originating_result_id, dispatch_id, proof_receipt_ids_json,
-                state, finding_slug, record_sha256
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement.id,
-                run_id,
-                identity_key,
-                target_key,
-                source_id,
-                source_anchor,
-                vulnerability_family,
-                hypothesis,
-                originating_result_id,
-                int(dispatch["id"]),
-                _json_text(receipt_ids),
-                state_value,
-                finding_slug,
-                record_sha256,
-            ),
-        )
+        cursor = _insert_row(connection, "assessment_run_candidates", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "identity_key": identity_key,
+            "target_key": target_key,
+            "source_id": source_id,
+            "source_anchor": source_anchor,
+            "vulnerability_family": vulnerability_family,
+            "hypothesis": hypothesis,
+            "originating_result_id": originating_result_id,
+            "dispatch_id": int(dispatch["id"]),
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+            "state": state_value,
+            "finding_slug": finding_slug,
+            "record_sha256": record_sha256,
+        })
         candidate_id = int(cursor.lastrowid)
-        connection.execute(
-            """
-            INSERT INTO assessment_run_candidate_events (
-                engagement_id, run_id, candidate_id, from_state, to_state,
-                reason, proof_receipt_ids_json
-            ) VALUES (?, ?, ?, NULL, ?, 'created', ?)
-            """,
-            (engagement.id, run_id, candidate_id, state_value, _json_text(receipt_ids)),
-        )
+        _insert_row(connection, "assessment_run_candidate_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "candidate_id": candidate_id,
+            "from_state": None,
+            "to_state": state_value,
+            "reason": "created",
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+        })
         row = connection.execute(
             "SELECT * FROM assessment_run_candidates WHERE id = ?", (candidate_id,)
         ).fetchone()
@@ -2572,39 +2458,33 @@ def record_analysis_result_candidate_with_connection(
         "state": "open",
         "finding_slug": "",
     }
-    cursor = connection.execute(
-        """
-        INSERT INTO assessment_run_candidates (
-            engagement_id, run_id, identity_key, target_key, source_id,
-            source_anchor, vulnerability_family, hypothesis,
-            originating_result_id, originating_signal_id, dispatch_id,
-            proof_receipt_ids_json, state, finding_slug, record_sha256
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, ?, '[]', 'open', '', ?)
-        """,
-        (
-            engagement_id,
-            run_id,
-            identity_key,
-            target_key,
-            source_id,
-            source_anchor,
-            vulnerability_family,
-            hypothesis,
-            result_id,
-            int(dispatch["id"]),
-            _sha256(record),
-        ),
-    )
+    cursor = _insert_row(connection, "assessment_run_candidates", {
+        "engagement_id": engagement_id,
+        "run_id": run_id,
+        "identity_key": identity_key,
+        "target_key": target_key,
+        "source_id": source_id,
+        "source_anchor": source_anchor,
+        "vulnerability_family": vulnerability_family,
+        "hypothesis": hypothesis,
+        "originating_result_id": result_id,
+        "originating_signal_id": None,
+        "dispatch_id": int(dispatch["id"]),
+        "proof_receipt_ids_json": "[]",
+        "state": "open",
+        "finding_slug": "",
+        "record_sha256": _sha256(record),
+    })
     candidate_id = int(cursor.lastrowid)
-    connection.execute(
-        """
-        INSERT INTO assessment_run_candidate_events (
-            engagement_id, run_id, candidate_id, from_state, to_state,
-            reason, proof_receipt_ids_json
-        ) VALUES (?, ?, ?, NULL, 'open', 'created from suspicious analysis result', '[]')
-        """,
-        (engagement_id, run_id, candidate_id),
-    )
+    _insert_row(connection, "assessment_run_candidate_events", {
+        "engagement_id": engagement_id,
+        "run_id": run_id,
+        "candidate_id": candidate_id,
+        "from_state": None,
+        "to_state": "open",
+        "reason": "created from suspicious analysis result",
+        "proof_receipt_ids_json": "[]",
+    })
     row = connection.execute(
         "SELECT * FROM assessment_run_candidates WHERE id = ?", (candidate_id,)
     ).fetchone()
@@ -2819,22 +2699,15 @@ def promote_run_candidate_with_connection(
         """,
         (finding_slug, _json_text(receipt_ids), _sha256(record), candidate_id),
     )
-    connection.execute(
-        """
-        INSERT INTO assessment_run_candidate_events (
-            engagement_id, run_id, candidate_id, from_state, to_state,
-            reason, proof_receipt_ids_json
-        ) VALUES (?, ?, ?, ?, 'promoted', ?, ?)
-        """,
-        (
-            engagement_id,
-            run_id,
-            candidate_id,
-            current,
-            reason,
-            _json_text(receipt_ids),
-        ),
-    )
+    _insert_row(connection, "assessment_run_candidate_events", {
+        "engagement_id": engagement_id,
+        "run_id": run_id,
+        "candidate_id": candidate_id,
+        "from_state": current,
+        "to_state": "promoted",
+        "reason": reason,
+        "proof_receipt_ids_json": _json_text(receipt_ids),
+    })
     updated = connection.execute(
         "SELECT * FROM assessment_run_candidates WHERE id = ?", (candidate_id,)
     ).fetchone()
@@ -2935,15 +2808,15 @@ def update_run_candidate(
             """,
             (state_value, finding_slug, _json_text(receipt_ids), _sha256(record), candidate_id),
         )
-        connection.execute(
-            """
-            INSERT INTO assessment_run_candidate_events (
-                engagement_id, run_id, candidate_id, from_state, to_state,
-                reason, proof_receipt_ids_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            """,
-            (engagement.id, run_id, candidate_id, current, state_value, reason, _json_text(receipt_ids)),
-        )
+        _insert_row(connection, "assessment_run_candidate_events", {
+            "engagement_id": engagement.id,
+            "run_id": run_id,
+            "candidate_id": candidate_id,
+            "from_state": current,
+            "to_state": state_value,
+            "reason": reason,
+            "proof_receipt_ids_json": _json_text(receipt_ids),
+        })
         updated = connection.execute(
             "SELECT * FROM assessment_run_candidates WHERE id = ?", (candidate_id,)
         ).fetchone()

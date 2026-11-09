@@ -868,6 +868,15 @@ export async function request<T>(path: string, init: RequestInit = {}): Promise<
   return response.json() as Promise<T>;
 }
 
+/** The offset-paged list envelope the ledger page routes return. */
+export type OffsetPage<T> = {
+  total: number;
+  offset: number;
+  count: number;
+  has_more: boolean;
+  items: T[];
+};
+
 export function listEngagements() {
   return request<Engagement[]>("/engagements");
 }

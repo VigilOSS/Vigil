@@ -204,6 +204,30 @@ def _normalize_scope_entry(raw: str) -> str:
     return raw.strip().lower()
 
 
+def _normalized_unique(items: list) -> list[str]:
+    """The normalised scope entries of *items*, in order, dropping blanks,
+    repeats and anything that is not a string."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for item in items:
+        if not isinstance(item, str):
+            continue
+        normalized = _normalize_scope_entry(item)
+        if not normalized or normalized in seen:
+            continue
+        seen.add(normalized)
+        result.append(normalized)
+    return result
+
+
+def _coerce_scope_priority(raw) -> int:
+    """A row's scope priority as an int, or 0 when it is absent or unreadable."""
+    try:
+        return int(raw) if raw is not None else 0
+    except (TypeError, ValueError):
+        return 0
+
+
 def _scope_match_score(pattern: str, hostname: str) -> int | None:
     """Return a match score for ``pattern`` against ``hostname``, or None on no match.
 
@@ -619,11 +643,7 @@ class CaseCollector:
                 for item in out_of_scope_raw
                 if isinstance(item, str) and str(item).strip()
             ]
-            scope_priority_raw = row.get("scope_priority", 0)
-            try:
-                scope_priority = int(scope_priority_raw) if scope_priority_raw is not None else 0
-            except (TypeError, ValueError):
-                scope_priority = 0
+            scope_priority = _coerce_scope_priority(row.get("scope_priority", 0))
             updated_at = str(row.get("updated_at") or "")
             capture_policy = _normalize_capture_policy(row.get("capture_policy"))
             # The backend ``/engagements`` payload does not carry
@@ -682,11 +702,7 @@ class CaseCollector:
             scope_patterns = self._scope_patterns_from_dict(scope_data)
             out_of_scope_patterns = self._out_of_scope_patterns_from_dict(scope_data)
             scope_enforcement = _scope_enforcement(scope_data)
-            scope_priority_raw = scope_data.get("scope_priority", 0)
-            try:
-                scope_priority = int(scope_priority_raw) if scope_priority_raw is not None else 0
-            except (TypeError, ValueError):
-                scope_priority = 0
+            scope_priority = _coerce_scope_priority(scope_data.get("scope_priority", 0))
             try:
                 mtime = scope_path.stat().st_mtime
                 updated_at = datetime.fromtimestamp(mtime, tz=timezone.utc).strftime(
@@ -751,34 +767,12 @@ class CaseCollector:
         hostname = scope_data.get("hostname")
         if isinstance(hostname, str) and hostname:
             raw.append(hostname)
-        seen: set[str] = set()
-        result: list[str] = []
-        for item in raw:
-            if not isinstance(item, str):
-                continue
-            normalized = _normalize_scope_entry(item)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            result.append(normalized)
-        return result
+        return _normalized_unique(raw)
 
     @staticmethod
     def _out_of_scope_patterns_from_dict(scope_data: dict) -> list[str]:
         raw = scope_data.get("out_of_scope")
-        if not isinstance(raw, list):
-            return []
-        seen: set[str] = set()
-        result: list[str] = []
-        for item in raw:
-            if not isinstance(item, str):
-                continue
-            normalized = _normalize_scope_entry(item)
-            if not normalized or normalized in seen:
-                continue
-            seen.add(normalized)
-            result.append(normalized)
-        return result
+        return _normalized_unique(raw) if isinstance(raw, list) else []
 
     def _write_routes_cache(self) -> None:
         if self.engagements_root is None:
@@ -1066,6 +1060,20 @@ class CaseCollector:
             )
             self.backend_warning_emitted = True
 
+    def _backend_request(self, path: str, payload: dict) -> Request:
+        """Build the JSON POST to the backend *path*.
+
+        Serialisation happens here, OUTSIDE each caller's transport ``try``, so a
+        payload that cannot be encoded still raises past the best-effort
+        ``except Exception`` that only means to swallow network failures.
+        """
+        return Request(
+            f"{self.orchestrator_base_url}{path}",
+            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+
     def _post_request_observation(
         self,
         *,
@@ -1202,18 +1210,12 @@ class CaseCollector:
                 "classifier_version": CLASSIFIER_VERSION,
             },
         }
-        request = Request(
-            f"{self.orchestrator_base_url}/engagements/{entry.key}/assessment/request-observations",
-            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
-            headers={
-                "Content-Type": "application/json",
-            },
-            method="POST",
+        request = self._backend_request(
+            f"/engagements/{entry.key}/assessment/request-observations", payload
         )
         try:
             with urlopen(request, timeout=10) as response:
-                response_body = response.read().decode("utf-8")
-            data = json.loads(response_body)
+                data = json.loads(response.read().decode("utf-8"))
         except Exception as exc:
             ctx.log.error(
                 f"proxy_addon: backend write failed for {url} (engagement {entry.key}) — {exc}"
@@ -1282,11 +1284,8 @@ class CaseCollector:
             "headers": headers,
             "tokens": tokens,
         }
-        request = Request(
-            f"{self.orchestrator_base_url}/engagements/{entry.key}/credentials/capture",
-            data=json.dumps(payload, ensure_ascii=True).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        request = self._backend_request(
+            f"/engagements/{entry.key}/credentials/capture", payload
         )
         try:
             with urlopen(request, timeout=10) as response:
@@ -1786,11 +1785,8 @@ class CaseCollector:
         if not self._backend_configured():
             self._warn_backend_unavailable()
             return
-        request = Request(
-            f"{self.orchestrator_base_url}/engagements/{entry.key}/assessment/http-flows",
-            data=json.dumps(record, ensure_ascii=True).encode("utf-8"),
-            headers={"Content-Type": "application/json"},
-            method="POST",
+        request = self._backend_request(
+            f"/engagements/{entry.key}/assessment/http-flows", record
         )
         try:
             with urlopen(request, timeout=10) as response:

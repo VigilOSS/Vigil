@@ -1,10 +1,8 @@
 """Operator coordination routes for assessment dispatches and checkpoints."""
 from __future__ import annotations
 
-import functools
 from typing import Any, Literal
 
-import anyio
 from fastapi import APIRouter, HTTPException, Query, status
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -16,7 +14,7 @@ from ..services.state_manager.dispatches import (
     list_dispatch_client_bindings,
     record_dispatch_client_binding,
 )
-from .assessment import _audit_assessment_mutation, _broadcast
+from .assessment import _audit_assessment_mutation, _broadcast, _offload
 
 
 router = APIRouter()
@@ -520,56 +518,52 @@ async def create_dispatch(engagement_key: str, request: DispatchCreate) -> dict[
             status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
             detail=f"{request.agent_role} dispatches require assessment_mode=code|web",
         )
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.record_dispatch,
-            engagement.id,
-            agent_id=request.agent_id,
-            agent_role=request.agent_role,
-            task=request.task,
-            application_unit_id=request.application_unit_id,
-            dispatched_at=request.dispatched_at,
-            status_value=request.status,
-            requested_model=request.requested_model,
-            actual_model="unknown",
-            requested_reasoning=request.requested_reasoning,
-            actual_reasoning="unknown",
-            launcher_effective_model=None,
-            launcher_effective_reasoning=None,
-            launcher_effective_source=None,
-            client_name=request.client_name,
-            requested_client=request.requested_client,
-            launcher_effective_client=request.launcher_effective_client,
-            provider_observed_client=request.provider_observed_client,
-            source_revision=request.source_revision,
-            operator_instruction_path=request.operator_instruction_path,
-            operator_instruction_sha256=request.operator_instruction_sha256,
-            specialist_instruction_path=request.specialist_instruction_path,
-            specialist_instruction_sha256=request.specialist_instruction_sha256,
-            instruction_identity_status=request.instruction_identity_status,
-            instructions_stale=request.instructions_stale,
-            dispatch_mode=request.dispatch_mode,
-            assessment_mode=request.assessment_mode,
-            finding_slugs=request.finding_slugs,
-            skills=request.skills,
-            tier=request.tier,
-            vuln_classes=request.vuln_classes,
-            identity=request.identity,
-            prompt_packet=(request.prompt_packet.model_dump() if request.prompt_packet else None),
-            continued_from_dispatch_id=request.continued_from_dispatch_id,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        state_manager.record_dispatch,
+        engagement.id,
+        agent_id=request.agent_id,
+        agent_role=request.agent_role,
+        task=request.task,
+        application_unit_id=request.application_unit_id,
+        dispatched_at=request.dispatched_at,
+        status_value=request.status,
+        requested_model=request.requested_model,
+        actual_model="unknown",
+        requested_reasoning=request.requested_reasoning,
+        actual_reasoning="unknown",
+        launcher_effective_model=None,
+        launcher_effective_reasoning=None,
+        launcher_effective_source=None,
+        client_name=request.client_name,
+        requested_client=request.requested_client,
+        launcher_effective_client=request.launcher_effective_client,
+        provider_observed_client=request.provider_observed_client,
+        source_revision=request.source_revision,
+        operator_instruction_path=request.operator_instruction_path,
+        operator_instruction_sha256=request.operator_instruction_sha256,
+        specialist_instruction_path=request.specialist_instruction_path,
+        specialist_instruction_sha256=request.specialist_instruction_sha256,
+        instruction_identity_status=request.instruction_identity_status,
+        instructions_stale=request.instructions_stale,
+        dispatch_mode=request.dispatch_mode,
+        assessment_mode=request.assessment_mode,
+        finding_slugs=request.finding_slugs,
+        skills=request.skills,
+        tier=request.tier,
+        vuln_classes=request.vuln_classes,
+        identity=request.identity,
+        prompt_packet=request.prompt_packet.model_dump() if request.prompt_packet else None,
+        continued_from_dispatch_id=request.continued_from_dispatch_id,
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent start",
-            action=f"agent_id={request.agent_id} role={request.agent_role}",
-            actor_name=request.agent_role,
-            result=request.status,
-            metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
-        )
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent start",
+        action=f"agent_id={request.agent_id} role={request.agent_role}",
+        actor_name=request.agent_role,
+        result=request.status,
+        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
     )
     await _broadcast(engagement.key, "dispatch", record)
     return record
@@ -615,30 +609,26 @@ async def patch_dispatch(
     agent_id: str,
     request: DispatchUpdate,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.update_dispatch,
-            engagement.id,
-            agent_id=agent_id,
-            status_value=request.status,
-            completed_at=request.completed_at,
-            finding_slugs=request.finding_slugs,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        state_manager.update_dispatch,
+        engagement.id,
+        agent_id=agent_id,
+        status_value=request.status,
+        completed_at=request.completed_at,
+        finding_slugs=request.finding_slugs,
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent done",
-            action=f"agent_id={agent_id}",
-            actor_name=agent_id,
-            result=str(record.get("status") or ""),
-            metadata={
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent done",
+        action=f"agent_id={agent_id}",
+        actor_name=agent_id,
+        result=str(record.get("status") or ""),
+        metadata={
                 "agent_id": agent_id,
                 "finding_slugs": record.get("finding_slugs") or [],
             },
-        )
     )
     await _broadcast(engagement.key, "dispatch", record)
     return record
@@ -658,31 +648,26 @@ async def create_dispatch_client_binding(
     handle does not exist when the dispatch row is written, so requiring it there
     would either block the dispatch or invite a fabricated value.
     """
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            record_dispatch_client_binding,
-            engagement.id,
-            agent_id=agent_id,
-            asserted_client=request.asserted_client,
-            asserted_session_namespace=request.asserted_session_namespace,
-            asserted_client_handle=request.asserted_client_handle,
-            note=request.note,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        record_dispatch_client_binding,
+        engagement.id,
+        agent_id=agent_id,
+        asserted_client=request.asserted_client,
+        asserted_session_namespace=request.asserted_session_namespace,
+        asserted_client_handle=request.asserted_client_handle,
+        note=request.note,
     )
     binding = record["binding"]
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent bind-client-handle",
-            action=(
-                f"agent_id={agent_id} client={binding['asserted_client']} "
-                f"handle={binding['asserted_client_handle']}"
-            ),
-            actor_name=agent_id,
-            result=f"binding_version={binding['binding_version']}",
-            metadata={
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent bind-client-handle",
+        action=f"agent_id={agent_id} client={binding['asserted_client']} "
+            f"handle={binding['asserted_client_handle']}",
+        actor_name=agent_id,
+        result=f"binding_version={binding['binding_version']}",
+        metadata={
                 "agent_id": agent_id,
                 "binding_version": binding["binding_version"],
                 "asserted_client": binding["asserted_client"],
@@ -690,14 +675,11 @@ async def create_dispatch_client_binding(
                 "asserted_client_handle": binding["asserted_client_handle"],
                 "superseded_binding_id": (record["superseded"] or {}).get("id"),
             },
-        )
     )
     # Broadcast the DISPATCH row, not the binding: what changed for every reader
     # is which session that dispatch is now reachable at, and the dispatch row
     # carries the current binding.
-    dispatch_row = await anyio.to_thread.run_sync(
-        functools.partial(state_manager.get_dispatch, engagement.id, agent_id)
-    )
+    dispatch_row = await _offload(state_manager.get_dispatch, engagement.id, agent_id)
     await _broadcast(engagement.key, "dispatch", dispatch_row)
     return record
 
@@ -713,38 +695,34 @@ def get_dispatch_client_bindings(
 
 @router.post("/dispatch-handoffs", status_code=status.HTTP_201_CREATED)
 async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.record_handoff,
-            engagement.id,
-            agent_id=request.agent_id,
-            agent_role=request.agent_role,
-            summary=request.summary,
-            phase=request.phase,
-            confidence=request.confidence,
-            finding_slugs=request.finding_slugs,
-            coverage_gaps=request.coverage_gaps,
-            next_steps=request.next_steps,
-            runtime_issues=request.runtime_issues,
-            working_artifacts=request.working_artifacts,
-            open_questions=request.open_questions,
-            recommended_next_agent=request.recommended_next_agent,
-            handoff_status=request.handoff_status,
-            closed_dispatch_status=request.closed_dispatch_status,
-            extras=request.extras,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        state_manager.record_handoff,
+        engagement.id,
+        agent_id=request.agent_id,
+        agent_role=request.agent_role,
+        summary=request.summary,
+        phase=request.phase,
+        confidence=request.confidence,
+        finding_slugs=request.finding_slugs,
+        coverage_gaps=request.coverage_gaps,
+        next_steps=request.next_steps,
+        runtime_issues=request.runtime_issues,
+        working_artifacts=request.working_artifacts,
+        open_questions=request.open_questions,
+        recommended_next_agent=request.recommended_next_agent,
+        handoff_status=request.handoff_status,
+        closed_dispatch_status=request.closed_dispatch_status,
+        extras=request.extras,
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent handoff",
-            action=f"agent_id={request.agent_id} role={request.agent_role}",
-            actor_name=request.agent_role,
-            result=request.summary,
-            metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
-        )
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent handoff",
+        action=f"agent_id={request.agent_id} role={request.agent_role}",
+        actor_name=request.agent_role,
+        result=request.summary,
+        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
     )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
@@ -780,38 +758,34 @@ async def patch_handoff(
     agent_id: str,
     request: HandoffUpdate,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.update_handoff,
-            engagement.id,
-            agent_id=agent_id,
-            summary=request.summary,
-            phase=request.phase,
-            confidence=request.confidence,
-            finding_slugs=request.finding_slugs,
-            coverage_gaps=request.coverage_gaps,
-            next_steps=request.next_steps,
-            runtime_issues=request.runtime_issues,
-            working_artifacts=request.working_artifacts,
-            open_questions=request.open_questions,
-            recommended_next_agent=request.recommended_next_agent,
-            handoff_status=request.handoff_status,
-            closed_dispatch_status=request.closed_dispatch_status,
-            extras=request.extras,
-            expected_handoff_version=request.expected_handoff_version,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        state_manager.update_handoff,
+        engagement.id,
+        agent_id=agent_id,
+        summary=request.summary,
+        phase=request.phase,
+        confidence=request.confidence,
+        finding_slugs=request.finding_slugs,
+        coverage_gaps=request.coverage_gaps,
+        next_steps=request.next_steps,
+        runtime_issues=request.runtime_issues,
+        working_artifacts=request.working_artifacts,
+        open_questions=request.open_questions,
+        recommended_next_agent=request.recommended_next_agent,
+        handoff_status=request.handoff_status,
+        closed_dispatch_status=request.closed_dispatch_status,
+        extras=request.extras,
+        expected_handoff_version=request.expected_handoff_version,
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent handoff",
-            action=f"agent_id={agent_id}",
-            actor_name=agent_id,
-            result=request.summary or "",
-            metadata={"agent_id": agent_id},
-        )
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent handoff",
+        action=f"agent_id={agent_id}",
+        actor_name=agent_id,
+        result=request.summary or "",
+        metadata={"agent_id": agent_id},
     )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
@@ -819,25 +793,21 @@ async def patch_handoff(
 
 @router.post("/dispatch-decisions", status_code=status.HTTP_201_CREATED)
 async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.record_decision,
-            engagement.id,
-            kind=request.kind,
-            payload=request.payload,
-            surfaced_to_user=request.surfaced_to_user,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        state_manager.record_decision,
+        engagement.id,
+        kind=request.kind,
+        payload=request.payload,
+        surfaced_to_user=request.surfaced_to_user,
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent decision",
-            action=f"kind={request.kind}",
-            result="surfaced_to_user" if request.surfaced_to_user else "",
-            metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
-        )
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent decision",
+        action=f"kind={request.kind}",
+        result="surfaced_to_user" if request.surfaced_to_user else "",
+        metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record
@@ -875,26 +845,22 @@ async def patch_decision(
     decision_id: int,
     request: DecisionUpdate,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            state_manager.update_decision,
-            engagement.id,
-            decision_id=int(decision_id),
-            resolved=request.resolved,
-            resolution=request.resolution,
-            surfaced_to_user=request.surfaced_to_user,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        state_manager.update_decision,
+        engagement.id,
+        decision_id=int(decision_id),
+        resolved=request.resolved,
+        resolution=request.resolution,
+        surfaced_to_user=request.surfaced_to_user,
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="agent decision",
-            action=f"decision_id={decision_id}",
-            result="resolved" if request.resolved else "",
-            metadata={"decision_id": int(decision_id)},
-        )
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="agent decision",
+        action=f"decision_id={decision_id}",
+        result="resolved" if request.resolved else "",
+        metadata={"decision_id": int(decision_id)},
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
     return record
@@ -959,30 +925,26 @@ class OperatorCheckpointCreate(BaseModel):
 async def create_operator_checkpoint(
     engagement_key: str, request: OperatorCheckpointCreate
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            operator_checkpoints.record_checkpoint,
-            engagement.id,
-            intent_note=request.intent_note,
-            finding_slugs=list(request.finding_slugs),
-            dispatch_agent_ids=list(request.dispatch_agent_ids),
-            command_run_ids=list(request.command_run_ids),
-            artifact_ids=list(request.artifact_ids),
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    record = await _offload(
+        operator_checkpoints.record_checkpoint,
+        engagement.id,
+        intent_note=request.intent_note,
+        finding_slugs=list(request.finding_slugs),
+        dispatch_agent_ids=list(request.dispatch_agent_ids),
+        command_run_ids=list(request.command_run_ids),
+        artifact_ids=list(request.artifact_ids),
     )
-    await anyio.to_thread.run_sync(
-        functools.partial(
-            _audit_assessment_mutation,
-            engagement.id,
-            title="operator checkpoint",
-            action=f"checkpoint_version={record['checkpoint_version']}",
-            result=record["current_phase"],
-            metadata={
+    await _offload(
+        _audit_assessment_mutation,
+        engagement.id,
+        title="operator checkpoint",
+        action=f"checkpoint_version={record['checkpoint_version']}",
+        result=record["current_phase"],
+        metadata={
                 "checkpoint_version": record["checkpoint_version"],
                 "source": record["source"],
             },
-        )
     )
     await _broadcast(engagement.key, "operator_checkpoint", record)
     return record

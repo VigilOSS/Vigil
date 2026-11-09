@@ -33,11 +33,14 @@ import sys
 import tempfile
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
 from assess.lib.parser_worker import (
+    PARSER_CAPABILITY_DENIED_EXIT,
+    PARSER_MEMORY_LIMIT_EXIT,
+    PARSER_PROTOCOL_SCHEMA,
     REQUEST_NAME,
     REQUEST_SOURCE_NAME,
     decode_server_frame,
@@ -50,7 +53,6 @@ from assess.lib.treesitter_index import (
 )
 
 
-PARSER_PROTOCOL_SCHEMA = "vigil-structural-parser/v1"
 DEFAULT_PARSER_TIMEOUT_SECONDS = 15.0
 PARSER_WALL_TIMEOUT_FACTOR = 4
 MAX_DEFAULT_PARSER_JOBS = 8
@@ -61,8 +63,6 @@ DEFAULT_MAX_EXACT_SOURCE_BYTES = 8 * 1024 * 1024
 DEFAULT_MAX_LINE_BYTES = 1024 * 1024
 DEFAULT_MEMORY_LIMIT_BYTES = 1024 * 1024 * 1024
 MAX_WORKER_DIAGNOSTIC_BYTES = 64 * 1024
-PARSER_CAPABILITY_DENIED_EXIT = 78
-PARSER_MEMORY_LIMIT_EXIT = 79
 _READ_SIZE = 64 * 1024
 _WIDE_UNICODE_BOMS = (
     codecs.BOM_UTF32_LE, codecs.BOM_UTF32_BE, codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE,
@@ -825,45 +825,35 @@ def index_file(
         raise ValueError("parser memory cap must be an integer of at least 16 MiB")
     if cancellation_requested is not None and cancellation_requested():
         raise ParserBoundaryCancelled("structural parser cancelled")
-    if source.startswith(_WIDE_UNICODE_BOMS):
-        return _fallback(
-            file_path, language, source, reason="utf16_or_utf32_source",
+    # Ordered, and short-circuiting: a wide-Unicode file is reported as such
+    # and never scanned for giant lines.
+    fallback_reason = (
+        "utf16_or_utf32_source" if source.startswith(_WIDE_UNICODE_BOMS)
+        else "exact_parser_source_limit" if len(source) > DEFAULT_MAX_EXACT_SOURCE_BYTES
+        else "giant_line_resource_limit" if _has_giant_line(
+            source, max_line_bytes=DEFAULT_MAX_LINE_BYTES,
             cancellation_requested=cancellation_requested,
         )
-    if len(source) > DEFAULT_MAX_EXACT_SOURCE_BYTES:
+        else ""
+    )
+    if fallback_reason:
         return _fallback(
-            file_path, language, source, reason="exact_parser_source_limit",
-            cancellation_requested=cancellation_requested,
-        )
-    if _has_giant_line(
-        source, max_line_bytes=DEFAULT_MAX_LINE_BYTES,
-        cancellation_requested=cancellation_requested,
-    ):
-        return _fallback(
-            file_path, language, source, reason="giant_line_resource_limit",
+            file_path, language, source, reason=fallback_reason,
             cancellation_requested=cancellation_requested,
         )
 
-    if worker is None:
-        with ParserWorker() as single_use:
-            return _parse_in_worker(
-                single_use, file_path, language, source,
-                timeout_seconds=float(timeout_seconds),
-                max_result_bytes=max_result_bytes,
-                memory_limit_bytes=memory_limit_bytes,
-                worker_command=worker_command,
-                cancellation_requested=cancellation_requested,
-                result_validator=result_validator,
-            )
-    return _parse_in_worker(
-        worker, file_path, language, source,
-        timeout_seconds=float(timeout_seconds),
-        max_result_bytes=max_result_bytes,
-        memory_limit_bytes=memory_limit_bytes,
-        worker_command=worker_command,
-        cancellation_requested=cancellation_requested,
-        result_validator=result_validator,
-    )
+    # A caller's warm worker outlives this call, so only a single-use server is
+    # closed on the way out.
+    with (ParserWorker() if worker is None else nullcontext(worker)) as active:
+        return _parse_in_worker(
+            active, file_path, language, source,
+            timeout_seconds=float(timeout_seconds),
+            max_result_bytes=max_result_bytes,
+            memory_limit_bytes=memory_limit_bytes,
+            worker_command=worker_command,
+            cancellation_requested=cancellation_requested,
+            result_validator=result_validator,
+        )
 
 
 def _parse_in_worker(

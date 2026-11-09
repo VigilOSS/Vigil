@@ -274,6 +274,25 @@ class _GroupActionParser(argparse.ArgumentParser):
         super().error(message)
 
 
+def _accept_engagement_dir(value: str, seen: int) -> int:
+    """Validate one `--engagement-dir` value, in either spelling, and count it.
+
+    The three refusals and the duplicate count are the same for `--flag value`
+    and `--flag=value`, so they live here once instead of in step across both.
+    """
+    if not value:
+        sys.exit("--engagement-dir: value is empty; pass an absolute or relative path")
+    if value.startswith("-"):
+        sys.exit(
+            f"--engagement-dir: value '{value}' looks like a flag; "
+            "pass an absolute or relative path"
+        )
+    seen += 1
+    if seen > 1:
+        sys.exit("--engagement-dir was specified more than once")
+    return seen
+
+
 def _hoist_root_flags(argv: list[str]) -> list[str]:
     """Move `--engagement-dir <path>` / `--actor-kind <kind>` to the front of
     argv regardless of their original position, but stop at the first `--`
@@ -304,34 +323,15 @@ def _hoist_root_flags(argv: list[str]) -> list[str]:
         if i < boundary and token in _ROOT_FLAGS_WITH_VALUE and i + 1 < len(argv):
             value = argv[i + 1]
             if token == "--engagement-dir":
-                if not value:
-                    sys.exit(
-                        "--engagement-dir: value is empty; pass an absolute or relative path"
-                    )
-                if value.startswith("-"):
-                    sys.exit(
-                        f"--engagement-dir: value '{value}' looks like a flag; "
-                        "pass an absolute or relative path"
-                    )
-                seen_engagement_dir += 1
-                if seen_engagement_dir > 1:
-                    sys.exit("--engagement-dir was specified more than once")
+                seen_engagement_dir = _accept_engagement_dir(value, seen_engagement_dir)
             hoisted.extend([token, value])
             i += 2
             continue
         if i < boundary and any(token.startswith(prefix) for prefix in _ROOT_FLAG_PREFIXES):
             if token.startswith("--engagement-dir="):
-                value = token.split("=", 1)[1]
-                if not value:
-                    sys.exit("--engagement-dir: value is empty; pass an absolute or relative path")
-                if value.startswith("-"):
-                    sys.exit(
-                        f"--engagement-dir: value '{value}' looks like a flag; "
-                        "pass an absolute or relative path"
-                    )
-                seen_engagement_dir += 1
-                if seen_engagement_dir > 1:
-                    sys.exit("--engagement-dir was specified more than once")
+                seen_engagement_dir = _accept_engagement_dir(
+                    token.split("=", 1)[1], seen_engagement_dir
+                )
             hoisted.append(token)
             i += 1
             continue

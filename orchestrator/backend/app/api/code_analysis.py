@@ -116,6 +116,33 @@ RepoKey: TypeAlias = Annotated[
 # Pydantic request models
 # ---------------------------------------------------------------------------
 
+def _require_sorted_unique_canonical(values: list[str], *, field: str, message: str) -> None:
+    """One rule: sorted, unique, canonical identifiers of at most 256 characters.
+
+    ``message`` carries the caller's own wording for the per-entry refusal,
+    which differs between the receipt models.
+    """
+    if values != sorted(set(values)):
+        raise ValueError(f"{field} must be sorted and unique")
+    if any(
+        not isinstance(value, str)
+        or not 1 <= len(value) <= 256
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        for value in values
+    ):
+        raise ValueError(message)
+
+
+def _require_trimmed_nonempty(model: BaseModel, *field_names: str) -> None:
+    for field_name in field_names:
+        value = getattr(model, field_name)
+        if value != value.strip() or not value.strip():
+            raise ValueError(
+                f"{field_name} must be nonempty and contain no surrounding whitespace"
+            )
+
+
 class CodeRepoCreateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -145,26 +172,9 @@ class CodeRepoCreateRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_verified_snapshot_identity(self) -> CodeRepoCreateRequest:
-        if self.source_snapshot_quality != "verified":
-            return self
-        missing = [
-            field_name
-            for field_name in ("source_origin_path", "snapshot_manifest_path", "snapshot_digest")
-            if not getattr(self, field_name)
-        ]
-        if self.source_kind == "legacy":
-            missing.append("source_kind")
-        if self.source_kind == "git" and self.worktree_dirty is None:
-            missing.append("worktree_dirty")
-        if missing:
-            raise ValueError(
-                "verified source snapshot is missing identity fields: "
-                + ", ".join(sorted(missing))
-            )
-        if len(self.snapshot_digest) != 64 or any(
-            character not in "0123456789abcdef" for character in self.snapshot_digest
-        ):
-            raise ValueError("snapshot_digest must be a lowercase SHA-256 digest")
+        problem = code_analysis.verified_snapshot_identity_problem(self.model_dump())
+        if problem is not None:
+            raise ValueError(problem)
         return self
 
 
@@ -788,28 +798,12 @@ class VariantCheckReceiptRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_parent_finding_slugs(self) -> VariantCheckReceiptRequest:
-        if self.parent_finding_slugs != sorted(set(self.parent_finding_slugs)):
-            raise ValueError("parent_finding_slugs must be sorted and unique")
-        invalid = [
-            slug
-            for slug in self.parent_finding_slugs
-            if (
-                not isinstance(slug, str)
-                or not 1 <= len(slug) <= 256
-                or slug != slug.strip()
-                or any(ord(character) < 32 or ord(character) == 127 for character in slug)
-            )
-        ]
-        if invalid:
-            raise ValueError(
-                "parent_finding_slugs entries must be canonical, trimmed strings up to 256 characters"
-            )
-        for field_name in ("evidence_ref", "rationale"):
-            value = getattr(self, field_name)
-            if value != value.strip() or not value.strip():
-                raise ValueError(
-                    f"{field_name} must be nonempty and contain no surrounding whitespace"
-                )
+        _require_sorted_unique_canonical(
+            self.parent_finding_slugs,
+            field="parent_finding_slugs",
+            message="parent_finding_slugs entries must be canonical, trimmed strings up to 256 characters",
+        )
+        _require_trimmed_nonempty(self, "evidence_ref", "rationale")
         return self
 
 
@@ -829,26 +823,16 @@ class FuzzDecisionRequest(BaseModel):
 
     @model_validator(mode="after")
     def validate_target_ids(self) -> FuzzDecisionRequest:
-        if self.target_ids != sorted(set(self.target_ids)):
-            raise ValueError("target_ids must be sorted and unique")
-        if any(
-            not target_id
-            or target_id != target_id.strip()
-            or len(target_id) > 256
-            or any(ord(character) < 32 or ord(character) == 127 for character in target_id)
-            for target_id in self.target_ids
-        ):
-            raise ValueError("target_ids entries must be canonical strings up to 256 characters")
+        _require_sorted_unique_canonical(
+            self.target_ids,
+            field="target_ids",
+            message="target_ids entries must be canonical strings up to 256 characters",
+        )
         if self.decision == "not_required" and self.target_ids:
             raise ValueError("not_required fuzz decisions cannot declare target_ids")
         if self.decision == "required" and not self.target_ids:
             raise ValueError("required fuzz decisions must declare at least one target_id")
-        for field_name in ("evidence_ref", "rationale"):
-            value = getattr(self, field_name)
-            if value != value.strip() or not value.strip():
-                raise ValueError(
-                    f"{field_name} must be nonempty and contain no surrounding whitespace"
-                )
+        _require_trimmed_nonempty(self, "evidence_ref", "rationale")
         return self
 
 
@@ -885,18 +869,11 @@ class FuzzCampaignReceiptRequest(BaseModel):
             ("covered_finding_slugs", self.covered_finding_slugs),
             ("sanitizers", self.sanitizers),
         ):
-            if values != sorted(set(values)):
-                raise ValueError(f"{field_name} must be sorted and unique")
-            if any(
-                not value
-                or value != value.strip()
-                or len(value) > 256
-                or any(ord(character) < 32 or ord(character) == 127 for character in value)
-                for value in values
-            ):
-                raise ValueError(
-                    f"{field_name} entries must be canonical strings up to 256 characters"
-                )
+            _require_sorted_unique_canonical(
+                values,
+                field=field_name,
+                message=f"{field_name} entries must be canonical strings up to 256 characters",
+            )
         if self.target_id != self.target_id.strip() or any(
             ord(character) < 32 or ord(character) == 127
             for character in self.target_id
@@ -907,12 +884,7 @@ class FuzzCampaignReceiptRequest(BaseModel):
             for character in self.engine
         ):
             raise ValueError("engine must be a canonical string")
-        for field_name in ("triage_summary", "evidence_ref", "rationale"):
-            value = getattr(self, field_name)
-            if value != value.strip() or not value.strip():
-                raise ValueError(
-                    f"{field_name} must be nonempty and contain no surrounding whitespace"
-                )
+        _require_trimmed_nonempty(self, "triage_summary", "evidence_ref", "rationale")
         if self.outcome == "completed_no_crash" and self.crash_count != 0:
             raise ValueError("completed_no_crash requires crash_count=0")
         if self.outcome == "completed_crashes_triaged" and self.crash_count < 1:
@@ -983,6 +955,38 @@ def _mutate_with_audit(
         return record
 
 
+async def _code_mutation(
+    engagement_key: str,
+    record_type: str | None,
+    service_call: Callable[[int], Any],
+    *,
+    audit: Callable[[int, dict[str, Any]], None] | None = None,
+    broadcast_payload: Callable[[Any], dict[str, Any]] | None = None,
+) -> Any:
+    """Resolve the engagement, run the service call on a worker thread, broadcast.
+
+    The one scaffolding every code mutation route shares. ``audit`` nests the
+    call inside `_mutate_with_audit` so the state and its audit commit together;
+    ``record_type`` of None skips the broadcast for the routes that publish
+    nothing or publish it themselves.
+    """
+    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
+    if audit is None:
+        record = await anyio.to_thread.run_sync(lambda: service_call(engagement.id))
+    else:
+        audit_call = audit
+        record = await anyio.to_thread.run_sync(
+            lambda: _mutate_with_audit(
+                lambda: service_call(engagement.id),
+                lambda value: audit_call(engagement.id, value),
+            )
+        )
+    if record_type is not None:
+        payload = record if broadcast_payload is None else broadcast_payload(record)
+        await _broadcast(engagement.key, record_type, payload)
+    return record
+
+
 def _audit_code_mutation(
     engagement_id: int,
     *,
@@ -1033,30 +1037,28 @@ def _audit_code_mutation(
 
 @router.post("/repos/refresh/start", status_code=status.HTTP_201_CREATED)
 async def start_repo_refresh(engagement_key: str, request: CodeRepoCreateRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.start_code_repo_refresh,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "repo_refresh_started",
+        lambda engagement_id: code_analysis.start_code_repo_refresh(
+            engagement_id,
             request.model_dump(exclude_unset=True),
-        )
+        ),
     )
-    await _broadcast(engagement.key, "repo_refresh_started", record)
-    return record
 
 
 @router.post("/repos/refresh/preview")
 async def preview_repo_refresh(
     engagement_key: str, request: CodeRepoRefreshPreviewRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    return await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.preview_code_repo_refresh,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        None,
+        lambda engagement_id: code_analysis.preview_code_repo_refresh(
+            engagement_id,
             repo_key=request.repo_key,
             files=[item.model_dump() for item in request.files],
-        )
+        ),
     )
 
 
@@ -1064,35 +1066,32 @@ async def preview_repo_refresh(
 async def stage_repo_refresh_files(
     engagement_key: str, repo_id: int, request: CodeRepoRefreshFilesRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.stage_code_repo_refresh_files,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        None,
+        lambda engagement_id: code_analysis.stage_code_repo_refresh_files(
+            engagement_id,
             repo_id,
             refresh_token=request.refresh_token,
             files=[item.model_dump() for item in request.files],
-        )
+        ),
     )
-    return record
 
 
 @router.post("/repos/{repo_id}/refresh/commit")
 async def commit_repo_refresh(
     engagement_key: str, repo_id: int, request: CodeRepoRefreshCommitRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.commit_code_repo_refresh,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "repo_refresh_committed",
+        lambda engagement_id: code_analysis.commit_code_repo_refresh(
+            engagement_id,
             repo_id,
             refresh_token=request.refresh_token,
             manifest_complete=request.manifest_complete,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "repo_refresh_committed", record)
-    return record
 
 
 def _with_structural_index_state(repo: dict[str, Any]) -> dict[str, Any]:
@@ -1123,12 +1122,11 @@ def get_repo(engagement_key: str, repo_id: int) -> dict[str, Any]:
 
 @router.patch("/repos/{repo_id}")
 async def update_repo(engagement_key: str, repo_id: int, request: dict[str, Any]) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(code_analysis.update_code_repo, engagement.id, repo_id, **request)
+    return await _code_mutation(
+        engagement_key,
+        "repo",
+        lambda engagement_id: code_analysis.update_code_repo(engagement_id, repo_id, **request),
     )
-    await _broadcast(engagement.key, "repo", record)
-    return record
 
 
 @router.post("/repos/{repo_id}/lsp-config")
@@ -1137,19 +1135,17 @@ async def publish_repo_lsp_config(
     repo_id: int,
     request: CodeRepoLspConfigPublishRequest,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.publish_code_repo_lsp_config,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "repo_lsp_config",
+        lambda engagement_id: code_analysis.publish_code_repo_lsp_config(
+            engagement_id,
             repo_id,
             repo_generation=request.repo_generation,
             source_manifest_digest=request.source_manifest_digest,
             lsp_config=request.lsp_config,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "repo_lsp_config", record)
-    return record
 
 
 # ---------------------------------------------------------------------------
@@ -1261,26 +1257,23 @@ def get_file(engagement_key: str, file_id: int) -> dict[str, Any]:
 
 @router.post("/files/bulk-classify")
 async def bulk_classify_files(engagement_key: str, request: CodeFilesBulkClassifyRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.bulk_classify_code_files,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "file_classification",
+        lambda engagement_id: code_analysis.bulk_classify_code_files(
+            engagement_id,
             classifications=[c.model_dump() for c in request.classifications],
-        )
+        ),
     )
-    await _broadcast(engagement.key, "file_classification", record)
-    return record
 
 
 @router.patch("/files/{file_id}")
 async def update_file(engagement_key: str, file_id: int, request: dict[str, Any]) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(code_analysis.update_code_file, engagement.id, file_id, **request)
+    return await _code_mutation(
+        engagement_key,
+        "file",
+        lambda engagement_id: code_analysis.update_code_file(engagement_id, file_id, **request),
     )
-    await _broadcast(engagement.key, "file", record)
-    return record
 
 
 @router.post("/files/bulk-structural-metadata")
@@ -1288,11 +1281,11 @@ async def bulk_structural_metadata(
     engagement_key: str,
     request: BulkStructuralMetadataRequest,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.bulk_update_structural_metadata,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "structural_metadata",
+        lambda engagement_id: code_analysis.bulk_update_structural_metadata(
+            engagement_id,
             repo_id=request.repo_id,
             repo_generation=request.repo_generation,
             source_manifest_digest=request.source_manifest_digest,
@@ -1305,10 +1298,8 @@ async def bulk_structural_metadata(
             artifact_truncated_file_paths=request.artifact_truncated_file_paths,
             analysis_status_counts=request.analysis_status_counts.model_dump(),
             updates=[u.model_dump(exclude_unset=True) for u in request.updates],
-        )
+        ),
     )
-    await _broadcast(engagement.key, "structural_metadata", record)
-    return record
 
 
 # ---------------------------------------------------------------------------
@@ -1317,17 +1308,16 @@ async def bulk_structural_metadata(
 
 @router.post("/modules", status_code=status.HTTP_201_CREATED)
 async def bulk_create_modules(engagement_key: str, request: CodeModulesBulkCreateRequest) -> list[dict[str, Any]]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    records = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.bulk_create_code_modules,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "modules",
+        lambda engagement_id: code_analysis.bulk_create_code_modules(
+            engagement_id,
             repo_id=request.repo_id,
             modules=[m.model_dump() for m in request.modules],
-        )
+        ),
+        broadcast_payload=lambda records: {"count": len(records)},
     )
-    await _broadcast(engagement.key, "modules", {"count": len(records)})
-    return records
 
 
 @router.get("/modules")
@@ -1345,18 +1335,16 @@ def list_modules(
 
 @router.post("/analysis-queue", status_code=status.HTTP_201_CREATED)
 async def bulk_create_queue_items(engagement_key: str, request: QueueItemsBulkCreateRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.bulk_create_queue_items,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "analysis_queue",
+        lambda engagement_id: code_analysis.bulk_create_queue_items(
+            engagement_id,
             items=[i.model_dump() for i in request.items],
             mode=request.mode,
             reason=request.reason,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "analysis_queue", record)
-    return record
 
 
 @router.get("/analysis-queue")
@@ -1414,11 +1402,11 @@ def get_queue_stats(engagement_key: str) -> dict[str, Any]:
 
 @router.post("/analysis-queue/fetch")
 async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> list[dict[str, Any]]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    records = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.fetch_queue_items,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "queue_fetch",
+        lambda engagement_id: code_analysis.fetch_queue_items(
+            engagement_id,
             limit=request.limit,
             agent_name=request.agent_name,
             repo_id=request.repo_id,
@@ -1428,192 +1416,168 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
             item_ids=request.item_ids,
             path_prefix=request.path_prefix,
             path_glob=request.path_glob,
-        )
+        ),
+        broadcast_payload=lambda records: {"count": len(records)},
     )
-    await _broadcast(engagement.key, "queue_fetch", {"count": len(records)})
-    return records
 
 
 @router.post("/analysis-queue/done")
 async def complete_queue_items(engagement_key: str, request: QueueCompleteRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.complete_queue_items,
-                engagement.id,
-                item_ids=request.item_ids,
-                agent_name=request.agent_name,
-                lease_token=request.lease_token,
-                disposition=request.disposition,
-                notes=request.notes,
-                cwe_coverage=request.cwe_coverage,
-                skip_reason=request.skip_reason,
-            ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch done",
-                action=f"item_ids={request.item_ids} disposition={request.disposition}",
-                actor_name=request.agent_name,
-                result=request.notes,
-                metadata={
-                    "item_ids": request.item_ids,
-                    "disposition": request.disposition,
-                    "lease_token": request.lease_token,
-                },
-            ),
-        )
+    return await _code_mutation(
+        engagement_key,
+        "queue_done",
+        lambda engagement_id: code_analysis.complete_queue_items(
+            engagement_id,
+            item_ids=request.item_ids,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
+            disposition=request.disposition,
+            notes=request.notes,
+            cwe_coverage=request.cwe_coverage,
+            skip_reason=request.skip_reason,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch done",
+            action=f"item_ids={request.item_ids} disposition={request.disposition}",
+            actor_name=request.agent_name,
+            result=request.notes,
+            metadata={
+                "item_ids": request.item_ids,
+                "disposition": request.disposition,
+                "lease_token": request.lease_token,
+            },
+        ),
     )
-    await _broadcast(engagement.key, "queue_done", record)
-    return record
 
 
 @router.post("/analysis-queue/error")
 async def error_queue_items(engagement_key: str, request: QueueErrorRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.error_queue_items,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "queue_error",
+        lambda engagement_id: code_analysis.error_queue_items(
+            engagement_id,
             item_ids=request.item_ids,
             agent_name=request.agent_name,
             lease_token=request.lease_token,
             notes=request.notes,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "queue_error", record)
-    return record
 
 
 @router.post("/analysis-queue/needs-context")
 async def needs_context_queue_items(engagement_key: str, request: QueueNeedsContextRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.needs_context_queue_items,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "queue_needs_context",
+        lambda engagement_id: code_analysis.needs_context_queue_items(
+            engagement_id,
             item_ids=request.item_ids,
             agent_name=request.agent_name,
             lease_token=request.lease_token,
             expansion_request=request.expansion_request,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "queue_needs_context", record)
-    return record
 
 
 @router.post("/analysis-queue/reset-stale")
 async def reset_stale_queue_items(engagement_key: str, request: QueueResetStaleRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.reset_stale_queue_items,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "queue_reset_stale",
+        lambda engagement_id: code_analysis.reset_stale_queue_items(
+            engagement_id,
             minutes=request.minutes,
             repo_id=request.repo_id,
             batch_theme=request.batch_theme,
             queue_mode=request.queue_mode,
             path_prefix=request.path_prefix,
             path_glob=request.path_glob,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "queue_reset_stale", record)
-    return record
 
 
 @router.post("/analysis-queue/heartbeat")
 async def heartbeat_queue_item(engagement_key: str, request: QueueHeartbeatRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.heartbeat_queue_item,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "queue_heartbeat",
+        lambda engagement_id: code_analysis.heartbeat_queue_item(
+            engagement_id,
             item_id=request.item_id,
             agent_name=request.agent_name,
             lease_token=request.lease_token,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "queue_heartbeat", record)
-    return record
 
 
 @router.post("/analysis-queue/adopt-lease")
 async def adopt_queue_lease(
     engagement_key: str, request: QueueAdoptLeaseRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.adopt_queue_lease,
-                engagement.id,
-                item_id=request.item_id,
-                expected_agent=request.expected_agent,
-                expected_lease_token=request.expected_lease_token,
-                agent_name=request.agent_name,
-                stale_minutes=request.stale_minutes,
-                reason=request.reason,
+    return await _code_mutation(
+        engagement_key,
+        "queue_adopt_lease",
+        lambda engagement_id: code_analysis.adopt_queue_lease(
+            engagement_id,
+            item_id=request.item_id,
+            expected_agent=request.expected_agent,
+            expected_lease_token=request.expected_lease_token,
+            agent_name=request.agent_name,
+            stale_minutes=request.stale_minutes,
+            reason=request.reason,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch adopt-lease",
+            action=(
+                f"item_id={request.item_id} from={request.expected_agent} "
+                f"to={request.agent_name} stale_minutes={request.stale_minutes}"
             ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch adopt-lease",
-                action=(
-                    f"item_id={request.item_id} from={request.expected_agent} "
-                    f"to={request.agent_name} stale_minutes={request.stale_minutes}"
-                ),
-                actor_name=request.agent_name,
-                result=request.reason,
-                metadata={
-                    "item_id": request.item_id,
-                    "previous_agent_name": request.expected_agent,
-                    "previous_lease_token": request.expected_lease_token,
-                    "lease_token": record["item"]["lease_token"],
-                    "stale_minutes": request.stale_minutes,
-                    "preserved_result_count": record["preserved_result_count"],
-                },
-            ),
-        )
+            actor_name=request.agent_name,
+            result=request.reason,
+            metadata={
+                "item_id": request.item_id,
+                "previous_agent_name": request.expected_agent,
+                "previous_lease_token": request.expected_lease_token,
+                "lease_token": record["item"]["lease_token"],
+                "stale_minutes": request.stale_minutes,
+                "preserved_result_count": record["preserved_result_count"],
+            },
+        ),
     )
-    await _broadcast(engagement.key, "queue_adopt_lease", record)
-    return record
 
 
 @router.post("/analysis-queue/release")
 async def release_queue_lease(
     engagement_key: str, request: QueueReleaseRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.release_queue_lease,
-                engagement.id,
-                item_id=request.item_id,
-                agent_name=request.agent_name,
-                lease_token=request.lease_token,
-                reason=request.reason,
-            ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch release",
-                action=f"item_id={request.item_id} agent={request.agent_name}",
-                actor_name=request.agent_name,
-                result=request.reason,
-                metadata={
-                    "item_id": request.item_id,
-                    "file_path": record["file_path"],
-                    "previous_agent_name": record["previous_agent_name"],
-                    "previous_lease_token": record["previous_lease_token"],
-                    "discarded_result_count": record["discarded_result_count"],
-                },
-            ),
-        )
+    return await _code_mutation(
+        engagement_key,
+        "queue_release",
+        lambda engagement_id: code_analysis.release_queue_lease(
+            engagement_id,
+            item_id=request.item_id,
+            agent_name=request.agent_name,
+            lease_token=request.lease_token,
+            reason=request.reason,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch release",
+            action=f"item_id={request.item_id} agent={request.agent_name}",
+            actor_name=request.agent_name,
+            result=request.reason,
+            metadata={
+                "item_id": request.item_id,
+                "file_path": record["file_path"],
+                "previous_agent_name": record["previous_agent_name"],
+                "previous_lease_token": record["previous_lease_token"],
+                "discarded_result_count": record["discarded_result_count"],
+            },
+        ),
     )
-    await _broadcast(engagement.key, "queue_release", record)
-    return record
 
 
 @router.get("/analysis-queue/{item_id}/progress")
@@ -1624,76 +1588,61 @@ def get_queue_item_progress(engagement_key: str, item_id: int) -> dict[str, Any]
 
 @router.post("/analysis-queue/retry-error")
 async def retry_error_queue_items(engagement_key: str, request: QueueRetryErrorRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.retry_error_queue_items,
-                engagement.id,
-                item_ids=request.item_ids,
-                reason=request.reason,
-            ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch retry-error",
-                action=f"item_ids={request.item_ids} reason={request.reason}",
-                result="",
-                metadata={"item_ids": request.item_ids, "reason": request.reason},
-            ),
-        )
+    return await _code_mutation(
+        engagement_key,
+        "queue_retry_error",
+        lambda engagement_id: code_analysis.retry_error_queue_items(
+            engagement_id,
+            item_ids=request.item_ids,
+            reason=request.reason,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch retry-error",
+            action=f"item_ids={request.item_ids} reason={request.reason}",
+            result="",
+            metadata={"item_ids": request.item_ids, "reason": request.reason},
+        ),
     )
-    await _broadcast(engagement.key, "queue_retry_error", record)
-    return record
 
 
 @router.post("/analysis-queue/retry-needs-context")
 async def retry_needs_context_queue_items(
     engagement_key: str, request: QueueRetryNeedsContextRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.retry_needs_context_queue_items,
-                engagement.id,
-                item_ids=request.item_ids,
-                reason=request.reason,
-            ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch retry-needs-context",
-                action=f"item_ids={request.item_ids} reason={request.reason}",
-                metadata={"item_ids": request.item_ids, "reason": request.reason},
-            ),
-        )
+    return await _code_mutation(
+        engagement_key,
+        "queue_retry_needs_context",
+        lambda engagement_id: code_analysis.retry_needs_context_queue_items(
+            engagement_id,
+            item_ids=request.item_ids,
+            reason=request.reason,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch retry-needs-context",
+            action=f"item_ids={request.item_ids} reason={request.reason}",
+            metadata={"item_ids": request.item_ids, "reason": request.reason},
+        ),
     )
-    await _broadcast(engagement.key, "queue_retry_needs_context", record)
-    return record
 
 
 @router.post("/analysis-queue/requeue", status_code=status.HTTP_201_CREATED)
 async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.requeue_triggered_files,
-                engagement.id,
-                items=[item.model_dump() for item in request.items],
-            ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch requeue-triggers",
-                action=f"count={len(request.items)}",
-                metadata={"count": len(request.items)},
-            ),
-        )
+    return await _code_mutation(
+        engagement_key,
+        "queue_requeue",
+        lambda engagement_id: code_analysis.requeue_triggered_files(
+            engagement_id,
+            items=[item.model_dump() for item in request.items],
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch requeue-triggers",
+            action=f"count={len(request.items)}",
+            metadata={"count": len(request.items)},
+        ),
     )
-    await _broadcast(engagement.key, "queue_requeue", record)
-    return record
 
 
 @router.get("/triggers")
@@ -1714,28 +1663,23 @@ def list_code_triggers(
 
 @router.post("/triggers/resolve")
 async def resolve_code_triggers(engagement_key: str, request: TriggerResolveRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.resolve_code_triggers,
-                engagement.id,
-                items=[item.model_dump() for item in request.items],
-                resolution_status=request.resolution_status,
-                resolution_note=request.resolution_note,
-            ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-dispatch resolve-triggers",
-                action=f"status={request.resolution_status} count={len(request.items)}",
-                result=request.resolution_note,
-                metadata={"count": len(request.items), "resolution_status": request.resolution_status},
-            ),
-        )
+    return await _code_mutation(
+        engagement_key,
+        "triggers_resolve",
+        lambda engagement_id: code_analysis.resolve_code_triggers(
+            engagement_id,
+            items=[item.model_dump() for item in request.items],
+            resolution_status=request.resolution_status,
+            resolution_note=request.resolution_note,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch resolve-triggers",
+            action=f"status={request.resolution_status} count={len(request.items)}",
+            result=request.resolution_note,
+            metadata={"count": len(request.items), "resolution_status": request.resolution_status},
+        ),
     )
-    await _broadcast(engagement.key, "triggers_resolve", record)
-    return record
 
 
 # ---------------------------------------------------------------------------
@@ -1744,35 +1688,33 @@ async def resolve_code_triggers(engagement_key: str, request: TriggerResolveRequ
 
 @router.post("/analysis-results", status_code=status.HTTP_201_CREATED)
 async def create_analysis_result(engagement_key: str, request: AnalysisResultRecord) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(code_analysis.create_analysis_result, engagement.id, request.model_dump()),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-record analysis",
-                action=(
-                    f"file_id={record['file_id']} receipt={request.receipt_kind} "
-                    f"callables={len(request.callable_refs)} spans={len(request.reviewed_spans)}"
-                ),
-                actor_name=request.agent_name,
-                result=request.disposition,
-                metadata={
-                    "file_id": record["file_id"],
-                    "result_id": record["id"],
-                    "queue_item_id": request.queue_item_id,
-                    "finding_slug": request.finding_slug,
-                    "disposition": request.disposition,
-                    "receipt_kind": request.receipt_kind,
-                    "callable_count": len(request.callable_refs),
-                    "reviewed_span_count": len(request.reviewed_spans),
-                },
+    return await _code_mutation(
+        engagement_key,
+        "analysis_result",
+        lambda engagement_id: code_analysis.create_analysis_result(
+            engagement_id, request.model_dump()
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-record analysis",
+            action=(
+                f"file_id={record['file_id']} receipt={request.receipt_kind} "
+                f"callables={len(request.callable_refs)} spans={len(request.reviewed_spans)}"
             ),
-        )
+            actor_name=request.agent_name,
+            result=request.disposition,
+            metadata={
+                "file_id": record["file_id"],
+                "result_id": record["id"],
+                "queue_item_id": request.queue_item_id,
+                "finding_slug": request.finding_slug,
+                "disposition": request.disposition,
+                "receipt_kind": request.receipt_kind,
+                "callable_count": len(request.callable_refs),
+                "reviewed_span_count": len(request.reviewed_spans),
+            },
+        ),
     )
-    await _broadcast(engagement.key, "analysis_result", record)
-    return record
 
 
 @router.get("/analysis-results")
@@ -1879,48 +1821,41 @@ async def create_variant_check_receipt(
     engagement_key: str,
     request: VariantCheckReceiptRequest,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_analysis.record_variant_check_receipt,
-                engagement.id,
-                dispatch_id=request.dispatch_id,
-                file_id=request.file_id,
-                repo_id=request.repo_id,
-                repo_generation=request.repo_generation,
-                source_manifest_digest=request.source_manifest_digest,
-                file_sha256=request.file_sha256,
-                parent_finding_slugs=request.parent_finding_slugs,
-                status_value=request.status,
-                evidence_ref=request.evidence_ref,
-                rationale=request.rationale,
+    return await _code_mutation(
+        engagement_key,
+        "variant_check_receipt",
+        lambda engagement_id: code_analysis.record_variant_check_receipt(
+            engagement_id,
+            dispatch_id=request.dispatch_id,
+            file_id=request.file_id,
+            repo_id=request.repo_id,
+            repo_generation=request.repo_generation,
+            source_manifest_digest=request.source_manifest_digest,
+            file_sha256=request.file_sha256,
+            parent_finding_slugs=request.parent_finding_slugs,
+            status_value=request.status,
+            evidence_ref=request.evidence_ref,
+            rationale=request.rationale,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-record variant-check",
+            action=(
+                f"dispatch_id={request.dispatch_id} file_id={request.file_id} "
+                f"receipt_id={record['id']}"
             ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-record variant-check",
-                action=(
-                    f"dispatch_id={request.dispatch_id} file_id={request.file_id} "
-                    f"receipt_id={record['id']}"
-                ),
-                actor_name=record["dispatch_agent_id"],
-                result="current" if record["current"] else "historical",
-                metadata={
-                    "dispatch_id": request.dispatch_id,
-                    "file_id": request.file_id,
-                    "receipt_id": record["id"],
-                    "receipt_fingerprint": record["receipt_fingerprint"],
-                    "agent_id": record["dispatch_agent_id"],
-                    "agent_role": record["dispatch_agent_role"],
-                },
-            ),
-        )
+            actor_name=record["dispatch_agent_id"],
+            result="current" if record["current"] else "historical",
+            metadata={
+                "dispatch_id": request.dispatch_id,
+                "file_id": request.file_id,
+                "receipt_id": record["id"],
+                "receipt_fingerprint": record["receipt_fingerprint"],
+                "agent_id": record["dispatch_agent_id"],
+                "agent_role": record["dispatch_agent_role"],
+            },
+        ),
     )
-    await _broadcast(engagement.key, "variant_check_receipt", record)
-    return record
 
 
 @router.get("/variant-checks")
@@ -2026,52 +1961,45 @@ async def create_fuzz_campaign_receipt(
     engagement_key: str,
     request: FuzzCampaignReceiptRequest,
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            _mutate_with_audit,
-            functools.partial(
-                code_fuzz_completion.record_fuzz_campaign_receipt,
-                engagement.id,
-                dispatch_id=request.dispatch_id,
-                repo_id=request.repo_id,
-                repo_generation=request.repo_generation,
-                source_manifest_digest=request.source_manifest_digest,
-                target_id=request.target_id,
-                covered_finding_slugs=request.covered_finding_slugs,
-                engine=request.engine,
-                sanitizers=request.sanitizers,
-                run_budget_seconds=request.run_budget_seconds,
-                executions=request.executions,
-                outcome=request.outcome,
-                crash_count=request.crash_count,
-                triage_summary=request.triage_summary,
-                evidence_ref=request.evidence_ref,
-                rationale=request.rationale,
+    return await _code_mutation(
+        engagement_key,
+        "fuzz_campaign_receipt",
+        lambda engagement_id: code_fuzz_completion.record_fuzz_campaign_receipt(
+            engagement_id,
+            dispatch_id=request.dispatch_id,
+            repo_id=request.repo_id,
+            repo_generation=request.repo_generation,
+            source_manifest_digest=request.source_manifest_digest,
+            target_id=request.target_id,
+            covered_finding_slugs=request.covered_finding_slugs,
+            engine=request.engine,
+            sanitizers=request.sanitizers,
+            run_budget_seconds=request.run_budget_seconds,
+            executions=request.executions,
+            outcome=request.outcome,
+            crash_count=request.crash_count,
+            triage_summary=request.triage_summary,
+            evidence_ref=request.evidence_ref,
+            rationale=request.rationale,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-record fuzz-campaign",
+            action=(
+                f"dispatch_id={request.dispatch_id} repo_id={request.repo_id} "
+                f"target_id={request.target_id} receipt_id={record['id']}"
             ),
-            lambda record: _audit_code_mutation(
-                engagement.id,
-                title="code-record fuzz-campaign",
-                action=(
-                    f"dispatch_id={request.dispatch_id} repo_id={request.repo_id} "
-                    f"target_id={request.target_id} receipt_id={record['id']}"
-                ),
-                actor_name=record["dispatch_agent_id"],
-                result="covering" if record["covering"] else "non-covering",
-                metadata={
-                    "dispatch_id": request.dispatch_id,
-                    "repo_id": request.repo_id,
-                    "receipt_id": record["id"],
-                    "receipt_fingerprint": record["receipt_fingerprint"],
-                    "outcome": request.outcome,
-                },
-            ),
-        )
+            actor_name=record["dispatch_agent_id"],
+            result="covering" if record["covering"] else "non-covering",
+            metadata={
+                "dispatch_id": request.dispatch_id,
+                "repo_id": request.repo_id,
+                "receipt_id": record["id"],
+                "receipt_fingerprint": record["receipt_fingerprint"],
+                "outcome": request.outcome,
+            },
+        ),
     )
-    await _broadcast(engagement.key, "fuzz_campaign_receipt", record)
-    return record
 
 
 @router.get("/fuzz/campaign-receipts")
@@ -2102,19 +2030,17 @@ def list_fuzz_campaign_receipts(
 
 @router.post("/threat-model")
 async def create_threat_model(engagement_key: str, request: ThreatModelRecordRequest) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.record_threat_model,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "threat_model",
+        lambda engagement_id: code_analysis.record_threat_model(
+            engagement_id,
             repo_id=request.repo_id,
             repo_generation=request.repo_generation,
             source_manifest_digest=request.source_manifest_digest,
             threat_model=request.threat_model,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "threat_model", record)
-    return record
 
 
 @router.get("/threat-model/{repo_id}")
@@ -2143,11 +2069,11 @@ def get_readiness(
 async def bind_code_lead(
     engagement_key: str, request: CodeLeadBindRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.bind_code_lead,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "lead_binding",
+        lambda engagement_id: code_analysis.bind_code_lead(
+            engagement_id,
             note_id=request.note_id,
             repo_id=request.repo_id,
             file_path=request.file_path,
@@ -2156,10 +2082,8 @@ async def bind_code_lead(
             prior_art_ref=request.prior_art_ref,
             rationale=request.rationale,
             bound_by=request.bound_by,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "lead_binding", record)
-    return record
 
 
 @router.get("/lead-bindings")
@@ -2194,17 +2118,15 @@ def list_code_lead_bindings(
 async def unbind_code_lead(
     engagement_key: str, binding_id: int, request: CodeLeadUnbindRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(lambda: get_engagement_or_404(engagement_key))
-    record = await anyio.to_thread.run_sync(
-        functools.partial(
-            code_analysis.unbind_code_lead,
-            engagement.id,
+    return await _code_mutation(
+        engagement_key,
+        "lead_binding",
+        lambda engagement_id: code_analysis.unbind_code_lead(
+            engagement_id,
             binding_id,
             reason=request.reason,
-        )
+        ),
     )
-    await _broadcast(engagement.key, "lead_binding", record)
-    return record
 
 
 # ---------------------------------------------------------------------------

@@ -1,6 +1,7 @@
 """Precise host-process ownership registry used by host-exec reconciliation."""
 from __future__ import annotations
 
+import functools
 import json
 import math
 import os
@@ -9,6 +10,7 @@ import secrets
 import signal
 import stat
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -261,9 +263,10 @@ def _process_identity(pid: int) -> str | None:
     return f"psutil-create:{created_at.hex()}"
 
 
-def _pid_exists(pid: int) -> bool | None:
+def _signal_probe(send: Callable[[int, int], None], target: int) -> bool | None:
+    """Probe liveness with a null signal: False gone, True alive, None unverifiable."""
     try:
-        os.kill(int(pid), 0)
+        send(int(target), 0)
     except ProcessLookupError:
         return False
     except PermissionError:
@@ -271,6 +274,10 @@ def _pid_exists(pid: int) -> bool | None:
     except (OSError, TypeError, ValueError, OverflowError):
         return None
     return True
+
+
+def _pid_exists(pid: int) -> bool | None:
+    return _signal_probe(os.kill, pid)
 
 
 def _process_group_id(pid: int) -> int | None:
@@ -282,15 +289,7 @@ def _process_group_id(pid: int) -> int | None:
 
 def _group_exists(pgid: int) -> bool | None:
     """Probe process-group liveness independently of its original leader."""
-    try:
-        os.killpg(int(pgid), 0)
-    except ProcessLookupError:
-        return False
-    except PermissionError:
-        return True
-    except (OSError, TypeError, ValueError, OverflowError):
-        return None
-    return True
+    return _signal_probe(os.killpg, pgid)
 
 
 def capture_process_ownership(pid: int) -> ProcessOwnership:
@@ -406,27 +405,14 @@ def register_process_ownership(
         os.close(directory_fd)
 
 
-def _register_process(
-    engagement_dir: str | os.PathLike[str], *, run_uuid: str, pid: int
-) -> tuple[Path, ProcessOwnership]:
-    ownership = capture_process_ownership(pid)
-    path = register_process_ownership(
-        engagement_dir,
-        run_uuid=run_uuid,
-        ownership=ownership,
-    )
-    return path, ownership
-
-
 def register_process(
     engagement_dir: str | os.PathLike[str], *, run_uuid: str, pid: int
 ) -> Path:
-    path, _ownership = _register_process(
+    return register_process_ownership(
         engagement_dir,
         run_uuid=run_uuid,
-        pid=pid,
+        ownership=capture_process_ownership(pid),
     )
-    return path
 
 
 def register_owned_process(
@@ -618,18 +604,20 @@ def reap_registered_processes(
             pid = int(record["pid"])
             pgid = int(record["pgid"])
             expected = str(record["process_identity"])
+            unlink = functools.partial(
+                _best_effort_unlink_matching_entry,
+                directory_fd,
+                name,
+                device=loaded.device,
+                inode=loaded.inode,
+            )
             current = _process_identity(pid)
             if current is None:
                 if _pid_exists(pid) is False:
                     group_exists = _group_exists(pgid)
                     if group_exists is False:
                         summary["stale"] += 1
-                        if not dry_run and not _best_effort_unlink_matching_entry(
-                            directory_fd,
-                            name,
-                            device=loaded.device,
-                            inode=loaded.inode,
-                        ):
+                        if not dry_run and not unlink():
                             summary["failed"] += 1
                         continue
                     if group_exists is None:
@@ -642,12 +630,7 @@ def reap_registered_processes(
                     continue
             elif current != expected:
                 summary["stale"] += 1
-                if not dry_run and not _best_effort_unlink_matching_entry(
-                    directory_fd,
-                    name,
-                    device=loaded.device,
-                    inode=loaded.inode,
-                ):
+                if not dry_run and not unlink():
                     summary["failed"] += 1
                 continue
             elif _process_group_id(pid) != pgid:
@@ -658,12 +641,7 @@ def reap_registered_processes(
                 continue
             if _terminate_owned_group(pid, pgid, expected):
                 summary["reaped"] += 1
-                if not _best_effort_unlink_matching_entry(
-                    directory_fd,
-                    name,
-                    device=loaded.device,
-                    inode=loaded.inode,
-                ):
+                if not unlink():
                     summary["failed"] += 1
             else:
                 summary["failed"] += 1

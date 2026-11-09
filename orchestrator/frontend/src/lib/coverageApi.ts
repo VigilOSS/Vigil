@@ -5,7 +5,8 @@
 // explanation, and where one item sits in the paged order (record navigation). `GET /coverage-items` (the bare list `vigil assess fetch`
 // pages) is NOT used here — it returns the full note log for every row.
 
-import { request } from "./api";
+import { request, type OffsetPage } from "./api";
+import type { RecordPosition } from "../components/record/recordNavigation";
 
 export type CoverageSortKey =
   | "updated_at"
@@ -78,13 +79,7 @@ export type CoverageLedgerItem = {
   created_from: string;
 };
 
-export type CoverageLedgerPage = {
-  total: number;
-  offset: number;
-  count: number;
-  has_more: boolean;
-  items: CoverageLedgerItem[];
-};
+export type CoverageLedgerPage = OffsetPage<CoverageLedgerItem>;
 
 export type CoverageFacetGroup = {
   values: { value: string; count: number }[];
@@ -265,12 +260,7 @@ export function fetchCoverageItem(engagementKey: string, coverageItemId: number,
 }
 
 /** Where an item sits in the page order for these filters and sort; `index` is null when it does not match. */
-export type CoverageItemPosition = {
-  index: number | null;
-  total: number;
-  previous: CoverageLedgerItem | null;
-  next: CoverageLedgerItem | null;
-};
+export type CoverageItemPosition = RecordPosition<CoverageLedgerItem>;
 
 export function fetchCoveragePosition(
   engagementKey: string,

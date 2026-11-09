@@ -79,25 +79,19 @@ def register_remediation_parser(
     list_cases = commands.add_parser("list", help="List case IDs and join commands, open cases first")
     list_cases.add_argument("--json", action="store_true", help="Full case records with case_id and join_command for agents and scripts")
     show = commands.add_parser("show", help="Show case and review state")
-    show.add_argument("case_id")
     handoff_case = commands.add_parser("handoff", help="Render the current case context for its developer")
-    handoff_case.add_argument("case_id")
     identity = commands.add_parser("identity", help="Attach a primary external reference to a case")
-    identity.add_argument("case_id")
     identity.add_argument("--provider", required=True, help="External reference provider")
     identity.add_argument("--key", dest="external_key", required=True, help="Provider's exact reference key")
     finalize = commands.add_parser("finalize-branch", help="Rename an unpublished case branch or bookmark")
-    finalize.add_argument("case_id")
     finalize.add_argument("--branch", required=True)
     checks = commands.add_parser("checks", help="Execute profile checks against the registered case source")
-    checks.add_argument("case_id")
     checks.add_argument("--actor", required=True)
     checks.add_argument("--name", action="append", default=[], help="Run a named check; repeatable, defaults to all")
     checks.add_argument("--shared-environment", help="Acquire exclusive use of the named shared test environment")
     checks.add_argument("--stage", choices=("verification", "publication"), default="verification",
                         help="publication includes all checks; verification omits publication-only checks")
     regression = commands.add_parser("test", help="Run a regression against reverted fix files, then the finished fix")
-    regression.add_argument("case_id")
     regression.add_argument("--method", required=True)
     regression.add_argument("--command", dest="test_command", required=True)
     regression.add_argument("--expected-failure", required=True, help="Text identifying the expected failure in red output")
@@ -107,13 +101,11 @@ def register_remediation_parser(
     regression.add_argument("--timeout-seconds", type=int, default=600, help="Timeout for each setup/test command (default: 600)")
     environment = commands.add_parser("environment", help="Acquire or release shared test-environment ownership")
     environment.add_argument("action", choices=("acquire", "release"))
-    environment.add_argument("case_id")
     environment.add_argument("--name", required=True)
     environment.add_argument("--actor", required=True)
     environment.add_argument("--token", help="Owning token required for release")
 
     worktree = commands.add_parser("worktree", help="Create a dedicated JJ workspace or Git worktree for a case")
-    worktree.add_argument("case_id")
     worktree.add_argument("--base", help="Override the profile's integration branch for this case")
     worktree.add_argument("--branch")
 
@@ -121,10 +113,8 @@ def register_remediation_parser(
         "sync-revision", help="Record the immutable case revision after committing the fix",
         description="Record the revision before green-test evidence, browser verification, or review. Requires a registered case workspace/bookmark or Git worktree/branch. Git must be clean; JJ snapshots edits and rejects conflicts. A rebase onto a newer base branch moves the review base forward. A content or base change makes approval stale.",
     )
-    sync_revision.add_argument("case_id")
 
     runtime = commands.add_parser("runtime-identity", help="Inspect which worktree or image revision Compose containers serve")
-    runtime.add_argument("case_id")
     runtime.add_argument("--compose-file", required=True, type=Path)
     runtime.add_argument("--service", required=True)
     runtime.add_argument("--container-path", required=True, help="Application path inside the service container")
@@ -133,7 +123,6 @@ def register_remediation_parser(
     runtime.add_argument("--actor")
 
     evidence = commands.add_parser("evidence", help="Record one evidence run")
-    evidence.add_argument("case_id")
     evidence.add_argument("--kind", required=True)
     evidence.add_argument("--method", required=True)
     evidence.add_argument("--environment", choices=("local", "development", "test", "production"), required=True)
@@ -153,7 +142,6 @@ def register_remediation_parser(
         "baseline", help="Record runtime reproduction or code/test support and owner decision",
         description="Record the case's reproduction decision. Record individual runs separately with evidence --kind baseline. Code/test confirmation without runtime reproduction requires an explicit owner decision.",
     )
-    baseline.add_argument("case_id")
     baseline.add_argument("--outcome", choices=("runtime_reproduced", "code_test_confirmed", "unreproduced"), required=True)
     baseline.add_argument("--method", required=True)
     baseline.add_argument("--proved", required=True)
@@ -162,20 +150,17 @@ def register_remediation_parser(
     baseline.add_argument("--owner-reason")
 
     plan = commands.add_parser("plan", help="Save human preparation and verification requirements")
-    plan.add_argument("case_id")
     plan.add_argument("--file", required=True, type=Path)
     plan.add_argument("--requirements-file", type=Path, help="JSON list of case-specific evidence requirements; required for the first plan")
     plan.add_argument("--alternatives-reason", help="Explain the selected verification methods")
 
     release = commands.add_parser("release-plan", help="Record production canary decision and monitoring")
-    release.add_argument("case_id")
     release.add_argument("--production-canary", choices=("required", "not_required", "defer"), required=True)
     release.add_argument("--rationale", required=True)
     release.add_argument("--safe-procedure", default="")
     release.add_argument("--monitoring", required=True)
 
     approve = commands.add_parser("approve", help="Approve the current code and plan snapshot")
-    approve.add_argument("case_id")
     approve.add_argument("--reviewer", required=True)
     approve.add_argument("--owner-instruction", required=True, help="Explicit case-owner instruction to approve the reviewed snapshot")
     approve.add_argument("--review-digest", required=True, help="Digest displayed in the reviewed Vigil case snapshot")
@@ -187,7 +172,6 @@ def register_remediation_parser(
     transition.add_argument("--reason", required=True)
 
     deployment = commands.add_parser("deployment", help="Record a manually triggered development deployment")
-    deployment.add_argument("case_id")
     deployment.add_argument("--workflow", required=True)
     deployment.add_argument("--run-id", required=True)
     deployment.add_argument("--expected-revision", required=True)
@@ -196,7 +180,6 @@ def register_remediation_parser(
     deployment.add_argument("--actor", required=True)
 
     human = commands.add_parser("human-verification", help="Record the owner's development verification result")
-    human.add_argument("case_id")
     human.add_argument("--actor", required=True)
     human.add_argument("--result", choices=("passed", "failed", "blocked"), required=True)
     human.add_argument("--observed-revision", required=True)
@@ -206,7 +189,6 @@ def register_remediation_parser(
         "stagehand", help="Run a trusted local Stagehand script and register evidence",
         description="Attach to configured local Chrome and run a trusted script. Stagehand uses a separate model API key from the configured environment variable; a Claude Code subscription does not authenticate this SDK. Happy-path evidence requires passing steps and a screenshot.",
     )
-    stagehand.add_argument("case_id")
     stagehand.add_argument("--script", required=True, type=Path)
     stagehand.add_argument("--revision", required=True)
     stagehand.add_argument("--environment", choices=("local", "development", "test", "production"), default="local")
@@ -220,7 +202,6 @@ def register_remediation_parser(
         "browser", help="Run a trusted browser UI rehearsal and retain evidence",
         description="Default browse driver uses the existing Claude Code or Codex session for reasoning, with an isolated local browser and no separate model API key. Install browse@0.11.1. Script must expose async def run(browser, output_dir); passed happy-path results require observed steps, a screenshot, and served_revision matching --revision. Stagehand is optional and requires its own configured provider key.",
     )
-    browser.add_argument("case_id")
     browser.add_argument("--driver", choices=("browse", "stagehand"), default="browse", help="browse (default): local tools; stagehand: optional model SDK")
     browser.add_argument("--script", required=True, type=Path)
     browser.add_argument("--revision", required=True)
@@ -235,7 +216,6 @@ def register_remediation_parser(
         "prepare-pr", help="Generate draft PR content after review approval",
         description="Requires current approval of the clean case revision, evidence, and human verification plan. Generate the body, then map it to the repository's PR template before create-pr.",
     )
-    draft.add_argument("case_id")
     draft.add_argument("--output", required=True, type=Path)
     draft.add_argument("--root-cause", required=True, help="Concrete root cause found in the reviewed diff")
     draft.add_argument("--fix-summary", required=True, help="Concrete code change and security boundary restored")
@@ -245,7 +225,6 @@ def register_remediation_parser(
         "create-pr", help="Push approved branch and open a draft PR against the case base",
         description="Requires current approval, a template-mapped body, a final canary decision, origin remote, and authenticated gh. Push the exact approved Git/JJ revision against the captured case base. Retry after partial failure to reconcile the existing draft.",
     )
-    create_pr.add_argument("case_id")
     create_pr.add_argument("--body-file", required=True, type=Path, help="Final body mapped to the repository PR template")
     create_pr.add_argument("--actor", required=True)
     create_pr.add_argument("--template-mapped", action="store_true", help="Assert final body maps required content to the actual repository PR template")
@@ -253,7 +232,6 @@ def register_remediation_parser(
     create_pr.add_argument("--owner-instruction", help="Explicit request to publish the requested PR update")
     create_pr.add_argument("--title", help="Title authored using the profile's repository conventions")
     deploy = commands.add_parser("deployment-run", help="Trigger the profile's development workflow after owner consent")
-    deploy.add_argument("case_id")
     deploy.add_argument("--actor", required=True)
     deploy.add_argument("--owner-instruction", required=True, help="Explicit instruction approving this development deployment")
     deploy.add_argument("--input", action="append", default=[], help="Approved workflow input KEY=VALUE; repeatable")
@@ -264,8 +242,20 @@ def register_remediation_parser(
         "development-handoff", help="Prepare manual GitHub Actions development deployment",
         description="Record the development handoff and print its expected revision and configured deployment_workflow. A human triggers the actual GitHub Actions workflow; this command does not deploy.",
     )
-    handoff.add_argument("case_id")
     handoff.add_argument("--actor", required=True)
+
+    # Every case-scoped verb takes the same positional. Registering it here
+    # keeps one owner for it; argparse renders positionals ahead of options
+    # regardless of when they were added.
+    for case_parser in (
+        show, handoff_case, identity, finalize,
+        checks, regression, environment, worktree,
+        sync_revision, runtime, evidence, baseline,
+        plan, release, approve, deployment,
+        human, stagehand, browser, draft,
+        create_pr, deploy, handoff,
+    ):
+        case_parser.add_argument("case_id")
 
 
 def _project(install_root: Path, key: str) -> tuple[Path, dict[str, object]]:

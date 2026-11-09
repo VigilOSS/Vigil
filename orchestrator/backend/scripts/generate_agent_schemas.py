@@ -127,9 +127,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             overlay={
                 "additionalProperties": False,
                 "properties": {
-                    "access_key": {
-                        "description": "Stable dedupe key for this access entry. Use kebab-case: '<principal>-<target>-<level>' (e.g. 'admin-db01-root').",
-                    },
+                    "access_key": "Stable dedupe key for this access entry. Use kebab-case: '<principal>-<target>-<level>' (e.g. 'admin-db01-root').",
                     "credential_id": {
                         "type": "integer",
                         "minimum": 1,
@@ -140,27 +138,13 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "minimum": 1,
                         "description": "ID of the service this access applies to. Omit if access is not tied to a specific service.",
                     },
-                    "principal": {
-                        "description": "Account or identity that holds this access (e.g. 'root', 'admin@corp.example', 'arn:aws:iam::123:role/Prod').",
-                    },
-                    "access_level": {
-                        "description": "Privilege tier obtained (e.g. 'read', 'admin', 'root', 'domain-admin', 'rce'). Use the most specific label that fits.",
-                    },
-                    "target_ref": {
-                        "description": "What the principal can access: host, URL, database, cloud resource ARN, or scope (e.g. 'db01.internal', 'https://app.example/', 'arn:aws:s3:::prod-bucket').",
-                    },
-                    "status": {
-                        "description": "Validity state of this access. Use 'active' when confirmed working, 'revoked' when credentials are burned or blocked.",
-                    },
-                    "evidence_ref": {
-                        "description": "Path or ID of the artifact proving access (e.g. 'scans/ssh-session.log'). Leave empty if evidence is in notes.",
-                    },
-                    "notes": {
-                        "description": "How access was obtained, lateral-movement path, or operational caveats.",
-                    },
-                    "provenance": {
-                        "description": "Agent or tool that recorded this access (e.g. {\"agent_name\": \"post-exploitation\"}).",
-                    },
+                    "principal": "Account or identity that holds this access (e.g. 'root', 'admin@corp.example', 'arn:aws:iam::123:role/Prod').",
+                    "access_level": "Privilege tier obtained (e.g. 'read', 'admin', 'root', 'domain-admin', 'rce'). Use the most specific label that fits.",
+                    "target_ref": "What the principal can access: host, URL, database, cloud resource ARN, or scope (e.g. 'db01.internal', 'https://app.example/', 'arn:aws:s3:::prod-bucket').",
+                    "status": "Validity state of this access. Use 'active' when confirmed working, 'revoked' when credentials are burned or blocked.",
+                    "evidence_ref": "Path or ID of the artifact proving access (e.g. 'scans/ssh-session.log'). Leave empty if evidence is in notes.",
+                    "notes": "How access was obtained, lateral-movement path, or operational caveats.",
+                    "provenance": "Agent or tool that recorded this access (e.g. {\"agent_name\": \"post-exploitation\"}).",
                 }
             },
         ),
@@ -176,48 +160,26 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "maxLength": 256,
                         "description": "Stable kebab-case identifier for this chain (e.g. 'anon-rce-via-sqli-lfi'). Omit to auto-generate.",
                     },
-                    "title": {
-                        "description": "One-line chain summary: initial access + pivots + terminal impact (e.g. 'Anon SQLi → LFI → RCE on app server').",
-                    },
-                    "status": {
-                        "description": "Chain lifecycle state (e.g. 'active', 'exploited', 'reported'). Mirrors finding workflow_status vocabulary.",
-                    },
-                    "severity": {
-                        "description": "Combined chain severity — set to the highest severity of constituent findings unless the chain itself escalates impact.",
-                    },
-                    "narrative": {
-                        "description": "Step-by-step attack story: initial foothold, each pivot, and terminal impact. Reference linked finding slugs inline.",
-                    },
-                    "evidence_ref": {
-                        "description": "Path or ID of the artifact documenting the chain (e.g. 'scans/chain-rce-proof.txt'). Leave empty if evidence is in linked findings.",
-                    },
-                    "provenance": {
-                        "description": "Agent that assembled this chain (e.g. {\"agent_name\": \"vulnerability-analyst\"}).",
-                    },
+                    "title": "One-line chain summary: initial access + pivots + terminal impact (e.g. 'Anon SQLi → LFI → RCE on app server').",
+                    "status": "Chain lifecycle state (e.g. 'active', 'exploited', 'reported'). Mirrors finding workflow_status vocabulary.",
+                    "severity": "Combined chain severity — set to the highest severity of constituent findings unless the chain itself escalates impact.",
+                    "narrative": "Step-by-step attack story: initial foothold, each pivot, and terminal impact. Reference linked finding slugs inline.",
+                    "evidence_ref": "Path or ID of the artifact documenting the chain (e.g. 'scans/chain-rce-proof.txt'). Leave empty if evidence is in linked findings.",
+                    "provenance": "Agent that assembled this chain (e.g. {\"agent_name\": \"vulnerability-analyst\"}).",
                     "links": {
                         "items": {
                             "additionalProperties": False,
                             "properties": {
-                                "relation": {
-                                    "description": "How this entity participates in the chain (e.g. 'step', 'prerequisite', 'outcome', 'credential-used').",
-                                },
-                                "entity_kind": {
-                                    "description": "Type of the linked entity (e.g. 'finding', 'credential', 'access_record').",
-                                },
+                                "relation": "How this entity participates in the chain (e.g. 'step', 'prerequisite', 'outcome', 'credential-used').",
+                                "entity_kind": "Type of the linked entity (e.g. 'finding', 'credential', 'access_record').",
                                 "entity_id": {
                                     "type": "integer",
                                     "minimum": 1,
                                     "description": "Database ID of the linked entity. Provide entity_id OR entity_ref, not both.",
                                 },
-                                "entity_ref": {
-                                    "description": "Slug or string reference when entity_id is unavailable (e.g. 'sqli-search-q').",
-                                },
-                                "notes": {
-                                    "description": "How this step connects to the next or why this entity is part of the chain.",
-                                },
-                                "provenance": {
-                                    "description": "Agent that created this link (e.g. {\"agent_name\": \"vulnerability-analyst\"}).",
-                                },
+                                "entity_ref": "Slug or string reference when entity_id is unavailable (e.g. 'sqli-search-q').",
+                                "notes": "How this step connects to the next or why this entity is part of the chain.",
+                                "provenance": "Agent that created this link (e.g. {\"agent_name\": \"vulnerability-analyst\"}).",
                             }
                         }
                     },
@@ -231,30 +193,14 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             overlay={
                 "additionalProperties": False,
                 "properties": {
-                    "credential_key": {
-                        "description": "Stable dedupe key for this credential. Use kebab-case: '<principal>-<kind>' (e.g. 'admin-ssh-key', 'svc-db-password').",
-                    },
-                    "kind": {
-                        "description": "Credential type. Common values: 'password', 'ssh-key', 'api-key', 'bearer-token', 'cookie', 'ntlm-hash', 'kerberos-ticket', 'aws-access-key', 'certificate', 'oauth-token'.",
-                    },
-                    "principal": {
-                        "description": "Account this credential authenticates (e.g. 'root', 'admin@corp.example', 'svc-deploy').",
-                    },
-                    "source_name": {
-                        "description": "Tool or agent that recovered this credential (e.g. 'mimikatz', 'post-exploitation').",
-                    },
-                    "status": {
-                        "description": "Validity state: 'discovered' (found, not yet tested), 'valid' (confirmed working), 'invalid' (tested and rejected), 'revoked'.",
-                    },
-                    "notes": {
-                        "description": "Where found, how extracted, scope of access, or any operational caveats.",
-                    },
-                    "provenance": {
-                        "description": "Agent or tool that recorded this credential (e.g. {\"agent_name\": \"post-exploitation\"}).",
-                    },
-                    "identity": {
-                        "description": "Human-readable display name or alias for the principal (e.g. 'John Smith', 'deploy-bot'). Distinct from principal login name.",
-                    },
+                    "credential_key": "Stable dedupe key for this credential. Use kebab-case: '<principal>-<kind>' (e.g. 'admin-ssh-key', 'svc-db-password').",
+                    "kind": "Credential type. Common values: 'password', 'ssh-key', 'api-key', 'bearer-token', 'cookie', 'ntlm-hash', 'kerberos-ticket', 'aws-access-key', 'certificate', 'oauth-token'.",
+                    "principal": "Account this credential authenticates (e.g. 'root', 'admin@corp.example', 'svc-deploy').",
+                    "source_name": "Tool or agent that recovered this credential (e.g. 'mimikatz', 'post-exploitation').",
+                    "status": "Validity state: 'discovered' (found, not yet tested), 'valid' (confirmed working), 'invalid' (tested and rejected), 'revoked'.",
+                    "notes": "Where found, how extracted, scope of access, or any operational caveats.",
+                    "provenance": "Agent or tool that recorded this credential (e.g. {\"agent_name\": \"post-exploitation\"}).",
+                    "identity": "Human-readable display name or alias for the principal (e.g. 'John Smith', 'deploy-bot'). Distinct from principal login name.",
                 },
             },
         ),
@@ -280,52 +226,24 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "minimum": 1,
                         "description": "ID of the coverage item this probe fulfills. Links probe runs to the coverage tracking table.",
                     },
-                    "auth_context": {
-                        "description": "Authentication state used during the probe (e.g. 'anonymous', 'user', 'admin', or a credential slug).",
-                    },
-                    "input_slot": {
-                        "description": "Attack surface class where the payload was injected (e.g. 'query-param', 'json-body', 'http-header', 'path-segment', 'cookie').",
-                    },
-                    "attack_family": {
-                        "description": "Vuln class being tested (e.g. 'sqli', 'xss', 'ssrf', 'lfi', 'rce', 'auth-bypass'). Required.",
-                    },
-                    "payload_family": {
-                        "description": "Payload sub-category or wordlist name (e.g. 'boolean-blind', 'time-based', 'polyglot-xss').",
-                    },
-                    "payload_value": {
-                        "description": "Exact payload string sent in the probe. Include URL-encoding if relevant.",
-                    },
-                    "tool_name": {
-                        "description": "Tool or script that sent the probe (e.g. 'sqlmap', 'ffuf', 'burp', 'custom-script'). Required.",
-                    },
-                    "agent_name": {
-                        "description": "Agent that dispatched this probe (e.g. 'vulnerability-analyst'). Defaults to empty when tool ran directly.",
-                    },
-                    "result_status": {
-                        "description": "Outcome: 'signal' = anomaly detected, warrants escalation to a finding. 'tested' = ran cleanly, no anomaly. 'no-signal' = explicit negative result. 'attempted' = sent but outcome unclear. 'blocked' = WAF/control stopped probe. 'error' = tool or network failure.",
-                    },
+                    "auth_context": "Authentication state used during the probe (e.g. 'anonymous', 'user', 'admin', or a credential slug).",
+                    "input_slot": "Attack surface class where the payload was injected (e.g. 'query-param', 'json-body', 'http-header', 'path-segment', 'cookie').",
+                    "attack_family": "Vuln class being tested (e.g. 'sqli', 'xss', 'ssrf', 'lfi', 'rce', 'auth-bypass'). Required.",
+                    "payload_family": "Payload sub-category or wordlist name (e.g. 'boolean-blind', 'time-based', 'polyglot-xss').",
+                    "payload_value": "Exact payload string sent in the probe. Include URL-encoding if relevant.",
+                    "tool_name": "Tool or script that sent the probe (e.g. 'sqlmap', 'ffuf', 'burp', 'custom-script'). Required.",
+                    "agent_name": "Agent that dispatched this probe (e.g. 'vulnerability-analyst'). Defaults to empty when tool ran directly.",
+                    "result_status": "Outcome: 'signal' = anomaly detected, warrants escalation to a finding. 'tested' = ran cleanly, no anomaly. 'no-signal' = explicit negative result. 'attempted' = sent but outcome unclear. 'blocked' = WAF/control stopped probe. 'error' = tool or network failure.",
                     "observed_http_status": {
                         "type": "integer",
                         "description": "HTTP response status code received (e.g. 200, 403, 500). Null for non-HTTP probes.",
                     },
-                    "signal_type": {
-                        "description": "What anomaly was detected when result_status is 'signal' (e.g. 'time-delay', 'error-disclosure', 'different-response-length').",
-                    },
-                    "evidence_ref": {
-                        "description": "Path or ID of the artifact capturing the probe exchange (e.g. 'scans/ffuf-run1.json').",
-                    },
-                    "notes": {
-                        "description": "Freeform observations about this probe run (anomalies, tool warnings, raw output excerpts).",
-                    },
-                    "target_host": {
-                        "description": "Hostname or IP of the probed target (e.g. 'api.example.com', '10.0.1.5').",
-                    },
-                    "target_path": {
-                        "description": "URL path probed (e.g. '/api/v1/search'). Include query string only if it was fixed across all payloads.",
-                    },
-                    "target_port": {
-                        "description": "TCP port probed. Omit when port is implied by the scheme (80/443).",
-                    },
+                    "signal_type": "What anomaly was detected when result_status is 'signal' (e.g. 'time-delay', 'error-disclosure', 'different-response-length').",
+                    "evidence_ref": "Path or ID of the artifact capturing the probe exchange (e.g. 'scans/ffuf-run1.json').",
+                    "notes": "Freeform observations about this probe run (anomalies, tool warnings, raw output excerpts).",
+                    "target_host": "Hostname or IP of the probed target (e.g. 'api.example.com', '10.0.1.5').",
+                    "target_path": "URL path probed (e.g. '/api/v1/search'). Include query string only if it was fixed across all payloads.",
+                    "target_port": "TCP port probed. Omit when port is implied by the scheme (80/443).",
                     "work_item_ids": {
                         "type": "array",
                         "items": {"type": "integer", "minimum": 1},
@@ -370,27 +288,21 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["queued", "running", "completed", "failed", "killed", "lost", "stop_failed"],
                         "description": "Lifecycle state. 'queued': row written, dtach not yet started. 'running': worker live. Terminal: 'completed' (exit 0), 'failed' (exit !=0), 'killed' (SIGKILL), 'lost' (socket gone), 'stop_failed' (kill attempt failed).",
                     },
-                    "started_at": {"description": "ISO 8601 UTC timestamp when the dtach worker first attached. Null until 'running'."},
-                    "ended_at": {"description": "ISO 8601 UTC timestamp when the worker exited or was killed. Null until terminal."},
+                    "started_at": "ISO 8601 UTC timestamp when the dtach worker first attached. Null until 'running'.",
+                    "ended_at": "ISO 8601 UTC timestamp when the worker exited or was killed. Null until terminal.",
                     "exit_code": {
                         "type": ["integer", "null"],
                         "description": "Process exit code. 0 = success; non-zero = failure. Null until terminal status.",
                     },
-                    "dtach_socket_path": {
-                        "description": "Filesystem path to the dtach control socket. Pass to `vigil assess kali job tail` to reattach to a running job.",
-                    },
-                    "stdout_path": {
-                        "description": "Absolute path to the stdout spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
-                    },
-                    "stderr_path": {
-                        "description": "Absolute path to the stderr spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
-                    },
+                    "dtach_socket_path": "Filesystem path to the dtach control socket. Pass to `vigil assess kali job tail` to reattach to a running job.",
+                    "stdout_path": "Absolute path to the stdout spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
+                    "stderr_path": "Absolute path to the stderr spill file under ${ENGAGEMENT_DIR}/scans/kali/.",
                     "audit_metadata": {
                         "type": ["object", "null"],
                         "description": "Structured fields captured at dispatch: technique, intent, probe_kind, destructive (bool), phase, agent_name.",
                     },
-                    "created_at": {"description": "ISO 8601 UTC timestamp when the job row was inserted."},
-                    "updated_at": {"description": "ISO 8601 UTC timestamp of the last status update."},
+                    "created_at": "ISO 8601 UTC timestamp when the job row was inserted.",
+                    "updated_at": "ISO 8601 UTC timestamp of the last status update.",
                 },
             },
         ),
@@ -442,9 +354,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "maxLength": 256,
                         "description": "Stable kebab-case identifier for this finding (e.g. 'sqli-search-q'). Omit to auto-generate.",
                     },
-                    "title": {
-                        "description": "One-line finding name: vuln class + location (e.g. 'Blind SQL injection in /search?q').",
-                    },
+                    "title": "One-line finding name: vuln class + location (e.g. 'Blind SQL injection in /search?q').",
                     "severity": {
                         "description": "CVSS-aligned impact rating. Use 'critical' only for CVSS >=9.0 or trivially exploitable RCE/auth-bypass.",
                         "enum": ["info", "low", "medium", "high", "critical"],
@@ -530,35 +440,23 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     # (``--agent-id``) rather than to the wire type.
                     "provenance": {
                         "properties": {
-                            "agent_id": {
-                                "description": (
-                                    "Dispatch agent_id of the agent that AUTHORED this finding "
+                            "agent_id": "Dispatch agent_id of the agent that AUTHORED this finding "
                                     "(e.g. 'HUNT-RUN-1'), copied verbatim from its Runtime Identity "
                                     "block — a dispatch id, not the role name in agent_name. A true "
                                     "insert requires it and resolves it in the engagement. "
                                     "Re-recording a valid authored finding may omit it because the "
                                     "immutable original is preserved. Historical authorless rows "
-                                    "require the one-time finding bind-author repair."
-                                ),
-                            },
+                                    "require the one-time finding bind-author repair.",
                         },
                     },
-                    "evidence_type": {
-                        "description": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation.",
-                    },
+                    "evidence_type": "Strength of evidence. 'network-confirmed': live exploit or observed response. 'code-inferred': static/dataflow analysis without runtime proof. 'theoretical': logic-based hypothesis, no code or traffic evidence. 'informational': non-exploitable observation.",
                     "submission_status": {
                         "description": "External bug-bounty/program submission state, ORTHOGONAL to workflow_status (report-inclusion). 'none': not submitted. 'submitted': sent to the program. 'accepted'/'rejected'/'duplicate': program triage outcome. 'needs_info': program requested more detail. 'withdrawn': the RESEARCHER retracted the submission (requires details.withdrawal_reason; never use 'rejected' for this, which asserts a program decision that did not happen). Moving to any non-'none' value requires submission_ref. Omit to keep the default 'none'.",
                         "enum": list(_SUBMISSION_STATUS_VALUES),
                     },
-                    "submission_platform": {
-                        "description": "Where the report was filed: 'bugcrowd', 'hackerone', or 'direct'.",
-                    },
-                    "submission_ref": {
-                        "description": "The program's own identifier for the report (e.g. a Bugcrowd submission id or HackerOne report number). REQUIRED when moving submission_status to a non-'none' value \u2014 a submission state with no referent cannot be joined back to the report it describes.",
-                    },
-                    "submission_url": {
-                        "description": "Direct URL to the filed report, when the platform exposes one.",
-                    },
+                    "submission_platform": "Where the report was filed: 'bugcrowd', 'hackerone', or 'direct'.",
+                    "submission_ref": "The program's own identifier for the report (e.g. a Bugcrowd submission id or HackerOne report number). REQUIRED when moving submission_status to a non-'none' value \u2014 a submission state with no referent cannot be joined back to the report it describes.",
+                    "submission_url": "Direct URL to the filed report, when the platform exposes one.",
                     "request_variant_id": {
                         "type": "integer",
                         "minimum": 1,
@@ -654,16 +552,12 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     }
                 ],
                 "properties": {
-                    "file_id": {
-                        "description": "Backend ID of the code_files record to classify.",
-                    },
+                    "file_id": "Backend ID of the code_files record to classify.",
                     "classification": {
                         "enum": ["critical", "high", "medium", "low", "skip"],
                         "description": "Security relevance tier. critical: parses untrusted input, auth, crypto, protocol state machines. high: memory mgmt, command building, file I/O. medium: utility, string handling. low: build, test infra. skip: generated, docs, vendored.",
                     },
-                    "role": {
-                        "description": "Functional role of the file (for example, protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation).",
-                    },
+                    "role": "Functional role of the file (for example, protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation).",
                     "language": {
                         "type": "string",
                         "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct.",
@@ -672,9 +566,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
                         "default": [],
                     },
-                    "analysis_priority": {
-                        "description": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
-                    },
+                    "analysis_priority": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
                     # Projected from the backend's own vocabulary
                     # (``app.services.code_analysis.SKIP_REASONS``, the set
                     # `_require_classification_skip_reason` enforces) so the
@@ -863,36 +755,16 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     }
                 ],
                 "properties": {
-                    "queue_item_id": {
-                        "description": "ID of the claimed code_analysis_queue item this result corresponds to. The backend derives file_id from this queue item.",
-                    },
-                    "file_id": {
-                        "description": "Optional consistency check. When supplied, it must match the file_id on queue_item_id; the backend records the queue-derived file_id.",
-                    },
-                    "agent_name": {
-                        "description": "Name of the agent that produced this result.",
-                    },
-                    "receipt_kind": {
-                        "description": "file groups reviewed source in the claimed queue file; call_chain may include exact anchors in other files from the same sealed repository snapshot, but must include the claimed file.",
-                    },
-                    "callable_refs": {
-                        "description": "Exact callable identities from the current structural index. The CLI maps index line_start/line_end to receipt start_line/end_line. File scope is published as <top-level> callables (name and qualified_name <top-level>), one per top_level_segments entry; a function reference never covers them. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease.",
-                    },
-                    "reviewed_spans": {
-                        "description": "Exact source line spans reviewed where no structural callable identity applies. A span requires a sealed callable registry publication; omitted callables are unpublished. Each span is validated against the sealed file and cannot substitute for an overlapped registered function unless every overlapped function is also supplied as an exact callable_ref; a span covering a <top-level> segment covers that file scope without citing it. When structural analysis is unsupported, when the function dimension is truncated or unavailable, when the index scanned no function scope at all (its function-scoped dimensions are unavailable), or when the indexed file holds no callable and no <top-level> segment (a CSS or HTML file only when it reports an entry point, sink or source), only a whole-file span can prove manual source review. When <top-level> is the only callable, each span must cover the lines of every segment the receipt does not cite. Non-skipped nonempty receipts require callable_refs or reviewed_spans.",
-                    },
-                    "empty_file_reviewed": {
-                        "description": "Explicit clean review of a current sealed zero-byte file. Requires file receipt kind and no callable refs or spans; bound to the claimed queue generation and lease.",
-                    },
-                    "hypothesis": {
-                        "description": "The vulnerability hypothesis tested. What could go wrong and why.",
-                    },
-                    "evidence": {
-                        "description": "Evidence supporting the disposition. For findings: code snippet + taint path + guard failure. For clean: brief reasoning why no vulnerability exists.",
-                    },
-                    "evidence_ref": {
-                        "description": "Optional engagement-owned artifact path supporting the disposition. A finding or suspicious closeout requires non-empty inline evidence or this artifact reference on a current result for the active lease.",
-                    },
+                    "queue_item_id": "ID of the claimed code_analysis_queue item this result corresponds to. The backend derives file_id from this queue item.",
+                    "file_id": "Optional consistency check. When supplied, it must match the file_id on queue_item_id; the backend records the queue-derived file_id.",
+                    "agent_name": "Name of the agent that produced this result.",
+                    "receipt_kind": "file groups reviewed source in the claimed queue file; call_chain may include exact anchors in other files from the same sealed repository snapshot, but must include the claimed file.",
+                    "callable_refs": "Exact callable identities from the current structural index. The CLI maps index line_start/line_end to receipt start_line/end_line. File scope is published as <top-level> callables (name and qualified_name <top-level>), one per top_level_segments entry; a function reference never covers them. Each referenced file's coverage is derived from the union of these references on current receipts; cross-file coverage does not close that file's separate lease.",
+                    "reviewed_spans": "Exact source line spans reviewed where no structural callable identity applies. A span requires a sealed callable registry publication; omitted callables are unpublished. Each span is validated against the sealed file and cannot substitute for an overlapped registered function unless every overlapped function is also supplied as an exact callable_ref; a span covering a <top-level> segment covers that file scope without citing it. When structural analysis is unsupported, when the function dimension is truncated or unavailable, when the index scanned no function scope at all (its function-scoped dimensions are unavailable), or when the indexed file holds no callable and no <top-level> segment (a CSS or HTML file only when it reports an entry point, sink or source), only a whole-file span can prove manual source review. When <top-level> is the only callable, each span must cover the lines of every segment the receipt does not cite. Non-skipped nonempty receipts require callable_refs or reviewed_spans.",
+                    "empty_file_reviewed": "Explicit clean review of a current sealed zero-byte file. Requires file receipt kind and no callable refs or spans; bound to the claimed queue generation and lease.",
+                    "hypothesis": "The vulnerability hypothesis tested. What could go wrong and why.",
+                    "evidence": "Evidence supporting the disposition. For findings: code snippet + taint path + guard failure. For clean: brief reasoning why no vulnerability exists.",
+                    "evidence_ref": "Optional engagement-owned artifact path supporting the disposition. A finding or suspicious closeout requires non-empty inline evidence or this artifact reference on a current result for the active lease.",
                     "disposition": {
                         "enum": ["finding", "suspicious", "clean", "needs_context", "skipped"],
                         "description": "Analysis result. finding: confirmed vulnerability. suspicious: needs variant analysis or deeper context. clean: no vulnerability. needs_context: blocked on missing code. skipped: deliberately not analyzed, with the reason retained in notes.",
@@ -901,24 +773,12 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["high", "medium", "low"],
                         "description": "high: full taint trace + guards evaluated. medium: trace but unresolved callees. low: pattern match only.",
                     },
-                    "finding_slug": {
-                        "description": "If disposition is 'finding', the slug of the assessment_findings record created. Empty otherwise.",
-                    },
-                    "cwe_id": {
-                        "description": "Specific CWE ID (for example, CWE-122, CWE-190). Must be specific, not generic (CWE-119).",
-                    },
-                    "slot_type": {
-                        "description": "Untrusted-input class this vulnerability is reached through, named from the same nine slot types the file classification uses: NETWORK-INPUT, URL-COMPONENT, CMD-ARGUMENT, FILE-CONTENT, ENV-VARIABLE, CALLBACK-DATA, PROTOCOL-FIELD, SERIALIZED-DATA, EXEC-POLICY (see agent/skills/code-architecture-mapping/SKILL.md Step 10 for the canonical table). Unlike the file-level slot_types list, this field is deliberately free text and is not validated: prefer a value from that list, but record a more precise one when the nine do not describe the reached input. It is a label only - it never gates coverage or family derivation, which read the file-level slot_types.",
-                    },
-                    "supersedes": {
-                        "description": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, file, grouped source anchors, and repository generation, and have been recorded under this attempt's lease or one it adopted.",
-                    },
-                    "notes": {
-                        "description": "Additional notes, context expansion requests, or follow-up recommendations.",
-                    },
-                    "audit_metadata": {
-                        "description": "Arbitrary key/value bag for agent-specific audit context (token counts, tool versions, analysis timestamps). Not used for security decisions; included verbatim in audit logs.",
-                    },
+                    "finding_slug": "If disposition is 'finding', the slug of the assessment_findings record created. Empty otherwise.",
+                    "cwe_id": "Specific CWE ID (for example, CWE-122, CWE-190). Must be specific, not generic (CWE-119).",
+                    "slot_type": "Untrusted-input class this vulnerability is reached through, named from the same nine slot types the file classification uses: NETWORK-INPUT, URL-COMPONENT, CMD-ARGUMENT, FILE-CONTENT, ENV-VARIABLE, CALLBACK-DATA, PROTOCOL-FIELD, SERIALIZED-DATA, EXEC-POLICY (see agent/skills/code-architecture-mapping/SKILL.md Step 10 for the canonical table). Unlike the file-level slot_types list, this field is deliberately free text and is not validated: prefer a value from that list, but record a more precise one when the nine do not describe the reached input. It is a label only - it never gates coverage or family derivation, which read the file-level slot_types.",
+                    "supersedes": "Optional analysis-result row ID explicitly replaced by this correction. The original must be current and have the same queue item, file, grouped source anchors, and repository generation, and have been recorded under this attempt's lease or one it adopted.",
+                    "notes": "Additional notes, context expansion requests, or follow-up recommendations.",
+                    "audit_metadata": "Arbitrary key/value bag for agent-specific audit context (token counts, tool versions, analysis timestamps). Not used for security decisions; included verbatim in audit logs.",
                     "cwe_coverage": {
                         "items": {
                             "type": "object",
@@ -1071,6 +931,29 @@ def _normalize_schema(schema: dict[str, Any], defs: dict[str, Any] | None = None
     return normalized
 
 
+def _expand_overlay(overlay: Any) -> Any:
+    """Expand the overlay's description-only shorthand into real property schemas.
+
+    A string under ``properties`` is shorthand for ``{"description": <string>}``,
+    so the 73 overlays that only restate prose stay one line each. Every other
+    overlay shape is returned unchanged.
+    """
+    if isinstance(overlay, dict):
+        expanded: dict[str, Any] = {}
+        for key, value in overlay.items():
+            if key == "properties" and isinstance(value, dict):
+                expanded[key] = {
+                    name: {"description": child} if isinstance(child, str) else _expand_overlay(child)
+                    for name, child in value.items()
+                }
+            else:
+                expanded[key] = _expand_overlay(value)
+        return expanded
+    if isinstance(overlay, list):
+        return [_expand_overlay(item) for item in overlay]
+    return overlay
+
+
 def deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
     merged = copy.deepcopy(base)
     for key, value in overlay.items():
@@ -1094,7 +977,7 @@ def build_schema_bundle() -> dict[str, dict[str, Any]]:
             "title": spec.title,
             **({"description": spec.description} if spec.description else {}),
         }
-        schema = deep_merge(generated, spec.overlay)
+        schema = deep_merge(generated, _expand_overlay(spec.overlay))
         if spec.filename == "finding-record.schema.json":
             # This schema also validates stored/captured finding records, whose
             # verification status may have advanced through the verify endpoint.

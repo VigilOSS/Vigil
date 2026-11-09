@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from assess.lib.client import (
@@ -395,11 +396,6 @@ def _confirm_refresh_commit(
         file=sys.stderr,
     )
     return generation, digest, role
-
-
-def _which(binary: str, *, source_root: str | os.PathLike[str] | None = None) -> str | None:
-    """Compatibility wrapper around repository-safe absolute tool lookup."""
-    return _resolve_trusted_tool(binary, source_root=source_root or os.getcwd())
 
 
 def _setup_ctags(
@@ -942,11 +938,6 @@ def _include_path_matches(rel_path: str, patterns: list[str] | None) -> list[str
     return [pattern for pattern in patterns or [] if _pattern_matches(normalized, pattern)]
 
 
-def _include_path_match(rel_path: str, patterns: list[str] | None) -> str | None:
-    matches = _include_path_matches(rel_path, patterns)
-    return matches[0] if matches else None
-
-
 def _exclude_path_match(rel_path: str, args) -> str | None:
     normalized = rel_path.replace(os.sep, '/')
     for pattern in getattr(args, "exclude_path", []) or []:
@@ -1204,14 +1195,56 @@ def _should_descend_skipped_dir(rel_dir: str, dirname: str, args) -> bool:
 
 
 def _include_reason(rel_path: str, skip_reason: str | None, args) -> str | None:
-    pattern = _include_path_match(rel_path, getattr(args, "include_path", []) or [])
-    if pattern:
-        return f'include_path:{pattern}'
+    matched = _include_path_matches(rel_path, getattr(args, "include_path", []) or [])
+    if matched and matched[0]:
+        return f'include_path:{matched[0]}'
     if skip_reason == 'minified_or_bundle' and getattr(args, "include_minified", False):
         return 'include_minified'
     if skip_reason and getattr(args, "include_skipped", False):
         return 'include_skipped'
     return None
+
+
+def _snapshots_relative(
+    source_tree: RootedSourceTree, snapshots_root: Path
+) -> Path | None:
+    """The snapshots directory relative to the repository root, or None outside it."""
+    try:
+        return snapshots_root.resolve(strict=False).relative_to(source_tree.root.resolve())
+    except ValueError:
+        return None
+
+
+def _prune_directories(
+    listing, policy: _SkipPolicy, args, snapshots_relative: Path | None
+) -> list[tuple[str, str]]:
+    """Stop the walk descending into directories neither inventory pass admits.
+
+    Assigning `listing.directories` IN PLACE is what stops the walker, and the
+    test order is load-bearing: `.git` first, then anything at or under the
+    snapshots root, then the skip policy's own reason. Returns the (path,
+    reason) of each directory the policy excluded — which the excluded-records
+    pass records and enumerates, and the admitted-paths pass discards — so the
+    two passes cannot drift into partitioning the tree differently.
+    """
+    kept: list[str] = []
+    skipped: list[tuple[str, str]] = []
+    for dirname in listing.directories:
+        rel_dir = f"{listing.relative_dir}/{dirname}" if listing.relative_dir else dirname
+        relative = Path(rel_dir)
+        if dirname == ".git":
+            continue
+        if snapshots_relative is not None and (
+            relative == snapshots_relative or relative.is_relative_to(snapshots_relative)
+        ):
+            continue
+        dir_reason = policy.directory_reason(rel_dir, dirname)
+        if dir_reason and not _should_descend_skipped_dir(rel_dir, dirname, args):
+            skipped.append((rel_dir, dir_reason))
+            continue
+        kept.append(dirname)
+    listing.directories[:] = kept
+    return skipped
 
 
 def _admitted_source_paths(
@@ -1230,29 +1263,9 @@ def _admitted_source_paths(
     include, so the caller need not re-read a file to classify it.
     """
     policy = _SkipPolicy(source_tree, args)
-    repo_root = source_tree.root.resolve()
-    snapshots_resolved = snapshots_root.resolve(strict=False)
-    try:
-        snapshots_relative = snapshots_resolved.relative_to(repo_root)
-    except ValueError:
-        snapshots_relative = None
+    snapshots_relative = _snapshots_relative(source_tree, snapshots_root)
     for listing in source_tree.walk():
-        kept: list[str] = []
-        for dirname in listing.directories:
-            rel_dir = f"{listing.relative_dir}/{dirname}" if listing.relative_dir else dirname
-            relative = Path(rel_dir)
-            if dirname == ".git":
-                continue
-            if snapshots_relative is not None and (
-                relative == snapshots_relative or relative.is_relative_to(snapshots_relative)
-            ):
-                continue
-            if policy.directory_reason(rel_dir, dirname) and not _should_descend_skipped_dir(
-                rel_dir, dirname, args
-            ):
-                continue
-            kept.append(dirname)
-        listing.directories[:] = kept
+        _prune_directories(listing, policy, args, snapshots_relative)
         for filename in listing.regular_files:
             rel_path = (
                 f"{listing.relative_dir}/{filename}" if listing.relative_dir else filename
@@ -1394,42 +1407,17 @@ def _collect_excluded_records(
     """
     policy = _SkipPolicy(source_tree, args)
     records: list[dict[str, object]] = []
-    repo_root = source_tree.root.resolve()
-    snapshots_resolved = snapshots_root.resolve(strict=False)
-    try:
-        snapshots_relative = snapshots_resolved.relative_to(repo_root)
-    except ValueError:
-        snapshots_relative = None
+    snapshots_relative = _snapshots_relative(source_tree, snapshots_root)
     for listing in source_tree.walk():
-        kept: list[str] = []
-        for dirname in listing.directories:
-            rel_dir = (
-                f"{listing.relative_dir}/{dirname}"
-                if listing.relative_dir
-                else dirname
+        for rel_dir, dir_reason in _prune_directories(
+            listing, policy, args, snapshots_relative
+        ):
+            records.append(
+                {"path": rel_dir, "kind": "directory", "reason": dir_reason}
             )
-            relative = Path(rel_dir)
-            if dirname == ".git":
-                continue
-            if snapshots_relative is not None and (
-                relative == snapshots_relative
-                or relative.is_relative_to(snapshots_relative)
-            ):
-                continue
-            dir_reason = policy.directory_reason(rel_dir, dirname)
-            if dir_reason and not _should_descend_skipped_dir(rel_dir, dirname, args):
-                directory_record: dict[str, object] = {
-                    "path": rel_dir,
-                    "kind": "directory",
-                    "reason": dir_reason,
-                }
-                records.append(directory_record)
-                records.extend(
-                    _enumerate_rooted_skipped_dir(source_tree, rel_dir, dir_reason)
-                )
-                continue
-            kept.append(dirname)
-        listing.directories[:] = kept
+            records.extend(
+                _enumerate_rooted_skipped_dir(source_tree, rel_dir, dir_reason)
+            )
 
         for name in listing.other_entries:
             rel_path = (
@@ -1802,21 +1790,34 @@ def _analyzed_churn(
     return analyzed, len(churn_scores) - len(analyzed)
 
 
-def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[str, int]:
-    """Compute per-file churn scores from git log --numstat over a bounded time window."""
-    churn: dict[str, int] = {}
+def _streamed_git_log(
+    repo_path: str,
+    arguments: list[str],
+    *,
+    scan_label: str,
+    incomplete_note: str,
+    consume: Callable[[str], None],
+) -> None:
+    """Run one bounded `git log` over the ingested repository, line by line.
+
+    Both history scans share this scaffold: spooled stdout/stderr so an enormous
+    log never lands in memory, the trusted-binary resolution, the bounded
+    timeout, the non-zero-status report that reads git's own stderr, and the
+    stripped-line walk. The accumulator stays with the caller, so a scan that
+    warns leaves whatever it had already gathered in place.
+    """
     try:
         with tempfile.TemporaryFile(mode='w+t', encoding='utf-8') as stdout, tempfile.TemporaryFile(
             mode='w+t', encoding='utf-8'
         ) as stderr:
             git_path = _resolve_trusted_tool("git", source_root=repo_path)
             if not git_path:
-                _git_warn("trusted Git executable disappeared before churn scan")
-                return churn
+                _git_warn(f"trusted Git executable disappeared before {scan_label} scan")
+                return
             result = _run_git(
                 repo_path,
                 git_path,
-                ['log', '--numstat', f'--since={since}', '--format=%H'],
+                arguments,
                 stdout=stdout,
                 stderr=stderr,
                 text=True,
@@ -1826,30 +1827,45 @@ def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[
                 stderr.seek(0)
                 detail = stderr.read().strip()
                 suffix = f": {detail}" if detail else ""
-                _git_warn(f"git churn scan failed for {repo_path}{suffix}")
-                return churn
+                _git_warn(f"git {scan_label} scan failed for {repo_path}{suffix}")
+                return
 
             stdout.seek(0)
             for line in stdout:
-                line = line.strip()
-                if not line:
-                    continue
-                parts = line.split('\t')
-                if len(parts) == 3:
-                    added, deleted, filepath = parts
-                    try:
-                        total = int(added) + int(deleted)
-                    except ValueError:
-                        # Binary files show '-' for added/deleted
-                        continue
-                    churn[filepath] = churn.get(filepath, 0) + total
+                consume(line.strip())
     except subprocess.TimeoutExpired:
         _git_warn(
-            f"git churn scan timed out for {repo_path} after {_GIT_LOG_TIMEOUT_SECONDS}s; "
-            "git churn data will be incomplete"
+            f"git {scan_label} scan timed out for {repo_path} after "
+            f"{_GIT_LOG_TIMEOUT_SECONDS}s; {incomplete_note}"
         )
     except (OSError, ValueError) as exc:
-        _git_warn(f"git churn scan failed for {repo_path}: {exc}")
+        _git_warn(f"git {scan_label} scan failed for {repo_path}: {exc}")
+
+
+def _git_churn_scores(repo_path: str, since: str = _GIT_CHURN_LOOKBACK) -> dict[str, int]:
+    """Compute per-file churn scores from git log --numstat over a bounded time window."""
+    churn: dict[str, int] = {}
+
+    def _tally(line: str) -> None:
+        if not line:
+            return
+        parts = line.split('\t')
+        if len(parts) == 3:
+            added, deleted, filepath = parts
+            try:
+                total = int(added) + int(deleted)
+            except ValueError:
+                # Binary files show '-' for added/deleted
+                return
+            churn[filepath] = churn.get(filepath, 0) + total
+
+    _streamed_git_log(
+        repo_path,
+        ['log', '--numstat', f'--since={since}', '--format=%H'],
+        scan_label="churn",
+        incomplete_note="git churn data will be incomplete",
+        consume=_tally,
+    )
     return churn
 
 
@@ -1857,51 +1873,26 @@ def _git_security_files(repo_path: str, history_args: list[str] | None = None) -
     """Identify files with past security-related commits."""
     sec_files: set[str] = set()
     history_args = history_args or ['--all']
-    try:
-        with tempfile.TemporaryFile(mode='w+t', encoding='utf-8') as stdout, tempfile.TemporaryFile(
-            mode='w+t', encoding='utf-8'
-        ) as stderr:
-            git_path = _resolve_trusted_tool("git", source_root=repo_path)
-            if not git_path:
-                _git_warn("trusted Git executable disappeared before security-history scan")
-                return sec_files
-            result = _run_git(
-                repo_path,
-                git_path,
-                [
-                    'log',
-                    *history_args,
-                    # Commit messages capitalize freely: "Security fix", "cve-2026-1".
-                    '--regexp-ignore-case',
-                    f'--grep={SECURITY_HISTORY_GIT_GREP}',
-                    '--format=commit:%H',
-                    '--name-only',
-                ],
-                stdout=stdout,
-                stderr=stderr,
-                text=True,
-                timeout=_GIT_LOG_TIMEOUT_SECONDS,
-            )
-            if result.returncode != 0:
-                stderr.seek(0)
-                detail = stderr.read().strip()
-                suffix = f": {detail}" if detail else ""
-                _git_warn(f"git security-history scan failed for {repo_path}{suffix}")
-                return sec_files
 
-            stdout.seek(0)
-            for line in stdout:
-                line = line.strip()
-                if not line or line.startswith('commit:'):
-                    continue
-                sec_files.add(line)
-    except subprocess.TimeoutExpired:
-        _git_warn(
-            f"git security-history scan timed out for {repo_path} after {_GIT_LOG_TIMEOUT_SECONDS}s; "
-            "security-history annotations will be incomplete"
-        )
-    except (OSError, ValueError) as exc:
-        _git_warn(f"git security-history scan failed for {repo_path}: {exc}")
+    def _collect(line: str) -> None:
+        if line and not line.startswith('commit:'):
+            sec_files.add(line)
+
+    _streamed_git_log(
+        repo_path,
+        [
+            'log',
+            *history_args,
+            # Commit messages capitalize freely: "Security fix", "cve-2026-1".
+            '--regexp-ignore-case',
+            f'--grep={SECURITY_HISTORY_GIT_GREP}',
+            '--format=commit:%H',
+            '--name-only',
+        ],
+        scan_label="security-history",
+        incomplete_note="security-history annotations will be incomplete",
+        consume=_collect,
+    )
     return sec_files
 
 

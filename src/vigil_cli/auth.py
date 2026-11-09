@@ -420,25 +420,6 @@ def import_auth(
     _api(engagement_dir, "PUT", f"/{identity}", incoming)
 
 
-def set_auth(
-    engagement_dir: Path,
-    identity: str,
-    *,
-    cookies: dict[str, str] | None = None,
-    headers: dict[str, str] | None = None,
-    make_active: bool = True,
-) -> None:
-    payload: dict[str, Any] = {
-        "mode": "manual",
-        "use_for_requests": True,
-        "cookies": cookies or {},
-        "headers": headers or {},
-        "make_active": make_active,
-        "updated_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
-    _api(engagement_dir, "PUT", f"/{identity}", payload)
-
-
 def set_active(engagement_dir: Path, identity: str) -> None:
     _api(engagement_dir, "POST", f"/{identity}/activate", {})
 

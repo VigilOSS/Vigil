@@ -9,17 +9,9 @@
 
 import { useEffect, useMemo, useRef } from "react";
 import { AgGridReact } from "ag-grid-react";
-import type { CellKeyDownEvent, ColDef, GridApi, ICellRendererParams, ModelUpdatedEvent, RowClickedEvent } from "ag-grid-community";
+import type { ColDef, GridApi, ICellRendererParams, ModelUpdatedEvent } from "ag-grid-community";
 import type { HttpFlow } from "../lib/api";
-import {
-  AG_GRID_THEME,
-  GRID_HEADER_HEIGHT,
-  GRID_ROW_HEIGHT,
-  GRID_THEME_PROP,
-  defaultColDef,
-  focusGridInvoker,
-  registerAgGrid,
-} from "../lib/agGrid";
+import { AG_GRID_THEME, gridBaseProps, registerAgGrid, rowOpenHandlers } from "../lib/agGrid";
 import { TimeStamp, formatBytes } from "./formatting";
 import { formatRelativeTime, gridTimeComparator } from "../lib/serverTime";
 import { HttpStatusPill, methodClass } from "./HttpTab";
@@ -186,31 +178,16 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
     },
   ], []);
 
-  const onRowClicked = (event: RowClickedEvent<HttpFlow>) => {
-    const sel = window.getSelection?.();
-    if (sel && sel.type === "Range" && sel.toString().length > 0) return;
-    if (event.data) onRowOpen(event.data, focusGridInvoker(event.event));
-  };
-
-  const onCellKeyDown = (event: CellKeyDownEvent<HttpFlow>) => {
-    const keyboardEvent = event.event as KeyboardEvent;
-    if (!event.data || (keyboardEvent.key !== "Enter" && keyboardEvent.key !== " ")) return;
-    keyboardEvent.preventDefault();
-    onRowOpen(event.data, focusGridInvoker(keyboardEvent));
-  };
+  const { onRowClicked, onCellKeyDown } = rowOpenHandlers<HttpFlow>(onRowOpen);
 
   return (
     <div className={`${AG_GRID_THEME} grid-host`}>
       <AgGridReact<HttpFlow>
         ref={gridRef}
-        theme={GRID_THEME_PROP}
+        {...gridBaseProps}
         rowData={rows}
         columnDefs={columnDefs}
-        defaultColDef={defaultColDef}
         getRowId={(p) => p.data.flow_uid || String(p.data.id)}
-        rowHeight={GRID_ROW_HEIGHT}
-        headerHeight={GRID_HEADER_HEIGHT}
-        tooltipShowDelay={400}
         onGridReady={(event) => onApiRef.current?.(event.api)}
         onRowClicked={onRowClicked}
         onCellKeyDown={onCellKeyDown}

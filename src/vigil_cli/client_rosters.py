@@ -986,8 +986,3 @@ def repair_engagement_client_rosters(
         unchanged_file_paths=tuple(sorted(unchanged)),
         preserved_extra_paths=tuple(sorted(extras)),
     )
-
-
-def repair_engagement_codex_agent_links(install_root: Path) -> None:
-    """Backfill `.codex/agents` links for existing Codex engagement workdirs."""
-    repair_engagement_client_rosters(install_root)

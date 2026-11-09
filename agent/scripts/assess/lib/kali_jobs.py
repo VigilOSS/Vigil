@@ -25,6 +25,7 @@ from .kali_runtime_exec import (
     _cat_container_pid_file,
     _check_container_running,
     _container_running,
+    _docker_probe,
     _engagement_env_args,
     _env_args,
 )
@@ -621,14 +622,8 @@ def _job_pid_alive(container_name: str, pid: int) -> bool | None:
     collapsed to False: a transient docker blip during ``job_stop`` would
     otherwise mark a still-running job 'killed'. Mirrors
     ``kali_sweep_orphans._pid_alive_in_container``."""
-    try:
-        result = subprocess.run(
-            ["docker", "exec", container_name, "kill", "-0", str(pid)],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    result = _docker_probe(["docker", "exec", container_name, "kill", "-0", str(pid)])
+    if result is None:
         return None
     if result.returncode == 0:
         return True
@@ -638,15 +633,9 @@ def _job_pid_alive(container_name: str, pid: int) -> bool | None:
 
 
 def _signal_job_pid(container_name: str, pid: int, signal_name: str) -> None:
-    try:
-        subprocess.run(
-            ["docker", "exec", container_name, "kill", f"-{signal_name}", str(pid)],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
+    _docker_probe(
+        ["docker", "exec", container_name, "kill", f"-{signal_name}", str(pid)]
+    )
 
 
 def _wait_for_pid_exit(
@@ -679,22 +668,16 @@ def _wait_for_pid_exit(
 
 
 def _interrupt_dtach_session(container_name: str, socket_path: str) -> None:
-    try:
-        subprocess.run(
-            [
-                "docker",
-                "exec",
-                container_name,
-                "sh",
-                "-c",
-                f"printf '\\003' | dtach -p {shlex.quote(socket_path)} || true",
-            ],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
+    _docker_probe(
+        [
+            "docker",
+            "exec",
+            container_name,
+            "sh",
+            "-c",
+            f"printf '\\003' | dtach -p {shlex.quote(socket_path)} || true",
+        ]
+    )
 
 
 def _cleanup_spawned_job(container_name: str, socket_path: str, pid_file: str) -> None:

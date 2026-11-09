@@ -875,6 +875,31 @@ def _require_reportable_root_file_finding(
     }
 
 
+def require_current_source_binding(
+    repo: dict[str, Any],
+    *,
+    repo_generation: int,
+    source_manifest_digest: str,
+    label: str,
+) -> None:
+    """Refuse a write bound to a superseded source generation or manifest.
+
+    Generation is checked before the digest so the operator reads the coarser
+    fact first. `label` is the caller's own prefix and is already part of the
+    refusal text the caller's tests assert.
+    """
+    if int(repo.get("active_generation", 0) or 0) != repo_generation:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{label} repository generation is stale",
+        )
+    if str(repo.get("source_manifest_digest", "") or "") != source_manifest_digest:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"{label} source manifest digest is stale",
+        )
+
+
 def _reject_unknown_fields(payload: dict[str, Any], allowed_fields: set[str], *, entity_name: str) -> None:
     unknown_fields = sorted(key for key in payload if key not in allowed_fields)
     if unknown_fields:
@@ -885,33 +910,17 @@ def _reject_unknown_fields(payload: dict[str, Any], allowed_fields: set[str], *,
 
 
 def _coerce_int(value: Any, *, field_name: str) -> int:
-    if isinstance(value, bool):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{field_name} must be an integer",
-        )
-    if isinstance(value, float):
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{field_name} must be an integer",
-        )
-    try:
-        return int(value)
-    except (TypeError, ValueError) as exc:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{field_name} must be an integer",
-        ) from exc
-
-
-def _coerce_non_negative_int(value: Any, *, field_name: str) -> int:
-    coerced = _coerce_int(value, field_name=field_name)
-    if coerced < 0:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=f"{field_name} must be >= 0",
-        )
-    return coerced
+    # A bool and a float are both rejected rather than truncated: an operator
+    # who sent one meant something the column cannot hold.
+    if not isinstance(value, (bool, float)):
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            pass
+    raise HTTPException(
+        status_code=status.HTTP_400_BAD_REQUEST,
+        detail=f"{field_name} must be an integer",
+    )
 
 
 def _require_strict_positive_id(value: Any, *, field_name: str) -> int:
@@ -1315,16 +1324,12 @@ def _normalize_analysis_receipt_anchors(
 
 def _analysis_result_row(connection, result_id: int) -> Any:
     return connection.execute(
-        """
+        f"""
         SELECT
             results.*,
             findings.status AS finding_workflow_status,
             findings.verification_status AS finding_verification_status,
-            (
-                SELECT replacement.id
-                FROM code_analysis_results AS replacement
-                WHERE replacement.supersedes_result_id = results.id
-            ) AS replaced_by_result_id
+            {_REPLACED_BY_RESULT_ID_SQL} AS replaced_by_result_id
         FROM code_analysis_results AS results
         LEFT JOIN assessment_findings AS findings
           ON findings.engagement_id = results.engagement_id
@@ -1941,6 +1946,44 @@ def _valid_current_root_finding_result_sql(
     """
 
 
+def queue_file_repo_join_sql(
+    *,
+    queue_alias: str = "queue",
+    files_alias: str = "files",
+    repos_alias: str = "repos",
+    repo_join_predicates: tuple[str, ...] = (),
+) -> str:
+    """The queue -> file -> repository join every queue read walks.
+
+    `repo_join_predicates` carries whatever else a site constrains the
+    repository join on, so a caller that admits only published or only
+    analysis-role repositories still says so at its own site.
+    """
+    repo_join_predicates = tuple(repo_join_predicates)
+    extra = "".join(f"\n         AND {predicate}" for predicate in repo_join_predicates)
+    return f"""FROM code_analysis_queue AS {queue_alias}
+        JOIN code_files AS {files_alias}
+          ON {files_alias}.id = {queue_alias}.file_id
+         AND {files_alias}.engagement_id = {queue_alias}.engagement_id
+        JOIN code_repos AS {repos_alias}
+          ON {repos_alias}.id = {files_alias}.repo_id
+         AND {repos_alias}.engagement_id = {files_alias}.engagement_id{extra}"""
+
+
+def canonical_current_attempt_sql(queue_alias: str, repos_alias: str) -> str:
+    """This attempt is the file's current one under the published generation.
+
+    The quartet every queue read applies together: the attempt belongs to the
+    repository's active generation, its source has not been superseded, it is
+    the latest current attempt on the file, and no superseded active attempt
+    shadows it. Written once so no reader can apply three of the four.
+    """
+    return f"""{queue_alias}.repo_generation = {repos_alias}.active_generation
+                  AND {queue_alias}.source_superseded_at IS NULL
+                  AND ({_latest_current_queue_attempt_sql(queue_alias, repos_alias)})
+                  AND ({_no_superseded_active_attempt_sql(queue_alias, repos_alias)})"""
+
+
 def _valid_claimed_terminal_attempt_sql(queue_alias: str) -> str:
     return f"""
         trim({queue_alias}.assigned_agent) != ''
@@ -2079,6 +2122,16 @@ def _valid_claimed_result_receipt_sql(
     """
 
 
+# The receipt that replaced this one, as every listing projects it under
+# `replaced_by_result_id`. Written once so the three readers cannot disagree
+# about what replacement means. Correlates against the alias `results`.
+_REPLACED_BY_RESULT_ID_SQL = """(
+            SELECT replacement.id
+            FROM code_analysis_results AS replacement
+            WHERE replacement.supersedes_result_id = results.id
+        )"""
+
+
 def _result_not_replaced_sql(result_alias: str) -> str:
     return f"""
         NOT EXISTS (
@@ -2105,6 +2158,19 @@ def _successful_terminal_review_row_sql(
             f"AND ({_result_not_replaced_sql(result_alias)})"
         )
 
+    def attempt_receipt(alias: str) -> str:
+        """Correlate one receipt to this attempt, and require it current and claimed.
+
+        Every receipt test below starts here; each one's own disposition and
+        evidence predicates follow it at its site.
+        """
+        return f"""{alias}.engagement_id = {queue_alias}.engagement_id
+                      AND {alias}.queue_item_id = {queue_alias}.id
+                      AND {alias}.file_id = {queue_alias}.file_id
+                      AND {alias}.repo_generation = {queue_alias}.repo_generation
+                      AND ({result_is_current(alias)})
+                      AND ({_valid_claimed_result_receipt_sql(queue_alias, alias)})"""
+
     return f"""
         {queue_alias}.status = 'done'
         AND {queue_alias}.disposition IN ('clean', 'finding', 'suspicious')
@@ -2117,15 +2183,8 @@ def _successful_terminal_review_row_sql(
                 AND NOT EXISTS (
                     SELECT 1
                     FROM code_analysis_results AS contradictory_result
-                    WHERE contradictory_result.engagement_id = {queue_alias}.engagement_id
-                      AND contradictory_result.queue_item_id = {queue_alias}.id
-                      AND contradictory_result.file_id = {queue_alias}.file_id
-                      AND contradictory_result.repo_generation = {queue_alias}.repo_generation
+                    WHERE {attempt_receipt("contradictory_result")}
                       AND contradictory_result.disposition IN ('finding', 'suspicious')
-                      AND ({result_is_current("contradictory_result")})
-                      AND ({_valid_claimed_result_receipt_sql(
-                          queue_alias, "contradictory_result"
-                      )})
                 )
             )
             OR (
@@ -2133,15 +2192,8 @@ def _successful_terminal_review_row_sql(
                 AND EXISTS (
                     SELECT 1
                     FROM code_analysis_results AS completed_result
-                    WHERE completed_result.engagement_id = {queue_alias}.engagement_id
-                      AND completed_result.queue_item_id = {queue_alias}.id
-                      AND completed_result.file_id = {queue_alias}.file_id
-                      AND completed_result.repo_generation = {queue_alias}.repo_generation
+                    WHERE {attempt_receipt("completed_result")}
                       AND completed_result.disposition = {queue_alias}.disposition
-                      AND ({result_is_current("completed_result")})
-                      AND ({_valid_claimed_result_receipt_sql(
-                          queue_alias, "completed_result"
-                      )})
                       AND (
                           trim(completed_result.evidence) != ''
                           OR trim(completed_result.evidence_ref) != ''
@@ -2159,31 +2211,17 @@ def _successful_terminal_review_row_sql(
                 AND NOT EXISTS (
                     SELECT 1
                     FROM code_analysis_results AS contradictory_result
-                    WHERE contradictory_result.engagement_id = {queue_alias}.engagement_id
-                      AND contradictory_result.queue_item_id = {queue_alias}.id
-                      AND contradictory_result.file_id = {queue_alias}.file_id
-                      AND contradictory_result.repo_generation = {queue_alias}.repo_generation
+                    WHERE {attempt_receipt("contradictory_result")}
                       AND contradictory_result.disposition IN ('finding', 'suspicious')
                       AND contradictory_result.disposition != {queue_alias}.disposition
-                      AND ({result_is_current("contradictory_result")})
-                      AND ({_valid_claimed_result_receipt_sql(
-                          queue_alias, "contradictory_result"
-                      )})
                 )
             )
         )
         AND EXISTS (
                 SELECT 1
                 FROM code_analysis_results AS source_receipt
-                WHERE source_receipt.engagement_id = {queue_alias}.engagement_id
-                  AND source_receipt.queue_item_id = {queue_alias}.id
-                  AND source_receipt.file_id = {queue_alias}.file_id
-                  AND source_receipt.repo_generation = {queue_alias}.repo_generation
+                WHERE {attempt_receipt("source_receipt")}
                   AND source_receipt.disposition = {queue_alias}.disposition
-                  AND ({result_is_current("source_receipt")})
-                  AND ({_valid_claimed_result_receipt_sql(
-                      queue_alias, "source_receipt"
-                  )})
                   AND (
                       (source_receipt.receipt_binding_status = 'empty_file'
                        AND EXISTS (

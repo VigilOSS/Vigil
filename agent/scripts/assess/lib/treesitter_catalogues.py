@@ -21,10 +21,6 @@ _FUNCTION_QUERIES: dict[str, str] = {
         (function_declaration) @func
         (method_definition) @func
     """,
-    "typescript": """
-        (function_declaration) @func
-        (method_definition) @func
-    """,
     "go": """
         (function_declaration) @func
         (method_declaration) @func
@@ -62,7 +58,6 @@ _CLASS_QUERIES: dict[str, str] = {
     """,
     "python": """(class_definition) @cls""",
     "javascript": """(class_declaration) @cls""",
-    "typescript": """(class_declaration) @cls""",
     "go": """(type_spec) @cls""",
     "ruby": """
         (class) @cls
@@ -92,7 +87,6 @@ _IMPORT_QUERIES: dict[str, str] = {
         (import_from_statement) @imp
     """,
     "javascript": """(import_statement) @imp""",
-    "typescript": """(import_statement) @imp""",
     "go": """(import_spec) @imp""",
     "php": """(namespace_use_declaration) @imp""",
     "csharp": """(using_directive) @imp""",
@@ -147,7 +141,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                     r"\b(?:std::)?(?:i|o|f)fstream\s+(?:[A-Za-z_]\w*)\s*[({]"],
             "python": [r"\bopen\s*\(", r"\bos\.path\.join\s*\(", r"\bPath\s*\("],
             "javascript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
-            "typescript": [r"\bfs\.readFile\w*\s*\(", r"\bfs\.writeFile\w*\s*\(", r"\bpath\.join\s*\("],
             "go": [r"\bos\.Open\w*\s*\(", r"\bos\.Create\s*\(", r"\bfilepath\.Join\s*\(",
                    r"\bioutil\.ReadFile\s*\(", r"\bos\.ReadFile\s*\("],
             "ruby": [r"\bFile\.open\s*\(", r"\bFile\.read\s*\(", r"\bIO\.read\s*\(",
@@ -169,10 +162,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "java": [r"\bcreateStatement\s*\(", r"\.execute\s*\(", r"\.executeQuery\s*\(",
                      r"\.executeUpdate\s*\("],
             "c": [r"\bsqlite3_exec\s*\("],
-            "cpp": [r"\bsqlite3_exec\s*\("],
             "python": [r"\bcursor\.execute\s*\(", r"\.execute\s*\("],
             "javascript": [r"\.query\s*\(", r"\.execute\s*\("],
-            "typescript": [r"\.query\s*\(", r"\.execute\s*\("],
             # `r.URL.Query()` reads the query string in every net/http handler;
             # a `URL` receiver is never a database handle.
             "go": [r"\b(?!URL\.)\w+\.Query\s*\(", r"\b\w+\.QueryRow\s*\(", r"\b\w+\.Exec\s*\("],
@@ -204,7 +195,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "java": [r"\bRuntime\.getRuntime\s*\(\s*\)\.exec\s*\(",
                      r"\bProcessBuilder\s*\("],
             "c": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
-            "cpp": [r"\bsystem\s*\(", r"\bpopen\s*\(", r"\bexecve\s*\("],
             "python": [r"\bos\.system\s*\(", r"\bsubprocess\.run\s*\(",
                        r"\bsubprocess\.Popen\s*\(", r"\bsubprocess\.call\s*\(",
                        r"\bsubprocess\.check_output\s*\(",
@@ -212,7 +202,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                        r"\bsubprocess\.getoutput\s*\(",
                        r"\bsubprocess\.getstatusoutput\s*\("],
             "javascript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
-            "typescript": [r"\bchild_process\.exec\s*\(", r"\bchild_process\.spawn\s*\("],
             "go": [r"\bexec\.Command\s*\(", r"\bos\.StartProcess\s*\("],
             # No leading `\b`: it demands a word character to the LEFT of the
             # backtick, which idiomatic Ruby (`out = \`ssh ...\``) never writes,
@@ -240,7 +229,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                        r"\brequests\.options\s*\(", r"\brequests\.request\s*\(",
                        r"\burllib\.request\.urlopen\s*\("],
             "javascript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
-            "typescript": [r"\bfetch\s*\(", r"\bhttp\.request\s*\(", r"\baxios\."],
             "go": [r"\bhttp\.Get\s*\(", r"\bhttp\.Post\s*\(",
                    r"\b\w*[Cc]lient\.Do\s*\("],
             "ruby": [r"\bNet::HTTP\.\w+\s*\(", r"\bHTTParty\.\w+\s*\(",
@@ -305,11 +293,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                 r"\bFunction\s*\(",
                 r"""\bset(?:Timeout|Interval)\s*\(\s*["'`]""",
             ],
-            "typescript": [
-                r"\beval\s*\(",
-                r"\bFunction\s*\(",
-                r"""\bset(?:Timeout|Interval)\s*\(\s*["'`]""",
-            ],
             "ruby": [r"\beval\s*\(", r"\bclass_eval\s*\(", r"\binstance_eval\s*\(",
                      r"\bsend\s*\(", r"\bpublic_send\s*\("],
             "php": [r"\beval\s*\(", r"\bassert\s*\(", r"\bpreg_replace\s*\(.*/e",
@@ -324,10 +307,8 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "patterns": {
             "java": [r"\bCipher\.getInstance\s*\(", r"\bSecretKeySpec\s*\(", r"\bMessageDigest\s*\("],
             "c": [r"\bEVP_Cipher\w*\s*\(", r"\bAES_encrypt\s*\("],
-            "cpp": [r"\bEVP_Cipher\w*\s*\(", r"\bAES_encrypt\s*\("],
             "python": [r"\bhashlib\.", r"\bCrypto\.Cipher\."],
             "javascript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
-            "typescript": [r"\bcrypto\.createCipher\w*\s*\(", r"\bcrypto\.createHash\s*\("],
             "go": [r"\bcrypto/\w+\b", r"\baes\.NewCipher\s*\(", r"\bsha256\.New\s*\(",
                    r"\bhmac\.New\s*\("],
             "ruby": [r"\bOpenSSL::Cipher\b", r"\bDigest::\w+\b", r"\bOpenSSL::HMAC\b"],
@@ -346,7 +327,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
                      r"\bauthenticate\s*\("],
             "python": [r"\blogin\s*\(", r"\bsession\s*\[", r"@login_required\b"],
             "javascript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
-            "typescript": [r"\breq\.session\b", r"\bpassport\.authenticate\s*\("],
             "go": [r"\bjwt\.\w+\s*\(", r"\bsession\.Get\s*\(", r"\bbcrypt\.\w+\s*\("],
             "ruby": [r"\bauthenticate_user\b", r"\b[Dd]evise\b", r"\bcurrent_user\b",
                      r"\bsession\s*\["],
@@ -366,7 +346,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "patterns": {
             "java": [r"\bgetWriter\s*\(\s*\)\.write\s*\("],
             "javascript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
-            "typescript": [r"\.innerHTML\b", r"\.outerHTML\b", r"\bdocument\.write\s*\("],
             "go": [r"\btemplate\.HTML\s*\(", r"\bfmt\.Fprintf\s*\(\s*w\b"],
             "ruby": [r"\braw\s*\(", r"\.html_safe\b"],
             # `die`/`exit` print a string argument and only exit with a number;
@@ -386,7 +365,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "java": [r"\bsendRedirect\s*\(", r'\bsetHeader\s*\(\s*"(?i:Location)"'],
             "python": [r"\bredirect\s*\(", r"\bHttpResponseRedirect\s*\("],
             "javascript": [r"\bres\.redirect\s*\("],
-            "typescript": [r"\bres\.redirect\s*\("],
             "go": [r"\bhttp\.Redirect\s*\("],
             "ruby": [r"\bredirect_to\s*\("],
             "php": [r"\bheader\s*\(\s*['\"]Location", r"\bredirect\s*\("],
@@ -400,7 +378,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
             "java": [r"\bDocumentBuilderFactory\b", r"\bSAXParserFactory\b",
                      r"\bXMLReader\b", r"\bXMLInputFactory\b"],
             "c": [r"\bxmlParseFile\s*\("],
-            "cpp": [r"\bxmlParseFile\s*\("],
             "python": [r"\bxml\.etree\.ElementTree\.parse\s*\(", r"\blxml\.etree\.parse\s*\("],
             "go": [r"\bxml\.NewDecoder\s*\(", r"\bxml\.Unmarshal\s*\("],
             "ruby": [r"\bNokogiri::XML\s*\(", r"\bREXML::Document\.new\s*\("],
@@ -416,8 +393,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "patterns": {
             "c": [r"\bmemcpy\s*\(", r"\bstrcpy\s*\(", r"\bsprintf\s*\(", r"\bmalloc\s*\(",
                   r"\bfree\s*\(", r"\brealloc\s*\("],
-            "cpp": [r"\bmemcpy\s*\(", r"\bstrcpy\s*\(", r"\bsprintf\s*\(", r"\bmalloc\s*\(",
-                    r"\bfree\s*\(", r"\brealloc\s*\("],
         },
     },
     {
@@ -425,7 +400,6 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
         "vuln_classes": ["format-string"],
         "patterns": {
             "c": [r"\bprintf\s*\(", r"\bfprintf\s*\(", r"\bsprintf\s*\(", r"\bsnprintf\s*\("],
-            "cpp": [r"\bprintf\s*\(", r"\bfprintf\s*\(", r"\bsprintf\s*\(", r"\bsnprintf\s*\("],
         },
     },
 ]
@@ -521,23 +495,7 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
         {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
     ],
-    "typescript": [
-        {"pattern": r"\bapp\.get\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.post\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.put\s*\(", "kind": "express_route"},
-        {"pattern": r"\bapp\.delete\s*\(", "kind": "express_route"},
-        {"pattern": r"\brouter\.get\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.post\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.put\s*\(", "kind": "express_router"},
-        {"pattern": r"\brouter\.delete\s*\(", "kind": "express_router"},
-        {"pattern": r"\bexport\s+default\s+function\b", "kind": "default_export"},
-        {"pattern": r"\bmodule\.exports\b", "kind": "module_exports"},
-    ],
     "c": [
-        {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
-        {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
-    ],
-    "cpp": [
         {"pattern": r"\b\w+_handler\s*\(", "kind": "handler_callback"},
         {"pattern": r"\b\w+_callback\s*\(", "kind": "handler_callback"},
     ],
@@ -572,6 +530,26 @@ _ENTRY_LINE_PATTERNS: dict[str, list[dict[str, str]]] = {
         {"pattern": r"\(\s*r?['\"]/[^'\"]*['\"]\s*,\s*\w*Handler\b", "kind": "tornado_route", "statement_lines": "all"},
     ],
 }
+
+# TypeScript reads as JavaScript in every catalogue above, and C++ reuses C's
+# entry-point lines and its sink patterns wherever C++ adds none of its own --
+# deliberately the same objects, not second copies for the two to drift apart,
+# the way `_GLOBAL_ENTRY_LINE_PATTERNS["php"]` below already is.
+def _mirror_language_aliases() -> None:
+    for query_table in (_FUNCTION_QUERIES, _CLASS_QUERIES, _IMPORT_QUERIES):
+        query_table["typescript"] = query_table["javascript"]
+    _ENTRY_LINE_PATTERNS["typescript"] = _ENTRY_LINE_PATTERNS["javascript"]
+    _ENTRY_LINE_PATTERNS["cpp"] = _ENTRY_LINE_PATTERNS["c"]
+    for definition in _SINK_DEFINITIONS:
+        language_patterns = definition["patterns"]
+        if "javascript" in language_patterns:
+            language_patterns["typescript"] = language_patterns["javascript"]
+        if "c" in language_patterns and "cpp" not in language_patterns:
+            language_patterns["cpp"] = language_patterns["c"]
+
+
+_mirror_language_aliases()
+
 
 # What a PHP command-line script reads instead of a request: its arguments and
 # its standard input. One table, two readers: the bounded source scan reports

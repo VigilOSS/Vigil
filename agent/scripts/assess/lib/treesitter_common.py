@@ -182,17 +182,40 @@ def _snippet(line: str, limit: int = 120) -> str:
         s = s[: limit - 3] + "..."
     return s
 
-def _empty_func(name: str, line_start: int, line_end: int) -> dict[str, Any]:
+def _empty_func(
+    name: str,
+    line_start: int,
+    line_end: int,
+    *,
+    qualified_name: str | None = None,
+    params: list[str] | None = None,
+    modifiers: list[str] | None = None,
+    annotations: list[str] | None = None,
+    **extra: Any,
+) -> dict[str, Any]:
+    """The eight published keys of a callable record, then *extra* in order.
+
+    `qualified_name` defaults to *name*, and each omitted list to its own fresh
+    empty list -- never one shared between records. *extra* carries the private
+    structural fields (`_start_byte`, `is_closure`, `_ruby_route`, ...) that
+    `_remove_internal_structural_fields` strips before publication.
+    """
     return {
         "name": name,
-        "qualified_name": name,
+        "qualified_name": name if qualified_name is None else qualified_name,
         "line_start": line_start,
         "line_end": line_end,
-        "params": [],
-        "modifiers": [],
-        "annotations": [],
+        "params": [] if params is None else params,
+        "modifiers": [] if modifiers is None else modifiers,
+        "annotations": [] if annotations is None else annotations,
         "is_entry_point": False,
+        **extra,
     }
+
+def _entry_point(name: str, line: int, kind: str, annotation: str = "") -> dict[str, Any]:
+    """One entry-point record, as every reader publishes it."""
+    return {"name": name, "line": line, "kind": kind, "annotation": annotation}
+
 
 def _php_import_record(kind: str, name: str, alias: str, line: int) -> dict[str, Any]:
     """One name a PHP `use` declaration imports, as every PHP reader publishes it.

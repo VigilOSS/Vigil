@@ -4,6 +4,7 @@
 // code contract (repositories, coverage, queue, readiness) lives in lib/api.ts.
 
 import { request, type CodeAnalysisResult, type CodeQueuePage, type CodeQueueStatus } from "./api";
+import type { RecordPosition } from "../components/record/recordNavigation";
 
 /** Why receipts or finished reviews are not counted or listed (`code`, count, plain message). */
 export type CodeReviewGap = { code: string; count: number; message: string };
@@ -91,13 +92,8 @@ export type CodeAnalysisResultQuery = {
   offset?: number;
 };
 
-export type CodeAnalysisResultPosition = {
-  /** 0-based; null when the result is outside the filtered results. */
-  index: number | null;
-  total: number;
-  previous: CodeAnalysisResult | null;
-  next: CodeAnalysisResult | null;
-};
+/** Where a receipt sits in the filtered order; `index` is 0-based and null when the result is outside the filtered results. */
+export type CodeAnalysisResultPosition = RecordPosition<CodeAnalysisResult>;
 
 export type CodeQueueLane = Exclude<CodeQueueStatus, "done">;
 

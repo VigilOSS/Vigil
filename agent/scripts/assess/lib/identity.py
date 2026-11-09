@@ -10,6 +10,7 @@ consumer expects.
 """
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
 
@@ -51,21 +52,28 @@ def identity_names(engagement_dir: str | Path) -> list[str]:
     return creds_client.identity_names(engagement_dir)
 
 
-def _matching_host_cookie_buckets(
-    material: dict[str, Any], host: str
-) -> list[tuple[int, str, dict[str, str]]]:
+def _cookie_buckets(material: dict[str, Any]) -> Iterator[tuple[str, dict[str, Any]]]:
+    """Yield ``(normalized host, cookies)`` per well-formed bucket, in stored order."""
     raw = material.get("host_cookies")
-    target = (host or "").strip().rstrip(".").lower()
-    if not isinstance(raw, list) or not target:
-        return []
-    matched: list[tuple[int, str, dict[str, str]]] = []
+    if not isinstance(raw, list):
+        return
     for bucket in raw:
         if not isinstance(bucket, dict):
             continue
         bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
         cookies = bucket.get("cookies")
-        if not bhost or not isinstance(cookies, dict):
-            continue
+        if bhost and isinstance(cookies, dict):
+            yield bhost, cookies
+
+
+def _matching_host_cookie_buckets(
+    material: dict[str, Any], host: str
+) -> list[tuple[int, str, dict[str, str]]]:
+    target = (host or "").strip().rstrip(".").lower()
+    if not target:
+        return []
+    matched: list[tuple[int, str, dict[str, str]]] = []
+    for bhost, cookies in _cookie_buckets(material):
         if target == bhost:
             specificity = 2
         elif target.endswith("." + bhost):
@@ -128,18 +136,7 @@ def browser_cookies_for(material: dict[str, Any], host: str) -> list[dict[str, s
 def host_cookie_hosts(material: dict[str, Any]) -> list[str]:
     """Host labels for which the identity carries a non-empty captured cookie
     bucket. Used to WARN when a run's request host matches none of them."""
-    raw = material.get("host_cookies")
-    if not isinstance(raw, list):
-        return []
-    hosts: list[str] = []
-    for bucket in raw:
-        if not isinstance(bucket, dict):
-            continue
-        bhost = str(bucket.get("host", "")).strip().rstrip(".").lower()
-        cookies = bucket.get("cookies")
-        if bhost and isinstance(cookies, dict) and cookies:
-            hosts.append(bhost)
-    return hosts
+    return [bhost for bhost, cookies in _cookie_buckets(material) if cookies]
 
 
 def resolve_identity(

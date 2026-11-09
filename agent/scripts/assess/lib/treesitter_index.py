@@ -37,6 +37,8 @@ from assess.lib.treesitter_catalogues import (
     _SINK_DEFINITIONS,
 )
 from assess.lib.treesitter_common import (
+    _empty_func,
+    _entry_point,
     _gate_literals,
     _php_import_record,
     _snippet,
@@ -56,7 +58,7 @@ from assess.lib.treesitter_lightweight import (
     _holds_unread_code,
 )
 from assess.lib.treesitter_streaming import (
-    _SIGNAL_DIMENSIONS,
+    SIGNAL_DIMENSIONS,
     _UNSUPPORTED_UNAVAILABLE_DIMENSIONS,
     _attach_bounded_security_sources,
     _complete_index_metadata,
@@ -74,7 +76,9 @@ from assess.lib.treesitter_streaming import (  # noqa: F401
     STREAMING_FALLBACK_BASELINE_UNAVAILABLE,
     STREAMING_SCAN_OVERLAP_BYTES,
     STREAMING_SCAN_WINDOW_BYTES,
+    STRUCTURAL_DIMENSIONS,
     STRUCTURAL_SIGNAL_LIMIT,
+    UNSCANNED_SCOPE_DEGRADATION_REASON,
     StreamingSecurityScanner,
     _CAPPED_INDEX_LISTS,
     _STREAM_EXTRA_ENTRY_PATTERNS,
@@ -780,28 +784,24 @@ def _parse_cpp_callable(
     function_declarator, name, declared_scope = callable_parts
     params_node = function_declarator.child_by_field_name("parameters")
     start_line, end_line = _node_lines(container)
-    parsed = {
-        "name": name,
-        "qualified_name": name,
-        "line_start": start_line,
-        "line_end": end_line,
-        "params": _extract_params(params_node, source) if params_node else [],
-        "modifiers": [],
-        "annotations": [],
-        "is_entry_point": False,
-        "is_declaration": is_declaration,
-        "_start_byte": container.start_byte,
-        "_end_byte": container.end_byte,
-        "_cpp_is_friend": _cpp_has_ancestor(container, "friend_declaration"),
-        "_cpp_declared_scope": declared_scope,
-        "_cpp_namespace": _cpp_namespace_qualifier(container, source),
-        "_cpp_parameter_signature": (
+    parsed = _empty_func(
+        name,
+        start_line,
+        end_line,
+        params=_extract_params(params_node, source) if params_node else [],
+        is_declaration=is_declaration,
+        _start_byte=container.start_byte,
+        _end_byte=container.end_byte,
+        _cpp_is_friend=_cpp_has_ancestor(container, "friend_declaration"),
+        _cpp_declared_scope=declared_scope,
+        _cpp_namespace=_cpp_namespace_qualifier(container, source),
+        _cpp_parameter_signature=(
             _cpp_parameter_signature(params_node, source) if params_node else ()
         ),
-        "_cpp_qualifier_signature": _cpp_qualifier_signature(
+        _cpp_qualifier_signature=_cpp_qualifier_signature(
             function_declarator, source
         ),
-    }
+    )
     body = container.child_by_field_name("body")
     if body is not None:
         (
@@ -925,22 +925,19 @@ def _parse_javascript_callable(node: Any, source: bytes) -> dict[str, Any]:
     name = _javascript_callable_name(node, source)
     parameters = node.child_by_field_name("parameters")
     single_parameter = node.child_by_field_name("parameter")
-    parsed = {
-        "name": name.rsplit(".", 1)[-1],
-        "qualified_name": name,
-        "line_start": node.start_point[0] + 1,
-        "line_end": node.end_point[0] + 1,
-        "params": (
+    parsed = _empty_func(
+        name.rsplit(".", 1)[-1],
+        node.start_point[0] + 1,
+        node.end_point[0] + 1,
+        qualified_name=name,
+        params=(
             _extract_params(parameters, source)
             if parameters is not None
             else ([_node_text(single_parameter, source)] if single_parameter is not None else [])
         ),
-        "modifiers": [],
-        "annotations": [],
-        "is_entry_point": False,
-        "_start_byte": node.start_byte,
-        "_end_byte": node.end_byte,
-    }
+        _start_byte=node.start_byte,
+        _end_byte=node.end_byte,
+    )
     _attach_callable_spans(parsed, callable_node=node, source=source)
     return parsed
 
@@ -1000,26 +997,23 @@ def _php_closure_name(node: Any, source: bytes) -> str:
 def _parse_php_closure(node: Any, source: bytes) -> dict[str, Any]:
     parameters = node.child_by_field_name("parameters")
     name = _php_closure_name(node, source)
-    parsed = {
-        "name": name,
-        "qualified_name": name,
-        "line_start": node.start_point[0] + 1,
-        "line_end": node.end_point[0] + 1,
-        "params": _extract_params(parameters, source) if parameters is not None else [],
-        "modifiers": [
+    parsed = _empty_func(
+        name,
+        node.start_point[0] + 1,
+        node.end_point[0] + 1,
+        params=_extract_params(parameters, source) if parameters is not None else [],
+        modifiers=[
             _node_text(child, source)
             for child in node.children
             if child.type == "static_modifier"
         ],
-        "annotations": [],
-        "is_entry_point": False,
         # A closure is a value, not a class member: `_detect_exports` treats a
         # modifier-less PHP callable as a public method, and `$formatter` is
         # not part of any file's public API.
-        "is_closure": True,
-        "_start_byte": node.start_byte,
-        "_end_byte": node.end_byte,
-    }
+        is_closure=True,
+        _start_byte=node.start_byte,
+        _end_byte=node.end_byte,
+    )
     _attach_callable_spans(parsed, callable_node=node, source=source)
     return parsed
 
@@ -1087,19 +1081,14 @@ def _extract_ruby_route_blocks(tree: Any, source: bytes) -> list[dict[str, Any]]
             continue
         line_start, line_end = _node_lines(node)
         name = f"{verb} {_node_text(path, source)}"
-        parsed = {
-            "name": name,
-            "qualified_name": name,
-            "line_start": line_start,
-            "line_end": line_end,
-            "params": [],
-            "modifiers": [],
-            "annotations": [],
-            "is_entry_point": False,
-            "_ruby_route": True,
-            "_start_byte": node.start_byte,
-            "_end_byte": node.end_byte,
-        }
+        parsed = _empty_func(
+            name,
+            line_start,
+            line_end,
+            _ruby_route=True,
+            _start_byte=node.start_byte,
+            _end_byte=node.end_byte,
+        )
         (
             parsed["_body_start_line"],
             parsed["_body_start_column"],
@@ -1163,23 +1152,20 @@ def _extract_c_declarations(tree: Any, language: str, source: bytes) -> list[dic
                 continue
             name = _node_text(name_node, source)
             start_line, end_line = _node_lines(node)
-            declarations.append({
-                "name": name,
-                "qualified_name": name,
-                "line_start": start_line,
-                "line_end": end_line,
-                "params": _extract_params(params_node, source) if params_node else [],
-                "modifiers": [
+            declarations.append(_empty_func(
+                name,
+                start_line,
+                end_line,
+                params=_extract_params(params_node, source) if params_node else [],
+                modifiers=[
                     _node_text(child, source)
                     for child in node.children
                     if child.type == "storage_class_specifier"
                 ],
-                "annotations": [],
-                "is_entry_point": False,
-                "is_declaration": True,
-                "_start_byte": node.start_byte,
-                "_end_byte": node.end_byte,
-            })
+                is_declaration=True,
+                _start_byte=node.start_byte,
+                _end_byte=node.end_byte,
+            ))
     return declarations
 
 
@@ -1232,22 +1218,18 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
                 continue
             line, column, _, _ = _node_character_range(callback, source)
             name = f"<route@{line}:{column}>"
-            parsed = {
-                "name": name,
-                "qualified_name": name,
-                "line_start": line,
-                "line_end": callback.end_point[0] + 1,
-                "params": _extract_params(params_node, source),
-                "modifiers": [],
-                "annotations": [],
-                "is_entry_point": False,
-                "is_closure": True,
-                "is_declaration": False,
-                "_start_byte": callback.start_byte,
-                "_end_byte": callback.end_byte,
-                "_cpp_parameter_signature": _cpp_parameter_signature(params_node, source),
-                "_cpp_qualifier_signature": (),
-            }
+            parsed = _empty_func(
+                name,
+                line,
+                callback.end_point[0] + 1,
+                params=_extract_params(params_node, source),
+                is_closure=True,
+                is_declaration=False,
+                _start_byte=callback.start_byte,
+                _end_byte=callback.end_byte,
+                _cpp_parameter_signature=_cpp_parameter_signature(params_node, source),
+                _cpp_qualifier_signature=(),
+            )
             _attach_callable_spans(parsed, callable_node=callback, source=source)
             ancestor = callback.parent
             while ancestor is not None:
@@ -1299,22 +1281,18 @@ def _extract_functions_ts(tree: Any, language: str, source: bytes) -> list[dict[
             name = f"<route@{line}:{column}>"
             parameters = node.child_by_field_name("parameters")
             single_parameter = node.child_by_field_name("parameter")
-            parsed = {
-                "name": name,
-                "qualified_name": name,
-                "line_start": line,
-                "line_end": node.end_point[0] + 1,
-                "params": (
+            parsed = _empty_func(
+                name,
+                line,
+                node.end_point[0] + 1,
+                params=(
                     _extract_params(parameters, source) if parameters is not None
                     else ([_node_text(single_parameter, source)] if single_parameter is not None else [])
                 ),
-                "modifiers": [],
-                "annotations": [],
-                "is_entry_point": False,
-                "_minimal_api_route": True,
-                "_start_byte": node.start_byte,
-                "_end_byte": node.end_byte,
-            }
+                _minimal_api_route=True,
+                _start_byte=node.start_byte,
+                _end_byte=node.end_byte,
+            )
             _attach_callable_spans(parsed, callable_node=node, source=source)
             functions.append(parsed)
 
@@ -1431,6 +1409,21 @@ def _php_attributes(attribute_list: Any, source: bytes) -> list[str]:
     ]
 
 
+def _node_field_text(node: Any, field: str, source: bytes) -> str:
+    """The text of *node*'s named *field*, or "" when the node has no such field."""
+    child = node.child_by_field_name(field)
+    return _node_text(child, source) if child else ""
+
+
+def _node_name_and_params(node: Any, source: bytes) -> tuple[str, list[str]]:
+    """A callable node's `name` field as text, and its `parameters` field parsed."""
+    params_node = node.child_by_field_name("parameters")
+    return (
+        _node_field_text(node, "name", source),
+        _extract_params(params_node, source) if params_node else [],
+    )
+
+
 def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, Any] | None:
     """Parse a single function/method tree-sitter node into a structured dict."""
     start_line, end_line = _node_lines(node)
@@ -1480,62 +1473,32 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
                 elif child.type == "qualified_identifier":
                     name = _node_text(child, source)
     elif language == "python":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
-        params_node = node.child_by_field_name("parameters")
-        if params_node:
-            params = _extract_params(params_node, source)
+        name, params = _node_name_and_params(node, source)
         parent = node.parent
         if parent and parent.type == "decorated_definition":
             for child in parent.children:
                 if child.type == "decorator":
                     annotations.append(_node_text(child, source).strip())
     elif language in ("javascript", "typescript"):
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
-        params_node = node.child_by_field_name("parameters")
-        if params_node:
-            params = _extract_params(params_node, source)
+        name, params = _node_name_and_params(node, source)
     elif language == "go":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
-        params_node = node.child_by_field_name("parameters")
-        if params_node:
-            params = _extract_params(params_node, source)
+        name, params = _node_name_and_params(node, source)
         receiver = node.child_by_field_name("receiver")
         if receiver:
             recv_text = _node_text(receiver, source).strip("() ")
             if recv_text:
                 annotations.append(f"receiver:{recv_text}")
     elif language == "ruby":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
-        params_node = node.child_by_field_name("parameters")
-        if params_node:
-            params = _extract_params(params_node, source)
+        name, params = _node_name_and_params(node, source)
     elif language == "php":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
-        params_node = node.child_by_field_name("parameters")
-        if params_node:
-            params = _extract_params(params_node, source)
+        name, params = _node_name_and_params(node, source)
         for child in node.children:
             if child.type in ("visibility_modifier", "static_modifier", "abstract_modifier"):
                 modifiers.append(_node_text(child, source))
             elif child.type == "attribute_list":
                 annotations.extend(_php_attributes(child, source))
     elif language == "csharp":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
-        params_node = node.child_by_field_name("parameters")
-        if params_node:
-            params = _extract_params(params_node, source)
+        name, params = _node_name_and_params(node, source)
         for child in node.children:
             if child.type == "modifier":
                 modifiers.append(_node_text(child, source))
@@ -1549,16 +1512,14 @@ def _parse_function_node(node: Any, language: str, source: bytes) -> dict[str, A
     if not name:
         return None
 
-    parsed = {
-        "name": name,
-        "qualified_name": name,
-        "line_start": start_line,
-        "line_end": end_line,
-        "params": params,
-        "modifiers": modifiers,
-        "annotations": annotations,
-        "is_entry_point": False,
-    }
+    parsed = _empty_func(
+        name,
+        start_line,
+        end_line,
+        params=params,
+        modifiers=modifiers,
+        annotations=annotations,
+    )
     parsed["_start_byte"] = node.start_byte
     parsed["_end_byte"] = node.end_byte
     _attach_callable_spans(parsed, callable_node=node, source=source)
@@ -1662,9 +1623,7 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
                                 else:
                                     implements.append(_node_text(ti, source))
     elif language in ("c", "cpp"):
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
+        name = _node_field_text(node, "name", source)
         # Base classes (C++)
         for child in node.children:
             if child.type == "base_class_clause":
@@ -1672,9 +1631,7 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
                     if base.type == "type_identifier":
                         extends = _node_text(base, source)
     elif language == "python":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
+        name = _node_field_text(node, "name", source)
         superclasses = node.child_by_field_name("superclasses")
         if superclasses:
             for child in superclasses.children:
@@ -1685,22 +1642,16 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
                     else:
                         implements.append(txt)
     elif language in ("javascript", "typescript"):
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
+        name = _node_field_text(node, "name", source)
         for child in node.children:
             if child.type == "class_heritage":
                 for hc in child.children:
                     if hc.type == "identifier" or hc.type == "member_expression":
                         extends = _node_text(hc, source)
     elif language == "go":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
+        name = _node_field_text(node, "name", source)
     elif language == "ruby":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
+        name = _node_field_text(node, "name", source)
         superclass_node = node.child_by_field_name("superclass")
         if superclass_node:
             for child in superclass_node.children:
@@ -1725,9 +1676,7 @@ def _parse_class_node(node: Any, language: str, source: bytes) -> dict[str, Any]
                     if gc.type in ("name", "qualified_name"):
                         implements.append(_node_text(gc, source))
     elif language == "csharp":
-        name_node = node.child_by_field_name("name")
-        if name_node:
-            name = _node_text(name_node, source)
+        name = _node_field_text(node, "name", source)
         # Only classes can inherit a base class. An interface/struct base list
         # consists entirely of interfaces; class first bases are resolved
         # against interfaces declared in this file after extraction.
@@ -2458,12 +2407,9 @@ def _detect_top_level_entry_points(
                     for entry in attributed
                 ):
                     continue
-                entry_points.append({
-                    "name": "<top-level>",
-                    "line": candidate,
-                    "kind": pattern["kind"],
-                    "annotation": "",
-                })
+                entry_points.append(
+                    _entry_point("<top-level>", candidate, pattern["kind"])
+                )
                 seen.add(identity)
     return entry_points
 
@@ -2596,23 +2542,18 @@ def _detect_php_file_scope_entry(
         None,
     )
     if request_line is not None:
-        entries.append({
-            "name": "<top-level>",
-            "line": request_line,
-            "kind": "php_script",
-            "annotation": "request_input",
-        })
+        entries.append(
+            _entry_point("<top-level>", request_line, "php_script", "request_input")
+        )
     elif (
         file_scope.inline_text_lines
         and not any(_PHP_FILE_SCOPE_THIS.search(line) for _index, line in executable)
         and not _php_direct_access_guard(tree, source)
     ):
-        entries.append({
-            "name": "<top-level>",
-            "line": file_scope.inline_text_lines[0],
-            "kind": "php_rendered_page",
-            "annotation": "inline_html",
-        })
+        entries.append(_entry_point(
+            "<top-level>", file_scope.inline_text_lines[0],
+            "php_rendered_page", "inline_html",
+        ))
     cli_evidence: tuple[int, str] | None = (1, "shebang") if source.startswith(b"#!") else None
     if cli_evidence is None:
         cli_patterns = _php_cli_evidence_patterns()
@@ -2628,12 +2569,9 @@ def _detect_php_file_scope_entry(
             None,
         )
     if cli_evidence is not None:
-        entries.append({
-            "name": "<top-level>",
-            "line": cli_evidence[0],
-            "kind": "php_cli_script",
-            "annotation": cli_evidence[1],
-        })
+        entries.append(
+            _entry_point("<top-level>", cli_evidence[0], "php_cli_script", cli_evidence[1])
+        )
     return entries
 
 
@@ -2869,6 +2807,21 @@ def _php_controller_classes(classes: list[dict[str, Any]], file_path: str) -> se
     }
 
 
+def _record_entry(
+    entry_points: list[dict[str, Any]],
+    func: dict[str, Any],
+    kind: str,
+    annotation: str = "",
+) -> None:
+    """Record *func* as an entry point of *kind*, and mark the callable itself.
+
+    Each rule keeps its own control flow (`continue`, or the `matched` flag the
+    name-pattern rules break on), so rule precedence stays at the call site.
+    """
+    entry_points.append(_entry_point(func["name"], func["line_start"], kind, annotation))
+    func["is_entry_point"] = True
+
+
 def _detect_entry_points(
     tree: Any,
     functions: list[dict[str, Any]],
@@ -2944,13 +2897,7 @@ def _detect_entry_points(
             and not func.get("_ruby_route")
             and _ruby_method_is_public(tree, func, source)
         ):
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "rails_action",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "rails_action")
             continue
         if (
             language == "php"
@@ -2960,23 +2907,11 @@ def _detect_entry_points(
             and (func["name"] == "__invoke" or not func["name"].startswith("__"))
             and not func["annotations"]
         ):
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "laravel_action",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "laravel_action")
             continue
 
         if language == "c" and func["name"] in c_http_callbacks:
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "http_handler",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "http_handler")
             continue
         if language == "cpp" and (
             (func.get("is_closure", False) and func.get("_start_byte") in cpp_http_lambdas)
@@ -2985,33 +2920,15 @@ def _detect_entry_points(
                 and any(re.search(r"\bRequest\b", param) for param in func["params"])
             )
         ):
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "http_handler",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "http_handler")
             continue
 
         if language == "csharp" and func.get("_minimal_api_route"):
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "minimal_api_route",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "minimal_api_route")
             continue
 
         if language == "go" and _is_go_http_handler(func, go_http_aliases):
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "go_http_handler",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "go_http_handler")
             continue
         if (
             language == "python"
@@ -3020,25 +2937,13 @@ def _detect_entry_points(
             and func["name"] in _TORNADO_VERB_METHODS
             and func.get("params", [])[:1] == ["self"]
         ):
-            entry_points.append({
-                "name": func["name"],
-                "line": func["line_start"],
-                "kind": "tornado_handler",
-                "annotation": "",
-            })
-            func["is_entry_point"] = True
+            _record_entry(entry_points, func, "tornado_handler")
             continue
 
         for ann_def in annotation_defs:
             for ann in func.get("annotations", []):
                 if re.search(ann_def["pattern"], ann):
-                    entry_points.append({
-                        "name": func["name"],
-                        "line": func["line_start"],
-                        "kind": ann_def["kind"],
-                        "annotation": ann.split("(")[0],
-                    })
-                    func["is_entry_point"] = True
+                    _record_entry(entry_points, func, ann_def["kind"], ann.split("(")[0])
                     matched = True
                     break
             if matched:
@@ -3059,32 +2964,14 @@ def _detect_entry_points(
                         else {"HttpServlet", "GenericServlet"}
                     )
                     if base_names & valid_bases:
-                        entry_points.append({
-                            "name": func["name"],
-                            "line": func["line_start"],
-                            "kind": mdef["kind"],
-                            "annotation": "@Override",
-                        })
-                        func["is_entry_point"] = True
+                        _record_entry(entry_points, func, mdef["kind"], "@Override")
                         matched = True
                 elif mdef["name"] == "main" and language == "java":
                     if "public" in func.get("modifiers", []) and "static" in func.get("modifiers", []):
-                        entry_points.append({
-                            "name": func["name"],
-                            "line": func["line_start"],
-                            "kind": "main_method",
-                            "annotation": "",
-                        })
-                        func["is_entry_point"] = True
+                        _record_entry(entry_points, func, "main_method")
                         matched = True
                 else:
-                    entry_points.append({
-                        "name": func["name"],
-                        "line": func["line_start"],
-                        "kind": mdef["kind"],
-                        "annotation": "",
-                    })
-                    func["is_entry_point"] = True
+                    _record_entry(entry_points, func, mdef["kind"])
                     matched = True
             if matched:
                 break
@@ -3115,13 +3002,7 @@ def _detect_entry_points(
         for lp in line_pattern_defs:
             if language in {"c", "cpp"}:
                 if re.search(lp["pattern"], f'{func["name"]}('):
-                    entry_points.append({
-                        "name": func["name"],
-                        "line": func["line_start"],
-                        "kind": lp["kind"],
-                        "annotation": "",
-                    })
-                    func["is_entry_point"] = True
+                    _record_entry(entry_points, func, lp["kind"])
                     matched = True
                     break
                 continue
@@ -3140,13 +3021,7 @@ def _detect_entry_points(
                         _line_pattern_matches(lp["pattern"], source_lines[line_no])
                     )
                 if hit:
-                    entry_points.append({
-                        "name": func["name"],
-                        "line": func["line_start"],
-                        "kind": lp["kind"],
-                        "annotation": "",
-                    })
-                    func["is_entry_point"] = True
+                    _record_entry(entry_points, func, lp["kind"])
                     matched = True
                     break
             if matched:
@@ -3194,13 +3069,7 @@ def _detect_entry_points(
                 if func["is_entry_point"]:
                     continue
                 kind = "express_route" if receiver == "app" else "express_router"
-                entry_points.append({
-                    "name": func["name"],
-                    "line": func["line_start"],
-                    "kind": kind,
-                    "annotation": "",
-                })
-                func["is_entry_point"] = True
+                _record_entry(entry_points, func, kind)
         # The request listener a Node HTTP server dispatches every request to.
         # A hand-rolled router is exactly this function, path switch and all.
         # A listener this file does not define -- an imported app, a factory's
@@ -3227,31 +3096,16 @@ def _detect_entry_points(
                     continue
                 if func["is_entry_point"]:
                     continue
-                entry_points.append({
-                    "name": func["name"],
-                    "line": func["line_start"],
-                    "kind": "node_http_server",
-                    "annotation": "",
-                })
-                func["is_entry_point"] = True
+                _record_entry(entry_points, func, "node_http_server")
             if unresolved:
-                entry_points.append({
-                    "name": "<top-level>",
-                    "line": node.start_point[0] + 1,
-                    "kind": "node_http_server",
-                    "annotation": "",
-                })
+                entry_points.append(_entry_point(
+                    "<top-level>", node.start_point[0] + 1, "node_http_server"
+                ))
 
     if language in ("c", "cpp", "go"):
         for func in functions:
             if func["name"] == "main" and not func["is_entry_point"] and not func.get("is_declaration", False):
-                entry_points.append({
-                    "name": "main",
-                    "line": func["line_start"],
-                    "kind": "main_function",
-                    "annotation": "",
-                })
-                func["is_entry_point"] = True
+                _record_entry(entry_points, func, "main_function")
 
     return entry_points
 
@@ -3336,8 +3190,6 @@ FUNCTION_SCOPED_DIMENSIONS = frozenset({"call_sites", "dataflow", "security_sink
 # the parser cannot call it a comment, but it holds no call and no sink.
 _COMMENT_NODE_TYPES = frozenset({"comment", "line_comment", "block_comment"})
 _DOCSTRING_NODE_TYPES = frozenset({"string", "concatenated_string", "string_literal"})
-
-UNSCANNED_SCOPE_DEGRADATION_REASON = "unscanned_function_scope"
 
 
 def _is_comment_node(node: Any) -> bool:
@@ -4301,8 +4153,10 @@ def _java_fetch_call_matches_type(
     return declared_type == "HttpClient"
 
 
-def _java_fetch_bindings(lines: list[str]) -> dict[str, str]:
-    bindings: dict[str, str] = {}
+def _java_fetch_bindings(
+    lines: list[str], known: dict[str, str] | None = None
+) -> dict[str, str]:
+    bindings: dict[str, str] = dict(known or {})
     for line in lines:
         for declared_type, name in re.findall(
             r"\b([A-Z][\w.]*|var|int|long|short|byte|boolean)\s+([A-Za-z_]\w*)\s*(?=[=;,)]|$)",
@@ -4343,6 +4197,16 @@ def _csharp_fetch_bindings(
         if factory_call and bindings.get(factory_call.group(2)) == "IHttpClientFactory":
             bindings[factory_call.group(1)] = "HttpClient"
     return bindings
+
+
+# The declared-type reader a language's `url_fetch` rows consult, so a call on a
+# receiver that is not an HTTP client is not read as a fetch. Each reader seeds
+# itself from the bindings already in hand, so class fields, then parameters,
+# then the scope's own lines merge in that order.
+_FETCH_BINDING_READERS: dict[str, Callable[..., dict[str, str]]] = {
+    "java": _java_fetch_bindings,
+    "csharp": _csharp_fetch_bindings,
+}
 
 
 def _csharp_fetch_call_matches_type(
@@ -4509,12 +4373,11 @@ def _detect_sinks(
     is reading text, not a call. See `_php_quoted_spans`.
     """
     sinks: list[dict[str, Any]] = []
-    java_class_receivers: dict[int, dict[str, str]] = {}
-    java_class_for_line: dict[int, dict[str, Any]] = {}
-    csharp_class_receivers: dict[int, dict[str, str]] = {}
-    csharp_class_for_line: dict[int, dict[str, Any]] = {}
+    class_receivers: dict[int, dict[str, str]] = {}
+    class_for_line: dict[int, dict[str, Any]] = {}
     go_http_aliases: set[str] = set()
-    if language == "java":
+    fetch_bindings = _FETCH_BINDING_READERS.get(language)
+    if fetch_bindings is not None:
         callable_lines = {
             line
             for function in functions
@@ -4522,22 +4385,8 @@ def _detect_sinks(
         }
         for cls in sorted(classes, key=lambda item: item["line_end"] - item["line_start"], reverse=True):
             for line in range(cls["line_start"], cls["line_end"] + 1):
-                java_class_for_line[line] = cls
-            java_class_receivers[id(cls)] = _java_fetch_bindings([
-                source_lines[line - 1]
-                for line in range(cls["line_start"], cls["line_end"] + 1)
-                if line not in callable_lines
-            ])
-    elif language == "csharp":
-        callable_lines = {
-            line
-            for function in functions
-            for line in range(function["line_start"], function["line_end"] + 1)
-        }
-        for cls in sorted(classes, key=lambda item: item["line_end"] - item["line_start"], reverse=True):
-            for line in range(cls["line_start"], cls["line_end"] + 1):
-                csharp_class_for_line[line] = cls
-            csharp_class_receivers[id(cls)] = _csharp_fetch_bindings([
+                class_for_line[line] = cls
+            class_receivers[id(cls)] = fetch_bindings([
                 source_lines[line - 1]
                 for line in range(cls["line_start"], cls["line_end"] + 1)
                 if line not in callable_lines
@@ -4558,8 +4407,7 @@ def _detect_sinks(
         scopes.append(({"name": "<top-level>"}, file_scope_lines))
 
     for func, scan_lines in scopes:
-        java_fetch_receivers: dict[str, str] = {}
-        csharp_fetch_receivers: dict[str, str] = {}
+        fetch_receivers: dict[str, str] = {}
         go_fetch_receivers: set[str] = set()
         # Each line is filtered once, and a line holding no literal a gated
         # pattern requires is offered only to the patterns that require none.
@@ -4568,21 +4416,13 @@ def _detect_sinks(
             for line_idx, line_text in scan_lines
             if source_lines[line_idx]
         ]
-        if language == "java":
-            cls = java_class_for_line.get(func.get("line_start", 0))
-            if cls is not None:
-                java_fetch_receivers.update(java_class_receivers[id(cls)])
-            java_fetch_receivers.update(_java_fetch_bindings(func.get("params", [])))
-            java_fetch_receivers.update(_java_fetch_bindings([line for _, line, _ in readable]))
-        elif language == "csharp":
-            cls = csharp_class_for_line.get(func.get("line_start", 0))
-            if cls is not None:
-                csharp_fetch_receivers.update(csharp_class_receivers[id(cls)])
-            csharp_fetch_receivers = _csharp_fetch_bindings(
-                func.get("params", []), csharp_fetch_receivers
-            )
-            csharp_fetch_receivers = _csharp_fetch_bindings(
-                [line for _, line, _ in readable], csharp_fetch_receivers
+        if fetch_bindings is not None:
+            cls = class_for_line.get(func.get("line_start", 0))
+            fetch_receivers = fetch_bindings(
+                [line for _, line, _ in readable],
+                fetch_bindings(
+                    func.get("params", []), class_receivers.get(id(cls), {})
+                ),
             )
         elif language == "go":
             go_fetch_receivers.update(_go_fetch_bindings(func.get("params", []), go_http_aliases))
@@ -4604,14 +4444,14 @@ def _detect_sinks(
                         matches = (
                             match for match in matches
                             if _java_fetch_call_matches_type(
-                                line_text, match.start(), pat, java_fetch_receivers
+                                line_text, match.start(), pat, fetch_receivers
                             )
                         )
                     elif language == "csharp" and sink_def["kind"] == "url_fetch":
                         matches = (
                             match for match in matches
                             if _csharp_fetch_call_matches_type(
-                                line_text, match.start(), pat, csharp_fetch_receivers
+                                line_text, match.start(), pat, fetch_receivers
                             )
                         )
                     if quoted_spans is not None:
@@ -4625,14 +4465,11 @@ def _detect_sinks(
                         if identity in seen:
                             continue
                         seen.add(identity)
-                        snippet = line_text.strip()
-                        if len(snippet) > 120:
-                            snippet = snippet[:117] + "..."
                         sinks.append({
                             "kind": sink_def["kind"],
                             "line": line_idx + 1,
                             "function": func["name"],
-                            "snippet": snippet,
+                            "snippet": _snippet(line_text),
                             "vuln_classes": list(sink_def["vuln_classes"]),
                         })
                         # Retain distinct lines so a safe-looking early call
@@ -5680,7 +5517,7 @@ def index_file(
                 "unavailable_dimensions": list(_UNSUPPORTED_UNAVAILABLE_DIMENSIONS),
                 "artifact_truncated": False,
                 "truncated_dimensions": [],
-                "signal_counts": {dimension: 0 for dimension in _SIGNAL_DIMENSIONS},
+                "signal_counts": {dimension: 0 for dimension in SIGNAL_DIMENSIONS},
             }
         )
         return indexed

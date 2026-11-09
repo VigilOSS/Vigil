@@ -15,6 +15,7 @@ from assess.lib.client import (
     AssessmentClient,
     require_finding_write_response,
 )
+from assess.lib.code_record_input import fail
 from assess.lib.code_snapshot_binding import fill_binding
 from assess.lib.config import load_config
 from assess.lib.contracts import common_mistake_hints, render_contract
@@ -187,14 +188,13 @@ def _refuse_non_initial_verification_status(payload: dict) -> None:
     if not incoming or incoming == _RECORD_TIME_VERIFICATION_STATUS:
         return
     slug = str(payload.get("slug") or "<slug>")
-    print(
-        f"finding record: REFUSED — verification_status={incoming!r} cannot be set at record "
+    fail(
+        "finding record",
+        f"REFUSED — verification_status={incoming!r} cannot be set at record "
         f"time; a new finding always opens at {_RECORD_TIME_VERIFICATION_STATUS!r}.\n"
         f"  - Record it first, then move the axis with its evidence: "
         f"`vigil assess finding verify {slug} --status {incoming} --reason \"...\"`.",
-        file=sys.stderr,
     )
-    sys.exit(1)
 
 
 def _apply_evidence_type(payload: dict, evidence_type: str) -> None:
@@ -210,12 +210,11 @@ def _apply_evidence_type(payload: dict, evidence_type: str) -> None:
         return
     embedded = str(payload.get("evidence_type") or "").strip()
     if embedded and embedded != flag:
-        print(
-            f"finding record: REFUSED — --evidence-type {flag!r} contradicts "
+        fail(
+            "finding record",
+            f"REFUSED — --evidence-type {flag!r} contradicts "
             f"evidence_type {embedded!r} in the JSON payload. Set it in one place.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     payload["evidence_type"] = flag
 
 
@@ -466,8 +465,9 @@ def _find_clobbered_finding(
 def _refuse_clobber(existing: dict) -> None:
     existing_slug = str(existing.get("slug", ""))
     existing_status = str(existing.get("workflow_status", ""))
-    print(
-        f"finding record: REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
+    fail(
+        "finding record",
+        f"REFUSED — this finding's dedup tuple (defect_family + root_cause_key "
         f"+ auth_context + canonical_location) collides with existing finding {existing_slug} "
         f"(workflow_status={existing_status}); recording it would silently overwrite that "
         f"{existing_status} finding.\n"
@@ -475,9 +475,7 @@ def _refuse_clobber(existing: dict) -> None:
         f"defect_family, then attach it after recording with "
         f"`vigil assess finding link <this-slug> --root-cause {existing_slug}`.\n"
         f"  - Intend to MODIFY {existing_slug}? Re-run with `--update {existing_slug}`.",
-        file=sys.stderr,
     )
-    sys.exit(1)
 
 
 def _resolve_update_target(
@@ -491,12 +489,11 @@ def _resolve_update_target(
     (its first tier) rather than re-running the net-new dedup collision.
     """
     if json_slug and json_slug != update_slug:
-        print(
-            f"finding record: --update {update_slug} conflicts with slug '{json_slug}' in the "
+        fail(
+            "finding record",
+            f"--update {update_slug} conflicts with slug '{json_slug}' in the "
             f"JSON payload. Drop the JSON slug or set it to {update_slug}.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     with AssessmentClient(base_url, engagement_key) as client:
         try:
             existing = client.get(f"findings/{update_slug}")
@@ -506,12 +503,11 @@ def _resolve_update_target(
             else:
                 raise
     if not isinstance(existing, dict) or not existing.get("slug"):
-        print(
-            f"finding record: --update {update_slug} names a finding that does not exist. Record "
+        fail(
+            "finding record",
+            f"--update {update_slug} names a finding that does not exist. Record "
             f"it without --update to create a new finding, or pass the correct existing slug.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     return existing
 
 
@@ -533,13 +529,12 @@ def _require_authoring_dispatch(
     if existing is None:
         author = incoming
         if not author:
-            print(
-                "finding record: REFUSED — new findings require provenance.agent_id. "
+            fail(
+                "finding record",
+                "REFUSED — new findings require provenance.agent_id. "
                 "Pass --agent-id <your Runtime Identity agent_id>; the role name cannot "
                 "identify one dispatch.",
-                file=sys.stderr,
             )
-            sys.exit(1)
     else:
         stored_provenance = existing.get("provenance")
         author = (
@@ -549,19 +544,17 @@ def _require_authoring_dispatch(
         )
         if not author:
             slug = str(existing.get("slug") or "this finding")
-            print(
-                f"finding record: REFUSED — {slug} is a historical finding with no author. "
+            fail(
+                "finding record",
+                f"REFUSED — {slug} is a historical finding with no author. "
                 "Run `vigil assess finding bind-author` once before re-recording it.",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if incoming and incoming != author:
-            print(
-                "finding record: REFUSED — provenance.agent_id is immutable after "
+            fail(
+                "finding record",
+                "REFUSED — provenance.agent_id is immutable after "
                 f"creation (stored {author!r}, received {incoming!r}).",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     with AssessmentClient(base_url, engagement_key) as client:
         try:
@@ -576,12 +569,11 @@ def _require_authoring_dispatch(
             if existing is None else
             "Run `vigil assess finding bind-author` once to repair this invalid historical binding."
         )
-        print(
-            f"finding record: REFUSED — provenance.agent_id {author!r} does not resolve "
+        fail(
+            "finding record",
+            f"REFUSED — provenance.agent_id {author!r} does not resolve "
             f"to a dispatch in this engagement. {recovery}",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
 
 def _guard_finding_clobber(payload: dict, *, candidate_slug: str, base_url: str, engagement_key: str) -> None:
@@ -751,26 +743,23 @@ def run(args) -> None:
 
     park_reason = (getattr(args, "pending_runtime_proof_reason", "") or "").strip()
     if len(park_reason) > 4096:
-        print('finding record: --pending-runtime-proof reason must be at most 4096 characters', file=sys.stderr)
-        sys.exit(1)
+        fail("finding record", '--pending-runtime-proof reason must be at most 4096 characters')
     next_test_file = (getattr(args, "next_test_file", "") or "").strip()
     next_test = None
     if bool(park_reason) != bool(next_test_file):
         # Checked before the record: a park that cannot be sent must not leave
         # a recorded-but-unparked finding behind.
-        print(
-            "finding record: --pending-runtime-proof and --next-test-file go together; "
+        fail(
+            "finding record",
+            "--pending-runtime-proof and --next-test-file go together; "
             "the park is a pending_runtime_proof verification and carries its runtime "
             "proof plan (see `vigil assess contract finding verify`).",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if next_test_file:
         try:
             next_test = load_next_test_file(next_test_file)
         except ValueError as exc:
-            print(f"finding record: --next-test-file: {exc}", file=sys.stderr)
-            sys.exit(1)
+            fail("finding record", f"--next-test-file: {exc}")
 
     agent_name = args.agent_name
     update_slug = (getattr(args, "update_slug", "") or "").strip()
@@ -860,13 +849,14 @@ def run(args) -> None:
                     response, payload["run_candidate"]
                 )
         except AssessError as exc:
-            print(f"finding record: {exc}", file=sys.stderr)
-            sys.exit(1)
+            fail("finding record", f"{exc}")
 
         finding = response.get("finding", {})
         if not finding.get("slug") or not finding.get("title"):
-            print("finding record: orchestrator backend did not return a canonical finding record", file=sys.stderr)
-            sys.exit(1)
+            fail(
+                "finding record",
+                "orchestrator backend did not return a canonical finding record",
+            )
 
         finding_slug = finding["slug"]
         _print_duplicate_advisories(
@@ -903,10 +893,9 @@ def run(args) -> None:
             retry = shlex.join(['vigil', 'assess', 'finding', 'verify', finding_slug,
                                 '--status', 'pending_runtime_proof', '--reason', park_reason,
                                 '--next-test-file', next_test_file])
-            print(
-                f"finding record: {finding_slug} WAS recorded, but parking it at "
+            fail(
+                "finding record",
+                f"{finding_slug} WAS recorded, but parking it at "
                 f"pending_runtime_proof failed: {exc}\n"
                 f"  - Retry only the park: `{retry}`.",
-                file=sys.stderr,
             )
-            sys.exit(1)

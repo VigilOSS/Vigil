@@ -187,19 +187,6 @@ def resolve_pipeline_paths(
     )
 
 
-def resolve_db_path(cfg: Config, override: str | None = None) -> Path:
-    """Resolve cases.db from the engagement dir unless an explicit override is passed.
-
-    The override exists so live testing and one-off operator workflows can
-    point at a temp DB without touching the production work buffer. New
-    callers should default to the auto-resolved path; older commands like
-    `ingest-endpoints` still take a positional `db_path` for backward compat.
-    """
-    if override:
-        return Path(override).expanduser().resolve()
-    return Path(cfg.engagement_dir).resolve() / "cases.db"
-
-
 def load_cache_meta(meta_path: Path) -> GauCacheMeta | None:
     """Read the sidecar meta JSON or return None on any read error.
 

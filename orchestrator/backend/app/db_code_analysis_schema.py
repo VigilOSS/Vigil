@@ -6,10 +6,9 @@ from __future__ import annotations
 
 import sqlite3
 
-def create_tables(connection: sqlite3.Connection) -> None:
-    # ── Code Analysis Tables ──────────────────────────────────
-    connection.execute(
-        """
+# ── Code Analysis Tables ──────────────────────────────────
+_CODE_ANALYSIS_DDL: tuple[str, ...] = (
+    """
             CREATE TABLE IF NOT EXISTS code_repos (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -53,10 +52,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 UNIQUE(engagement_id, repo_key),
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_modules (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -74,10 +71,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_files (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -118,10 +113,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
                 FOREIGN KEY(module_id) REFERENCES code_modules(id) ON DELETE SET NULL
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_source_generations (
                 engagement_id INTEGER NOT NULL,
                 repo_id INTEGER NOT NULL,
@@ -146,10 +139,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_source_generation_files (
                 engagement_id INTEGER NOT NULL,
                 repo_id INTEGER NOT NULL,
@@ -170,10 +161,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                     ) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE RESTRICT
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_analysis_queue (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -207,10 +196,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_analysis_results (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -247,10 +234,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_structural_callable_publications (
                 engagement_id INTEGER NOT NULL,
                 repo_id INTEGER NOT NULL,
@@ -261,10 +246,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_structural_callables (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -285,10 +268,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_analysis_result_callables (
                 result_id INTEGER NOT NULL,
                 callable_id INTEGER NOT NULL,
@@ -300,18 +281,12 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(callable_id) REFERENCES code_structural_callables(id) ON DELETE RESTRICT,
                 FOREIGN KEY(file_id) REFERENCES code_files(id) ON DELETE CASCADE
             )
-            """
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_code_structural_callables_current_file "
-        "ON code_structural_callables(engagement_id, file_id, repo_generation, qualified_name)"
-    )
-    connection.execute(
-        "CREATE INDEX IF NOT EXISTS idx_code_analysis_result_callables_file "
-        "ON code_analysis_result_callables(file_id, result_id)"
-    )
-    connection.execute(
-        """
+            """,
+    "CREATE INDEX IF NOT EXISTS idx_code_structural_callables_current_file "
+        "ON code_structural_callables(engagement_id, file_id, repo_generation, qualified_name)",
+    "CREATE INDEX IF NOT EXISTS idx_code_analysis_result_callables_file "
+        "ON code_analysis_result_callables(file_id, result_id)",
+    """
             CREATE TABLE IF NOT EXISTS code_variant_check_receipts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -340,27 +315,21 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(dispatch_id) REFERENCES assessment_dispatches(id) ON DELETE RESTRICT
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE INDEX IF NOT EXISTS idx_code_variant_receipts_current_lookup
             ON code_variant_check_receipts(
                 engagement_id, repo_id, current_file_id, variant_input_digest
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE INDEX IF NOT EXISTS idx_code_variant_receipts_latest_file
             ON code_variant_check_receipts(
                 engagement_id, current_file_id, id DESC
             )
             WHERE current_file_id IS NOT NULL
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_fuzz_decisions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -378,19 +347,15 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE RESTRICT
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE INDEX IF NOT EXISTS idx_code_fuzz_decisions_current
             ON code_fuzz_decisions(
                 engagement_id, repo_id, repo_generation,
                 source_manifest_digest, id DESC
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_fuzz_campaign_receipts (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -421,19 +386,15 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(dispatch_id) REFERENCES assessment_dispatches(id) ON DELETE RESTRICT,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE RESTRICT
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE INDEX IF NOT EXISTS idx_code_fuzz_campaign_receipts_current
             ON code_fuzz_campaign_receipts(
                 engagement_id, repo_id, repo_generation,
                 source_manifest_digest, target_id, id DESC
             )
-            """
-    )
-    connection.execute(
-        """
+            """,
+    """
             CREATE TABLE IF NOT EXISTS code_ingest_staging (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -446,10 +407,8 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(engagement_id) REFERENCES engagements(id) ON DELETE CASCADE,
                 FOREIGN KEY(repo_id) REFERENCES code_repos(id) ON DELETE CASCADE
             )
-        """
-    )
-    connection.execute(
-        """
+        """,
+    """
             CREATE TABLE IF NOT EXISTS code_analysis_triggers (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 engagement_id INTEGER NOT NULL,
@@ -476,6 +435,11 @@ def create_tables(connection: sqlite3.Connection) -> None:
                 FOREIGN KEY(target_file_id) REFERENCES code_files(id) ON DELETE SET NULL,
                 FOREIGN KEY(resolved_queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE SET NULL
             )
-            """
-    )
-    # ── End Code Analysis Tables ──────────────────────────────
+            """,
+)
+# ── End Code Analysis Tables ──────────────────────────────
+
+
+def create_tables(connection: sqlite3.Connection) -> None:
+    for statement in _CODE_ANALYSIS_DDL:
+        connection.execute(statement)

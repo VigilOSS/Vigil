@@ -275,24 +275,20 @@ def list_http_flows(
     limit, offset = _bounded_http_flow_window(limit, offset)
     clauses = ["engagement_id = ?"]
     params: list[Any] = [engagement.id]
-    if flow_uid.strip():
-        clauses.append("flow_uid = ?")
-        params.append(flow_uid.strip())
-    if host.strip():
-        clauses.append("host = ?")
-        params.append(host.strip().lower())
-    if method.strip():
-        clauses.append("method = ?")
-        params.append(method.strip().upper())
-    if response_status is not None:
-        clauses.append("response_status = ?")
-        params.append(int(response_status))
-    if content_type_family.strip():
-        clauses.append("content_type_family = ?")
-        params.append(content_type_family.strip())
-    if auth_context.strip():
-        clauses.append("auth_context = ?")
-        params.append(auth_context.strip())
+    # The equality filters, in the order their clauses join the WHERE; a column
+    # whose normalized value is None is not filtered on.
+    for column, value in (
+        ("flow_uid", flow_uid.strip() or None),
+        ("host", host.strip().lower() or None),
+        ("method", method.strip().upper() or None),
+        ("response_status", None if response_status is None else int(response_status)),
+        ("content_type_family", content_type_family.strip() or None),
+        ("auth_context", auth_context.strip() or None),
+    ):
+        if value is None:
+            continue
+        clauses.append(f"{column} = ?")
+        params.append(value)
     if truncated is True:
         clauses.append("(request_body_truncated = 1 OR response_body_truncated = 1)")
     elif truncated is False:

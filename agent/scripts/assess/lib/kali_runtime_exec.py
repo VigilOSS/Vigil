@@ -12,6 +12,7 @@ from __future__ import annotations
 import subprocess
 import sys
 from contextlib import redirect_stdout
+from typing import Any
 
 from .client import AssessError, default_runtime_container
 
@@ -19,17 +20,37 @@ from .client import AssessError, default_runtime_container
 _validated_managed_runtimes: set[tuple[str, str]] = set()
 
 
-def _container_identity(container_name: str) -> str:
-    """Return the current container instance ID, or an empty string if unknown."""
+def _docker_probe(
+    argv: list[str],
+    *,
+    text: bool = False,
+) -> subprocess.CompletedProcess[Any] | None:
+    """Run one short, non-raising docker probe.
+
+    Canonical home for the ``check=False, capture_output=True, timeout=5``
+    idiom every docker probe in this module and in ``kali_jobs`` shares.
+    Returns ``None`` when docker itself could not be reached (missing binary
+    or probe timeout) so each caller keeps its own docker-unreachable answer;
+    callers that need the exception instance for a diagnostic keep their own
+    ``try``."""
     try:
-        result = subprocess.run(
-            ["docker", "inspect", "-f", "{{.Id}}", container_name],
+        return subprocess.run(
+            argv,
             check=False,
             capture_output=True,
-            text=True,
+            text=text,
             timeout=5,
         )
     except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def _container_identity(container_name: str) -> str:
+    """Return the current container instance ID, or an empty string if unknown."""
+    result = _docker_probe(
+        ["docker", "inspect", "-f", "{{.Id}}", container_name], text=True
+    )
+    if result is None:
         return ""
     return (result.stdout or "").strip() if result.returncode == 0 else ""
 
@@ -61,15 +82,8 @@ def _container_running(container_name: str) -> bool:
     ``docker ps`` output. Swallows docker-unreachable as ``False`` (callers
     that need to distinguish unreachable from absent use
     :func:`_check_container_running`, which raises)."""
-    try:
-        result = subprocess.run(
-            _docker_ps_names_filter_argv(container_name),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
+    result = _docker_probe(_docker_ps_names_filter_argv(container_name), text=True)
+    if result is None:
         return False
     return container_name in (result.stdout or "").splitlines()
 
@@ -227,28 +241,14 @@ def _kill_in_container(container_name: str, pid: int, signal_name: str) -> None:
     failure modes are swallowed: the process may have already exited, the
     container may be gone, docker may not be reachable. Caller still has the
     host-side process-group kill as belt-and-braces."""
-    try:
-        subprocess.run(
-            ["docker", "exec", container_name, "kill", f"-{signal_name}", str(pid)],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
+    _docker_probe(
+        ["docker", "exec", container_name, "kill", f"-{signal_name}", str(pid)]
+    )
 
 
 def _cleanup_container_pid_file(container_name: str, run_uuid: str) -> None:
     pid_file = _container_pid_file(run_uuid)
-    try:
-        subprocess.run(
-            ["docker", "exec", container_name, "rm", "-f", pid_file],
-            check=False,
-            capture_output=True,
-            timeout=5,
-        )
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return
+    _docker_probe(["docker", "exec", container_name, "rm", "-f", pid_file])
 
 
 def _check_container_running(container_name: str) -> None:

@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient, require_finding_write_response
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.contracts import SUBMISSION_STATUSES, render_contract_epilog
 from assess.lib.evidence_ref import warn_evidence_ref
@@ -299,12 +300,11 @@ def run(args) -> None:
     if legacy_inline is None:
         legacy_inline = getattr(args, "inline_payload", None)
     if legacy_inline is not None:
-        print(
-            "finding update: --inline was removed; use explicit patch flags for small changes "
+        fail(
+            "finding update",
+            "--inline was removed; use explicit patch flags for small changes "
             "or --payload-file <path> for a structured single-finding patch.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     finding_slug = getattr(args, "finding_slug", [])
     slugs = finding_slug if isinstance(finding_slug, list) else [finding_slug]
@@ -323,52 +323,51 @@ def run(args) -> None:
     payload_file = getattr(args, "payload_file", None)
     if payload_file is not None:
         if not str(payload_file).strip():
-            print("finding update: --payload-file must not be empty", file=sys.stderr)
-            sys.exit(1)
+            fail("finding update", "--payload-file must not be empty")
         provided_flags = _provided_content_flags(args)
         if provided_flags:
-            print(
-                "finding update: --payload-file cannot be combined with request-content flags "
+            fail(
+                "finding update",
+                "--payload-file cannot be combined with request-content flags "
                 f"({', '.join(provided_flags)}); put the complete patch in the file or use "
                 "explicit patch flags.",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if len(slugs) != 1:
-            print(
-                "finding update: --payload-file requires exactly one finding slug; use explicit "
+            fail(
+                "finding update",
+                "--payload-file requires exactly one finding slug; use explicit "
                 "flags for batch updates.",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     # --notes-replace overwrites the notes column; without --notes it would write
     # an empty string over the existing notes (silent data loss). Reject that.
     # (Runs first, before touching finding_slug, so a guard-only invocation exits here.)
     if getattr(args, "notes_replace", False) and args.notes is None:
-        print("finding update: --notes-replace requires --notes <text> (it overwrites the "
-              "notes column; running it without --notes would wipe existing notes).", file=sys.stderr)
-        sys.exit(1)
+        fail(
+            "finding update",
+            "--notes-replace requires --notes <text> (it overwrites the "
+              "notes column; running it without --notes would wipe existing notes).",
+        )
     raw_payload = payload_file
     # --details-replace overwrites the whole details object; without
     # --details-inline it would null the column. Payload files carry their own
     # details_mode and cannot be combined with this flag.
     if getattr(args, "details_replace", False) and args.details_inline is None and raw_payload is None:
-        print("finding update: --details-replace requires --details-inline <json> (it overwrites "
+        fail(
+            "finding update",
+            "--details-replace requires --details-inline <json> (it overwrites "
               "the details object; running it without details would wipe existing details).",
-              file=sys.stderr)
-        sys.exit(1)
+        )
     if (
         getattr(args, "notes_replace", False)
         or getattr(args, "notes_rotate", False)
         or getattr(args, "details_replace", False)
     ) and getattr(args, "expected_row_version", None) is None:
-        print(
-            "finding update: --notes-replace, --notes-rotate, and --details-replace require "
+        fail(
+            "finding update",
+            "--notes-replace, --notes-rotate, and --details-replace require "
             "--expected-row-version so a concurrent writer cannot be erased.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if raw_payload is not None:
         if not Path(raw_payload).is_file():
             print(f"finding patch payload file not found: {raw_payload}", file=sys.stderr)
@@ -461,15 +460,14 @@ def run(args) -> None:
         dropped = _silently_dropped_detail_keys(payload.get("details"))
         if dropped:
             keys = ", ".join(repr(key) for key in dropped)
-            print(
-                f"finding update: details {keys} would be silently discarded — the "
+            fail(
+                "finding update",
+                f"details {keys} would be silently discarded — the "
                 "details merge drops null/\"\"/[]/{} values, so this patch would report "
                 "success (HTTP 200, bumped row_version) while changing nothing. To CLEAR "
                 "a details key, send the complete object with --details-replace "
                 "--expected-row-version <n>. To SET one, give it a non-empty value.",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     # Validate `details` AND `provenance` against the record contract (see
     # `_FINDING_SCHEMA` above), in PATCH mode so a partial update is not required
@@ -525,39 +523,37 @@ def run(args) -> None:
             or isinstance(row_version, bool)
             or row_version < 1
         ):
-            print(
-                "finding update: a payload file must contain expected_row_version as a positive "
+            fail(
+                "finding update",
+                "a payload file must contain expected_row_version as a positive "
                 "integer; refresh it from the successful response before the next update. "
                 "Exempt: a patch whose only mutation is a notes append (\"notes\" plus "
                 "\"notes_mode\": \"append\"), which commutes and so has nothing to guard.",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if "notes" in payload and payload.get("notes_mode") not in {"append", "replace", "rotate"}:
-            print(
-                "finding update: a payload file containing notes must set notes_mode to "
+            fail(
+                "finding update",
+                "a payload file containing notes must set notes_mode to "
                 "'replace' (cumulative working document), 'rotate' (ledger-preserved "
                 "reset), or 'append' (deliberate checkpoint).",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     if len(slugs) > 1 and payload.get("expected_row_version") is not None:
-        print(
-            "finding update: one --expected-row-version cannot safely guard "
+        fail(
+            "finding update",
+            "one --expected-row-version cannot safely guard "
             "multiple findings; omit it and the command will fetch each slug's "
             "current row_version immediately before its PATCH.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     # Set the explicit-flag mode so the backend overwrites rather than merges.
     if getattr(args, "details_replace", False):
         if payload.get("details") is None:
-            print("finding update: --details-replace requires a 'details' object in the payload "
+            fail(
+                "finding update",
+                "--details-replace requires a 'details' object in the payload "
                   "(it overwrites the details object; without details it would wipe existing details).",
-                  file=sys.stderr)
-            sys.exit(1)
+            )
         payload["details_mode"] = "replace"
 
     cfg = load_config(args.engagement_dir)

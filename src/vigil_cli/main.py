@@ -344,6 +344,12 @@ def main(argv: list[str] | None = None) -> None:
         _main(raw)
 
 
+def _engagement_selector(parser: argparse.ArgumentParser, *, dest: str = "key") -> None:
+    """The optional engagement positional and its picker, in their usage order."""
+    parser.add_argument(dest, nargs="?")
+    parser.add_argument("--select", action="store_true")
+
+
 def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     raw_argv = argv
     command_idx = _top_level_command_index(raw_argv)
@@ -618,8 +624,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     set_rate_p.add_argument("key")
     set_rate_p.add_argument("value", type=float, metavar="REQ_PER_SEC")
     path_p = engagement_sub.add_parser("path")
-    path_p.add_argument("key", nargs="?")
-    path_p.add_argument("--select", action="store_true")
+    _engagement_selector(path_p)
     mode_p = engagement_sub.add_parser("mode", help="Inspect enabled tracks, phases, prompts, and session selection")
     mode_p.add_argument("key", nargs="?")
     mode_p.add_argument("--json", action="store_true")
@@ -646,8 +651,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
         "Noninteractive starts require a key, --client, and an explicit mode when ambiguous. "
         "Switch modes by starting a new process.",
     )
-    start_p.add_argument("key", nargs="?")
-    start_p.add_argument("--select", action="store_true")
+    _engagement_selector(start_p)
     start_p.add_argument("--client", choices=_ENGAGEMENT_CLIENTS,
                          help="Agent client; asks on a terminal when omitted")
     start_p.add_argument("--mode", choices=["web", "code", "blue", "remediation", "android"],
@@ -674,8 +678,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     # from its value. See _engagement_start_client_args.
     start_p.set_defaults(client_args=[], create_parser=create_p)
     prove_p = engagement_sub.add_parser("prove", help="Inspect, prepare, or recover proof work without launching another operator")
-    prove_p.add_argument("key", nargs="?")
-    prove_p.add_argument("--select", action="store_true")
+    _engagement_selector(prove_p)
     prove_p.add_argument("--finding", help="Candidate slug awaiting runtime proof")
     prove_p.add_argument("--mode", choices=("code", "web"), help="Explicit local code or live application proof route")
     prove_p.add_argument("--objective", help="Test that can confirm, disprove, or narrow the hypothesis")
@@ -687,11 +690,9 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     prove_p.add_argument("--reason", help="Recorded explanation for releasing proof ownership")
     prove_p.add_argument("--json", action="store_true", help="Emit the complete durable result")
     open_p = engagement_sub.add_parser("open")
-    open_p.add_argument("key", nargs="?")
-    open_p.add_argument("--select", action="store_true")
+    _engagement_selector(open_p)
     archive_p = engagement_sub.add_parser("archive")
-    archive_p.add_argument("key", nargs="?")
-    archive_p.add_argument("--select", action="store_true")
+    _engagement_selector(archive_p)
     export_p = engagement_sub.add_parser(
         "export",
         help=(
@@ -702,8 +703,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
             "instead, use `vigil assess export findings`."
         ),
     )
-    export_p.add_argument("key", nargs="?")
-    export_p.add_argument("--select", action="store_true")
+    _engagement_selector(export_p)
     export_p.add_argument(
         "--format",
         dest="export_format",
@@ -717,8 +717,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     )
     export_p.add_argument("--output")
     export_pdf_p = engagement_sub.add_parser("export-pdf", help="Export report.md as a PDF using pandoc + Chrome headless")
-    export_pdf_p.add_argument("key", nargs="?")
-    export_pdf_p.add_argument("--select", action="store_true")
+    _engagement_selector(export_pdf_p)
     export_pdf_p.add_argument("--output", help="Output PDF path (default: <engagement>/report.pdf)")
 
     blue_module.register_blue_parser(sub)
@@ -901,8 +900,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     auth_sub = auth_p.add_subparsers(dest="auth_command", required=True)
     for auth_name in ("status", "show", "edit", "clear", "export", "quarantine"):
         auth_cmd = auth_sub.add_parser(auth_name)
-        auth_cmd.add_argument("engagement", nargs="?")
-        auth_cmd.add_argument("--select", action="store_true")
+        _engagement_selector(auth_cmd, dest="engagement")
         auth_cmd.add_argument(
             "--identity",
             required=auth_name == "quarantine",
@@ -986,18 +984,15 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
         "--factor", default="", help="MFA factor type to store (for example totp or webauthn)."
     )
     auth_alias = auth_sub.add_parser("alias")
-    auth_alias.add_argument("engagement", nargs="?")
-    auth_alias.add_argument("--select", action="store_true")
+    _engagement_selector(auth_alias, dest="engagement")
     auth_alias.add_argument("--name", required=True)
     auth_alias.add_argument("--principal", required=True)
     auth_alias.add_argument("--scope", default="")
     auth_env = auth_sub.add_parser("env-check")
-    auth_env.add_argument("engagement", nargs="?")
-    auth_env.add_argument("--select", action="store_true")
+    _engagement_selector(auth_env, dest="engagement")
     auth_env.add_argument("--keys", nargs="+", required=True)
     auth_activate = auth_sub.add_parser("set-active")
-    auth_activate.add_argument("engagement", nargs="?")
-    auth_activate.add_argument("--select", action="store_true")
+    _engagement_selector(auth_activate, dest="engagement")
     auth_activate.add_argument("--identity", required=True, help="Identity to activate")
 
     auth_keepalive = auth_sub.add_parser(
@@ -1030,8 +1025,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    auth_keepalive.add_argument("engagement", nargs="?")
-    auth_keepalive.add_argument("--select", action="store_true")
+    _engagement_selector(auth_keepalive, dest="engagement")
     auth_keepalive.add_argument(
         "--identity",
         action="append",
@@ -1764,56 +1758,45 @@ def _print_engagement_mode(state: dict[str, Any]) -> None:
         "(zcode, opencode, claude, codex, goose, kimi, or pi). "
         "Inside a generated client project, run this check from its Project folder."
     ) if state["mode"] is None else None
+    # One entry per emitted line: the terminal record key, the plain-form label
+    # (``None`` where the plain form carries the value alone), and the value
+    # both forms render.
+    rows: list[tuple[str, str | None, str]] = [
+        ("mode", "mode", f"{state['mode'] or 'unselected'}"),
+        ("prompt", "prompt", f"{state['prompt'] or 'unselected'}"),
+    ]
+    if state.get("client"):
+        rows.append(("client", "client", f"{state['client']}"))
+    if selection_note:
+        rows.append(("session", None, selection_note))
+    for name, track in state["tracks"].items():
+        rows.append((name, name, f"phase={track['phase']}"))
+        rows.append((f"{name} prompt", "  prompt", f"{track['prompt']}"))
+        if track["start_command"]:
+            rows.append((f"{name} start", "  start", f"{track['start_command']}"))
+    source = state.get("source")
+    if isinstance(source, dict):
+        rows.extend(
+            [
+                ("source", "source", f"{source['path']}"),
+                ("source state", "  state", f"{source['state']}"),
+                ("source files", "  files", f"{source['file_count']}"),
+                (
+                    "source entries",
+                    "  entries",
+                    json.dumps(source["entries"], ensure_ascii=False),
+                ),
+            ]
+        )
+        if source.get("detail"):
+            rows.append(("source detail", "  detail", f"{source['detail']}"))
     if term.is_terminal(sys.stdout):
-        records = [
-            f"mode\t{state['mode'] or 'unselected'}",
-            f"prompt\t{state['prompt'] or 'unselected'}",
-        ]
-        if state.get("client"):
-            records.append(f"client\t{state['client']}")
-        if selection_note:
-            records.append(f"session\t{selection_note}")
-        for name, track in state["tracks"].items():
-            records.extend(
-                [
-                    f"{name}\tphase={track['phase']}",
-                    f"{name} prompt\t{track['prompt']}",
-                    *([f"{name} start\t{track['start_command']}"] if track["start_command"] else []),
-                ]
-            )
-        source = state.get("source")
-        if isinstance(source, dict):
-            records.extend(
-                [
-                    f"source\t{source['path']}",
-                    f"source state\t{source['state']}",
-                    f"source files\t{source['file_count']}",
-                    f"source entries\t{json.dumps(source['entries'], ensure_ascii=False)}",
-                ]
-            )
-            if source.get("detail"):
-                records.append(f"source detail\t{source['detail']}")
+        records = [f"{key}\t{value}" for key, _, value in rows]
         term.print_records("Engagement mode", records, stream=sys.stdout)
         return
 
-    print(f"mode: {state['mode'] or 'unselected'}\nprompt: {state['prompt'] or 'unselected'}")
-    if state.get("client"):
-        print(f"client: {state['client']}")
-    if selection_note:
-        print(selection_note)
-    for name, track in state["tracks"].items():
-        print(
-            f"{name}: phase={track['phase']}\n"
-            f"  prompt: {track['prompt']}"
-        )
-        if track["start_command"]:
-            print(f"  start: {track['start_command']}")
-    source = state.get("source")
-    if isinstance(source, dict):
-        print(f"source: {source['path']}\n  state: {source['state']}\n  files: {source['file_count']}")
-        print(f"  entries: {json.dumps(source['entries'], ensure_ascii=False)}")
-        if source.get("detail"):
-            print(f"  detail: {source['detail']}")
+    for _, label, value in rows:
+        print(value if label is None else f"{label}: {value}")
 
 
 def _logs(args: argparse.Namespace, install_root: Path) -> None:
@@ -2450,50 +2433,36 @@ def _print_create_summary(
     out_of_scope: list[str] | None = None,
     rate_limit: float | None = None,
 ) -> None:
+    # One entry per emitted row: the terminal record key, the plain-form label,
+    # the padding that aligns the plain column, and the value. The rate limit
+    # stays out of the table because the two forms word it differently.
+    rows: list[tuple[str, str, str, str]] = [("type", "type", "      ", engagement_type)]
+    if target:
+        rows.append(("target", "target", "    ", target))
+    if name:
+        rows.append(("name", "name", "      ", name))
+    if hosts:
+        rows.append(("hosts", "hosts", "     ", ", ".join(hosts)))
+    if repos:
+        rows.append(("repositories", "repos", "     ", ", ".join(repos)))
+    if artifacts:
+        rows.append(("artifacts", "artifacts", " ", ", ".join(artifacts)))
+    if android_package:
+        rows.append(("package", "package", "   ", android_package))
+    if required_headers:
+        rendered = ", ".join(f"{key}: {value}" for key, value in required_headers.items())
+        rows.append(("headers", "headers", "   ", rendered))
+    if out_of_scope:
+        rows.append(("out of scope", "out-of-scope", " ", ", ".join(out_of_scope)))
     if term.is_terminal(sys.stderr):
-        records = [f"type\t{engagement_type}"]
-        if target:
-            records.append(f"target\t{target}")
-        if name:
-            records.append(f"name\t{name}")
-        if hosts:
-            records.append(f"hosts\t{', '.join(hosts)}")
-        if repos:
-            records.append(f"repositories\t{', '.join(repos)}")
-        if artifacts:
-            records.append(f"artifacts\t{', '.join(artifacts)}")
-        if android_package:
-            records.append(f"package\t{android_package}")
-        if required_headers:
-            records.append(
-                "headers\t"
-                + ", ".join(f"{key}: {value}" for key, value in required_headers.items())
-            )
-        if out_of_scope:
-            records.append(f"out of scope\t{', '.join(out_of_scope)}")
+        records = [f"{key}\t{value}" for key, _, _, value in rows]
         if rate_limit is not None:
             records.append(f"rate limit\t{rate_limit:g} req/s (global per invocation)")
         term.print_records("Engagement summary", records, stream=sys.stderr)
         return
     print("[vigil] engagement summary:", file=sys.stderr)
-    print(f"[vigil]   type:      {engagement_type}", file=sys.stderr)
-    if target:
-        print(f"[vigil]   target:    {target}", file=sys.stderr)
-    if name:
-        print(f"[vigil]   name:      {name}", file=sys.stderr)
-    if hosts:
-        print(f"[vigil]   hosts:     {', '.join(hosts)}", file=sys.stderr)
-    if repos:
-        print(f"[vigil]   repos:     {', '.join(repos)}", file=sys.stderr)
-    if artifacts:
-        print(f"[vigil]   artifacts: {', '.join(artifacts)}", file=sys.stderr)
-    if android_package:
-        print(f"[vigil]   package:   {android_package}", file=sys.stderr)
-    if required_headers:
-        rendered = ", ".join(f"{k}: {v}" for k, v in required_headers.items())
-        print(f"[vigil]   headers:   {rendered}", file=sys.stderr)
-    if out_of_scope:
-        print(f"[vigil]   out-of-scope: {', '.join(out_of_scope)}", file=sys.stderr)
+    for _, label, pad, value in rows:
+        print(f"[vigil]   {label}:{pad}{value}", file=sys.stderr)
     if rate_limit is not None:
         print(
             f"[vigil]   rate-limit: {rate_limit:g} req/s "

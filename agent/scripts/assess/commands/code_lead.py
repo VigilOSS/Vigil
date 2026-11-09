@@ -236,7 +236,15 @@ def _run_list(args) -> None:
         # An empty page is not an empty worklist. The default filter hides every
         # binding whose generation moved on, which after a re-ingest is all of
         # them — while the completion gate goes on counting those leads.
-        hidden = 0 if args.include_superseded else _hidden_binding_count(cfg, args)
+        hidden = 0
+        if not args.include_superseded:
+            _items, hidden = _fetch_bindings(
+                cfg,
+                note_id=args.note_id,
+                repo_id=args.repo_id,
+                lead_status=args.lead_status,
+                include_superseded=True,
+            )
         if hidden:
             print(
                 f"{hidden} binding(s) are hidden by the default filter (stale or "
@@ -272,19 +280,6 @@ def _run_list(args) -> None:
         "Close a lead on the note itself: `vigil assess intel update note <lead-id> "
         "--inline '{\"lead_status\": \"resolved\"}'` (or ruled_out)."
     )
-
-
-def _hidden_binding_count(cfg, args) -> int:
-    """How many bindings the default filter left out of an empty page."""
-
-    _items, total = _fetch_bindings(
-        cfg,
-        note_id=args.note_id,
-        repo_id=args.repo_id,
-        lead_status=args.lead_status,
-        include_superseded=True,
-    )
-    return total
 
 
 def _guidance_line(binding: dict) -> str:

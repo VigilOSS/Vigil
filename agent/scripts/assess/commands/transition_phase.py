@@ -15,6 +15,7 @@ import re
 import sys
 
 from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.code_record_input import fail
 from assess.lib.config import Config, load_config
 from assess.lib.phases import (
     BLUE_TRANSITION_PHASES as BLUE_PHASES,
@@ -131,13 +132,12 @@ def run(args) -> None:
     )
     if is_backward:
         if not args.force and not reason:
-            print(
-                f"transition-phase: refusing backward transition "
+            fail(
+                "transition-phase",
+                f"refusing backward transition "
                 f"'{current_phase}' -> '{target_phase}'. Pass --reason \"<why>\" "
                 "for a deliberate regression, or --force.",
-                file=sys.stderr,
             )
-            sys.exit(1)
         _record_transition_decision(
             cfg,
             kind="phase_regression",
@@ -205,16 +205,15 @@ def run(args) -> None:
                 f"  - [{blocker['kind']}] {blocker['detail']}",
                 file=sys.stderr,
             )
-        print(
-            "transition-phase: --force does not apply to this edge. Resolve each "
+        fail(
+            "transition-phase",
+            "--force does not apply to this edge. Resolve each "
             "blocker above and re-run; `vigil assess code-coverage "
             "--require-transition-ready complete` re-checks the same backend "
             "contract and names what is still outstanding. If the remaining work "
             "is genuinely out of scope, leave the engagement in its current phase "
             "— `complete` is not the state for a scan with open debt.",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     if hard and not args.force:
         print(f"transition-phase: {len(hard)} blocker(s) for '{target_phase}':", file=sys.stderr)

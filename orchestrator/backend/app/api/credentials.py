@@ -19,6 +19,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .. import db
 from ..services import credentials as creds_service
 from ..services.engagements import get_engagement_or_404
+from .assessment import _offload
 
 # Verdicts accepted by the per-session liveness-persist route. Mirrors the
 # ``{live, dead, unknown}`` vocabulary the CLI liveness classifier emits and
@@ -91,14 +92,8 @@ async def list_identities(
     host: str | None = Query(default=None),
     include_dead: bool = Query(default=False),
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    return await anyio.to_thread.run_sync(
-        lambda: creds_service.load_identities(
-            engagement.id, host=host, include_dead=include_dead
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    return await _offload(creds_service.load_identities, engagement.id, host=host, include_dead=include_dead)
 
 
 @router.get("/resolve")
@@ -111,13 +106,9 @@ async def resolve_identity(
     # at a session cannot keep it from aging into `stale` or out to the purge.
     record_use: bool = Query(default=True),
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    name, material = await anyio.to_thread.run_sync(
-        lambda: creds_service.resolve_identity(
-            engagement.id, identity, scope_key=scope, record_use=record_use
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    name, material = await _offload(
+        creds_service.resolve_identity, engagement.id, identity, scope_key=scope, record_use=record_use
     )
     return {"identity_name": name, "material": material}
 
@@ -126,14 +117,8 @@ async def resolve_identity(
 async def put_alias(
     engagement_key: str, alias: str, request: CredentialAliasRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    await anyio.to_thread.run_sync(
-        lambda: db.set_credential_alias(
-            engagement.id, alias, request.principal_id, request.scope_key
-        )
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    await _offload(db.set_credential_alias, engagement.id, alias, request.principal_id, request.scope_key)
     return {
         "alias": alias,
         "principal_id": request.principal_id,
@@ -145,27 +130,22 @@ async def put_alias(
 async def capture(
     engagement_key: str, request: CredentialCaptureRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    return await anyio.to_thread.run_sync(
-        lambda: creds_service.capture_material(
-            engagement.id,
-            request.identity_name,
-            host=request.host,
-            cookies=request.cookies,
-            headers=request.headers,
-            tokens=request.tokens,
-            scope_host=request.scope_host,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    return await _offload(
+        creds_service.capture_material,
+        engagement.id,
+        request.identity_name,
+        host=request.host,
+        cookies=request.cookies,
+        headers=request.headers,
+        tokens=request.tokens,
+        scope_host=request.scope_host,
     )
 
 
 @router.get("/{identity_name}")
 async def get_identity(engagement_key: str, identity_name: str) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
     material = await anyio.to_thread.run_sync(
         lambda: creds_service.resolve_identity(engagement.id, identity_name)[1]
     )
@@ -181,16 +161,9 @@ async def get_identity(engagement_key: str, identity_name: str) -> dict[str, Any
 async def put_identity(
     engagement_key: str, identity_name: str, request: CredentialUpsertRequest
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    return await anyio.to_thread.run_sync(
-        lambda: creds_service.upsert_material(
-            engagement.id,
-            identity_name,
-            request.model_dump(),
-            make_active=request.make_active,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    return await _offload(
+        creds_service.upsert_material, engagement.id, identity_name, request.model_dump(), make_active=request.make_active
     )
 
 
@@ -198,12 +171,8 @@ async def put_identity(
 async def activate_identity(
     engagement_key: str, identity_name: str
 ) -> dict[str, Any]:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    ok = await anyio.to_thread.run_sync(
-        creds_service.set_active, engagement.id, identity_name
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    ok = await _offload(creds_service.set_active, engagement.id, identity_name)
     if not ok:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -217,12 +186,8 @@ async def quarantine_identity(
     engagement_key: str, identity_name: str
 ) -> dict[str, Any]:
     """Disable request replay while preserving the credential as evidence."""
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    material = await anyio.to_thread.run_sync(
-        db.quarantine_credential, engagement.id, identity_name
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    material = await _offload(db.quarantine_credential, engagement.id, identity_name)
     if material is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -250,20 +215,17 @@ async def persist_liveness(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail=f"verdict must be one of {sorted(_LIVENESS_VERDICTS)}",
         )
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    material = await anyio.to_thread.run_sync(
-        lambda: db.record_credential_liveness(
-            engagement.id,
-            identity_name,
-            scope_key=request.scope_key,
-            verdict=verdict,
-            observed_at=request.probed_at or "",
-            ttl_seconds=request.ttl_seconds,
-            source=request.source,
-            reason=request.reason,
-        )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    material = await _offload(
+        db.record_credential_liveness,
+        engagement.id,
+        identity_name,
+        scope_key=request.scope_key,
+        verdict=verdict,
+        observed_at=request.probed_at or "",
+        ttl_seconds=request.ttl_seconds,
+        source=request.source,
+        reason=request.reason,
     )
     # The singleton columns are a legacy unscoped projection. A dead verdict for
     # one app scope must not kill the same principal's capability everywhere.
@@ -280,13 +242,12 @@ async def persist_liveness(
             None,
         )
         if authoritative is not None:
-            material = await anyio.to_thread.run_sync(
-                lambda: db.set_liveness(
-                    engagement.id,
-                    identity_name,
-                    str(authoritative["verdict"]),
-                    str(authoritative["observed_at"]),
-                )
+            material = await _offload(
+                db.set_liveness,
+                engagement.id,
+                identity_name,
+                str(authoritative["verdict"]),
+                str(authoritative["observed_at"]),
             )
     elif material is not None and verdict == "live":
         scoped_live = next(
@@ -301,14 +262,7 @@ async def persist_liveness(
         if scoped_live is not None and str(scoped_live.get("observed_at") or "") >= str(
             material.get("last_probed_at") or ""
         ):
-            material = await anyio.to_thread.run_sync(
-                lambda: db.set_liveness(
-                    engagement.id,
-                    identity_name,
-                    "live",
-                    str(scoped_live["observed_at"]),
-                )
-            )
+            material = await _offload(db.set_liveness, engagement.id, identity_name, "live", str(scoped_live["observed_at"]))
     if material is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -319,17 +273,11 @@ async def persist_liveness(
 
 @router.delete("/{identity_name}", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_identity(engagement_key: str, identity_name: str) -> None:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    await anyio.to_thread.run_sync(
-        creds_service.clear, engagement.id, identity_name
-    )
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    await _offload(creds_service.clear, engagement.id, identity_name)
 
 
 @router.delete("", status_code=status.HTTP_204_NO_CONTENT)
 async def delete_all(engagement_key: str) -> None:
-    engagement = await anyio.to_thread.run_sync(
-        lambda: get_engagement_or_404(engagement_key)
-    )
-    await anyio.to_thread.run_sync(creds_service.clear, engagement.id, None)
+    engagement = await _offload(get_engagement_or_404, engagement_key)
+    await _offload(creds_service.clear, engagement.id, None)

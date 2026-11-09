@@ -5,7 +5,7 @@ re-exports this catalog's public symbols for compatibility.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from typing import Any
 
@@ -670,9 +670,18 @@ _RAW_ENDPOINT_RULES = (
 )
 
 
-_CONTRACTS: dict[str, CommandContract] = {
-    "intel record": CommandContract(
-        name="intel record",
+def _contract(**fields: Any) -> CommandContract:
+    """One `_CONTRACT_SPECS` entry, named by the key it is filed under.
+
+    `CommandContract.name` stays a required field — every contract built
+    dynamically in :mod:`assess.lib.contracts` passes it — so the placeholder
+    here is replaced with the key when `_CONTRACTS` is built below.
+    """
+    return CommandContract(name="", **fields)
+
+
+_CONTRACT_SPECS: dict[str, CommandContract] = {
+    "intel record": _contract(
         goals=("recon",),
         phase=("recon", "collect"),
         summary="Record one structured intel row through a type-specific intel schema.",
@@ -704,8 +713,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "finding record": CommandContract(
-        name="finding record",
+    "finding record": _contract(
         goals=("finding-lifecycle",),
         phase=("consume-test", "verify", "exploit", "code-hunt"),
         summary="Create or upsert a finding through helper-normalized lifecycle defaults.",
@@ -882,8 +890,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "finding link": CommandContract(
-        name="finding link",
+    "finding link": _contract(
         goals=("finding-lifecycle",),
         phase=("verify", "report"),
         summary="Group findings by root cause, attach intel, or record a generic typed finding link (incl. the unblock path for blocked findings).",
@@ -936,8 +943,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("omitting --order in a rerun", "an existing root-cause link keeps its order; a new sibling receives max(active sibling_order)+1, so reruns do not duplicate orders"),
         ),
     ),
-    "block-technique": CommandContract(
-        name="block-technique",
+    "block-technique": _contract(
         phase=("consume-test", "exploit"),
         summary="Record a technique walled off on a target (account/device/credential/policy wall, WAF) so it is not silently re-attempted.",
         schema_name="backend BlockedTechniqueRecordRequest",
@@ -966,8 +972,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Put the wall's provisioning need in details.unblock_requirements on the RELATED finding (kind ∈ account|line|device|credential|access, description, requested_from); the block-technique row carries the short reason + retry_state, and --notes is a one-line cue (also shown in the resume brief), not the durable home for unblock requirements.",
         ),
     ),
-    "auth": CommandContract(
-        name="auth",
+    "auth": _contract(
         phase=("consume-test", "exploit"),
         summary="List the engagement's stored session identities (append-only multi-identity store) so you can pick one for cross-account IDOR/BOLA.",
         schema_name="engagement_credentials table / GET /credentials[?host=&include_dead=]",
@@ -1001,8 +1006,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("reading raw cookie values out of the text table", "the table column is a scannable name index — pass `--json` for the values, or let `kali <tool> --identity` inject them host-scoped"),
         ),
     ),
-    "http": CommandContract(
-        name="http",
+    "http": _contract(
         summary="Query, export, and configure captured full-flow HTTP traffic (the canonical mitmproxy flow store + per-engagement capture policy).",
         schema_name="assessment_http_flows + assessment_capture_policy tables / /assessment/http-flows + /assessment/capture-policy endpoints",
         preferred_invocations=(
@@ -1046,8 +1050,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("policy set with no fields", "pass at least one field — an empty update is rejected"),
         ),
     ),
-    "host-exec": CommandContract(
-        name="host-exec",
+    "host-exec": _contract(
         summary=(
             "Run a host-machine command through the audited command-run lifecycle "
             "with bounded previews and engagement-local full-output artifacts."
@@ -1083,8 +1086,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--finding accepts a finding slug or numeric id. Because the linkage was explicitly requested, lookup failure or backend rejection fails closed before command execution; Vigil never silently retries or records that invocation unlinked.",
         ),
     ),
-    "record-probe": CommandContract(
-        name="record-probe",
+    "record-probe": _contract(
         phase=("consume-test", "exploit"),
         summary="Record ANY probe outcome — covering (tested|signal, evidence required) or non-covering (attempted|blocked|no-signal|error) — to the probe ledger. A covering probe carrying a coverage-item/request-variant link drains its work-items and advances its surface(s) by default.",
         schema_name="backend ProbeRunRecordRequest (POST /probe-runs)",
@@ -1128,8 +1130,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("recording a wall as a bare blocked probe when it is a durable technique wall", "a one-off `blocked` probe is a lead; a durable technique-level wall on a target belongs in `vigil assess block-technique`"),
         ),
     ),
-    "record-surface": CommandContract(
-        name="record-surface",
+    "record-surface": _contract(
         goals=("discovery",),
         # The code track records surfaces too (operator-core-code routes plugin
         # and framework registrations here), so the verb has to appear in the
@@ -1176,8 +1177,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("inventing a surface type for a plugin construct (keycloak_authenticator, realm_rest_provider)", "keep the shared semantic type and put the architecture on --framework-registration"),
         ),
     ),
-    "finding report": CommandContract(
-        name="finding report",
+    "finding report": _contract(
         goals=("finding-lifecycle",),
         phase=("report",),
         summary="Fetch the grouped report finding projection that report-writer consumes.",
@@ -1200,8 +1200,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--json` is the report-writer/LLM ingestion form. The default text form is for quick human inspection.",
         ),
     ),
-    "resume-brief": CommandContract(
-        name="resume-brief",
+    "resume-brief": _contract(
         summary="Render a bounded resume brief from backend state, command history, handoffs, and indexed artifacts.",
         schema_name="GET /assessment/resume-brief",
         preferred_invocations=(
@@ -1228,8 +1227,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("loading local notes first", "run resume-brief, then artifact search/get for linked files"),
         ),
     ),
-    "proof-work": CommandContract(
-        name="proof-work",
+    "proof-work": _contract(
         goals=("finding-lifecycle",),
         phase=("verify", "code-verify"),
         summary="Prepare current-context proof work, atomically claim a fresh dispatch, and recover without duplicate workers.",
@@ -1256,8 +1254,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "update links owned proof runs and records blockers or work completion. Evidence receipts and finding verify remain mandatory. Reconcile is an explicit mutation; get/list never change state. Client exit and elapsed time do not reclaim runtime work. release requires a terminal owning dispatch and no active owned runs, command runs, or supervised jobs.",
         ),
     ),
-    "proof-run": CommandContract(
-        name="proof-run",
+    "proof-run": _contract(
         goals=("finding-lifecycle",),
         phase=("verify", "code-verify"),
         summary=(
@@ -1317,8 +1314,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ),
         ),
     ),
-    "run-audit": CommandContract(
-        name="run-audit",
+    "run-audit": _contract(
         goals=("code-analysis", "finding-lifecycle"),
         phase=("code-hunt", "code-verify"),
         summary=(
@@ -1386,8 +1382,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ),
         ),
     ),
-    "proof-receipt": CommandContract(
-        name="proof-receipt",
+    "proof-receipt": _contract(
         goals=("finding-lifecycle", "artifact"),
         phase=("verify", "code-verify"),
         summary=(
@@ -1436,8 +1431,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ),
         ),
     ),
-    "operator-checkpoint": CommandContract(
-        name="operator-checkpoint",
+    "operator-checkpoint": _contract(
         goals=("dispatch",),
         summary=(
             "Record or read the operator's own durable checkpoint: references to "
@@ -1472,8 +1466,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("passing a finding slug that was never recorded", "record the finding first; the checkpoint refuses unknown references"),
         ),
     ),
-    "artifact": CommandContract(
-        name="artifact",
+    "artifact": _contract(
         goals=("artifact",),
         summary="Register one file or many, refresh, search, fetch, unlink, or scratch-mark indexed engagement-local artifact metadata.",
         schema_name="assessment_artifacts table + /assessment/artifacts endpoints",
@@ -1520,8 +1513,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("deleting unlinked notes to clear blockers", "use `mark-scratch` to keep the audit row; delete only when the file should not exist"),
         ),
     ),
-    "finding verify": CommandContract(
-        name="finding verify",
+    "finding verify": _contract(
         goals=("finding-lifecycle",),
         phase=("verify", "code-verify"),
         summary="Apply a verification transition to an existing finding through the audit ledger.",
@@ -1615,8 +1607,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "finding update": CommandContract(
-        name="finding update",
+    "finding update": _contract(
         goals=("finding-lifecycle",),
         summary="Patch non-verification finding fields on an existing slug.",
         schema_name="backend FindingPatchRequest",
@@ -1712,8 +1703,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "finding bind-author": CommandContract(
-        name="finding bind-author",
+    "finding bind-author": _contract(
         goals=("finding-lifecycle",),
         phase=("consume-test", "verify", "exploit", "code-hunt", "code-verify"),
         summary=(
@@ -1747,8 +1737,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ),
         ),
     ),
-    "finding relocate": CommandContract(
-        name="finding relocate",
+    "finding relocate": _contract(
         goals=("finding-lifecycle",),
         phase=("consume-test", "verify", "exploit", "code-hunt", "code-verify"),
         summary=(
@@ -1787,8 +1776,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ),
         ),
     ),
-    "resolve": CommandContract(
-        name="resolve",
+    "resolve": _contract(
         phase=("collect", "consume-test", "verify"),
         summary="PATCH a surface OR a coverage-item by id (target-kind positional + status + rationale). Post-1b (recording advances surfaces/drains work by default) this is the manual-override / negative-verdict path.",
         schema_name="backend SurfaceUpdateRequest (surface) / CoverageItemUpdateRequest (coverage-item)",
@@ -1822,8 +1810,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--followup-condition on a coverage-item", "that flag is surface-only; a coverage-item takes only --status and --rationale"),
         ),
     ),
-    "intel update": CommandContract(
-        name="intel update",
+    "intel update": _contract(
         goals=("recon",),
         summary="PATCH an existing intel row by id without inserting a new history record.",
         schema_name="backend IntelUpdateRequest (per-type updatable column whitelist)",
@@ -1847,8 +1834,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             {"notes": "Confirmed working PoC against staging"},
         ),
     ),
-    "intel supersede": CommandContract(
-        name="intel supersede",
+    "intel supersede": _contract(
         goals=("recon",),
         summary="Insert a replacement intel row; old row stays for audit but is filtered from reports.",
         schema_name="type-specific intel schema for the new payload",
@@ -1878,8 +1864,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "code-dispatch": CommandContract(
-        name="code-dispatch",
+    "code-dispatch": _contract(
         goals=("dispatch", "code-analysis"),
         phase=("code-classify", "code-hunt"),
         summary="Operate the backend code-analysis queue and cross-file trigger lifecycle.",
@@ -2032,8 +2017,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "code-sourcemap-extract": CommandContract(
-        name="code-sourcemap-extract",
+    "code-sourcemap-extract": _contract(
         goals=("code-analysis",),
         phase=("code-ingest",),
         summary=(
@@ -2061,8 +2045,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("ingesting bundle and extracted tree", "treat extracted sources as the covering representation; mapped minified artifacts remain non-covering"),
         ),
     ),
-    "code-ingest": CommandContract(
-        name="code-ingest",
+    "code-ingest": _contract(
         goals=("code-analysis",),
         phase=("code-ingest",),
         summary="Walk a source repository, fingerprint analyzable files, and register them with the code-analysis backend.",
@@ -2115,8 +2098,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("re-ingesting a reference repo with --role analysis to 'refresh' it", "omit --role entirely — it keeps the recorded role; --role analysis is a deliberate promotion that makes every admitted file owe review"),
         ),
     ),
-    "code-dependencies": CommandContract(
-        name="code-dependencies",
+    "code-dependencies": _contract(
         goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
         summary="Derive what a sealed repository actually ships and what the reviewed code reaches, from its own manifests, lockfiles, build configuration and build output.",
@@ -2161,8 +2143,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("running it against a live working tree", "pass the sealed snapshot path so the picture is bound to the generation everything else cites"),
         ),
     ),
-    "code-history commits": CommandContract(
-        name="code-history commits",
+    "code-history commits": _contract(
         goals=("code-analysis",),
         phase=("code-classify",),
         summary="Walk ancestors of the sealed snapshot's recorded HEAD and classify security history, within a commit budget.",
@@ -2201,8 +2182,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("treating a keyword hit as a confirmed fix", "a hit is navigation; read the diff before writing a bug shape"),
         ),
     ),
-    "code-history diff": CommandContract(
-        name="code-history diff",
+    "code-history diff": _contract(
         goals=("code-analysis",),
         phase=("code-classify",),
         summary="Write one recorded-history commit's first-parent patch and receipt, within byte and file budgets.",
@@ -2233,8 +2213,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("citing a truncated patch as the whole fix", "rerun with a larger --max-bytes/--max-files or say the evidence is truncated"),
         ),
     ),
-    "code-history check-shapes": CommandContract(
-        name="code-history check-shapes",
+    "code-history check-shapes": _contract(
         goals=("code-analysis",),
         phase=("code-classify", "code-hunt"),
         summary="Validate cve-bug-shapes.jsonl: every shape describes its bug and guard and cites the code-history diff receipt and patch for its revisions.",
@@ -2262,8 +2241,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("leaving an empty cve-bug-shapes.jsonl", "omit the file and state that historical seeding is not applicable"),
         ),
     ),
-    "code-index build": CommandContract(
-        name="code-index build",
+    "code-index build": _contract(
         goals=("code-analysis",),
         phase=("code-ingest",),
         summary="Build the structural index under the engagement analysis-state directory.",
@@ -2305,8 +2283,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("malformed or unknown aggregate schema", "inspect and migrate it explicitly; automatic archival is limited to the exact writer-shaped structural-index-aggregate/v3 contract"),
         ),
     ),
-    "code-index sync": CommandContract(
-        name="code-index sync",
+    "code-index sync": _contract(
         goals=("code-analysis",),
         phase=("code-ingest",),
         summary="Push structural counts and explicit per-file/aggregate analysis debt from the analysis-state manifest to the backend.",
@@ -2338,8 +2315,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--repo-id against a current aggregate with no matching identity", "select the numeric backend repo ID recorded by code-index build"),
         ),
     ),
-    "code-record classify": CommandContract(
-        name="code-record classify",
+    "code-record classify": _contract(
         goals=("code-analysis",),
         phase=("code-classify",),
         summary="Bulk-classify code files and persist architect-assigned analysis priority.",
@@ -2393,8 +2369,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "code-record modules": CommandContract(
-        name="code-record modules",
+    "code-record modules": _contract(
         goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
         summary="Record repository module boundaries from the architecture mapping pass.",
@@ -2424,8 +2399,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("duplicate auto-derived module_key", "provide explicit module_key values"),
         ),
     ),
-    "code-record threat-model": CommandContract(
-        name="code-record threat-model",
+    "code-record threat-model": _contract(
         goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
         summary="Record the repository threat model produced by code-architect.",
@@ -2448,8 +2422,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("threat model only in markdown", "persist durable threat-model context with code-record threat-model"),
         ),
     ),
-    "code-record analysis": CommandContract(
-        name="code-record analysis",
+    "code-record analysis": _contract(
         goals=("code-analysis",),
         phase=("code-hunt", "code-verify"),
         summary="Record a grouped file or call-chain source-review receipt against its claimed file lease.",
@@ -2577,8 +2550,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "code-record variant-check": CommandContract(
-        name="code-record variant-check",
+    "code-record variant-check": _contract(
         goals=("code-analysis",),
         phase=("code-verify",),
         summary=(
@@ -2632,8 +2604,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "code-record fuzz-decision": CommandContract(
-        name="code-record fuzz-decision",
+    "code-record fuzz-decision": _contract(
         goals=("code-analysis",),
         phase=("code-verify", "code-fuzz"),
         summary=(
@@ -2668,8 +2639,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("stale source identity", "re-evaluate applicability against the current sealed generation"),
         ),
     ),
-    "code-record fuzz-campaign": CommandContract(
-        name="code-record fuzz-campaign",
+    "code-record fuzz-campaign": _contract(
         goals=("code-analysis",),
         phase=("code-fuzz",),
         summary=(
@@ -2704,8 +2674,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("untriaged crashes", "triage every crash before completed_crashes_triaged"),
         ),
     ),
-    "code-lead": CommandContract(
-        name="code-lead",
+    "code-lead": _contract(
         goals=("recon", "code-analysis"),
         # Binding needs an ingested repository to point at, so it starts at
         # code-ingest even though the lead itself is usually authored in recon.
@@ -2740,8 +2709,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Every claimed queue item carries `prior_art_leads` — the unanswered leads bound to that file, with their line ranges and whether each binding is current for this generation — so a specialist reads the engagement's own prior art with the file, whether the row came from `code-lead queue` or from the bulk `code-dispatch queue` pass.",
         ),
     ),
-    "code-coverage": CommandContract(
-        name="code-coverage",
+    "code-coverage": _contract(
         goals=("code-analysis",),
         phase=("code-hunt", "code-verify"),
         summary="Display code-analysis coverage, a per-directory breakdown, per-file CWE effort, and the coverage-gate verdict.",
@@ -2784,8 +2752,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--inherited-from <generation>` is a READ, and ONLY a read. A new source generation stamps every queue row, result and trigger superseded repo-wide, so a re-ingest for an unrelated change drops a reviewed file's coverage to zero even though its bytes never moved. This view joins each currently-pending file to its most recent TERMINAL result from the named generation where the file's recorded hash is unchanged, and labels it `inherited` together with the generation it came from. That label is PRIOR WORK ON IDENTICAL BYTES — it is NOT a currency claim: an inherited result stays superseded, counts nowhere in the coverage numbers, satisfies no coverage gate and clears no transition blocker, and `code-dispatch fetch` will still hand the file out. Use it to decide where to spend the re-review budget first (and to recover the receipt ids with `code-dispatch progress`), never as evidence the file is covered. Making it current would need an explicit inheritance binding on the row; the honest cheap move is to re-queue the file and record a result that cites the prior one. It is its own view: it narrows by --repo-id and repeatable --path-prefix and pages with --limit/--offset/--json, exactly as `code/coverage/inherited` accepts them, and it refuses --by-path, --depth, --cwe-matrix, --require-gate-pass, --require-transition-ready and --debt-paths, because one output carrying both a prior-generation verdict and a current-generation number IS the currency claim it must never make.",
         ),
     ),
-    "code-size-summary": CommandContract(
-        name="code-size-summary",
+    "code-size-summary": _contract(
         goals=("code-analysis",),
         phase=("code-ingest", "code-classify"),
         summary="Summarize backend-indexed code_files: counts, LOC buckets, and large-file candidates.",
@@ -2818,8 +2785,7 @@ _CONTRACTS: dict[str, CommandContract] = {
     # catalog is a COMPLETE index of what a specialist reaches for — not only
     # the write/probe verbs. `vigil assess contract <name>` resolves each via
     # `get_contract` -> `_CONTRACTS.get(name)` with no extra wiring.
-    "fixture": CommandContract(
-        name="fixture",
+    "fixture": _contract(
         goals=("artifact",),
         summary="Record observed fixture IDs atomically and resolve rotation-safe manifest references for engagement PoCs.",
         schema_name="vigil-fixture-manifest/v1 local JSON manifest",
@@ -2860,8 +2826,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             },
         ),
     ),
-    "list-commands": CommandContract(
-        name="list-commands",
+    "list-commands": _contract(
         goals=("discovery",),
         summary="Per-phase catalog of helper-owned assess commands (this command); each row points at `vigil assess contract <verb>`.",
         schema_name="assess.lib.contracts registry (CommandContract + kali verb table)",
@@ -2885,8 +2850,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Phase-agnostic utilities (empty phase tuple) group separately at the bottom and are omitted from a `--phase` filter.",
         ),
     ),
-    "list-skills": CommandContract(
-        name="list-skills",
+    "list-skills": _contract(
         goals=("discovery",),
         summary="List available skills with compact descriptions.",
         schema_name="agent/skills/*/SKILL.md frontmatter",
@@ -2900,8 +2864,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--skills-dir overrides the default agent/skills lookup for non-standard checkouts.",
         ),
     ),
-    "list-references": CommandContract(
-        name="list-references",
+    "list-references": _contract(
         goals=("discovery",),
         summary="List available reference docs with compact descriptions.",
         schema_name="agent/references/**/*.md frontmatter",
@@ -2916,8 +2879,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Discovery command. Filter by `--skill <name>` (references whose `skill:` frontmatter includes it), `--category <label>`, or `--grep <s>`.",
         ),
     ),
-    "list-mindsets": CommandContract(
-        name="list-mindsets",
+    "list-mindsets": _contract(
         goals=("discovery", "dispatch"),
         summary="List the Dispatch-Mindset lens packets (agent/rules/mindsets/) with compact descriptions.",
         schema_name="agent/rules/mindsets/*.md (H1 + preamble; no frontmatter by design)",
@@ -2935,8 +2897,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--sections` expands each packet into its `##` headings — the detail needed to choose a lens without opening the file; `--grep <s>` filters on name/title/description/headings; `--json` emits the structured rows.",
         ),
     ),
-    "contract": CommandContract(
-        name="contract",
+    "contract": _contract(
         goals=("discovery",),
         summary="Show schema, defaults, and examples for a helper-owned CLI contract.",
         schema_name="assess.lib.contracts.render_contract",
@@ -2954,8 +2915,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Generated from the same source as the CLI's argparse, so it never drifts from the real command.",
         ),
     ),
-    "prompt-census": CommandContract(
-        name="prompt-census",
+    "prompt-census": _contract(
         goals=("discovery",),
         summary="Advisory census of role Load-First structure, approximate standing bytes, operator-core size, and declared partial-read visibility.",
         schema_name="agent/agents/*.md structural sections plus resolved mandatory file sizes, and agent/operator-core*.md measured sizes",
@@ -2977,8 +2937,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--read-bytes reports whether the Load First byte range was not reached, partially read, or complete. It does not claim to observe a provider's context window.",
         ),
     ),
-    "export triage-packet": CommandContract(
-        name="export triage-packet",
+    "export triage-packet": _contract(
         goals=("submission",),
         phase=("report",),
         summary="Build a content-addressed blind-triage packet from the QA-passed external submission body, selected attachments, program brief, and rubric.",
@@ -2996,8 +2955,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "An existing packet is idempotently verified and never overwritten with different bytes.",
         ),
     ),
-    "export submission": CommandContract(
-        name="export submission",
+    "export submission": _contract(
         goals=("submission",),
         phase=("report",),
         summary="Render one finding into a platform-shaped submission.md (+ context JSON); final mode publishes a verified immutable version and --recover reconciles interrupted exports.",
@@ -3035,8 +2993,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Draft mode surfaces internal UUID / absolute-path / cases.db hygiene diagnostics; final mode blocks until clean. Attachments default to none and must be registered, present, and hash-valid when the backend reads them.",
         ),
     ),
-    "scope explain": CommandContract(
-        name="scope explain",
+    "scope explain": _contract(
         goals=("scope",),
         summary="Explain the scope verdict for one or more URLs/hosts: admitted/denied, the matching allow/deny entry, required headers, rate limit, vendor-SaaS warning (read-only, no network).",
         schema_name="assess.lib.scope (scope.json allow/deny entries)",
@@ -3054,8 +3011,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--json emits the verdict structs; the text view emits a vendor-SaaS WARN to stderr when a host matches a known SaaS-fronted suffix.",
         ),
     ),
-    "check-phase-readiness": CommandContract(
-        name="check-phase-readiness",
+    "check-phase-readiness": _contract(
         summary="Phase-aware readiness gate: per-phase coverage/scope/depth/exploit/intel checks before a phase transition (read-only).",
         schema_name="backend readiness aggregates (coverage/scope/depth/exploit/intel)",
         preferred_invocations=(
@@ -3073,8 +3029,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The depth ledger also renders for `consume-test` and `verify`, and on demand anywhere via `--depth` / `--by-app-unit`. `--strict-deep` escalates an unsatisfied deep_required unit to a non-zero exit on those phases (default off, detection is warm-first); it changes nothing about what the terminal backstop blocks on, and `--strict` does not imply it.",
         ),
     ),
-    "transition-phase": CommandContract(
-        name="transition-phase",
+    "transition-phase": _contract(
         summary="Guarded phase transition for scope.json (checks blockers, then advances current_phase).",
         schema_name="scope.json current_phase (guarded write)",
         preferred_invocations=(
@@ -3102,8 +3057,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("draining a depth_uncovered_classes block with a sibling-class probe", "the class grain demands a probe for the named class — covering `injection` via ssti leaves a flagged `sqli` uncovered"),
         ),
     ),
-    "coverage": CommandContract(
-        name="coverage",
+    "coverage": _contract(
         summary="Coverage ledger (read-only). Default: per-host route/real_app/verdict state. --by-family: per application-unit × attack-family GAP grid. --for-dispatch --host <h>: a paste-ready COVERAGE block for a dispatch prompt. --attempts: the recorded probe-attempt ledger.",
         schema_name="backend per-host coverage projection (+ coverage-readiness/by-family for --by-family/--for-dispatch; GET /assessment/attempts for --attempts)",
         preferred_invocations=(
@@ -3127,8 +3081,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Scoping vocabulary: on the default/grid views, --host / --path-prefix select application-UNITS (grid rows). Under --attempts, --surface is a surface-ID and --host is the target-host filter — keep the two straight.",
         ),
     ),
-    "finding list": CommandContract(
-        name="finding list",
+    "finding list": _contract(
         goals=("finding-lifecycle",),
         summary="List findings with common CLI-side filters (severity, workflow/verification state, root-cause group, free-text search).",
         schema_name="GET /assessment/findings",
@@ -3151,8 +3104,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--holding is broader than the runtime-proof-owed set: it is `evidence_type=theoretical` OR verification_status in (pending_runtime_proof, blocked), so it also sweeps permanently blocked rows and theoretical evidence at any status. The findings actually owed runtime proof are the pending_runtime_proof findings that are not merged; `vigil assess proof-work list` and `vigil assess exploit review` (under `Runtime proof owed`) render that set. A merged finding keeps its verification status as history.",
         ),
     ),
-    "finding get": CommandContract(
-        name="finding get",
+    "finding get": _contract(
         goals=("finding-lifecycle",),
         summary="Fetch one complete finding row by slug.",
         schema_name="GET /assessment/findings/{slug}",
@@ -3168,8 +3120,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The older generic `vigil assess fetch findings/<slug>` route remains available, but this typed command is the discoverable point-read surface.",
         ),
     ),
-    "finding history": CommandContract(
-        name="finding history",
+    "finding history": _contract(
         goals=("finding-lifecycle",),
         summary="Read the append-only transition ledger for one finding.",
         schema_name="GET /assessment/findings/{slug}/transitions",
@@ -3184,8 +3135,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "History is an audit surface, not a rollback command: it does not rewrite or delete the current finding or its evidence.",
         ),
     ),
-    "finding retract-claim": CommandContract(
-        name="finding retract-claim",
+    "finding retract-claim": _contract(
         goals=("finding-lifecycle",),
         summary="Replace an incorrect current summary while preserving evidence and correction history.",
         schema_name="PATCH /assessment/findings/{slug}",
@@ -3209,8 +3159,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "After the patch, current authored report fields containing the retracted phrase are reported with exact field locations; correction history and raw proof are not rewritten.",
         ),
     ),
-    "intel list": CommandContract(
-        name="intel list",
+    "intel list": _contract(
         goals=("recon",),
         summary="List intel records per-type or via full-text search.",
         schema_name="GET /intel/summary, /intel/{type-plural}, /intel/search",
@@ -3227,8 +3176,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "--json emits compact index/search rows with a `_point_read` command instead of embedding record bodies or hydrated records. Use `vigil assess intel get <type> <id>` for the complete stored row.",
         ),
     ),
-    "intel get": CommandContract(
-        name="intel get",
+    "intel get": _contract(
         goals=("recon",),
         summary="Fetch one complete typed intel row by id.",
         schema_name="GET /intel/{type-plural}/{id}",
@@ -3244,8 +3192,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Read-only point lookup. Always emits the complete JSON row, including parsed provenance; --json is accepted as a no-op for symmetry.",
         ),
     ),
-    "command-run list": CommandContract(
-        name="command-run list",
+    "command-run list": _contract(
         summary="Search the `vigil assess kali` command-run audit ledger for this engagement.",
         schema_name="GET /assessment/command-runs",
         preferred_invocations=(
@@ -3264,8 +3211,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Drill into a single row with `vigil assess command-run get <id>`.",
         ),
     ),
-    "command-run get": CommandContract(
-        name="command-run get",
+    "command-run get": _contract(
         summary="Fetch a single kali command-run record by id, including previews and artifact refs.",
         schema_name="GET /assessment/command-runs/{id}",
         preferred_invocations=(
@@ -3278,8 +3224,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Read-only drill-down for `command-run list` / `resume-brief`. Always emits JSON (the `--json` flag is a no-op accepted for symmetry).",
         ),
     ),
-    "finding merge": CommandContract(
-        name="finding merge",
+    "finding merge": _contract(
         goals=("finding-lifecycle",),
         phase=("verify", "report"),
         summary="Merge one finding into another: the source is absorbed by the target and stops being reported separately.",
@@ -3312,8 +3257,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("reversing the argument order", "source first (absorbed), target second (survives)"),
         ),
     ),
-    "export findings": CommandContract(
-        name="export findings",
+    "export findings": _contract(
         goals=("submission",),
         phase=("report",),
         summary="Render the single consolidated findings.md report document from backend state (one section per report-durable finding, severity-sorted).",
@@ -3334,8 +3278,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Shares assess.lib.finding_render with the markdown-tree export, so the two can never drift.",
         ),
     ),
-    "export reply": CommandContract(
-        name="export reply",
+    "export reply": _contract(
         goals=("submission",),
         phase=("report",),
         summary="Export one reply-<N>.md: render editable authored content, or download and verify the immutable exact bytes of a sent reply.",
@@ -3369,8 +3312,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("reconstructing a legacy sent reply", "historical bytes are unknown; report the explicit unavailable state"),
         ),
     ),
-    "export surfaces": CommandContract(
-        name="export surfaces",
+    "export surfaces": _contract(
         goals=("discovery",),
         summary="Regenerate surfaces.jsonl from backend surface state on demand (one JSON object per line).",
         schema_name="GET /assessment/surfaces (paginated) -> surfaces.jsonl",
@@ -3385,8 +3327,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The backend is the source of truth; surfaces.jsonl is a derived snapshot, so regenerate it rather than appending to it by hand. `record-surface` and `resolve surface` are the write paths.",
         ),
     ),
-    "emit-event": CommandContract(
-        name="emit-event",
+    "emit-event": _contract(
         summary="POST one runtime event to the engagement activity feed (fire-and-forget).",
         schema_name="backend CreateEventRequest (POST /events)",
         preferred_invocations=(
@@ -3409,8 +3350,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("using emit-event to record work", "it persists nothing queryable; use log / record-probe / finding record"),
         ),
     ),
-    "log": CommandContract(
-        name="log",
+    "log": _contract(
         summary="Append one durable activity entry to the backend narrative ledger (the replacement for appending to log.md).",
         schema_name="backend ActivityEntryRecordRequest (POST /engagements/{key}/activity-entries)",
         preferred_invocations=(
@@ -3435,8 +3375,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Narrative only. A finding belongs in `finding record`, a probe outcome in `record-probe`, and structured intel in `intel record`.",
         ),
     ),
-    "post": CommandContract(
-        name="post",
+    "post": _contract(
         summary="Contract-checked POST for the four legacy low-frequency assessment endpoints.",
         schema_name="the target endpoint's own backend request model (no client-side schema)",
         preferred_invocations=(
@@ -3465,8 +3404,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("post probe-runs <json>", "use record-probe — it owns the result-status vocabulary and the FK-derived cascade"),
         ),
     ),
-    "record-chain": CommandContract(
-        name="record-chain",
+    "record-chain": _contract(
         goals=("finding-lifecycle",),
         phase=("exploit", "report"),
         summary="Record a multi-step attack chain that composes existing findings into one end-to-end impact narrative.",
@@ -3488,8 +3426,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("omitting title", "title drives the chain_key; an empty title is rejected before the POST"),
         ),
     ),
-    "record-reply": CommandContract(
-        name="record-reply",
+    "record-reply": _contract(
         goals=("submission",),
         phase=("report",),
         summary="Durably author an outgoing reply and, on --sent, atomically bind it to immutable exact renderer bytes.",
@@ -3530,8 +3467,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("expecting submission_status to advance automatically", "pass --set-submission-status explicitly"),
         ),
     ),
-    "app-unit": CommandContract(
-        name="app-unit",
+    "app-unit": _contract(
         phase=("collect", "consume-test"),
         summary="Inspect, (re)score, and manually override depth app-units — the (host, port-class, path-prefix) application boundaries the depth gate reasons over.",
         schema_name="assessment application_units table / /assessment/application-units endpoints",
@@ -3560,8 +3496,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("mark-deep with no id", "the three override actions require the app-unit id from `app-unit list`"),
         ),
     ),
-    "approve-proposal": CommandContract(
-        name="approve-proposal",
+    "approve-proposal": _contract(
         summary="Mark one or more containment-proposal decision rows approved so `vigil blue contain` will execute them.",
         schema_name="PATCH /assessment/dispatch-decisions/{id} (resolved + resolution_json)",
         preferred_invocations=(
@@ -3583,8 +3518,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Batch: every listed id gets the same --approved-by/--note in a resilient loop; the command exits non-zero when any id failed, after reporting the per-id tally.",
         ),
     ),
-    "scaffold-probe": CommandContract(
-        name="scaffold-probe",
+    "scaffold-probe": _contract(
         goals=("artifact",),
         phase=("consume-test", "exploit"),
         summary="Write a runnable single-file Python probe skeleton into the engagement scripts/ dir and pre-register it as an artifact.",
@@ -3610,8 +3544,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Registration reuses the same artifact POST as `artifact register`, so the probe is linkable to a finding from the first second.",
         ),
     ),
-    "scope filter": CommandContract(
-        name="scope filter",
+    "scope filter": _contract(
         goals=("scope",),
         summary="Filter a URL/host list down to the entries scope.json admits (read-only oracle; writes only the file you name).",
         schema_name="assess.lib.scope (scope.json allow/deny entries)",
@@ -3628,8 +3561,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Denylist wins, and vendor-SaaS hosts already dispositioned in the engagement are honoured. Run `scope explain <host>` when you need the reason a specific entry was dropped.",
         ),
     ),
-    "exploit": CommandContract(
-        name="exploit",
+    "exploit": _contract(
         goals=("scope",),
         phase=("exploit",),
         summary="Exploit-phase review + approval gate: read the candidate/approval state, then record the operator's exploitation decision into scope.json.",
@@ -3663,8 +3595,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("using approve-proposal for exploit approval", "approve-proposal is the blue containment gate; `exploit approve` is the red one"),
         ),
     ),
-    "ingest": CommandContract(
-        name="ingest",
+    "ingest": _contract(
         goals=("discovery",),
         phase=("recon", "collect"),
         summary="Fold recon output into assessment state: endpoints | candidates | spec | arjun | httpx. Each kind writes backend rows — this is the bridge from a scan file to queryable work.",
@@ -3695,8 +3626,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("running kali arjun without ingest arjun", "the discovered params never reach the work buffer and never auto-route"),
         ),
     ),
-    "gau": CommandContract(
-        name="gau",
+    "gau": _contract(
         goals=("recon",),
         phase=("recon", "collect"),
         summary="Cache-aware historical-URL (gau) pipelines: endpoints | secrets | js-endpoints, over one shared gau corpus and cache-key namespace.",
@@ -3717,8 +3647,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`recon` runs the gau stage by default (drop it with `--no-gau`); reach for these verbs directly for a focused re-run.",
         ),
     ),
-    "recon": CommandContract(
-        name="recon",
+    "recon": _contract(
         goals=("recon", "discovery", "dns"),
         phase=("recon", "recon-pivot"),
         summary="Supervised, resumable recon pipeline: dns-discovery -> web-discovery -> gau -> js-mining, checkpointed per stage so a killed run restarts without redo.",
@@ -3754,8 +3683,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--brute on a wildcard-sink apex", "brute is OFF by default for a reason; confirm the wildcard strip first"),
         ),
     ),
-    "recon-status": CommandContract(
-        name="recon-status",
+    "recon-status": _contract(
         goals=("recon",),
         phase=("recon", "recon-pivot"),
         summary="Read the recon pipeline digest: percent complete, per-stage state, counts, and what runs next (read-only).",
@@ -3774,8 +3702,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`--job-id` cross-checks the backend job row and lazy-finalizes it from the host-readable exit marker, which is how a job the poller missed converges to its real terminal state.",
         ),
     ),
-    "dns-discovery": CommandContract(
-        name="dns-discovery",
+    "dns-discovery": _contract(
         goals=("recon", "dns", "discovery"),
         phase=("recon", "recon-pivot"),
         summary="Convergent DNS-discovery pipeline: subfinder + CT (+ optional brute/recursion) -> merge/de-noise -> wildcard pre-strip -> dnsx resolve, looped until it converges.",
@@ -3807,8 +3734,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`recon` runs this as its first stage with checkpointing — reach for this verb directly for a focused re-enumeration.",
         ),
     ),
-    "web-discovery": CommandContract(
-        name="web-discovery",
+    "web-discovery": _contract(
         goals=("recon", "discovery", "http-probe"),
         phase=("recon", "collect"),
         summary="Web-probing pipeline: de-noise hosts -> httpx liveness -> ingest the liveness ledger -> katana crawl the LIVE subset -> (optional) work-buffer ingest.",
@@ -3839,8 +3765,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "The dead-host revalidation pass is on by default so a service on a non-standard port is not silently undercounted — disable it only when you already know the port surface.",
         ),
     ),
-    "js-mining": CommandContract(
-        name="js-mining",
+    "js-mining": _contract(
         goals=("recon", "discovery"),
         phase=("recon", "collect"),
         summary="Bounded JS asset mining: fetch crawled .js -> jsluice/regex endpoint extraction -> trufflehog secret scan -> ingest the endpoints. Best-effort.",
@@ -3867,8 +3792,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "Extraction is jsluice (AST) first with the LinkFinder-style regex as the offline fallback, so a missing/quiet jsluice still yields endpoints.",
         ),
     ),
-    "arjun-select": CommandContract(
-        name="arjun-select",
+    "arjun-select": _contract(
         goals=("discovery",),
         phase=("collect", "consume-test"),
         summary="Build a GATED Arjun target list from the work buffer (live + dynamic + template-deduped + param-poor first), with a per-method sidecar per output.",
@@ -3893,8 +3817,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             "`arjun-sweep` chains select -> per-method arjun -> `ingest arjun` in one audited command — use this verb directly only when you want to inspect or hand-edit the target list first.",
         ),
     ),
-    "arjun-sweep": CommandContract(
-        name="arjun-sweep",
+    "arjun-sweep": _contract(
         goals=("discovery",),
         phase=("collect", "consume-test"),
         summary="Gated hidden-parameter discovery end to end: arjun-select -> one audited arjun run PER METHOD -> ingest arjun. Sized to FINISH rather than to be exhaustive.",
@@ -3927,8 +3850,7 @@ _CONTRACTS: dict[str, CommandContract] = {
             ("--stable on a large list", "the run will not finish inside the budget and reports a false 0"),
         ),
     ),
-    "egress-check": CommandContract(
-        name="egress-check",
+    "egress-check": _contract(
         goals=("recon",),
         phase=("recon", "collect"),
         summary="Sample in-scope hosts plus a known-good control to detect an egress-reputation blackhole before it burns dispatches. Advisory, never a gate.",
@@ -3959,6 +3881,15 @@ _CONTRACTS: dict[str, CommandContract] = {
             "ADVISORY: it can emit a blocked-hosts file only for an observed cluster blackhole, but it blocks nothing on its own.",
         ),
     ),
+}
+
+
+# `name` is the key the entry is filed under — the same string for all 88
+# entries — so the key owns it and is stamped in here rather than repeated
+# inside every entry where the two could drift apart. `_CONTRACT_SPECS` is
+# never read anywhere else: `_CONTRACTS` is the registry.
+_CONTRACTS: dict[str, CommandContract] = {
+    key: replace(spec, name=key) for key, spec in _CONTRACT_SPECS.items()
 }
 
 

@@ -4552,27 +4552,24 @@ def list_findings(
     )
     where = ["findings.engagement_id = ?"]
     params: list[Any] = [engagement.id]
-    if severity:
-        where.append("LOWER(findings.severity) = ?")
-        params.append(severity)
-    if workflow_status:
-        where.append("LOWER(findings.status) = ?")
-        params.append(workflow_status)
-    if verification_status:
-        where.append("LOWER(findings.verification_status) = ?")
-        params.append(verification_status)
-    if auth_context:
-        # Server-side drill-down for the coverage ledger: an operator pivots
-        # from a host's verdict into "the authenticated findings on this host"
-        # without pulling every finding to the client.
-        where.append("LOWER(findings.auth_context) = LOWER(?)")
-        params.append(auth_context)
-    if source_name:
-        where.append("LOWER(findings.source_name) = LOWER(?)")
-        params.append(source_name)
-    if slug:
-        where.append("LOWER(findings.slug) = LOWER(?)")
-        params.append(slug)
+    # The equality filters, in predicate order. The LOWER-on-both-sides shape
+    # is per-filter and deliberate: the three enum axes above are already
+    # normalised by ``_validated_enum_filter``, so only the free-text axes
+    # fold the bound parameter as well. ``auth_context`` is a server-side
+    # drill-down for the coverage ledger: an operator pivots from a host's
+    # verdict into "the authenticated findings on this host" without pulling
+    # every finding to the client.
+    for filter_value, predicate in (
+        (severity, "LOWER(findings.severity) = ?"),
+        (workflow_status, "LOWER(findings.status) = ?"),
+        (verification_status, "LOWER(findings.verification_status) = ?"),
+        (auth_context, "LOWER(findings.auth_context) = LOWER(?)"),
+        (source_name, "LOWER(findings.source_name) = LOWER(?)"),
+        (slug, "LOWER(findings.slug) = LOWER(?)"),
+    ):
+        if filter_value:
+            where.append(predicate)
+            params.append(filter_value)
     if search:
         needle = like_contains(search.lower())
         where.append(
@@ -4824,6 +4821,23 @@ def _serialize_finding_transition(
     return record
 
 
+def _finding_id_or_404(connection, engagement_id: int, slug: str) -> int:
+    """Resolve an alias-resolved slug to its finding id, or raise the 404.
+
+    ``_finding_not_found`` builds the refusal detail (including its difflib
+    close-match suggestions) off the same connection, so the lookup and the
+    refusal it implies stay in one place for every per-finding read path.
+    """
+
+    finding = connection.execute(
+        "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, slug),
+    ).fetchone()
+    if finding is None:
+        raise _finding_not_found(connection, engagement_id, slug)
+    return int(finding["id"])
+
+
 def list_finding_transitions(
     engagement_id: int,
     *,
@@ -4834,32 +4848,24 @@ def list_finding_transitions(
     engagement = _engagement_or_404(engagement_id)
     slug = canonical_finding_alias(slug) or slug
     with _common.get_connection() as connection:
-        finding = connection.execute(
-            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-            (engagement.id, slug),
-        ).fetchone()
-        if finding is None:
-            raise _finding_not_found(connection, engagement.id, slug)
+        finding_id = _finding_id_or_404(connection, engagement.id, slug)
         sql = """
             SELECT *
             FROM assessment_finding_transitions
             WHERE engagement_id = ? AND finding_id = ?
             ORDER BY created_at DESC, id DESC
             """
-        params: list[Any] = [engagement.id, int(finding["id"])]
+        params: list[Any] = [engagement.id, finding_id]
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params.extend((int(limit), int(offset)))
         rows = connection.execute(sql, tuple(params)).fetchall()
         transition_ids = [int(row["id"]) for row in rows]
         audit_by_transition = verification_audit_by_transition(
-            connection,
-            engagement.id,
-            int(finding["id"]),
-            transition_ids,
+            connection, engagement.id, finding_id, transition_ids
         )
         plans_by_transition = next_tests_by_transition(
-            connection, engagement.id, int(finding["id"]), transition_ids
+            connection, engagement.id, finding_id, transition_ids
         )
     return [
         _serialize_finding_transition(
@@ -4883,19 +4889,14 @@ def list_finding_transition_summaries(
     engagement = _engagement_or_404(engagement_id)
     slug = canonical_finding_alias(slug) or slug
     with _common.get_connection() as connection:
-        finding = connection.execute(
-            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-            (engagement.id, slug),
-        ).fetchone()
-        if finding is None:
-            raise _finding_not_found(connection, engagement.id, slug)
+        finding_id = _finding_id_or_404(connection, engagement.id, slug)
         sql = f"""
             SELECT {_TRANSITION_SUMMARY_COLUMNS}
             FROM assessment_finding_transitions
             WHERE engagement_id = ? AND finding_id = ?
             ORDER BY created_at DESC, id DESC
             """
-        params: list[Any] = [engagement.id, int(finding["id"])]
+        params: list[Any] = [engagement.id, finding_id]
         if limit is not None:
             sql += " LIMIT ? OFFSET ?"
             params.extend((int(limit), int(offset)))
@@ -4914,19 +4915,14 @@ def get_finding_transition(
     engagement = _engagement_or_404(engagement_id)
     slug = canonical_finding_alias(slug) or slug
     with _common.get_connection() as connection:
-        finding = connection.execute(
-            "SELECT id FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
-            (engagement.id, slug),
-        ).fetchone()
-        if finding is None:
-            raise _finding_not_found(connection, engagement.id, slug)
+        finding_id = _finding_id_or_404(connection, engagement.id, slug)
         row = connection.execute(
             """
             SELECT *
             FROM assessment_finding_transitions
             WHERE engagement_id = ? AND finding_id = ? AND id = ?
             """,
-            (engagement.id, int(finding["id"]), int(transition_id)),
+            (engagement.id, finding_id, int(transition_id)),
         ).fetchone()
         if row is None:
             raise HTTPException(
@@ -4934,12 +4930,9 @@ def get_finding_transition(
                 detail="finding transition not found",
             )
         audit = verification_audit_by_transition(
-            connection,
-            engagement.id,
-            int(finding["id"]),
-            [int(row["id"])],
+            connection, engagement.id, finding_id, [int(row["id"])]
         )[int(row["id"])]
         plan = next_tests_by_transition(
-            connection, engagement.id, int(finding["id"]), [int(row["id"])]
+            connection, engagement.id, finding_id, [int(row["id"])]
         ).get(int(row["id"]))
     return _serialize_finding_transition(row, verification_audit=audit, next_test=plan)

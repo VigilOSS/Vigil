@@ -286,8 +286,8 @@ def _precreate_json_parent(args, json_path: str) -> None:
         pass
 
 
-def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> None:
-    """Write a placeholder at the -oJ path if arjun produced no file.
+def ensure_arjun_artifact(path: Path, *, incomplete: bool, mkdir: bool = False) -> None:
+    """Write a placeholder at an -oJ path if arjun produced no file.
 
     Arjun omits the -oJ file entirely when it discovers 0 params; this keeps the
     run's artifact present + auditable and lets ``ingest-arjun`` always find a
@@ -295,30 +295,39 @@ def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> 
     list) the placeholder is the incomplete-run sentinel instead of a bare ``{}``
     (Finding 1), so a later ``ingest-arjun`` can tell an empty artifact apart from
     a genuine "0 hidden params" negative. Best-effort — never raises into the verb.
+
+    One implementation for both doors: this verb, which resolves a container path
+    back to its host path and therefore needs the parent directory created, and
+    ``arjun-sweep``, whose per-method paths already exist.
     """
-    host = _host_json_path(args, json_path)
-    if not host:
-        return
     try:
-        p = Path(host)
         from assess.lib.arjun_enrich import incomplete_sentinel, mark_artifact_incomplete
 
         if incomplete:
-            p.parent.mkdir(parents=True, exist_ok=True)
-            if p.exists():
-                p.write_text(
+            if mkdir:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            if path.exists():
+                path.write_text(
                     mark_artifact_incomplete(
-                        p.read_text(encoding="utf-8", errors="replace")
+                        path.read_text(encoding="utf-8", errors="replace")
                     ),
                     encoding="utf-8",
                 )
             else:
-                p.write_text(incomplete_sentinel(), encoding="utf-8")
-        elif not p.exists():
-            p.parent.mkdir(parents=True, exist_ok=True)
-            p.write_text("{}", encoding="utf-8")
+                path.write_text(incomplete_sentinel(), encoding="utf-8")
+        elif not path.exists():
+            if mkdir:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{}", encoding="utf-8")
     except OSError:
         pass
+
+
+def _ensure_json_artifact(args, json_path: str, *, incomplete: bool = False) -> None:
+    """Place this run's -oJ placeholder, resolving the container path to the host."""
+    host = _host_json_path(args, json_path)
+    if host:
+        ensure_arjun_artifact(Path(host), incomplete=incomplete, mkdir=True)
 
 
 def run(args) -> None:

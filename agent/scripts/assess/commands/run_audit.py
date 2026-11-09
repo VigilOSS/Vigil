@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import Any, BinaryIO, Callable
 from urllib.parse import urlencode
@@ -261,73 +262,42 @@ def _write_error(operation: str) -> AssessError:
     )
 
 
-def _require_source(
-    value: object,
-    *,
-    operation: str,
-    requested_run_id: int | None = None,
-    write: bool = False,
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and _nonempty_string(row.get("target_key"))
-            and _nonempty_string(row.get("declared_root"))
-            and _nonempty_string(row.get("path"))
-            and _sha256(row.get("content_sha256"))
-            and _nonnegative_int(row.get("byte_size"))
-            and _nonnegative_int(row.get("line_count"))
-            and _nonempty_string(row.get("encoding"))
-            and row.get("inventory_status") in _INVENTORY_STATUSES
-            and isinstance(row.get("exclusion_reason"), str)
-            and row.get("parser_status") in _PARSER_STATUSES
-            and isinstance(row.get("parser_error"), str)
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
-    if not valid:
-        raise _write_error(operation) if write else _read_error(operation)
-    return value
+# A backend row is vouched for by a sequence of checks over the whole row, so a
+# cross-field relation (byte_end >= byte_start) sits in that sequence beside the
+# per-field shape checks. The order is load-bearing and is the order the fields
+# are listed in: a relation is only reached once both its fields are integers.
+_RowCheck = Callable[[dict[str, Any]], bool]
 
 
-def _require_source_read(
+def _field(name: str, predicate: Callable[[object], bool]) -> _RowCheck:
+    return lambda row: predicate(row.get(name))
+
+
+def _require_row(
     value: object,
     *,
+    spec: tuple[_RowCheck, ...],
     operation: str,
     requested_run_id: int | None = None,
+    requested_id: int | None = None,
     requested_source_id: int | None = None,
     write: bool = False,
+    run_id_field: str = "run_id",
 ) -> dict[str, Any]:
+    """Refuse a backend row this verb cannot vouch for, and return it intact.
+
+    The checks run in order and stop at the first failure. A write refusal says
+    the write may have committed, because the response that would have
+    confirmed it is the thing that came back malformed.
+    """
     valid = isinstance(value, dict)
     if valid:
         row = value
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and _positive_int(row.get("source_id"))
-            and _positive_int(row.get("dispatch_id"))
-            and _nonempty_string(row.get("dispatch_agent_id"))
-            and _positive_int(row.get("attempt"))
-            and _nonnegative_int(row.get("byte_start"))
-            and _nonnegative_int(row.get("byte_end"))
-            and row.get("byte_end", -1) >= row.get("byte_start", 0)
-            and _positive_int(row.get("line_start"))
-            and _positive_int(row.get("line_end"))
-            and row.get("line_end", 0) >= row.get("line_start", 1)
-            and (
-                row.get("proof_receipt_id") is None
-                or _positive_int(row.get("proof_receipt_id"))
-            )
-            and _sha256(row.get("source_sha256"))
-            and _nonempty_string(row.get("source_path"))
-            and _nonempty_string(row.get("target_key"))
-            and _nonempty_string(row.get("encoding"))
-        )
+        valid = all(check(row) for check in spec)
         if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
+            valid = valid and row.get(run_id_field) == requested_run_id
+        if requested_id is not None:
+            valid = valid and row.get("id") == requested_id
         if requested_source_id is not None:
             valid = valid and row.get("source_id") == requested_source_id
     if not valid:
@@ -335,185 +305,133 @@ def _require_source_read(
     return value
 
 
-def _require_obligation(
-    value: object,
-    *,
-    operation: str,
-    requested_run_id: int | None = None,
-    requested_id: int | None = None,
-    write: bool = False,
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and _nonempty_string(row.get("identity_key"))
-            and _nonempty_string(row.get("obligation_kind"))
-            and _nonempty_string(row.get("object_type"))
-            and _nonempty_string(row.get("object_key"))
-            and isinstance(row.get("hard"), bool)
-            and row.get("status") in _OBLIGATION_STATUSES
-            and isinstance(row.get("resolution"), str)
-            and _positive_ids(row.get("proof_receipt_ids"))
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
-        if requested_id is not None:
-            valid = valid and row.get("id") == requested_id
-    if not valid:
-        raise _write_error(operation) if write else _read_error(operation)
-    return value
+_SOURCE_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    _field("target_key", _nonempty_string),
+    _field("declared_root", _nonempty_string),
+    _field("path", _nonempty_string),
+    _field("content_sha256", _sha256),
+    _field("byte_size", _nonnegative_int),
+    _field("line_count", _nonnegative_int),
+    _field("encoding", _nonempty_string),
+    lambda row: row.get("inventory_status") in _INVENTORY_STATUSES,
+    lambda row: isinstance(row.get("exclusion_reason"), str),
+    lambda row: row.get("parser_status") in _PARSER_STATUSES,
+    lambda row: isinstance(row.get("parser_error"), str),
+)
+_require_source = partial(_require_row, spec=_SOURCE_FIELDS)
 
+_SOURCE_READ_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    _field("source_id", _positive_int),
+    _field("dispatch_id", _positive_int),
+    _field("dispatch_agent_id", _nonempty_string),
+    _field("attempt", _positive_int),
+    _field("byte_start", _nonnegative_int),
+    _field("byte_end", _nonnegative_int),
+    lambda row: row.get("byte_end", -1) >= row.get("byte_start", 0),
+    _field("line_start", _positive_int),
+    _field("line_end", _positive_int),
+    lambda row: row.get("line_end", 0) >= row.get("line_start", 1),
+    _field("proof_receipt_id", _optional_positive_int),
+    _field("source_sha256", _sha256),
+    _field("source_path", _nonempty_string),
+    _field("target_key", _nonempty_string),
+    _field("encoding", _nonempty_string),
+)
+_require_source_read = partial(_require_row, spec=_SOURCE_READ_FIELDS)
 
-def _require_candidate(
-    value: object,
-    *,
-    operation: str,
-    requested_run_id: int | None = None,
-    requested_id: int | None = None,
-    write: bool = False,
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and _nonempty_string(row.get("identity_key"))
-            and _nonempty_string(row.get("target_key"))
-            and (row.get("source_id") is None or _positive_int(row.get("source_id")))
-            and _nonempty_string(row.get("source_anchor"))
-            and _nonempty_string(row.get("vulnerability_family"))
-            and _nonempty_string(row.get("hypothesis"))
-            and (
-                row.get("originating_result_id") is None
-                or _positive_int(row.get("originating_result_id"))
-            )
-            and _positive_int(row.get("dispatch_id"))
-            and _positive_ids(row.get("proof_receipt_ids"))
-            and row.get("state") in _CANDIDATE_STATES
-            and isinstance(row.get("finding_slug"), str)
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
-        if requested_id is not None:
-            valid = valid and row.get("id") == requested_id
-    if not valid:
-        raise _write_error(operation) if write else _read_error(operation)
-    return value
+_OBLIGATION_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    _field("identity_key", _nonempty_string),
+    _field("obligation_kind", _nonempty_string),
+    _field("object_type", _nonempty_string),
+    _field("object_key", _nonempty_string),
+    lambda row: isinstance(row.get("hard"), bool),
+    lambda row: row.get("status") in _OBLIGATION_STATUSES,
+    lambda row: isinstance(row.get("resolution"), str),
+    _field("proof_receipt_ids", _positive_ids),
+)
+_require_obligation = partial(_require_row, spec=_OBLIGATION_FIELDS)
 
+_CANDIDATE_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    _field("identity_key", _nonempty_string),
+    _field("target_key", _nonempty_string),
+    _field("source_id", _optional_positive_int),
+    _field("source_anchor", _nonempty_string),
+    _field("vulnerability_family", _nonempty_string),
+    _field("hypothesis", _nonempty_string),
+    _field("originating_result_id", _optional_positive_int),
+    _field("dispatch_id", _positive_int),
+    _field("proof_receipt_ids", _positive_ids),
+    lambda row: row.get("state") in _CANDIDATE_STATES,
+    lambda row: isinstance(row.get("finding_slug"), str),
+)
+_require_candidate = partial(_require_row, spec=_CANDIDATE_FIELDS)
 
-def _require_tool_signal(
-    value: object,
-    *,
-    operation: str,
-    requested_run_id: int | None = None,
-    requested_id: int | None = None,
-    write: bool = False,
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and _nonempty_string(row.get("identity_key"))
-            and row.get("signal_kind")
-            in {"sanitizer_violation", "reproducible_crash", "attributed_oob_callback"}
-            and _positive_int(row.get("dispatch_id"))
-            and _nonempty_string(row.get("target_key"))
-            and _optional_positive_int(row.get("source_id"))
-            and _nonempty_string(row.get("source_anchor"))
-            and _nonempty_string(row.get("vulnerability_family"))
-            and _nonempty_string(row.get("hypothesis"))
-            and _nonempty_string(row.get("observed_signature"))
-            and isinstance(row.get("exact_input_sha256"), str)
-            and _positive_int(row.get("command_run_id"))
-            and _positive_ids(row.get("proof_receipt_ids"))
-            and _positive_int(row.get("candidate_id"))
-            and _sha256(row.get("record_sha256"))
-            and _nonempty_string(row.get("created_at"))
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
-        if requested_id is not None:
-            valid = valid and row.get("id") == requested_id
-    if not valid:
-        raise _write_error(operation) if write else _read_error(operation)
-    return value
+_TOOL_SIGNAL_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    _field("identity_key", _nonempty_string),
+    lambda row: row.get("signal_kind")
+    in {"sanitizer_violation", "reproducible_crash", "attributed_oob_callback"},
+    _field("dispatch_id", _positive_int),
+    _field("target_key", _nonempty_string),
+    _field("source_id", _optional_positive_int),
+    _field("source_anchor", _nonempty_string),
+    _field("vulnerability_family", _nonempty_string),
+    _field("hypothesis", _nonempty_string),
+    _field("observed_signature", _nonempty_string),
+    lambda row: isinstance(row.get("exact_input_sha256"), str),
+    _field("command_run_id", _positive_int),
+    _field("proof_receipt_ids", _positive_ids),
+    _field("candidate_id", _positive_int),
+    _field("record_sha256", _sha256),
+    _field("created_at", _nonempty_string),
+)
+_require_tool_signal = partial(_require_row, spec=_TOOL_SIGNAL_FIELDS)
 
+_DISCOVERY_PASS_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    _field("identity_key", _nonempty_string),
+    _field("dispatch_id", _positive_int),
+    _field("frontier_identity_sha256", _sha256),
+    lambda row: row.get("terminal_reason")
+    in {"frontier_exhausted", "no_new_candidates", "cap_reached", "interrupted", "failed"},
+    lambda row: isinstance(row.get("candidate_identity_keys"), list)
+    and all(
+        _nonempty_string(item) and len(item) <= 1024
+        for item in row["candidate_identity_keys"]
+    ),
+    _field("candidate_delta", _nonnegative_int),
+    _field("proof_receipt_ids", _positive_ids),
+    _field("record_sha256", _sha256),
+    _field("created_at", _nonempty_string),
+)
+_require_discovery_pass = partial(_require_row, spec=_DISCOVERY_PASS_FIELDS)
 
-def _require_discovery_pass(
-    value: object,
-    *,
-    operation: str,
-    requested_run_id: int | None = None,
-    requested_id: int | None = None,
-    write: bool = False,
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        candidates = row.get("candidate_identity_keys")
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and _nonempty_string(row.get("identity_key"))
-            and _positive_int(row.get("dispatch_id"))
-            and _sha256(row.get("frontier_identity_sha256"))
-            and row.get("terminal_reason")
-            in {"frontier_exhausted", "no_new_candidates", "cap_reached", "interrupted", "failed"}
-            and isinstance(candidates, list)
-            and all(_nonempty_string(item) and len(item) <= 1024 for item in candidates)
-            and _nonnegative_int(row.get("candidate_delta"))
-            and _positive_ids(row.get("proof_receipt_ids"))
-            and _sha256(row.get("record_sha256"))
-            and _nonempty_string(row.get("created_at"))
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
-        if requested_id is not None:
-            valid = valid and row.get("id") == requested_id
-    if not valid:
-        raise _write_error(operation) if write else _read_error(operation)
-    return value
-
-
-def _require_code_receipt(
-    value: object,
-    *,
-    operation: str,
-    requested_run_id: int | None = None,
-    requested_id: int | None = None,
-    write: bool = False,
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        valid = (
-            _positive_int(row.get("id"))
-            and _positive_int(row.get("run_id"))
-            and row.get("receipt_kind")
-            in {"variant_check", "fuzz_decision", "fuzz_campaign"}
-            and _positive_int(row.get("receipt_id"))
-            and _nonempty_string(row.get("target_key"))
-            and _positive_int(row.get("obligation_id"))
-            and _positive_ids(row.get("candidate_ids"))
-            and _positive_ids(row.get("signal_ids"))
-            and _positive_ids(row.get("proof_receipt_ids"))
-            and row.get("obligation_status") in {"resolved", "blocked"}
-            and _sha256(row.get("record_sha256"))
-            and _nonempty_string(row.get("created_at"))
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("run_id") == requested_run_id
-        if requested_id is not None:
-            valid = valid and row.get("id") == requested_id
-    if not valid:
-        raise _write_error(operation) if write else _read_error(operation)
-    return value
+_CODE_RECEIPT_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _positive_int),
+    _field("run_id", _positive_int),
+    lambda row: row.get("receipt_kind")
+    in {"variant_check", "fuzz_decision", "fuzz_campaign"},
+    _field("receipt_id", _positive_int),
+    _field("target_key", _nonempty_string),
+    _field("obligation_id", _positive_int),
+    _field("candidate_ids", _positive_ids),
+    _field("signal_ids", _positive_ids),
+    _field("proof_receipt_ids", _positive_ids),
+    lambda row: row.get("obligation_status") in {"resolved", "blocked"},
+    _field("record_sha256", _sha256),
+    _field("created_at", _nonempty_string),
+)
+_require_code_receipt = partial(_require_row, spec=_CODE_RECEIPT_FIELDS)
 
 
 def _require_audit_receipt(
@@ -596,66 +514,38 @@ def _require_observed_event(
     return row
 
 
-def _require_decision_event(
-    value: object, *, operation: str, requested_run_id: int | None = None
-) -> dict[str, Any]:
-    valid = isinstance(value, dict)
-    if valid:
-        row = value
-        valid = (
-            _nonempty_string(row.get("id"))
-            and _positive_int(row.get("audit_run_id"))
-            and row.get("object_type") in {"obligation", "candidate"}
-            and _positive_int(row.get("object_id"))
-            and _positive_int(row.get("origin_run_id"))
-            and (row.get("from_status") is None or _nonempty_string(row.get("from_status")))
-            and _nonempty_string(row.get("to_status"))
-            and isinstance(row.get("detail"), str)
-            and _positive_ids(row.get("proof_receipt_ids"))
-            and _nonempty_string(row.get("created_at"))
-        )
-        if requested_run_id is not None:
-            valid = valid and row.get("audit_run_id") == requested_run_id
-    if not valid:
-        raise _read_error(operation)
-    return value
+_DECISION_EVENT_FIELDS: tuple[_RowCheck, ...] = (
+    _field("id", _nonempty_string),
+    _field("audit_run_id", _positive_int),
+    lambda row: row.get("object_type") in {"obligation", "candidate"},
+    _field("object_id", _positive_int),
+    _field("origin_run_id", _positive_int),
+    lambda row: row.get("from_status") is None or _nonempty_string(row.get("from_status")),
+    _field("to_status", _nonempty_string),
+    lambda row: isinstance(row.get("detail"), str),
+    _field("proof_receipt_ids", _positive_ids),
+    _field("created_at", _nonempty_string),
+)
+_require_decision_event = partial(
+    _require_row, spec=_DECISION_EVENT_FIELDS, run_id_field="audit_run_id"
+)
 
 
-_ROW_VALIDATORS: dict[str, Callable[..., dict[str, Any]]] = {
-    "sources": _require_source,
-    "source-read": _require_source_read,
-    "obligation": _require_obligation,
-    "candidate": _require_candidate,
-    "tool-signal": _require_tool_signal,
-    "discovery-pass": _require_discovery_pass,
-    "code-receipt": _require_code_receipt,
-    "commands": _require_command_receipt,
-    "observed-events": _require_observed_event,
-    "decision-history": _require_decision_event,
-}
-_ENDPOINT_NAMES = {
-    "sources": "sources",
-    "source-read": "source-reads",
-    "obligation": "obligations",
-    "candidate": "candidates",
-    "tool-signal": "tool-signals",
-    "discovery-pass": "discovery-passes",
-    "code-receipt": "code-receipts",
-    "commands": "commands",
-    "observed-events": "observed-events",
-    "decision-history": "decision-history",
-}
-_NOUNS = {
-    "sources": "run sources",
-    "source-read": "source reads",
-    "obligation": "run obligations",
-    "candidate": "run candidates",
-    "tool-signal": "typed tool signals",
-    "discovery-pass": "discovery passes",
-    "code-receipt": "linked code receipts",
-    "commands": "recorded commands",
-    "observed-events": "observed events",
-    "decision-history": "decision history events",
+_FAMILIES: dict[str, tuple[str, str, Callable[..., dict[str, Any]]]] = {
+    "sources": ("sources", "run sources", _require_source),
+    "source-read": ("source-reads", "source reads", _require_source_read),
+    "obligation": ("obligations", "run obligations", _require_obligation),
+    "candidate": ("candidates", "run candidates", _require_candidate),
+    "tool-signal": ("tool-signals", "typed tool signals", _require_tool_signal),
+    "discovery-pass": ("discovery-passes", "discovery passes", _require_discovery_pass),
+    "code-receipt": ("code-receipts", "linked code receipts", _require_code_receipt),
+    "commands": ("commands", "recorded commands", _require_command_receipt),
+    "observed-events": ("observed-events", "observed events", _require_observed_event),
+    "decision-history": (
+        "decision-history",
+        "decision history events",
+        _require_decision_event,
+    ),
 }
 
 
@@ -683,7 +573,7 @@ def _require_page(
         or (has_more and not items)
     ):
         raise _read_error(f"{family} list")
-    validator = _ROW_VALIDATORS[family]
+    validator = _FAMILIES[family][2]
     rows = [
         validator(row, operation=f"{family} list", requested_run_id=run_id)
         for row in items
@@ -710,7 +600,7 @@ def _run_list(args) -> None:
     family = str(args.run_audit_family)
     run_id = int(args.run_id)
     limit, offset = _validated_window(args)
-    endpoint_name = _ENDPOINT_NAMES[family]
+    endpoint_name, noun, _ = _FAMILIES[family]
     _, client = _client(args)
     rows: list[dict[str, Any]] = []
     next_offset = offset
@@ -747,7 +637,7 @@ def _run_list(args) -> None:
 
     report_page(
         page,
-        noun=_NOUNS[family],
+        noun=noun,
         continuation_command=(
             f"vigil assess run-audit {family} list {run_id} --limit {limit} "
             f"--offset {next_offset}"

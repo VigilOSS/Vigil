@@ -80,6 +80,8 @@ from .code_analysis_support import (
     _json_list_text,
     _json_text,
     _latest_current_queue_attempt_sql,
+    canonical_current_attempt_sql,
+    queue_file_repo_join_sql,
     _lease_activity_age_seconds_sql,
     _lease_activity_sql,
     _merge_cwe_coverage_entries,
@@ -96,6 +98,7 @@ from .code_analysis_support import (
     _require_queue_lease,
     _require_queue_status,
     _require_strict_positive_id,
+    _REPLACED_BY_RESULT_ID_SQL,
     _result_not_replaced_sql,
     _safe_int,
     _scalar_row,
@@ -132,6 +135,7 @@ from .variant_scopes import (
 )
 
 from .code_analysis_support import (
+    require_current_source_binding,
     CODE_REPO_ROLES as CODE_REPO_ROLES,
     REFERENCE_REPO_ROLE as REFERENCE_REPO_ROLE,
     STRUCTURAL_CALLABLE_IDENTITY_SCHEMA as STRUCTURAL_CALLABLE_IDENTITY_SCHEMA,
@@ -143,35 +147,46 @@ from .sql_like import like_contains
 # Repository Management
 # =========================================================================
 
+def verified_snapshot_identity_problem(repo: dict[str, Any]) -> str | None:
+    """The refusal a declared `verified` source snapshot earns, or None.
+
+    One implementation of the rule, enforced twice: the request model raises it
+    as a 422 for HTTP callers and this module raises it as a 400 for every
+    other entry into the refresh. A snapshot that is not declared verified has
+    no identity obligation and so no problem.
+    """
+    if repo.get("source_snapshot_quality") != "verified":
+        return None
+    missing = sorted(
+        field_name
+        for field_name in ("source_origin_path", "snapshot_manifest_path", "snapshot_digest")
+        if not repo.get(field_name)
+    )
+    if repo.get("source_kind") not in {"git", "directory"}:
+        missing.append("source_kind")
+    if repo.get("source_kind") == "git" and repo.get("worktree_dirty") is None:
+        missing.append("worktree_dirty")
+    if missing:
+        return (
+            "verified source snapshot is missing identity fields: "
+            + ", ".join(sorted(set(missing)))
+        )
+    snapshot_digest = str(repo["snapshot_digest"])
+    if len(snapshot_digest) != 64 or any(
+        char not in "0123456789abcdef" for char in snapshot_digest
+    ):
+        return "snapshot_digest must be a lowercase SHA-256 digest"
+    return None
+
+
 def start_code_repo_refresh(engagement_id: int, repo: dict[str, Any]) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
-    if repo.get("source_snapshot_quality") == "verified":
-        required_identity = {
-            "source_origin_path": repo.get("source_origin_path"),
-            "snapshot_manifest_path": repo.get("snapshot_manifest_path"),
-            "snapshot_digest": repo.get("snapshot_digest"),
-        }
-        missing = sorted(key for key, value in required_identity.items() if not value)
-        if repo.get("source_kind") not in {"git", "directory"}:
-            missing.append("source_kind")
-        if repo.get("source_kind") == "git" and repo.get("worktree_dirty") is None:
-            missing.append("worktree_dirty")
-        if missing:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "verified source snapshot is missing identity fields: "
-                    + ", ".join(sorted(set(missing)))
-                ),
-            )
-        snapshot_digest = str(repo["snapshot_digest"])
-        if len(snapshot_digest) != 64 or any(
-            char not in "0123456789abcdef" for char in snapshot_digest
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="snapshot_digest must be a lowercase SHA-256 digest",
-            )
+    identity_problem = verified_snapshot_identity_problem(repo)
+    if identity_problem is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=identity_problem,
+        )
     refresh_token = str(uuid.uuid4())
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -380,6 +395,26 @@ def _invalidate_repo_structural_index(connection, engagement_id: int, repo_id: i
 
 
 _METADATA_REFRESH_REVIEW_THEME = "metadata-refresh-review"
+# Hand one claimed row back to the unleased pending rotation: clear ownership,
+# the adoption chain and the claim timestamps, and re-read the file's current
+# analysis_priority -- except on a metadata-refresh row, whose priority belongs
+# to the refresh lane and not to the file's review ranking. The one bound
+# parameter is `_METADATA_REFRESH_REVIEW_MODE`, and it is first in the
+# parameter tuple at every site that applies this clause.
+_RETURN_TO_PENDING_SET_SQL = """status = 'pending', assigned_agent = '', lease_token = '',
+                adopted_leases_json = '[]',
+                consumed_at = NULL, last_heartbeat_at = NULL,
+                priority = CASE
+                    WHEN queue_mode = ? THEN priority
+                    ELSE COALESCE((
+                        SELECT files.analysis_priority
+                        FROM code_files AS files
+                        WHERE files.engagement_id = code_analysis_queue.engagement_id
+                          AND files.id = code_analysis_queue.file_id
+                    ), priority)
+                END"""
+
+
 _METADATA_REFRESH_REVIEW_MODE = "metadata-refresh"
 _SOURCE_GENERATION_REPLACED_REASON = "source_generation_replaced"
 
@@ -819,6 +854,23 @@ def _sync_metadata_review_queue_identity(
     )
 
 
+def _staged_refresh_inventory(
+    connection, engagement_id: int, repo_id: int, refresh_token: str
+) -> dict[str, Any]:
+    """The staged file inventory this refresh token carries, keyed by path."""
+    return {
+        str(row["file_path"]): _json_decode(row["file_json"], {})
+        for row in connection.execute(
+            """
+            SELECT file_path, file_json FROM code_ingest_staging
+            WHERE engagement_id = ? AND repo_id = ? AND refresh_token = ?
+            ORDER BY file_path
+            """,
+            (engagement_id, repo_id, refresh_token),
+        ).fetchall()
+    }
+
+
 def commit_code_repo_refresh(
     engagement_id: int, repo_id: int, *, refresh_token: str, manifest_complete: bool
 ) -> dict[str, Any]:
@@ -863,23 +915,14 @@ def commit_code_repo_refresh(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="repo refresh token is stale",
                 )
-            staged_rows = connection.execute(
-                """
-                SELECT file_path, file_json FROM code_ingest_staging
-                WHERE engagement_id = ? AND repo_id = ? AND refresh_token = ?
-                ORDER BY file_path
-                """,
-                (engagement.id, repo_id, refresh_token),
-            ).fetchall()
+            staged = _staged_refresh_inventory(
+                connection, engagement.id, repo_id, refresh_token
+            )
             if not manifest_complete:
                 raise HTTPException(
                     status_code=status.HTTP_400_BAD_REQUEST,
                     detail="repo refresh manifest is incomplete",
                 )
-            staged = {
-                str(row["file_path"]): _json_decode(row["file_json"], {})
-                for row in staged_rows
-            }
             metadata = _json_decode(repo.get("pending_refresh_json"), {})
             if metadata != claimed_metadata:
                 raise HTTPException(
@@ -910,18 +953,9 @@ def commit_code_repo_refresh(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="repo refresh metadata changed during snapshot attestation",
                 )
-            live_rows = connection.execute(
-                """
-                SELECT file_path, file_json FROM code_ingest_staging
-                WHERE engagement_id = ? AND repo_id = ? AND refresh_token = ?
-                ORDER BY file_path
-                """,
-                (engagement.id, repo_id, refresh_token),
-            ).fetchall()
-            live_staged = {
-                str(row["file_path"]): _json_decode(row["file_json"], {})
-                for row in live_rows
-            }
+            live_staged = _staged_refresh_inventory(
+                connection, engagement.id, repo_id, refresh_token
+            )
             if live_staged != staged:
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
@@ -1127,27 +1161,20 @@ def commit_code_repo_refresh(
                         ),
                     )
                     changed += 1
-                elif header_changed or risk_metadata_changed:
-                    _reopen_file_metadata_review(
-                        connection,
-                        engagement.id,
-                        current,
-                        invalidate_architecture=header_changed,
-                    )
-                    connection.execute(
-                        """
-                        UPDATE code_files SET language = ?, loc = ?, header_snippet = ?,
-                            git_churn_score = ?, has_past_cve_fix = ?, updated_at = CURRENT_TIMESTAMP
-                        WHERE engagement_id = ? AND id = ?
-                        """,
-                        (
-                            record.get("language", ""), record.get("loc", 0), record.get("header_snippet", ""),
-                            record.get("git_churn_score", 0), 1 if record.get("has_past_cve_fix") else 0,
-                            engagement.id, current["id"],
-                        ),
-                    )
-                    changed += 1
                 else:
+                    # Metadata-only review reopening and a wholly unchanged file
+                    # write the same row; only the reopen and which counter the
+                    # file lands in differ.
+                    if header_changed or risk_metadata_changed:
+                        _reopen_file_metadata_review(
+                            connection,
+                            engagement.id,
+                            current,
+                            invalidate_architecture=header_changed,
+                        )
+                        changed += 1
+                    else:
+                        unchanged += 1
                     connection.execute(
                         """
                         UPDATE code_files SET language = ?, loc = ?, header_snippet = ?,
@@ -1160,7 +1187,6 @@ def commit_code_repo_refresh(
                             engagement.id, current["id"],
                         ),
                     )
-                    unchanged += 1
 
             for path in missing_paths - renamed_old:
                 file_id = int(existing[path]["id"])
@@ -1348,13 +1374,8 @@ def update_code_repo(
     set_clauses = []
     params: list[Any] = []
     for key, value in kwargs.items():
-        if key not in _CODE_REPO_ALLOWED_FIELDS:
-            continue
         set_clauses.append(f"{key} = ?")
         params.append(value)
-
-    if not set_clauses:
-        return get_code_repo(engagement_id, repo_id)
 
     set_clauses.append("updated_at = CURRENT_TIMESTAMP")
     params.extend([engagement.id, repo_id])
@@ -1388,16 +1409,12 @@ def publish_code_repo_lsp_config(
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         repo = _get_published_repo_row(connection, engagement.id, repo_id)
-        if int(repo.get("active_generation", 0) or 0) != repo_generation:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="LSP repository generation is stale",
-            )
-        if str(repo.get("source_manifest_digest", "") or "") != source_manifest_digest:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="LSP source manifest digest is stale",
-            )
+        require_current_source_binding(
+            repo,
+            repo_generation=repo_generation,
+            source_manifest_digest=source_manifest_digest,
+            label="LSP",
+        )
         cursor = connection.execute(
             """
             UPDATE code_repos
@@ -1448,6 +1465,23 @@ DEFAULT_CODE_FILE_SORT = "analysis_priority"
 DEFAULT_CODE_FILE_ORDER = "desc"
 
 
+def _append_optional_filters(
+    clauses: list[str],
+    params: list[Any],
+    spec: tuple[tuple[str, Any], ...],
+) -> None:
+    """Append one WHERE predicate and its bound value per supplied filter.
+
+    `spec` order is the append order, because these queries bind positionally.
+    Only filters whose value is used verbatim belong here; anything that
+    coerces, validates or builds a subquery stays at its own site.
+    """
+    for clause, value in spec:
+        if value is not None:
+            clauses.append(clause)
+            params.append(value)
+
+
 def list_code_files(
     engagement_id: int,
     *,
@@ -1496,18 +1530,12 @@ def list_code_files(
         "repos.active_generation > 0",
     ]
     params: list[Any] = [engagement.id]
-    if repo_id is not None:
-        clauses.append("files.repo_id = ?")
-        params.append(repo_id)
-    if module_id is not None:
-        clauses.append("files.module_id = ?")
-        params.append(module_id)
-    if classification is not None:
-        clauses.append("files.classification = ?")
-        params.append(classification)
-    if analysis_status is not None:
-        clauses.append("files.analysis_status = ?")
-        params.append(analysis_status)
+    _append_optional_filters(clauses, params, (
+        ("files.repo_id = ?", repo_id),
+        ("files.module_id = ?", module_id),
+        ("files.classification = ?", classification),
+        ("files.analysis_status = ?", analysis_status),
+    ))
     if search is not None:
         clauses.append("files.file_path LIKE ? ESCAPE '\\'")
         params.append(like_contains(search))
@@ -2178,8 +2206,6 @@ def update_code_file(
 
     set_clauses = []
     params: list[Any] = []
-    json_list_fields = {"slot_types_json"}
-    json_object_fields: set[str] = set()
 
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
@@ -2340,23 +2366,14 @@ def update_code_file(
             normalized_kwargs["analysis_priority"] = int(effective_priority)
 
         for key, value in normalized_kwargs.items():
-            if key not in _CODE_FILE_ALLOWED_FIELDS:
-                continue  # already caught by _reject_unknown_fields above; dead branch
-            if key in json_list_fields:
-                set_clauses.append(f"{key} = ?")
+            set_clauses.append(f"{key} = ?")
+            if key == "slot_types_json":
                 params.append(_json_list_text(value))
-            elif key in json_object_fields:
-                set_clauses.append(f"{key} = ?")
-                params.append(_json_text(value))
             else:
-                set_clauses.append(f"{key} = ?")
                 params.append(value)
 
         if review_identity_changed:
             set_clauses.append("variant_check_status = 'pending'")
-
-        if not set_clauses:
-            return get_code_file(engagement_id, file_id)
 
         set_clauses.append("updated_at = CURRENT_TIMESTAMP")
         params.extend([engagement.id, file_id])
@@ -2454,16 +2471,12 @@ def bulk_update_structural_metadata(
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         repo = _get_published_repo_row(connection, engagement.id, repo_id)
-        if int(repo.get("active_generation", 0) or 0) != repo_generation:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="structural index repository generation is stale",
-            )
-        if str(repo.get("source_manifest_digest", "") or "") != source_manifest_digest:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="structural index source manifest digest is stale",
-            )
+        require_current_source_binding(
+            repo,
+            repo_generation=repo_generation,
+            source_manifest_digest=source_manifest_digest,
+            label="structural index",
+        )
 
         submitted_ids = [int(item["file_id"]) for item in updates]
         if len(submitted_ids) != len(set(submitted_ids)):
@@ -3545,6 +3558,26 @@ def _adopted_lease_identities(raw: Any) -> list[dict[str, str]]:
     return identities
 
 
+def _lease_activity_projection(row: Any) -> dict[str, Any]:
+    """Ownership truth an operator needs to tell a working lease from an
+    abandoned one: when it last proved life, how long ago that was on the
+    database clock, how much durable work the row already carries, and which
+    earlier leases were adopted into it. The queue listing and the open-lease
+    view read it identically."""
+    return {
+        "consumed_at": row["consumed_at"],
+        "last_heartbeat_at": row["last_heartbeat_at"],
+        "lease_activity_at": row["lease_activity_at"],
+        "heartbeat_age_seconds": (
+            None
+            if row["heartbeat_age_seconds"] is None
+            else int(row["heartbeat_age_seconds"])
+        ),
+        "current_result_count": int(row["current_result_count"] or 0),
+        "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
+    }
+
+
 def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
     return {
         "id": int(row["id"]),
@@ -3580,20 +3613,7 @@ def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
         "disposition": str(row["disposition"] or ""),
         "skip_reason": str(row["skip_reason"] or ""),
         "reanalysis_of_queue_item_id": row["reanalysis_of_queue_item_id"],
-        "consumed_at": row["consumed_at"],
-        "last_heartbeat_at": row["last_heartbeat_at"],
-        # Ownership truth an operator needs to tell a working lease from an
-        # abandoned one: when it last proved life, how long ago that was on the
-        # database clock, how much durable work the row already carries, and
-        # which earlier leases were adopted into it.
-        "lease_activity_at": row["lease_activity_at"],
-        "heartbeat_age_seconds": (
-            None
-            if row["heartbeat_age_seconds"] is None
-            else int(row["heartbeat_age_seconds"])
-        ),
-        "current_result_count": int(row["current_result_count"] or 0),
-        "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
+        **_lease_activity_projection(row),
         "completed_at": row["completed_at"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
@@ -3685,15 +3705,11 @@ def list_queue_items(
     if repo_id is not None:
         clauses.append("files.repo_id = ?")
         params.append(_coerce_int(repo_id, field_name="repo_id"))
-    if classification is not None:
-        clauses.append("files.classification = ?")
-        params.append(classification)
-    if batch_theme is not None:
-        clauses.append("queue.batch_theme = ?")
-        params.append(batch_theme)
-    if queue_mode is not None:
-        clauses.append("queue.queue_mode = ?")
-        params.append(queue_mode)
+    _append_optional_filters(clauses, params, (
+        ("files.classification = ?", classification),
+        ("queue.batch_theme = ?", batch_theme),
+        ("queue.queue_mode = ?", queue_mode),
+    ))
     if stale_minutes is not None:
         if stale_minutes < 1:
             raise HTTPException(
@@ -3790,15 +3806,11 @@ def fetch_queue_items(
     now = _now_iso()
     filter_clauses: list[str] = []
     filter_params: list[Any] = []
-    if repo_id is not None:
-        filter_clauses.append("files.repo_id = ?")
-        filter_params.append(repo_id)
-    if classification is not None:
-        filter_clauses.append("files.classification = ?")
-        filter_params.append(classification)
-    if batch_theme is not None:
-        filter_clauses.append("queue.batch_theme = ?")
-        filter_params.append(batch_theme)
+    _append_optional_filters(filter_clauses, filter_params, (
+        ("files.repo_id = ?", repo_id),
+        ("files.classification = ?", classification),
+        ("queue.batch_theme = ?", batch_theme),
+    ))
     if queue_mode is not None:
         if queue_mode not in _QUEUE_MODES:
             raise HTTPException(
@@ -3825,21 +3837,13 @@ def fetch_queue_items(
         selected = connection.execute(
             f"""
             SELECT queue.id, queue.repo_generation
-            FROM code_analysis_queue AS queue
-            JOIN code_files AS files
-              ON files.id = queue.file_id
-             AND files.engagement_id = queue.engagement_id
-            JOIN code_repos AS repos
-              ON repos.id = files.repo_id
-             AND repos.engagement_id = files.engagement_id
-             AND repos.active_generation > 0
+            {queue_file_repo_join_sql(
+                repo_join_predicates=("repos.active_generation > 0",)
+            )}
             WHERE queue.engagement_id = ? AND queue.status = 'pending'
               AND queue.assigned_agent = '' AND queue.lease_token = ''
-              AND queue.repo_generation = repos.active_generation
               AND {_analysis_repo_sql("repos")}
-              AND queue.source_superseded_at IS NULL
-              AND ({_latest_current_queue_attempt_sql("queue", "repos")})
-              AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+              AND {canonical_current_attempt_sql("queue", "repos")}
               {filter_sql}
             ORDER BY queue.priority DESC, queue.id ASC
             LIMIT ?
@@ -4182,7 +4186,7 @@ def _compute_coverage_integrity(
 ) -> dict[str, Any]:
     """Derive source coverage from current grouped receipts and structural bindings."""
     receipt_counts = connection.execute(
-        """
+        f"""
         SELECT
             COUNT(*) AS current_receipt_rows,
             COALESCE(SUM(
@@ -4194,10 +4198,7 @@ def _compute_coverage_integrity(
           AND receipt_binding_status NOT IN (
               'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM code_analysis_results AS replacement
-              WHERE replacement.supersedes_result_id = code_analysis_results.id
-          )
+          AND ({_result_not_replaced_sql("code_analysis_results")})
         """,
         (engagement_id, queue_item_id, file_id),
     ).fetchone()
@@ -4216,10 +4217,7 @@ def _compute_coverage_integrity(
           AND results.receipt_binding_status NOT IN (
               'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
           )
-          AND NOT EXISTS (
-              SELECT 1 FROM code_analysis_results AS replacement
-              WHERE replacement.supersedes_result_id = results.id
-          )
+          AND ({_result_not_replaced_sql("results")})
         """,
         (file_id, engagement_id, queue_item_id, file_id),
     ).fetchone()[0] or 0
@@ -4458,47 +4456,34 @@ def _record_cross_file_triggers(
         # cannot satisfy a hypothesis that did not exist when that review ran.
         trigger_status = _TRIGGER_STATUS_PENDING
 
-        if target_file_id is not None:
-            existing = connection.execute(
-                """
-                SELECT id, status, resolution_note
-                FROM code_analysis_triggers
-                WHERE engagement_id = ? AND target_file_id = ? AND vuln_class = ?
-                  AND reason = ? AND source_file_id IS ? AND source_queue_item_id IS ?
-                  AND repo_id = ? AND repo_generation = ?
-                """,
-                (
-                    engagement_id,
-                    target_file_id,
-                    vuln_class,
-                    reason,
-                    source_file_id,
-                    source_queue_item_id,
-                    source_repo_id,
-                    source_repo_generation,
-                ),
-            ).fetchone()
-        else:
-            existing = connection.execute(
-                """
-                SELECT id, status, resolution_note
-                FROM code_analysis_triggers
-                WHERE engagement_id = ? AND source_file_id = ? AND target_file_id IS NULL
-                  AND target_file_path = ? AND vuln_class = ?
-                  AND reason = ? AND source_queue_item_id IS ?
-                  AND repo_id = ? AND repo_generation = ?
-                """,
-                (
-                    engagement_id,
-                    source_file_id,
-                    target_file_path,
-                    vuln_class,
-                    reason,
-                    source_queue_item_id,
-                    source_repo_id,
-                    source_repo_generation,
-                ),
-            ).fetchone()
+        # The identity of an already-recorded trigger differs only in how the
+        # target is named: a resolved file row, or the path no admitted file
+        # carries yet. Every other predicate is shared, so it is written once.
+        target_predicate = (
+            "target_file_id = ?"
+            if target_file_id is not None
+            else "target_file_id IS NULL AND target_file_path = ?"
+        )
+        existing = connection.execute(
+            f"""
+            SELECT id, status, resolution_note
+            FROM code_analysis_triggers
+            WHERE engagement_id = ? AND vuln_class = ? AND reason = ?
+              AND source_file_id IS ? AND source_queue_item_id IS ?
+              AND repo_id = ? AND repo_generation = ?
+              AND {target_predicate}
+            """,
+            (
+                engagement_id,
+                vuln_class,
+                reason,
+                source_file_id,
+                source_queue_item_id,
+                source_repo_id,
+                source_repo_generation,
+                target_file_path if target_file_id is None else target_file_id,
+            ),
+        ).fetchone()
 
         resolution_note = ""
 
@@ -4778,26 +4763,29 @@ def complete_queue_items(
         # make an adopting agent re-record work adoption exists to preserve.
         attempt_tokens = _attempt_lease_tokens(queue_row)
         token_placeholders = ",".join("?" for _ in attempt_tokens)
+        # The four reads below ask four different questions of the same row set:
+        # the attempt's current, unreplaced receipts. The identity is written
+        # once so no question can drift onto a different set of receipts.
+        attempt_receipt_where = f"""results.engagement_id = ? AND results.queue_item_id = ?
+                  AND results.file_id = ?
+                  AND results.lease_token IN ({token_placeholders})
+                  AND results.superseded_at IS NULL
+                  AND ({_result_not_replaced_sql("results")})"""
+        attempt_receipt_params = (
+            engagement.id,
+            int(queue_row["id"]),
+            int(queue_row["file_id"]),
+            *attempt_tokens,
+        )
         candidate_rows = connection.execute(
             f"""
             SELECT DISTINCT disposition
-            FROM code_analysis_results
-            WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-              AND lease_token IN ({token_placeholders})
-              AND disposition IN ('finding', 'suspicious')
-              AND superseded_at IS NULL
-              AND NOT EXISTS (
-                  SELECT 1 FROM code_analysis_results AS replacement
-                  WHERE replacement.supersedes_result_id = code_analysis_results.id
-              )
+            FROM code_analysis_results AS results
+            WHERE {attempt_receipt_where}
+              AND results.disposition IN ('finding', 'suspicious')
             ORDER BY disposition
             """,
-            (
-                engagement.id,
-                int(queue_row["id"]),
-                int(queue_row["file_id"]),
-                *attempt_tokens,
-            ),
+            attempt_receipt_params,
         ).fetchall()
         candidate_dispositions = [str(row["disposition"]) for row in candidate_rows]
         if len(candidate_dispositions) > 1:
@@ -4822,23 +4810,12 @@ def complete_queue_items(
             finding_results = connection.execute(
                 f"""
                 SELECT finding_slug
-                FROM code_analysis_results
-                WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-                  AND lease_token IN ({token_placeholders})
-                  AND disposition = 'finding'
-                  AND superseded_at IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM code_analysis_results AS replacement
-                      WHERE replacement.supersedes_result_id = code_analysis_results.id
-                  )
+                FROM code_analysis_results AS results
+                WHERE {attempt_receipt_where}
+                  AND results.disposition = 'finding'
                 ORDER BY id
                 """,
-                (
-                    engagement.id,
-                    int(queue_row["id"]),
-                    int(queue_row["file_id"]),
-                    *attempt_tokens,
-                ),
+                attempt_receipt_params,
             ).fetchall()
             for finding_result in finding_results:
                 association = _require_reportable_root_file_finding(
@@ -4853,24 +4830,13 @@ def complete_queue_items(
             evidenced_result = connection.execute(
                 f"""
                 SELECT id
-                FROM code_analysis_results
-                WHERE engagement_id = ? AND queue_item_id = ? AND file_id = ?
-                  AND lease_token IN ({token_placeholders})
-                  AND disposition = ? AND superseded_at IS NULL
-                  AND NOT EXISTS (
-                      SELECT 1 FROM code_analysis_results AS replacement
-                      WHERE replacement.supersedes_result_id = code_analysis_results.id
-                  )
+                FROM code_analysis_results AS results
+                WHERE {attempt_receipt_where}
+                  AND results.disposition = ?
                   AND (trim(evidence) != '' OR trim(evidence_ref) != '')
                 LIMIT 1
                 """,
-                (
-                    engagement.id,
-                    int(queue_row["id"]),
-                    int(queue_row["file_id"]),
-                    *attempt_tokens,
-                    disposition,
-                ),
+                (*attempt_receipt_params, disposition),
             ).fetchone()
             if evidenced_result is None:
                 raise HTTPException(
@@ -4885,17 +4851,10 @@ def complete_queue_items(
                 f"""
                 SELECT results.id
                 FROM code_analysis_results AS results
-                WHERE results.engagement_id = ? AND results.queue_item_id = ?
-                  AND results.file_id = ?
-                  AND results.lease_token IN ({token_placeholders})
+                WHERE {attempt_receipt_where}
                   AND results.repo_generation = ? AND results.disposition = ?
-                  AND results.superseded_at IS NULL
                   AND results.receipt_binding_status NOT IN (
                       'legacy_ambiguous', 'legacy_missing', 'legacy_unbound'
-                  )
-                  AND NOT EXISTS (
-                      SELECT 1 FROM code_analysis_results AS replacement
-                      WHERE replacement.supersedes_result_id = results.id
                   )
                   AND (
                       (results.receipt_binding_status = 'empty_file'
@@ -4913,10 +4872,7 @@ def complete_queue_items(
                 LIMIT 1
                 """,
                 (
-                    engagement.id,
-                    int(queue_row["id"]),
-                    int(queue_row["file_id"]),
-                    *attempt_tokens,
+                    *attempt_receipt_params,
                     int(queue_row["repo_generation"]),
                     disposition,
                     int(file_row["loc"]),
@@ -5108,10 +5064,7 @@ def reset_stale_queue_items(
     clauses = [
         "queue.engagement_id = ?",
         "queue.status = 'processing'",
-        "queue.repo_generation = repos.active_generation",
-        "queue.source_superseded_at IS NULL",
-        f"({_latest_current_queue_attempt_sql('queue', 'repos')})",
-        f"({_no_superseded_active_attempt_sql('queue', 'repos')})",
+        canonical_current_attempt_sql("queue", "repos"),
         f"({_lease_activity_sql('queue')} IS NULL"
         f" OR datetime({_lease_activity_sql('queue')})"
         " < datetime('now', ? || ' minutes'))",
@@ -5162,18 +5115,7 @@ def reset_stale_queue_items(
             cursor = connection.execute(
                 f"""
                 UPDATE code_analysis_queue
-                SET status = 'pending', assigned_agent = '', lease_token = '',
-                    adopted_leases_json = '[]',
-                    consumed_at = NULL, last_heartbeat_at = NULL,
-                    priority = CASE
-                        WHEN queue_mode = ? THEN priority
-                        ELSE COALESCE((
-                            SELECT files.analysis_priority
-                            FROM code_files AS files
-                            WHERE files.engagement_id = code_analysis_queue.engagement_id
-                              AND files.id = code_analysis_queue.file_id
-                        ), priority)
-                    END,
+                SET {_RETURN_TO_PENDING_SET_SQL},
                     updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ? AND status = 'processing'
                   AND lease_token = ?
@@ -5480,18 +5422,7 @@ def release_queue_lease(
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
-            SET status = 'pending', assigned_agent = '', lease_token = '',
-                adopted_leases_json = '[]',
-                consumed_at = NULL, last_heartbeat_at = NULL,
-                priority = CASE
-                    WHEN queue_mode = ? THEN priority
-                    ELSE COALESCE((
-                        SELECT files.analysis_priority
-                        FROM code_files AS files
-                        WHERE files.engagement_id = code_analysis_queue.engagement_id
-                          AND files.id = code_analysis_queue.file_id
-                    ), priority)
-                END,
+            SET {_RETURN_TO_PENDING_SET_SQL},
                 analysis_notes = analysis_notes || ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND id = ? AND status = 'processing'
@@ -5711,21 +5642,7 @@ def retry_error_queue_items(
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
-            SET status = 'pending',
-                assigned_agent = '',
-                lease_token = '',
-                adopted_leases_json = '[]',
-                consumed_at = NULL,
-                last_heartbeat_at = NULL,
-                priority = CASE
-                    WHEN queue_mode = ? THEN priority
-                    ELSE COALESCE((
-                        SELECT files.analysis_priority
-                        FROM code_files AS files
-                        WHERE files.engagement_id = code_analysis_queue.engagement_id
-                          AND files.id = code_analysis_queue.file_id
-                    ), priority)
-                END,
+            SET {_RETURN_TO_PENDING_SET_SQL},
                 analysis_notes = analysis_notes || ?,
                 updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND status = 'error' AND id IN ({placeholders})
@@ -5758,18 +5675,7 @@ def retry_needs_context_queue_items(
         cursor = connection.execute(
             f"""
             UPDATE code_analysis_queue
-            SET status = 'pending', assigned_agent = '', lease_token = '',
-                adopted_leases_json = '[]',
-                consumed_at = NULL, last_heartbeat_at = NULL,
-                priority = CASE
-                    WHEN queue_mode = ? THEN priority
-                    ELSE COALESCE((
-                        SELECT files.analysis_priority
-                        FROM code_files AS files
-                        WHERE files.engagement_id = code_analysis_queue.engagement_id
-                          AND files.id = code_analysis_queue.file_id
-                    ), priority)
-                END,
+            SET {_RETURN_TO_PENDING_SET_SQL},
                 analysis_notes = analysis_notes || ?, updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND status = 'needs_context' AND id IN ({placeholders})
             """,
@@ -6499,11 +6405,7 @@ def get_analysis_result(engagement_id: int, result_id: int) -> dict[str, Any]:
                 files.repo_id, repos.repo_key, repos.repo_role,
                 result_queue.status AS queue_status,
                 result_queue.disposition AS queue_disposition,
-                (
-                    SELECT replacement.id
-                    FROM code_analysis_results AS replacement
-                    WHERE replacement.supersedes_result_id = results.id
-                ) AS replaced_by_result_id,
+                {_REPLACED_BY_RESULT_ID_SQL} AS replaced_by_result_id,
                 (
                     SELECT latest.id || ':' || latest.status
                     FROM code_analysis_queue AS latest
@@ -6543,21 +6445,13 @@ def list_analysis_results(
     engagement = _engagement_or_404(engagement_id)
     clauses: list[str] = []
     params: list[Any] = [engagement.id]
-    if file_id is not None:
-        clauses.append("results.file_id = ?")
-        params.append(file_id)
-    if queue_item_id is not None:
-        clauses.append("results.queue_item_id = ?")
-        params.append(queue_item_id)
-    if lease_token is not None:
-        clauses.append("results.lease_token = ?")
-        params.append(lease_token)
-    if function_name is not None:
-        clauses.append("results.function_name = ?")
-        params.append(function_name)
-    if disposition is not None:
-        clauses.append("results.disposition = ?")
-        params.append(disposition)
+    _append_optional_filters(clauses, params, (
+        ("results.file_id = ?", file_id),
+        ("results.queue_item_id = ?", queue_item_id),
+        ("results.lease_token = ?", lease_token),
+        ("results.function_name = ?", function_name),
+        ("results.disposition = ?", disposition),
+    ))
     file_path_projection = "files.file_path"
     if include_superseded:
         file_path_projection = _RECORDED_RESULT_FILE_PATH_SQL
@@ -6570,11 +6464,7 @@ def list_analysis_results(
             findings.status AS finding_workflow_status,
             findings.verification_status AS finding_verification_status,
             {file_path_projection} AS file_path,
-            (
-                SELECT replacement.id
-                FROM code_analysis_results AS replacement
-                WHERE replacement.supersedes_result_id = results.id
-            ) AS replaced_by_result_id
+            {_REPLACED_BY_RESULT_ID_SQL} AS replaced_by_result_id
         {source_sql}
         {''.join(f" AND {clause}" for clause in clauses)}
         ORDER BY results.id DESC
@@ -7223,16 +7113,12 @@ def record_variant_check_receipt(
                 status_code=status.HTTP_409_CONFLICT,
                 detail="variant check repository binding is stale",
             )
-        if int(repo.get("active_generation", 0) or 0) != repo_generation:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="variant check repository generation is stale",
-            )
-        if str(repo.get("source_manifest_digest", "") or "") != source_manifest_digest:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="variant check source manifest digest is stale",
-            )
+        require_current_source_binding(
+            repo,
+            repo_generation=repo_generation,
+            source_manifest_digest=source_manifest_digest,
+            label="variant check",
+        )
         if str(file_row.get("file_hash", "") or "") != file_sha256:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
@@ -7541,16 +7427,12 @@ def record_threat_model(
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         repo = _get_published_repo_row(connection, engagement.id, repo_id)
-        if int(repo.get("active_generation", 0) or 0) != repo_generation:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="threat model repository generation is stale",
-            )
-        if str(repo.get("source_manifest_digest", "") or "") != source_manifest_digest:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="threat model source manifest digest is stale",
-            )
+        require_current_source_binding(
+            repo,
+            repo_generation=repo_generation,
+            source_manifest_digest=source_manifest_digest,
+            label="threat model",
+        )
         connection.execute(
             """
             UPDATE code_repos
@@ -7637,22 +7519,16 @@ def _open_authoring_lease_rows(
     repo_clause = "" if repo_id is None else " AND files.repo_id = ?"
     repo_params: tuple[Any, ...] = () if repo_id is None else (repo_id,)
     from_where = f"""
-        FROM code_analysis_queue AS queue
-        JOIN code_files AS files
-          ON files.id = queue.file_id
-         AND files.engagement_id = queue.engagement_id
-        JOIN code_repos AS repos
-          ON repos.id = files.repo_id
-         AND repos.engagement_id = files.engagement_id
-         AND repos.active_generation > 0
-         AND {_analysis_repo_sql("repos")}
+        {queue_file_repo_join_sql(
+            repo_join_predicates=(
+                "repos.active_generation > 0",
+                _analysis_repo_sql("repos"),
+            )
+        )}
         WHERE queue.engagement_id = ?
           AND queue.status = 'processing'
           AND files.retired_at IS NULL
-          AND queue.repo_generation = repos.active_generation
-          AND queue.source_superseded_at IS NULL
-          AND ({_latest_current_queue_attempt_sql("queue", "repos")})
-          AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+          AND {canonical_current_attempt_sql("queue", "repos")}
           {repo_clause}
     """
     total = _scalar_row(
@@ -7690,16 +7566,7 @@ def _open_authoring_lease_rows(
             "batch_theme": str(row["batch_theme"] or ""),
             "agent_name": str(row["assigned_agent"] or ""),
             "lease_token": str(row["lease_token"] or ""),
-            "consumed_at": row["consumed_at"],
-            "last_heartbeat_at": row["last_heartbeat_at"],
-            "lease_activity_at": row["lease_activity_at"],
-            "heartbeat_age_seconds": (
-                None
-                if row["heartbeat_age_seconds"] is None
-                else int(row["heartbeat_age_seconds"])
-            ),
-            "current_result_count": int(row["current_result_count"] or 0),
-            "adopted_leases": _adopted_lease_identities(row["adopted_leases_json"]),
+            **_lease_activity_projection(row),
         }
         for row in rows
     ]
@@ -7719,6 +7586,119 @@ def open_authoring_leases(
             connection, engagement.id, repo_id=repo_id, limit=limit
         )
     return {"open_leases": leases, "open_leases_count": total}
+
+
+# The receipts -> attempt -> file -> repository spine every current-receipt
+# read walks. One spelling, so the alias set the receipt predicate below is
+# written against cannot drift away from the joins that supply it.
+_RESULT_RECEIPT_FROM_SQL = """
+        FROM code_analysis_results AS results
+        JOIN code_analysis_queue AS result_queue
+          ON result_queue.id = results.queue_item_id
+        JOIN code_files AS result_files
+          ON result_files.id = results.file_id
+        JOIN code_repos AS result_repos
+          ON result_repos.id = result_files.repo_id"""
+
+
+def _result_receipt_source(*, allow_processing: bool) -> str:
+    """The current-receipt predicate over `_RESULT_RECEIPT_FROM_SQL`'s aliases."""
+    return _current_result_receipt_sql(
+        "results",
+        "result_queue",
+        "result_files",
+        "result_repos",
+        allow_processing=allow_processing,
+    )
+
+
+def _empty_receipt_effort() -> dict[str, int]:
+    """Zeroed per-file review effort, in the order the views serialize it."""
+    return {
+        "current_receipt_rows": 0,
+        "evidenced_receipt_rows": 0,
+        "distinct_structural_callables_reviewed": 0,
+    }
+
+
+def _current_receipt_coverage_rows(
+    connection,
+    engagement_id: int,
+    file_ids_json: str,
+    *,
+    allow_processing: bool,
+) -> list[Any]:
+    """Each current receipt's own `cwe_coverage` over the named files."""
+    return connection.execute(
+        f"""
+        SELECT results.file_id, results.cwe_coverage_json
+        {_RESULT_RECEIPT_FROM_SQL}
+        WHERE results.engagement_id = ?
+          AND results.file_id IN (SELECT value FROM json_each(?))
+          AND ({_result_receipt_source(allow_processing=allow_processing)})
+        """,
+        (engagement_id, file_ids_json),
+    ).fetchall()
+
+
+def _current_receipt_effort_by_file(
+    connection,
+    engagement_id: int,
+    file_ids_json: str,
+    *,
+    allow_processing: bool,
+) -> dict[int, dict[str, int]]:
+    """Per-file review effort behind the current receipts on the named files.
+
+    ``{file_id: {current_receipt_rows, evidenced_receipt_rows,
+    distinct_structural_callables_reviewed}}``. The two aggregates are read
+    separately because a file can carry receipts with no structurally bound
+    callable, and can carry a bound callable through a receipt recorded against
+    another file; each dimension keeps its zero rather than dropping the file.
+    """
+    receipt_source = _result_receipt_source(allow_processing=allow_processing)
+    effort: dict[int, dict[str, int]] = {}
+    receipt_rows = connection.execute(
+        f"""
+        SELECT results.file_id,
+               COUNT(DISTINCT results.id) AS current_receipt_rows,
+               COUNT(DISTINCT
+                   CASE WHEN trim(results.evidence) != '' OR trim(results.evidence_ref) != ''
+                        THEN results.id END
+               ) AS evidenced_receipt_rows
+        {_RESULT_RECEIPT_FROM_SQL}
+        WHERE results.engagement_id = ?
+          AND results.file_id IN (SELECT value FROM json_each(?))
+          AND ({receipt_source})
+        GROUP BY results.file_id
+        """,
+        (engagement_id, file_ids_json),
+    ).fetchall()
+    for row in receipt_rows:
+        entry = effort.setdefault(int(row["file_id"]), _empty_receipt_effort())
+        entry["current_receipt_rows"] = int(row["current_receipt_rows"] or 0)
+        entry["evidenced_receipt_rows"] = int(row["evidenced_receipt_rows"] or 0)
+    callable_rows = connection.execute(
+        f"""
+        SELECT links.file_id,
+               COUNT(DISTINCT links.callable_id)
+                   AS distinct_structural_callables_reviewed
+        {_RESULT_RECEIPT_FROM_SQL}
+        JOIN code_analysis_result_callables AS links
+          ON links.result_id = results.id
+        WHERE results.engagement_id = ?
+          AND links.file_id IN (SELECT value FROM json_each(?))
+          AND ({receipt_source})
+          AND ({function_callable_link_sql("links")})
+        GROUP BY links.file_id
+        """,
+        (engagement_id, file_ids_json),
+    ).fetchall()
+    for row in callable_rows:
+        effort.setdefault(int(row["file_id"]), _empty_receipt_effort())[
+            "distinct_structural_callables_reviewed"
+        ] = int(row["distinct_structural_callables_reviewed"] or 0)
+    return effort
 
 
 def code_coverage_summary(
@@ -7883,34 +7863,32 @@ def code_coverage_summary(
         )
 
         # -- Confidence metrics --
-        critical_total = _scalar_row(
-            connection,
-            f"SELECT COUNT(*) FROM code_files WHERE engagement_id = ? AND classification = 'critical'{repo_clause}",
-            (engagement.id, *repo_params),
-        )
-        critical_analyzed = _scalar_row(
-            connection,
-            f"""
-            SELECT COUNT(*) FROM code_files AS files
-            WHERE files.engagement_id = ? AND files.classification = 'critical'
-              AND ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}){repo_clause}
-            """,
-            (engagement.id, *repo_params),
-        )
-        high_total = _scalar_row(
-            connection,
-            f"SELECT COUNT(*) FROM code_files WHERE engagement_id = ? AND classification = 'high'{repo_clause}",
-            (engagement.id, *repo_params),
-        )
-        high_analyzed = _scalar_row(
-            connection,
-            f"""
-            SELECT COUNT(*) FROM code_files AS files
-            WHERE files.engagement_id = ? AND files.classification = 'high'
-              AND ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}){repo_clause}
-            """,
-            (engagement.id, *repo_params),
-        )
+        # The two tiers the gate refuses on, counted by one pair of statements
+        # with the classification bound rather than inlined, so neither tier can
+        # be counted under a predicate the other does not share.
+        tier_counts: dict[str, dict[str, int]] = {
+            tier: {
+                "total": _scalar_row(
+                    connection,
+                    f"SELECT COUNT(*) FROM code_files WHERE engagement_id = ? AND classification = ?{repo_clause}",
+                    (engagement.id, tier, *repo_params),
+                ),
+                "analyzed": _scalar_row(
+                    connection,
+                    f"""
+                    SELECT COUNT(*) FROM code_files AS files
+                    WHERE files.engagement_id = ? AND files.classification = ?
+                      AND ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}){repo_clause}
+                    """,
+                    (engagement.id, tier, *repo_params),
+                ),
+            }
+            for tier in ("critical", "high")
+        }
+        critical_total = tier_counts["critical"]["total"]
+        critical_analyzed = tier_counts["critical"]["analyzed"]
+        high_total = tier_counts["high"]["total"]
+        high_analyzed = tier_counts["high"]["analyzed"]
         overall_loc_analyzed = _scalar_row(
             connection,
             f"""
@@ -7925,20 +7903,12 @@ def code_coverage_summary(
             connection,
             f"""
             SELECT COUNT(*)
-            FROM code_analysis_queue AS queue
-            JOIN code_files AS files
-              ON files.id = queue.file_id
-             AND files.engagement_id = queue.engagement_id
-            JOIN code_repos AS repos
-              ON repos.id = files.repo_id
-             AND repos.engagement_id = files.engagement_id
-             AND {_analysis_repo_sql("repos")}
+            {queue_file_repo_join_sql(
+                repo_join_predicates=(_analysis_repo_sql("repos"),)
+            )}
             WHERE queue.engagement_id = ? AND queue.status = 'needs_context'
               AND repos.active_generation > 0
-              AND queue.repo_generation = repos.active_generation
-              AND queue.source_superseded_at IS NULL
-              AND ({_latest_current_queue_attempt_sql("queue", "repos")})
-              AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+              AND {canonical_current_attempt_sql("queue", "repos")}
               {queue_repo_clause}
             """,
             (engagement.id, *repo_params),
@@ -7969,21 +7939,13 @@ def code_coverage_summary(
             connection,
             f"""
             SELECT COUNT(*)
-            FROM code_analysis_queue AS queue
-            JOIN code_files AS files
-              ON files.id = queue.file_id
-             AND files.engagement_id = queue.engagement_id
-            JOIN code_repos AS repos
-              ON repos.id = files.repo_id
-             AND repos.engagement_id = files.engagement_id
-             AND {_analysis_repo_sql("repos")}
+            {queue_file_repo_join_sql(
+                repo_join_predicates=(_analysis_repo_sql("repos"),)
+            )}
             WHERE queue.engagement_id = ?
               AND queue.status IN ('pending', 'processing')
               AND repos.active_generation > 0
-              AND queue.repo_generation = repos.active_generation
-              AND queue.source_superseded_at IS NULL
-              AND ({_latest_current_queue_attempt_sql("queue", "repos")})
-              AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+              AND {canonical_current_attempt_sql("queue", "repos")}
               {queue_repo_clause}
             """,
             (engagement.id, *repo_params),
@@ -8003,43 +7965,25 @@ def code_coverage_summary(
         open_leases, open_leases_count = _open_authoring_lease_rows(
             connection, engagement.id, repo_id=repo_id
         )
+        trigger_repo_clause = "" if repo_id is None else " AND sf.repo_id = ?"
         trigger_rows = connection.execute(
-            (
-                f"""
-                SELECT t.status, COUNT(*) AS total
-                FROM code_analysis_triggers AS t
-                JOIN code_files AS sf
-                  ON sf.id = t.source_file_id
-                 AND sf.engagement_id = t.engagement_id
-                JOIN code_repos AS repos
-                  ON repos.id = sf.repo_id
-                 AND repos.engagement_id = sf.engagement_id
-                 AND repos.active_generation > 0
-                 AND {_analysis_repo_sql("repos")}
-                WHERE t.engagement_id = ?
-                  AND t.repo_generation = repos.active_generation
-                  AND t.source_superseded_at IS NULL
-                GROUP BY t.status
-                """
-                if repo_id is None
-                else f"""
-                SELECT t.status, COUNT(*) AS total
-                FROM code_analysis_triggers t
-                JOIN code_files sf
-                  ON sf.id = t.source_file_id
-                 AND sf.engagement_id = t.engagement_id
-                JOIN code_repos repos
-                  ON repos.id = sf.repo_id
-                 AND repos.engagement_id = sf.engagement_id
-                 AND repos.active_generation > 0
-                 AND {_analysis_repo_sql("repos")}
-                WHERE t.engagement_id = ? AND sf.repo_id = ?
-                  AND t.repo_generation = repos.active_generation
-                  AND t.source_superseded_at IS NULL
-                GROUP BY t.status
-                """
-            ),
-            (engagement.id,) if repo_id is None else (engagement.id, repo_id),
+            f"""
+            SELECT t.status, COUNT(*) AS total
+            FROM code_analysis_triggers AS t
+            JOIN code_files AS sf
+              ON sf.id = t.source_file_id
+             AND sf.engagement_id = t.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = sf.repo_id
+             AND repos.engagement_id = sf.engagement_id
+             AND repos.active_generation > 0
+             AND {_analysis_repo_sql("repos")}
+            WHERE t.engagement_id = ?{trigger_repo_clause}
+              AND t.repo_generation = repos.active_generation
+              AND t.source_superseded_at IS NULL
+            GROUP BY t.status
+            """,
+            (engagement.id, *repo_params),
         ).fetchall()
         trigger_counts: dict[str, int] = {}
         for row in trigger_rows:
@@ -8189,29 +8133,9 @@ def code_coverage_summary(
 
         if file_meta:
             file_ids_json = json.dumps(list(file_meta))
-            current_result_receipt = _current_result_receipt_sql(
-                "results",
-                "result_queue",
-                "result_files",
-                "result_repos",
-                allow_processing=False,
+            direct_rows = _current_receipt_coverage_rows(
+                connection, engagement.id, file_ids_json, allow_processing=False
             )
-            direct_rows = connection.execute(
-                f"""
-                SELECT results.file_id, results.cwe_coverage_json
-                FROM code_analysis_results AS results
-                JOIN code_analysis_queue AS result_queue
-                  ON result_queue.id = results.queue_item_id
-                JOIN code_files AS result_files
-                  ON result_files.id = results.file_id
-                JOIN code_repos AS result_repos
-                  ON result_repos.id = result_files.repo_id
-                WHERE results.engagement_id = ?
-                  AND results.file_id IN (SELECT value FROM json_each(?))
-                  AND ({current_result_receipt})
-                """,
-                (engagement.id, file_ids_json),
-            ).fetchall()
             for drow in direct_rows:
                 fid = int(drow["file_id"])
                 file_meta[fid]["has_coverage_record"] = True
@@ -8293,68 +8217,10 @@ def code_coverage_summary(
         with get_connection() as connection:
             file_id_list = list(file_meta.keys())
             file_ids_json = json.dumps(list(file_id_list))
-            current_result_receipt = _current_result_receipt_sql(
-                "results",
-                "result_queue",
-                "result_files",
-                "result_repos",
-                allow_processing=False,
+            current_result_receipt = _result_receipt_source(allow_processing=False)
+            result_counts = _current_receipt_effort_by_file(
+                connection, engagement.id, file_ids_json, allow_processing=False
             )
-            result_count_rows = connection.execute(
-                f"""
-                SELECT results.file_id,
-                       COUNT(DISTINCT results.id) AS receipt_count
-                FROM code_analysis_results AS results
-                JOIN code_analysis_queue AS result_queue
-                  ON result_queue.id = results.queue_item_id
-                JOIN code_files AS result_files
-                  ON result_files.id = results.file_id
-                JOIN code_repos AS result_repos
-                  ON result_repos.id = result_files.repo_id
-                WHERE results.engagement_id = ?
-                  AND results.file_id IN (SELECT value FROM json_each(?))
-                  AND ({current_result_receipt})
-                GROUP BY results.file_id
-                """,
-                (engagement.id, file_ids_json),
-            ).fetchall()
-            result_counts = {
-                int(r["file_id"]): {
-                    "receipt_count": int(r["receipt_count"]),
-                    "distinct_structural_callables": 0,
-                }
-                for r in result_count_rows
-            }
-            callable_count_rows = connection.execute(
-                f"""
-                SELECT links.file_id,
-                       COUNT(DISTINCT links.callable_id)
-                           AS distinct_structural_callables
-                FROM code_analysis_results AS results
-                JOIN code_analysis_result_callables AS links
-                  ON links.result_id = results.id
-                JOIN code_analysis_queue AS result_queue
-                  ON result_queue.id = results.queue_item_id
-                JOIN code_files AS result_files
-                  ON result_files.id = results.file_id
-                JOIN code_repos AS result_repos
-                  ON result_repos.id = result_files.repo_id
-                WHERE results.engagement_id = ?
-                  AND links.file_id IN (SELECT value FROM json_each(?))
-                  AND ({current_result_receipt})
-                  AND ({function_callable_link_sql("links")})
-                GROUP BY links.file_id
-                """,
-                (engagement.id, file_ids_json),
-            ).fetchall()
-            for row in callable_count_rows:
-                fid = int(row["file_id"])
-                result_counts.setdefault(
-                    fid,
-                    {"receipt_count": 0, "distinct_structural_callables": 0},
-                )["distinct_structural_callables"] = int(
-                    row["distinct_structural_callables"]
-                )
             file_func_rows = connection.execute(
                 """
                 SELECT id, loc, total_functions, structural_analysis_status,
@@ -8379,13 +8245,10 @@ def code_coverage_summary(
             for fid, meta in file_meta.items():
                 if not meta["has_coverage_record"]:
                     continue
-                actual = result_counts.get(
-                    fid,
-                    {"receipt_count": 0, "distinct_structural_callables": 0},
-                )
+                actual = result_counts.get(fid, _empty_receipt_effort())
                 total_funcs = file_total_functions.get(fid, 0)
                 file_warnings: list[str] = []
-                if actual["receipt_count"] == 0 and meta["has_coverage_record"]:
+                if actual["current_receipt_rows"] == 0 and meta["has_coverage_record"]:
                     efforts = file_efforts.get(fid, {})
                     max_effort = max(efforts.values(), default=0.0)
                     if max_effort >= 60 and fid in files_owing_review:
@@ -8398,9 +8261,9 @@ def code_coverage_summary(
                         "file_path": meta["file_path"],
                         "classification": meta["classification"],
                         "total_functions": total_funcs,
-                        "current_receipt_rows": actual["receipt_count"],
+                        "current_receipt_rows": actual["current_receipt_rows"],
                         "distinct_structural_callables_reviewed": actual[
-                            "distinct_structural_callables"
+                            "distinct_structural_callables_reviewed"
                         ],
                         "warnings": file_warnings,
                     })
@@ -8914,21 +8777,13 @@ SELECT bindings.*,
        files.classification AS classification,
        files.retired_at AS file_retired_at,
        (
-         SELECT queue.id FROM code_analysis_queue AS queue
+         SELECT queue.id || ':' || queue.status FROM code_analysis_queue AS queue
          WHERE queue.engagement_id = bindings.engagement_id
            AND queue.file_id = bindings.file_id
            AND queue.repo_generation = repos.active_generation
            AND queue.source_superseded_at IS NULL
          ORDER BY queue.id DESC LIMIT 1
-       ) AS queue_item_id,
-       (
-         SELECT queue.status FROM code_analysis_queue AS queue
-         WHERE queue.engagement_id = bindings.engagement_id
-           AND queue.file_id = bindings.file_id
-           AND queue.repo_generation = repos.active_generation
-           AND queue.source_superseded_at IS NULL
-         ORDER BY queue.id DESC LIMIT 1
-       ) AS queue_status
+       ) AS latest_queue_attempt
 FROM code_lead_bindings AS bindings
 JOIN intel_notes AS notes
   ON notes.id = bindings.note_id
@@ -8947,8 +8802,18 @@ def _lead_binding_row(row: Any) -> dict[str, Any]:
     lead_status = str(record.get("lead_status") or "")
     repo_role = str(record.get("repo_role") or ANALYSIS_REPO_ROLE)
     binding_status = str(record["binding_status"])
-    record["queued"] = record.get("queue_item_id") is not None
-    record["queue_status"] = str(record.get("queue_status") or "")
+    # The latest attempt arrives as one `id:status` pair so the projection
+    # reads one correlated row rather than the same row twice.
+    attempt_id, _, attempt_status = str(
+        record.pop("latest_queue_attempt", None) or ""
+    ).partition(":")
+    # Key order matches the two subqueries this one replaced: `queue_item_id`
+    # then `queue_status` sat at the end of the SELECT list, and `queued` was
+    # appended after them. The row is JSON-serialised into API responses and
+    # recorded receipts, so the emission order is part of the payload.
+    record["queue_item_id"] = int(attempt_id) if attempt_id else None
+    record["queue_status"] = attempt_status
+    record["queued"] = record["queue_item_id"] is not None
     # An obligation exists only where the engagement agreed to review the code
     # (B8) and the lead is still unanswered. Everything else is a citation.
     record["carries_obligation"] = (
@@ -9170,15 +9035,11 @@ def list_code_lead_bindings(
     engagement = _engagement_or_404(engagement_id)
     clauses = ["bindings.engagement_id = ?"]
     params: list[Any] = [engagement.id]
-    if note_id is not None:
-        clauses.append("bindings.note_id = ?")
-        params.append(note_id)
-    if repo_id is not None:
-        clauses.append("bindings.repo_id = ?")
-        params.append(repo_id)
-    if lead_status is not None:
-        clauses.append("notes.lead_status = ?")
-        params.append(lead_status)
+    _append_optional_filters(clauses, params, (
+        ("bindings.note_id = ?", note_id),
+        ("bindings.repo_id = ?", repo_id),
+        ("notes.lead_status = ?", lead_status),
+    ))
     if not include_superseded:
         clauses.append("bindings.unbound_at IS NULL")
         clauses.append(f"NOT {_lead_binding_stale_sql('bindings', 'repos')}")
@@ -9781,20 +9642,11 @@ def code_readiness(
                 connection,
                 f"""
                 SELECT queue.status, COUNT(*) AS items
-                FROM code_analysis_queue AS queue
-                JOIN code_files AS files
-                  ON files.id = queue.file_id
-                 AND files.engagement_id = queue.engagement_id
-                JOIN code_repos AS queue_repos
-                  ON queue_repos.id = files.repo_id
-                 AND queue_repos.engagement_id = files.engagement_id
+                {queue_file_repo_join_sql(repos_alias="queue_repos")}
                 WHERE queue.engagement_id = ? AND files.repo_id = ?
                   AND files.retired_at IS NULL
                   AND queue.status IN ('pending', 'processing', 'error')
-                  AND queue.repo_generation = queue_repos.active_generation
-                  AND queue.source_superseded_at IS NULL
-                  AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
-                  AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
+                  AND {canonical_current_attempt_sql("queue", "queue_repos")}
                 GROUP BY queue.status
                 """,
                 (engagement.id, repo_id),
@@ -9859,20 +9711,11 @@ def code_readiness(
                 connection,
                 f"""
                 SELECT COUNT(*)
-                FROM code_analysis_queue AS queue
-                JOIN code_files AS files
-                  ON files.id = queue.file_id
-                 AND files.engagement_id = queue.engagement_id
-                JOIN code_repos AS queue_repos
-                  ON queue_repos.id = files.repo_id
-                 AND queue_repos.engagement_id = files.engagement_id
+                {queue_file_repo_join_sql(repos_alias="queue_repos")}
                 WHERE queue.engagement_id = ? AND files.repo_id = ?
                   AND files.retired_at IS NULL
                   AND queue.status = 'needs_context'
-                  AND queue.repo_generation = queue_repos.active_generation
-                  AND queue.source_superseded_at IS NULL
-                  AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
-                  AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
+                  AND {canonical_current_attempt_sql("queue", "queue_repos")}
                 """,
                 (engagement.id, repo_id),
             )
@@ -10438,11 +10281,6 @@ def _path_suggested_families_for_file(
     return sorted(suggested.difference(required))
 
 
-def _applicable_families_for_slots(slot_types: list[str], language: str = "") -> list[str]:
-    """Backward-compatible slot-only family computation."""
-    return _applicable_families_for_file(slot_types, language=language)
-
-
 # =========================================================================
 # Requeue triggered files
 # =========================================================================
@@ -10619,31 +10457,19 @@ def _requeue_target_by_path(
     by the `file_path` selector and the unbound-`trigger_id` selector so neither
     can diagnose a miss the other cannot.
     """
+    repo_clause = "" if repo_id is None else " AND files.repo_id = ?"
     rows = connection.execute(
-        (
-            f"""
-            SELECT {_REQUEUE_TARGET_COLUMNS}
-            FROM code_files AS files
-            JOIN code_repos AS repos
-              ON repos.id = files.repo_id
-             AND repos.engagement_id = files.engagement_id
-             AND repos.active_generation > 0
-            WHERE files.engagement_id = ? AND files.file_path = ?
-              AND files.retired_at IS NULL
-            """
-            if repo_id is None
-            else f"""
-            SELECT {_REQUEUE_TARGET_COLUMNS}
-            FROM code_files AS files
-            JOIN code_repos AS repos
-              ON repos.id = files.repo_id
-             AND repos.engagement_id = files.engagement_id
-             AND repos.active_generation > 0
-            WHERE files.engagement_id = ? AND files.repo_id = ?
-              AND files.file_path = ?
-              AND files.retired_at IS NULL
-            """
-        ),
+        f"""
+        SELECT {_REQUEUE_TARGET_COLUMNS}
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id
+         AND repos.engagement_id = files.engagement_id
+         AND repos.active_generation > 0
+        WHERE files.engagement_id = ?{repo_clause}
+          AND files.file_path = ?
+          AND files.retired_at IS NULL
+        """,
         (engagement_id, file_path)
         if repo_id is None
         else (engagement_id, int(repo_id), file_path),
@@ -11407,19 +11233,12 @@ def code_coverage_cwe_detail(
             queue_done_rows = connection.execute(
                 f"""
                 SELECT queue.file_id, queue.cwe_coverage_json
-                FROM code_analysis_queue AS queue
-                JOIN code_files AS queue_files
-                  ON queue_files.id = queue.file_id
-                 AND queue_files.engagement_id = queue.engagement_id
-                JOIN code_repos AS queue_repos
-                  ON queue_repos.id = queue_files.repo_id
-                 AND queue_repos.engagement_id = queue_files.engagement_id
+                {queue_file_repo_join_sql(
+                    files_alias="queue_files", repos_alias="queue_repos"
+                )}
                 WHERE queue.engagement_id = ?
                   AND queue.file_id IN (SELECT value FROM json_each(?))
-                  AND queue.repo_generation = queue_repos.active_generation
-                  AND queue.source_superseded_at IS NULL
-                  AND ({_latest_current_queue_attempt_sql("queue", "queue_repos")})
-                  AND ({_no_superseded_active_attempt_sql("queue", "queue_repos")})
+                  AND {canonical_current_attempt_sql("queue", "queue_repos")}
                   AND ({successful_queue_review})
                 """,
                 (engagement.id, file_ids_json),
@@ -11429,98 +11248,17 @@ def code_coverage_cwe_detail(
                 cwe_cov = _json_decode(qr["cwe_coverage_json"], [])
                 _merge_cwe_coverage_entries(cwe_by_file, fid, cwe_cov)
 
-            current_result_receipt = _current_result_receipt_sql(
-                "results",
-                "result_queue",
-                "result_files",
-                "result_repos",
-                allow_processing=True,
+            direct_rows = _current_receipt_coverage_rows(
+                connection, engagement.id, file_ids_json, allow_processing=True
             )
-            direct_rows = connection.execute(
-                f"""
-                SELECT results.file_id, results.cwe_coverage_json
-                FROM code_analysis_results AS results
-                JOIN code_analysis_queue AS result_queue
-                  ON result_queue.id = results.queue_item_id
-                JOIN code_files AS result_files
-                  ON result_files.id = results.file_id
-                JOIN code_repos AS result_repos
-                  ON result_repos.id = result_files.repo_id
-                WHERE results.engagement_id = ?
-                  AND results.file_id IN (SELECT value FROM json_each(?))
-                  AND ({current_result_receipt})
-                """,
-                (engagement.id, file_ids_json),
-            ).fetchall()
             for dr in direct_rows:
                 fid = int(dr["file_id"])
                 cwe_cov = _json_decode(dr["cwe_coverage_json"], [])
                 _merge_cwe_coverage_entries(cwe_by_file, fid, cwe_cov)
 
-            effort_rows = connection.execute(
-                f"""
-                SELECT results.file_id,
-                       COUNT(DISTINCT results.id) AS current_receipt_rows,
-                       COUNT(DISTINCT
-                           CASE WHEN trim(results.evidence) != '' OR trim(results.evidence_ref) != ''
-                                THEN results.id END
-                       ) AS evidenced_receipt_rows
-                FROM code_analysis_results AS results
-                JOIN code_analysis_queue AS result_queue
-                  ON result_queue.id = results.queue_item_id
-                JOIN code_files AS result_files
-                  ON result_files.id = results.file_id
-                JOIN code_repos AS result_repos
-                  ON result_repos.id = result_files.repo_id
-                WHERE results.engagement_id = ?
-                  AND results.file_id IN (SELECT value FROM json_each(?))
-                  AND ({current_result_receipt})
-                GROUP BY results.file_id
-                """,
-                (engagement.id, file_ids_json),
-            ).fetchall()
-            result_effort_by_file = {
-                int(row["file_id"]): {
-                    "current_receipt_rows": int(row["current_receipt_rows"] or 0),
-                    "evidenced_receipt_rows": int(row["evidenced_receipt_rows"] or 0),
-                    "distinct_structural_callables_reviewed": 0,
-                }
-                for row in effort_rows
-            }
-            callable_effort_rows = connection.execute(
-                f"""
-                SELECT links.file_id,
-                       COUNT(DISTINCT links.callable_id)
-                           AS distinct_structural_callables_reviewed
-                FROM code_analysis_results AS results
-                JOIN code_analysis_result_callables AS links
-                  ON links.result_id = results.id
-                JOIN code_analysis_queue AS result_queue
-                  ON result_queue.id = results.queue_item_id
-                JOIN code_files AS result_files
-                  ON result_files.id = results.file_id
-                JOIN code_repos AS result_repos
-                  ON result_repos.id = result_files.repo_id
-                WHERE results.engagement_id = ?
-                  AND links.file_id IN (SELECT value FROM json_each(?))
-                  AND ({current_result_receipt})
-                  AND ({function_callable_link_sql("links")})
-                GROUP BY links.file_id
-                """,
-                (engagement.id, file_ids_json),
-            ).fetchall()
-            for row in callable_effort_rows:
-                fid = int(row["file_id"])
-                result_effort_by_file.setdefault(
-                    fid,
-                    {
-                        "current_receipt_rows": 0,
-                        "evidenced_receipt_rows": 0,
-                        "distinct_structural_callables_reviewed": 0,
-                    },
-                )["distinct_structural_callables_reviewed"] = int(
-                    row["distinct_structural_callables_reviewed"] or 0
-                )
+            result_effort_by_file = _current_receipt_effort_by_file(
+                connection, engagement.id, file_ids_json, allow_processing=True
+            )
 
         files_detail: list[dict[str, Any]] = []
         for fr in file_rows:
@@ -11537,14 +11275,7 @@ def code_coverage_cwe_detail(
             )
             merged_entries = list(cwe_by_file.get(fid, {}).values())
             total_functions = int(fr["total_functions"] or 0)
-            result_effort = result_effort_by_file.get(
-                fid,
-                {
-                    "current_receipt_rows": 0,
-                    "evidenced_receipt_rows": 0,
-                    "distinct_structural_callables_reviewed": 0,
-                },
-            )
+            result_effort = result_effort_by_file.get(fid, _empty_receipt_effort())
             distinct_callables = int(
                 result_effort["distinct_structural_callables_reviewed"]
             )

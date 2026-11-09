@@ -11,15 +11,12 @@ import {
   formatLabel,
   SEVERITY_RANK,
 } from "../lib/format";
-import { asPocRequest, asPocResponse, pocCurl, pocResponseText } from "../lib/poc";
-import { reproRunIds, stepsText } from "../lib/steps";
 import { Markdown } from "./Markdown";
 import {
   CopyMarkdownButton,
+  FindingSections,
   OperatorAuthorityAttestation,
   OperatorAuthorityTag,
-  ReferenceList,
-  ReproRunProvenance,
 } from "./FindingParts";
 
 interface Props {
@@ -68,9 +65,6 @@ function FindingBlock({
   draft: boolean;
 }) {
   const sev = finding.severity ?? "info";
-  const steps = stepsText(finding.steps_to_reproduce);
-  const curl = pocCurl(asPocRequest(finding.poc_request));
-  const responseText = pocResponseText(asPocResponse(finding.poc_response));
   const hasMeta =
     finding.owasp_category ||
     finding.cvss_vector ||
@@ -171,79 +165,7 @@ function FindingBlock({
       {kind === "sibling" && finding.root_cause_note && (
         <p className="rpt-doc-rootcause">{finding.root_cause_note}</p>
       )}
-      {finding.summary && (
-        <div className="rpt-doc-block">
-          <h4>Summary</h4>
-          <Markdown text={finding.summary} />
-        </div>
-      )}
-      {finding.impact && (
-        <div className="rpt-doc-block">
-          <h4>Impact</h4>
-          <Markdown text={finding.impact} />
-        </div>
-      )}
-      {finding.evidence_detail && (
-        <div className="rpt-doc-block">
-          <h4>Evidence</h4>
-          {/* Verbatim. `evidence_detail` is a CAPTURE — a request/response pair,
-              a log excerpt, a stack trace — not authored prose, and markdown
-              silently rewrites exactly the characters that carry its meaning:
-              `__init__.py` loses its underscores to bold, a `>` request marker
-              becomes a blockquote, `#` becomes a heading, and consecutive lines
-              of an HTTP transcript collapse into one paragraph. Vigil does not
-              alter what the operator captured (AGENTS.md; ADR 0019), and
-              lib/findingMarkdown.ts already fences this field for the same
-              reason — rendering it through Markdown made the page lossier than
-              its own copy button. */}
-          <pre className="rpt-code">{finding.evidence_detail}</pre>
-        </div>
-      )}
-      {steps && (
-        <div className="rpt-doc-block">
-          <h4>Steps to reproduce</h4>
-          {/* Verbatim — the author's numbering is what other sections cite. */}
-          <div className="rpt-steps">{steps}</div>
-          <ReproRunProvenance
-            runIds={reproRunIds(finding.repro_runs)}
-            draft={draft}
-            basis={finding.reproduction_basis}
-          />
-        </div>
-      )}
-      {curl && (
-        <div className="rpt-doc-block">
-          <h4>Reproduction request</h4>
-          {/* Synthesized from the recorded request object so it pastes into a
-              terminal and runs: see lib/poc.ts. rpt-code-command does not
-              soft-wrap, so a copied line is the line that was shown. */}
-          <pre className="rpt-code rpt-code-command">{curl}</pre>
-        </div>
-      )}
-      {responseText && (
-        <div className="rpt-doc-block">
-          <h4>Observed response</h4>
-          <pre className="rpt-code">{responseText}</pre>
-        </div>
-      )}
-      {finding.poc_code && (
-        <div className="rpt-doc-block">
-          <h4>Proof of concept</h4>
-          <pre className="rpt-code rpt-code-command">{finding.poc_code}</pre>
-        </div>
-      )}
-      {finding.remediation && (
-        <div className="rpt-doc-block">
-          <h4>Remediation</h4>
-          <Markdown text={finding.remediation} />
-        </div>
-      )}
-      {Array.isArray(finding.references) && finding.references.length > 0 && (
-        <div className="rpt-doc-block">
-          <h4>References</h4>
-          <ReferenceList references={finding.references} />
-        </div>
-      )}
+      <FindingSections finding={finding} draft={draft} block="doc" />
     </article>
   );
 }

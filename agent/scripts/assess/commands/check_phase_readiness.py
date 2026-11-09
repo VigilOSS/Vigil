@@ -61,6 +61,7 @@ from typing import Any
 
 from assess.lib import coverage_checks as cc
 from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.exploit_targets import resolve_approved_target_slugs
 from assess.lib.phases import CODE_PHASES, PHASE_INPUT_ALIASES, WEB_PHASES, canonical_phase
@@ -230,11 +231,10 @@ def run(args: argparse.Namespace) -> None:
 
     tracks = track_phases(scope)
     if "code" not in tracks and phase not in PHASES:
-        print(
-            f"check-phase-readiness: {phase} is a code phase, but this engagement has no code track",
-            file=sys.stderr,
+        fail(
+            "check-phase-readiness",
+            f"{phase} is a code phase, but this engagement has no code track",
         )
-        sys.exit(1)
     if "web" not in tracks or phase in (*CODE_PHASES, "complete"):
         if phase in (*CODE_PHASES, "complete"):
             target = phase
@@ -263,12 +263,9 @@ def run(args: argparse.Namespace) -> None:
         try:
             backend = client.get(f"phase-readiness?phase={phase}")
         except AssessError as exc:
-            print(f"check-phase-readiness: backend phase-readiness fetch failed: {exc}",
-                  file=sys.stderr)
-            sys.exit(1)
+            fail("check-phase-readiness", f"backend phase-readiness fetch failed: {exc}")
         if not isinstance(backend, dict):
-            print("check-phase-readiness: unexpected response from backend", file=sys.stderr)
-            sys.exit(1)
+            fail("check-phase-readiness", "unexpected response from backend")
 
         if phase == "report":
             exit_nonzero |= _run_report_phase(
@@ -453,20 +450,17 @@ def _run_scope_gate(
     try:
         services = client.get("services")
     except AssessError as exc:
-        print(f"check-phase-readiness: backend services fetch failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        fail("check-phase-readiness", f"backend services fetch failed: {exc}")
     try:
         surfaces = _get_all_pages(client, "surfaces")
     except AssessError as exc:
-        print(f"check-phase-readiness: backend surfaces fetch failed: {exc}", file=sys.stderr)
-        sys.exit(1)
+        fail("check-phase-readiness", f"backend surfaces fetch failed: {exc}")
     decided_hosts = cc._vendor_saas_decided_hosts(client)
 
     try:
         work_by_host = cc._load_work_items_by_host(client)
     except AssessError as exc:
-        print(f"check-phase-readiness: unable to read work buffer: {exc}", file=sys.stderr)
-        sys.exit(1)
+        fail("check-phase-readiness", f"unable to read work buffer: {exc}")
     # The backend work buffer is the single store; "buffer present" now means the
     # buffer has any rows rather than a local cases.db existing on disk.
     buffer_present = bool(work_by_host)
@@ -501,9 +495,7 @@ def _run_by_host(
     try:
         payload = client.get("coverage-readiness/by-host")
     except AssessError as exc:
-        print(f"check-phase-readiness: backend per-host coverage fetch failed: {exc}",
-              file=sys.stderr)
-        sys.exit(1)
+        fail("check-phase-readiness", f"backend per-host coverage fetch failed: {exc}")
     section = cc.annotate_by_host_payload(payload if isinstance(payload, dict) else {})
     if not args.include_discovered:
         section = cc.filter_to_scope_literals(section, literals)

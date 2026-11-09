@@ -11,6 +11,7 @@ from assess.lib.client import (
     require_write_result,
     verdict_effect_line,
 )
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.contracts import render_contract_epilog
 from assess.lib.json_inputs import parse_optional_inline_json
@@ -236,28 +237,24 @@ def run(args) -> None:
     )
 
     if args.clear_root_cause and args.root_cause_slug:
-        print("finding link: --clear-root-cause cannot be combined with --root-cause", file=sys.stderr)
-        sys.exit(1)
+        fail("finding link", "--clear-root-cause cannot be combined with --root-cause")
     if args.clear_root_cause and intel_ids:
-        print("finding link: --clear-root-cause cannot be combined with --intel", file=sys.stderr)
-        sys.exit(1)
+        fail("finding link", "--clear-root-cause cannot be combined with --intel")
     if args.root_cause_slug and intel_ids:
-        print(
-            "finding link: --root-cause and --intel cannot be combined in a single call; "
+        fail(
+            "finding link",
+            "--root-cause and --intel cannot be combined in a single call; "
             "run them as two separate invocations",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if (generic_selected or link_update_selected) and (
         args.root_cause_slug or args.clear_root_cause or intel_ids
     ):
-        print(
-            "finding link: generic link flags (--link-kind / --target-kind / --target-id / "
+        fail(
+            "finding link",
+            "generic link flags (--link-kind / --target-kind / --target-id / "
             "--target-ref) cannot be combined with --root-cause, --clear-root-cause, or --intel; "
             "run them as separate invocations",
-            file=sys.stderr,
         )
-        sys.exit(1)
     if (
         not args.clear_root_cause
         and not args.root_cause_slug
@@ -274,39 +271,23 @@ def run(args) -> None:
         sys.exit(1)
 
     if link_update_selected and len(args.finding_slug) != 1:
-        print(
-            "finding link: --link-id updates exactly one finding at a time",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("finding link", "--link-id updates exactly one finding at a time")
     if (
         getattr(args, "retire", False) or getattr(args, "reactivate", False)
     ) and not link_update_selected:
-        print(
-            "finding link: --retire/--reactivate requires --link-id",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("finding link", "--retire/--reactivate requires --link-id")
     if (
         getattr(args, "target_id", None) is not None
         and getattr(args, "target_ref", None) is not None
     ):
-        print(
-            "finding link: provide only one of --target-id or --target-ref",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("finding link", "provide only one of --target-id or --target-ref")
     if (
         link_update_selected
         and getattr(args, "target_kind", None) is not None
         and getattr(args, "target_id", None) is None
         and getattr(args, "target_ref", None) is None
     ):
-        print(
-            "finding link: changing --target-kind requires --target-id or --target-ref",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("finding link", "changing --target-kind requires --target-id or --target-ref")
 
     if generic_selected:
         target_kind = (getattr(args, "target_kind", None) or "").strip()
@@ -314,25 +295,19 @@ def run(args) -> None:
         target_ref = (getattr(args, "target_ref", None) or "").strip()
         link_kind = (getattr(args, "link_kind", None) or "related").strip()
         if not target_kind:
-            print(
-                "finding link: a generic link requires --target-kind (e.g. finding | chain | "
+            fail(
+                "finding link",
+                "a generic link requires --target-kind (e.g. finding | chain | "
                 "surface | command_run | probe_run)",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if target_id is None and not target_ref:
-            print(
-                "finding link: a generic link requires --target-id <int> or --target-ref <ref>",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            fail("finding link", "a generic link requires --target-id <int> or --target-ref <ref>")
         if link_kind == _ROOT_CAUSE_LINK_KIND:
-            print(
-                "finding link: --link-kind root_cause is not allowed on the generic route; "
+            fail(
+                "finding link",
+                "--link-kind root_cause is not allowed on the generic route; "
                 "use --root-cause <root-slug>",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     try:
         provenance = parse_optional_inline_json(
@@ -383,12 +358,11 @@ def run(args) -> None:
         elif getattr(args, "reactivate", False):
             link_update_payload["retired"] = False
         if not link_update_payload:
-            print(
-                "finding link: --link-id requires a field correction, --retire, "
+            fail(
+                "finding link",
+                "--link-id requires a field correction, --retire, "
                 "or --reactivate",
-                file=sys.stderr,
             )
-            sys.exit(1)
 
     slugs = args.finding_slug if isinstance(args.finding_slug, list) else [args.finding_slug]
     cfg = load_config(args.engagement_dir)

@@ -15,6 +15,7 @@ import uuid
 from typing import Any
 
 from assess.lib.client import AssessmentClient, AssessError
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.contract_registry import HANDOFF_SUMMARY_MAX_CHARS as _HANDOFF_SUMMARY_MAX_CHARS
 from assess.lib.contracts import (
@@ -98,8 +99,7 @@ def _build_register_payload(args) -> dict:
     if getattr(args, "from_json", None):
         loaded = _load_json_arg(args.from_json)
         if not isinstance(loaded, dict):
-            print("agent start --from-json: file must contain a JSON object", file=sys.stderr)
-            sys.exit(1)
+            fail("agent start --from-json", "file must contain a JSON object")
         payload.update(loaded)
         json_has_budget = "rate_budget" in payload or "no_target_traffic" in payload
     # CLI flags override / supplement the JSON payload.
@@ -132,11 +132,7 @@ def _build_register_payload(args) -> dict:
     json_prompt_context = payload.pop("prompt_context", None)
     if json_prompt_context is not None:
         if not isinstance(json_prompt_context, dict):
-            print(
-                "agent start --from-json: prompt_context must be a JSON object",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            fail("agent start --from-json", "prompt_context must be a JSON object")
         # Shallow-merge rather than refuse: shared wave boilerplate (target,
         # prior_state, coverage, cleanup, oob) is authored once in --from-json
         # and overridden per lane by --prompt-context-json, under the same
@@ -146,16 +142,11 @@ def _build_register_payload(args) -> dict:
         if getattr(args, "prompt_context_json", None):
             overlay = _load_json_arg(args.prompt_context_json)
             if not isinstance(overlay, dict):
-                print(
-                    "agent start: --prompt-context-json must provide a JSON object",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                fail("agent start", "--prompt-context-json must provide a JSON object")
             merged.update(overlay)
         args.prompt_context = merged
     if not payload.get("agent_role"):
-        print("agent start: --agent-role is required (or include 'agent_role' in --from-json)", file=sys.stderr)
-        sys.exit(1)
+        fail("agent start", "--agent-role is required (or include 'agent_role' in --from-json)")
     if not payload.get("agent_id"):
         if getattr(args, "action", None) == "start":
             role_slug = (
@@ -166,11 +157,7 @@ def _build_register_payload(args) -> dict:
             payload["agent_id"] = f"{role_slug}-{uuid.uuid4().hex[:8]}"
             args.agent_id = payload["agent_id"]
         else:
-            print(
-                "agent start: --agent-id is required (or include 'agent_id' in --from-json)",
-                file=sys.stderr,
-            )
-            sys.exit(1)
+            fail("agent start", "--agent-id is required (or include 'agent_id' in --from-json)")
     has_traffic_contract = (
         hasattr(args, "rate_budget")
         or hasattr(args, "no_target_traffic")
@@ -180,36 +167,29 @@ def _build_register_payload(args) -> dict:
         cli_rate_budget = str(getattr(args, "rate_budget", None) or "").strip()
         cli_no_target_traffic = bool(getattr(args, "no_target_traffic", False))
         if json_has_budget and (cli_rate_budget or cli_no_target_traffic):
-            print(
-                "agent start: traffic budget must come from either --from-json or "
+            fail(
+                "agent start",
+                "traffic budget must come from either --from-json or "
                 "CLI flags, not both",
-                file=sys.stderr,
             )
-            sys.exit(1)
         if json_has_budget:
             if json_rate_budget is not None and not isinstance(json_rate_budget, str):
-                print("agent start --from-json: rate_budget must be a string", file=sys.stderr)
-                sys.exit(1)
+                fail("agent start --from-json", "rate_budget must be a string")
             if json_no_target_traffic is not None and not isinstance(
                 json_no_target_traffic, bool
             ):
-                print(
-                    "agent start --from-json: no_target_traffic must be true or false",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                fail("agent start --from-json", "no_target_traffic must be true or false")
             rate_budget = str(json_rate_budget or "").strip()
             no_target_traffic = json_no_target_traffic is True
         else:
             rate_budget = cli_rate_budget
             no_target_traffic = cli_no_target_traffic
         if bool(rate_budget) == no_target_traffic:
-            print(
-                "agent start: pass exactly one of --rate-budget or "
+            fail(
+                "agent start",
+                "pass exactly one of --rate-budget or "
                 "--no-target-traffic; Vigil does not infer a traffic budget",
-                file=sys.stderr,
             )
-            sys.exit(1)
         args.rate_budget = rate_budget or None
         args.no_target_traffic = no_target_traffic
     if not payload.get("dispatch_mode"):
@@ -222,27 +202,21 @@ def _build_register_payload(args) -> dict:
             file=sys.stderr,
         )
     if payload.get("agent_role") in MIXED_ASSESSMENT_ROLES and not payload.get("assessment_mode"):
-        print(
-            f"agent start: {payload.get('agent_role')} requires --assessment-mode code|web",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("agent start", f"{payload.get('agent_role')} requires --assessment-mode code|web")
     from assess.commands.agent import _CODE_SOURCE_IDENTITY_ROLES
     if payload.get("agent_role") in _CODE_SOURCE_IDENTITY_ROLES:
         if payload.get("assessment_mode") not in (None, 'code'):
-            print('agent start: code-only roles require assessment_mode=code', file=sys.stderr)
-            sys.exit(1)
+            fail("agent start", 'code-only roles require assessment_mode=code')
         payload['assessment_mode'] = 'code'
     non_canonical = _non_canonical_vuln_classes(payload.get("vuln_classes"))
     if non_canonical:
-        print(
-            "agent start: --vuln-classes must name canonical vuln classes: "
+        fail(
+            "agent start",
+            "--vuln-classes must name canonical vuln classes: "
             + "; ".join(non_canonical)
             + ". List them with `vigil assess list-skills --json` or read "
             "agent/references/runtime-guides/vuln-taxonomy.md.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     errors, warnings = validate_specialist_dispatch_contract(payload)
     for warning in warnings:
         print(f"WARN agent start: {warning}", file=sys.stderr)
@@ -479,11 +453,7 @@ def _update_dispatch_status(args, extra: list[str]) -> None:
         patch["completed_at"] = args.completed_at
     finding_slugs = _split_csv(getattr(args, "finding_slugs", None))
     if not patch and not finding_slugs:
-        print(
-            "agent done: pass at least one of --status, --completed-at, --finding-slugs",
-            file=sys.stderr,
-        )
-        sys.exit(1)
+        fail("agent done", "pass at least one of --status, --completed-at, --finding-slugs")
     client, _ = _client_for(args)
     rows: list[dict[str, Any]] = []
     failed = 0
@@ -545,12 +515,11 @@ def _abort_duplicate_dispatch(args, extra: list[str]) -> None:
         )
         sys.exit(1)
     if agent_id == replacement:
-        print(
-            "abort-duplicate: --replacement-agent-id must point at the dispatch to keep, "
+        fail(
+            "abort-duplicate",
+            "--replacement-agent-id must point at the dispatch to keep, "
             "not the duplicate being aborted.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     client, _ = _client_for(args)
     now = _utcnow_iso()
     try:
@@ -629,15 +598,13 @@ def _get_dispatch(args, extra: list[str]) -> None:
 def _record_decision(args) -> None:
     kind = getattr(args, "decision_kind", None)
     if not kind:
-        print("agent decision: --kind is required", file=sys.stderr)
-        sys.exit(1)
+        fail("agent decision", "--kind is required")
     payload: dict[str, Any] = {}
     payload_json = getattr(args, "payload_json", None)
     if payload_json:
         loaded = _load_json_arg(payload_json)
         if not isinstance(loaded, dict):
-            print("agent decision --payload-json: must produce a JSON object", file=sys.stderr)
-            sys.exit(1)
+            fail("agent decision --payload-json", "must produce a JSON object")
         payload.update(loaded)
     # CLI flags override / supplement the JSON payload — the same rule `agent
     # start --from-json` and `host-exec --from-json` already apply. The flags
@@ -661,12 +628,11 @@ def _record_decision(args) -> None:
         if value:
             payload[key] = value
     if not payload:
-        print(
-            "agent decision: pass --payload-json or at least one of "
+        fail(
+            "agent decision",
+            "pass --payload-json or at least one of "
             "--host/--vendor/--choice/--note/--reason/--phase",
-            file=sys.stderr,
         )
-        sys.exit(1)
     body = {
         "kind": kind,
         "payload": payload,
@@ -683,28 +649,24 @@ def _record_decision(args) -> None:
 def _build_handoff_payload(args) -> dict:
     source = getattr(args, "from_json", None)
     if not source:
-        print("agent handoff: --from-json is required", file=sys.stderr)
-        sys.exit(1)
+        fail("agent handoff", "--from-json is required")
     loaded = _load_json_arg(source)
     if not isinstance(loaded, dict):
-        print("agent handoff --from-json: file must contain a JSON object", file=sys.stderr)
-        sys.exit(1)
+        fail("agent handoff --from-json", "file must contain a JSON object")
     if not str(loaded.get("agent_id") or "").strip():
-        print(
-            "agent handoff --from-json: agent_id is required in the payload and must "
+        fail(
+            "agent handoff --from-json",
+            "agent_id is required in the payload and must "
             "equal --agent-id; the match is what stops a sibling lane's handoff file "
             "from being re-sent, so the key cannot be filled in from the flag",
-            file=sys.stderr,
         )
-        sys.exit(1)
     expected = getattr(args, "agent_id", None)
     if loaded["agent_id"] != expected:
-        print(
-            f"agent handoff: payload agent_id {loaded['agent_id']!r} does not match --agent-id {expected!r}; "
+        fail(
+            "agent handoff",
+            f"payload agent_id {loaded['agent_id']!r} does not match --agent-id {expected!r}; "
             "write your own handoff file rather than re-sending another dispatch's",
-            file=sys.stderr,
         )
-        sys.exit(1)
     # Every create payload and every partial-update patch passes through here,
     # so one check covers both writes. The create model is extra="forbid", so a
     # misspelled key 422s there; the patch path used to filter it out silently
@@ -712,38 +674,35 @@ def _build_handoff_payload(args) -> dict:
     # prompt-context rejection in `agent start`.
     unknown = sorted(set(loaded) - _HANDOFF_PAYLOAD_FIELDS)
     if unknown:
-        print(
-            "agent handoff --from-json: unknown handoff keys: "
+        fail(
+            "agent handoff --from-json",
+            "unknown handoff keys: "
             + ", ".join(_HANDOFF_BACKEND_OWNED_HINTS.get(key, key) for key in unknown)
             + ". Read `vigil assess contract agent handoff` or "
             "agent/references/runtime-guides/handoff-schema.md for the field set.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     expected_version = loaded.get("expected_handoff_version")
     if expected_version is not None and (
         type(expected_version) is not int or expected_version < 1
     ):
-        print(
-            "agent handoff --from-json: expected_handoff_version must be the integer "
+        fail(
+            "agent handoff --from-json",
+            "expected_handoff_version must be the integer "
             "handoff_version you read (>= 1); it guards this write against a "
             "concurrent one and is never a string",
-            file=sys.stderr,
         )
-        sys.exit(1)
     # Every create payload and every partial-update patch passes through here,
     # so one check covers both writes. The summary is never trimmed or split:
     # that would ship text the specialist did not author.
     summary = loaded.get("summary")
     if isinstance(summary, str) and len(summary) > _HANDOFF_SUMMARY_MAX_CHARS:
-        print(
-            f"agent handoff --from-json: summary is {len(summary)} characters, over "
+        fail(
+            "agent handoff --from-json",
+            f"summary is {len(summary)} characters, over "
             f"the {_HANDOFF_SUMMARY_MAX_CHARS}-character persistence limit. Input is unchanged; shorten the summary and "
             "retain evidence in working_artifacts. Use these structured fields for their meanings: "
             "coverage_gaps, next_steps, runtime_issues.",
-            file=sys.stderr,
         )
-        sys.exit(1)
     return loaded
 
 
@@ -764,30 +723,24 @@ def _record_handoff(args) -> None:
             existing = client.get_handoff(agent_id)
             if existing is None:
                 if guarded:
-                    print(
-                        "agent handoff --from-json: expected_handoff_version guards an "
+                    fail(
+                        "agent handoff --from-json",
+                        "expected_handoff_version guards an "
                         f"existing handoff row and {agent_id!r} has none yet; write the "
                         "first handoff without the guard",
-                        file=sys.stderr,
                     )
-                    sys.exit(1)
-                print(
-                    "agent handoff --from-json: agent_role and summary are required "
+                fail(
+                    "agent handoff --from-json",
+                    "agent_role and summary are required "
                     f"keys when creating new handoff {agent_id!r}",
-                    file=sys.stderr,
                 )
-                sys.exit(1)
             patch = {
                 key: value
                 for key, value in payload.items()
                 if key in _HANDOFF_PATCHABLE_FIELDS
             }
             if not patch:
-                print(
-                    "agent handoff: supply at least one handoff field to update",
-                    file=sys.stderr,
-                )
-                sys.exit(1)
+                fail("agent handoff", "supply at least one handoff field to update")
             row = client.update_handoff(agent_id, patch)
     finally:
         client.close()
@@ -867,8 +820,9 @@ def _report_handoff_artifact_states(
         )
     if handoff_status != "ready":
         return
-    print(
-        f"agent handoff: REFUSED to confirm this ready handoff: it claims "
+    fail(
+        "agent handoff",
+        f"REFUSED to confirm this ready handoff: it claims "
         f"{len(unverifiable)} working artifact(s) that are not present in the "
         "engagement ("
         + ", ".join(f"{path} [{state}]" for path, state in unverifiable)
@@ -876,6 +830,4 @@ def _report_handoff_artifact_states(
         "non-zero exit reports an unsubstantiated artifact claim, not a failed write. "
         "Write the files or remove the entries, then re-run the same command; a ready "
         "handoff asserting a file it never wrote is a fabricated result.",
-        file=sys.stderr,
     )
-    sys.exit(1)

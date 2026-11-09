@@ -77,21 +77,40 @@ def _extract_content_type_coarse(rec: dict) -> str | None:
     return str(val).split(";", 1)[0].strip().lower() or None
 
 
+def _bucket(prefix: str, edges: tuple[int, ...], n: int) -> str:
+    """Label *n* as ``<prefix>_0``, ``<prefix>_<lo>_<hi>`` or ``<prefix>_<last+1>+``.
+
+    ``edges`` are the inclusive upper bound of each band, so ``(3, 7, 15)``
+    gives ``hdrs_0 / hdrs_1_3 / hdrs_4_7 / hdrs_8_15 / hdrs_16+``. One formula
+    for the three count ladders below, each of which is a stable oracle label.
+    """
+    if n == 0:
+        return f"{prefix}_0"
+    lo = 1
+    for hi in edges:
+        if n <= hi:
+            return f"{prefix}_{lo}_{hi}"
+        lo = hi + 1
+    return f"{prefix}_{edges[-1] + 1}+"
+
+
+def _int_field(rec: dict, key: str) -> int | None:
+    """Read *key* as an int, or ``None`` when it is absent or not numeric."""
+    val = rec.get(key)
+    if val is None:
+        return None
+    try:
+        return int(val)
+    except (TypeError, ValueError):
+        return None
+
+
 def _extract_header_count(rec: dict) -> str | None:
     """Bucket the number of response headers into coarse groups."""
     headers = rec.get("headers")
     if not isinstance(headers, dict):
         return None
-    n = len(headers)
-    if n == 0:
-        return "hdrs_0"
-    if n <= 3:
-        return "hdrs_1_3"
-    if n <= 7:
-        return "hdrs_4_7"
-    if n <= 15:
-        return "hdrs_8_15"
-    return "hdrs_16+"
+    return _bucket("hdrs", (3, 7, 15), len(headers))
 
 
 _NOTABLE_HEADERS = (
@@ -132,44 +151,14 @@ def _extract_title(rec: dict) -> str | None:
 
 def _extract_words_bucket(rec: dict) -> str | None:
     """Bucket the word count of the response body."""
-    val = rec.get("words")
-    if val is None:
-        return None
-    try:
-        n = int(val)
-    except (TypeError, ValueError):
-        return None
-    if n == 0:
-        return "words_0"
-    if n <= 10:
-        return "words_1_10"
-    if n <= 100:
-        return "words_11_100"
-    if n <= 500:
-        return "words_101_500"
-    if n <= 2000:
-        return "words_501_2000"
-    return "words_2001+"
+    n = _int_field(rec, "words")
+    return None if n is None else _bucket("words", (10, 100, 500, 2000), n)
 
 
 def _extract_lines_bucket(rec: dict) -> str | None:
     """Bucket the line count of the response body."""
-    val = rec.get("lines")
-    if val is None:
-        return None
-    try:
-        n = int(val)
-    except (TypeError, ValueError):
-        return None
-    if n == 0:
-        return "lines_0"
-    if n <= 5:
-        return "lines_1_5"
-    if n <= 25:
-        return "lines_6_25"
-    if n <= 100:
-        return "lines_26_100"
-    return "lines_101+"
+    n = _int_field(rec, "lines")
+    return None if n is None else _bucket("lines", (5, 25, 100), n)
 
 
 # Attribute name → extractor function

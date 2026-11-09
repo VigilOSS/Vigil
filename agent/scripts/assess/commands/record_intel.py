@@ -21,6 +21,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient
+from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.contracts import get_contract
 from assess.lib.intel_types import INTEL_TYPES
@@ -246,13 +247,12 @@ def run(args) -> None:
             for field, default in _NATURAL_IDENTITY_FIELDS[intel_type]
         )
     ):
-        print(
-            f"record-intel: backend did not return a canonical {intel_type} record "
+        fail(
+            "record-intel",
+            f"backend did not return a canonical {intel_type} record "
             "with a positive id; the write may have committed, so inspect "
             f"`vigil assess intel list {intel_type}` and do not retry automatically",
-            file=sys.stderr,
         )
-        sys.exit(1)
 
     # Emit event — fire-and-forget, outside the main call.
     summary_title = ""

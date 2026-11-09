@@ -461,37 +461,49 @@ def _serialize_receipts(
     )
 
 
+# (wire key, command-run column, SELECT alias) for the bounded command detail a
+# run receipt carries when it cites a command run. The projection in
+# ``list_run_proof_receipts`` and the ``command_fields`` block in
+# ``_serialize_run_receipt`` are both generated from this one list, so an added
+# field cannot reach the query without reaching the wire record, or vice versa.
+# Three mappings are deliberately irregular and stay spelled out: ``command``
+# is aliased ``linked_command_text``, ``argv`` comes from ``argv_json``, and
+# ``command_hash`` is aliased ``linked_command_hash`` rather than
+# ``linked_command_command_hash``.
+_LINKED_COMMAND_FIELDS: tuple[tuple[str, str, str], ...] = (
+    ("id", "id", "linked_command_id"),
+    ("run_uuid", "run_uuid", "linked_command_run_uuid"),
+    ("command", "command", "linked_command_text"),
+    ("argv", "argv_json", "linked_command_argv_json"),
+    ("tool_name", "tool_name", "linked_command_tool_name"),
+    ("agent_name", "agent_name", "linked_command_agent_name"),
+    ("phase", "phase", "linked_command_phase"),
+    ("status", "status", "linked_command_status"),
+    ("return_code", "return_code", "linked_command_return_code"),
+    ("timed_out", "timed_out", "linked_command_timed_out"),
+    ("success", "success", "linked_command_success"),
+    ("started_at", "started_at", "linked_command_started_at"),
+    ("completed_at", "completed_at", "linked_command_completed_at"),
+    ("duration_ms", "duration_ms", "linked_command_duration_ms"),
+    ("command_hash", "command_hash", "linked_command_hash"),
+    ("stdout_sha256", "stdout_sha256", "linked_command_stdout_sha256"),
+    ("stderr_sha256", "stderr_sha256", "linked_command_stderr_sha256"),
+    ("output_retention_status", "output_retention_status", "linked_command_output_retention_status"),
+    ("stdout_artifact_ref", "stdout_artifact_ref", "linked_command_stdout_artifact_ref"),
+    ("stderr_artifact_ref", "stderr_artifact_ref", "linked_command_stderr_artifact_ref"),
+)
+_LINKED_COMMAND_SELECT = ",\n".join(
+    f"                   commands.{column} AS {alias}"
+    for _key, column, alias in _LINKED_COMMAND_FIELDS
+)
+
+
 def _serialize_run_receipt(row: sqlite3.Row) -> dict[str, Any]:
     """Serialize a run receipt with bounded command detail when it cites one."""
 
     record = _serialize_receipt(row)
-    command_fields = {
-        "id": record.pop("linked_command_id", None),
-        "run_uuid": record.pop("linked_command_run_uuid", None),
-        "command": record.pop("linked_command_text", None),
-        "argv": record.pop("linked_command_argv_json", None),
-        "tool_name": record.pop("linked_command_tool_name", None),
-        "agent_name": record.pop("linked_command_agent_name", None),
-        "phase": record.pop("linked_command_phase", None),
-        "status": record.pop("linked_command_status", None),
-        "return_code": record.pop("linked_command_return_code", None),
-        "timed_out": record.pop("linked_command_timed_out", None),
-        "success": record.pop("linked_command_success", None),
-        "started_at": record.pop("linked_command_started_at", None),
-        "completed_at": record.pop("linked_command_completed_at", None),
-        "duration_ms": record.pop("linked_command_duration_ms", None),
-        "command_hash": record.pop("linked_command_hash", None),
-        "stdout_sha256": record.pop("linked_command_stdout_sha256", None),
-        "stderr_sha256": record.pop("linked_command_stderr_sha256", None),
-        "output_retention_status": record.pop(
-            "linked_command_output_retention_status", None
-        ),
-        "stdout_artifact_ref": record.pop(
-            "linked_command_stdout_artifact_ref", None
-        ),
-        "stderr_artifact_ref": record.pop(
-            "linked_command_stderr_artifact_ref", None
-        ),
+    command_fields: dict[str, Any] = {
+        key: record.pop(alias, None) for key, _column, alias in _LINKED_COMMAND_FIELDS
     }
     if command_fields["id"] is None:
         record["command"] = None
@@ -863,29 +875,7 @@ def list_run_proof_receipts(
                    artifacts.present AS artifact_present,
                    artifacts.integrity_status AS artifact_integrity_status,
                    artifacts.sha256 AS artifact_current_sha256,
-                   commands.id AS linked_command_id,
-                   commands.run_uuid AS linked_command_run_uuid,
-                   commands.command AS linked_command_text,
-                   commands.argv_json AS linked_command_argv_json,
-                   commands.tool_name AS linked_command_tool_name,
-                   commands.agent_name AS linked_command_agent_name,
-                   commands.phase AS linked_command_phase,
-                   commands.status AS linked_command_status,
-                   commands.return_code AS linked_command_return_code,
-                   commands.timed_out AS linked_command_timed_out,
-                   commands.success AS linked_command_success,
-                   commands.started_at AS linked_command_started_at,
-                   commands.completed_at AS linked_command_completed_at,
-                   commands.duration_ms AS linked_command_duration_ms,
-                   commands.command_hash AS linked_command_hash,
-                   commands.stdout_sha256 AS linked_command_stdout_sha256,
-                   commands.stderr_sha256 AS linked_command_stderr_sha256,
-                   commands.output_retention_status
-                       AS linked_command_output_retention_status,
-                   commands.stdout_artifact_ref
-                       AS linked_command_stdout_artifact_ref,
-                   commands.stderr_artifact_ref
-                       AS linked_command_stderr_artifact_ref
+{_LINKED_COMMAND_SELECT}
             FROM assessment_proof_receipts AS receipts
             JOIN assessment_dispatches AS dispatches
               ON dispatches.id = receipts.producer_dispatch_id
