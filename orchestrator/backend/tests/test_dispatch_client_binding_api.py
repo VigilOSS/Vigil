@@ -142,17 +142,23 @@ def test_a_correction_supersedes_and_never_overwrites_the_prior_binding(
     assert row["client_binding"]["binding_version"] == 2
 
 
-def test_rebinding_the_identical_handle_is_refused_as_a_no_op(
+def test_rebinding_the_identical_handle_is_an_answered_no_op(
     client, isolate_settings
 ) -> None:
     _seed(client, isolate_settings["engagements_dir"])
     _dispatch(client)
-    assert _bind(client, "code-hunter-3").status_code == 201
+    first = _bind(client, "code-hunter-3")
+    assert first.status_code == 201
 
     repeat = _bind(client, "code-hunter-3")
-    assert repeat.status_code == 409, repeat.text
-    assert "already" in repeat.json()["detail"]
+    assert repeat.status_code == 200, repeat.text
+    body = repeat.json()
+    assert body["already_bound"] is True
+    assert body["superseded"] is None
+    assert body["binding"] == first.json()["binding"]
 
+    # Re-asserting the current binding writes no version: the history keeps
+    # only real corrections.
     history = client.get(f"{BASE}/dispatches/code-hunter-3/client-bindings").json()
     assert len(history) == 1
 

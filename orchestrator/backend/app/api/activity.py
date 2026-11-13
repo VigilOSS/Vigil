@@ -23,9 +23,13 @@ from .intel_schemas import (
     ActivityEntryRecordRequest,
     ListActivityEntriesResponse,
 )
+from .query_params import DeclaredQueryParamsRoute
 
 
-router = APIRouter(prefix="/engagements/{engagement_key}", tags=["activity"])
+router = APIRouter(
+    prefix="/engagements/{engagement_key}", tags=["activity"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class ActivityFeedActor(BaseModel):

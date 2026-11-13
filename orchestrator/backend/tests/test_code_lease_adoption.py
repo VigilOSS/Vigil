@@ -495,9 +495,9 @@ def test_adopter_may_correct_a_receipt_it_inherited(client, isolate_settings) ->
     """Step 2: adoption exists so the replacement can finish the attempt — which
     includes correcting what the dead lease got wrong. A supersede identity
     pinned to the CURRENT lease refused exactly that write, leaving the adopter
-    with a contradictory second receipt (closeout then deadlocks on conflicting
-    candidate-bearing dispositions) or `reset-stale`, which discards the very
-    receipts adoption preserved."""
+    with a second receipt beside the wrong one (closeout stays pinned to the
+    inherited candidate-bearing disposition) or `reset-stale`, which discards
+    the very receipts adoption preserved."""
     engagement_key = "2026-09-16-code-lease-adopt-supersede"
     _, _, claim = _seed_claimed_parser(
         client, isolate_settings, engagement_key, "lease-adopt-supersede-repo"

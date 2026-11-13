@@ -75,9 +75,13 @@ def test_requeue_preserves_the_original_batch_theme_and_trigger_provenance(
     assert requeued.status_code == 201, requeued.text
     assert requeued.json()["already_queued"] == 1
 
-    row = client.get(f"{base}/analysis-queue?queue_mode=trigger").json()["items"][0]
-    assert row["batch_theme"] == "shared-helpers"
-    assert row["queue_mode"] == "trigger"
+    (row,) = client.get(f"{base}/analysis-queue?batch_theme=shared-helpers").json()["items"]
+    # The owed initial review keeps its mode, so its closeout still answers for
+    # every family; the requeue's context rides on the row.
+    assert row["queue_mode"] == "initial"
+    assert any(
+        entry.get("reason") == "helper carries taint" for entry in row["cross_file_triggers"]
+    )
     assert client.get(
         f"{base}/analysis-queue?batch_theme=shared-helpers"
     ).json()["total"] == 1
@@ -95,7 +99,7 @@ def test_requeue_preserves_the_original_batch_theme_and_trigger_provenance(
         },
     )
     assert explicit.status_code == 201, explicit.text
-    retargeted = client.get(f"{base}/analysis-queue?queue_mode=trigger").json()["items"][0]
+    (retargeted,) = client.get(f"{base}/analysis-queue?queue_mode=initial").json()["items"]
     assert retargeted["batch_theme"] == "cross-file-trigger"
 
 
@@ -135,7 +139,7 @@ def test_requeue_accepts_list_trigger_rows_and_rejects_selectorless_input(
         },
     )
     assert result.status_code == 201, result.text
-    trigger = client.get(f"{base}/triggers").json()[0]
+    trigger = client.get(f"{base}/triggers").json()["items"][0]
 
     # The trigger row is the selector: id + target_file_path, exactly as
     # `list-triggers` emits it.
@@ -157,7 +161,7 @@ def test_requeue_accepts_list_trigger_rows_and_rejects_selectorless_input(
         }
     ]
     queued_trigger = next(
-        row for row in client.get(f"{base}/triggers").json() if row["id"] == trigger["id"]
+        row for row in client.get(f"{base}/triggers").json()["items"] if row["id"] == trigger["id"]
     )
     assert queued_trigger["status"] == "queued"
 
@@ -357,7 +361,7 @@ def test_requeue_names_a_trigger_target_missing_from_the_snapshot_and_the_closes
         },
     )
     assert result.status_code == 201, result.text
-    trigger = client.get(f"{base}/triggers").json()[0]
+    trigger = client.get(f"{base}/triggers").json()["items"][0]
 
     requeued = client.post(f"{base}/analysis-queue/requeue", json={"items": [{"trigger_id": trigger["id"]}]})
 

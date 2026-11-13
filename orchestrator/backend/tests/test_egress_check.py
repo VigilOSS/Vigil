@@ -130,6 +130,20 @@ def test_cluster_blackholed_records_decision(monkeypatch, tmp_path, capsys, mod)
     assert "destinations" not in recorded["exec_kwargs"]
 
 
+def test_empty_host_input_refuses_before_probing(monkeypatch, tmp_path, capsys, mod):
+    """No in-scope host means no sample to judge: the verb exits non-zero before
+    any probe runs or any decision is recorded, rather than reporting a rate."""
+    (tmp_path / "hosts.txt").write_text("# no hosts yet\n\n", encoding="utf-8")
+    recorded = _wire(monkeypatch, mod, tmp_path, "")
+
+    with pytest.raises(SystemExit) as exited:
+        mod.run(_args(tmp_path, hosts=str(tmp_path / "hosts.txt")))
+
+    assert exited.value.code == 1
+    assert "no in-scope hosts provided" in capsys.readouterr().err
+    assert recorded == {}
+
+
 def test_control_failure_records_inconclusive_observation(monkeypatch, tmp_path, capsys, mod):
     probe = (
         "example.com 000 0.000000 \n"            # control DOWN → transient/global, not a cluster block

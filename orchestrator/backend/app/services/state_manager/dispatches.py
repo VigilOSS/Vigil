@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import json
 import hashlib
 import sqlite3
@@ -705,15 +706,13 @@ def record_dispatch_client_binding(
         ):
             # Re-asserting the current binding carries no new information, and an
             # identical extra version would bury the real corrections in the
-            # history this table exists to preserve.
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    f"dispatch {agent_id!r} is already bound to this client handle "
-                    f"at binding_version={int(current['binding_version'])}; bind a "
-                    "different client, namespace, or handle to supersede it"
-                ),
-            )
+            # history this table exists to preserve. The caller asked for the
+            # state that already holds, so it gets that binding back, marked.
+            return {
+                "binding": _serialize_client_binding(current, agent_id=agent_id),
+                "superseded": None,
+                "already_bound": True,
+            }
         highest = connection.execute(
             "SELECT MAX(binding_version) AS version "
             "FROM assessment_dispatch_client_bindings WHERE dispatch_id = ?",
@@ -778,6 +777,7 @@ def record_dispatch_client_binding(
     return {
         "binding": by_id[binding_id],
         "superseded": by_id.get(int(current["id"])) if current is not None else None,
+        "already_bound": False,
     }
 
 def list_dispatch_client_bindings(
@@ -850,7 +850,7 @@ def record_handoff(
     engagement_id: int,
     *,
     agent_id: str,
-    agent_role: str,
+    agent_role: str | None,
     summary: str,
     phase: str | None = None,
     confidence: str | None = None,
@@ -889,14 +889,34 @@ def record_handoff(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"dispatch not found for handoff agent_id={agent_id!r}",
             )
-        if str(dispatch_row["agent_role"]) != str(agent_role):
+        # The handoff's role is the dispatch's: ``agent_id`` names the dispatch,
+        # and its registered role is the one every role-keyed read joins on. A
+        # role the caller left out is filled from it, and the response says so;
+        # a different role contradicts the dispatch the handoff names and is
+        # refused, because one of the two identities is wrong.
+        registered_role = str(dispatch_row["agent_role"])
+        derived: list[dict[str, Any]] = []
+        if agent_role and agent_role != registered_role:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
-                    f"agent_role mismatch: handoff agent_role={agent_role!r} does not match registered "
-                    f"dispatch role={dispatch_row['agent_role']!r}"
+                    f"handoff agent_role {agent_role!r} contradicts the role "
+                    f"{registered_role!r} dispatch {agent_id!r} was registered "
+                    "with; omit agent_role to have the registered role stored, or "
+                    "name the dispatch this handoff belongs to"
                 ),
             )
+        if not agent_role:
+            derived.append({
+                "field": "agent_role",
+                "value": registered_role,
+                "derived_from": "dispatch",
+                "detail": (
+                    f"stored the registered dispatch role {registered_role!r}; "
+                    "the handoff named none"
+                ),
+            })
+        agent_role = registered_role
         existing = connection.execute(
             "SELECT id FROM assessment_dispatch_handoffs WHERE engagement_id = ? AND agent_id = ?",
             (engagement.id, agent_id),
@@ -945,7 +965,7 @@ def record_handoff(
     assert row is not None
     serialized = _serialize_handoff(row)
     _register_handoff_artifacts(engagement.id, serialized)
-    return serialized
+    return {**serialized, "derived": derived}
 
 def update_handoff(
     engagement_id: int,
@@ -1145,40 +1165,399 @@ def _serialize_decision(row) -> dict[str, Any]:
         data["resolved"] = bool(data["resolved"])
     return data
 
+_QC_PAYLOAD_KEYS = frozenset(
+    {"reviewer_dispatch_agent_id", "writer_dispatch_agent_id", "verdict", "failed_rows"}
+)
+
+
+def _qc_verdict_problems(
+    connection, engagement_id: int, payload: dict[str, Any], *, label: str, subject_keys: frozenset[str],
+) -> tuple[list[str], str | None]:
+    """Shape and attribution shared by every report-writer QC verdict.
+
+    Returns each problem the payload has, and the reviewer when the attribution
+    names two distinct recorded report-writer dispatches (else None). A blocked
+    verdict names each failed checklist row with the quoted text that failed it,
+    so the writer receives the fix list; a pass names none. Every problem is
+    collected, because nothing about the payload changes between refusals.
+    """
+    problems: list[str] = []
+    allowed = _QC_PAYLOAD_KEYS | subject_keys
+    unknown = sorted(set(payload) - allowed)
+    if unknown:
+        named = "; ".join(
+            f"{key!r}"
+            + (
+                f" (did you mean {close[0]!r}?)"
+                if (close := difflib.get_close_matches(key, sorted(allowed), n=1, cutoff=0.6))
+                else ""
+            )
+            for key in unknown
+        )
+        problems.append(
+            f"{label} payload has unknown fields: {named}. Its fields: {', '.join(sorted(allowed))}"
+        )
+    verdict = payload.get("verdict")
+    rows = payload.get("failed_rows", [])
+    if verdict not in {"pass", "blocked"}:
+        problems.append(f"{label} verdict must be pass or blocked (got {verdict!r})")
+    if not isinstance(rows, list) or any(
+        not isinstance(row, dict)
+        or set(row) != {"row", "quote"}
+        or any(not isinstance(row[key], str) or not row[key].strip() for key in ("row", "quote"))
+        for row in rows
+    ):
+        problems.append(f"{label} failed_rows entries need a checklist row and the quoted failing text")
+    elif verdict == "blocked" and not rows:
+        problems.append(f"a blocked {label} verdict names its failed_rows")
+    elif verdict == "pass" and rows:
+        problems.append(f"a passing {label} verdict has no failed_rows")
+    if any(
+        not isinstance(payload.get(key), str) or not payload[key].strip()
+        for key in ("reviewer_dispatch_agent_id", "writer_dispatch_agent_id")
+    ):
+        problems.append(f"{label} requires reviewer and writer dispatch attribution")
+        return problems, None
+    reviewer = payload["reviewer_dispatch_agent_id"]
+    writer = payload["writer_dispatch_agent_id"]
+    if reviewer == writer:
+        problems.append(f"{label} reviewer must be a dispatch separate from the writer")
+    identities = connection.execute(
+        "SELECT agent_id, agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id IN (?, ?)",
+        (engagement_id, reviewer, writer),
+    ).fetchall()
+    roles = {row["agent_id"]: row["agent_role"] for row in identities}
+    not_writers = [
+        f"{side} {agent!r}"
+        for side, agent in (("reviewer", reviewer), ("writer", writer))
+        if roles.get(agent) != "report-writer"
+    ]
+    if not_writers:
+        problems.append(
+            f"{label} requires recorded report-writer dispatches for reviewer and writer; "
+            f"{' and '.join(not_writers)} is not one"
+        )
+    return problems, (reviewer if reviewer != writer and not not_writers else None)
+
+
+def _refuse_qc_problems(label: str, problems: list[str]) -> None:
+    """One refusal naming every problem a QC verdict payload has."""
+    if problems:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                problems[0]
+                if len(problems) == 1
+                else f"{label} verdict has {len(problems)} problems: " + "; ".join(problems)
+            ),
+        )
+
+
+def _artifact_producers(artifact) -> set[str]:
+    """Every agent recorded as registering one artifact row's path."""
+    try:
+        history = json.loads(artifact["producer_history_json"] or "[]")
+    except (TypeError, ValueError):
+        history = []
+    producers = {
+        agent for agent in (history if isinstance(history, list) else [])
+        if isinstance(agent, str) and agent
+    }
+    producers.update(
+        agent for agent in (artifact["producer_agent_id"], artifact["content_producer_agent_id"])
+        if isinstance(agent, str) and agent
+    )
+    return producers
+
+
+def _registered_producers(connection, engagement_id: int, slug: str) -> set[str]:
+    """Every agent that registered a submission workspace linked to ``slug``.
+
+    ``export submission --agent-id`` attributes each render's registration, so a
+    dispatch that wrote any version of the workspace is in this set.
+    """
+    rows = connection.execute(
+        """
+        SELECT producer_agent_id, content_producer_agent_id, producer_history_json
+        FROM assessment_artifacts
+        WHERE engagement_id = ? AND kind = 'submission' AND related_finding_slug = ?
+        """,
+        (engagement_id, slug),
+    ).fetchall()
+    return set().union(*(_artifact_producers(row) for row in rows))
+
+
+def _validate_submission_qc(connection, engagement_id: int, payload: dict[str, Any]) -> None:
+    """An independent report-writer reviewed one triage packet of this finding."""
+    from ..submission_versions import triage_packet_issue
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="submission QC payload must be an object")
+    problems, reviewer = _qc_verdict_problems(
+        connection, engagement_id, payload, label="submission QC",
+        subject_keys=frozenset({"finding_slug", "packet_id"}),
+    )
+    slug = payload.get("finding_slug")
+    packet_id = payload.get("packet_id")
+    if not isinstance(slug, str) or not slug.strip() or not isinstance(packet_id, str):
+        problems.append("submission QC requires finding_slug and packet_id")
+        _refuse_qc_problems("submission QC", problems)
+    finding = connection.execute(
+        "SELECT id, provenance_json FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, slug),
+    ).fetchone()
+    if finding is None:
+        if not problems:
+            raise HTTPException(status_code=404, detail="submission QC finding not found")
+        problems.append(f"submission QC finding {slug!r} not found")
+        _refuse_qc_problems("submission QC", problems)
+    if reviewer is not None:
+        if reviewer == _common._json_object(finding["provenance_json"]).get("agent_id"):
+            problems.append("submission QC reviewer must differ from the finding author")
+        if reviewer in _registered_producers(connection, engagement_id, slug):
+            problems.append(
+                "submission QC reviewer registered this finding's submission workspace; "
+                "a report-writer that has not written it must review"
+            )
+        edited = connection.execute(
+            """
+            SELECT 1 FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ?
+              AND (actor = ? OR json_extract(metadata_json, '$.dispatch_agent_id') = ?)
+            LIMIT 1
+            """,
+            (engagement_id, int(finding["id"]), reviewer, reviewer),
+        ).fetchone()
+        if edited is not None:
+            problems.append(
+                "submission QC reviewer edited this finding; a dispatch that has not "
+                "edited it must review"
+            )
+    issue = triage_packet_issue(engagement_id, slug, packet_id)
+    if issue:
+        problems.append(f"submission QC must review a triage packet of this finding: {issue}")
+    _refuse_qc_problems("submission QC", problems)
+
+
+def _report_disk_check(root, size_bytes: int, sha256: str) -> str | None:
+    """Why report.md on disk is not ``size_bytes`` bytes hashing to ``sha256``."""
+    from .. import artifact_index
+
+    try:
+        artifact_index.read_registered_artifact_bytes(
+            root, "report.md", expected_size=size_bytes, expected_sha256=sha256,
+        )
+    except HTTPException as exc:
+        return str(exc.detail)
+    return None
+
+
+def _observe_report_bytes(engagement, payload: Any) -> tuple[int, str, str | None] | None:
+    """Read report.md against the reviewed digest before the write lock is taken.
+
+    Hashing the whole report inside ``BEGIN IMMEDIATE`` held every other writer
+    for the length of the read. Returns ``(size_bytes, sha256, problem)`` for the
+    registration the read was checked against; the validator under the lock
+    uses it only while the registration still names those bytes, and reads
+    again otherwise.
+    """
+    from pathlib import Path
+
+    if not isinstance(payload, dict):
+        return None
+    artifact_id = payload.get("artifact_id")
+    sha256 = payload.get("sha256")
+    if type(artifact_id) is not int or not isinstance(sha256, str) or len(sha256) != 64:
+        return None
+    with _common.get_connection() as connection:
+        artifact = connection.execute(
+            "SELECT relative_path, size_bytes, sha256 FROM assessment_artifacts "
+            "WHERE engagement_id = ? AND id = ?",
+            (engagement.id, artifact_id),
+        ).fetchone()
+    if artifact is None or artifact["relative_path"] != "report.md" or artifact["sha256"] != sha256:
+        return None
+    size_bytes = int(artifact["size_bytes"])
+    root = Path(engagement.engagement_root).expanduser().resolve()
+    return size_bytes, sha256, _report_disk_check(root, size_bytes, sha256)
+
+
+def _validate_report_qc(
+    connection,
+    engagement,
+    payload: dict[str, Any],
+    *,
+    observed: tuple[int, str, str | None] | None = None,
+) -> None:
+    """An independent report-writer reviewed the registered bytes of report.md."""
+    from pathlib import Path
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="report QC payload must be an object")
+    problems, reviewer = _qc_verdict_problems(
+        connection, engagement.id, payload, label="report QC",
+        subject_keys=frozenset({"artifact_id", "sha256"}),
+    )
+    artifact_id = payload.get("artifact_id")
+    sha256 = payload.get("sha256")
+    if type(artifact_id) is not int or not isinstance(sha256, str) or len(sha256) != 64:
+        problems.append("report QC requires artifact_id and the sha256 it reviewed")
+        _refuse_qc_problems("report QC", problems)
+    artifact = connection.execute(
+        "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND id = ?",
+        (engagement.id, artifact_id),
+    ).fetchone()
+    if artifact is None or artifact["relative_path"] != "report.md" or not artifact["present"]:
+        problems.append("report QC must name the registered report.md artifact")
+        _refuse_qc_problems("report QC", problems)
+    if artifact["sha256"] != sha256:
+        problems.append("report QC sha256 differs from the registered report.md")
+    if not artifact["content_producer_agent_id"]:
+        problems.append(
+            "report QC needs report.md's current bytes registered by their writer: "
+            "`vigil assess artifact register report.md --kind report --agent-id <writer dispatch>`, "
+            "then review those bytes"
+        )
+    if reviewer is not None and reviewer in _artifact_producers(artifact):
+        problems.append(
+            "report QC reviewer registered report.md bytes; a report-writer that has not "
+            "drafted it must review"
+        )
+    if artifact["sha256"] == sha256:
+        size_bytes = int(artifact["size_bytes"])
+        if observed is not None and observed[:2] == (size_bytes, sha256):
+            problem = observed[2]
+        else:
+            problem = _report_disk_check(
+                Path(engagement.engagement_root).expanduser().resolve(), size_bytes, sha256,
+            )
+        if problem is not None:
+            problems.append(
+                f"report.md on disk differs from its registration ({problem}); register "
+                "its current bytes and review them"
+            )
+    _refuse_qc_problems("report QC", problems)
+
+
+_REPRO_VOCABULARY = {
+    "verdict": ("followed", "failed", "equivalent"),
+    "proof_mode": ("live", "source", "fuzz"),
+}
+
+
+def _repro_payload_problems(payload: Any) -> list[str]:
+    """Each way a repro_rehearsal payload is malformed, naming the field."""
+    if not isinstance(payload, dict):
+        return ["payload must be an object"]
+    problems = [
+        f"payload.{key} is required (a non-empty string)"
+        for key in ("finding_slug", "verifier_dispatch_agent_id")
+        if not isinstance(payload.get(key), str) or not payload[key].strip()
+    ]
+    for key, allowed in _REPRO_VOCABULARY.items():
+        if payload.get(key) not in allowed:
+            problems.append(
+                f"payload.{key} must be one of: {', '.join(allowed)} "
+                f"(got {payload.get(key)!r})"
+            )
+    runs = payload.get("runs_checked", [])
+    if not isinstance(runs, list) or any(type(run_id) is not int or run_id < 1 for run_id in runs):
+        problems.append("payload.runs_checked must be a list of positive integer command-run ids")
+    return problems
+
+
+#: Gate readers and approve+execute flows read only rows this predicate admits:
+#: a decision recorded with ``supersedes`` replaces the row it names, which stays
+#: readable by id and through ``include_superseded``.
+CURRENT_DECISION_SQL = "superseded_by_id IS NULL"
+
+#: Kinds whose gate state lives outside the decision row, so replacing the row
+#: would leave the state it recorded in force. ``severity_variance`` attaches to
+#: the current verification and is replaced by a fresh verification.
+_UNSUPERSEDABLE_DECISION_KINDS: dict[str, str] = {
+    "severity_variance": (
+        "a severity_variance is attached to the finding's current verification, "
+        "not held by its decision row; record the corrected reason on a fresh "
+        "verification with `vigil assess finding verify <slug> ... "
+        "--severity-variance-file <path>`"
+    ),
+}
+
+
+def _check_supersedable(connection, engagement_id: int, kind: str, decision_id: int) -> None:
+    """Refuse a supersession the new row cannot truthfully make."""
+    if kind in _UNSUPERSEDABLE_DECISION_KINDS:
+        raise HTTPException(
+            status_code=422,
+            detail=f"supersedes is refused for {kind}: {_UNSUPERSEDABLE_DECISION_KINDS[kind]}",
+        )
+    row = connection.execute(
+        "SELECT id, kind, superseded_by_id FROM assessment_dispatch_decisions "
+        "WHERE engagement_id = ? AND id = ?",
+        (engagement_id, decision_id),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=404,
+            detail=(
+                f"supersedes names decision {decision_id}, which this engagement does not "
+                "hold; read the row to correct with `vigil assess fetch "
+                f"dispatch-decisions/{decision_id}`"
+            ),
+        )
+    if row["kind"] != kind:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"supersedes names decision {decision_id}, a {row['kind']!r} row; a "
+                f"{kind!r} row supersedes only a {kind!r} row. Record the correction "
+                f"under `--kind {row['kind']}`"
+            ),
+        )
+    if row["superseded_by_id"] is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"decision {decision_id} is already superseded by decision "
+                f"{row['superseded_by_id']}; supersede {row['superseded_by_id']} instead"
+            ),
+        )
+
+
 def record_decision(
     engagement_id: int,
     *,
     kind: str,
     payload: dict[str, Any],
     surfaced_to_user: bool = False,
+    supersedes: int | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (kind or "").strip():
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="kind is required")
     created_at = _common._utcnow_iso_dispatch()
+    report_bytes = (
+        _observe_report_bytes(engagement, payload) if kind == "report_qc_verdict" else None
+    )
     with _common.get_connection() as connection:
+        if supersedes is not None:
+            _check_supersedable(connection, engagement.id, kind, supersedes)
         if kind == "claim_equivalence":
             connection.execute("BEGIN IMMEDIATE")
             from .findings import validate_claim_equivalence_decision
 
             validate_claim_equivalence_decision(connection, engagement.id, payload)
-        if kind == "pass1_qa_verdict":
+        if kind == "submission_qc_verdict":
             connection.execute("BEGIN IMMEDIATE")
-            required = ("finding_slug", "packet_id", "auditor_dispatch_agent_id", "reason")
-            if (
-                any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required)
-                or payload.get("verdict") not in {"pass", "blocked"}
-                or len(payload["packet_id"]) != 64
-                or any(char not in "0123456789abcdef" for char in payload["packet_id"])
-            ):
-                raise HTTPException(status_code=422, detail="invalid Pass 1 QA payload")
-            _ensure_finding_slugs_exist(connection, engagement.id, [payload["finding_slug"]])
-            auditor = connection.execute(
-                "SELECT 1 FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
-                (engagement.id, payload["auditor_dispatch_agent_id"]),
-            ).fetchone()
-            if auditor is None:
-                raise HTTPException(status_code=422, detail="Pass 1 QA requires a recorded auditor dispatch")
+            _validate_submission_qc(connection, engagement.id, payload)
+        if kind == "severity_variance":
+            connection.execute("BEGIN IMMEDIATE")
+            from .proofs import attach_severity_variance
+
+            payload = attach_severity_variance(connection, engagement.id, payload)
+        if kind == "report_qc_verdict":
+            connection.execute("BEGIN IMMEDIATE")
+            _validate_report_qc(connection, engagement, payload, observed=report_bytes)
         if kind == "blind_triage_verdict":
             # Existing verdict rows retain their historical attribution. Every new
             # review names real dispatches; distinct IDs prove attribution, not
@@ -1197,7 +1576,7 @@ def record_decision(
             ).fetchone()
             if finding is None:
                 raise HTTPException(status_code=404, detail="blind triage finding not found")
-            provenance = json.loads(finding["provenance_json"] or "{}")
+            provenance = _common._json_object(finding["provenance_json"])
             if reviewer_id in {writer_id, provenance.get("agent_id")}:
                 raise HTTPException(status_code=422, detail="blind triage reviewer must differ from the finding author and report writer")
             identities = connection.execute(
@@ -1213,16 +1592,12 @@ def record_decision(
             connection.execute("BEGIN IMMEDIATE")
             from .repro_currentness import reproduction_basis, reproduction_sha256
 
-            required = ("finding_slug", "verdict", "proof_mode", "verifier_dispatch_agent_id")
-            if (
-                not isinstance(payload, dict)
-                or any(not isinstance(payload.get(key), str) or not payload[key].strip() for key in required)
-                or payload.get("verdict") not in {"followed", "failed", "equivalent"}
-                or payload.get("proof_mode") not in {"live", "source", "fuzz"}
-                or not isinstance(payload.get("runs_checked", []), list)
-                or any(type(run_id) is not int or run_id < 1 for run_id in payload.get("runs_checked", []))
-            ):
-                raise HTTPException(status_code=422, detail="invalid reproduction decision payload")
+            problems = _repro_payload_problems(payload)
+            if problems:
+                raise HTTPException(
+                    status_code=422,
+                    detail="repro_rehearsal payload invalid: " + "; ".join(problems),
+                )
 
             finding = connection.execute(
                 "SELECT * FROM assessment_findings WHERE engagement_id = ? AND slug = ?",
@@ -1291,7 +1666,8 @@ def record_decision(
                     raise HTTPException(status_code=422, detail="failed reproduction needs the failed step")
             else:
                 prior = connection.execute(
-                    "SELECT payload_json FROM assessment_dispatch_decisions WHERE id = ? AND engagement_id = ? AND kind = 'repro_rehearsal'",
+                    "SELECT payload_json FROM assessment_dispatch_decisions WHERE id = ? AND engagement_id = ? AND kind = 'repro_rehearsal' "
+                    f"AND {CURRENT_DECISION_SQL}",
                     (payload.get("prior_decision_id"), engagement.id),
                 ).fetchone()
                 previous = json.loads(prior["payload_json"]) if prior else {}
@@ -1305,8 +1681,8 @@ def record_decision(
             """
             INSERT INTO assessment_dispatch_decisions (
                 engagement_id, kind, payload_json, surfaced_to_user, resolved,
-                resolution_json, created_at
-            ) VALUES (?, ?, ?, ?, 0, NULL, ?)
+                resolution_json, created_at, supersedes_id
+            ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
             """,
             (
                 engagement.id,
@@ -1314,8 +1690,22 @@ def record_decision(
                 json.dumps(payload or {}),
                 1 if surfaced_to_user else 0,
                 created_at,
+                supersedes,
             ),
         )
+        if supersedes is not None:
+            # Conditional on the row still being current, so two corrections
+            # racing for one row cannot both claim it; the loser rolls back.
+            stamped = connection.execute(
+                "UPDATE assessment_dispatch_decisions SET superseded_by_id = ?, superseded_at = ? "
+                f"WHERE engagement_id = ? AND id = ? AND {CURRENT_DECISION_SQL}",
+                (cursor.lastrowid, created_at, engagement.id, supersedes),
+            )
+            if stamped.rowcount != 1:
+                raise HTTPException(
+                    status_code=409,
+                    detail=f"decision {supersedes} was superseded concurrently; read it and retry",
+                )
         row = connection.execute(
             "SELECT * FROM assessment_dispatch_decisions WHERE id = ?",
             (cursor.lastrowid,),
@@ -1328,12 +1718,15 @@ def list_decisions(
     *,
     kind: str = "",
     resolved: bool | None = None,
+    include_superseded: bool = False,
     limit: int = 100,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
     engagement = _engagement_or_404(engagement_id)
     where = ["engagement_id = ?"]
     params: list[Any] = [engagement.id]
+    if not include_superseded:
+        where.append(CURRENT_DECISION_SQL)
     if kind:
         where.append("kind = ?")
         params.append(kind)
@@ -1385,6 +1778,14 @@ def update_decision(
         ).fetchone()
         if existing is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="decision not found")
+        if existing["superseded_by_id"] is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    f"decision {decision_id} is superseded by decision "
+                    f"{existing['superseded_by_id']}; act on {existing['superseded_by_id']}"
+                ),
+            )
         sets: list[str] = []
         values: list[Any] = []
         if resolved is not None:

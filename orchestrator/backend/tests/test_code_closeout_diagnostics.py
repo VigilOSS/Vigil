@@ -1,12 +1,12 @@
-"""A refused `code-dispatch done` names what is missing and where to read it.
+"""`code-dispatch done` names what is missing and where to read it.
 
-Three closeout refusals cost a real hunt wave a round trip each because the
-message described a rule without naming the state it was applied to:
+Each message names the state its rule was applied to, so one response ends the
+round trip:
 
-* the coverage refusal named the missing families but not the full required
-  set, nor the classification metadata that derives it — and a queue row
-  carries its own ``slot_types`` batch metadata, which is *not* what closeout
-  enforces, so the obvious field disagreed with the rule;
+* the effort-0 record for families a critical/high closeout left out names the
+  full required set and the classification metadata that derives it — a queue
+  row carries its own ``slot_types`` batch metadata, which is *not* what
+  closeout uses, so the obvious field would otherwise disagree with the rule;
 * the missing-source-receipt refusal named neither the file nor the lease it
   searched under, so a `code-record analysis` that had failed validation
   surfaced as an unrelated closeout error;
@@ -32,6 +32,7 @@ def _seed_claimed_file(
     *,
     repo_key: str,
     role: str = "parser",
+    context_tags: tuple[str, ...] = (),
     slot_types: tuple[str, ...] = ("NETWORK-INPUT",),
     item_slot_types: tuple[str, ...] | None = None,
     agent_name: str = "hunter-a",
@@ -62,6 +63,7 @@ def _seed_claimed_file(
                     "file_id": int(parser["id"]),
                     "classification": "critical",
                     "role": role,
+                    "context_tags": list(context_tags),
                     "slot_types": list(slot_types),
                     "analysis_priority": 100,
                 },
@@ -127,8 +129,8 @@ def test_the_claim_publishes_exactly_the_family_set_closeout_enforces(
 ) -> None:
     """The claim's `applicable_vuln_classes` is the authoritative required set.
 
-    Pinned against the families a real wave was rejected for: a transactional
-    role plus file/callback slots require `business-logic`, `race-condition`,
+    Pinned against the families a real wave was rejected for: transactional
+    context tags plus file/callback slots require `business-logic`, `race-condition`,
     `type-confusion` and `web-app-data-exposure`, and all four reach the hunter
     on the claim rather than only in the rejection.
     """
@@ -139,6 +141,7 @@ def test_the_claim_publishes_exactly_the_family_set_closeout_enforces(
         engagement_key,
         repo_key="closeout-declared-repo",
         role="Checkout payment resolver",
+        context_tags=("value-transfer", "response-data"),
         slot_types=("FILE-CONTENT", "CALLBACK-DATA"),
     )
     declared = list(claim["applicable_vuln_classes"])
@@ -154,9 +157,11 @@ def test_the_claim_publishes_exactly_the_family_set_closeout_enforces(
     assert closed.status_code == 200, closed.text
 
 
-def test_the_coverage_refusal_names_the_required_set_and_its_basis(
+def test_the_recorded_gap_names_the_required_set_and_its_basis(
     client, isolate_settings
 ) -> None:
+    """A short critical/high closeout records the rest at effort 0 and says,
+    on the response, which families and where the required set came from."""
     engagement_key = "2026-11-07-closeout-coverage-refusal"
     _repo, _parser, claim = _seed_claimed_file(
         client,
@@ -164,6 +169,7 @@ def test_the_coverage_refusal_names_the_required_set_and_its_basis(
         engagement_key,
         repo_key="closeout-coverage-repo",
         role="Checkout payment resolver",
+        context_tags=("value-transfer", "response-data"),
         slot_types=("FILE-CONTENT", "CALLBACK-DATA"),
         # What the queue row itself declares: batch metadata the operator typed
         # at submission, NOT the review surface closeout enforces.
@@ -175,21 +181,22 @@ def test_the_coverage_refusal_names_the_required_set_and_its_basis(
 
     short = [family for family in declared if family != "type-confusion"]
     _record_clean_receipt(client, engagement_key, claim, short)
-    refused = _close(client, engagement_key, claim, short)
+    closed = _close(client, engagement_key, claim, short)
 
-    assert refused.status_code == 400, refused.text
-    detail = refused.json()["detail"]
-    # The missing family, as before.
-    assert "type-confusion" in detail
-    # The full required set, so one refusal ends the guessing.
+    assert closed.status_code == 200, closed.text
+    recorded = closed.json()["unreviewed_families_recorded"]
+    assert recorded["families"] == ["type-confusion"]
+    assert recorded["effort"] == 0
+    detail = recorded["detail"]
+    # The full required set, so the reader sees what the file owes.
     for family in declared:
         assert family in detail
     # What derived it, and the queue row's own narrower slot_types, which is
     # the field a lane mistakes for the review surface.
     assert "CALLBACK-DATA" in detail and "FILE-CONTENT" in detail
-    assert "Checkout payment resolver" in detail
+    assert "value-transfer" in detail and "response-data" in detail
     assert "NETWORK-INPUT" in detail
-    # Where to re-read the authoritative list without a rejection.
+    # Where to re-read the authoritative list.
     assert f"code-dispatch progress {claim['id']}" in detail
 
 

@@ -384,7 +384,7 @@ def test_awaiting_verdict_scope_lists_exactly_the_readiness_obligation(client, i
 
     readiness = client.get(f"{base}/readiness?target_phase=verify-variant").json()
     [blocker] = [b for b in readiness["blockers"] if b["code"] == "unresolved_suspicious_analysis"]
-    assert blocker["message"].startswith("Repository has 2 current suspicious")
+    assert blocker["message"].startswith("Repository has 2 file(s)")
 
     # The current-receipt listing drops the receipt whose file is queued again.
     current = client.get(f"{base}/analysis-results/page?disposition=suspicious").json()
@@ -541,6 +541,17 @@ def test_review_progress_explains_finished_jobs_that_do_not_count(client, isolat
     assert (hidden["code"], hidden["count"]) == ("legacy_receipts", 1)
     assert hidden["message"].strip()
     assert parser["analysis_status"] == "analyzed"
+    # The count answers for the listing it explains: a filter that leaves the
+    # receipt out of the listing leaves it out of not_listed too.
+    assert client.get(
+        f"{base}/analysis-results/page?file=acme-no-such-file"
+    ).json()["not_listed"] == []
+    assert [
+        entry["count"]
+        for entry in client.get(
+            f"{base}/analysis-results/page?file={parser['file_path']}"
+        ).json()["not_listed"]
+    ] == [1]
 
 
 def test_readiness_says_whether_the_code_track_applies(client, isolate_settings):

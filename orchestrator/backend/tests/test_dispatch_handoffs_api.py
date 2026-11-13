@@ -252,7 +252,7 @@ def test_handoff_requires_registered_dispatch(client, isolate_settings) -> None:
     assert "dispatch not found" in resp.text
 
 
-def test_handoff_rejects_role_mismatch(client, isolate_settings) -> None:
+def test_handoff_refuses_a_role_that_contradicts_the_dispatch(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     _register_dispatch(client, agent_id="ROLE-MISMATCH", agent_role="recon-specialist")
 
@@ -262,7 +262,35 @@ def test_handoff_rejects_role_mismatch(client, isolate_settings) -> None:
     )
 
     assert resp.status_code == 409, resp.text
-    assert "agent_role mismatch" in resp.text
+    detail = resp.json()["detail"]
+    assert "vulnerability-analyst" in detail and "recon-specialist" in detail
+    assert client.get(f"{BASE}/dispatch-handoffs/ROLE-MISMATCH").status_code == 404
+
+
+def test_handoff_without_a_role_takes_the_dispatch_role(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="ROLE-OMITTED", agent_role="recon-specialist")
+    payload = _full_payload(agent_id="ROLE-OMITTED", agent_role="recon-specialist")
+    payload.pop("agent_role")
+
+    resp = client.post(f"{BASE}/dispatch-handoffs", json=payload)
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["agent_role"] == "recon-specialist"
+    assert [entry["field"] for entry in resp.json()["derived"]] == ["agent_role"]
+
+
+def test_handoff_with_the_dispatch_role_derives_nothing(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="ROLE-MATCH", agent_role="recon-specialist")
+
+    resp = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(agent_id="ROLE-MATCH", agent_role="recon-specialist"),
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["derived"] == []
 
 
 def test_handoff_rejects_non_terminal_closed_dispatch_status(client, isolate_settings) -> None:

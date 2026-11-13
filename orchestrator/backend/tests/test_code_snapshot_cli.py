@@ -317,7 +317,7 @@ def _sealed_snapshot(
 
     origin = tmp_path / f"{repo_key}-origin"
     origin.mkdir()
-    builder = SnapshotBuilder(tmp_path / "snapshots", repo_key)
+    builder = SnapshotBuilder(tmp_path / "tools" / "analysis-state" / "code-snapshots", repo_key)
     for rel_path, raw in files.items():
         path = origin / rel_path
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -1886,7 +1886,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
             raise AssertionError(endpoint)
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient, raising=False)
-    _patch_load_config(monkeypatch, module, raising=False)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path), raising=False)
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
     parsed: list[bytes | None] = []
     parser_fails = False
@@ -2338,6 +2338,7 @@ def test_code_index_build_emits_generation_scoped_current_and_preserves_v4_histo
         _repo_row(source, server_digest),
         sync_manifest,
         output / "structural-index",
+        engagement_dir=tmp_path,
     )
     assert prepared["structural_index_schema"] == STRUCTURAL_INDEX_SCHEMA
     unsupported_update = next(item for item in prepared["updates"] if item["file_id"] == 12)
@@ -2405,7 +2406,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
         }
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    _patch_load_config(monkeypatch, module)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "index_file", fake_index)
     args = SimpleNamespace(
         repo_path=str(source),
@@ -2471,6 +2472,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
             backend_repo,
             {**first_manifest, "_resolved_manifest_path": str(first_manifest_path)},
             output / "structural-index",
+            engagement_dir=tmp_path,
         )
 
     prepared = sync_module._prepare_repo_payload(
@@ -2478,6 +2480,7 @@ def test_code_index_language_correction_creates_a_new_immutable_identity_and_onl
         backend_repo,
         {**current_manifest, "_resolved_manifest_path": str(current_manifest_path)},
         output / "structural-index",
+        engagement_dir=tmp_path,
     )
     assert prepared["structural_input_digest"] == current_manifest[
         "structural_input_digest"
@@ -2512,7 +2515,7 @@ def test_code_index_explicit_unknown_backend_language_never_falls_back_to_filena
             raise AssertionError(endpoint)
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    _patch_load_config(monkeypatch, module)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     monkeypatch.setattr(
         module,
         "index_file",
@@ -2545,6 +2548,7 @@ def test_code_index_explicit_unknown_backend_language_never_falls_back_to_filena
         _repo_row(source, "d" * 64),
         {**manifest, "_resolved_manifest_path": str(manifest_path)},
         output / "structural-index",
+        engagement_dir=tmp_path,
     )
     assert prepared["updates"][0]["indexed_language"] == ""
 
@@ -2588,7 +2592,7 @@ def test_code_index_build_rejects_untrusted_backend_inventory(
             raise AssertionError(endpoint)
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    _patch_load_config(monkeypatch, module)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     def fake_index(path, language, source=None, **_kwargs):
         if failure != "generation":
             pytest.fail("untrusted inventory reached the parser")
@@ -2677,7 +2681,7 @@ def test_code_index_build_rejects_an_ancestor_swapped_after_validation(
             raise AssertionError(endpoint)
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    _patch_load_config(monkeypatch, module)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     monkeypatch.setattr(module, "validate_snapshot", lambda *_args, **_kwargs: source_manifest)
     original_capture = RootedSourceTree.capture
     swapped = False
@@ -3266,7 +3270,9 @@ def test_code_index_sync_rejects_source_path_traversal(tmp_path: Path) -> None:
 
     backend_repo = _repo_row(source, digest)
     with pytest.raises(ValueError, match="unsafe source file path"):
-        module._prepare_repo_payload(FakeClient(), backend_repo, manifest, index_root)
+        module._prepare_repo_payload(
+            FakeClient(), backend_repo, manifest, index_root, engagement_dir=tmp_path
+        )
 
 
 def test_code_index_sync_validates_all_files_before_bound_cas_post(
@@ -3478,7 +3484,9 @@ def test_code_index_sync_validates_all_files_before_bound_cas_post(
     }
     backend_repo = _repo_row(source, digest)
     with pytest.raises(ValueError, match="path_to_index"):
-        module._prepare_repo_payload(FakeClient(), backend_repo, tampered_manifest, index_root)
+        module._prepare_repo_payload(
+            FakeClient(), backend_repo, tampered_manifest, index_root, engagement_dir=tmp_path
+        )
 
     include_extra_backend_file = True
     posted.clear()
@@ -3997,6 +4005,7 @@ def test_code_index_sync_uses_observed_signal_counts_when_artifact_lists_are_cap
         _repo_row(source, digest),
         manifest,
         index_root,
+        engagement_dir=tmp_path,
     )
 
     assert payload["updates"][0]["total_entry_points"] == 5
@@ -4507,7 +4516,7 @@ def test_code_index_large_file_fallback_scans_every_byte_and_surfaces_debt(
             raise AssertionError(endpoint)
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    _patch_load_config(monkeypatch, module)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
 
     def should_not_materialize(*_args, **_kwargs):

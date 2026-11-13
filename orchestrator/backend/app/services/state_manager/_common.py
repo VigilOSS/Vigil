@@ -207,6 +207,14 @@ ROOT_CAUSE_LINK_KIND = "root_cause"
 # re-admitting the suppressed finding to any report projection.
 DUPLICATE_LINK_KIND = "duplicate_of"
 
+# "Another lane independently re-derived this finding" is evidence about the
+# finding's discovery, not a second record of it: a lane that reaches an
+# existing finding links its dispatch here instead of authoring a duplicate.
+# The target is always a recorded dispatch (target_kind='dispatch',
+# target_ref=<agent_id>), and the link is review context only, so it never moves
+# the verdict.
+CORROBORATION_LINK_KIND = "corroborated_by"
+
 ROOT_CAUSE_EFFECTS = {"eliminates_finding", "eliminates_attack_path"}
 
 SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -278,12 +286,10 @@ def _append_object_text(existing: str, incoming: dict[str, Any] | None, *, path:
 # Canonical bounds for the finding ``notes`` column. The API models import these
 # so the HTTP layer and the persistence layer cannot disagree about the cap.
 #
-# The cap used to be asserted on the INCOMING field only while the stored column
-# was unbounded, so the field was append-only-forever: appends always fit, and
-# the one write that must carry the whole field — the repair — was the only one
-# that could exceed 20000 and 422. The accumulator is now bounded where it grows
-# (``_append_notes``), and the replace path is allowed a larger payload so a row
-# that is already past the append cap can still be rewritten.
+# The accumulator is bounded where it grows (``_append_notes``), not on the
+# incoming field alone, and the replace path is allowed a larger payload: the
+# repair write is the one that must carry a whole over-cap field, so a row
+# already past the append cap can still be rewritten.
 FINDING_NOTES_MAX_LENGTH = 20000
 FINDING_NOTES_REPLACE_MAX_LENGTH = 65536
 
@@ -313,8 +319,34 @@ def _append_notes(existing: str, incoming: str, *, max_length: int | None = None
     return appended
 
 def _normalize_severity(value: str) -> str:
+    """Read a STORED severity, defaulting anything unrecognised to ``info``.
+
+    Only for values already on a row or a transition (where an empty or NULL
+    column reads as ``info``). A severity a caller supplies goes through
+    :func:`_require_severity`, which refuses what this function would default.
+    """
     severity = (value or "info").strip().lower()
     return severity if severity in SEVERITY_RANK else "info"
+
+
+def _require_severity(value: str | None, *, field: str = "severity") -> str:
+    """Resolve a caller-supplied severity to its canonical band, or refuse it.
+
+    Case and surrounding whitespace are ignored; an empty value is the column
+    default ``info``. Anything else outside the vocabulary is a 400 naming the
+    allowed bands: severity is an invalidating field, so storing a typo as
+    ``info`` would both under-rate the finding and reset its verdict.
+    """
+    severity = (value or "info").strip().lower()
+    if severity not in SEVERITY_RANK:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid {field}: {value!r}; expected one of "
+                + ", ".join(SEVERITY_RANK)
+            ),
+        )
+    return severity
 
 def _stronger_severity(existing: str, incoming: str) -> str:
     existing_normalized = _normalize_severity(existing)
@@ -449,10 +481,26 @@ def _ranked_facet_values(counts: list[tuple[Any, int]], limit: int) -> dict[str,
 def _fetch_all(connection, query: str, params: tuple[Any, ...]) -> list[dict[str, Any]]:
     return [dict(row) for row in connection.execute(query, params).fetchall()]
 
+# A finding reference too loose for the lookup aliases: an unpadded number
+# (``VA-7``), an underscore (``VA_007``), a short run of digits (``VA07``). It is
+# never resolved — ``VA-7`` and ``VA-0007`` could both be slugs — only offered.
+_LOOSE_FINDING_SLUG_RE = re.compile(r"^(?:finding[-_\s]*)?([A-Za-z]{2})[-_\s]*(\d{1,})$", re.IGNORECASE)
+
+
+def _suggested_finding_slug(value: str) -> str | None:
+    alias = canonical_finding_alias(value)
+    if alias:
+        return alias
+    match = _LOOSE_FINDING_SLUG_RE.fullmatch(value)
+    if match is None:
+        return None
+    return f"{match.group(1).upper()}-{int(match.group(2)):03d}"
+
+
 def _require_canonical_finding_slug(slug: str | None, *, field: str = "finding_slug") -> str:
     value = str(slug or "").strip()
     if not is_canonical_finding_slug(value):
-        alias = canonical_finding_alias(value)
+        alias = _suggested_finding_slug(value)
         suggestion = f"; did you mean {alias}?" if alias and alias != value else ""
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,

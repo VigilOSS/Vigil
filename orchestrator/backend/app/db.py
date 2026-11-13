@@ -1654,7 +1654,12 @@ def _fts_row_values(row_columns: str, alias: str) -> str:
 
 
 def _ensure_content_fts(connection: sqlite3.Connection, spec: _ContentFts) -> None:
-    """Create one content-backed FTS5 index, rebuilding it on column drift."""
+    """Create one content-backed FTS5 index, rebuilding it on column drift.
+
+    The update trigger is the one body that changes shape across releases, so a
+    stored update trigger whose SQL differs from the current one is replaced;
+    one that matches is left untouched and startup writes no schema change.
+    """
 
     base = spec.base_table
     fts = spec.fts_table
@@ -1664,11 +1669,27 @@ def _ensure_content_fts(connection: sqlite3.Connection, spec: _ContentFts) -> No
     delete_values = _fts_row_values(insert_target, "old").replace(
         "old.id", "'delete', old.id", 1
     )
-    indexed_columns = "".join(
-        f"                {name},\n"
+    column_names = [
+        name
         for name in (part.strip() for part in insert_target.strip("()").split(","))
         if name and name != "rowid"
-    ).rstrip("\n")
+    ]
+    indexed_columns = "".join(f"                {name},\n" for name in column_names).rstrip("\n")
+    # The index holds only these columns, so an UPDATE that changes none of them
+    # (a scratch flag, a timestamp, producer attribution) leaves it correct as
+    # is; re-tokenizing the row's whole text for it is pure cost.
+    watched = ["id", *column_names]
+    update_trigger = f"""
+            CREATE TRIGGER IF NOT EXISTS {base}_au
+            AFTER UPDATE OF {", ".join(watched)} ON {base}
+            WHEN {" OR ".join(f"old.{name} IS NOT new.{name}" for name in watched)}
+            BEGIN
+                INSERT INTO {fts}{delete_target}
+                VALUES {delete_values};
+                INSERT INTO {fts}{insert_target}
+                VALUES {new_values};
+            END
+            """
 
     fts_columns = _table_columns(connection, fts)
     existing_count = connection.execute(f"SELECT COUNT(*) FROM {base}").fetchone()[0]
@@ -1678,6 +1699,15 @@ def _ensure_content_fts(connection: sqlite3.Connection, spec: _ContentFts) -> No
         for suffix in ("ai", "ad", "au"):
             connection.execute(f"DROP TRIGGER IF EXISTS {base}_{suffix}")
         rebuild = existing_count > 0
+    stored_update_trigger = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = ?",
+        (f"{base}_au",),
+    ).fetchone()
+    if stored_update_trigger is not None and " ".join(
+        str(stored_update_trigger[0]).split()
+    ) != " ".join(update_trigger.replace(" IF NOT EXISTS", "", 1).split()):
+        # Replacing a trigger is a schema-only change: no row is rewritten.
+        connection.execute(f"DROP TRIGGER {base}_au")
     _execute_all(
         connection,
         f"""
@@ -1703,18 +1733,70 @@ def _ensure_content_fts(connection: sqlite3.Connection, spec: _ContentFts) -> No
                 VALUES {delete_values};
             END
             """,
-        f"""
-            CREATE TRIGGER IF NOT EXISTS {base}_au
-            AFTER UPDATE ON {base} BEGIN
-                INSERT INTO {fts}{delete_target}
-                VALUES {delete_values};
-                INSERT INTO {fts}{insert_target}
-                VALUES {new_values};
-            END
-            """,
+        update_trigger,
     )
     if rebuild:
         connection.execute(f"INSERT INTO {fts}({fts}) VALUES ('rebuild')")
+
+
+_DECISION_FINDING_INDEX = "idx_decisions_engagement_kind_finding"
+
+
+def _ensure_decision_supersession_columns(connection: sqlite3.Connection) -> None:
+    """Additive migration for the decision supersession link.
+
+    A decision row recorded with ``supersedes`` names the row it replaces in
+    ``supersedes_id``, and that row is stamped ``superseded_by_id`` /
+    ``superseded_at`` in the same transaction; every gate reads only rows with
+    no ``superseded_by_id``. Existing rows supersede nothing and stay current.
+    SQLite cannot ALTER in a REFERENCES constraint; the application enforces
+    the link on legacy files, the CREATE TABLE carries it on fresh ones.
+    """
+
+    columns = _table_columns(connection, "assessment_dispatch_decisions")
+    for name, definition in (
+        ("supersedes_id", "INTEGER"),
+        ("superseded_by_id", "INTEGER"),
+        ("superseded_at", "TEXT"),
+    ):
+        if columns and name not in columns:
+            connection.execute(
+                f"ALTER TABLE assessment_dispatch_decisions ADD COLUMN {name} {definition}"
+            )
+
+
+def _ensure_decision_finding_index(connection: sqlite3.Connection) -> None:
+    """Index dispatch decisions by the finding their payload names.
+
+    The latest QC / blind-triage / claim-equivalence decision is read per
+    finding, keyed on ``json_extract(payload_json, '$.finding_slug')``; without
+    this index each read walks every decision of its kind. ``json_extract``
+    raises on malformed JSON, so an index over it would refuse to build (and
+    then refuse inserts) against a row whose payload is not JSON. Every writer
+    stores ``json.dumps`` output; a database holding a malformed payload anyway
+    keeps working unindexed and says so in the log.
+    """
+
+    if connection.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (_DECISION_FINDING_INDEX,),
+    ).fetchone():
+        return
+    malformed = connection.execute(
+        "SELECT COUNT(*) FROM assessment_dispatch_decisions WHERE NOT json_valid(payload_json)"
+    ).fetchone()[0]
+    if malformed:
+        logger.warning(
+            "assessment_dispatch_decisions holds %d row(s) whose payload_json is not JSON; "
+            "%s is not created and per-finding decision reads scan their kind",
+            malformed,
+            _DECISION_FINDING_INDEX,
+        )
+        return
+    connection.execute(
+        f"CREATE INDEX {_DECISION_FINDING_INDEX} ON assessment_dispatch_decisions("
+        "engagement_id, kind, json_extract(payload_json, '$.finding_slug'), id)"
+    )
 
 
 def _create_core_tables(connection: sqlite3.Connection) -> None:
@@ -2923,6 +3005,8 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
                 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
                 last_indexed_at TEXT,
+                producer_history_json TEXT NOT NULL DEFAULT '[]',
+                content_producer_agent_id TEXT,
                 UNIQUE(engagement_id, relative_path)
             )
             """,
@@ -2984,6 +3068,18 @@ def _create_artifacts_table_and_fts(connection: sqlite3.Connection) -> None:
     if "integrity_status" not in artifact_columns:
         connection.execute(
             "ALTER TABLE assessment_artifacts ADD COLUMN integrity_status TEXT NOT NULL DEFAULT 'unverified'"
+        )
+    # Every agent that registered the path, and the one that registered its
+    # current bytes (NULL when those bytes arrived unattributed). Independent
+    # review gates read these; ``producer_agent_id`` alone carries the last
+    # attribution forward across an unattributed re-registration.
+    if "producer_history_json" not in artifact_columns:
+        connection.execute(
+            "ALTER TABLE assessment_artifacts ADD COLUMN producer_history_json TEXT NOT NULL DEFAULT '[]'"
+        )
+    if "content_producer_agent_id" not in artifact_columns:
+        connection.execute(
+            "ALTER TABLE assessment_artifacts ADD COLUMN content_producer_agent_id TEXT"
         )
     _execute_all(
         connection,
@@ -3624,6 +3720,12 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "retired_at": "TEXT",
         "retirement_reason": "TEXT",
         "replacement_repo_generation": "INTEGER",
+        # The architect's structured context tags (`CodeContextTag`). '' means
+        # no tags were recorded, which is not "none apply" ('[]'): an upgraded
+        # file starts unrecorded, and coverage and code readiness name it until
+        # the architect records its tags. The free-text role label it was
+        # classified with is never read for an obligation.
+        "context_tags_json": "TEXT NOT NULL DEFAULT ''",
     }
     file_columns = _table_columns(connection, "code_files")
     for col_name, col_def in file_history_columns.items():
@@ -3753,13 +3855,29 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "source_superseded_at": "TEXT",
         "source_supersession_reason": "TEXT NOT NULL DEFAULT ''",
         "replacement_repo_generation": "INTEGER",
+        # The verb that inserted the row ('requeue-triggers' for a directed
+        # attempt `withdraw` may take back); '' for every other row, and for
+        # rows written before the column existed, which withdraw refuses.
+        "inserted_by": "TEXT NOT NULL DEFAULT ''",
+        # The first lease claim. A return to pending clears the lease fields
+        # and keeps this, so a released or reset attempt reads as claimed before.
+        "first_claimed_at": "TEXT",
     }
     for col_name, col_def in queue_new_columns.items():
         if queue_columns and col_name not in queue_columns:
             connection.execute(
                 f"ALTER TABLE code_analysis_queue ADD COLUMN {col_name} {col_def}"
             )
-    if queue_columns:
+    if queue_columns and "first_claimed_at" not in queue_columns:
+        # A row's current claim is the earliest one still on record.
+        connection.execute(
+            "UPDATE code_analysis_queue SET first_claimed_at = consumed_at "
+            "WHERE consumed_at IS NOT NULL"
+        )
+    if queue_columns and "queue_mode" not in queue_columns:
+        # Classify the rows written before attempts recorded a mode. Once the
+        # column exists the mode is the writer's: an owed review that trigger
+        # context merged into keeps its own mode and answers for every family.
         connection.execute(
             """
             UPDATE code_analysis_queue
@@ -3831,6 +3949,10 @@ def _apply_additive_migrations(connection: sqlite3.Connection) -> None:
         "source_superseded_at": "TEXT",
         "source_supersession_reason": "TEXT NOT NULL DEFAULT ''",
         "replacement_repo_generation": "INTEGER",
+        # Who raised the trigger: a reviewer naming another file
+        # (`cross_file`), or the backend when a critical/high closeout left a
+        # family below its review-depth floor (`depth_floor`).
+        "origin": "TEXT NOT NULL DEFAULT 'cross_file'",
     }.items():
         if trigger_columns and col_name not in trigger_columns:
             connection.execute(
@@ -4648,7 +4770,10 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 surfaced_to_user INTEGER NOT NULL DEFAULT 0,
                 resolved INTEGER NOT NULL DEFAULT 0,
                 resolution_json TEXT,
-                created_at TEXT NOT NULL
+                created_at TEXT NOT NULL,
+                supersedes_id INTEGER REFERENCES assessment_dispatch_decisions(id),
+                superseded_by_id INTEGER REFERENCES assessment_dispatch_decisions(id),
+                superseded_at TEXT
             )
             """,
         "CREATE INDEX IF NOT EXISTS idx_decisions_engagement_kind "
@@ -4702,6 +4827,8 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             )
             """,
     )
+    _ensure_decision_supersession_columns(connection)
+    _ensure_decision_finding_index(connection)
     # Additive migration for deployments whose table predates the code track.
     # Nullable with no default, so every existing row keeps its web phase and
     # reports no code-track position rather than inheriting a fabricated one.

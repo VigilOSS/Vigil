@@ -290,7 +290,7 @@ def test_assessment_summary_never_walks_every_artifact_row(client, isolate_setti
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
     _seed_finding(client, eng)
     (eng / "RESUME.md").write_text("Deferred work is tracked in `MISSING.md`.", encoding="utf-8")
-    _register_note(client, "RESUME.md", producer_agent_id="operator")
+    _register_note(client, "RESUME.md")
     capture = eng / "evidence" / "capture.txt"
     capture.parent.mkdir(parents=True, exist_ok=True)
     capture.write_text("captured response body\n" * 64, encoding="utf-8")
@@ -589,7 +589,9 @@ def test_suspicious_analysis_counts_seek_results_by_queue_item(
 
     Planned onto the (engagement, generation) index instead, every queue
     attempt rescans every result of its repository generation -- quadratic in
-    the size of a code engagement.
+    the size of a code engagement. The one other lookup, whether a lead beside
+    a finding has been replaced, seeks its replacement by the unique
+    ``supersedes_result_id`` key.
     """
     with _captured_statements() as (connection, statements):
         code_analysis_support._current_suspicious_analysis_counts(connection, 1)
@@ -610,7 +612,11 @@ def test_suspicious_analysis_counts_seek_results_by_queue_item(
         if (match := _PLAN_LINE_RE.match(line)) and match.group("index") in result_indexes
     ]
     assert result_lines, plans
-    assert all("queue_item_id=?" in line for line in result_lines), result_lines
+    assert all(
+        "queue_item_id=?" in line or "(supersedes_result_id=?)" in line
+        for line in result_lines
+    ), result_lines
+    assert any("queue_item_id=?" in line for line in result_lines), result_lines
 
 
 def test_request_variant_reads_seek_observations_by_variant(client, isolate_settings) -> None:

@@ -319,3 +319,36 @@ def test_directory_rows_break_terminal_work_down_by_disposition(client, isolate_
             tier["analyzed"] for tier in row["by_classification"].values()
         )
         assert sum(row["by_disposition"].values()) == analyzed + row["accounted_skips"]
+
+
+def test_summary_names_the_classified_files_closed_as_accounted_skips(
+    client, isolate_settings
+):
+    """The summary's skip count reads the by-path accounted-skip predicate.
+
+    `code-coverage` splits the `classified` bucket into accounted skips and
+    files still owed a queue row. A count taken from a different query than the
+    bucket's own (retired or unclassified files included, the accounting guard
+    left out) names files the bucket does not hold and hides the ones it does.
+    """
+    base, _repo_id, _reference_id, files = _seed(
+        client, isolate_settings, "2026-11-13-coverage-classified-skips"
+    )
+    summary = client.get(f"{base}/coverage").json()
+    assert summary["by_status"]["classified"] == 3
+    assert summary["confidence"]["classified_accounted_skips"] == 1
+
+    generator_id = next(int(row["id"]) for row in files if row["file_path"] == "tools/gen.py")
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        connection.execute(
+            "UPDATE code_files SET classification = 'unclassified' WHERE id = ?",
+            (generator_id,),
+        )
+        connection.commit()
+
+    reclassified = client.get(f"{base}/coverage").json()
+    # The skip reason is still a recorded census entry, but the file left the
+    # `classified` bucket, so it is no longer part of that bucket's split.
+    assert reclassified["confidence"]["skip_reasons"] == {"generated-code": 1}
+    assert reclassified["by_status"]["classified"] == 2
+    assert reclassified["confidence"]["classified_accounted_skips"] == 0

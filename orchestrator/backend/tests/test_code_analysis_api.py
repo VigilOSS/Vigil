@@ -1586,7 +1586,7 @@ def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
         cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert completed.status_code == 200, completed.text
-    trigger = client.get(f"{base}/triggers").json()[0]
+    trigger = client.get(f"{base}/triggers").json()["items"][0]
     prior_parser_hash = parser["file_hash"]
 
     refreshed_manifest = [
@@ -1743,8 +1743,8 @@ def test_changed_generation_preserves_grouped_receipt_queue_and_trigger_history(
         }
     ]
 
-    assert client.get(f"{base}/triggers").json() == []
-    trigger_history = client.get(f"{base}/triggers?include_superseded=true").json()
+    assert client.get(f"{base}/triggers").json()["items"] == []
+    trigger_history = client.get(f"{base}/triggers?include_superseded=true").json()["items"]
     assert [row["id"] for row in trigger_history] == [trigger["id"]]
     assert trigger_history[0]["source_supersession_reason"] == (
         "source_generation_replaced"
@@ -4605,6 +4605,8 @@ def test_bulk_classify_reports_the_structural_invalidation_it_caused(
         "total": 1,
         "structural_index_invalidated_repo_ids": [],
         "language_changes": [],
+        "derived": [],
+        "obligation_changes": [],
     }
 
     corrected = _bulk_classify(
@@ -4633,6 +4635,8 @@ def test_bulk_classify_reports_the_structural_invalidation_it_caused(
                 "language": "c++",
             }
         ],
+        "derived": [],
+        "obligation_changes": [],
     }
 
 
@@ -4806,8 +4810,17 @@ def test_both_classify_doors_refuse_the_same_unexplained_skip(
 @pytest.mark.parametrize(
     ("mutation_mode", "mutation"),
     [
-        ("file-patch", {"classification": "critical", "analysis_priority": 80}),
-        ("file-patch", {"role": "crypto_impl"}),
+        # The review identity is the slot types and the language; a tier or
+        # role change beside a slot change still reopens through the slots.
+        (
+            "file-patch",
+            {
+                "classification": "critical",
+                "analysis_priority": 80,
+                "slot_types_json": ["NETWORK-INPUT", "FILE-CONTENT"],
+            },
+        ),
+        ("file-patch", {"role": "crypto_impl", "slot_types_json": ["URL-COMPONENT"]}),
         ("file-patch", {"slot_types_json": ["SERIALIZED-DATA"]}),
         (
             "bulk-classify",
@@ -5222,7 +5235,7 @@ def test_generation_zero_repo_children_are_hidden_and_immutable_across_public_ap
         json={"limit": 100, "agent_name": "public-agent"},
     ).json() == []
     assert client.get(f"{base}/analysis-results?include_superseded=true").json() == []
-    assert client.get(f"{base}/triggers").json() == []
+    assert client.get(f"{base}/triggers").json()["items"] == []
     summary = client.get(f"{base}/coverage").json()
     assert summary["total_files"] == 0
     assert summary["confidence"]["active_queue_items"] == 0
@@ -5891,7 +5904,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
         cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert metadata_done.status_code == 200, metadata_done.text
-    after_unseen_review = client.get(f"{base}/triggers").json()[0]
+    after_unseen_review = client.get(f"{base}/triggers").json()["items"][0]
     assert after_unseen_review["status"] == "pending"
     assert after_unseen_review["resolved_queue_item_id"] is None
 
@@ -5922,7 +5935,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
     assert trigger_skipped.status_code == 200, trigger_skipped.text
     after_valid_skip = next(
         row
-        for row in client.get(f"{base}/triggers").json()
+        for row in client.get(f"{base}/triggers").json()["items"]
         if row["id"] == resolved_trigger_id
     )
     assert after_valid_skip["status"] == "pending"
@@ -5936,7 +5949,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
     assert final_requeue.json()["inserted"] == 1
     rebound_trigger = next(
         row
-        for row in client.get(f"{base}/triggers").json()
+        for row in client.get(f"{base}/triggers").json()["items"]
         if row["id"] == resolved_trigger_id
     )
     assert rebound_trigger["resolved_queue_item_id"] != trigger_claim["id"]
@@ -5971,7 +5984,7 @@ def test_same_hash_risk_metadata_change_reopens_review_at_prior_priority(
     )
     assert final_done.status_code == 200, final_done.text
     trigger_statuses = {
-        row["id"]: row["status"] for row in client.get(f"{base}/triggers").json()
+        row["id"]: row["status"] for row in client.get(f"{base}/triggers").json()["items"]
     }
     assert trigger_statuses[resolved_trigger_id] == "resolved"
     assert trigger_statuses[accepted_gap_trigger_id] == "not_applicable"
@@ -6100,8 +6113,8 @@ def test_rename_preserves_file_id_and_invalidates_path_sensitive_analysis(client
     assert result_history[0]["source_supersession_reason"] == (
         "source_generation_replaced"
     )
-    assert client.get(f"{base}/triggers").json() == []
-    trigger_history = client.get(f"{base}/triggers?include_superseded=true").json()
+    assert client.get(f"{base}/triggers").json()["items"] == []
+    trigger_history = client.get(f"{base}/triggers?include_superseded=true").json()["items"]
     assert len(trigger_history) == 1
     assert trigger_history[0]["target_file_id"] == helper["id"]
     assert trigger_history[0]["target_file_path"] == "src/helpers.py"
@@ -6728,7 +6741,7 @@ def test_durable_code_classes_must_be_canonical(client, isolate_settings):
     )
     assert bad_trigger.status_code == 400, bad_trigger.text
     assert "path-traversal" in bad_trigger.json()["detail"]
-    assert client.get(f"{base}/triggers").json() == []
+    assert client.get(f"{base}/triggers").json()["items"] == []
 
     # The hint has to fold case before matching: `sqli`, `xss` and `csrf` all
     # exist verbatim, so a class typed in the wrong case is a spelling the
@@ -6778,7 +6791,7 @@ def test_durable_code_classes_must_be_canonical(client, isolate_settings):
     assert "nearest canonical class" not in unrelated_detail
     assert "Allowed values: " in unrelated_detail
     assert "sqli" in unrelated_detail
-    assert client.get(f"{base}/triggers").json() == []
+    assert client.get(f"{base}/triggers").json()["items"] == []
 
     bad_family = _close_queue_item(
         client, engagement_key, claim,
@@ -6801,7 +6814,10 @@ def test_durable_code_classes_must_be_canonical(client, isolate_settings):
         notes="reviewed",
         cwe_coverage=[
             *_network_input_coverage(default_effort=80),
-            {"family": "race-condition", "effort": 0, "not_applicable": True},
+            {
+                "family": "race-condition", "effort": 0, "not_applicable": True,
+                "notes": "The parser holds no shared state.",
+            },
         ],
     )
     assert accepted.status_code == 200, accepted.text
@@ -7215,6 +7231,9 @@ def test_suspicious_result_atomically_materializes_its_run_candidate(
             },
             "disposition": "finding",
             "finding_slug": "CH-991",
+            # The finding answers the suspicious receipt's hypothesis on the
+            # same anchors, so it replaces it.
+            "supersedes": first.json()["id"],
         },
     )
     assert linked_finding_result.status_code == 201, linked_finding_result.text
@@ -7599,7 +7618,7 @@ def test_candidate_result_cannot_be_downcast_by_queue_closeout(
     assert [row["id"] for row in current_results] == [candidate.json()["id"]]
 
 
-def test_conflicting_candidate_result_dispositions_fail_closed(
+def test_a_finding_receipt_takes_precedence_over_a_suspicious_receipt_at_close(
     client, isolate_settings
 ):
     engagement_key = "2026-08-05-code-closeout-conflicting-candidates"
@@ -7618,36 +7637,53 @@ def test_conflicting_candidate_result_dispositions_fail_closed(
     claim = _claim_file_for_analysis(
         client, engagement_key, int(parser_file["id"]), agent_name="candidate-agent"
     )
-    for disposition in ("finding", "suspicious"):
-        created = client.post(
-            f"/engagements/{engagement_key}/assessment/code/analysis-results",
-            json=_owned(
-                claim,
-                queue_item_id=claim["id"],
-                disposition=disposition,
-                evidence=f"Current evidenced {disposition} candidate.",
-                **({"finding_slug": "CH-706"} if disposition == "finding" else {}),
-            ),
-        )
-        assert created.status_code == 201, created.text
+    created = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="finding",
+            evidence="Current evidenced finding candidate.",
+            finding_slug="CH-706",
+        ),
+    )
+    assert created.status_code == 201, created.text
+    lead = client.post(
+        f"/engagements/{engagement_key}/assessment/code/analysis-results",
+        json=_owned(
+            claim,
+            queue_item_id=claim["id"],
+            disposition="suspicious",
+            hypothesis="A second decoder path may skip the length guard.",
+            evidence="Current evidenced suspicious lead.",
+        ),
+    )
+    assert lead.status_code == 201, lead.text
 
     rejected = _close_queue_item(
         client, engagement_key, claim,
-        disposition="finding",
-        notes="Cannot choose between contradictory candidate receipts.",
+        disposition="suspicious",
+        notes="A suspicious close would bury the recorded finding.",
         cwe_coverage=_network_input_coverage(default_effort=80),
     )
 
     assert rejected.status_code == 409
-    assert "conflicting candidate-bearing analysis result dispositions" in rejected.json()[
-        "detail"
-    ]
+    assert "requires queue disposition='finding'" in rejected.json()["detail"]
     db_path = isolate_settings["data_dir"] / "orchestrator.sqlite3"
     with sqlite3.connect(str(db_path)) as connection:
         queue_status = connection.execute(
             "SELECT status FROM code_analysis_queue WHERE id = ?", (claim["id"],)
         ).fetchone()[0]
     assert queue_status == "processing"
+
+    closed = _close_queue_item(
+        client, engagement_key, claim,
+        disposition="finding",
+        notes="CH-706 recorded; the second decoder path stays a lead.",
+        cwe_coverage=_network_input_coverage(default_effort=80),
+    )
+    assert closed.status_code == 200, closed.text
+    assert closed.json()["open_lead_receipts"] == [lead.json()["id"]]
 
 
 def test_clean_closeout_requires_nonempty_review_notes(client, isolate_settings):
@@ -8269,11 +8305,11 @@ def test_bulk_classify_rejects_high_without_slot_types(client, isolate_settings)
     assert "slot_types" in response.json()["detail"]
 
 
-def test_applicable_families_include_serialization_and_role_derived_contexts():
+def test_applicable_families_include_serialization_and_context_tag_families():
     serialized = code_analysis._applicable_families_for_file(
         ["SERIALIZED-DATA"],
         language="python",
-        role="deserializer",
+        context_tags=["parser"],
     )
     assert "deserialization" in serialized
     assert "algorithmic-dos" in serialized
@@ -8281,14 +8317,14 @@ def test_applicable_families_include_serialization_and_role_derived_contexts():
     crypto = code_analysis._applicable_families_for_file(
         ["NETWORK-INPUT"],
         language="python",
-        role="crypto_impl",
+        context_tags=["crypto"],
     )
     assert "crypto-misuse" in crypto
 
     auth = code_analysis._applicable_families_for_file(
         ["NETWORK-INPUT"],
         language="python",
-        role="auth_handler",
+        context_tags=["authentication"],
     )
     assert "auth-bypass" in auth
     assert "web-app-auth" in auth
@@ -8296,7 +8332,7 @@ def test_applicable_families_include_serialization_and_role_derived_contexts():
     error_handler = code_analysis._applicable_families_for_file(
         ["NETWORK-INPUT"],
         language="c",
-        role="error_handler",
+        context_tags=["error-handling"],
     )
     assert "error-handling" in error_handler
     assert "null-dereference" in error_handler
@@ -8304,7 +8340,7 @@ def test_applicable_families_include_serialization_and_role_derived_contexts():
     allocator = code_analysis._applicable_families_for_file(
         ["NETWORK-INPUT"],
         language="c",
-        role="memory_allocator",
+        context_tags=["allocator"],
     )
     assert "uninitialized-memory" in allocator
     assert "algorithmic-dos" in allocator
@@ -8312,14 +8348,14 @@ def test_applicable_families_include_serialization_and_role_derived_contexts():
     graphql = code_analysis._applicable_families_for_file(
         ["URL-COMPONENT"],
         language="python",
-        role="graphql_resolver",
+        context_tags=["response-data"],
     )
     assert "web-app-data-exposure" in graphql
 
     llm = code_analysis._applicable_families_for_file(
         ["NETWORK-INPUT"],
         language="python",
-        role="llm_orchestrator",
+        context_tags=["ai-model"],
     )
     assert "ai-ml-security" in llm
 
@@ -8329,7 +8365,6 @@ def test_untrusted_transport_slots_include_resource_and_error_handling_families(
     families = code_analysis._applicable_families_for_file(
         [slot_type],
         language="c++",
-        role="http-client-core",
     )
 
     assert "algorithmic-dos" in families
@@ -8347,7 +8382,7 @@ def test_untrusted_transport_slots_include_resource_and_error_handling_families(
 def test_request_input_slots_require_injection_traversal_upload_and_deserialization(
     slot_type, language, required
 ):
-    families = code_analysis._applicable_families_for_file([slot_type], language=language, role="controller")
+    families = code_analysis._applicable_families_for_file([slot_type], language=language)
 
     assert required <= set(families)
 
@@ -8357,7 +8392,6 @@ def test_native_files_include_resource_and_error_handling_families_with_sparse_c
     families = code_analysis._applicable_families_for_file(
         slot_types,
         language="c++",
-        role="",
     )
 
     assert "algorithmic-dos" in families
@@ -8368,7 +8402,6 @@ def test_managed_supported_file_has_real_resource_and_error_handling_floor():
     families = code_analysis._applicable_families_for_file(
         ["FILE-CONTENT"],
         language="python",
-        role="storage",
     )
 
     assert "algorithmic-dos" in families
@@ -8377,7 +8410,7 @@ def test_managed_supported_file_has_real_resource_and_error_handling_floor():
 
 def test_freemarker_template_file_content_prioritizes_rendering_defects():
     families = code_analysis._applicable_families_for_file(
-        ["FILE-CONTENT"], language="freemarker", role="email-template"
+        ["FILE-CONTENT"], language="freemarker"
     )
     assert "web-app-injection" in families
     assert not {"buffer-overflow", "integer-overflow", "type-confusion", "deserialization"} & set(families)
@@ -8411,7 +8444,6 @@ def test_unknown_language_does_not_receive_a_synthetic_family_floor():
     families = code_analysis._applicable_families_for_file(
         [],
         language="",
-        role="",
     )
 
     assert families == []
@@ -8543,7 +8575,7 @@ def test_repo_patch_rejects_sealed_source_identity(
     assert client.get(endpoint).json()[field_name] == repo[field_name]
 
 
-def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_overrides(client, isolate_settings):
+def test_queue_fetch_uses_backend_applicable_classes_with_context_tags_and_language_overrides(client, isolate_settings):
     engagement_key = "2026-04-09-code-queue-applicable-vulns"
     repo, files = _seed_repo_files(client, isolate_settings, engagement_key, repo_key="queue-applicable-vulns-repo")
     parser_file = next(item for item in files if item["file_path"] == "src/parser.py")
@@ -8556,6 +8588,7 @@ def test_queue_fetch_uses_backend_applicable_classes_with_role_and_language_over
                     "file_id": parser_file["id"],
                     "classification": "critical",
                     "role": "crypto_impl",
+                    "context_tags": ["crypto"],
                     "language": "c++",
                     "slot_types": ["SERIALIZED-DATA"],
                     "analysis_priority": 95,
@@ -9454,7 +9487,7 @@ def test_pending_trigger_can_be_resolved_as_external_context_gap(client, isolate
 
     pending = client.get(f"/engagements/{engagement_key}/assessment/code/triggers?status=pending")
     assert pending.status_code == 200
-    assert pending.json()[0]["target_file_path"] == "bin/StorageService.dll"
+    assert pending.json()["items"][0]["target_file_path"] == "bin/StorageService.dll"
 
     coverage_before = client.get(
         f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
@@ -9573,6 +9606,7 @@ def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
                 "ssrf": {
                     "effort": 0,
                     "disposition": "not_applicable",
+                    "notes": "Believed to make no outbound request.",
                 }
             },
         ),
@@ -9603,8 +9637,7 @@ def test_reanalysis_effort_gate_does_not_skip_family_with_stale_not_applicable(
     )
     assert coverage_after.status_code == 200
     gate = coverage_after.json()["gate"]
-    assert gate["passed"] is False
-    assert any("family 'ssrf' effort 10 < 70" in reason for reason in gate["reasons"])
+    assert any("family 'ssrf' effort 10 < 70" in warning for warning in gate["effort_warnings"])
 
 
 def test_effort_gate_names_every_family_under_the_threshold(client, isolate_settings):
@@ -9622,22 +9655,20 @@ def test_effort_gate_names_every_family_under_the_threshold(client, isolate_sett
     )
     assert done.status_code == 200, done.text
 
-    reasons = client.get(
+    warnings = client.get(
         f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
-    ).json()["gate"]["reasons"]
+    ).json()["gate"]["effort_warnings"]
 
-    assert any("family 'ssrf' effort 10 < 70" in reason for reason in reasons)
-    assert any("family 'file-upload' effort 20 < 70" in reason for reason in reasons)
+    assert any("family 'ssrf' effort 10 < 70" in warning for warning in warnings)
+    assert any("family 'file-upload' effort 20 < 70" in warning for warning in warnings)
 
 
 def test_effort_harness_measures_medium_files_and_leaves_low_alone(
     client, isolate_settings
 ):
-    """`done` demands a coverage entry per applicable family at every tier, but
-    an `effort: 0` entry satisfies it, so a medium file can close with a token
-    number. The harness measures that against the medium threshold and names it
-    in `effort_warnings`; `tests/test_code_effort_gate_tiers.py` owns which
-    tiers the number is allowed to refuse the gate for.
+    """A medium file's effort is measured against the medium threshold and
+    named in `effort_warnings`; `tests/test_code_effort_gate_tiers.py` owns the
+    rule that no tier's self-attested number refuses the gate.
 
     Precision matters more than reach here: medium files are not required to
     carry slot_types, so the two metadata-completeness warnings stay
@@ -9872,7 +9903,7 @@ def test_trigger_status_does_not_trust_mutable_file_analysis_rollup(client, isol
 
     triggers = client.get(
         f"/engagements/{engagement_key}/assessment/code/triggers"
-    ).json()
+    ).json()["items"]
     assert len(triggers) == 1
     assert triggers[0]["status"] == "pending"
 
@@ -9937,7 +9968,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
         ),
     )
     assert trigger_result.status_code == 201, trigger_result.text
-    triggers = client.get(f"{base}/triggers").json()
+    triggers = client.get(f"{base}/triggers").json()["items"]
     assert {row["vuln_class"] for row in triggers} == {
         "error-handling",
         "path-traversal",
@@ -10020,7 +10051,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
         for row in follow_up["cross_file_triggers"]
         if row.get("trigger_id") is not None
     )
-    assert {row["status"] for row in client.get(f"{base}/triggers").json()} == {
+    assert {row["status"] for row in client.get(f"{base}/triggers").json()["items"]} == {
         "queued"
     }
 
@@ -10044,7 +10075,7 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
         cwe_coverage=_network_input_coverage(default_effort=80),
     )
     assert follow_up_done.status_code == 200, follow_up_done.text
-    assert {row["status"] for row in client.get(f"{base}/triggers").json()} == {
+    assert {row["status"] for row in client.get(f"{base}/triggers").json()["items"]} == {
         "resolved"
     }
 
@@ -10064,9 +10095,9 @@ def test_late_cross_file_trigger_requires_its_bound_post_trigger_review(
             }
         ],
     )
-    stale_triggers = client.get(f"{base}/triggers").json()
+    stale_triggers = client.get(f"{base}/triggers").json()["items"]
     assert stale_triggers == []
-    trigger_history = client.get(f"{base}/triggers?include_superseded=true").json()
+    trigger_history = client.get(f"{base}/triggers?include_superseded=true").json()["items"]
     assert {row["status"] for row in trigger_history} == {"resolved"}
     assert {row["resolved_queue_item_id"] for row in trigger_history} == {
         linked_item_id
@@ -10296,7 +10327,8 @@ def test_coverage_summary_tolerates_non_numeric_effort_values(client, isolate_se
     queue_item = claimed.json()[0]
     _record_fixture_source_receipt(client, engagement_key, queue_item)
 
-    done = _close_queue_item(
+    # A non-numeric effort is refused on the write ...
+    refused = _close_queue_item(
         client, engagement_key, queue_item,
         disposition="clean",
         notes="Reviewed",
@@ -10305,15 +10337,42 @@ def test_coverage_summary_tolerates_non_numeric_effort_values(client, isolate_se
             overrides={"web-app-injection": {"effort": "unknown"}},
         ),
     )
-    assert done.status_code == 200
+    assert refused.status_code == 400, refused.text
+    assert "web-app-injection" in refused.json()["detail"]
+    done = _close_queue_item(
+        client, engagement_key, queue_item,
+        disposition="clean",
+        notes="Reviewed",
+        cwe_coverage=_network_input_coverage(default_effort=80),
+    )
+    assert done.status_code == 200, done.text
+    # ... and one an older backend stored still reads as effort 0.
+    with sqlite3.connect(str(db_module.database_path())) as connection:
+        row = connection.execute(
+            "SELECT cwe_coverage_json FROM code_analysis_queue WHERE id = ?", (queue_item["id"],)
+        ).fetchone()
+        stored = [
+            {**entry, "effort": "unknown"} if entry["family"] == "web-app-injection" else entry
+            for entry in json.loads(row[0])
+        ]
+        connection.execute(
+            "UPDATE code_analysis_queue SET cwe_coverage_json = ? WHERE id = ?",
+            (json.dumps(stored), queue_item["id"]),
+        )
+        connection.execute(
+            "UPDATE code_analysis_results SET cwe_coverage_json = '[]' WHERE queue_item_id = ?",
+            (queue_item["id"],),
+        )
 
     coverage = client.get(
         f"/engagements/{engagement_key}/assessment/code/coverage?repo_id={repo['id']}"
     )
     assert coverage.status_code == 200
     payload = coverage.json()
-    assert payload["gate"]["passed"] is False
-    assert any("web-app-injection" in reason for reason in payload["gate"]["reasons"])
+    assert any(
+        "family 'web-app-injection' effort 0 < 70" in warning
+        for warning in payload["gate"]["effort_warnings"]
+    )
 
 
 def test_coverage_summary_excludes_false_positive_variants(client, isolate_settings):
@@ -11376,7 +11435,7 @@ def test_readiness_separates_snapshot_lifecycle_blockers_from_quality_warnings(
     payload = classify_map.json()
     assert payload["target_phase"] == "classify-map"
     assert payload["transition_ready"] is False
-    assert payload["quality_gate"] == {"passed": True, "warnings": []}
+    assert payload["quality_gate"] == {"passed": True, "warnings": [], "effort_gap_warnings": []}
     assert payload["blockers"] == [
         {
             "code": "structural_index_stale",
@@ -13890,6 +13949,21 @@ def test_fuzz_readiness_keeps_effort_warnings_advisory(client, isolate_settings)
     )
     assert decision.status_code == 201, decision.text
 
+    # The shallow critical review is owed as depth-floor triggers until a
+    # directed pass or a recorded resolution settles each one.
+    owed = [
+        row for row in client.get(f"{base}/triggers?status=pending").json()["items"]
+        if row["origin"] == "depth_floor"
+    ]
+    assert owed
+    blocked = client.get(f"{base}/readiness?target_phase=fuzz").json()
+    assert {blocker["code"] for blocker in blocked["blockers"]} == {"depth_floor_triggers"}
+    assert client.post(f"{base}/triggers/resolve", json={
+        "items": [{"trigger_id": row["id"]} for row in owed],
+        "resolution_status": "not_applicable",
+        "resolution_note": "Deliberately shallow fixture review; documented exclusion.",
+    }).status_code == 200
+
     readiness = client.get(f"{base}/readiness?target_phase=fuzz")
     assert readiness.status_code == 200, readiness.text
     payload = readiness.json()
@@ -14879,7 +14953,7 @@ def test_analysis_results_dedupe_cross_file_triggers_across_writers(client, isol
     assert coverage.json()["trigger_summary"]["pending"] == 3
     triggers = client.get(
         f"/engagements/{engagement_key}/assessment/code/triggers"
-    ).json()
+    ).json()["items"]
     assert len(triggers) == 3
     assert len({(row["source_queue_item_id"], row["reason"]) for row in triggers}) == 3
 
@@ -15177,7 +15251,7 @@ def test_coverage_integrity_passes_with_matching_results(client, isolate_setting
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
-    assert integrity["plausible"] is True
+    assert integrity["receipts_consistent"] is True
     assert integrity["current_receipt_rows"] == 1
     assert integrity["distinct_structural_callables_reviewed"] == 1
     assert len(integrity["warnings"]) == 0
@@ -15212,7 +15286,7 @@ def test_coverage_integrity_treats_claimed_exceeds_total_as_advisory(client, iso
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
-    assert integrity["plausible"] is True
+    assert integrity["receipts_consistent"] is True
     assert integrity["authoritative_blockers"] == []
     assert any("exceeds" in item for item in integrity["advisories"])
 
@@ -15239,13 +15313,19 @@ def test_coverage_integrity_skips_not_applicable_entries(client, isolate_setting
     coverage = [
         {"family": "web-app-injection", "effort": 70, "functions_analyzed": 2},
         {"family": "web-app-auth", "effort": 70, "functions_analyzed": 2},
-        {"family": "ssrf", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
-        {"family": "open-redirect", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "ssrf", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0,
+         "notes": "Acme: the family cannot occur here."},
+        {"family": "open-redirect", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0,
+         "notes": "Acme: the family cannot occur here."},
         {"family": "path-traversal", "effort": 70, "functions_analyzed": 2},
-        {"family": "deserialization", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
-        {"family": "file-upload", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
-        {"family": "algorithmic-dos", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
-        {"family": "error-handling", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0},
+        {"family": "deserialization", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0,
+         "notes": "Acme: the family cannot occur here."},
+        {"family": "file-upload", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0,
+         "notes": "Acme: the family cannot occur here."},
+        {"family": "algorithmic-dos", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0,
+         "notes": "Acme: the family cannot occur here."},
+        {"family": "error-handling", "disposition": "not_applicable", "effort": 0, "functions_analyzed": 0,
+         "notes": "Acme: the family cannot occur here."},
     ]
 
     done = _close_queue_item(
@@ -15256,7 +15336,7 @@ def test_coverage_integrity_skips_not_applicable_entries(client, isolate_setting
     )
     assert done.status_code == 200
     integrity = done.json()["coverage_integrity"]
-    assert integrity["plausible"] is True
+    assert integrity["receipts_consistent"] is True
     assert len(integrity["warnings"]) == 0
 
 
@@ -15990,7 +16070,7 @@ def test_queue_stats_projects_latest_attempt_and_reports_preserved_history(
 
     reopened = client.patch(
         f"{base}/files/{file_row['id']}",
-        json={"role": "network-parser-v2"},
+        json={"slot_types_json": ["NETWORK-INPUT", "FILE-CONTENT"]},
     )
     assert reopened.status_code == 200, reopened.text
 
@@ -16044,8 +16124,8 @@ def test_reclassification_refuses_to_force_close_a_live_lease(
     """A re-classification must not discharge work another agent still holds.
 
     `analysis_priority` has always been refused while a lease is live; the
-    review identity (classification / role / slot_types / language) took the
-    same reopen path with no guard, closing the row `done`/`superseded` and
+    tier and the review identity (slot_types / language) took the same reopen
+    path with no guard, closing the row `done`/`superseded` and
     superseding every receipt under the holder's feet. The holder then saw a
     plain "not processing" and "current status is done" — indistinguishable
     from a reclaim.
@@ -16061,7 +16141,9 @@ def test_reclassification_refuses_to_force_close_a_live_lease(
     assert before["status"] == "processing"
     assert before["current_results"] == 1
 
-    patched = client.patch(f"{base}/files/{file_id}", json={"role": "network-parser-v2"})
+    patched = client.patch(
+        f"{base}/files/{file_id}", json={"slot_types_json": ["NETWORK-INPUT", "FILE-CONTENT"]}
+    )
     assert patched.status_code == 409, patched.text
     detail = patched.json()["detail"]
     assert str(queue_item["agent_name"]) in detail
@@ -16082,6 +16164,12 @@ def test_reclassification_refuses_to_force_close_a_live_lease(
     )
     assert classified.status_code == 409, classified.text
     assert str(queue_item["agent_name"]) in classified.json()["detail"]
+    assert _live_lease_queue_row(file_id) == before
+
+    # The role is descriptive metadata: relabelling it takes nothing from the holder.
+    relabelled = client.patch(f"{base}/files/{file_id}", json={"role": "network-parser-v2"})
+    assert relabelled.status_code == 200, relabelled.text
+    assert relabelled.json()["role"] == "network-parser-v2"
     assert _live_lease_queue_row(file_id) == before
 
     # The holder's own lifecycle calls still work: nothing was taken from it.
@@ -16692,7 +16780,9 @@ def test_concurrent_initial_and_trigger_writers_keep_one_trigger_protected_row(
             (file_row["id"],),
         ).fetchall()
     assert len(rows) == 1
-    assert rows[0]["queue_mode"] == "trigger"
+    # Whichever writer inserted the row owns its mode: a trigger merged into
+    # the initial review leaves that review owed for every family.
+    assert rows[0]["queue_mode"] == ("trigger" if trigger_result["inserted"] else "initial")
     assert json.loads(rows[0]["cross_file_triggers_json"])[0]["reason"] == "race trigger"
 
 
@@ -16884,7 +16974,13 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
     assert suspicious_blockers == [
         {
             "code": "unresolved_suspicious_analysis",
-            "message": "Repository has 1 current suspicious analysis attempt(s) requiring a finding or clean terminal reanalysis.",
+            "message": (
+                "Repository has 1 file(s) whose latest review holds a suspicious receipt "
+                "awaiting a verdict (a `suspicious` close, or a lead beside a `finding` "
+                "close); settle each with a targeted `code-dispatch reanalyze` that records "
+                "the finding or a clean receipt citing the guard. `vigil assess fetch "
+                "'code/analysis-results/page?scope=awaiting_verdict'` lists them."
+            ),
             "overrideable": False,
             "repo_id": repo["id"],
         }
@@ -16911,8 +17007,9 @@ def test_verify_variant_readiness_blocks_only_current_suspicious_attempt(
             "repo_id": repo["id"],
             "suspicious_count": 1,
             "detail": (
-                "repository has 1 current suspicious code-analysis attempt(s); "
-                "promote each to a finding or complete a clean terminal reanalysis"
+                "repository has 1 code file(s) whose latest review holds a "
+                "suspicious receipt awaiting a verdict; settle each with a targeted "
+                "reanalysis that records the finding or a clean receipt citing the guard"
             ),
             "severity": "block",
         }

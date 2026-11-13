@@ -17,16 +17,20 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 
+from .aggregate_reads import AggregateReadMiddleware
 from .api.activity import router as activity_router
 from .api.admin import router as admin_router
 from .api.artifacts import router as artifacts_router
 from .api.assessment import router as assessment_router
+from .api.assessment_operator import router as assessment_operator_router
+from .api.assessment_proof_work import router as assessment_proof_work_router
 from .api.code_analysis import router as code_analysis_router
 from .api.credentials import router as credentials_router
 from .api.dashboard import router as dashboard_router
 from .api.engagements import router as engagements_router
 from .api.events import router as events_router
 from .api.intel import router as intel_router
+from .api.query_params import REJECT_UNKNOWN_QUERY_PARAMS
 from .api.report_export import router as report_export_router
 from .api.remediation import router as remediation_router
 from .api.submissions import router as submissions_router
@@ -380,6 +384,9 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
+# Added first so it runs inside diagnostics: a request waiting for its
+# aggregate-read turn is still a request in flight.
+app.add_middleware(AggregateReadMiddleware)
 app.add_middleware(RequestDiagnosticsMiddleware, diagnostics=request_diagnostics)
 
 
@@ -420,18 +427,20 @@ app.include_router(events_router)
 app.include_router(artifacts_router)
 app.include_router(submissions_router)
 app.include_router(assessment_router)
+app.include_router(assessment_operator_router)
+app.include_router(assessment_proof_work_router)
 app.include_router(report_export_router)
 app.include_router(code_analysis_router)
 app.include_router(intel_router)
 app.include_router(activity_router)
 
 
-@app.get("/healthz")
+@app.get("/healthz", dependencies=[REJECT_UNKNOWN_QUERY_PARAMS])
 async def healthz() -> dict[str, str]:
     return {"status": "ok", "app": settings.app_name}
 
 
-@app.get("/readyz", response_model=None)
+@app.get("/readyz", response_model=None, dependencies=[REJECT_UNKNOWN_QUERY_PARAMS])
 def readyz() -> JSONResponse | dict[str, object]:
     with get_connection() as connection:
         connection.execute("SELECT 1").fetchone()

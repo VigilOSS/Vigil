@@ -490,7 +490,7 @@ def test_readiness_items_carry_their_own_gating_class(client, isolate_settings):
     )
     registered = client.post(
         f"/engagements/{ENGAGEMENT_KEY}/assessment/artifacts",
-        json={"path": "RESUME.md", "kind": "note", "producer_agent_id": "operator"},
+        json={"path": "RESUME.md", "kind": "note"},
     )
     assert registered.status_code == 201, registered.text
 
@@ -736,7 +736,13 @@ def test_summary_allow_list_mirrors_the_report_summary_contract():
 
 
 def test_attack_chain_allow_lists_mirror_the_report_chain_contracts():
-    assert set(report_export._CHAIN_FIELDS) == _declared_fields("ReportAttackChain")
+    # Like the summary, a delivered chain has a copied half and a derived half
+    # (whether this report's own findings prove it); together they are exactly
+    # ReportAttackChain.
+    copied = set(report_export._CHAIN_FIELDS)
+    derived = set(report_export._DERIVED_CHAIN_FIELDS)
+    assert copied.isdisjoint(derived)
+    assert copied | derived == _declared_fields("ReportAttackChain")
     assert set(report_export._CHAIN_LINK_FIELDS) == _declared_fields(
         "ReportAttackChainLink"
     )
@@ -932,6 +938,113 @@ def test_report_payload_carries_attack_chain_steps_in_recorded_order(
         isolate_settings["engagements_dir"] / ENGAGEMENT_KEY / relative_path
     ).read_text(encoding="utf-8")
     assert "CHAIN-MARKER" not in delivered
+
+
+def _chain(client, chain_key: str, severity: str, links: list[dict]) -> None:
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/attack-chains",
+        json={
+            "chain_key": chain_key,
+            "title": chain_key,
+            "severity": severity,
+            "narrative": f"{chain_key} narrative",
+            "links": links,
+        },
+    )
+    assert response.status_code == 201, response.text
+
+
+def _step(slug: str) -> dict:
+    return {"relation": "step", "entity_kind": "finding", "entity_ref": slug}
+
+
+def _medium_finding(slug: str, title: str) -> dict:
+    payload = _finding(slug, title, severity="medium")
+    payload["details"].update(
+        {"cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N", "cvss_score": 5.3}
+    )
+    return payload
+
+
+def test_report_derives_chain_severity_only_from_chains_its_own_findings_prove(
+    client, isolate_settings, fake_template
+):
+    """The chain-derived severity counts a chain only when this report proves it.
+
+    A chain qualifies when it has at least one step and every step names a
+    finding this report delivers with a verified status. The author's stated
+    chain severity still travels beside it, and no leg's own severity changes:
+    two medium legs stay medium inside a high chain.
+    """
+    _seed(client, isolate_settings)
+    _add_finding(client, _medium_finding("VA-120", "Guard skipped on admin router"))
+    _add_finding(client, _medium_finding("VA-121", "Admin export reachable"))
+    # Recorded, never verified: no report projection delivers it.
+    _record_finding(client, _medium_finding("VA-122", "Unverified pivot"))
+
+    _chain(client, "chain-proven-high", "high", [_step("VA-120"), _step("VA-121")])
+    # One step is not a delivered, verified finding.
+    _chain(client, "chain-unverified-leg", "critical", [_step("VA-120"), _step("VA-122")])
+    # Zero steps: supporting context alone proves nothing.
+    _chain(
+        client,
+        "chain-no-steps",
+        "critical",
+        [{"relation": "supporting-evidence", "entity_kind": "finding", "entity_ref": "VA-120"}],
+    )
+    # A step that is not a finding at all.
+    _chain(
+        client,
+        "chain-host-step",
+        "critical",
+        [_step("VA-121"), {"relation": "step", "entity_kind": "host", "entity_ref": "acme.example"}],
+    )
+
+    response = _export(client, mode="draft")
+    assert response.status_code == 200, response.text
+    payload = _injected_payload(isolate_settings, response.json()["relative_path"])
+
+    summary = payload["summary"]
+    assert summary["chain_proven_severity"] == "high"
+    assert summary["chain_stated_severity"] == "critical"
+
+    proven = {chain["chain_key"]: chain["chain_proven"] for chain in payload["attack_chains"]}
+    assert proven == {
+        "chain-proven-high": True,
+        "chain-unverified-leg": False,
+        "chain-no-steps": False,
+        "chain-host-step": False,
+    }
+    # The author's stated severity is copied verbatim on every chain.
+    stated = {chain["chain_key"]: chain["severity"] for chain in payload["attack_chains"]}
+    assert stated["chain-proven-high"] == "high"
+    assert stated["chain-unverified-leg"] == "critical"
+
+    legs = {
+        record["slug"]: record["severity"]
+        for record in payload["finding_groups"]["standalone"]
+    }
+    assert legs == {"VA-120": "medium", "VA-121": "medium"}
+
+
+def test_report_without_a_proven_chain_derives_no_chain_severity(
+    client, isolate_settings, fake_template
+):
+    _seed(client, isolate_settings)
+    _add_finding(client, _finding("VA-130", "Missing authorization on admin API"))
+
+    response = _export(client, mode="draft")
+    assert response.status_code == 200, response.text
+    summary = _injected_payload(isolate_settings, response.json()["relative_path"])["summary"]
+    assert summary["chain_proven_severity"] is None
+    assert summary["chain_stated_severity"] is None
+
+    _chain(client, "chain-no-steps", "high", [])
+    response = _export(client, mode="draft")
+    assert response.status_code == 200, response.text
+    summary = _injected_payload(isolate_settings, response.json()["relative_path"])["summary"]
+    assert summary["chain_proven_severity"] is None
+    assert summary["chain_stated_severity"] == "high"
 
 
 def test_report_payload_carries_every_root_cause_group_key(

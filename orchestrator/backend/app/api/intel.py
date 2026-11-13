@@ -15,6 +15,7 @@ from fastapi import APIRouter, HTTPException, Query, status
 from ..services import intel as intel_service
 from ..services import state_manager
 from ..services.engagements import get_engagement_or_404
+from ..services.state_manager.coverage_readiness import check_waf_measurement
 from ..ws import broadcaster
 from .assessment import _offload
 from .intel_schemas import (
@@ -33,9 +34,13 @@ from .intel_schemas import (
     SocialProfileRecordRequest,
     TechComponentRecordRequest,
 )
+from .query_params import DeclaredQueryParamsRoute
 
 
-router = APIRouter(prefix="/engagements/{engagement_key}/intel", tags=["intel"])
+router = APIRouter(
+    prefix="/engagements/{engagement_key}/intel", tags=["intel"],
+    route_class=DeclaredQueryParamsRoute,
+)
 DEFAULT_INTEL_LIST_LIMIT = 100
 MAX_INTEL_LIST_LIMIT = 500
 
@@ -179,6 +184,7 @@ async def create_tech_component(
     engagement_key: str, request: TechComponentRecordRequest
 ) -> dict[str, Any]:
     engagement = await _offload(get_engagement_or_404, engagement_key)
+    await _offload(check_waf_measurement, engagement.id, request.provenance)
     record = await _offload(intel_service.record_tech_component, engagement.id, **request.model_dump())
     await _broadcast(engagement.key, "tech_component", record)
     return record
@@ -325,6 +331,8 @@ async def patch_intel_record(
     """
     engagement = await _offload(get_engagement_or_404, engagement_key)
     intel_type = _resolve_intel_plural(intel_type_plural)
+    if intel_type == "tech-component":
+        await _offload(check_waf_measurement, engagement.id, request.payload.get("provenance"))
     record = await _offload(intel_service.update_intel, engagement.id, intel_type, intel_id, request.payload)
     await _broadcast(engagement.key, intel_type.replace("-", "_"), record)
     return record
@@ -344,6 +352,8 @@ async def supersede_intel_record(
     """
     engagement = await _offload(get_engagement_or_404, engagement_key)
     intel_type = _resolve_intel_plural(intel_type_plural)
+    if intel_type == "tech-component":
+        await _offload(check_waf_measurement, engagement.id, request.payload.get("provenance"))
     result = await _offload(
         intel_service.supersede_intel,
         engagement.id,

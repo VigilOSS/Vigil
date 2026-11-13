@@ -1020,6 +1020,12 @@ def test_verify_finding_posts_verification_payload(monkeypatch, tmp_path, capsys
     captured: dict[str, object] = {}
 
     class FakeClient(_FakeClientBase):
+        def get(self, endpoint: str):
+            # The payload-file door reads the finding to derive a file: binding;
+            # this one is not source-bound, so nothing is derived.
+            assert endpoint == "findings/VA-001"
+            return {"slug": "VA-001", "canonical_location": "https://app.example/parse"}
+
         def post(self, endpoint: str, payload: dict):
             captured["endpoint"] = endpoint
             captured["payload"] = payload
@@ -2276,11 +2282,15 @@ def test_contract_prints_record_finding_contract(capsys):
 
     out = capsys.readouterr().out
     assert "Command: finding record" in out
-    assert "Schema: finding-record.schema.json" in out
-    assert "Helper defaults:" in out
-    assert "workflow_status = active" in out
-    assert "verification_status = unreviewed" in out
-    assert "Examples:" in out
+    assert "Schema: agent/schemas/finding-record.schema.json" in out
+    assert "  - workflow_status (string; default active;" in out
+    assert "  - verification_status (string; default unreviewed — the only record-time value" in out
+    assert "Example:" in out
+
+    module.run(SimpleNamespace(name="finding", variant=["record"], notes=True))
+    notes = capsys.readouterr().out
+    assert "Helper defaults:" in notes
+    assert "workflow_status = active" in notes
 
 
 def test_contract_update_finding_documents_reopen_fold(capsys):
@@ -2289,6 +2299,7 @@ def test_contract_update_finding_documents_reopen_fold(capsys):
     module = _load_assess_module("contract.py")
 
     module.run(SimpleNamespace(name="finding", variant=["update"]))
+    module.run(SimpleNamespace(name="finding", variant=["update"], notes=True))
 
     out = capsys.readouterr().out
     assert "Command: finding update" in out
@@ -2301,10 +2312,11 @@ def test_contract_prints_code_record_analysis_contract(capsys):
     module = _load_assess_module("contract.py")
 
     module.run(SimpleNamespace(name="code-record", variant="analysis"))
+    module.run(SimpleNamespace(name="code-record", variant="analysis", notes=True))
 
     out = capsys.readouterr().out
     assert "Command: code-record analysis" in out
-    assert "Schema: code-analysis-result.schema.json" in out
+    assert "Schema: agent/schemas/code-analysis-result.schema.json" in out
     assert "queue_item_id" in out
     assert "file_id = derived by the backend from queue_item_id" in out
     assert "receipt_kind" in out
@@ -2320,6 +2332,7 @@ def test_contract_prints_code_record_variant_check_contract(capsys):
     module = _load_assess_module("contract.py")
 
     module.run(SimpleNamespace(name="code-record", variant=["variant-check"]))
+    module.run(SimpleNamespace(name="code-record", variant=["variant-check"], notes=True))
 
     out = capsys.readouterr().out
     assert "Command: code-record variant-check" in out
@@ -2335,12 +2348,12 @@ def test_contract_prints_record_intel_variant_contract(capsys):
     module = _load_assess_module("contract.py")
 
     module.run(SimpleNamespace(name="intel", variant=["record", "tech-component"]))
+    module.run(SimpleNamespace(name="intel", variant=["record", "tech-component"], notes=True))
 
     out = capsys.readouterr().out
     assert "Command: intel record tech-component" in out
-    assert "Schema: intel-tech-component.schema.json" in out
-    assert "Required top-level fields:" in out
-    assert "component" in out
+    assert "Schema: agent/schemas/intel-tech-component.schema.json" in out
+    assert "  - component (string, required" in out
     assert "source -> use source_name" in out
 
 
@@ -2599,7 +2612,9 @@ def test_list_findings_pushes_status_and_severity_to_backend(monkeypatch, capsys
 
     class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
-            assert endpoint == "findings?severity=high&workflow_status=active&limit=101&offset=0"
+            if endpoint == "attack-chain-links":
+                return []
+            assert endpoint == "findings?view=list&severity=high&workflow_status=active&limit=101&offset=0"
             return [
                 {
                     "slug": "ACTIVE-001",
@@ -2644,9 +2659,13 @@ def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):
 
     _patch_load_config(monkeypatch, module, engagement_dir=str(tmp_path))
 
+    posts: list[tuple[str, dict]] = []
+
     class FakeClient(_FakeClientBase):
-        def __init__(self, *args, **kwargs) -> None:
-            raise AssertionError("dry-run should not create a client")
+        def post(self, endpoint, payload):
+            posts.append((endpoint, payload))
+            return {"dry_run": True, "updated": 0, "would_update": 1, "total": 1,
+                    "disposition": "clean"}
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
 
@@ -2654,13 +2673,18 @@ def test_code_dispatch_done_supports_dry_run(monkeypatch, tmp_path, capsys):
         SimpleNamespace(
             engagement_dir=tmp_path,
             action="done",
-            extra=["42", "code-vuln-hunter", "lease-42", "clean", str(coverage_path), "--dry-run"],
+            extra=["42", "code-vuln-hunter", "lease-42", "clean", str(coverage_path),
+                   "Reviewed every decode path", "--dry-run"],
         )
     )
 
     output = capsys.readouterr().out
     assert "Dry run only" in output
     assert '"endpoint": "code/analysis-queue/done"' in output
+    # The backend runs every check the close runs and writes nothing.
+    assert [(endpoint, payload["dry_run"]) for endpoint, payload in posts] == [
+        ("code/analysis-queue/done", True)
+    ]
 
 
 def test_code_dispatch_done_rejects_invalid_disposition(monkeypatch, tmp_path, capsys):

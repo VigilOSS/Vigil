@@ -859,3 +859,16 @@ def test_list_surface_request_variant_links_by_request_variant_does_not_leak_acr
     )
     assert own.status_code == 200, own.text
     assert len(own.json()) == 1
+
+
+def test_coverage_readiness_counts_the_surfaces_it_judged(client, isolate_settings):
+    """`ready` with nothing recorded is a different verdict from every surface
+    covered, so the payload says how many surfaces it judged."""
+    _seed_engagement(client, isolate_settings)
+
+    empty = client.get(f"{ASSESSMENT_BASE}/coverage-readiness").json()
+    assert empty["ready"] is True and empty["surface_count"] == 0
+
+    _create_surface(client)
+    judged = client.get(f"{ASSESSMENT_BASE}/coverage-readiness").json()
+    assert judged["surface_count"] == 1

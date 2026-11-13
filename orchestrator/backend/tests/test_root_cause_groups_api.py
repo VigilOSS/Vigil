@@ -975,3 +975,124 @@ def test_finding_get_returns_outbound_and_inbound_link_state(client, isolate_set
     root = client.get(f"{base}/findings/AC-004").json()
     assert [row["finding_slug"] for row in root["inbound_links"]] == ["AC-001"]
     assert [row["link_kind"] for row in root["links"]] == ["evidence"]
+
+
+def _dispatch(client, agent_id: str, role: str = "code-vuln-hunter") -> None:
+    response = client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/dispatches",
+        json={"agent_id": agent_id, "agent_role": role, "task": f"Lane {agent_id}"},
+    )
+    assert response.status_code == 201, response.text
+
+
+def _corroborate(client, slug: str, agent_id: str, **over):
+    payload = {
+        "link_kind": "corroborated_by",
+        "target_kind": "dispatch",
+        "target_ref": agent_id,
+        "notes": f"{agent_id} re-derived the same sink.",
+        "provenance": {"dispatch_agent_id": agent_id},
+        **over,
+    }
+    return client.post(
+        f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/{slug}/links",
+        json=payload,
+    )
+
+
+def test_corroboration_counts_independent_lanes_without_touching_the_verdict(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _create(client, _finding("RC-200", "Shared guard bypass", root_key="rc-200"))
+    _confirm(client, "RC-200")
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-200"
+    before = client.get(base).json()
+    before_transitions = client.get(f"{base}/transitions").json()
+    _dispatch(client, "LANE-B")
+    _dispatch(client, "LANE-C", role="code-variant-hunter")
+
+    first = _corroborate(client, "RC-200", "LANE-B")
+    assert first.status_code == 200, first.text
+    assert first.json()["link_kind"] == "corroborated_by"
+    assert first.json()["verification_invalidated"] is False
+    replay = _corroborate(client, "RC-200", "LANE-B", notes="Same lane again.")
+    assert replay.status_code == 200, replay.text
+    assert replay.json()["id"] == first.json()["id"]
+    second = _corroborate(client, "RC-200", "LANE-C")
+    assert second.status_code == 200, second.text
+
+    after = client.get(base).json()
+    assert after["verification_status"] == before["verification_status"] == "confirmed"
+    assert after["row_version"] == before["row_version"]
+    assert after["verification_audit"]["claim_review_pending"] is False
+    assert client.get(f"{base}/transitions").json() == before_transitions
+    corroboration = after["corroboration"]
+    assert corroboration["lane_count"] == 2
+    assert corroboration["summary"] == "independently re-derived by 2 lanes"
+    assert [lane["agent_id"] for lane in corroboration["dispatches"]] == ["LANE-B", "LANE-C"]
+    assert corroboration["dispatches"][1]["agent_role"] == "code-variant-hunter"
+    assert corroboration["dispatches"][0]["link_id"] == first.json()["id"]
+
+    retired = client.patch(f"{base}/links/{first.json()['id']}", json={"retired": True})
+    assert retired.status_code == 200, retired.text
+    settled = client.get(base).json()
+    assert settled["verification_status"] == "confirmed"
+    assert settled["corroboration"]["lane_count"] == 1
+    assert settled["corroboration"]["summary"] == "independently re-derived by 1 lane"
+
+    remaining = settled["corroboration"]["dispatches"]
+    assert [lane["agent_id"] for lane in remaining] == ["LANE-C"]
+
+
+def test_corroboration_must_name_a_recorded_independent_dispatch(
+    client, isolate_settings
+):
+    _seed(client, isolate_settings)
+    _create(client, _finding("RC-210", "Shared guard bypass", root_key="rc-210"))
+    base = f"/engagements/{ENGAGEMENT_KEY}/assessment/findings/RC-210"
+
+    unrecorded = _corroborate(client, "RC-210", "LANE-NEVER-STARTED")
+    assert unrecorded.status_code == 404, unrecorded.text
+    assert "recorded dispatch" in unrecorded.json()["detail"]
+
+    _dispatch(client, "LANE-D")
+    wrong_kind = _corroborate(client, "RC-210", "LANE-D", target_kind="surface")
+    assert wrong_kind.status_code == 400, wrong_kind.text
+    assert "target_kind='dispatch'" in wrong_kind.json()["detail"]
+
+    author = _corroborate(client, "RC-210", "AUTHOR-RC-210")
+    assert author.status_code == 400, author.text
+    assert "AUTHOR-RC-210" in author.json()["detail"]
+
+    edited = client.patch(
+        base,
+        json={"notes": "Lane D refined the summary.", "dispatch_agent_id": "LANE-D"},
+    )
+    assert edited.status_code == 200, edited.text
+    editor = _corroborate(client, "RC-210", "LANE-D")
+    assert editor.status_code == 400, editor.text
+    assert "LANE-D" in editor.json()["detail"]
+
+    _dispatch(client, "LANE-E")
+    linked = _corroborate(client, "RC-210", "LANE-E")
+    assert linked.status_code == 200, linked.text
+    retarget = client.patch(
+        f"{base}/links/{linked.json()['id']}", json={"target_ref": "LANE-NEVER-STARTED"}
+    )
+    assert retarget.status_code == 404, retarget.text
+    record = client.get(base).json()
+    assert record["verification_status"] == "unreviewed"
+    assert record["corroboration"]["lane_count"] == 1
+
+
+def test_corroboration_and_chain_verbs_mirror_the_backend_vocabulary() -> None:
+    from assess.commands import corroborate_finding, list_chains
+
+    from app.services.state_manager import finding_change_policy
+    from app.services.state_manager._common import CORROBORATION_LINK_KIND
+
+    assert corroborate_finding.CORROBORATION_LINK_KIND == CORROBORATION_LINK_KIND
+    assert list_chains._VERIFIED_STATUSES == (
+        finding_change_policy.CLAIM_REVIEW_VERIFICATION_STATUSES
+    )

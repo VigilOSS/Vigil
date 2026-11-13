@@ -4,9 +4,9 @@ Two layers are covered here:
 
 1. **The transition-phase gate** (``_blind_triage_blockers`` in
    ``agent/scripts/assess/commands/transition_phase.py``). It mirrors the
-   ``missing_variant_pass`` Verify->Exploit gate: it enumerates Medium-or-above
-   ACTIVE findings and demands a recorded ``kind='blind_triage_verdict'``
-   decision row whose ``verdict`` starts ``Accept`` for each. A finding without
+   ``missing_variant_pass`` Verify->Exploit gate: at the terminal ``complete``
+   edge it enumerates Medium-or-above SUBMITTABLE findings and demands a
+   recorded ``kind='blind_triage_verdict'`` decision row whose ``verdict`` starts ``Accept`` for each. A finding without
    one appends a hard ``missing_blind_triage`` blocker at the DEFAULT
    ``severity="block"`` — the same enforcement level as ``missing_variant_pass``
    — so ``--force``/``--reason`` already overrides it. These tests drive
@@ -68,10 +68,10 @@ def _setup_env(
             pass
 
         def get(self, path: str):
-            if path == "findings":
+            if path == "findings?view=list":
                 return findings or []
             if path == "report-readiness":
-                return {"ready": True, "blockers": []}
+                return {"ready": True, "blockers": [], "report_qc": {"required": False, "status": "missing", "issue": ""}}
             if path == "application-units/terminal-block":
                 return {
                     "skipped": False, "blocking": [], "warned_under_observed": [],
@@ -154,21 +154,18 @@ def _accept_verdict_row(slug: str, verdict: str = "Accept@P3") -> dict:
 # ---------------------------------------------------------------------------
 
 
-def test_report_blocks_when_medium_finding_has_no_blind_verdict(monkeypatch, tmp_path, capsys):
-    module = _load_transition_module("tp_blind_report_block")
+def test_entering_report_does_not_require_blind_verdicts(monkeypatch, tmp_path):
+    """Blind-triage verdicts are produced inside the report phase (phase 8), so
+    the edge into `report` cannot require them; `complete` is the gate."""
+    module = _load_transition_module("tp_blind_report_entry")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "web", "current_phase": "exploit"},
         findings=[_MEDIUM_ACTIVE],
         decisions_by_kind={"blind_triage_verdict": []},
     )
-    with pytest.raises(SystemExit):
-        module.run(_args(eng, "report"))
-    err = capsys.readouterr().err
-    assert "missing_blind_triage" in err
-    assert "idor-7" in err
-    # Phase must NOT have advanced.
-    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "exploit"
+    module.run(_args(eng, "report"))
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
 def test_complete_blocks_when_medium_finding_has_no_blind_verdict(monkeypatch, tmp_path, capsys):
@@ -190,24 +187,24 @@ def test_complete_blocks_when_medium_finding_has_no_blind_verdict(monkeypatch, t
 # ---------------------------------------------------------------------------
 
 
-def test_report_passes_when_accept_verdict_recorded(monkeypatch, tmp_path, capsys):
+def test_complete_passes_when_accept_verdict_recorded(monkeypatch, tmp_path, capsys):
     module = _load_transition_module("tp_blind_report_ok")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[_MEDIUM_ACTIVE],
         decisions_by_kind={"blind_triage_verdict": [_accept_verdict_row("idor-7", "Accept@P3")]},
     )
-    module.run(_args(eng, "report"))
+    module.run(_args(eng, "complete"))
     assert "missing_blind_triage" not in capsys.readouterr().err
-    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
 
 
 def test_non_accept_verdict_does_not_clear_block(monkeypatch, tmp_path, capsys):
     module = _load_transition_module("tp_blind_non_accept")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[_MEDIUM_ACTIVE],
         # A recorded but non-Accept verdict (e.g. Need-More-Info) is NOT clearance.
         decisions_by_kind={
@@ -215,7 +212,7 @@ def test_non_accept_verdict_does_not_clear_block(monkeypatch, tmp_path, capsys):
         },
     )
     with pytest.raises(SystemExit):
-        module.run(_args(eng, "report"))
+        module.run(_args(eng, "complete"))
     assert "missing_blind_triage" in capsys.readouterr().err
 
 
@@ -226,16 +223,16 @@ def test_later_blind_miss_revokes_earlier_accept(monkeypatch, tmp_path, capsys):
     older = _accept_verdict_row("idor-7", "Accept@P3")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[_MEDIUM_ACTIVE],
         decisions_by_kind={"blind_triage_verdict": [latest, older]},
     )
     with pytest.raises(SystemExit):
-        module.run(_args(eng, "report"))
+        module.run(_args(eng, "complete"))
     assert "missing_blind_triage" in capsys.readouterr().err
 
 
-def test_report_blocks_when_an_exploited_finding_has_no_blind_verdict(
+def test_complete_blocks_when_an_exploited_finding_has_no_blind_verdict(
     monkeypatch, tmp_path, capsys
 ):
     """A Medium+ finding driven to `exploited` is still a submission.
@@ -250,12 +247,12 @@ def test_report_blocks_when_an_exploited_finding_has_no_blind_verdict(
     exploited = dict(_MEDIUM_ACTIVE, slug="rce-1", severity="critical", workflow_status="exploited")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[exploited],
         decisions_by_kind={"blind_triage_verdict": []},
     )
     with pytest.raises(SystemExit):
-        module.run(_args(eng, "report"))
+        module.run(_args(eng, "complete"))
     err = capsys.readouterr().err
     assert "missing_blind_triage" in err
     assert "rce-1" in err
@@ -288,7 +285,7 @@ def test_draft_and_false_positive_findings_never_block(monkeypatch, tmp_path, ca
     module = _load_transition_module("tp_blind_unsubmittable")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[
             dict(_MEDIUM_ACTIVE, slug="draft-1", workflow_status="draft"),
             dict(_MEDIUM_ACTIVE, slug="fp-1", workflow_status="false_positive"),
@@ -296,7 +293,7 @@ def test_draft_and_false_positive_findings_never_block(monkeypatch, tmp_path, ca
         ],
         decisions_by_kind={"blind_triage_verdict": []},
     )
-    module.run(_args(eng, "report"))
+    module.run(_args(eng, "complete"))
     assert "missing_blind_triage" not in capsys.readouterr().err
 
 
@@ -305,13 +302,13 @@ def test_low_severity_finding_does_not_block(monkeypatch, tmp_path, capsys):
     low = dict(_MEDIUM_ACTIVE, slug="info-1", severity="low")
     eng, _ = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[low],
         decisions_by_kind={"blind_triage_verdict": []},
     )
-    module.run(_args(eng, "report"))
+    module.run(_args(eng, "complete"))
     assert "missing_blind_triage" not in capsys.readouterr().err
-    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
 
 
 # ---------------------------------------------------------------------------
@@ -323,13 +320,13 @@ def test_force_overrides_missing_blind_triage_and_records_decision(monkeypatch, 
     module = _load_transition_module("tp_blind_force")
     eng, recorded = _setup_env(
         monkeypatch, module, tmp_path,
-        scope={"engagement_type": "web", "current_phase": "exploit"},
+        scope={"engagement_type": "web", "current_phase": "report"},
         findings=[_MEDIUM_ACTIVE],
         decisions_by_kind={"blind_triage_verdict": []},
     )
-    module.run(_args(eng, "report", force=True, reason="accepted-risk per program scope"))
+    module.run(_args(eng, "complete", force=True, reason="accepted-risk per program scope"))
     # Phase advanced under --force.
-    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "complete"
     # The override was recorded with the missing_blind_triage blocker attached,
     # exactly like missing_variant_pass / depth_unsatisfied_units overrides.
     override = [d for d in recorded if d["kind"] == "forced_transition_override"]

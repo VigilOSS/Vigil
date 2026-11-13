@@ -16,7 +16,11 @@ lives in the backend (`app.services.code_analysis`), imported normally.
 from __future__ import annotations
 
 import ast
+import inspect
+import textwrap
 from pathlib import Path
+
+import pytest
 
 
 _REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -90,17 +94,16 @@ def test_every_skill_vuln_class_is_canonical():
 
 def test_code_families_subset_of_canonical():
     """Code alignment-by-inclusion: every class the code track validates against
-    (`SLOT_VULN_CLASSES` + `ROLE_CONTEXT_VULN_CLASSES` +
-    `WORKFLOW_CONTEXT_VULN_CLASSES`) is canonical."""
+    (`SLOT_VULN_CLASSES` + `MARKUP_SIGNAL_FAMILIES` + `CONTEXT_TAG_VULN_CLASSES`)
+    is canonical."""
     canonical = vuln_taxonomy.all_classes()
     code_classes: set[str] = set()
     for groups in code_analysis.SLOT_VULN_CLASSES.values():
         for families in groups.values():
             code_classes.update(families)
-    for _keywords, groups in (
-        *code_analysis.ROLE_CONTEXT_VULN_CLASSES,
-        *code_analysis.WORKFLOW_CONTEXT_VULN_CLASSES,
-    ):
+    for families in code_analysis.MARKUP_SIGNAL_FAMILIES.values():
+        code_classes.update(families)
+    for groups in code_analysis.CONTEXT_TAG_VULN_CLASSES.values():
         for families in groups.values():
             code_classes.update(families)
     assert code_classes, "code track family lists are empty — wrong module?"
@@ -115,13 +118,13 @@ def test_code_families_subset_of_canonical():
 # reachable as a required code-track family.
 #
 # `_applicable_families_for_file` computes what `done` demands and what the
-# effort gate holds, from slot types, language and the architect's role label.
+# effort gate holds, from slot types, language and the architect's context tags.
 # A class the indexer emits but that map can never produce is a signal that
 # points at nothing: the hunter reads it off the index and no closeout ever
 # asks about it. Each entry below is therefore a DECISION with a stated reason,
 # never silence — mirroring `TECHNIQUE_EXEMPT_CLASSES`. If the code track CAN
-# honestly demand the class, it belongs in a `SLOT_VULN_CLASSES`,
-# `ROLE_CONTEXT_VULN_CLASSES` or `WORKFLOW_CONTEXT_VULN_CLASSES` row instead.
+# honestly demand the class, it belongs in a `SLOT_VULN_CLASSES` or
+# `CONTEXT_TAG_VULN_CLASSES` row instead.
 CODE_FAMILY_EXEMPT_INDEXER_CLASSES: dict[str, str] = {
     # Refinements of a coarse code-track rollup the map already requires: the
     # indexer names the specific sink, closeout asks about the family.
@@ -131,7 +134,6 @@ CODE_FAMILY_EXEMPT_INDEXER_CLASSES: dict[str, str] = {
     "mass-assignment": "refines the `web-app-injection` family the managed slot rows already require",
     "lfi": "refines the `path-traversal` family every file-reading slot row already requires",
     "rfi": "refines the `path-traversal` family every file-reading slot row already requires",
-    "secrets-exposure": "a literal in source, not a taint path: proven by reading the sink the index already names, and reported as a finding rather than reviewed as a family",
     "clickjacking": "a response-header and framing posture of a rendered page, not a property of the source file the hunter reviews",
     # The infrastructure family, for the same reason its skill allowlist entry
     # above records: Vigil has no build-hardening or deployment-review skill,
@@ -178,25 +180,111 @@ def indexer_emitted_vuln_classes() -> set[str]:
         treesitter_lightweight,
         treesitter_streaming,
     ):
-        tree = ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
-        for node in ast.walk(tree):
-            if isinstance(node, ast.Dict):
-                for key, value in zip(node.keys, node.values):
-                    if (
-                        isinstance(key, ast.Constant)
-                        and key.value == "vuln_classes"
-                        and (values := _string_list(value)) is not None
-                    ):
-                        emitted.update(values)
-            elif (
-                isinstance(node, ast.Call)
-                and isinstance(node.func, ast.Name)
-                and node.func.id == "flag"
-                and len(node.args) == 3
-                and (values := _string_list(node.args[2])) is not None
-            ):
-                emitted.update(values)
+        emitted.update(_literal_vuln_classes(
+            ast.parse(Path(module.__file__).read_text(encoding="utf-8"))
+        ))
     return emitted
+
+
+def _literal_vuln_classes(tree: ast.AST) -> set[str]:
+    """Classes written inline: a `"vuln_classes": [...]` entry, or the third
+    argument of a local `flag(kind, line, classes)` helper."""
+    found: set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Dict):
+            for key, value in zip(node.keys, node.values):
+                if (
+                    isinstance(key, ast.Constant)
+                    and key.value == "vuln_classes"
+                    and (values := _string_list(value)) is not None
+                ):
+                    found.update(values)
+        elif (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id == "flag"
+            and len(node.args) == 3
+            and (values := _string_list(node.args[2])) is not None
+        ):
+            found.update(values)
+    return found
+
+
+def _function_vuln_classes(function) -> set[str]:
+    return _literal_vuln_classes(ast.parse(textwrap.dedent(inspect.getsource(function))))
+
+
+def _table_vuln_classes(rows, *, skip_kinds: frozenset[str] = frozenset()) -> set[str]:
+    return {cls for row in rows if row["kind"] not in skip_kinds for cls in row["vuln_classes"]}
+
+
+# Blade and Twig replace the HTML pass's `{{ }}` row with their own reading of
+# the construct; FreeMarker keeps it.
+_HTML_PASS_SKIPPED_KINDS = {
+    "html": frozenset(),
+    "blade": frozenset({"template_interpolation"}),
+    "twig": frozenset({"template_interpolation"}),
+    "freemarker": frozenset(),
+}
+
+
+def markup_index_vuln_classes(language: str) -> set[str]:
+    """Every class one markup language's index can tag a sink with: its
+    lightweight extractor (and the HTML pass it builds on) plus its streaming
+    fallback rows."""
+    lightweight = treesitter_lightweight
+    classes = {
+        cls
+        for _kind, _pattern, row_classes in treesitter_streaming._STREAM_EXTRA_SINK_PATTERNS.get(
+            language, []
+        )
+        for cls in row_classes
+    }
+    if language == "css":
+        classes |= _table_vuln_classes(lightweight._CSS_SINK_PATTERNS)
+        classes |= _function_vuln_classes(lightweight._extract_css)
+        return classes
+    classes |= _table_vuln_classes(
+        lightweight._HTML_LINE_SINK_PATTERNS, skip_kinds=_HTML_PASS_SKIPPED_KINDS[language]
+    )
+    classes |= _function_vuln_classes(lightweight._extract_html)
+    if language != "html":
+        classes |= _function_vuln_classes(getattr(lightweight, f"_extract_{language}"))
+    if language == "freemarker":
+        classes |= set(lightweight._FREEMARKER_URL_VULN_CLASSES)
+    return classes
+
+
+def test_markup_sink_class_table_matches_what_each_index_tags():
+    """`MARKUP_SINK_VULN_CLASSES` is what each markup language's families are
+    derived from, so it must say exactly what that language's index can tag."""
+    assert set(code_analysis.MARKUP_SINK_VULN_CLASSES) == set(_HTML_PASS_SKIPPED_KINDS) | {"css"}
+    drift = {
+        language: (sorted(declared), sorted(markup_index_vuln_classes(language)))
+        for language, declared in code_analysis.MARKUP_SINK_VULN_CLASSES.items()
+        if set(declared) != markup_index_vuln_classes(language)
+    }
+    assert not drift, (
+        "MARKUP_SINK_VULN_CLASSES (declared, indexed) disagrees with the markup "
+        f"extractors: {drift}"
+    )
+
+
+@pytest.mark.parametrize("language", sorted(code_analysis.MARKUP_SINK_VULN_CLASSES))
+def test_every_markup_sink_class_maps_to_a_family_or_is_exempt(language):
+    undecided = sorted(
+        cls
+        for cls in code_analysis.MARKUP_SINK_VULN_CLASSES[language]
+        if cls not in code_analysis.MARKUP_SINK_CLASS_FAMILIES
+        and cls not in CODE_FAMILY_EXEMPT_INDEXER_CLASSES
+    )
+    assert not undecided, (language, undecided)
+    derived = {
+        family
+        for cls in code_analysis.MARKUP_SINK_VULN_CLASSES[language]
+        for family in code_analysis.MARKUP_SINK_CLASS_FAMILIES.get(cls, ())
+    }
+    assert derived <= code_analysis.MARKUP_SIGNAL_FAMILIES[language]
 
 
 def code_track_required_families() -> set[str]:
@@ -205,10 +293,9 @@ def code_track_required_families() -> set[str]:
     for groups in code_analysis.SLOT_VULN_CLASSES.values():
         for group_families in groups.values():
             families.update(group_families)
-    for _keywords, groups in (
-        *code_analysis.ROLE_CONTEXT_VULN_CLASSES,
-        *code_analysis.WORKFLOW_CONTEXT_VULN_CLASSES,
-    ):
+    for group_families in code_analysis.MARKUP_SIGNAL_FAMILIES.values():
+        families.update(group_families)
+    for groups in code_analysis.CONTEXT_TAG_VULN_CLASSES.values():
         for group_families in groups.values():
             families.update(group_families)
     return families
@@ -219,7 +306,7 @@ def test_every_indexer_emitted_class_is_required_or_exempt_with_a_reason():
 
     `test_code_families_subset_of_canonical` proves the families the code track
     REQUIRES are canonical. Without this direction the indexer can keep emitting
-    a class that no slot, role or workflow row can ever turn into a required
+    a class that no slot or context-tag row can ever turn into a required
     family: the hunter reads it off the structural index, closeout never asks
     about it, and the class silently means nothing on the code track.
     """
@@ -234,8 +321,8 @@ def test_every_indexer_emitted_class_is_required_or_exempt_with_a_reason():
     assert not unreachable, (
         "the structural indexer emits classes that no code-track row can turn "
         "into a required family, so closeout can never ask about them. Add a "
-        "row to SLOT_VULN_CLASSES / ROLE_CONTEXT_VULN_CLASSES / "
-        "WORKFLOW_CONTEXT_VULN_CLASSES in app/services/code_analysis.py, or add "
+        "row to SLOT_VULN_CLASSES / CONTEXT_TAG_VULN_CLASSES in "
+        "app/services/code_analysis.py, or add "
         "the class to CODE_FAMILY_EXEMPT_INDEXER_CLASSES in this file with a "
         "one-line reason:\n  " + "\n  ".join(unreachable)
     )

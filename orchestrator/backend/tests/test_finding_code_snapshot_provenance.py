@@ -1258,6 +1258,8 @@ def test_report_readiness_blocks_invalid_file_snapshot_in_every_reportable_statu
     ]
     assert [blocker["slug"] for blocker in snapshot_blockers] == ["VA-018"]
     assert snapshot_blockers[0]["snapshot_status"] == snapshot_status
+    # A terminal verdict rebinds only with fresh proof, so the hint names it.
+    assert "fresh proof receipts" in snapshot_blockers[0]["detail"]
 
     final = client.get(
         f"/engagements/{_ENGAGEMENT_KEY}/assessment/report-findings?mode=final"
@@ -1313,7 +1315,6 @@ def _info_severity_variance(proof_receipt_id: int) -> dict[str, object]:
     return {
         "normal_band": "high",
         "chosen_severity": "info",
-        "actor": "code-vuln-verifier",
         "reason": "This fixture isolates snapshot provenance at informational severity.",
         "proof_receipt_id": proof_receipt_id,
     }

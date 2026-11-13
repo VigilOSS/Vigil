@@ -23,6 +23,7 @@ from app.api.assessment import (  # noqa: E402 - import path is bootstrapped abo
     AccessRecordRequest,
     AttackChainRecordRequest,
     CredentialRecordRequest,
+    REQUEST_FIELD_HOMES,
     FindingRecordRequest,
     JobRecord,
     ProbeRunRecordRequest,
@@ -154,6 +155,9 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
             title="Assessment Attack Chain",
             overlay={
                 "additionalProperties": False,
+                # The backend's own home for each refused chain word, so the
+                # CLI door names the same home the server does.
+                "x-vigil-field-aliases": dict(REQUEST_FIELD_HOMES["AttackChainRecordRequest"]),
                 "properties": {
                     "chain_key": {
                         "type": "string",
@@ -169,6 +173,9 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                     "links": {
                         "items": {
                             "additionalProperties": False,
+                            "x-vigil-field-aliases": dict(
+                                REQUEST_FIELD_HOMES["AttackChainLinkRequest"]
+                            ),
                             "properties": {
                                 "relation": "How this entity participates in the chain (e.g. 'step', 'prerequisite', 'outcome', 'credential-used').",
                                 "entity_kind": "Type of the linked entity (e.g. 'finding', 'credential', 'access_record').",
@@ -786,7 +793,7 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                             "properties": {
                                 "family": {
                                     "type": "string",
-                                    "description": "Vulnerability class name (for example, sql-injection, path-traversal)",
+                                    "description": "Canonical vulnerability class name (for example, sqli, path-traversal); `vigil assess code-coverage --cwe-matrix` renders one column per family",
                                 },
                                 "effort": {
                                     "type": "integer",

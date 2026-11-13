@@ -67,7 +67,7 @@ def test_a_trigger_to_a_path_absent_from_the_snapshot_is_refused_with_the_closes
     assert f"'src/helper.py' is not a file in generation {repo['active_generation']}" in detail
     assert "closest admitted path: 'src/helpers.py'" in detail
     assert "outside_snapshot" in detail
-    assert client.get(f"{base}/triggers").json() == []
+    assert client.get(f"{base}/triggers").json()["items"] == []
 
     # The lease survives the refusal, so the corrected result lands on the same claim.
     corrected = client.post(
@@ -79,7 +79,7 @@ def test_a_trigger_to_a_path_absent_from_the_snapshot_is_refused_with_the_closes
         ),
     )
     assert corrected.status_code == 201, corrected.text
-    [trigger] = client.get(f"{base}/triggers").json()
+    [trigger] = client.get(f"{base}/triggers").json()["items"]
     assert trigger["target_file_path"] == "src/helpers.py"
     assert trigger["target_file_id"] is not None
 
@@ -107,7 +107,7 @@ def test_a_trigger_declared_outside_the_snapshot_is_recorded_pending(client, iso
     )
 
     assert accepted.status_code == 201, accepted.text
-    [trigger] = client.get(f"{base}/triggers?status=pending").json()
+    [trigger] = client.get(f"{base}/triggers?status=pending").json()["items"]
     assert trigger["target_file_path"] == "bin/StorageService.dll"
     assert trigger["target_file_id"] is None
 
@@ -159,7 +159,7 @@ def test_a_rooted_or_dotted_spelling_names_the_same_snapshot_file(client, isolat
 
     recorded = client.post(f"{base}/analysis-results", json=_result(queue_item, parser, [trigger]))
     assert recorded.status_code == 201, recorded.text
-    triggers = client.get(f"{base}/triggers").json()
+    triggers = client.get(f"{base}/triggers").json()["items"]
     assert [(row["target_file_path"], row["target_file_id"] is not None) for row in triggers] == [
         ("src/helpers.py", True)
     ]
@@ -240,7 +240,7 @@ def test_every_malformed_trigger_key_is_reported_in_one_pass(client, isolate_set
     assert "entry 1 is missing reason" in detail
     assert "entry 2" in detail and "not-a-canonical-class" in detail
     assert "entry 2 outside_snapshot must be a boolean" in detail
-    assert client.get(f"{base}/triggers").json() == []
+    assert client.get(f"{base}/triggers").json()["items"] == []
 
 
 def test_a_trigger_spelled_with_target_path_is_told_the_canonical_key(
@@ -276,7 +276,7 @@ def test_a_trigger_spelled_with_target_path_is_told_the_canonical_key(
     detail = refused.json()["detail"]
     assert "entry 0 is missing file_path" in detail
     assert "target_path" in detail
-    assert client.get(f"{base}/triggers").json() == []
+    assert client.get(f"{base}/triggers").json()["items"] == []
 
 
 def test_the_cli_and_api_agree_on_one_trigger_alias_roster() -> None:
@@ -291,3 +291,86 @@ def test_the_cli_and_api_agree_on_one_trigger_alias_roster() -> None:
     from assess.commands import code_record_analysis
 
     assert code_record_analysis._TRIGGER_KEY_ALIASES == _CROSS_FILE_TRIGGER_KEY_ALIASES
+
+
+def test_a_closed_trigger_note_is_amended_by_appending_never_by_rewriting(
+    client, isolate_settings
+):
+    """A resolution note that misstates what decided a trigger can be corrected.
+
+    The amendment is a dated line appended to the note: the status, the
+    original note and every other column stay as recorded, so the durable
+    record still says what was decided first and now also what corrected it.
+    """
+    engagement_key = "2026-11-13-trigger-amend-note"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    _repo, parser, queue_item = _seed(client, engagement_key)
+    base = f"/engagements/{engagement_key}/assessment/code"
+    triggers = [
+        {"file_path": "src/helpers.py", "reason": "shared helper", "vuln_class": "web-app-injection"},
+        {"file_path": "src/helpers.py", "reason": "shared helper", "vuln_class": "path-traversal"},
+    ]
+    recorded = client.post(f"{base}/analysis-results", json=_result(queue_item, parser, triggers))
+    assert recorded.status_code == 201, recorded.text
+    rows = {row["vuln_class"]: row for row in client.get(f"{base}/triggers").json()["items"]}
+    closed, still_pending = rows["web-app-injection"], rows["path-traversal"]
+    resolved = client.post(
+        f"{base}/triggers/resolve",
+        json={
+            "items": [{"trigger_id": closed["id"]}],
+            "resolution_status": "source_equivalent_analyzed",
+            "resolution_note": "Covered by receipts 1-3.",
+        },
+    )
+    assert resolved.status_code == 200, resolved.text
+
+    amended = client.post(
+        f"{base}/triggers/resolve",
+        json={
+            "amend": True,
+            "items": [{"trigger_id": closed["id"]}, {"trigger_id": still_pending["id"]}],
+            "resolution_note": "Receipts 1-3 did not decide this; receipt 7 did.",
+        },
+    )
+    assert amended.status_code == 200, amended.text
+    body = amended.json()
+    assert body["amended"] == [{"trigger_id": closed["id"], "status": "source_equivalent_analyzed"}]
+    # A pending trigger is resolved, not amended.
+    assert body["not_resolved"] == [str(still_pending["id"])]
+
+    after = {row["id"]: row for row in client.get(f"{base}/triggers").json()["items"]}
+    assert after[closed["id"]]["status"] == "source_equivalent_analyzed"
+    first, amendment = after[closed["id"]]["resolution_note"].split("\n")
+    assert first == "Covered by receipts 1-3."
+    assert amendment.startswith("Amended ")
+    assert amendment.endswith(": Receipts 1-3 did not decide this; receipt 7 did.")
+    assert after[still_pending["id"]]["status"] == "pending"
+
+    activity = client.get(
+        f"/engagements/{engagement_key}/activity-entries",
+        params={"q": "resolve-triggers --amend"},
+    )
+    assert activity.status_code == 200, activity.text
+    [entry] = [row for row in activity.json()["items"] if row["title"] == "code-dispatch resolve-triggers --amend"]
+    assert entry["metadata"]["amended"] == body["amended"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        # An amendment changes the note only, so it takes no status.
+        {"amend": True, "resolution_status": "not_applicable", "items": [{"trigger_id": 1}]},
+        # An amendment names the exact trigger it corrects.
+        {"amend": True, "items": [{"file_path": "src/helpers.py"}]},
+        # A resolution still needs the status it moves the trigger to.
+        {"items": [{"trigger_id": 1}]},
+    ],
+)
+def test_amend_and_resolve_requests_are_each_complete(client, isolate_settings, payload):
+    engagement_key = "2026-11-13-trigger-amend-shape"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    response = client.post(
+        f"/engagements/{engagement_key}/assessment/code/triggers/resolve",
+        json={"resolution_note": "note", **payload},
+    )
+    assert response.status_code == 422, response.text

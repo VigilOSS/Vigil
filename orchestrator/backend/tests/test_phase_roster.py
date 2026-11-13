@@ -180,8 +180,13 @@ def test_check_phase_readiness_uses_the_shared_web_roster():
 
 
 def test_list_commands_phase_choices_are_the_roster_plus_aliases():
+    # Code track phases are accepted because `agent start` stores them in a code
+    # lane's packet; each resolves to its audit tag's catalogue slice.
     assert set(list_commands._PHASE_CHOICES) == set(phases.AUDIT_PHASE_TAGS) | set(
         phases.PHASE_INPUT_ALIASES
+    ) | set(phases.CODE_PHASES)
+    assert {phases.code_audit_tag(phase) for phase in phases.CODE_PHASES} <= set(
+        phases.AUDIT_PHASE_TAGS
     )
 
 

@@ -8,9 +8,14 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from ..services.engagements import get_engagement_or_404
 from ..services.state_manager import proof_work
+from .assessment import ASSESSMENT_PREFIX
 from .assessment_operator import DispatchCreate
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter()
+# Registered by the app at its full path, like the operator routes.
+router = APIRouter(
+    prefix=ASSESSMENT_PREFIX, tags=["assessment"], route_class=DeclaredQueryParamsRoute
+)
 
 
 class ProofWorkPrepare(BaseModel):

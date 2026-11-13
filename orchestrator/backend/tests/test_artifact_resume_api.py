@@ -287,6 +287,10 @@ def test_reregister_linked_artifact_records_digest_change_history(
     path.write_text("Original Acme advisory", encoding="utf-8")
     original = _register_note(client, "notes/advisory.md", related_finding_slug="VA-047")
     path.write_text("Corrected Acme advisory with its precondition", encoding="utf-8")
+    editor = _dispatch(
+        client, agent_id="advisory-editor", agent_role="report-writer", task="correct the advisory"
+    )
+    assert editor.status_code == 201, editor.text
     payload = {"path": "notes/advisory.md", "producer_agent_id": "advisory-editor"}
     if operation == "refresh":
         response = client.post(f"{BASE}/artifacts/{original['id']}/refresh", json={})
@@ -1178,7 +1182,7 @@ def test_report_readiness_flags_missing_markdown_paths_cited_by_durable_notes(
         "Deferred work is tracked in `OOB-CALLBACKS.md`.",
         encoding="utf-8",
     )
-    registered = _artifact(client, path="RESUME.md", kind="note", producer_agent_id="operator")
+    registered = _artifact(client, path="RESUME.md", kind="note")
     assert registered.status_code == 201, registered.text
 
     readiness = client.get(f"{BASE}/report-readiness")
@@ -1205,7 +1209,7 @@ def test_report_readiness_does_not_follow_markdown_citations_outside_engagement(
         "Deferred work is tracked in `../outside.md`.",
         encoding="utf-8",
     )
-    registered = _artifact(client, path="RESUME.md", kind="note", producer_agent_id="operator")
+    registered = _artifact(client, path="RESUME.md", kind="note")
     assert registered.status_code == 201, registered.text
 
     readiness = client.get(f"{BASE}/report-readiness")
@@ -1552,7 +1556,7 @@ def test_code_resume_projects_existing_coverage_gate_and_reference_repos(
     scope_doc["current_phase"] = "hunt"
     scope_path.write_text(json.dumps(scope_doc))
     assert client.get(f"/engagements/{ENGAGEMENT_KEY}").status_code == 200
-    monkeypatch.setattr(assessment_memory.code_analysis, "code_coverage_summary", lambda *_a: {
+    coverage = {
         "by_classification": {
             "high": {"count": 4, "analyzed": 2},
             "skip": {"count": 10, "analyzed": 1},
@@ -1560,11 +1564,13 @@ def test_code_resume_projects_existing_coverage_gate_and_reference_repos(
         "confidence": {"active_queue_items": 3},
         "trigger_summary": {"pending": 2, "queued": 1},
         "gate": {"passed": False, "reasons": ["3 queue items remain", "2 triggers unresolved"]},
-    })
+    }
+    # Readiness carries the summary it gated on, so the brief reads both from it.
     monkeypatch.setattr(assessment_memory.code_analysis, "code_readiness", lambda *_a, **_k: {
         "target_phase": "verify-variant", "transition_ready": False,
         "blockers": [{"code": "structural_analysis_debt_unreviewed"}],
         "structural_debt_count": 3,
+        **({"coverage": dict(coverage)} if _k.get("include_coverage") else {}),
     })
     monkeypatch.setattr(assessment_memory.code_analysis, "list_code_repos", lambda *_a: [
         {"id": 7, "repo_key": "primary", "repo_role": "analysis", "active_generation": 4},

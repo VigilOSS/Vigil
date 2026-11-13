@@ -10,8 +10,12 @@ from fastapi import APIRouter
 from pydantic import BaseModel, Field
 
 from ..services.dashboard import dashboard_summary
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/dashboard", tags=["dashboard"])
+router = APIRouter(
+    prefix="/dashboard", tags=["dashboard"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class EngagementCounts(BaseModel):

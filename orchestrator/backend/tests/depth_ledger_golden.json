@@ -1,0 +1,4707 @@
+{
+ "by_family": {
+  "units": [
+   {
+    "application_unit_id": 112,
+    "host": "app.example.com",
+    "port_class": "port-8443",
+    "path_prefix": "/",
+    "deep_required": false,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "covered",
+      "probe_count": 13,
+      "covering_probe_count": 6,
+      "has_finding": true,
+      "finding_id": 503
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth_entry/account_recovery surface",
+      "status": "missing_block",
+      "probe_count": 7,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 503
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "cart/checkout/payment path",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 7,
+      "covering_probe_count": 7,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "proxy/CDN fingerprint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 107,
+    "host": "app.example.com",
+    "port_class": "web",
+    "path_prefix": "/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "covered",
+      "probe_count": 55,
+      "covering_probe_count": 27,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth_entry/account_recovery surface",
+      "status": "covered",
+      "probe_count": 28,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 504
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "cart/checkout/payment path",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 6,
+      "covering_probe_count": 4,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 30,
+      "covering_probe_count": 28,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 108,
+    "host": "app.example.com",
+    "port_class": "web",
+    "path_prefix": "/api",
+    "deep_required": false,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "covered",
+      "probe_count": 32,
+      "covering_probe_count": 9,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "covered",
+      "probe_count": 22,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 2,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 23,
+      "covering_probe_count": 21,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 505
+     }
+    ]
+   },
+   {
+    "application_unit_id": 109,
+    "host": "app.example.com",
+    "port_class": "web",
+    "path_prefix": "/api/v2",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "covered",
+      "probe_count": 11,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "covered",
+      "probe_count": 7,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "deferred",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 7,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 111,
+    "host": "app.example.com",
+    "port_class": "web",
+    "path_prefix": "/files",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "covered",
+      "probe_count": 10,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 8,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 504
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 10,
+      "covering_probe_count": 9,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": null,
+      "status": "missing_block",
+      "probe_count": 5,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 110,
+    "host": "app.example.com",
+    "port_class": "web",
+    "path_prefix": "/login",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth_entry/account_recovery surface",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": null,
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 125,
+    "host": "cdn.example.net",
+    "port_class": "port-8443",
+    "path_prefix": "/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "auth",
+      "expected_reason": "login/session path",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "cart/checkout/payment path",
+      "status": "covered",
+      "probe_count": 7,
+      "covering_probe_count": 7,
+      "has_finding": true,
+      "finding_id": 503
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "deferred",
+      "probe_count": 7,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket path",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "missing_block",
+      "probe_count": 9,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 120,
+    "host": "cdn.example.net",
+    "port_class": "web",
+    "path_prefix": "/",
+    "deep_required": false,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "login/session path",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "cart/checkout/payment path",
+      "status": "covered",
+      "probe_count": 28,
+      "covering_probe_count": 28,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 32,
+      "covering_probe_count": 4,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 31,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 504
+     }
+    ]
+   },
+   {
+    "application_unit_id": 121,
+    "host": "cdn.example.net",
+    "port_class": "web",
+    "path_prefix": "/api",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "missing_block",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 10,
+      "covering_probe_count": 10,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 15,
+      "covering_probe_count": 4,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": null,
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 2,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "missing_block",
+      "probe_count": 12,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 504
+     }
+    ]
+   },
+   {
+    "application_unit_id": 122,
+    "host": "cdn.example.net",
+    "port_class": "web",
+    "path_prefix": "/api/v2",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "object_reference surface",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "deferred",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": null,
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 124,
+    "host": "cdn.example.net",
+    "port_class": "web",
+    "path_prefix": "/files",
+    "deep_required": false,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 123,
+    "host": "cdn.example.net",
+    "port_class": "web",
+    "path_prefix": "/login",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "login/session path",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 7,
+      "covering_probe_count": 7,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 9,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 2,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 2,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "missing_block",
+      "probe_count": 9,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 505
+     }
+    ]
+   },
+   {
+    "application_unit_id": 106,
+    "host": "example.com",
+    "port_class": "port-8443",
+    "path_prefix": "/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth_entry/account_recovery surface",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "cart/checkout/payment path",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 3,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 14,
+      "covering_probe_count": 12,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket path",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 11,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 503
+     }
+    ]
+   },
+   {
+    "application_unit_id": 101,
+    "host": "example.com",
+    "port_class": "web",
+    "path_prefix": "/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth_entry/account_recovery surface",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "cart/checkout/payment path",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 13,
+      "covering_probe_count": 6,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 25,
+      "covering_probe_count": 21,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 26,
+      "covering_probe_count": 0,
+      "has_finding": true,
+      "finding_id": 505
+     }
+    ]
+   },
+   {
+    "application_unit_id": 102,
+    "host": "example.com",
+    "port_class": "web",
+    "path_prefix": "/api",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 6,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "webhook/import/proxy path",
+      "status": "missing_block",
+      "probe_count": 8,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 103,
+    "host": "example.com",
+    "port_class": "web",
+    "path_prefix": "/api/v2",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 9,
+      "covering_probe_count": 6,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "webhook/import/proxy path",
+      "status": "covered",
+      "probe_count": 10,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 105,
+    "host": "example.com",
+    "port_class": "web",
+    "path_prefix": "/files",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "deferred",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 104,
+    "host": "example.com",
+    "port_class": "web",
+    "path_prefix": "/login",
+    "deep_required": false,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth_entry/account_recovery surface",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": null,
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 5,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 118,
+    "host": "shop.example.com",
+    "port_class": "port-8443",
+    "path_prefix": "/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "deferred",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "login/session path",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "workflow_token surface",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 14,
+      "covering_probe_count": 10,
+      "has_finding": true,
+      "finding_id": 503
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "file_handling surface",
+      "status": "covered",
+      "probe_count": 12,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 11,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket path",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "webhook/import/proxy path",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 113,
+    "host": "shop.example.com",
+    "port_class": "web",
+    "path_prefix": "/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "deferred",
+      "probe_count": 5,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "login/session path",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "workflow_token surface",
+      "status": "covered",
+      "probe_count": 4,
+      "covering_probe_count": 4,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 24,
+      "covering_probe_count": 21,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "file_handling surface",
+      "status": "covered",
+      "probe_count": 25,
+      "covering_probe_count": 4,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 25,
+      "covering_probe_count": 4,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 7,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 114,
+    "host": "shop.example.com",
+    "port_class": "web",
+    "path_prefix": "/api",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "deferred",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 7,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 2,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 119,
+    "host": "shop.example.com",
+    "port_class": "web",
+    "path_prefix": "/api/",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "deferred",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 7,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 8,
+      "covering_probe_count": 2,
+      "has_finding": true,
+      "finding_id": 505
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 115,
+    "host": "shop.example.com",
+    "port_class": "web",
+    "path_prefix": "/api/v2",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "deferred",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "auth-gated routing (401/403)",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": true,
+      "finding_id": 502
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 1,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "missing_block",
+      "probe_count": 1,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 117,
+    "host": "shop.example.com",
+    "port_class": "web",
+    "path_prefix": "/files",
+    "deep_required": true,
+    "families": [
+     {
+      "family": "auth",
+      "expected_reason": "credentials exist for host",
+      "status": "missing_block",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 6,
+      "covering_probe_count": 6,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "file_handling surface",
+      "status": "missing_block",
+      "probe_count": 5,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 6,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   },
+   {
+    "application_unit_id": 116,
+    "host": "shop.example.com",
+    "port_class": "web",
+    "path_prefix": "/login",
+    "deep_required": false,
+    "families": [
+     {
+      "family": "access-control",
+      "expected_reason": "id-bearing params",
+      "status": "deferred",
+      "probe_count": 4,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "auth",
+      "expected_reason": "login/session path",
+      "status": "missing_block",
+      "probe_count": 2,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "business-logic",
+      "expected_reason": "state-changing methods (PUT/PATCH/DELETE)",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 3,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "client-side",
+      "expected_reason": "reflected params / forms",
+      "status": "covered",
+      "probe_count": 5,
+      "covering_probe_count": 3,
+      "has_finding": true,
+      "finding_id": 501
+     },
+     {
+      "family": "disclosure",
+      "expected_reason": "every application unit (always expected)",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "file",
+      "expected_reason": "upload/download/file param or path",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 2,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "injection",
+      "expected_reason": "endpoint carries params",
+      "status": "covered",
+      "probe_count": 2,
+      "covering_probe_count": 1,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "protocol",
+      "expected_reason": "websocket endpoint",
+      "status": "missing_warn",
+      "probe_count": 0,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     },
+     {
+      "family": "ssrf",
+      "expected_reason": "url/redirect/callback param",
+      "status": "covered",
+      "probe_count": 3,
+      "covering_probe_count": 0,
+      "has_finding": false,
+      "finding_id": null
+     }
+    ]
+   }
+  ],
+  "totals": {
+   "units": 25,
+   "cells": 219,
+   "covered": 114,
+   "missing_block": 42,
+   "missing_warn": 53,
+   "deferred": 10,
+   "with_finding": 49
+  }
+ },
+ "depth_ledger": {
+  "skipped": false,
+  "units": [
+   {
+    "unit": {
+     "id": 115,
+     "host": "shop.example.com",
+     "port_class": "web",
+     "path_prefix": "/api/v2",
+     "depth_tier": "app-unit",
+     "risk_score": 10,
+     "structure_score": 4,
+     "total_score": 3,
+     "confidence": "low"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "deferral"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "low",
+    "ev_rank": 60,
+    "signal_classes_uncovered": [
+     "lfi",
+     "open-redirect",
+     "ssrf"
+    ],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 107,
+     "host": "app.example.com",
+     "port_class": "web",
+     "path_prefix": "/",
+     "depth_tier": "app-unit",
+     "risk_score": 9,
+     "structure_score": 1,
+     "total_score": 5,
+     "confidence": "high"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "object_reference surface"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "cart/checkout/payment path"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "object_reference surface",
+      "via": "cross-identity (alice, anonymous, bob)"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "cart/checkout/payment path",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": true,
+    "confidence": "high",
+    "ev_rank": 18,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [
+     {
+      "request_variant_id": 1033,
+      "method": "GET",
+      "path": "/",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-0-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401,
+          404
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-0-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-0-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1036,
+      "method": "DELETE",
+      "path": "/api",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-1-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401,
+          404
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-1-anonymous.txt",
+          "evidence/probe-4.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          403
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-1-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [
+        {
+         "auth_context": "bob",
+         "assertion": "bob read alice's order",
+         "evidence_ref": "evidence/identity-1-bob.txt"
+        }
+       ],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1039,
+      "method": "PUT",
+      "path": "/api/items",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-2-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-2-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-2-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [],
+       "linked_finding_ids": [
+        502
+       ]
+      }
+     },
+     {
+      "request_variant_id": 1048,
+      "method": "DELETE",
+      "path": "/api/v2/webhook",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-5-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-5-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          403
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-5-bob.txt",
+          "evidence/probe-5.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [
+        {
+         "auth_context": "bob",
+         "assertion": "bob read alice's order",
+         "evidence_ref": "evidence/identity-5-bob.txt"
+        }
+       ],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1051,
+      "method": "PUT",
+      "path": "/apix/status",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-6-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-6-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-6-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1054,
+      "method": "POST",
+      "path": "/login/reset",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-7-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-7-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          403
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-7-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1057,
+      "method": "GET",
+      "path": "/files/upload",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-8-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-8-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-8-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [
+        {
+         "auth_context": "anonymous",
+         "assertion": "owner-only data returned",
+         "evidence_ref": ""
+        }
+       ],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1060,
+      "method": "DELETE",
+      "path": "/checkout/pay",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-9-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-9-anonymous.txt",
+          "evidence/probe-11.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          403
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-9-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [
+        {
+         "auth_context": "bob",
+         "assertion": "bob read alice's order",
+         "evidence_ref": "evidence/identity-9-bob.txt"
+        }
+       ],
+       "linked_finding_ids": []
+      }
+     },
+     {
+      "request_variant_id": 1063,
+      "method": "PUT",
+      "path": "/ws",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-10-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-10-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-10-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [],
+       "linked_finding_ids": []
+      }
+     }
+    ],
+    "identity_outcome_difference_count": 9
+   },
+   {
+    "unit": {
+     "id": 102,
+     "host": "example.com",
+     "port_class": "web",
+     "path_prefix": "/api",
+     "depth_tier": "endpoint-cluster",
+     "risk_score": 7,
+     "structure_score": 1,
+     "total_score": 3,
+     "confidence": "medium"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "webhook/import/proxy path"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "needs": "a second identity",
+      "detail": "needs a second identity",
+      "identities_seen": []
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "webhook/import/proxy path"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "medium",
+    "ev_rank": 14,
+    "signal_classes_uncovered": [
+     "open-redirect",
+     "ssrf"
+    ],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 119,
+     "host": "shop.example.com",
+     "port_class": "web",
+     "path_prefix": "/api/",
+     "depth_tier": "app-unit",
+     "risk_score": 5,
+     "structure_score": 3,
+     "total_score": 2,
+     "confidence": "high"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "deferral"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "high",
+    "ev_rank": 10,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 118,
+     "host": "shop.example.com",
+     "port_class": "port-8443",
+     "path_prefix": "/",
+     "depth_tier": "endpoint-cluster",
+     "risk_score": 9,
+     "structure_score": 2,
+     "total_score": 12,
+     "confidence": "low"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "login/session path"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "webhook/import/proxy path"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "file_handling surface"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "workflow_token surface"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket path"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "deferral"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "webhook/import/proxy path",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "file_handling surface",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "workflow_token surface",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "login/session path"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket path"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "low",
+    "ev_rank": 9,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 111,
+     "host": "app.example.com",
+     "port_class": "web",
+     "path_prefix": "/files",
+     "depth_tier": "app-unit",
+     "risk_score": 4,
+     "structure_score": 0,
+     "total_score": 4,
+     "confidence": "medium"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "cross-identity (alice, anonymous, bob)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": true,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "medium",
+    "ev_rank": 8,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [
+     {
+      "request_variant_id": 1057,
+      "method": "GET",
+      "path": "/files/upload",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-8-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-8-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-8-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [
+        {
+         "auth_context": "anonymous",
+         "assertion": "owner-only data returned",
+         "evidence_ref": ""
+        }
+       ],
+       "linked_finding_ids": []
+      }
+     }
+    ],
+    "identity_outcome_difference_count": 1
+   },
+   {
+    "unit": {
+     "id": 110,
+     "host": "app.example.com",
+     "port_class": "web",
+     "path_prefix": "/login",
+     "depth_tier": "endpoint-cluster",
+     "risk_score": 8,
+     "structure_score": 4,
+     "total_score": 1,
+     "confidence": "high"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "cross-identity (alice, anonymous, bob)"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "high",
+    "ev_rank": 8,
+    "signal_classes_uncovered": [
+     "sqli"
+    ],
+    "identity_outcome_differences": [
+     {
+      "request_variant_id": 1054,
+      "method": "POST",
+      "path": "/login/reset",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-7-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-7-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          403
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-7-bob.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [],
+       "linked_finding_ids": []
+      }
+     }
+    ],
+    "identity_outcome_difference_count": 1
+   },
+   {
+    "unit": {
+     "id": 103,
+     "host": "example.com",
+     "port_class": "web",
+     "path_prefix": "/api/v2",
+     "depth_tier": "app-unit",
+     "risk_score": 3,
+     "structure_score": 2,
+     "total_score": 6,
+     "confidence": "low"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "webhook/import/proxy path"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "webhook/import/proxy path",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "needs": "a second identity",
+      "detail": "needs a second identity",
+      "identities_seen": []
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "low",
+    "ev_rank": 6,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 114,
+     "host": "shop.example.com",
+     "port_class": "web",
+     "path_prefix": "/api",
+     "depth_tier": "endpoint-cluster",
+     "risk_score": 3,
+     "structure_score": 3,
+     "total_score": 0,
+     "confidence": "medium"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "deferral"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "medium",
+    "ev_rank": 3,
+    "signal_classes_uncovered": [
+     "open-redirect"
+    ],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 106,
+     "host": "example.com",
+     "port_class": "port-8443",
+     "path_prefix": "/",
+     "depth_tier": "endpoint-cluster",
+     "risk_score": 2,
+     "structure_score": 0,
+     "total_score": 2,
+     "confidence": "low"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "cart/checkout/payment path"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket path"
+     }
+    ],
+    "covered": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "cart/checkout/payment path",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "needs": "a second identity",
+      "detail": "needs a second identity",
+      "identities_seen": []
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket path"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": true,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": true,
+    "confidence": "low",
+    "ev_rank": 2,
+    "signal_classes_uncovered": [
+     "idor"
+    ],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 109,
+     "host": "app.example.com",
+     "port_class": "web",
+     "path_prefix": "/api/v2",
+     "depth_tier": "thin",
+     "risk_score": 1,
+     "structure_score": 3,
+     "total_score": 11,
+     "confidence": "low"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "cross-identity (alice, anonymous, bob)"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "deferral"
+     }
+    ],
+    "missing_block": [],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "low",
+    "ev_rank": 0,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [
+     {
+      "request_variant_id": 1048,
+      "method": "DELETE",
+      "path": "/api/v2/webhook",
+      "observation": {
+       "kind": "identity_http_status_difference",
+       "identity_count": 3,
+       "by_identity": [
+        {
+         "auth_context": "alice",
+         "observed_http_statuses": [
+          200
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-5-alice.txt"
+         ]
+        },
+        {
+         "auth_context": "anonymous",
+         "observed_http_statuses": [
+          401
+         ],
+         "probe_count": 1,
+         "evidence_refs": [
+          "evidence/identity-5-anonymous.txt"
+         ]
+        },
+        {
+         "auth_context": "bob",
+         "observed_http_statuses": [
+          403
+         ],
+         "probe_count": 2,
+         "evidence_refs": [
+          "evidence/identity-5-bob.txt",
+          "evidence/probe-5.txt"
+         ]
+        }
+       ]
+      },
+      "conclusions": {
+       "derived_from_status_difference": false,
+       "recorded_outcome_assertions": [
+        {
+         "auth_context": "bob",
+         "assertion": "bob read alice's order",
+         "evidence_ref": "evidence/identity-5-bob.txt"
+        }
+       ],
+       "linked_finding_ids": []
+      }
+     }
+    ],
+    "identity_outcome_difference_count": 1
+   },
+   {
+    "unit": {
+     "id": 101,
+     "host": "example.com",
+     "port_class": "web",
+     "path_prefix": "/",
+     "depth_tier": "thin",
+     "risk_score": 0,
+     "structure_score": 0,
+     "total_score": 0,
+     "confidence": "high"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "cart/checkout/payment path"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth_entry/account_recovery surface",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "cart/checkout/payment path",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "needs": "a second identity",
+      "detail": "needs a second identity",
+      "identities_seen": []
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": true,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": true,
+    "confidence": "high",
+    "ev_rank": 0,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 105,
+     "host": "example.com",
+     "port_class": "web",
+     "path_prefix": "/files",
+     "depth_tier": "thin",
+     "risk_score": 6,
+     "structure_score": 4,
+     "total_score": 12,
+     "confidence": "medium"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "deferral"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "needs": "a second identity",
+      "detail": "needs a second identity",
+      "identities_seen": []
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "auth-gated routing (401/403)"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "upload/download/file param or path"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "state-changing methods (PUT/PATCH/DELETE)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": false,
+    "decisive_surface": false,
+    "confidence": "medium",
+    "ev_rank": 0,
+    "signal_classes_uncovered": [
+     "open-redirect",
+     "ssrf"
+    ],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 113,
+     "host": "shop.example.com",
+     "port_class": "web",
+     "path_prefix": "/",
+     "depth_tier": "thin",
+     "risk_score": 7,
+     "structure_score": 2,
+     "total_score": 10,
+     "confidence": "high"
+    },
+    "expected": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "login/session path"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "file_handling surface"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "workflow_token surface"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "covered": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params",
+      "via": "deferral"
+     },
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "login/session path",
+      "via": "coverage"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "ssrf",
+      "block_level": "high",
+      "predicate_fired_on": "url/redirect/callback param",
+      "via": "coverage"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "file_handling surface",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     },
+     {
+      "family": "business-logic",
+      "block_level": "warn",
+      "predicate_fired_on": "workflow_token surface",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "protocol",
+      "block_level": "warn",
+      "predicate_fired_on": "websocket endpoint"
+     }
+    ],
+    "deferred": [
+     {
+      "family": "access-control",
+      "block_level": "high",
+      "predicate_fired_on": "id-bearing params"
+     }
+    ],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "high",
+    "ev_rank": 0,
+    "signal_classes_uncovered": [],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   },
+   {
+    "unit": {
+     "id": 117,
+     "host": "shop.example.com",
+     "port_class": "web",
+     "path_prefix": "/files",
+     "depth_tier": "thin",
+     "risk_score": 2,
+     "structure_score": 1,
+     "total_score": 9,
+     "confidence": "medium"
+    },
+    "expected": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "credentials exist for host"
+     },
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "file_handling surface"
+     },
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms"
+     }
+    ],
+    "covered": [
+     {
+      "family": "injection",
+      "block_level": "high",
+      "predicate_fired_on": "endpoint carries params",
+      "via": "coverage"
+     },
+     {
+      "family": "client-side",
+      "block_level": "warn",
+      "predicate_fired_on": "reflected params / forms",
+      "via": "coverage"
+     }
+    ],
+    "missing_block": [
+     {
+      "family": "auth",
+      "block_level": "high",
+      "predicate_fired_on": "credentials exist for host"
+     },
+     {
+      "family": "file",
+      "block_level": "high",
+      "predicate_fired_on": "file_handling surface"
+     }
+    ],
+    "missing_warn": [
+     {
+      "family": "disclosure",
+      "block_level": "warn",
+      "predicate_fired_on": "every application unit (always expected)"
+     }
+    ],
+    "deferred": [],
+    "dedicated_dispatch_satisfied": false,
+    "depth_satisfied": false,
+    "touched": true,
+    "decisive_surface": false,
+    "confidence": "medium",
+    "ev_rank": 0,
+    "signal_classes_uncovered": [
+     "open-redirect",
+     "ssrf"
+    ],
+    "identity_outcome_differences": [],
+    "identity_outcome_difference_count": 0
+   }
+  ],
+  "deferral_count": 3,
+  "summary": {
+   "deep_required": 15,
+   "depth_satisfied": 0,
+   "depth_unsatisfied": 15
+  }
+ }
+}

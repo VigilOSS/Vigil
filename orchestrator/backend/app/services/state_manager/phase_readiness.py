@@ -267,7 +267,8 @@ def _build_stage_gap(spec: _StageSpec, runs: list[dict[str, Any]]) -> dict[str, 
             "action": "re-run-or-accept",
             "detail": (
                 f"{spec.label} is expected for this phase but no command run is "
-                "recorded — re-run the stage or record an accept-with-reason deferral."
+                "recorded; re-run the stage, or for a host objective skipped on purpose "
+                "record a coverage_deferral decision and name this gap in the handoff."
             ),
         }
 
@@ -295,8 +296,9 @@ def _build_stage_gap(spec: _StageSpec, runs: list[dict[str, Any]]) -> dict[str, 
         "command_run_ids": offending_ids,
         "action": "re-run-or-accept",
         "detail": (
-            f"{spec.label} {why}; re-run the stage or record an "
-            f"accept-with-reason deferral (offending run id(s): "
+            f"{spec.label} {why}; re-run the stage, or for a host objective skipped "
+            "on purpose record a coverage_deferral decision and name this gap in the "
+            f"handoff (offending run id(s): "
             f"{', '.join(str(i) for i in offending_ids) or 'n/a'})."
         ),
     }

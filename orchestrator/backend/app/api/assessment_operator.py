@@ -1,27 +1,53 @@
 """Operator coordination routes for assessment dispatches and checkpoints."""
 from __future__ import annotations
 
+import difflib
 from typing import Any, Literal
 
-from fastapi import APIRouter, HTTPException, Query, status
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from fastapi import APIRouter, HTTPException, Query, Response, status
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 
 from ..services import operator_checkpoints, state_manager
+from ..services.code_analysis import FAMILY_EXCLUSION_DECISION_KIND, family_exclusion_problems
 from ..services.engagements import get_engagement_or_404
 from ..services.state_manager.coverage import MAX_ASSESSMENT_LIST_LIMIT
+from ..services.state_manager.coverage_readiness import PER_HOST_OBJECTIVES
 from ..services.state_manager.dispatches import (
     HANDOFF_SUMMARY_MAX_CHARS,
     list_dispatch_client_bindings,
     record_dispatch_client_binding,
 )
-from .assessment import _audit_assessment_mutation, _broadcast, _offload
+from .assessment import (
+    ASSESSMENT_PREFIX,
+    _audit_assessment_mutation,
+    _broadcast,
+    _offload,
+    folded_vocabulary,
+)
+from .query_params import DeclaredQueryParamsRoute
 
 
-router = APIRouter()
+# Registered by the app at its full path (not included under the assessment
+# router's prefix), so engagement_key is a path param of every route here.
+router = APIRouter(
+    prefix=ASSESSMENT_PREFIX, tags=["assessment"], route_class=DeclaredQueryParamsRoute
+)
 
 
-_DISPATCH_STATUS = Literal["in-progress", "completed", "failed", "aborted", "blocked"]
-_DISPATCH_TERMINAL_STATUS = Literal["completed", "failed", "aborted", "blocked"]
+_DISPATCH_STATUS = folded_vocabulary(
+    Literal["in-progress", "completed", "failed", "aborted", "blocked"]
+)
+_DISPATCH_TERMINAL_STATUS = folded_vocabulary(
+    Literal["completed", "failed", "aborted", "blocked"]
+)
 _KNOWN_DISPATCH_MODES: tuple[str, ...] = (
     "hypothesis-driven",
     "item-iterating",
@@ -31,7 +57,7 @@ _KNOWN_DISPATCH_MODES: tuple[str, ...] = (
 )
 _REASONING = Literal["low", "medium", "high", "xhigh", "max"]
 _CONFIDENCE = Literal["low", "medium", "high"]
-_HANDOFF_STATUS = Literal["checkpointed", "ready", "blocked", "superseded"]
+_HANDOFF_STATUS = folded_vocabulary(Literal["checkpointed", "ready", "blocked", "superseded"])
 # A dispatch can omit client identity, while a client binding cannot.
 _LAUNCHED_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "zcode", "pi"]
 _DISPATCH_CLIENT = Literal["claude", "codex", "goose", "kimi", "opencode", "zcode", "pi", "unknown"]
@@ -177,7 +203,10 @@ class HandoffCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     agent_id: str = Field(min_length=1, max_length=256)
-    agent_role: str = Field(min_length=1, max_length=128)
+    # Optional: the handoff records the dispatch's registered role. When absent it
+    # is filled from the dispatch and named on the response's ``derived`` list; a
+    # different role contradicts the dispatch ``agent_id`` names and is refused (409).
+    agent_role: str | None = Field(default=None, min_length=1, max_length=128)
     phase: str | None = Field(default=None, max_length=64)
     summary: str = Field(min_length=1, max_length=HANDOFF_SUMMARY_MAX_CHARS)
     confidence: _CONFIDENCE | None = None
@@ -213,15 +242,6 @@ class HandoffUpdate(BaseModel):
     extras: dict[str, Any] | None = None
 
 
-_COVERAGE_DEFERRAL_OBJECTIVES = (
-    "waf_tier",
-    "service_inventory",
-    "directory_fuzz",
-    "tech_fingerprint",
-    "osint",
-)
-
-
 class CoverageDeferralPayload(BaseModel):
     """Strict shape for ``kind='coverage_deferral'`` decision rows.
 
@@ -237,15 +257,9 @@ class CoverageDeferralPayload(BaseModel):
 
     model_config = ConfigDict(extra="allow")
 
-    deferred_objectives: list[
-        Literal[
-            "waf_tier",
-            "service_inventory",
-            "directory_fuzz",
-            "tech_fingerprint",
-            "osint",
-        ]
-    ] = Field(
+    # Exactly the objectives ``per_host_coverage`` evaluates: a deferral of
+    # anything else would be stored and then read by no gate.
+    deferred_objectives: list[Literal[PER_HOST_OBJECTIVES]] = Field(  # type: ignore[valid-type]
         min_length=1,
         description="One or more sub-objectives the operator is explicitly skipping for the host.",
     )
@@ -420,17 +434,21 @@ class BlindTriageVerdictPayload(BaseModel):
         "Duplicate",
     ]
 
+    @field_validator("verdict", mode="before")
+    @classmethod
+    def _canonical_verdict_case(cls, value: Any) -> Any:
+        # The verdict vocabulary is mixed-case by convention (`Accept@P2`); the
+        # case a caller types it in carries no meaning, so it folds to the
+        # canonical spelling the report gate compares against.
+        if isinstance(value, str):
+            return _BLIND_TRIAGE_VERDICTS_BY_FOLD.get(value.strip().casefold(), value)
+        return value
 
-class Pass1QAVerdictPayload(BaseModel):
-    """An editing auditor's checklist result, separate from independent triage."""
 
-    model_config = ConfigDict(extra="forbid")
-
-    finding_slug: str = Field(min_length=1)
-    packet_id: str = Field(pattern=r"^[0-9a-f]{64}$")
-    auditor_dispatch_agent_id: str = Field(min_length=1)
-    verdict: Literal["pass", "blocked"]
-    reason: str = Field(min_length=1)
+_BLIND_TRIAGE_VERDICTS_BY_FOLD = {
+    verdict.casefold(): verdict
+    for verdict in BlindTriageVerdictPayload.model_fields["verdict"].annotation.__args__
+}
 
 
 class ReproRehearsalPayload(BaseModel):
@@ -448,29 +466,241 @@ class ReproRehearsalPayload(BaseModel):
     prior_decision_id: int | None = Field(default=None, gt=0)
     reason: str = ""
 
+    @field_validator("verdict", "proof_mode", mode="before")
+    @classmethod
+    def _lowercase_vocabulary(cls, value: Any) -> Any:
+        return value.strip().lower() if isinstance(value, str) else value
+
+
+def _literal_values(model: type[BaseModel], field: str) -> list[str]:
+    info = model.model_fields.get(field)
+    if info is None or getattr(info.annotation, "__origin__", None) is not Literal:
+        return []
+    return [str(value) for value in info.annotation.__args__]
+
+
+def _validated_kind_payload(
+    kind: str,
+    model: type[BaseModel],
+    payload: dict[str, Any],
+    *,
+    literal_notes: dict[str, str] | None = None,
+) -> None:
+    """Validate a gated kind's payload, naming each failing ``payload.<field>``.
+
+    A raw validation error inside ``DecisionCreate`` reports ``body.<field>``,
+    which points at the request instead of the payload, and an unknown key as
+    "Extra inputs are not permitted" with no hint of the field meant.
+    ``literal_notes`` adds, for a value refused from a field's vocabulary,
+    where a value outside it belongs.
+    """
+    try:
+        model.model_validate(payload)
+    except ValidationError as exc:
+        problems = []
+        for error in exc.errors():
+            path = ".".join(str(part) for part in ("payload", *error["loc"]))
+            if error["type"] == "extra_forbidden":
+                field = str(error["loc"][-1])
+                close = difflib.get_close_matches(field, sorted(model.model_fields), n=1, cutoff=0.6)
+                problems.append(
+                    f"{path} is not a {kind} field"
+                    + (f" (did you mean payload.{close[0]}?)" if close else "")
+                )
+            elif error["type"] == "literal_error":
+                allowed = str(error["ctx"]["expected"]).replace("'", "").replace(" or ", ", ")
+                # A before-validator may have folded the word; quote it as sent.
+                sent = (
+                    payload[error["loc"][0]]
+                    if len(error["loc"]) == 1 and error["loc"][0] in payload
+                    else error["input"]
+                )
+                note = (literal_notes or {}).get(str(error["loc"][0]))
+                problems.append(
+                    f"{path} must be one of: {allowed} (got {sent!r})"
+                    + (f"; {note}" if note else "")
+                )
+            elif error["type"] == "missing" and _literal_values(model, str(error["loc"][-1])):
+                allowed = ", ".join(_literal_values(model, str(error["loc"][-1])))
+                problems.append(f"{path} is required, one of: {allowed}")
+            else:
+                problems.append(f"{path}: {error['msg']}")
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"{kind} payload invalid: " + "; ".join(problems)
+                + f". Fields: {', '.join(model.model_fields)}"
+                " (`vigil assess contract agent decision`)"
+            ),
+        ) from exc
+
+
+# Where a deferral of work that no per-host objective covers belongs: an ungated
+# kind the vocabulary accepts as written, read by audit views and no gate.
+_NON_OBJECTIVE_DEFERRAL_NOTE = (
+    "a coverage_deferral closes only these readiness objectives. Record a deferred "
+    "step that is not one of them (authenticated recon, a skipped scan) as an "
+    "ungated decision, e.g. `vigil assess agent decision --kind phase_step_deferral "
+    "--payload-json '{\"hosts\": [...], \"step\": \"<step>\", \"reason\": \"<why>\"}' "
+    "--surfaced-to-user`, which no gate reads"
+)
+
+
+# Decision kinds a backend gate or a downstream approve+execute flow reads. A
+# row recorded under another spelling of one of these would satisfy nothing and
+# leave the gate open. A spelling equal to a gated kind once case and separators
+# are folded is stored under that kind (named on the response's ``derived``); a
+# misspelling within the near-miss distance is refused with the kind it meant.
+GATED_DECISION_KINDS = frozenset(
+    {
+        "blind_triage_verdict",
+        "claim_equivalence",
+        "containment_proposal",
+        "coverage_completeness_deferral",
+        "coverage_deferral",
+        "depth_deferral",
+        "repro_rehearsal",
+        "report_qc_verdict",
+        "severity_variance",
+        "submission_qc_verdict",
+        "vuln_family_exclusion",
+    }
+)
+# Kinds that satisfy no gate, mapped to the gated kind that does their job. The
+# kind and its near misses are refused naming that kind, so a caller is led to a
+# kind that is accepted; stored rows of these kinds stay readable data.
+UNGATED_KIND_REPLACEMENTS: dict[str, str] = {
+    "pass1_qa_verdict": "submission_qc_verdict",
+}
+_NEAR_MISS_EDIT_DISTANCE = 2
+
+
+def _folded_kind(kind: str) -> str:
+    return "".join(char for char in kind.casefold() if char.isalnum())
+
+
+def _edit_distance(left: str, right: str) -> int:
+    """Optimal-string-alignment distance: a transposition counts as one edit."""
+    rows = [list(range(len(right) + 1))]
+    for i, left_char in enumerate(left, start=1):
+        row = [i] + [0] * len(right)
+        for j, right_char in enumerate(right, start=1):
+            row[j] = min(
+                rows[-1][j] + 1,
+                row[j - 1] + 1,
+                rows[-1][j - 1] + (left_char != right_char),
+            )
+            if (
+                i > 1 and j > 1
+                and left_char == right[j - 2] and left[i - 2] == right_char
+            ):
+                row[j] = min(row[j], rows[-2][j - 2] + 1)
+        rows.append(row)
+    return rows[-1][-1]
+
+
+def _nearest_kind(kind: str, candidates) -> str | None:
+    """The candidate ``kind`` spells within the near-miss distance, if any."""
+    folded = _folded_kind(kind)
+    distance, canonical = min(
+        (_edit_distance(folded, _folded_kind(candidate)), candidate)
+        for candidate in candidates
+    )
+    return canonical if distance <= _NEAR_MISS_EDIT_DISTANCE else None
+
+
+def _gated_kind_spelled(kind: str) -> str | None:
+    """The gated kind ``kind`` names once case and separators are folded."""
+    folded = _folded_kind(kind)
+    return next(
+        (candidate for candidate in GATED_DECISION_KINDS if _folded_kind(candidate) == folded),
+        None,
+    )
+
+
+def _gated_kind_near_miss(kind: str) -> str | None:
+    """The gated kind ``kind`` misspells, or None for a gated or unrelated kind."""
+    if _gated_kind_spelled(kind) is not None:
+        return None
+    return _nearest_kind(kind, GATED_DECISION_KINDS)
+
+
+def _ungated_kind_replacement(kind: str) -> str | None:
+    """The gated kind that does the job of the ungated kind ``kind`` names or misspells."""
+    ungated = _nearest_kind(kind, UNGATED_KIND_REPLACEMENTS)
+    return UNGATED_KIND_REPLACEMENTS[ungated] if ungated is not None else None
+
 
 class DecisionCreate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     # ``kind`` is intentionally NOT a Literal — operators may add new
     # checkpoint kinds (scope_decision, egress_decision, dispatch_blocked,
-    # license_decision, ...) without a backend redeploy. The CLI helper layer
-    # validates the well-known shapes; the table just stores the bytes.
+    # license_decision, ...) without a backend redeploy, and the table stores
+    # the payload of an unrecognised kind as sent.
     #
-    # The exception is kinds whose payload is consumed by a backend gate
-    # (currently: ``coverage_deferral`` → ``per_host_coverage()``) OR by a
-    # downstream approve+execute flow (``containment_proposal`` →
-    # ``vigil blue contain``). For those, validate the payload shape at POST
-    # time so malformed payloads can't silently neuter the gate that depends
-    # on them, or get blindly approved and executed later.
+    # The exceptions are the GATED_DECISION_KINDS. Another case or separator
+    # spelling of one is stored under the canonical kind, a misspelling is
+    # refused rather than stored under a name no gate reads, and a gated kind
+    # whose gate depends on the payload shape has it validated at POST time —
+    # here, or by its state-manager recorder — so a malformed payload cannot
+    # silently neuter that gate or be blindly approved and executed later. The
+    # CLI sends every kind's payload unchanged and relies on this validation.
     kind: str = Field(min_length=1, max_length=128)
     payload: dict[str, Any]
     surfaced_to_user: bool = False
+    supersedes: int | None = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Id of an earlier decision of the same kind in this engagement that this row "
+            "replaces. The earlier row is stamped superseded_by_id and every gate reads "
+            "only current rows; it stays readable by id."
+        ),
+    )
+    # What the POST stored in place of what was sent, for the response's
+    # ``derived`` list.
+    _derived: list[dict[str, Any]] = PrivateAttr(default_factory=list)
 
     @model_validator(mode="after")
     def _validate_known_kind_payload(self) -> "DecisionCreate":
+        replacement = _ungated_kind_replacement(self.kind)
+        if replacement is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"decision kind {self.kind!r} satisfies no gate and is not recorded; "
+                    f"record the review as `--kind {replacement}` from a dispatch "
+                    "separate from the writer (payload shape: `vigil assess "
+                    "contract agent decision`)"
+                ),
+            )
+        canonical = _gated_kind_near_miss(self.kind)
+        if canonical is not None:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                detail=(
+                    f"decision kind {self.kind!r} is not a gated kind; did you mean "
+                    f"'{canonical}'? A row under any other name satisfies no gate. "
+                    f"Record it with `--kind {canonical}`"
+                ),
+            )
+        spelled = _gated_kind_spelled(self.kind)
+        if spelled is not None and spelled != self.kind:
+            self._derived.append({
+                "field": "kind",
+                "value": spelled,
+                "derived_from": "kind",
+                "detail": f"stored the gated kind {spelled!r} for the spelling {self.kind!r}",
+            })
+            self.kind = spelled
         if self.kind == "coverage_deferral":
-            CoverageDeferralPayload.model_validate(self.payload)
+            _validated_kind_payload(
+                self.kind,
+                CoverageDeferralPayload,
+                self.payload,
+                literal_notes={"deferred_objectives": _NON_OBJECTIVE_DEFERRAL_NOTE},
+            )
         elif self.kind == "depth_deferral":
             try:
                 DepthDeferralPayload.model_validate(self.payload)
@@ -495,11 +725,28 @@ class DecisionCreate(BaseModel):
                     detail=f"containment_proposal payload invalid: {exc}",
                 ) from exc
         elif self.kind == "blind_triage_verdict":
-            BlindTriageVerdictPayload.model_validate(self.payload)
-        elif self.kind == "pass1_qa_verdict":
-            Pass1QAVerdictPayload.model_validate(self.payload)
+            _validated_kind_payload(self.kind, BlindTriageVerdictPayload, self.payload)
+            self.payload = {
+                **self.payload,
+                "verdict": BlindTriageVerdictPayload.model_validate(self.payload).verdict,
+            }
+        elif self.kind == FAMILY_EXCLUSION_DECISION_KIND:
+            problems = family_exclusion_problems(self.payload, surfaced_to_user=self.surfaced_to_user)
+            if problems:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        f"{FAMILY_EXCLUSION_DECISION_KIND} not recorded: " + "; ".join(problems)
+                        + '. Payload: {"vuln_classes": [<canonical review families>], '
+                        '"ruling": "<the ruling verbatim and where it is recorded>"}'
+                    ),
+                )
         elif self.kind == "repro_rehearsal":
-            ReproRehearsalPayload.model_validate(self.payload)
+            _validated_kind_payload(self.kind, ReproRehearsalPayload, self.payload)
+            folded = ReproRehearsalPayload.model_validate(self.payload)
+            self.payload = {
+                **self.payload, "verdict": folded.verdict, "proof_mode": folded.proof_mode,
+            }
         return self
 
 
@@ -641,6 +888,7 @@ async def create_dispatch_client_binding(
     engagement_key: str,
     agent_id: str,
     request: DispatchClientBindingCreate,
+    response: Response,
 ) -> dict[str, Any]:
     """Bind a dispatch to the client session the operator actually launched.
 
@@ -658,6 +906,10 @@ async def create_dispatch_client_binding(
         asserted_client_handle=request.asserted_client_handle,
         note=request.note,
     )
+    if record["already_bound"]:
+        # Nothing was written: the dispatch already holds exactly this binding.
+        response.status_code = status.HTTP_200_OK
+        return record
     binding = record["binding"]
     await _offload(
         _audit_assessment_mutation,
@@ -719,10 +971,10 @@ async def create_handoff(engagement_key: str, request: HandoffCreate) -> dict[st
         _audit_assessment_mutation,
         engagement.id,
         title="agent handoff",
-        action=f"agent_id={request.agent_id} role={request.agent_role}",
-        actor_name=request.agent_role,
+        action=f"agent_id={request.agent_id} role={record['agent_role']}",
+        actor_name=record["agent_role"],
         result=request.summary,
-        metadata={"agent_id": request.agent_id, "agent_role": request.agent_role},
+        metadata={"agent_id": request.agent_id, "agent_role": record["agent_role"]},
     )
     await _broadcast(engagement.key, "dispatch_handoff", record)
     return record
@@ -800,6 +1052,7 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
         kind=request.kind,
         payload=request.payload,
         surfaced_to_user=request.surfaced_to_user,
+        supersedes=request.supersedes,
     )
     await _offload(
         _audit_assessment_mutation,
@@ -807,10 +1060,14 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
         title="agent decision",
         action=f"kind={request.kind}",
         result="surfaced_to_user" if request.surfaced_to_user else "",
-        metadata={"kind": request.kind, "surfaced_to_user": request.surfaced_to_user},
+        metadata={
+            "kind": request.kind,
+            "surfaced_to_user": request.surfaced_to_user,
+            "supersedes": request.supersedes,
+        },
     )
     await _broadcast(engagement.key, "dispatch_decision", record)
-    return record
+    return {**record, "derived": list(request._derived)}
 
 
 @router.get("/dispatch-decisions")
@@ -818,6 +1075,10 @@ def get_decisions(
     engagement_key: str,
     kind: str = "",
     resolved: bool | None = Query(default=None),
+    include_superseded: bool = Query(
+        default=False,
+        description="Also list rows a later decision superseded (history); gates never read them.",
+    ),
     limit: int = Query(default=100, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -826,6 +1087,7 @@ def get_decisions(
         engagement.id,
         kind=kind,
         resolved=resolved,
+        include_superseded=include_superseded,
         limit=limit,
         offset=offset,
     )

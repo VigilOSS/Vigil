@@ -25,8 +25,12 @@ from pydantic import BaseModel
 from .. import db
 from ..config import settings
 from ..services.engagements import engagements_root, maybe_sync_engagements
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/admin", tags=["admin"])
+router = APIRouter(
+    prefix="/admin", tags=["admin"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class InstallRootResponse(BaseModel):

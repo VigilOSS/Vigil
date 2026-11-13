@@ -84,6 +84,7 @@ _CODE_ANALYSIS_DDL: tuple[str, ...] = (
                 classification TEXT NOT NULL DEFAULT 'unclassified',
                 role TEXT NOT NULL DEFAULT '',
                 slot_types_json TEXT NOT NULL DEFAULT '[]',
+                context_tags_json TEXT NOT NULL DEFAULT '',
                 analysis_priority INTEGER NOT NULL DEFAULT 0,
                 analysis_status TEXT NOT NULL DEFAULT 'unclassified',
                 analysis_depth TEXT NOT NULL DEFAULT 'none',
@@ -186,7 +187,9 @@ _CODE_ANALYSIS_DDL: tuple[str, ...] = (
                 queue_mode TEXT NOT NULL DEFAULT 'initial',
                 reanalysis_reason TEXT NOT NULL DEFAULT '',
                 reanalysis_of_queue_item_id INTEGER,
+                inserted_by TEXT NOT NULL DEFAULT '',
                 consumed_at TEXT,
+                first_claimed_at TEXT,
                 completed_at TEXT,
                 source_superseded_at TEXT,
                 source_supersession_reason TEXT NOT NULL DEFAULT '',
@@ -418,6 +421,7 @@ _CODE_ANALYSIS_DDL: tuple[str, ...] = (
                 target_file_path TEXT NOT NULL DEFAULT '',
                 vuln_class TEXT NOT NULL DEFAULT '',
                 reason TEXT NOT NULL DEFAULT '',
+                origin TEXT NOT NULL DEFAULT 'cross_file',
                 status TEXT NOT NULL DEFAULT 'pending',
                 resolved_queue_item_id INTEGER,
                 resolution_note TEXT NOT NULL DEFAULT '',
@@ -436,6 +440,18 @@ _CODE_ANALYSIS_DDL: tuple[str, ...] = (
                 FOREIGN KEY(resolved_queue_item_id) REFERENCES code_analysis_queue(id) ON DELETE SET NULL
             )
             """,
+    # Triggers are read per target file (status sync), per resolving attempt
+    # (reanalysis carry-forward) and per unbound target path. Each key leads, so
+    # the target-file-or-path disjunction plans as one seek per branch, and the
+    # ON DELETE SET NULL children of a queue row or a file are found by seek.
+    # An index led by engagement_id instead wins the planner's choice without
+    # sqlite_stat1 and walks every trigger of the engagement.
+    "CREATE INDEX IF NOT EXISTS idx_code_analysis_triggers_target_file "
+        "ON code_analysis_triggers(target_file_id, engagement_id)",
+    "CREATE INDEX IF NOT EXISTS idx_code_analysis_triggers_target_path "
+        "ON code_analysis_triggers(target_file_path, engagement_id)",
+    "CREATE INDEX IF NOT EXISTS idx_code_analysis_triggers_resolved_queue_item "
+        "ON code_analysis_triggers(resolved_queue_item_id, engagement_id)",
 )
 # ── End Code Analysis Tables ──────────────────────────────
 

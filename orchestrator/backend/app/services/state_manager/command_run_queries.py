@@ -133,9 +133,14 @@ def list_command_runs(
     if tool_bin:
         filters.append(("r.tool_bin = ?", [tool_bin]))
     if target_host:
-        # Case-insensitive exact match against the parsed target_host column.
-        # NULL-tolerant (LOWER(NULL) = NULL, which will not match the literal).
-        filters.append(("LOWER(r.target_host) = ?", [target_host.strip().lower()]))
+        # Case-insensitive match against the parsed target_host column: the
+        # whole value, or one host of the comma-joined seed hosts a list-mode
+        # crawl records (a hostname never holds a comma). NULL-tolerant.
+        host = target_host.strip().lower()
+        filters.append((
+            "(LOWER(r.target_host) = ? OR instr(',' || LOWER(r.target_host) || ',', ?) > 0)",
+            [host, f",{host},"],
+        ))
     if auth_context:
         filters.append(("r.auth_context = ?", [auth_context]))
     if audit_source:

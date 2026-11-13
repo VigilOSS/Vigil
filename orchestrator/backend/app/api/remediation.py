@@ -8,8 +8,12 @@ from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PositiveInt, field_validator, model_validator
 
 from ..services import remediation
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/engagements/{engagement_key}/remediation", tags=["remediation"])
+router = APIRouter(
+    prefix="/engagements/{engagement_key}/remediation", tags=["remediation"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class CaseCreate(BaseModel):

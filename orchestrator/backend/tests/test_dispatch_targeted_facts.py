@@ -37,7 +37,7 @@ def test_finding_count_does_not_project_evidence(client, isolate_settings, monke
     monkeypatch.setattr(proofs, "_serialize_receipts", unexpected)
     response = client.get(BASE + "/findings/count")
     assert response.status_code == 200, response.text
-    assert response.json() == {"total": 1}
+    assert response.json() == {"total": 1, "by_severity": {"info": 1}}
 
 
 def test_exact_file_lookup_supports_full_file_path_contract(client, isolate_settings):

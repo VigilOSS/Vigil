@@ -124,7 +124,8 @@ def test_the_agent_done_contract_renders_the_pinned_semantics() -> None:
     helper = dict(contracts.get_contract("agent done").helper_defaults)
 
     assert helper["--finding-slugs"] == contract_registry.dispatch_finding_slugs_help()
-    assert "--finding-slugs = " in contracts.render_contract("agent done")
+    assert "--finding-slugs = " in contracts.render_contract_notes("agent done")
+    assert "--finding-slugs = " in contracts.render_field_sections("agent done", ["finding-slugs"])
 
 
 def test_the_contract_line_states_the_cli_union_and_the_raw_replace() -> None:

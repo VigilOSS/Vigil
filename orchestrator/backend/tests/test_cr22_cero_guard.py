@@ -3,7 +3,7 @@
 The CR-3 guard (warn_excessive_resolver_ips) counts RESOLVER destinations and is
 wired only into the DNS/web-discovery path; it does NOT cover cero. A whole-CIDR
 cero run in the container NAT-saturates the macOS Docker Desktop userspace proxy
-exactly like a large resolver list (engagement I-001), so cero needs its own
+exactly like a large resolver list, so cero needs its own
 WARN-only guard keyed on distinct SCAN-TARGET IPs.
 
 This covers:

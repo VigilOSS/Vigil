@@ -1599,7 +1599,7 @@ def test_patch_finding_accepts_existing_database_legacy_slug(client, isolate_set
     assert patched.json()["finding"]["summary"] == "Updated without forcing a new slug spelling."
 
 
-def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_settings):
+def test_events_synthesizes_the_phase_from_a_legacy_log_artifact_actor(client, isolate_settings):
     write_engagement(isolate_settings["engagements_dir"])
 
     create_start = client.post(
@@ -1629,10 +1629,8 @@ def test_events_synthesizes_legacy_log_artifact_timeline(client, isolate_setting
     response = client.get("/engagements/2026-03-30-120000-example/events")
 
     assert response.status_code == 200, response.text
-    event_types = [event["event_type"] for event in response.json()]
-    assert "phase.started" in event_types
-    assert "task.started" in event_types
-    assert "task.completed" in event_types
+    phases = [event for event in response.json() if event["event_type"] == "phase.started"]
+    assert [event["phase"] for event in phases] == ["recon"]
 
 
 def test_events_recent_limit_is_configurable(client, isolate_settings):
@@ -1734,7 +1732,9 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
     assert report_readiness.status_code == 200
     assert report_readiness.json()["ready"] is False
     assert any(
-        blocker["kind"] == "finding_verification_status" for blocker in report_readiness.json()["blockers"]
+        blocker["kind"] in {"finding_verification_status", "unreviewed_findings"}
+        and blocker.get("slug") == "VA-009"
+        for blocker in report_readiness.json()["blockers"]
     )
 
     final_report = client.get(
@@ -1743,7 +1743,8 @@ def test_final_report_mode_returns_conflict_when_readiness_fails(client, isolate
     assert final_report.status_code == 409
     assert final_report.json()["detail"]["ready"] is False
     assert any(
-        blocker["kind"] == "finding_verification_status"
+        blocker["kind"] in {"finding_verification_status", "unreviewed_findings"}
+        and blocker.get("slug") == "VA-009"
         for blocker in final_report.json()["detail"]["blockers"]
     )
 
@@ -2564,6 +2565,15 @@ def test_bulk_artifact_register_rolls_back_only_the_refused_item(client, isolate
     )
     assert proofs.status_code == 200, proofs.text
     cited = proofs.json()[0]
+    other = client.post(
+        "/engagements/2026-03-30-120000-example/assessment/dispatches",
+        json={
+            "agent_id": "SOMEONE-ELSE",
+            "agent_role": "vulnerability-analyst",
+            "task": "A different dispatch that did not produce the proof.",
+        },
+    )
+    assert other.status_code == 201, other.text
 
     response = client.post(
         _ARTIFACTS_BULK_URL,
@@ -3306,8 +3316,12 @@ def test_merge_false_positive_source_preserves_live_target(client, isolate_setti
     )
     assert merge_payload["target"]["details"]["evidence"] == "Unchecked copy"
     assert merge_payload["target"]["details"]["impact"] == "Heap corruption"
-    assert merge_payload["target"]["details"]["kill_check"] == 5
-    assert merge_payload["target"]["details"]["kill_reason"] == (
+    # The source's kill rationale explains the source's verdict, not the live
+    # target's; it stays on the merged source.
+    assert "kill_check" not in merge_payload["target"]["details"]
+    assert "kill_reason" not in merge_payload["target"]["details"]
+    assert merge_payload["source"]["details"]["kill_check"] == 5
+    assert merge_payload["source"]["details"]["kill_reason"] == (
         "Old triage considered the path dead."
     )
     assert merge_payload["source"]["workflow_status"] == "merged"

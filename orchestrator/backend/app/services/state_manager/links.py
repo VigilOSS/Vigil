@@ -6,7 +6,7 @@ from fastapi import HTTPException, status
 from ..events import _engagement_or_404
 
 from . import _common
-from ._common import DUPLICATE_LINK_KIND, ROOT_CAUSE_EFFECTS, ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _is_suppressed_workflow_status, _json_object, _json_text, _merge_object_text, _resolve_existing_finding_slug, _row_workflow_status, _serialize_finding_record
+from ._common import CORROBORATION_LINK_KIND, DUPLICATE_LINK_KIND, ROOT_CAUSE_EFFECTS, ROOT_CAUSE_LINK_KIND, SEVERITY_RANK, _is_suppressed_workflow_status, _json_object, _json_text, _merge_object_text, _resolve_existing_finding_slug, _row_workflow_status, _serialize_finding_record
 
 # What a root-cause link means when the caller states no effect. This module owns
 # root-cause link semantics, so it owns the default too: the API request model,
@@ -194,6 +194,158 @@ def _validate_proof_run_link_target(
         )
 
 
+def _validate_corroboration_link_target(
+    connection,
+    engagement_id: int,
+    *,
+    link_kind: str,
+    target_kind: str,
+    target_id: int | None,
+    target_ref: str,
+) -> None:
+    """A corroboration names exactly one dispatch this engagement recorded.
+
+    The check runs on every path that writes the link (the generic route, a
+    finding record's ``links`` array, the merge link copy, a retarget), so no
+    corroboration can name a lane the dispatch ledger never saw.
+    """
+    if link_kind != CORROBORATION_LINK_KIND:
+        return
+    if target_kind != "dispatch" or target_id is not None or not target_ref:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{CORROBORATION_LINK_KIND} links require target_kind='dispatch' and "
+                "target_ref=<agent_id> of a recorded dispatch; use `vigil assess "
+                "finding corroborate <slug> --dispatch <agent_id>`"
+            ),
+        )
+    dispatch = connection.execute(
+        "SELECT 1 FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+        (engagement_id, target_ref),
+    ).fetchone()
+    if dispatch is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                f"{CORROBORATION_LINK_KIND} target {target_ref} is not a recorded "
+                "dispatch in this engagement; pass the agent_id `vigil assess agent "
+                "start` recorded for the corroborating lane"
+            ),
+        )
+
+
+def _require_independent_corroboration(
+    connection,
+    engagement_id: int,
+    *,
+    finding: dict[str, Any] | Any,
+    agent_id: str,
+) -> None:
+    """Refuse a corroboration from the lane that authored or edited the finding.
+
+    Re-deriving a finding means reaching it without having written it. The
+    author is the finding's ``provenance.agent_id``; an editor is a dispatch a
+    transition attributes through its actor or ``metadata.dispatch_agent_id``.
+    """
+    slug = str(finding["slug"])
+    if _row_workflow_status(finding) == "merged":
+        target = connection.execute(
+            "SELECT slug FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+            (engagement_id, finding["merged_into_finding_id"]),
+        ).fetchone()
+        survivor = str(target["slug"]) if target is not None else "the merge target"
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{slug} was merged into {survivor}; corroborate {survivor} instead",
+        )
+    author = str(_json_object(finding["provenance_json"]).get("agent_id") or "").strip()
+    if author and author == agent_id:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"dispatch {agent_id} authored {slug}; a corroboration records a "
+                "different lane that re-derived the finding independently"
+            ),
+        )
+    edited = connection.execute(
+        """
+        SELECT 1 FROM assessment_finding_transitions
+        WHERE engagement_id = ? AND finding_id = ?
+          AND (actor = ? OR json_extract(metadata_json, '$.dispatch_agent_id') = ?)
+        LIMIT 1
+        """,
+        (engagement_id, int(finding["id"]), agent_id, agent_id),
+    ).fetchone()
+    if edited is not None:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"dispatch {agent_id} edited {slug}; a corroboration records a lane "
+                "that re-derived the finding without writing to it"
+            ),
+        )
+
+
+def _corroboration_state(
+    connection, engagement_id: int, *, finding_id: int
+) -> dict[str, Any]:
+    """The live lanes that independently re-derived one finding.
+
+    One entry per distinct dispatch with an active ``corroborated_by`` link, in
+    the order the lanes were linked. The finding's own author never counts,
+    even when a merge copied a corroboration that names it onto the survivor.
+    """
+    finding = connection.execute(
+        "SELECT provenance_json FROM assessment_findings WHERE engagement_id = ? AND id = ?",
+        (engagement_id, finding_id),
+    ).fetchone()
+    author = (
+        str(_json_object(finding["provenance_json"]).get("agent_id") or "").strip()
+        if finding is not None
+        else ""
+    )
+    rows = connection.execute(
+        """
+        SELECT links.id, links.target_ref, links.notes, links.created_at,
+               dispatches.agent_role
+        FROM assessment_finding_links AS links
+        LEFT JOIN assessment_dispatches AS dispatches
+          ON dispatches.engagement_id = links.engagement_id
+         AND dispatches.agent_id = links.target_ref
+        WHERE links.engagement_id = ? AND links.finding_id = ?
+          AND links.link_kind = ? AND links.target_kind = 'dispatch'
+          AND links.retired_at IS NULL
+        ORDER BY links.id
+        """,
+        (engagement_id, finding_id, CORROBORATION_LINK_KIND),
+    ).fetchall()
+    lanes: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for row in rows:
+        agent_id = str(row["target_ref"] or "")
+        if not agent_id or agent_id == author or agent_id in seen:
+            continue
+        seen.add(agent_id)
+        lanes.append({
+            "agent_id": agent_id,
+            "agent_role": str(row["agent_role"] or ""),
+            "link_id": int(row["id"]),
+            "reason": str(row["notes"] or ""),
+            "linked_at": row["created_at"],
+        })
+    count = len(lanes)
+    return {
+        "lane_count": count,
+        "dispatches": lanes,
+        "summary": (
+            f"independently re-derived by {count} lane{'' if count == 1 else 's'}"
+            if count
+            else ""
+        ),
+    }
+
+
 def _record_relationship_change(
     connection,
     *,
@@ -279,6 +431,11 @@ def _upsert_finding_link(
         target_id=target_id, target_ref=target_ref,
     )
     _validate_proof_run_link_target(
+        connection, engagement_id,
+        link_kind=link_kind, target_kind=target_kind,
+        target_id=target_id, target_ref=target_ref,
+    )
+    _validate_corroboration_link_target(
         connection, engagement_id,
         link_kind=link_kind, target_kind=target_kind,
         target_id=target_id, target_ref=target_ref,
@@ -387,6 +544,15 @@ def create_finding_link(
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail=f"{DUPLICATE_LINK_KIND} links require the duplicated finding's slug",
+            )
+        if link_kind == CORROBORATION_LINK_KIND:
+            _validate_corroboration_link_target(
+                connection, engagement.id,
+                link_kind=link_kind, target_kind=target_kind,
+                target_id=target_id, target_ref=target_ref,
+            )
+            _require_independent_corroboration(
+                connection, engagement.id, finding=finding, agent_id=target_ref,
             )
         # A SUPPRESSED target is deliberately allowed here, and only here: pointing
         # at the false positive this rediscovery duplicates is the whole point.
@@ -673,25 +839,51 @@ def clear_root_cause_link(engagement_id: int, *, finding_slug: str) -> dict[str,
         )
     return {"finding_slug": finding_slug, "cleared": int(cursor.rowcount), **verdict}
 
-def list_finding_links(engagement_id: int) -> list[dict[str, Any]]:
+def list_finding_links(
+    engagement_id: int,
+    *,
+    finding_slug: str | None = None,
+    limit: int | None = None,
+    offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Typed finding relationships, newest first, retired history included.
+
+    ``finding_slug`` keeps the links recorded on that one finding (its exact
+    slug, as each row's ``finding_slug`` reads). The filter and the
+    ``limit``/``offset`` window run in the query over the stable
+    ``updated_at DESC, id DESC`` order, so a page is the same slice of the
+    listing whichever way it is read.
+    """
     engagement = _engagement_or_404(engagement_id)
+    where = "links.engagement_id = ?"
+    params: list[Any] = [engagement.id]
+    if finding_slug is not None:
+        where += " AND findings.slug = ?"
+        params.append(finding_slug)
+    window = ""
+    if limit is not None:
+        window = " LIMIT ? OFFSET ?"
+        params.extend([int(limit), int(offset)])
+    elif offset:
+        window = " LIMIT -1 OFFSET ?"
+        params.append(int(offset))
     with _common.get_connection() as connection:
         rows = connection.execute(
-            """
+            f"""
             SELECT links.*, findings.slug AS finding_slug
             FROM assessment_finding_links AS links
             JOIN assessment_findings AS findings ON findings.id = links.finding_id
-            WHERE links.engagement_id = ?
-            ORDER BY links.updated_at DESC, links.id DESC
+            WHERE {where}
+            ORDER BY links.updated_at DESC, links.id DESC{window}
             """,
-            (engagement.id,),
+            tuple(params),
         ).fetchall()
     return [_finding_link_read_projection(row) for row in rows]
 
 
 def finding_link_state(
     connection, engagement_id: int, *, finding_id: int, finding_slug: str
-) -> dict[str, list[dict[str, Any]]]:
+) -> dict[str, Any]:
     """One finding's recorded relationships in the ``/finding-links`` row shape.
 
     ``links`` are recorded ON the finding, retired history included; ``inbound_links``
@@ -699,6 +891,8 @@ def finding_link_state(
     sees its ``variant_of`` children or a root its ``root_cause`` siblings. Both keep
     retired rows, so a reader checks ``retired_at``. A non-empty ``target_ref``
     names the target, as in variant ancestry; ``target_id`` only when it is empty.
+    ``corroboration`` summarises the live ``corroborated_by`` links: the
+    distinct lanes, other than the author, that independently re-derived it.
     """
     select = """
         SELECT links.*, findings.slug AS finding_slug
@@ -724,6 +918,9 @@ def finding_link_state(
     return {
         "links": [_finding_link_read_projection(row) for row in outbound],
         "inbound_links": [_finding_link_read_projection(row) for row in inbound],
+        "corroboration": _corroboration_state(
+            connection, engagement_id, finding_id=finding_id
+        ),
     }
 
 
@@ -827,6 +1024,16 @@ def update_finding_link(
             link_kind=str(link["link_kind"]), target_kind=next_kind,
             target_id=next_id, target_ref=next_ref,
         )
+        if not retired and str(link["link_kind"]) == CORROBORATION_LINK_KIND:
+            _validate_corroboration_link_target(
+                connection, engagement.id,
+                link_kind=CORROBORATION_LINK_KIND, target_kind=next_kind,
+                target_id=next_id, target_ref=next_ref,
+            )
+            if retired is False or next_ref != str(link["target_ref"]):
+                _require_independent_corroboration(
+                    connection, engagement.id, finding=finding, agent_id=next_ref,
+                )
 
         if not retired and str(link["link_kind"]) == "variant_of":
             _validate_variant_link_target(

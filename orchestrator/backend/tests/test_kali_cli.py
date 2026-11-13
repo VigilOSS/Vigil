@@ -2598,7 +2598,7 @@ def test_contract_kali_per_verb_renders_examples():
     contracts = _import("assess.lib.contracts")
     rendered = contracts.render_contract("kali nmap-scan")
     assert "nmap-scan" in rendered
-    assert "Examples" in rendered
+    assert "Example:" in rendered
     assert "--technique" in rendered
 
 
@@ -2620,7 +2620,7 @@ def test_contract_command_supports_two_arg_form(capsys):
     cli.main(["contract", "kali", "nmap-scan"])
     out = capsys.readouterr().out
     assert "kali nmap-scan" in out
-    assert "Notes" in out
+    assert "--notes" in out
 
 
 def test_kali_exec_noop_short_circuit_keeps_argparse_smoke_test_offline(

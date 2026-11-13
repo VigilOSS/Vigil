@@ -36,6 +36,22 @@ def _approve_packet(client, isolate_settings, slug: str, attachments: list[dict]
         sys.path.insert(0, str(scripts))
     packet_module = importlib.import_module("assess.commands.export_triage_packet")
     packet = packet_module.build_packet(root, slug, attachment_rows=attachments)
+    writer = _triage_dispatches(client, slug)["writer_dispatch_agent_id"]
+    qc = client.post(
+        f"{BASE}/dispatch-decisions",
+        json={
+            "kind": "submission_qc_verdict",
+            "payload": {
+                "finding_slug": slug,
+                "packet_id": packet["packet_id"],
+                "reviewer_dispatch_agent_id": _qc_dispatch(client, slug),
+                "writer_dispatch_agent_id": writer,
+                "verdict": "pass",
+                "failed_rows": [],
+            },
+        },
+    )
+    assert qc.status_code == 201, qc.text
     decision = client.post(
         f"{BASE}/dispatch-decisions",
         json={
@@ -1724,7 +1740,19 @@ def _triage_dispatches(client, slug: str) -> dict[str, str]:
     return identities
 
 
-@pytest.mark.parametrize("invalid_reviewer", [None, "unknown", "WRITE-VA-001", "SOURCE-VA-001"])
+def _qc_dispatch(client, slug: str) -> str:
+    """A report-writer dispatch separate from the writer, for submission QC."""
+    agent_id = f"QC-{slug}"
+    response = client.post(f"{BASE}/dispatches", json={
+        "agent_id": agent_id,
+        "agent_role": "report-writer",
+        "task": f"QC review of the submission packet for {slug}",
+    })
+    assert response.status_code in {201, 409}, response.text
+    return agent_id
+
+
+@pytest.mark.parametrize("invalid_reviewer",[None, "unknown", "WRITE-VA-001", "SOURCE-VA-001"])
 def test_new_blind_verdict_requires_recorded_independent_reviewer(
     client, isolate_settings, invalid_reviewer
 ) -> None:
@@ -2053,6 +2081,46 @@ def test_submission_listing_classifies_readiness_server_side(
     hackerone = client.get(f"{BASE}/submissions?readiness=all&platform=hackerone").json()
     assert {row["slug"] for row in hackerone["findings"]} == {"VA-001", "VA-003"}
     assert client.get(f"{BASE}/submissions?readiness=bogus").status_code == 422
+
+
+def test_listing_and_readiness_agree_a_captured_body_is_exported(
+    client, isolate_settings
+) -> None:
+    """The listing's "exported" and readiness's ``existing_version_number`` are
+    one rule: the latest version captured the current body at the current
+    finding row version with the selected attachments. A workspace artifact
+    that is no longer linked blocks a new export, not the captured one."""
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    exported = _export(client, "VA-001", submission_path, context_path)
+    assert exported.status_code == 201, exported.text
+    with get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_artifacts SET related_finding_slug = NULL WHERE relative_path = ?",
+            (submission_path,),
+        )
+
+    row = client.get(f"{BASE}/submissions").json()["findings"][0]
+    readiness = client.get(f"{BASE}/submissions/VA-001").json()["readiness"]
+    selected = client.get(f"{BASE}/submissions/VA-001/readiness").json()
+
+    assert row["readiness"] == "exported"
+    assert readiness["existing_version_number"] == 1
+    assert readiness["existing_version_match"] == "body"
+    assert any("not linked to this finding" in item for item in readiness["blockers"])
+    assert selected["existing_version_number"] == 1
+    assert selected["existing_version_match"] == "body"
+
+
+def test_an_exact_replay_is_reported_as_a_sources_match(client, isolate_settings) -> None:
+    finding = _seed_reportable_finding(client, isolate_settings)
+    submission_path, context_path = _write_workspace(client, isolate_settings, finding)
+    assert _export(client, "VA-001", submission_path, context_path).status_code == 201
+
+    readiness = client.get(f"{BASE}/submissions/VA-001/readiness").json()
+
+    assert readiness["existing_version_number"] == 1
+    assert readiness["existing_version_match"] == "sources"
 
 
 def test_submission_listing_reports_a_captured_body_and_recent_changes(

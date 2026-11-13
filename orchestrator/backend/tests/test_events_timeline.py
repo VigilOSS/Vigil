@@ -27,12 +27,12 @@ def _seed_mixed_timeline(engagement_id: int) -> None:
     # Inferred phase.started + task.started at 12:00:03 (ISO spelling).
     _audit(
         engagement_id, "2026-04-17T12:00:03Z", "Recon start",
-        actor_kind="agent", actor_name="recon-specialist",
+        actor_kind="agent", actor_name="recon-specialist", action="task.started",
     )
     _event(engagement_id, "2026-04-17 12:00:05", "finding.created", task_name="VA-001", summary="Stored middle")
     _audit(
         engagement_id, "2026-04-17T12:00:07.500000Z", "Recon summary",
-        actor_kind="agent", actor_name="recon-specialist",
+        actor_kind="agent", actor_name="recon-specialist", action="task.completed",
     )
     _event(engagement_id, "2026-04-17 12:00:09", "chain.created", task_name="acme-chain", summary="Stored late")
 
@@ -92,3 +92,24 @@ def test_events_limit_keeps_newest_rows_without_loading_full_history(client, iso
     # Inferred rows keep their identity whatever the window.
     assert [event["id"] for event in _timeline(client, limit=5)] == [event["id"] for event in full[-5:]]
     assert all(event["id"] < 0 for event in full if event["event_type"] in {"phase.started", "task.started", "task.completed"})
+
+
+def test_a_task_row_comes_from_the_structured_action_never_the_title(client, isolate_settings):
+    """An activity row's kind is its `action`; its title is prose for people."""
+    engagement_id = _seed(client, isolate_settings)
+    _audit(
+        engagement_id, "2026-04-17T12:00:03Z", "Login flow summary",
+        actor_kind="agent", actor_name="vulnerability-analyst", action="probe /login",
+    )
+    _audit(
+        engagement_id, "2026-04-17T12:00:04Z", "Login flow review",
+        actor_kind="agent", actor_name="vulnerability-analyst", action="task.completed",
+    )
+
+    tasks = [event for event in _timeline(client) if event["event_type"].startswith("task.")]
+
+    assert [(event["event_type"], event["summary"]) for event in tasks] == [
+        ("task.completed", "Login flow review"),
+    ]
+    summary = client.get(f"{EVENTS}/summary").json()
+    assert summary["latest_task"]["summary"] == "Login flow review"

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import difflib
 import functools
 import hashlib
 import json
@@ -7,11 +8,24 @@ import logging
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
+import re
+import typing
 from typing import Annotated, Any, Literal, TypeVar
 
 import anyio
 from fastapi import APIRouter, Depends, HTTPException, Query, Response, status
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
+from pydantic_core import InitErrorDetails, PydanticCustomError
 
 from ..models.engagement import Engagement
 from ..retry_state import RETRY_STATES
@@ -19,8 +33,9 @@ from ..services import activity as activity_service
 from ..services import assessment_memory
 from ..services import artifact_index
 from ..services import state_manager
+from ..services.state_manager import finding_details
 from ..services.state_manager._common import CommandRunStatus
-from ..services.state_manager.findings import count_findings
+from ..services.state_manager.findings import count_findings, list_finding_list_rows
 from ..services.state_manager.command_run_queries import (
     COMMAND_LEDGER_FACET_DEFAULT_LIMIT,
     COMMAND_LEDGER_FACET_MAX_LIMIT,
@@ -87,8 +102,18 @@ from ..services.state_manager.links import DEFAULT_ROOT_CAUSE_EFFECT
 from ..services.state_manager.oob import record_oob_probe_verdict
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
+# Shared with the operator and proof-work routers, which the app registers
+# beside this one at the same prefix.
+ASSESSMENT_PREFIX = "/engagements/{engagement_key}/assessment"
+
+# Every GET route declared here refuses query keys it does not read.
+router = APIRouter(
+    prefix=ASSESSMENT_PREFIX,
+    tags=["assessment"],
+    route_class=DeclaredQueryParamsRoute,
+)
 logger = logging.getLogger(__name__)
 
 _T = TypeVar("_T")
@@ -432,7 +457,7 @@ class ProbeRunRecordRequest(BaseModel):
 class CoverageItemRecordRequest(BaseModel):
     """Create or update a class-typed coverage item.
 
-    Wires the previously-dead ``record_coverage_item``. The gf-bucket bridge
+    Backs ``record_coverage_item``. The gf-bucket bridge
     (``ingest_endpoints``) POSTs one of these per matched gf bucket with the
     canonical ``attack_family`` so the depth ledger sees a class-typed coverage
     obligation per endpoint, not just the generic baseline.
@@ -552,10 +577,9 @@ class CommandRunFinalize(BaseModel):
 
     Accepting ``running`` here is a deliberate idempotency hatch: a no-op
     refresh of an in-flight row is allowed (B4) so an operator can re-PATCH
-    metadata without flipping lifecycle state. The terminal-only check that
-    used to live at this layer now belongs to ``finalize_command_run`` so
-    duplicate terminal PATCHes can be detected and rejected with 409 instead
-    of silently overwriting the first finalize."""
+    metadata without flipping lifecycle state. The terminal-only check lives in
+    ``finalize_command_run``, so a duplicate terminal PATCH is detected and
+    rejected with 409 instead of silently overwriting the first finalize."""
 
     model_config = ConfigDict(extra="forbid")
 
@@ -615,6 +639,12 @@ class ArtifactRegisterRequest(BaseModel):
     related_chain_key: str | None = Field(default=None, max_length=256)
     related_surface_id: int | None = Field(default=None, ge=1)
     related_request_variant_id: int | None = Field(default=None, ge=1)
+
+    @field_validator("producer_agent_id")
+    @classmethod
+    def _strip_producer(cls, value: str | None) -> str | None:
+        # The audit row names the same producer the index stores.
+        return value.strip() or None if isinstance(value, str) else value
 
 
 class ArtifactRegisterBulkRequest(BaseModel):
@@ -800,7 +830,139 @@ class OobInteractionRecordRequest(BaseModel):
     client_payload_host: str = Field(min_length=1, max_length=256, pattern=r".*\S.*")
 
 
-class AttackChainLinkRequest(BaseModel):
+# Request fields that are refused but have a stated home: a spelling another
+# verb uses, a value another route owns, or a word the chain template uses for
+# what the chain request carries elsewhere. Looked up before the fuzzy match,
+# which finds nothing for ``reason`` -> ``reason_text`` (or ``steps`` -> ``links``)
+# at a useful cutoff. `generate_agent_schemas.py` writes each model's table into
+# its bundled schema, so the CLI refusal quotes the same home.
+REQUEST_FIELD_HOMES: dict[str, dict[str, str]] = {
+    "FindingRecordRequest": {
+        "status": "workflow_status",
+        "reason": "notes (a record carries no transition reason)",
+    },
+    "FindingPatchRequest": {
+        "status": "workflow_status",
+        "reason": "reason_text",
+        "verification_status": (
+            "POST /findings/{slug}/verify (`vigil assess finding verify`); a patch "
+            "never moves the verdict"
+        ),
+        "new_severity": "severity",
+    },
+    "AttackChainRecordRequest": {
+        **{
+            word: (
+                'links (one {"entity_kind": "finding", "entity_ref": "<slug>"} entry per '
+                "step, in order)"
+            )
+            for word in ("steps", "components", "findings", "finding_slugs", "finding_refs")
+        },
+        **{
+            word: "narrative (the step-by-step story: prerequisites, data flow, terminal impact)"
+            for word in (
+                "impact", "composite_impact", "prerequisites", "data_flow", "description",
+                "summary",
+            )
+        },
+        "composite_severity": "severity",
+        "name": "title",
+        "key": "chain_key",
+        "slug": "chain_key",
+        "agent_name": "provenance.agent_name",
+    },
+    "AttackChainLinkRequest": {
+        **{
+            word: "entity_ref (the finding slug or other reference)"
+            for word in ("slug", "finding", "finding_slug", "ref")
+        },
+        **{word: "entity_id" for word in ("id", "finding_id")},
+        **{word: "entity_kind" for word in ("kind", "type")},
+        "role": "notes (what this step contributes) or relation (step, prerequisite, outcome)",
+        "agent_name": "provenance.agent_name",
+    },
+    "FindingVerifyRequest": {
+        "status": "verification_status",
+        "reason": "reason_text",
+        "severity": "new_severity",
+        "workflow_status": "verification_status (the verdict sets the workflow)",
+        "receipt_ids": "proof_receipt_ids",
+    },
+}
+
+
+def _unknown_request_field_home(model: type[BaseModel], key: str) -> str:
+    stated = REQUEST_FIELD_HOMES.get(model.__name__, {}).get(key)
+    if stated is not None:
+        return f"it belongs at {stated}"
+    homes: list[str] = []
+    close = difflib.get_close_matches(key, sorted(model.model_fields), n=2, cutoff=0.6)
+    homes.extend(f"'{match}'" for match in close)
+    if "details" in model.model_fields and key in finding_details.FINDING_DETAIL_PROPERTIES:
+        homes.append(f"details.{key}")
+    if "provenance" in model.model_fields and key in FindingProvenance.model_fields:
+        homes.append(f"provenance.{key}")
+    if homes:
+        return f"it belongs at {' or '.join(homes)}"
+    return "the request's fields are: " + ", ".join(sorted(model.model_fields))
+
+
+class _NamedFieldsRequest(BaseModel):
+    """A write body whose unknown fields are refused, each with its home.
+
+    ``extra="forbid"`` alone answers "Extra inputs are not permitted", which
+    names nothing a caller can act on; this names every unknown field and where
+    it goes (a details or provenance key, the field it misspells, the route that
+    owns it). Each unknown field is its own error located at the field, and the
+    known fields are still validated, so one response lists every problem.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    @model_validator(mode="wrap")
+    @classmethod
+    def _name_unknown_fields(cls, data: Any, handler: ValidatorFunctionWrapHandler) -> Any:
+        if not isinstance(data, dict):
+            return handler(data)
+        unknown = [key for key in data if key not in cls.model_fields]
+        if not unknown:
+            return handler(data)
+        line_errors: list[InitErrorDetails] = []
+        try:
+            handler({key: value for key, value in data.items() if key in cls.model_fields})
+        except ValidationError as exc:
+            # Re-raised with their own type, location and message; the message
+            # is passed as a literal (braces escaped), not re-rendered.
+            line_errors.extend(
+                InitErrorDetails(
+                    type=PydanticCustomError(
+                        error["type"],
+                        str(error["msg"]).replace("{", "{{").replace("}", "}}"),
+                    ),
+                    loc=tuple(error["loc"]),
+                    input=error.get("input"),
+                )
+                for error in exc.errors()
+            )
+        line_errors.extend(
+            InitErrorDetails(
+                type=PydanticCustomError(
+                    "extra_forbidden",
+                    "{message}",
+                    {"message": (
+                        f"{key!r} is not a field of this request; "
+                        f"{_unknown_request_field_home(cls, key)}"
+                    )},
+                ),
+                loc=(key,),
+                input=data[key],
+            )
+            for key in unknown
+        )
+        raise ValidationError.from_exception_data(cls.__name__, line_errors)
+
+
+class AttackChainLinkRequest(_NamedFieldsRequest):
     relation: str = Field(default="step", min_length=1, max_length=64)
     entity_kind: str = Field(min_length=1, max_length=64)
     entity_id: int | None = None
@@ -809,7 +971,7 @@ class AttackChainLinkRequest(BaseModel):
     provenance: dict[str, Any] = Field(default_factory=dict)
 
 
-class AttackChainRecordRequest(BaseModel):
+class AttackChainRecordRequest(_NamedFieldsRequest):
     chain_key: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
     status: str = Field(default="active", min_length=1, max_length=32)
@@ -993,13 +1155,10 @@ class CodeSnapshotProvenance(BaseModel):
     )
 
 
-# ``FindingProvenance`` used to be ``extra="allow"`` while the generated agent
-# schema declared ``additionalProperties: false`` over four keys — so provenance
-# was *creatable or maintainable, pick one*: ``finding record`` validated the
-# whole payload and refused ``reported_by`` / ``captured_at`` / ``artifact_ref``
-# / ``evidence_quote``, which ``finding update`` accepted, the backend stored,
-# the report-generation skill prescribes and the operator views render. One
-# vocabulary now, enforced on both doors.
+# ``FindingProvenance`` is one closed vocabulary (``extra="forbid"``) shared by
+# the record and patch doors and by the generated agent schema, so a provenance
+# key one door accepts (``reported_by``, ``captured_at``, ``artifact_ref``,
+# ``evidence_quote``) is a key the other accepts too.
 #
 # Closed rather than open on purpose: provenance answers "who recorded this, and
 # from what", and a key only one door accepts is a key nobody can rely on. The
@@ -1143,6 +1302,46 @@ class FindingProvenance(BaseModel):
     )
 
 
+def _vocabulary_key(value: str) -> str:
+    return re.sub(r"[\s_-]+", "", value.casefold())
+
+
+def folded_vocabulary(literal: Any) -> Any:
+    """``literal`` accepting each of its words in any case and separator.
+
+    ``Blocked``, ``pending-runtime-proof`` and ``in_progress`` each name exactly
+    one canonical value, so the request folds them to it before the vocabulary
+    is checked; the stored and returned value is the canonical spelling, and a
+    word outside the vocabulary is refused as before. The JSON schema is the
+    literal's own enum.
+    """
+    by_key = {_vocabulary_key(str(value)): value for value in typing.get_args(literal)}
+    if len(by_key) != len(typing.get_args(literal)):
+        raise ValueError(f"vocabulary words collide once folded: {typing.get_args(literal)}")
+
+    def fold(value: Any) -> Any:
+        if isinstance(value, str):
+            return by_key.get(_vocabulary_key(value), value)
+        return value
+
+    return Annotated[literal, BeforeValidator(fold)]
+
+
+_EvidenceType = folded_vocabulary(
+    Literal["network-confirmed", "code-inferred", "theoretical", "informational"]
+)
+_VerifyStatus = folded_vocabulary(
+    Literal[
+        "confirmed",
+        "downgraded",
+        "pending_runtime_proof",
+        "blocked",
+        "false_positive",
+        "disputed",
+    ]
+)
+
+
 class FindingRunCandidatePromotion(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -1152,8 +1351,7 @@ class FindingRunCandidatePromotion(BaseModel):
     proof_receipt_ids: list[int] = Field(min_length=1, max_length=1000)
 
 
-class FindingRecordRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class FindingRecordRequest(_NamedFieldsRequest):
 
     slug: str | None = Field(default=None, max_length=256)
     title: str = Field(min_length=1, max_length=512)
@@ -1179,9 +1377,7 @@ class FindingRecordRequest(BaseModel):
     # C44: evidence_type categorizes confirmation mode so report-writer can
     # sort/downrate without re-parsing details. Nullable; agents that don't
     # set it leave NULL (legacy behavior preserved).
-    evidence_type: Literal[
-        "network-confirmed", "code-inferred", "theoretical", "informational"
-    ] | None = None
+    evidence_type: _EvidenceType | None = None
     # External submission-tracking axis, ORTHOGONAL to workflow_status. Nullable
     # with default None: a true create lands the 'none' default server-side, and
     # a re-record upsert that omits it preserves the stored value (so external
@@ -1230,8 +1426,7 @@ class FindingRecordRequest(BaseModel):
         return self
 
 
-class FindingPatchRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class FindingPatchRequest(_NamedFieldsRequest):
 
     title: str | None = Field(default=None, min_length=1, max_length=512)
     severity: str | None = Field(default=None, min_length=1, max_length=32)
@@ -1270,9 +1465,7 @@ class FindingPatchRequest(BaseModel):
     # makes the vocabulary something a reader can rely on.
     provenance: FindingProvenance | None = None
     # Allow retroactive labeling via vigil assess finding update.
-    evidence_type: Literal[
-        "network-confirmed", "code-inferred", "theoretical", "informational"
-    ] | None = None
+    evidence_type: _EvidenceType | None = None
     # Optional on patch: None preserves the stored submission_status (the
     # workflow axis can move without disturbing the submission axis). Validated
     # against the canonical state_manager.SUBMISSION_STATUSES set.
@@ -1418,13 +1611,20 @@ class FindingConfirmCheckRequest(BaseModel):
 
 
 class FindingSeverityVarianceRequest(BaseModel):
+    """Why a terminal verdict's severity departs from its CVSS band.
+
+    Only ``reason`` is authored; the band, the chosen severity, the verifier and
+    the decision receipt are derived from the verification (and named on the
+    envelope's ``derived`` list), and an authored one must agree with it.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
-    normal_band: Literal["info", "low", "medium", "high", "critical"]
-    chosen_severity: Literal["info", "low", "medium", "high", "critical"]
-    actor: str = Field(min_length=1, max_length=128)
+    normal_band: Literal["info", "low", "medium", "high", "critical"] | None = None
+    chosen_severity: Literal["info", "low", "medium", "high", "critical"] | None = None
+    actor: str | None = Field(default=None, min_length=1, max_length=128)
     reason: str = Field(min_length=1, max_length=4096)
-    proof_receipt_id: int = Field(ge=1)
+    proof_receipt_id: int | None = Field(default=None, ge=1)
 
 
 class FindingNextTestRequest(BaseModel):
@@ -1452,19 +1652,16 @@ class FindingNextTestRequest(BaseModel):
         return value
 
 
-class FindingVerifyRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+class FindingVerifyRequest(_NamedFieldsRequest):
 
-    verification_status: Literal[
-        "confirmed",
-        "downgraded",
-        "pending_runtime_proof",
-        "blocked",
-        "false_positive",
-        "disputed",
-    ]
+    verification_status: _VerifyStatus
     reason_code: str = Field(default="", max_length=128)
-    reason_text: str = Field(min_length=1, max_length=4096)
+    # Optional where the structured check states the reason (confirm_check,
+    # counter_check or kill_reason, next_test, block_reason): the service then
+    # records that text and names it on the envelope's ``derived`` list. It stays
+    # required for disputed, operator authority, and a terminal verdict walked
+    # back to an open status.
+    reason_text: str = Field(default="", max_length=4096)
     new_severity: str | None = Field(default=None, min_length=1, max_length=32)
     evidence_ref: str = Field(default="", max_length=1024)
     artifact_ref: str = Field(default="", max_length=1024)
@@ -1829,7 +2026,9 @@ def get_per_host_coverage(engagement_key: str) -> dict[str, Any]:
 
 
 @router.get("/coverage-readiness/by-family")
-def get_by_family_coverage(engagement_key: str) -> dict[str, Any]:
+def get_by_family_coverage(
+    engagement_key: str, host: str = "", path_prefix: str = "",
+) -> dict[str, Any]:
     """A1 — engagement-wide (application-unit × vuln-family) coverage grid.
 
     Complements ``/coverage-readiness/by-host`` (per-host recon outcomes) with a
@@ -1838,10 +2037,14 @@ def get_by_family_coverage(engagement_key: str) -> dict[str, Any]:
     tagged covered / missing_block / missing_warn / deferred with its probe and
     finding-linkage stats. Read-only/advisory — operators use it to SEE
     never-probed gaps vs probed-and-walled vs finding-linked before a phase exit.
+    ``host`` (case-insensitive) and ``path_prefix`` (exact) select units; totals
+    then count only those units and the payload echoes the filter as ``scope``.
     """
     engagement = get_engagement_or_404(engagement_key)
     with state_manager.get_connection() as connection:
-        return by_family_coverage(connection, engagement.id)
+        return by_family_coverage(
+            connection, engagement.id, host=host, path_prefix=path_prefix
+        )
 
 
 _READINESS_RESPONSE = TypeAdapter(dict[str, Any])
@@ -2549,6 +2752,7 @@ def search_artifacts(
     q: str = "",
     finding: str = "",
     kind: str = "",
+    path: str = "",
     limit: int = Query(default=50, ge=1, le=1000),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
@@ -2558,6 +2762,7 @@ def search_artifacts(
         query=q,
         finding=finding,
         kind=kind,
+        path=path,
         limit=limit,
         offset=offset,
     )
@@ -2688,15 +2893,7 @@ def get_oob_probe(engagement_key: str, nonce: str) -> dict[str, Any]:
 _FINDING_LIST_RESPONSE = TypeAdapter(list[dict[str, Any]])
 
 
-@router.get("/findings/count")
-def get_finding_count(engagement_key: str) -> dict[str, int]:
-    engagement = get_engagement_or_404(engagement_key)
-    return {"total": count_findings(engagement.id)}
-
-
-@router.get("/findings", response_model=list[dict[str, Any]])
-def get_findings(
-    engagement_key: str,
+def _finding_filters(
     severity: str | None = None,
     workflow_status: str | None = None,
     verification_status: str | None = None,
@@ -2706,27 +2903,57 @@ def get_findings(
     search: str | None = None,
     holding: bool = False,
     runtime_proof_owed: bool = False,
+) -> dict[str, Any]:
+    """The finding-ledger filters, shared by the listing and its count."""
+    return {
+        "severity": severity,
+        "workflow_status": workflow_status,
+        "verification_status": verification_status,
+        "auth_context": auth_context,
+        "source_name": source_name,
+        "slug": slug,
+        "search": search,
+        "holding": holding,
+        "runtime_proof_owed": runtime_proof_owed,
+    }
+
+
+FindingFilters = Annotated[dict[str, Any], Depends(_finding_filters)]
+
+
+@router.get("/findings/count")
+def get_finding_count(engagement_key: str, filters: FindingFilters) -> dict[str, Any]:
+    """Exact ``total`` and ``by_severity`` counts of what ``GET /findings``
+    selects with the same filters."""
+    engagement = get_engagement_or_404(engagement_key)
+    return count_findings(engagement.id, **filters)
+
+
+@router.get("/findings", response_model=list[dict[str, Any]])
+def get_findings(
+    engagement_key: str,
+    filters: FindingFilters,
     limit: int | None = Query(default=None, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
-    view: Literal["full", "summary"] = "full",
+    view: Literal["full", "summary", "list"] = "full",
 ) -> Response:
     """The finding ledger. ``view=summary`` returns the same rows without
     ``details`` and ``notes`` (most of the payload) for list views that never
-    show them; ``GET /findings/{slug}`` keeps the full record."""
+    show them. ``view=list`` selects only the list fields named by
+    ``FINDING_LIST_VIEW_FIELDS`` (identity, title, severity, the status and
+    submission axes, dedup tuple, merge target, code-snapshot status, row
+    version, timestamps, and a blocked finding's ``block_reason``) in SQL, for
+    readers that list, count or gate on those fields; every other field is left
+    out. ``GET /findings/{slug}`` keeps the full record."""
     engagement = get_engagement_or_404(engagement_key)
+    if view == "list":
+        rows = list_finding_list_rows(engagement.id, limit=limit, offset=offset, **filters)
+        return Response(_FINDING_LIST_RESPONSE.dump_json(rows), media_type="application/json")
     rows = state_manager.list_findings(
         engagement.id,
-        severity=severity,
-        workflow_status=workflow_status,
-        verification_status=verification_status,
-        auth_context=auth_context,
-        source_name=source_name,
-        slug=slug,
-        search=search,
-        holding=holding,
-        runtime_proof_owed=runtime_proof_owed,
         limit=limit,
         offset=offset,
+        **filters,
     )
     if view == "summary":
         rows = [
@@ -3235,20 +3462,23 @@ def get_report_findings(
 @router.get("/finding-links")
 def get_finding_links(
     engagement_key: str,
+    finding_slug: str | None = Query(default=None, min_length=1),
     limit: int = Query(default=MAX_ASSESSMENT_LIST_LIMIT, ge=1, le=MAX_ASSESSMENT_LIST_LIMIT),
     offset: int = Query(default=0, ge=0),
 ) -> list[dict[str, Any]]:
     """Every typed finding relationship in the engagement, newest first.
 
+    ``finding_slug`` keeps only the links recorded on that finding (exact slug).
     Paged like the other assessment list routes so a generic reader can walk it.
     ``limit`` defaults to the route ceiling rather than a smaller page: the
     frontend's findings view reads this route whole, and a lower default would
-    silently drop relationships it used to show. The window is applied over the
-    service's stable ``updated_at DESC, id DESC`` ordering.
+    silently drop relationships from it. The filter and window run in
+    the query over the service's stable ``updated_at DESC, id DESC`` ordering.
     """
     engagement = get_engagement_or_404(engagement_key)
-    rows = state_manager.list_finding_links(engagement.id)
-    return rows[offset : offset + limit]
+    return state_manager.list_finding_links(
+        engagement.id, finding_slug=finding_slug, limit=limit, offset=offset
+    )
 
 
 def _make_engagement_lister(
@@ -4533,16 +4763,22 @@ async def verify_finding(
         operator_authority_intel_id=request.operator_authority_intel_id,
     )
     if not record.get("already_applied"):
+        # The audit row records what the write stored, which can differ from
+        # the request: a lower-band confirm is recorded as downgraded, and an
+        # omitted reason is derived from the structured check.
+        stored_slug = str(record["finding"]["slug"])
+        stored_status = str(record["finding"]["verification_status"])
+        transition = record.get("transition") or {}
         await _offload(
             _audit_assessment_mutation,
             engagement.id,
             title="finding-verify",
-            action=f"finding={finding_slug} verification_status={request.verification_status}",
+            action=f"finding={stored_slug} verification_status={stored_status}",
             actor_name=request.source_name,
-            result=request.reason_code or request.reason_text or request.verification_status,
+            result=request.reason_code or str(transition.get("reason_text") or "") or stored_status,
             metadata={
-                    "finding_slug": finding_slug,
-                    "verification_status": request.verification_status,
+                    "finding_slug": stored_slug,
+                    "verification_status": stored_status,
                 },
         )
     await _broadcast(engagement.key, "finding_verify", record)
@@ -4678,11 +4914,4 @@ from .assessment_operator import (  # noqa: E402 - helpers above must initialize
     OperatorCheckpointCreate as OperatorCheckpointCreate,
     _DISPATCH_CLIENT as _DISPATCH_CLIENT,
     _LAUNCHED_CLIENT as _LAUNCHED_CLIENT,
-    router as operator_router,
 )
-
-router.include_router(operator_router)
-
-from .assessment_proof_work import router as proof_work_router  # noqa: E402
-
-router.include_router(proof_work_router)

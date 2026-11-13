@@ -722,6 +722,13 @@ def test_merge_never_completes_a_half_cvss_pair_from_the_losing_side(
         severity="high",
         details={"cvss_vector": _HIGH_VECTOR, "impact": "Full account takeover"},
     )
+    # A write now scores a vector-only finding; a row stored without the score
+    # is the shape this guard protects.
+    with db_module.get_connection() as connection:
+        connection.execute(
+            "UPDATE assessment_findings SET details_json = ? WHERE slug = 'CV-901'",
+            (json.dumps({"cvss_vector": _HIGH_VECTOR, "impact": "Full account takeover"}),),
+        )
     _create_finding_with_details(
         client,
         "CV-902",

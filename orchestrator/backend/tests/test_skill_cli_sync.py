@@ -573,14 +573,6 @@ _KNOWN_UNDOCUMENTED_OOB_CLIENT: set[str] = set()
 # `test_known_undocumented_positional_actions_has_no_stale_entries` fails the
 # moment an action leaves the CLI or reaches a doc, forcing the entry back out.
 _KNOWN_UNDOCUMENTED_POSITIONAL_ACTIONS: dict[str, set[str]] = {
-    "code-dispatch": {
-        # The read half of the cross-file trigger lifecycle. The phase prompt
-        # drives `requeue-triggers` and `resolve-triggers` and names a
-        # `list-triggers` ROW as the shape its input takes — that is the payload,
-        # not the command that produces it, so the read itself is specified only
-        # by `vigil assess contract code-dispatch`. Real debt, not an exemption.
-        "list-triggers",
-    },
     "work-buffer": {
         # Operator-side triage leaves on the web work buffer. The prompts drive
         # fetch / fetch-by-unit / peek / done / error / defer; these three are

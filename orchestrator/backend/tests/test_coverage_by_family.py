@@ -495,3 +495,57 @@ def test_by_family_disclosure_expected_reason_accurate_on_shallow_unit(client, i
     assert reason is not None
     assert "deep_required" not in reason
     assert reason == "every application unit (always expected)"
+
+
+def test_by_family_host_filter_scopes_units_and_totals(client, isolate_settings):
+    _seed_grid(client, isolate_settings)
+    _insert_unit(_eng_id(client), host=DEEP_HOST, path_prefix="/admin", deep_required=0)
+
+    response = client.get(
+        f"{BASE}/coverage-readiness/by-family", params={"host": DEEP_HOST.upper()}
+    )
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["scope"] == {"host": DEEP_HOST, "path_prefix": None}
+    assert {(u["host"], u["path_prefix"]) for u in body["units"]} == {
+        (DEEP_HOST, "/admin"), (DEEP_HOST, "/api"),
+    }
+    assert body["totals"]["units"] == 2
+    assert body["totals"]["cells"] == sum(len(u["families"]) for u in body["units"])
+
+
+def test_by_family_host_and_path_prefix_filter_one_unit(client, isolate_settings):
+    _seed_grid(client, isolate_settings)
+    _insert_unit(_eng_id(client), host=DEEP_HOST, path_prefix="/admin", deep_required=0)
+    unfiltered = client.get(f"{BASE}/coverage-readiness/by-family").json()
+    expected_unit = next(
+        u for u in unfiltered["units"] if (u["host"], u["path_prefix"]) == (DEEP_HOST, "/api")
+    )
+
+    body = client.get(
+        f"{BASE}/coverage-readiness/by-family",
+        params={"host": DEEP_HOST, "path_prefix": "/api"},
+    ).json()
+    assert body["scope"] == {"host": DEEP_HOST, "path_prefix": "/api"}
+    # The scoped unit is computed exactly as in the whole-engagement grid.
+    assert body["units"] == [expected_unit]
+    assert body["totals"] == {
+        "units": 1,
+        "cells": 3,
+        "covered": 1,
+        "missing_block": 0,
+        "missing_warn": 2,
+        "deferred": 0,
+        "with_finding": 1,
+    }
+
+
+def test_by_family_refuses_an_undeclared_query_param(client, isolate_settings):
+    _seed_grid(client, isolate_settings)
+    response = client.get(
+        f"{BASE}/coverage-readiness/by-family", params={"application_unit_id": "1"}
+    )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "application_unit_id" in detail
+    assert "host" in detail and "path_prefix" in detail

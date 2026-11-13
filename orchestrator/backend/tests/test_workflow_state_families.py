@@ -1,19 +1,22 @@
-"""Transactional and one-time-code files carry race, business-logic and rate-limit review.
+"""Structured context tags carry the families a file's job owes; paths only suggest.
 
 Request handlers run concurrently across requests, so a refund, booking or
-quota file is exactly where check-then-act races and workflow abuse live, yet
-no slot or role row ever required those families on the code track. The
-classifier's role label makes them required: the architect read the file and
-named what it moves. The file's own path only suggests them, because a
-directory word such as `Checkout` or `credits` names whole trees of value
-objects, events and helpers that never touch the workflow. Both read whole
-words, so `load_balancer` is not a balance and a refund policy document is
-pointed at nothing.
+quota file is exactly where check-then-act races and workflow abuse live. The
+architect records that as a context tag (`value-transfer`, `provider-callback`,
+`one-time-secret`, ...) on the classification, and the tag makes the families
+required. The free-text role label is descriptive only: no word in it is read
+for an obligation. The file's own path only suggests the workflow families,
+because a directory word such as `Checkout` or `credits` names whole trees of
+value objects, events and helpers that never touch the workflow, and it reads
+whole words, so `load_balancer` is not a balance.
 """
 from __future__ import annotations
 
+from typing import get_args
+
 import pytest
 
+from app.api.code_analysis import CodeContextTag
 from app.services import code_analysis
 from test_code_analysis_api import (
     _create_repo,
@@ -29,38 +32,50 @@ _WORKFLOW = {"race-condition", "business-logic"}
 _WORKFLOW_STATE = {"race-condition", "business-logic", "rate-limit"}
 
 
-def _families(slot_types, *, language, role="", file_path=""):
+def _families(slot_types, *, language, context_tags=(), file_path=""):
     required = set(
         code_analysis._applicable_families_for_file(
-            slot_types, language=language, role=role
+            slot_types, language=language, context_tags=context_tags
         )
     )
     suggested = set(
         code_analysis._path_suggested_families_for_file(
-            slot_types, language=language, role=role, file_path=file_path
+            slot_types, language=language, context_tags=context_tags, file_path=file_path
         )
     )
     return required, suggested
 
 
+def test_the_request_model_accepts_exactly_the_tags_the_family_table_maps():
+    assert set(get_args(CodeContextTag)) == set(code_analysis.CONTEXT_TAG_VULN_CLASSES)
+
+
 @pytest.mark.parametrize(
-    "role",
+    ("tag", "language", "expected"),
     [
-        "refund_service",
-        "booking_controller",
-        "seat_hold_handler",
-        "quota_manager",
-        "store_credit_ledger",
-        "coupon_redeem_controller",
-        "WalletBalanceService",
-        "checkout",
-        "inventory_reservations",
+        ("crypto", "python", {"crypto-misuse"}),
+        ("authentication", "python", {"auth-bypass", "web-app-auth", "rate-limit"}),
+        ("authorization", "python", {"auth-bypass", "web-app-auth"}),
+        ("error-handling", "c", {"error-handling", "null-dereference"}),
+        ("allocator", "c", {"uninitialized-memory", "algorithmic-dos"}),
+        ("parser", "python", {"algorithmic-dos"}),
+        ("response-data", "python", {"web-app-data-exposure"}),
+        ("ai-model", "python", {"ai-ml-security"}),
+        ("value-transfer", "python", _WORKFLOW),
+        ("provider-callback", "python", _WORKFLOW),
+        ("one-time-secret", "ruby", {"rate-limit"}),
     ],
 )
-def test_transactional_roles_require_race_and_business_logic_review(role):
-    required, suggested = _families(["NETWORK-INPUT"], language="python", role=role)
-    assert _WORKFLOW <= required
-    assert not suggested & _WORKFLOW
+def test_each_context_tag_requires_its_families(tag, language, expected):
+    required, suggested = _families(["NETWORK-INPUT"], language=language, context_tags=[tag])
+    assert expected <= required
+    assert not suggested & expected
+
+
+def test_an_authorization_policy_point_does_not_owe_rate_limit():
+    """Precision: a policy decision point is not a guessing surface."""
+    required, _ = _families(["NETWORK-INPUT"], language="python", context_tags=["authorization"])
+    assert "rate-limit" not in required
 
 
 @pytest.mark.parametrize(
@@ -87,9 +102,7 @@ def test_transactional_roles_require_race_and_business_logic_review(role):
     ],
 )
 def test_transactional_paths_suggest_race_and_business_logic_review(file_path, language):
-    required, suggested = _families(
-        ["NETWORK-INPUT"], language=language, role="handler", file_path=file_path
-    )
+    required, suggested = _families(["NETWORK-INPUT"], language=language, file_path=file_path)
     assert not required & _WORKFLOW
     assert _WORKFLOW <= suggested
 
@@ -104,16 +117,10 @@ def test_a_path_hint_is_never_a_family_the_file_already_requires():
 
 def test_a_credits_page_in_a_native_runtime_is_only_pointed_at_the_workflow():
     required, suggested = _families(
-        ["NETWORK-INPUT"], language="c", role="info_page", file_path="ext/standard/credits.c"
+        ["NETWORK-INPUT"], language="c", file_path="ext/standard/credits.c"
     )
     assert "race-condition" not in required
     assert "race-condition" in suggested
-
-
-@pytest.mark.parametrize("role", ["payment_webhook", "StripeWebhookHandler"])
-def test_webhook_roles_require_race_and_business_logic_review(role):
-    required, _ = _families(["CALLBACK-DATA"], language="python", role=role)
-    assert _WORKFLOW <= required
 
 
 def test_webhook_paths_suggest_race_and_business_logic_review():
@@ -122,15 +129,6 @@ def test_webhook_paths_suggest_race_and_business_logic_review():
     )
     assert not required & _WORKFLOW
     assert _WORKFLOW <= suggested
-
-
-@pytest.mark.parametrize(
-    "role",
-    ["otp_verifier", "MfaChallenge", "totp_enrollment", "passcode_check", "PasswordResetService"],
-)
-def test_one_time_code_and_reset_roles_require_rate_limit_review(role):
-    required, _ = _families(["NETWORK-INPUT"], language="ruby", role=role)
-    assert "rate-limit" in required
 
 
 def test_reset_paths_suggest_rate_limit_review():
@@ -144,28 +142,26 @@ def test_reset_paths_suggest_rate_limit_review():
 
 
 @pytest.mark.parametrize(
-    ("role", "file_path", "language"),
+    ("file_path", "language"),
     [
-        ("placeholder", "src/ui/placeholder.ts", "typescript"),
-        ("threshold", "src/alerts/threshold.py", "python"),
-        ("load_balancer", "src/net/load_balancer.go", "go"),
-        ("stakeholder_report", "src/reports/stakeholder.py", "python"),
-        ("", "docs/refund-policy.md", "markdown"),
-        ("", "config/locales/refund.en.yml", "yaml"),
-        ("", "templates/checkout.html", "html"),
-        ("", "static/wallet.css", "css"),
-        ("", "deploy/payments/Dockerfile", "dockerfile"),
-        ("", "templates/emails/refund.ftl", "freemarker"),
-        ("", "resources/views/checkout.blade.php", "blade"),
-        ("", "templates/checkout.html.twig", "twig"),
+        ("src/ui/placeholder.ts", "typescript"),
+        ("src/alerts/threshold.py", "python"),
+        ("src/net/load_balancer.go", "go"),
+        ("src/reports/stakeholder.py", "python"),
+        ("docs/refund-policy.md", "markdown"),
+        ("config/locales/refund.en.yml", "yaml"),
+        ("templates/checkout.html", "html"),
+        ("static/wallet.css", "css"),
+        ("deploy/payments/Dockerfile", "dockerfile"),
+        ("templates/emails/refund.ftl", "freemarker"),
+        ("resources/views/checkout.blade.php", "blade"),
+        ("templates/checkout.html.twig", "twig"),
     ],
 )
 def test_words_that_merely_contain_a_token_and_non_source_paths_point_at_nothing(
-    role, file_path, language
+    file_path, language
 ):
-    required, suggested = _families(
-        ["NETWORK-INPUT"], language=language, role=role, file_path=file_path
-    )
+    required, suggested = _families(["NETWORK-INPUT"], language=language, file_path=file_path)
     assert not required & _WORKFLOW_STATE
     assert not suggested & _WORKFLOW_STATE
 
@@ -178,6 +174,7 @@ def _claim_classified_file(
     file_path,
     language,
     role,
+    context_tags=(),
     classification="critical",
     priority=90,
 ):
@@ -210,6 +207,7 @@ def _claim_classified_file(
                     "file_id": file_id,
                     "classification": classification,
                     "role": role,
+                    "context_tags": list(context_tags),
                     "slot_types": ["NETWORK-INPUT"],
                     "analysis_priority": priority,
                 }
@@ -270,34 +268,28 @@ def test_a_refund_path_is_a_hint_that_done_does_not_enforce(client, isolate_sett
     assert row["path_suggested_families"] == ["business-logic", "race-condition"]
 
 
-def test_done_refuses_a_refund_role_that_omits_the_workflow_families(client, isolate_settings):
-    base, _repo_id, claim = _claim_classified_file(
+def test_done_records_the_omitted_workflow_families_of_a_value_transfer_file_at_effort_zero(
+    client, isolate_settings
+):
+    base, repo_id, claim = _claim_classified_file(
         client,
         isolate_settings,
         "2026-11-05-workflow-families-done",
         file_path="src/billing/refund_service.py",
         language="python",
         role="refund_service",
+        context_tags=["value-transfer"],
     )
     assert _WORKFLOW <= set(claim["applicable_vuln_classes"])
     assert claim["path_suggested_vuln_classes"] == []
 
-    refused = _done(client, base, claim, _network_input_coverage(default_effort=80))
-    assert refused.status_code == 400, refused.text
-    detail = refused.json()["detail"]
-    assert "race-condition" in detail and "business-logic" in detail
-
-    accepted = _done(
-        client,
-        base,
-        claim,
-        [
-            *_network_input_coverage(default_effort=80),
-            {"family": "race-condition", "effort": 80},
-            {"family": "business-logic", "effort": 80},
-        ],
-    )
-    assert accepted.status_code == 200, accepted.text
+    closed = _done(client, base, claim, _network_input_coverage(default_effort=80))
+    assert closed.status_code == 200, closed.text
+    recorded = closed.json()["unreviewed_families_recorded"]
+    assert {"race-condition", "business-logic"} <= set(recorded["families"])
+    warnings = client.get(f"{base}/coverage?repo_id={repo_id}").json()["gate"]["effort_warnings"]
+    assert any("'race-condition' effort 0 <" in warning for warning in warnings), warnings
+    assert any("'business-logic' effort 0 <" in warning for warning in warnings), warnings
 
 
 def test_a_checkout_value_object_closes_without_race_coverage_and_the_gate_stays_quiet(
@@ -321,76 +313,70 @@ def test_a_checkout_value_object_closes_without_race_coverage_and_the_gate_stays
     assert not [reason for reason in gate["reasons"] if path in reason]
 
 
-@pytest.mark.parametrize(
-    "role",
-    [
-        "auth_controller",
-        "login_controller",
-        "signin_handler",
-        "SessionService",
-        "oauth_token_endpoint",
-        "sso_entry",
-    ],
-)
-def test_credential_presentation_roles_require_rate_limit_review(role):
-    """A credential entry point owes guessing review, OTP or not.
-
-    `rate-limit` used to be reachable only through the one-time-code workflow
-    words, so a plain `login_controller` owed `auth-bypass` and `web-app-auth`
-    and nothing about credential stuffing or brute force — the two cheapest
-    attacks on exactly that file.
-    """
-    required, suggested = _families(["NETWORK-INPUT"], language="python", role=role)
-    assert "rate-limit" in required
-    assert {"auth-bypass", "web-app-auth"} <= required
-    assert "rate-limit" not in suggested
+def test_a_role_label_alone_requires_no_family(client, isolate_settings):
+    """The role is free text the architect writes for people; no word in it is
+    read for an obligation, so `refund_service` with no tag owes nothing extra."""
+    _base, _repo_id, claim = _claim_classified_file(
+        client,
+        isolate_settings,
+        "2026-11-14-workflow-families-role-only",
+        file_path="src/acme/handler.py",
+        language="python",
+        role="refund_service",
+    )
+    assert not _WORKFLOW_STATE & set(claim["applicable_vuln_classes"])
 
 
-@pytest.mark.parametrize("role", ["permission_policy", "rbac_evaluator", "acl_resolver"])
-def test_authorization_policy_roles_do_not_owe_rate_limit(role):
-    """Precision: a policy decision point is not a guessing surface. Requiring
-    `rate-limit` there would make the obligation noise on files that present no
-    credential."""
-    required, _suggested = _families(["NETWORK-INPUT"], language="python", role=role)
-    assert {"auth-bypass", "web-app-auth"} <= required
-    assert "rate-limit" not in required
+def test_an_unknown_context_tag_is_refused(client, isolate_settings):
+    engagement_key = "2026-11-14-workflow-families-unknown-tag"
+    write_engagement(isolate_settings["engagements_dir"], engagement_key)
+    repo = _create_repo(client, engagement_key, repo_key="workflow-families")
+    files = _refresh_repo_files(
+        client,
+        engagement_key,
+        int(repo["id"]),
+        [{"file_path": "src/acme/a.py", "language": "python", "loc": 3,
+          "file_hash": _source_hash("src/acme/a.py"), "header_snippet": "",
+          "git_churn_score": 0, "has_past_cve_fix": False}],
+    )
+    refused = client.post(
+        f"/engagements/{engagement_key}/assessment/code/files/bulk-classify",
+        json={"classifications": [{
+            "file_id": int(files[0]["id"]), "classification": "high", "role": "refunds",
+            "context_tags": ["refunds"], "slot_types": ["NETWORK-INPUT"],
+            "analysis_priority": 60,
+        }]},
+    )
+    assert refused.status_code == 422, refused.text
+    assert "value-transfer" in refused.text
 
 
-def test_a_medium_transactional_role_is_still_held_to_the_workflow_families(
+def test_a_medium_value_transfer_file_lists_the_workflow_families_as_guidance(
     client, isolate_settings
 ):
-    """The role label makes the workflow families required at every tier.
+    """The context tag names the workflow families at every tier.
 
-    `done` validates against `_applicable_families_for_file`, which reads the
-    role and never the classification — so a refund handler classified `medium`
-    owes the same check-then-act review a `critical` one does. Only the EFFORT
-    threshold is tier-dependent.
+    `_applicable_families_for_file` reads the tags and never the
+    classification, so a refund handler classified `medium` is pointed at the
+    same check-then-act review a `critical` one is. Closeout owes an entry per
+    family only on critical and high files; on a medium file the families stay
+    on the claim and are measured by the effort harness.
     """
-    base, _repo_id, claim = _claim_classified_file(
+    base, repo_id, claim = _claim_classified_file(
         client,
         isolate_settings,
         "2026-11-06-workflow-families-medium",
         file_path="src/billing/refund_service.py",
         language="python",
         role="refund_service",
+        context_tags=["value-transfer"],
         classification="medium",
         priority=40,
     )
     assert _WORKFLOW <= set(claim["applicable_vuln_classes"])
 
-    refused = _done(client, base, claim, _network_input_coverage(default_effort=80))
-    assert refused.status_code == 400, refused.text
-    detail = refused.json()["detail"]
-    assert "race-condition" in detail and "business-logic" in detail
-
-    accepted = _done(
-        client,
-        base,
-        claim,
-        [
-            *_network_input_coverage(default_effort=80),
-            {"family": "race-condition", "effort": 80},
-            {"family": "business-logic", "effort": 80},
-        ],
-    )
+    accepted = _done(client, base, claim, _network_input_coverage(default_effort=80))
     assert accepted.status_code == 200, accepted.text
+    warnings = client.get(f"{base}/coverage?repo_id={repo_id}").json()["gate"]["effort_warnings"]
+    assert any("'race-condition' effort 0 < 30" in warning for warning in warnings), warnings
+    assert any("'business-logic' effort 0 < 30" in warning for warning in warnings), warnings

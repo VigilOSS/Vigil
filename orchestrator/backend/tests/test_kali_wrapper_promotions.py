@@ -62,13 +62,13 @@ def _val_after(cmd: list[str], flag: str) -> str:
 
 # ── katana defaults ────────────────────────────────────────────────────────
 
-def test_katana_bakes_in_deep_rate_and_disk_defaults_without_scope_filter(monkeypatch):
+def test_katana_bakes_in_deep_rate_disk_and_exact_host_defaults(monkeypatch):
     captured = _capture_kali_exec(monkeypatch, "assess.commands.kali_katana")
     cli = _import("assess.cli")
     cli.main(["kali", "katana", "-u", "https://x.example", *_AUDIT])
     cmd = captured["cmd"]
     assert _val_after(cmd, "-d") == "5"          # deep by default
-    assert "-fs" not in cmd                      # never scope-filter outbound crawl
+    assert _val_after(cmd, "-fs") == "fqdn"      # each seed stays on its own host
     assert _val_after(cmd, "-rl") == "10"        # politely rated by default
     assert _val_after(cmd, "-c") == "5"
     assert "-or" in cmd and "-ob" in cmd         # disk-bounded by default
@@ -401,6 +401,71 @@ def test_arjun_sweep_maps_body_verbs_to_post(monkeypatch, tmp_path):
     _import("assess.cli").main(["arjun-sweep", *_AUDIT])
     modes = {c[c.index("-m") + 1] for c in cmds if "-m" in c}
     assert modes == {"POST", "GET"}  # no raw PUT/PATCH/DELETE reaches arjun
+
+
+def _run_budgeted_sweep(monkeypatch, tmp_path, methods, argv):
+    """Run arjun-sweep under a fake clock where every arjun arm uses its whole
+    budget; return the per-arm timeouts handed to ``kali_exec``."""
+    sweep = _import("assess.commands.arjun_sweep")
+    kali = _import("assess.lib.kali")
+    monkeypatch.setattr(
+        sweep, "load_config",
+        lambda d: SimpleNamespace(
+            engagement_dir=str(tmp_path), engagement_key="eng", base_url="http://x"
+        ),
+    )
+    monkeypatch.setattr(
+        sweep.arjun_select, "select_targets",
+        lambda rows, **kw: [(m, f"https://x.example/{m.lower()}") for m in methods],
+    )
+    _patch_work_items_client(monkeypatch, sweep, [])
+    clock = {"now": 1000.0}
+    monkeypatch.setattr(
+        sweep, "time", SimpleNamespace(monotonic=lambda: clock["now"]), raising=False
+    )
+    arm_timeouts: list[int] = []
+
+    def fake_exec(cmd, **kwargs):
+        arm_timeouts.append(kwargs["timeout"])
+        clock["now"] += kwargs["timeout"]
+        return kali.KaliResult(
+            run_id=1, status="completed", return_code=0, stdout_path="", stderr_path="",
+            duration_ms=1, peak_rss_bytes=None, stdout_preview="", stderr_preview="",
+            timed_out=False, partial_results=False,
+        )
+
+    monkeypatch.setattr(sweep, "kali_exec", fake_exec)
+    monkeypatch.setattr(sweep.ingest_arjun, "run", lambda ns: None)
+    audit = [a for a in _AUDIT if a not in ("--timeout", "60")]
+    _import("assess.cli").main(["arjun-sweep", *audit, *argv])
+    return arm_timeouts
+
+
+def test_arjun_sweep_whole_run_is_bounded_by_timeout(monkeypatch, tmp_path, capsys):
+    arm_timeouts = _run_budgeted_sweep(
+        monkeypatch, tmp_path, ["GET", "JSON", "POST"],
+        ["--timeout", "100", "--stage-timeout", "60"],
+    )
+    # GET gets its full stage budget, JSON only what is left, POST nothing.
+    assert arm_timeouts == [60, 40]
+    assert sum(arm_timeouts) <= 100
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)
+    runs = {r["method"]: r for r in summary["runs"]}
+    assert runs["POST"]["status"] == "deferred"
+    assert runs["POST"]["incomplete"] is True
+    assert summary["deferred_methods"] == ["POST"]
+    assert summary["incomplete"] is True
+    # the cut-short JSON arm and the deferred POST arm are both said on stderr.
+    assert "JSON" in captured.err and "40s" in captured.err
+    assert "deferring POST" in captured.err
+
+
+def test_arjun_sweep_stage_timeout_defaults_to_blocking_ceiling(monkeypatch, tmp_path):
+    arm_timeouts = _run_budgeted_sweep(
+        monkeypatch, tmp_path, ["GET"], ["--timeout", "900"],
+    )
+    assert arm_timeouts == [600]
 
 
 def test_nuclei_timeout_and_retries_passthrough(monkeypatch):

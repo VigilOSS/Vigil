@@ -256,7 +256,7 @@ def test_fetch_defaults_to_one_bounded_assessment_page(capsys) -> None:
     class FakeClient:
         def get(self, endpoint: str):
             calls.append(endpoint)
-            return [{"id": i} for i in range(100)]
+            return [{"id": i} for i in range(101)]
 
         def get_all_pages(self, *_args, **_kwargs):
             raise AssertionError("default fetch must not traverse every page")
@@ -264,9 +264,9 @@ def test_fetch_defaults_to_one_bounded_assessment_page(capsys) -> None:
     rows = module._fetch_assessment_endpoint(FakeClient(), "surfaces")
 
     assert len(rows) == 100
-    assert calls == ["surfaces?limit=100&offset=0"]
+    assert calls == ["surfaces?limit=101&offset=0"]
     err = capsys.readouterr().err
-    assert "bounded page" in err
+    assert "bounded page" in err and "TRUNCATED" in err
     assert "--paginate" in err
 
 
@@ -946,6 +946,8 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
 
     class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
+            if endpoint == "attack-chain-links":
+                return []
             captured.append(endpoint)
             return [
                 {
@@ -980,7 +982,7 @@ def test_list_findings_pushes_filters_and_limit_to_backend(monkeypatch, tmp_path
     )
 
     assert captured == [
-        "findings?severity=high&workflow_status=active&verification_status=confirmed&"
+        "findings?view=list&severity=high&workflow_status=active&verification_status=confirmed&"
         "source_name=vulnerability-analyst&search=OIDC%20state&"
         "limit=26&offset=50"
     ]
@@ -998,7 +1000,9 @@ def test_list_findings_does_not_repeat_backend_search_filter(
 
     class FakeClient(_FakeClientBase):
         def get(self, endpoint: str):
-            assert endpoint == "findings?search=parser&limit=11&offset=0"
+            if endpoint == "attack-chain-links":
+                return []
+            assert endpoint == "findings?view=list&search=parser&limit=11&offset=0"
             return [
                 {
                     "slug": "VA-124",
@@ -2929,7 +2933,7 @@ def test_check_report_readiness_prints_advisories_alongside_blockers(monkeypatch
 # output. report-writer (pure backend-state transformation) and
 # surface-collector (rule-based triage) are explicitly excluded because
 # adversarial framing skews their output toward exaggeration / speculation.
-# operator loads it via the always-active rules list in operator-core.md.
+# The operator does not load it; it is a specialist lens (operator cores name their trigger-loaded rules).
 # ---------------------------------------------------------------------------
 
 _ADVERSARIAL_MINDSET_INCLUDED = {
@@ -3287,7 +3291,7 @@ def test_agent_done_status_completed_warns_when_no_handoff_exists(
 # `details_json` (TEXT, JSON-encoded). The CLI write path on
 # `update-finding --inline` accepts `details` (dict) and the API
 # encodes it back into the column. Operators are warned about this
-# asymmetry in agent/rules/hunting.md §20 and the report-generation
+# asymmetry in the report-generation
 # skill. This regression test locks in the current correct state:
 # NO operator-facing prompt should instruct invoking
 # `update-finding --inline` (or its --details-json equivalent) with
@@ -3588,7 +3592,7 @@ def test_resume_brief_findings_always_show_medium_plus(monkeypatch, tmp_path, ca
     # (beyond the 6-row floor) is dropped, and the truncation note is printed.
     assert "CRIT-1 critical" in out
     assert "L7 low" not in out
-    assert "showing 7 of 8 (medium+ always shown)" in out
+    assert "INCOMPLETE: showing 7 of 8 (most severe first; medium+ in this window always shown)" in out
 
 
 def test_resume_brief_renders_read_first_intel_notes(monkeypatch, tmp_path, capsys):

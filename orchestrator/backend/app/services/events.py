@@ -25,12 +25,10 @@ class _ActivitySignal:
 
     The ``/events`` timeline (Overview "Latest activity") and its summary
     expect ``phase.started``, ``task.started``, and ``task.completed`` rows to
-    infer phase progression.
-    Pre-refactor those were synthesised from ``artifact.updated task_name=log.md``
-    events emitted by the old ``assess.py log`` (which also appended to
-    ``log.md``). Now that ``log.md`` is gone and ``vigil assess log`` POSTs to
-    ``activity_entries`` without writing a parallel event row, we synthesise
-    the same signals from activity rows here.
+    infer phase progression. ``vigil assess log`` POSTs to ``activity_entries``
+    without writing a parallel event row, so the signals are synthesised from
+    activity rows here: a phase from the actor, a task from the row's
+    structured ``action``.
     """
 
     source_id: int
@@ -38,6 +36,7 @@ class _ActivitySignal:
     actor_name: str
     title: str
     occurred_at: str
+    action: str = ""
 
 
 def _engagement_or_404(engagement_id: int):
@@ -68,10 +67,12 @@ def _phase_for_actor(actor_name: str, title: str = "") -> str:
     return "unknown"
 
 
-_TASK_TITLE_SQL = (
-    "(lower({column}) LIKE '% start' OR lower({column}) LIKE '% summary' "
-    "OR lower({column}) LIKE '% complete')"
-)
+# The activity `action` values that project a timeline task row. An activity
+# row's kind is its structured `action` (`vigil assess log <agent> <title>
+# task.started <result>`); its title is prose for people and is never read for
+# one.
+_TASK_ACTIONS = ("task.started", "task.completed")
+_TASK_ACTION_SQL = "action IN ('task.started', 'task.completed')"
 
 
 def _limit_sql(limit: int | None) -> tuple[str, tuple[int, ...]]:
@@ -90,39 +91,17 @@ def _load_activity_signals(engagement_id: int, *, limit: int | None = None) -> l
     with db.get_connection() as connection:
         rows = connection.execute(
             f"""
-            SELECT id, engagement_id, actor_name, title, occurred_at
+            SELECT id, engagement_id, actor_name, title, occurred_at, action
             FROM activity_entries
             WHERE engagement_id = ?
               AND actor_name != 'operator'
-              AND {_TASK_TITLE_SQL.format(column="title")}
+              AND {_TASK_ACTION_SQL}
             ORDER BY julianday(occurred_at) DESC, id DESC
             {limit_sql}
             """,
             (engagement_id, *limit_params),
         ).fetchall()
     return [_activity_signal_from_row(row) for row in rows]
-
-
-def _load_legacy_task_signals(
-    connection: Connection, engagement_id: int, *, limit: int | None
-) -> list[_ActivitySignal]:
-    """Pre-``activity_entries`` engagements narrated through ``log.md`` events."""
-    limit_sql, limit_params = _limit_sql(limit)
-    rows = connection.execute(
-        f"""
-        SELECT id, engagement_id, agent_name, summary, created_at
-        FROM events
-        WHERE engagement_id = ?
-          AND event_type = 'artifact.updated'
-          AND task_name = 'log.md'
-          AND agent_name != 'operator'
-          AND {_TASK_TITLE_SQL.format(column="summary")}
-        ORDER BY julianday(created_at) DESC, id DESC
-        {limit_sql}
-        """,
-        (engagement_id, *limit_params),
-    ).fetchall()
-    return [_event_signal_from_row(row) for row in rows]
 
 
 def _load_stored_events(
@@ -176,6 +155,7 @@ def _activity_signal_from_row(row) -> _ActivitySignal:
         actor_name=row["actor_name"] or "",
         title=row["title"] or "",
         occurred_at=row["occurred_at"] or "",
+        action=row["action"] if "action" in row.keys() else "",
     )
 
 
@@ -194,37 +174,17 @@ def _latest_activity_task_signal(
 ) -> _ActivitySignal | None:
     row = connection.execute(
         f"""
-        SELECT id, engagement_id, actor_name, title, occurred_at
+        SELECT id, engagement_id, actor_name, title, occurred_at, action
         FROM activity_entries
         WHERE engagement_id = ?
           AND actor_name != 'operator'
-          AND {_TASK_TITLE_SQL.format(column="title")}
+          AND {_TASK_ACTION_SQL}
         ORDER BY julianday(occurred_at) DESC, id DESC
         LIMIT 1
         """,
         (engagement_id,),
     ).fetchone()
     return _activity_signal_from_row(row) if row else None
-
-
-def _latest_legacy_task_signal(
-    connection: Connection, engagement_id: int
-) -> _ActivitySignal | None:
-    row = connection.execute(
-        f"""
-        SELECT id, engagement_id, agent_name, summary, created_at
-        FROM events
-        WHERE engagement_id = ?
-          AND event_type = 'artifact.updated'
-          AND task_name = 'log.md'
-          AND agent_name != 'operator'
-          AND {_TASK_TITLE_SQL.format(column="summary")}
-        ORDER BY julianday(created_at) DESC, id DESC
-        LIMIT 1
-        """,
-        (engagement_id,),
-    ).fetchone()
-    return _event_signal_from_row(row) if row else None
 
 
 def _first_activity_phase_signal(
@@ -277,18 +237,14 @@ def _first_legacy_phase_signal(
     return _event_signal_from_row(row) if row else None
 
 
-def _projected_task_event(signal: _ActivitySignal) -> Event | None:
-    normalized = signal.title.lower()
-    if normalized.endswith(" start"):
-        event_type = "task.started"
-    elif normalized.endswith(" summary") or normalized.endswith(" complete"):
-        event_type = "task.completed"
-    else:
+def _projected_task_event(signal: _ActivitySignal | None) -> Event | None:
+    """The ``task.*`` timeline row an activity row's structured action names."""
+    if signal is None or signal.actor_name == "operator" or signal.action not in _TASK_ACTIONS:
         return None
     return Event(
         id=_inferred_id(signal, "task"),
         engagement_id=signal.engagement_id,
-        event_type=event_type,
+        event_type=signal.action,
         phase=_phase_for_actor(signal.actor_name, signal.title),
         task_name=signal.actor_name,
         agent_name=signal.actor_name,
@@ -304,29 +260,6 @@ def _inferred_id(signal: _ActivitySignal, kind: str) -> int:
     keep them distinct from stored events.
     """
     return -(2 * signal.source_id + (1 if kind == "phase" else 0))
-
-
-def _task_event_from_signal(signal: _ActivitySignal | None) -> Event | None:
-    if signal is None or signal.actor_name == "operator":
-        return None
-    normalized = signal.title.lower()
-    if normalized.endswith("start"):
-        event_type = "task.started"
-    elif normalized.endswith("summary") or normalized.endswith("complete"):
-        event_type = "task.completed"
-    else:
-        return None
-    phase = _phase_for_actor(signal.actor_name, signal.title)
-    return Event(
-        id=_inferred_id(signal, "task"),
-        engagement_id=signal.engagement_id,
-        event_type=event_type,
-        phase=phase,
-        task_name=signal.actor_name,
-        agent_name=signal.actor_name,
-        summary=signal.title,
-        created_at=signal.occurred_at,
-    )
 
 
 def _phase_event_from_signal(signal: _ActivitySignal | None, phase: str) -> Event | None:
@@ -402,9 +335,10 @@ def _latest_persisted_event(
 def list_events_for_engagement(engagement_id: int, *, limit: int | None = None) -> list[Event]:
     """Structured timeline, oldest first, optionally only the newest ``limit``.
 
-    Stored events are joined by ``phase.started`` / ``task.*`` rows inferred
-    from activity (or legacy ``log.md``) signals. Each source is bounded in
-    SQL by the same ``limit`` before the merge, so a window never reads the
+    Stored events are joined by ``phase.started`` rows inferred from the
+    actors of activity (or legacy ``log.md``) signals and by ``task.*`` rows
+    from activity rows whose ``action`` is a task kind. Each source is bounded
+    in SQL by the same ``limit`` before the merge, so a window never reads the
     whole history; timestamps come back as ISO-8601 UTC.
     """
     engagement = _engagement_or_404(engagement_id)
@@ -412,13 +346,7 @@ def list_events_for_engagement(engagement_id: int, *, limit: int | None = None) 
         stored = _load_stored_events(connection, engagement.id, limit=limit)
         use_activity = _has_activity_signals(connection, engagement.id)
         phases = _projected_phase_candidates(connection, engagement.id, use_activity=use_activity)
-        signals = (
-            None
-            if use_activity
-            else _load_legacy_task_signals(connection, engagement.id, limit=limit)
-        )
-    if signals is None:
-        signals = _load_activity_signals(engagement.id, limit=limit)
+    signals = _load_activity_signals(engagement.id, limit=limit) if use_activity else []
     tasks = [event for event in map(_projected_task_event, signals) if event is not None]
     timeline = sorted([*stored, *phases, *tasks], key=_instant_key)
     if limit is not None:
@@ -430,10 +358,10 @@ def summarize_events_for_engagement(engagement_id: int) -> dict[str, dict[str, s
     engagement = _engagement_or_404(engagement_id)
     with db.get_connection() as connection:
         use_activity = _has_activity_signals(connection, engagement.id)
-        latest_projected_task = _task_event_from_signal(
-            _latest_activity_task_signal(connection, engagement.id)
+        latest_projected_task = (
+            _projected_task_event(_latest_activity_task_signal(connection, engagement.id))
             if use_activity
-            else _latest_legacy_task_signal(connection, engagement.id)
+            else None
         )
         latest_phase = _latest_event(
             [

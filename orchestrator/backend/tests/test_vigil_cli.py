@@ -7114,11 +7114,17 @@ def test_transition_phase_resolves_engagement_dir_from_cwd(
     assert "Phase transitioned" in capsys.readouterr().out
 
 
-def test_transition_phase_backend_error_blocks_precondition_check(
-    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+@pytest.mark.parametrize(
+    ("current_phase", "target_phase", "blocks"),
+    [("verify", "exploit", True), ("recon", "collect", False)],
+    ids=["blocking-check", "advisory-check"],
+)
+def test_transition_phase_backend_error_matches_the_check_it_stands_in_for(
+    monkeypatch, tmp_path: Path, capsys: pytest.CaptureFixture[str],
+    current_phase: str, target_phase: str, blocks: bool,
 ) -> None:
-    """Backend/query failures during guarded phase transitions are blockers
-    because the readiness state is unknown."""
+    """A failed read behind a blocking check blocks, because the readiness state
+    is unknown; behind an advisory check it is an advisory that says so."""
     module = _load_assess_module(
         "round3_transition_phase_blocker_module",
         "agent/scripts/assess/commands/transition_phase.py",
@@ -7127,7 +7133,7 @@ def test_transition_phase_backend_error_blocks_precondition_check(
     engagement.mkdir(parents=True)
     scope_path = engagement / "scope.json"
     scope_path.write_text(
-        json.dumps({"engagement_type": "web", "current_phase": "recon"}),
+        json.dumps({"engagement_type": "web", "current_phase": current_phase}),
         encoding="utf-8",
     )
 
@@ -7135,26 +7141,29 @@ def test_transition_phase_backend_error_blocks_precondition_check(
         def get(self, _path: str) -> dict:
             raise RuntimeError("backend unavailable")
 
+        def get_all_pages(self, _path: str, **_kwargs) -> list:
+            raise RuntimeError("backend unavailable")
+
     monkeypatch.setattr(module, "AssessmentClient", _Client)
     _pin_assess_config(
         monkeypatch, module, engagement_dir=str(engagement), engagement_key=engagement.name,
         agent_root=str(tmp_path / "agent"),
     )
+    args = SimpleNamespace(engagement_dir=str(engagement), target_phase=target_phase, force=False)
 
-    with pytest.raises(SystemExit) as exc:
-        module.run(
-            SimpleNamespace(
-                engagement_dir=str(engagement),
-                target_phase="collect",
-                force=False,
-            )
-        )
-
-    assert exc.value.code == 1
+    if blocks:
+        with pytest.raises(SystemExit) as exc:
+            module.run(args)
+        assert exc.value.code == 1
+    else:
+        module.run(args)
     err = capsys.readouterr().err
     assert "precondition_check_failed" in err
     assert "backend unavailable" in err
-    assert json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"] == "recon"
+    phase = json.loads(scope_path.read_text(encoding="utf-8"))["current_phase"]
+    assert phase == (current_phase if blocks else target_phase)
+    if not blocks:
+        assert "not evaluated" in err
 
 
 def test_transition_phase_both_engagement_advances_code_track_separately(
@@ -7355,7 +7364,7 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
     class _Client(_ContextFakeClient):
         def get(self, path: str):
             captured_paths.append(path)
-            if path == "findings":
+            if path == "findings?view=list":
                 return [confirmed_finding]
             if path.startswith("dispatches"):
                 return [older_variant_dispatch]
@@ -7393,7 +7402,7 @@ def test_transition_phase_exploit_variant_gate_requests_full_dispatch_page(
 def _setup_transition_env(
     monkeypatch, module, tmp_path, *, scope, services=None, findings=None,
     dispatches=None, report_readiness=None, terminal_block=None,
-    decisions_by_kind=None, work_items=None,
+    decisions_by_kind=None, work_items=None, chain_links=None,
 ):
     engagement = tmp_path / "agent" / "engagements" / "eng-test"
     engagement.mkdir(parents=True, exist_ok=True)
@@ -7412,7 +7421,7 @@ def _setup_transition_env(
         def get(self, path: str):
             if path == "services":
                 return services or []
-            if path == "findings":
+            if path == "findings?view=list":
                 return findings or []
             if path.startswith("dispatch-decisions"):
                 for kind, rows in decisions_by_kind.items():
@@ -7421,6 +7430,8 @@ def _setup_transition_env(
                 return []
             if path.startswith("dispatches"):
                 return dispatches or []
+            if path == "attack-chain-links":
+                return chain_links or []
             if path == "report-readiness":
                 return report_readiness or {"ready": True, "blockers": []}
             if path == "application-units/terminal-block":
@@ -7541,17 +7552,17 @@ def test_transition_backward_without_reason_or_force_refuses(monkeypatch, tmp_pa
     assert decisions == []
 
 
-def test_transition_force_override_records_decision(monkeypatch, tmp_path, capsys):
+def test_transition_empty_services_is_advisory_and_needs_no_override(monkeypatch, tmp_path, capsys):
     module = _load_assess_module("tp_force_audit", "agent/scripts/assess/commands/transition_phase.py")
     eng, decisions = _setup_transition_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "web", "current_phase": "recon"},
         services=[],
     )
-    module.run(_transition_args(eng, "collect", force=True, reason="services known-empty, internal host"))
-    assert len(decisions) == 1
-    assert decisions[0]["kind"] == "forced_transition_override"
-    assert any(b["kind"] == "no_services" for b in decisions[0]["payload"]["overridden_blockers"])
+    module.run(_transition_args(eng, "collect"))
+    assert decisions == []
+    assert "[no_services]" in capsys.readouterr().err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "collect"
 
 
 def test_transition_generalized_walk_checks_intermediate_gates(monkeypatch, tmp_path, capsys):
@@ -7559,12 +7570,16 @@ def test_transition_generalized_walk_checks_intermediate_gates(monkeypatch, tmp_
     eng, _ = _setup_transition_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "web", "current_phase": "recon"},
-        services=[], findings=[],
+        services=[],
+        findings=[{**_CONFIRMED_HIGH, "verification_status": "unreviewed"}],
     )
     with pytest.raises(SystemExit):
         module.run(_transition_args(eng, "exploit"))
     err = capsys.readouterr().err
-    assert "no_services" in err
+    # The skipped collect edge's advisory and the exploit edge's blocker both run.
+    assert "[no_services]" in err
+    assert "unverified_high_findings" in err
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "recon"
 
 
 def test_transition_verify_consumption_is_advisory_not_block(monkeypatch, tmp_path, capsys):
@@ -7811,8 +7826,11 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
                     "blockers": [],
                     "quality_gate": {"passed": True, "warnings": []},
                 }
-            if path == "findings":
+            if path == "findings?view=list":
                 return []
+            if path == "report-readiness":
+                # No report.md is registered, so its QC is not owed.
+                return {"ready": True, "blockers": [], "report_qc": {"required": False, "status": "missing", "issue": ""}}
             return []
         def __exit__(self, *_e): return False
 
@@ -7828,11 +7846,10 @@ def test_transition_code_complete_unaffected_by_depth_backstop(monkeypatch, tmp_
 
 
 # ---------------------------------------------------------------------------
-# Chain-construction pass gate (Exploit -> Report / -> complete).
-# Mirrors the variant-pass gate: enumerates confirmed high/critical findings
-# (>=2, since the chain runs ACROSS the confirmed set) and demands a COMPLETED
-# exploit-developer dispatch on record. Hard `missing_chain_construction`
-# blocker at the same enforcement level as `missing_variant_pass`.
+# Chain-construction pass advisory (Exploit -> Report / -> complete).
+# Enumerates confirmed high/critical findings (>=2, since the chain runs ACROSS
+# the confirmed set), names the ones no recorded attack chain links, counts the
+# completed exploit-developer dispatches, and never blocks.
 # ---------------------------------------------------------------------------
 
 _CONFIRMED_HIGH_2 = {
@@ -7857,26 +7874,27 @@ def _accept_verdicts(*slugs: str) -> dict[str, list[dict]]:
     }
 
 
-def test_transition_chain_gate_blocks_when_no_exploit_developer_dispatch(
+def test_transition_chain_advisory_names_unchained_findings_without_blocking(
     monkeypatch, tmp_path, capsys
 ):
     module = _load_assess_module("tp_chain_block", "agent/scripts/assess/commands/transition_phase.py")
-    eng, _ = _setup_transition_env(
+    eng, decisions = _setup_transition_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "web", "current_phase": "exploit"},
         findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
         dispatches=[],
     )
-    with pytest.raises(SystemExit):
-        module.run(_transition_args(eng, "report"))
+    module.run(_transition_args(eng, "report"))
     err = capsys.readouterr().err
-    assert "missing_chain_construction" in err
-    assert "ssrf-1" in err
-    # Phase must NOT have advanced.
-    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "exploit"
+    assert "[chain_construction_unchained]" in err
+    assert "ssrf-1" in err and "redirect-2" in err
+    assert "0 completed exploit-developer dispatch(es)" in err
+    assert "vigil assess chain list" in err
+    assert decisions == []
+    assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
-def test_transition_chain_gate_satisfied_by_completed_exploit_developer_dispatch(
+def test_transition_chain_advisory_counts_completed_exploit_developer_dispatches(
     monkeypatch, tmp_path, capsys
 ):
     module = _load_assess_module("tp_chain_ok", "agent/scripts/assess/commands/transition_phase.py")
@@ -7893,7 +7911,7 @@ def test_transition_chain_gate_satisfied_by_completed_exploit_developer_dispatch
         decisions_by_kind=_accept_verdicts("ssrf-1", "redirect-2"),
     )
     module.run(_transition_args(eng, "report"))
-    assert "missing_chain_construction" not in capsys.readouterr().err
+    assert "1 completed exploit-developer dispatch(es)" in capsys.readouterr().err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
@@ -7911,7 +7929,7 @@ def test_transition_chain_gate_does_not_block_single_confirmed_finding(
         decisions_by_kind=_accept_verdicts("ssrf-1"),
     )
     module.run(_transition_args(eng, "report"))
-    assert "missing_chain_construction" not in capsys.readouterr().err
+    assert "chain_construction" not in capsys.readouterr().err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
@@ -7932,9 +7950,8 @@ def test_transition_chain_gate_ignores_incomplete_exploit_developer_dispatch(
             "dispatch_mode": "deep-manual",
         }],
     )
-    with pytest.raises(SystemExit):
-        module.run(_transition_args(eng, "report"))
-    assert "missing_chain_construction" in capsys.readouterr().err
+    module.run(_transition_args(eng, "report"))
+    assert "0 completed exploit-developer dispatch(es)" in capsys.readouterr().err
 
 
 def test_transition_chain_gate_requests_full_completed_exploit_dev_page(
@@ -7955,7 +7972,7 @@ def test_transition_chain_gate_requests_full_completed_exploit_dev_page(
     class _Client(_ContextFakeClient):
         def get(self, path: str):
             captured.append(path)
-            if path == "findings":
+            if path == "findings?view=list":
                 return [_CONFIRMED_HIGH, _CONFIRMED_HIGH_2]
             if path == "report-readiness":
                 return {"ready": True, "blockers": []}
@@ -7985,30 +8002,29 @@ def test_transition_chain_gate_requests_full_completed_exploit_dev_page(
     assert "limit=1000" in q
 
 
-def test_transition_chain_gate_force_overrides_and_records_decision(
+def test_transition_chain_advisory_is_silent_once_each_finding_is_chained(
     monkeypatch, tmp_path, capsys
 ):
     module = _load_assess_module("tp_chain_force", "agent/scripts/assess/commands/transition_phase.py")
-    eng, decisions = _setup_transition_env(
+    eng, _ = _setup_transition_env(
         monkeypatch, module, tmp_path,
         scope={"engagement_type": "web", "current_phase": "exploit"},
         findings=[_CONFIRMED_HIGH, _CONFIRMED_HIGH_2],
         dispatches=[],
+        chain_links=[
+            {"id": 1, "chain_id": 1, "relation": "step", "entity_kind": "finding",
+             "entity_ref": slug}
+            for slug in ("ssrf-1", "redirect-2")
+        ],
     )
-    module.run(_transition_args(eng, "report", force=True,
-                                reason="findings are independent, no chain plausible"))
+    module.run(_transition_args(eng, "report"))
+    assert "chain_construction" not in capsys.readouterr().err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
-    override = [d for d in decisions if d["kind"] == "forced_transition_override"]
-    assert len(override) == 1
-    assert any(
-        b["kind"] == "missing_chain_construction"
-        for b in override[0]["payload"]["overridden_blockers"]
-    )
 
 
-def test_transition_chain_gate_also_fires_on_complete(monkeypatch, tmp_path, capsys):
+def test_transition_chain_advisory_also_prints_on_complete(monkeypatch, tmp_path, capsys):
     """A direct report -> complete edge (where only `complete` preconditions are
-    walked) must still enforce the chain pass, mirroring blind-triage/depth."""
+    walked) still names the unchained findings, beside the blind-triage gate."""
     module = _load_assess_module("tp_chain_complete", "agent/scripts/assess/commands/transition_phase.py")
     eng, _ = _setup_transition_env(
         monkeypatch, module, tmp_path,
@@ -8018,7 +8034,9 @@ def test_transition_chain_gate_also_fires_on_complete(monkeypatch, tmp_path, cap
     )
     with pytest.raises(SystemExit):
         module.run(_transition_args(eng, "complete"))
-    assert "missing_chain_construction" in capsys.readouterr().err
+    err = capsys.readouterr().err
+    assert "[chain_construction_unchained]" in err
+    assert "missing_blind_triage" in err
     assert json.loads((eng / "scope.json").read_text())["current_phase"] == "report"
 
 
@@ -13391,6 +13409,11 @@ def test_artifact_cli_registers_payload(
     posts: list[tuple[str, dict]] = []
 
     class _Client(_ContextFakeClient):
+        def get(self, endpoint: str):
+            # `--agent-id` must name a recorded dispatch.
+            assert endpoint == "dispatches/AG-1"
+            return {"agent_id": "AG-1", "agent_role": "vulnerability-analyst"}
+
         def post(self, endpoint: str, payload: dict):
             posts.append((endpoint, payload))
             return {"id": 7, "present": True, "relative_path": payload["path"], "kind": payload["kind"]}
@@ -13708,6 +13731,74 @@ def test_agent_close_all_ready_refuses_an_explicit_id_list(
 
     assert fake.patches == []
     assert "--all-ready" in capsys.readouterr().err
+
+
+def test_agent_close_batch_stamps_the_given_completed_at_on_every_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A listed batch records the operator's --completed-at as the single-id close does."""
+    module = _load_assess_module(
+        "agent_command_module_close_batch_completed_at",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    for agent_id in ("AG-1", "AG-2"):
+        fake.dispatches_by_id[agent_id] = {
+            "agent_id": agent_id, "agent_role": "code-vuln-hunter", "status": "in-progress",
+        }
+        fake.handoffs_by_id[agent_id] = {
+            "agent_id": agent_id, "handoff_status": "ready", "handoff_version": 1,
+        }
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    module.run(
+        SimpleNamespace(
+            action="close",
+            extra=["AG-1", "AG-2"],
+            agent_id=None,
+            completed_at="2026-05-19T12:00:00Z",
+            reason="wave close",
+            quiet=True,
+        )
+    )
+
+    assert {agent_id: patch["completed_at"] for agent_id, patch in fake.patches} == {
+        "AG-1": "2026-05-19T12:00:00Z", "AG-2": "2026-05-19T12:00:00Z",
+    }
+    assert "closed 2" in capsys.readouterr().err
+
+
+def test_agent_close_all_ready_refuses_one_completed_at_for_a_selected_set(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    module = _load_assess_module(
+        "agent_command_module_close_all_ready_completed_at",
+        "agent/scripts/assess/commands/agent.py",
+    )
+    fake = _CapturingClient()
+    fake.dispatches_by_id["AG-1"] = {
+        "agent_id": "AG-1", "agent_role": "code-vuln-hunter", "status": "in-progress",
+    }
+    fake.handoffs_by_id["AG-1"] = {"agent_id": "AG-1", "handoff_status": "ready", "handoff_version": 1}
+    monkeypatch.setattr(module.dispatch, "_client_for", lambda _args: (fake, SimpleNamespace()))
+
+    with pytest.raises(SystemExit):
+        module.run(
+            SimpleNamespace(
+                action="close",
+                extra=[],
+                agent_id=None,
+                completed_at="2026-05-19T12:00:00Z",
+                reason="wave close",
+                all_ready=True,
+            )
+        )
+
+    assert fake.patches == []
+    err = capsys.readouterr().err
+    assert "--completed-at" in err and "--all-ready" in err
 
 
 def test_agent_reconcile_stale_dry_run_groups_handoffs(
@@ -14860,8 +14951,8 @@ def test_record_handoff_client_upsert_falls_back_to_patch_on_409() -> None:
     assert patch_body["summary"] == "v2"
 
 
-def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None:
-    """Role-mismatch 409s are validation failures, not duplicate-row upserts."""
+def test_record_handoff_client_upsert_does_not_patch_a_non_duplicate_409() -> None:
+    """A 409 other than the duplicate-row conflict is an error, not an upsert."""
     from assess.lib.client import AssessError, AssessmentClient  # type: ignore[import-not-found]
 
     captured: dict[str, object] = {"posts": [], "patches": []}
@@ -14876,10 +14967,7 @@ def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None
                 "HTTP 409:\n"
                 + json.dumps(
                     {
-                        "detail": (
-                            "agent_role mismatch: handoff agent_role='wrong' "
-                            "does not match registered dispatch role='right'"
-                        )
+                        "detail": "dispatch AG-X is closed; handoff refused"
                     }
                 )
             )
@@ -14889,9 +14977,9 @@ def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None
             return {"id": 7, "agent_id": "AG-X", **payload}
 
     stub = _StubClient()
-    with pytest.raises(AssessError, match="agent_role mismatch"):
+    with pytest.raises(AssessError, match="closed"):
         stub.record_handoff(
-            {"agent_id": "AG-X", "agent_role": "wrong", "summary": "v2"},
+            {"agent_id": "AG-X", "agent_role": "vulnerability-analyst", "summary": "v2"},
             upsert=True,
         )
     assert len(captured["posts"]) == 1
@@ -14905,7 +14993,7 @@ def test_record_handoff_client_upsert_does_not_patch_role_mismatch_409() -> None
 #   1. ORCHESTRATOR_BASE_URL env var (explicit override)
 #   2. Per-engagement ``.orchestrator.env``
 #   3. ``vigil config get orchestrator_base_url`` (persistent default)
-#   4. Install-root env files (legacy fallback)
+#   4. Install-root env files (above 3 for a workspace other than the global default)
 #   5. Hardcoded fallback ``http://127.0.0.1:18000``
 # ──────────────────────────────────────────────────────────────────────────
 
@@ -15020,7 +15108,9 @@ def test_resolve_orchestrator_base_url_aith_config_wins_over_install_env(
     )
 
     monkeypatch.delenv("ORCHESTRATOR_BASE_URL", raising=False)
-    monkeypatch.setattr(paths_module, "get_config_value", lambda key: "http://from-config:5678/")
+    # The global URL belongs to the global default workspace.
+    config = {"install.root": str(install_root), "orchestrator_base_url": "http://from-config:5678/"}
+    monkeypatch.setattr(paths_module, "get_config_value", config.get)
 
     assert (
         resolve_orchestrator_base_url(install_root, engagement_dir)
@@ -15199,146 +15289,6 @@ def test_validate_dispatch_accepts_application_unit_metadata() -> None:
     }
     errors, _warnings = validate_specialist_dispatch_contract(payload)
     assert errors == []
-
-
-def test_validate_dispatch_flags_technique_cage_warn_only() -> None:
-    """C4a: a numbered step list that pre-names vuln classes reads as a technique
-    cage — the validator WARNs (pointing at `coverage --for-dispatch`) and NEVER
-    adds to errors. WARN-only is the whole contract of the lint."""
-    from assess.lib.contracts import validate_specialist_dispatch_contract
-
-    payload = {
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "idor-testing",
-        "task": (
-            "Test the login endpoint for the following:\n"
-            "1. Test for SQLi in the username parameter\n"
-            "2. Check for XSS in the redirect field\n"
-            "3. Verify the JWT signature is validated\n"
-            "4. Confirm CSRF tokens are enforced\n"
-        ),
-    }
-    errors, warnings = validate_specialist_dispatch_contract(payload)
-    assert errors == [], errors  # a cage is a depth smell, never an error
-    assert any("technique cage" in w for w in warnings), warnings
-    assert any("--for-dispatch" in w for w in warnings), warnings
-    assert not any("cage" in e.lower() for e in errors), errors
-
-
-def test_validate_dispatch_open_objective_task_has_no_cage_warning() -> None:
-    """C4a conservatism: an open-ended, hypothesis-framed prose task (no step
-    list, no imperative verb run) must NOT trip the technique-cage lint, so the
-    warning does not fire on legitimately-shaped dispatches."""
-    from assess.lib.contracts import validate_specialist_dispatch_contract
-
-    payload = {
-        "agent_role": "vulnerability-analyst",
-        "dispatch_mode": "item-iterating",
-        "skills": "idor-testing",
-        "task": (
-            "Hunt the tenant-isolation boundary on the orders workflow. We have "
-            "two member identities in different orgs; the interesting question is "
-            "whether one org's member can observe or mutate the other org's "
-            "records. Reason about where the boundary is enforced and where it "
-            "leaks, then follow the strongest signal you find."
-        ),
-    }
-    errors, warnings = validate_specialist_dispatch_contract(payload)
-    assert not any("technique cage" in w for w in warnings), warnings
-    assert errors == [], errors
-
-
-def test_detect_technique_cage_requires_two_signals() -> None:
-    """The pure lint helper is conservative: a single signal (a step list alone,
-    or a lone vuln-class mention in prose) is not enough — >=2 co-occurring
-    signals are required before it warns."""
-    from assess.lib.contracts import _detect_technique_cage
-
-    # A numbered list with NO vuln class and NO imperative-verb run — one signal.
-    step_only = (
-        "Cover the checkout flow in this order:\n"
-        "1. the cart page\n"
-        "2. the shipping page\n"
-        "3. the payment page\n"
-    )
-    assert _detect_technique_cage(step_only) == []
-
-    # A single vuln-class mention in open prose — one signal only.
-    class_only = "Consider whether an idor is reachable across the two org tenants."
-    assert _detect_technique_cage(class_only) == []
-
-    # Two co-occurring signals (step list + pre-named classes) — warns.
-    caged = (
-        "Run these probes:\n"
-        "1. Test the id param for sqli\n"
-        "2. Test the url param for ssrf\n"
-        "3. Test the next param for open-redirect\n"
-    )
-    caged_warnings = _detect_technique_cage(caged)
-    assert caged_warnings and "technique cage" in caged_warnings[0]
-    assert "--for-dispatch" in caged_warnings[0]
-
-
-def test_detect_technique_cage_ignores_benign_scope_list_but_catches_bug_menu() -> None:
-    """Regression (QC): a structured SCOPE list with one incidental class noun and
-    NO imperative verbs is not a cage and must not warn (avoids warning-fatigue);
-    a verb-less per-step BUG MENU (>=2 steps each pre-naming a class) IS a cage."""
-    from assess.lib.contracts import _detect_technique_cage
-
-    # Benign: numbered scope areas, one incidental class token, zero imperative
-    # verbs — a single class-naming step line is below the bug-menu threshold.
-    benign = (
-        "Review these areas in order:\n"
-        "1. the sqli-prone search endpoint\n"
-        "2. the account settings page\n"
-        "3. the admin dashboard\n"
-    )
-    assert _detect_technique_cage(benign) == []
-
-    # A cage without imperative verbs: each step pre-names a specific bug class.
-    bug_menu = (
-        "Cover these:\n"
-        "1. idor on /api/users/{id}\n"
-        "2. sqli on the login form\n"
-        "3. ssrf on the webhook url\n"
-    )
-    menu_warnings = _detect_technique_cage(bug_menu)
-    assert menu_warnings and "technique cage" in menu_warnings[0]
-
-
-def test_detect_technique_cage_needs_named_bug_not_bare_recipe() -> None:
-    """Regression (blind triage): a STRUCTURED imperative list that names no bug
-    to hunt is NOT a cage — an orientation checklist and a confirmed-finding PoC
-    both have >=3 steps + imperative verbs but pre-name no vuln class, so they
-    must stay quiet. A cage needs >=2 named bug classes on its recipe lines."""
-    from assess.lib.contracts import _detect_technique_cage
-
-    orientation = (
-        "Get your bearings first:\n"
-        "1. Enumerate the site routes\n"
-        "2. Confirm the login flow works\n"
-        "3. Verify the account page loads\n"
-    )
-    assert _detect_technique_cage(orientation) == []
-
-    poc = (
-        "Weaponize the confirmed finding:\n"
-        "1. Send a request to /latest/meta-data/\n"
-        "2. Confirm the metadata document is returned\n"
-        "3. Validate the returned creds against STS\n"
-    )
-    assert _detect_technique_cage(poc) == []
-
-    # Exactly two recipe lines pre-name a bug -> the >=2 threshold; warns.
-    two_named = (
-        "Run these:\n"
-        "1. Test sqli on the id param\n"
-        "2. Test xss on the name param\n"
-        "3. review the pricing page\n"
-    )
-    warned = _detect_technique_cage(two_named)
-    assert warned and "technique cage" in warned[0]
 
 
 def test_list_attempts_build_query_emits_route_param_names() -> None:

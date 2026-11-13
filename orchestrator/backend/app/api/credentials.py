@@ -20,6 +20,7 @@ from .. import db
 from ..services import credentials as creds_service
 from ..services.engagements import get_engagement_or_404
 from .assessment import _offload
+from .query_params import DeclaredQueryParamsRoute
 
 # Verdicts accepted by the per-session liveness-persist route. Mirrors the
 # ``{live, dead, unknown}`` vocabulary the CLI liveness classifier emits and
@@ -28,7 +29,8 @@ from .assessment import _offload
 _LIVENESS_VERDICTS = frozenset({"live", "dead", "unknown"})
 
 router = APIRouter(
-    prefix="/engagements/{engagement_key}/credentials", tags=["credentials"]
+    prefix="/engagements/{engagement_key}/credentials", tags=["credentials"],
+    route_class=DeclaredQueryParamsRoute,
 )
 
 

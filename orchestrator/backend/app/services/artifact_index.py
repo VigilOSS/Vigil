@@ -6,6 +6,7 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 import errno
 import hashlib
+import json
 import mimetypes
 import os
 import sqlite3
@@ -270,6 +271,12 @@ def _file_payload(
 def _serialize_artifact(row, *, compact: bool = False) -> dict[str, Any]:
     data = dict(row)
     data.pop("sensitive", None)
+    if "producer_history_json" in data:
+        try:
+            history = json.loads(data.pop("producer_history_json") or "[]")
+        except (TypeError, ValueError):
+            history = []
+        data["producer_history"] = history if isinstance(history, list) else []
     for key in ("present", "scratch"):
         data[key] = bool(data.get(key))
     indexed_text = str(data.get("indexed_text") or "")
@@ -329,6 +336,45 @@ def _normalize_related_finding_slug(value: str | None) -> str | None:
     return canonical_finding_alias(raw) or raw
 
 
+def _registration_producer_fields(
+    previous, producer_agent_id: str | None, *, sha256: str, bytes_kept: bool,
+) -> tuple[str, str | None]:
+    """One registration's attribution folded into the path's producer history.
+
+    Returns ``(producer_history_json, content_producer_agent_id)`` for the
+    registration's own upsert, so the row is written once.
+    ``producer_history_json`` lists every agent that has registered the path;
+    ``content_producer_agent_id`` names the agent that registered the current
+    bytes, and is NULL when those bytes arrived with no attribution (an
+    unattributed registration or a refresh). Re-registering unchanged bytes
+    without attribution keeps the earlier content producer. A registration
+    whose bytes the upsert ignores (``bytes_kept``: the file is missing, or the
+    row is verified command output) joins the history but produced none of the
+    stored bytes, so the earlier content producer stays.
+    """
+    explicit = producer_agent_id.strip() if isinstance(producer_agent_id, str) else ""
+    history: list[str] = []
+    if previous is not None:
+        try:
+            stored = json.loads(previous["producer_history_json"] or "[]")
+        except (TypeError, ValueError):
+            stored = []
+        history = [str(agent) for agent in stored if isinstance(agent, str) and agent]
+        for agent in (previous["producer_agent_id"], previous["content_producer_agent_id"]):
+            if isinstance(agent, str) and agent and agent not in history:
+                history.append(agent)
+    if explicit and explicit not in history:
+        history.append(explicit)
+    content_changed = previous is None or previous["sha256"] != sha256
+    if bytes_kept:
+        content_producer = None if previous is None else previous["content_producer_agent_id"]
+    else:
+        content_producer = explicit or (
+            None if content_changed or previous is None else previous["content_producer_agent_id"]
+        )
+    return json.dumps(history), content_producer
+
+
 def _store_artifact(
     engagement_id: int,
     *,
@@ -361,6 +407,19 @@ def _store_artifact(
             "SELECT * FROM assessment_artifacts WHERE engagement_id = ? AND relative_path = ?",
             (engagement_id, relative_path),
         ).fetchone()
+        # Mirrors the upsert's byte CASE: a missing file, or an unverified write
+        # over verified command output, keeps the stored bytes.
+        bytes_kept = not file_data["present"] or (
+            previous is not None
+            and previous["verified_device"] is not None
+            and verified_device is None
+        )
+        producer_history_json, content_producer_agent_id = _registration_producer_fields(
+            previous,
+            producer_agent_id,
+            sha256=str(file_data["sha256"]),
+            bytes_kept=bytes_kept,
+        )
         _execute_artifact_upsert(
             connection,
             """
@@ -370,9 +429,10 @@ def _store_artifact(
                 verified_device, verified_inode, integrity_status,
                 producer_agent_role, producer_command_run_id, related_finding_slug,
                 related_chain_key, related_surface_id, related_request_variant_id,
-                created_at, updated_at, last_indexed_at
+                created_at, updated_at, last_indexed_at,
+                producer_history_json, content_producer_agent_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(engagement_id, relative_path) DO UPDATE SET
                 -- Bind the RAW caller-supplied kind/media_type here, not
                 -- excluded.* — excluded.kind carries the _guess_kind() result,
@@ -477,7 +537,9 @@ def _store_artifact(
                     THEN assessment_artifacts.related_request_variant_id
                     ELSE COALESCE(excluded.related_request_variant_id, assessment_artifacts.related_request_variant_id) END,
                 updated_at = excluded.updated_at,
-                last_indexed_at = excluded.last_indexed_at
+                last_indexed_at = excluded.last_indexed_at,
+                producer_history_json = excluded.producer_history_json,
+                content_producer_agent_id = excluded.content_producer_agent_id
             """,
             (
                 engagement_id,
@@ -502,6 +564,8 @@ def _store_artifact(
                 now,
                 now,
                 now,
+                producer_history_json,
+                content_producer_agent_id,
                 # DO UPDATE placeholders (raw explicit kind/media_type, stripped).
                 kind.strip(),
                 media_type.strip(),
@@ -570,6 +634,75 @@ def _store_artifact(
     return result
 
 
+def _unrecorded_producer(agent_id: str) -> HTTPException:
+    return HTTPException(
+        status_code=status.HTTP_404_NOT_FOUND,
+        detail=(
+            f"producer_agent_id {agent_id!r} names no recorded dispatch in this "
+            "engagement; pass the registering dispatch's agent_id "
+            "(`vigil assess agent list`), or omit it for an operator registration"
+        ),
+    )
+
+
+def _named_producer(producer_agent_id: Any) -> str | None:
+    """The producer a registration names, stripped once; blank is the operator."""
+    if not isinstance(producer_agent_id, str) or not producer_agent_id.strip():
+        return None
+    return producer_agent_id.strip()
+
+
+def _require_recorded_producer(
+    connection,
+    engagement_id: int,
+    producer_agent_id: str | None,
+    *,
+    recorded_producers: frozenset[str] | None = None,
+) -> None:
+    """Refuse a producer_agent_id that names no dispatch of this engagement.
+
+    The producer is an identity review gates compare against (report QC refuses
+    a reviewer in a path's producer history), so it must be someone: a recorded
+    dispatch. An omitted producer is an operator registration.
+    ``recorded_producers`` is a batch's one lookup of which of its producers are
+    recorded; without it the producer is looked up here.
+    """
+    agent_id = _named_producer(producer_agent_id)
+    if agent_id is None:
+        return
+    if recorded_producers is not None:
+        if agent_id not in recorded_producers:
+            raise _unrecorded_producer(agent_id)
+        return
+    row = connection.execute(
+        "SELECT 1 FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+        (engagement_id, agent_id),
+    ).fetchone()
+    if row is None:
+        raise _unrecorded_producer(agent_id)
+
+
+_PRODUCER_LOOKUP_CHUNK = 500
+
+
+def _recorded_producers(engagement_id: int, agent_ids: set[str]) -> frozenset[str]:
+    """Which of ``agent_ids`` name a recorded dispatch of this engagement."""
+    wanted = sorted(agent_ids)
+    found: set[str] = set()
+    with get_connection() as connection:
+        for start in range(0, len(wanted), _PRODUCER_LOOKUP_CHUNK):
+            chunk = wanted[start:start + _PRODUCER_LOOKUP_CHUNK]
+            found.update(
+                str(row["agent_id"])
+                for row in connection.execute(
+                    "SELECT DISTINCT agent_id FROM assessment_dispatches "
+                    f"WHERE engagement_id = ? AND agent_id IN ({', '.join('?' for _ in chunk)})",
+                    (engagement_id, *chunk),
+                ).fetchall()
+            )
+    return frozenset(found)
+
+
 def register_artifact(
     engagement_id: int,
     *,
@@ -583,10 +716,17 @@ def register_artifact(
     related_chain_key: str | None = None,
     related_surface_id: int | None = None,
     related_request_variant_id: int | None = None,
+    recorded_producers: frozenset[str] | None = None,
 ) -> dict[str, Any]:
     _engagement, root = _engagement_root(engagement_id)
     relative_path = _normalize_relative_path(root, path)
+    # Checked, stored and compared in one spelling, so a padded id is the same
+    # dispatch and a blank one is an operator registration.
+    producer_agent_id = _named_producer(producer_agent_id)
     with get_connection() as connection:
+        _require_recorded_producer(
+            connection, engagement_id, producer_agent_id, recorded_producers=recorded_producers,
+        )
         reservation = connection.execute(
             """
             SELECT 1 FROM assessment_artifact_path_reservations
@@ -660,9 +800,13 @@ def register_artifacts_bulk(
     # endpoint's whole contract, so batch atomicity is an invariant no reader
     # relies on; get_connection()'s depth-0 rollback inside _store_artifact
     # already isolates a path refused after its own upsert.
+    # Producer attribution is looked up for the whole batch at once; each path
+    # is then refused or registered exactly as a single registration would be.
+    named = {agent for agent in (_named_producer(item.get("producer_agent_id")) for item in items) if agent}
+    recorded = _recorded_producers(engagement_id, named) if named else frozenset()
     for index, item in enumerate(items):
         try:
-            record = register_artifact(engagement_id, **item)
+            record = register_artifact(engagement_id, **item, recorded_producers=recorded)
         except HTTPException as refused:
             outcomes.append(
                 {
@@ -1418,6 +1562,7 @@ def search_artifacts(
     query: str = "",
     finding: str = "",
     kind: str = "",
+    path: str = "",
     limit: int = 50,
     offset: int = 0,
 ) -> list[dict[str, Any]]:
@@ -1455,6 +1600,11 @@ def search_artifacts(
     if kind:
         where.append("a.kind = ?")
         params.append(kind)
+    # ``path`` is an exact engagement-relative path, for callers that need one
+    # registration rather than a ranked text search.
+    if path:
+        where.append("a.relative_path = ?")
+        params.append(path)
     params.extend([int(limit), int(offset)])
     rank_select = ""
     if canonical_finding:

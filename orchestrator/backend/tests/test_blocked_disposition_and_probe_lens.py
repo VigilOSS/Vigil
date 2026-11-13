@@ -168,10 +168,21 @@ def test_verify_blocked_requires_block_reason(client, seeded_engagement):
     _create_finding(client, "VA-001")
     resp = client.post(
         f"{BASE}/findings/VA-001/verify",
-        json={"verification_status": "blocked", "reason_text": "attempt could not start"},
+        json={"verification_status": "blocked"},
     )
     assert resp.status_code == 400, resp.text
     assert "block_reason" in resp.json()["detail"]
+
+
+def test_verify_blocked_stores_its_reason_as_the_block_reason(client, seeded_engagement):
+    _create_finding(client, "VA-001")
+    resp = client.post(
+        f"{BASE}/findings/VA-001/verify",
+        json={"verification_status": "blocked", "reason_text": "attempt could not start"},
+    )
+    assert resp.status_code == 200, resp.text
+    assert resp.json()["finding"]["details"]["block_reason"] == "attempt could not start"
+    assert [entry["field"] for entry in resp.json()["derived"]] == ["details.block_reason"]
 
 
 def test_verify_blocked_with_block_reason_in_request_succeeds(client, seeded_engagement):

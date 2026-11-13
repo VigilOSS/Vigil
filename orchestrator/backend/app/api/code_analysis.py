@@ -7,28 +7,35 @@ from collections.abc import Callable
 from typing import Annotated, Any, Literal, TypeAlias
 
 import anyio
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, model_validator
+from fastapi import APIRouter, Depends, Query, Response, status
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from ..services import activity as activity_service
 # The API layer's one bulk-write ceiling, owned beside the five assessment
 # models that already apply it. Imported rather than restated so the cap cannot
 # drift between the two routers.
 from .assessment import MAX_BULK_ASSESSMENT_WRITE_ITEMS
+from .query_params import DeclaredQueryParamsRoute
 from ..db import get_connection
 from ..services import code_analysis
 from ..services import code_analysis_support
 from ..services import code_fuzz_completion
-from ..services.code_analysis_support import TOP_LEVEL_CALLABLE_NAME
+from ..services.code_analysis_support import (
+    STREAMING_FALLBACK_UNAVAILABLE_BASELINE,
+    TOP_LEVEL_CALLABLE_NAME,
+)
 from ..services.engagements import get_engagement_or_404
 from ..services.events import create_event_for_engagement
 from ..ws import broadcaster
 
 logger = logging.getLogger(__name__)
 
+# Every list/fetch route refuses a query key it does not declare: FastAPI drops
+# an undeclared key, so a mistyped filter would answer with the unfiltered rows.
 router = APIRouter(
     prefix="/engagements/{engagement_key}/assessment/code",
     tags=["code-analysis"],
+    route_class=DeclaredQueryParamsRoute,
 )
 
 
@@ -42,6 +49,23 @@ CodeSlotType: TypeAlias = Literal[
     "PROTOCOL-FIELD",
     "SERIALIZED-DATA",
     "EXEC-POLICY",
+]
+# What a file's job makes it owe beyond its slot types, recorded by the
+# architect as structure; `code_analysis.CONTEXT_TAG_VULN_CLASSES` maps each to
+# its families. The free-text `role` is descriptive and never read for one.
+CodeContextTag: TypeAlias = Literal[
+    "crypto",
+    "authentication",
+    "authorization",
+    "error-handling",
+    "allocator",
+    "parser",
+    "response-data",
+    "ai-model",
+    "value-transfer",
+    "provider-callback",
+    "one-time-secret",
+    "client-bundle",
 ]
 StrictPositiveId: TypeAlias = Annotated[int, Field(strict=True, gt=0)]
 CodeClassification: TypeAlias = Literal["critical", "high", "medium", "low", "skip"]
@@ -73,9 +97,6 @@ StructuralDimension: TypeAlias = Literal[
     "security_sinks",
     "security_sources",
 ]
-_STREAMING_FALLBACK_UNAVAILABLE_BASELINE = frozenset(
-    {"call_sites", "classes", "dataflow", "exports", "functions"}
-)
 # Declared when the sink and call-site readers returned nothing while a
 # declaration header line they withhold carries a sink. The producer is
 # `_unscanned_scope_dimensions` in `agent/scripts/assess/lib/treesitter_index.py`;
@@ -218,8 +239,15 @@ class CodeFileClassification(BaseModel):
 
     file_id: StrictPositiveId
     classification: str = Field(min_length=1, max_length=32)  # critical/high/medium/low/skip
-    role: str = Field(default="", max_length=128)
-    slot_types: list[CodeSlotType] = Field(default_factory=list)
+    # Omitted (or null) keeps the role, slot types or tags the file already
+    # records, each named on the response's ``derived`` list, exactly as an
+    # omitted ``language`` keeps the stored one: a missing field never clears
+    # one. On a file with no tags recorded an omitted ``context_tags`` records
+    # none, and coverage names the file until they are. An empty value records
+    # that none applies.
+    role: str | None = Field(default=None, max_length=128)
+    slot_types: list[CodeSlotType] | None = None
+    context_tags: list[CodeContextTag] | None = None
     language: str | None = Field(default=None, max_length=64)
     analysis_priority: int = Field(strict=True, ge=0, le=100)
     # Required by the service when classification='skip' and refused otherwise:
@@ -313,6 +341,8 @@ class QueueCompleteRequest(BaseModel):
     # C50: structured reason when disposition='skipped'. Required at the
     # service layer when skipping; ignored for other dispositions.
     skip_reason: str = Field(default="", max_length=512)
+    # Runs every check the close runs and writes nothing (no state, no audit row).
+    dry_run: bool = False
 
 
 class QueueErrorRequest(BaseModel):
@@ -370,6 +400,15 @@ class QueueRetryNeedsContextRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     item_ids: list[StrictPositiveId] = Field(min_length=1)
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class QueueWithdrawRequest(BaseModel):
+    """Take back pending directed attempts no lease has claimed (`code-dispatch withdraw`)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    item_ids: list[StrictPositiveId] = Field(min_length=1, max_length=10000)
     reason: str = Field(min_length=1, max_length=2000)
 
 
@@ -509,6 +548,8 @@ TriggerResolutionStatus: TypeAlias = Literal[
     "external_context_unavailable",
     "source_equivalent_analyzed",
     "not_applicable",
+    # depth_floor triggers only (`code_analysis.resolve_code_triggers`).
+    "reviewed_at_sufficient_depth",
 ]
 
 
@@ -524,11 +565,34 @@ class TriggerResolutionItem(BaseModel):
 
 
 class TriggerResolveRequest(BaseModel):
+    """Resolve pending triggers, or with ``amend`` correct closed ones' notes.
+
+    A resolution moves each addressed pending trigger to ``resolution_status``.
+    An amendment appends ``resolution_note`` as a dated line to each named
+    closed trigger's note and changes nothing else, so it takes no status and
+    addresses triggers by id only.
+    """
+
     model_config = ConfigDict(extra="forbid")
 
     items: list[TriggerResolutionItem] = Field(min_length=1)
-    resolution_status: TriggerResolutionStatus
+    resolution_status: TriggerResolutionStatus | None = None
     resolution_note: str = Field(min_length=1, max_length=20000)
+    amend: bool = False
+
+    @model_validator(mode="after")
+    def validate_mode(self) -> TriggerResolveRequest:
+        if self.amend:
+            if self.resolution_status is not None:
+                raise ValueError(
+                    "amend appends to the resolution note and keeps the status; "
+                    "omit resolution_status"
+                )
+            if any(item.trigger_id is None and item.id is None for item in self.items):
+                raise ValueError("amend addresses each trigger by trigger_id")
+        elif self.resolution_status is None:
+            raise ValueError("resolution_status is required unless amend is set")
+        return self
 
 
 class StructuralSignalCounts(BaseModel):
@@ -604,7 +668,7 @@ class StructuralMetadataItem(BaseModel):
                         "streaming fallback analysis must name unavailable dimensions"
                     )
                 missing_baseline = sorted(
-                    _STREAMING_FALLBACK_UNAVAILABLE_BASELINE
+                    STREAMING_FALLBACK_UNAVAILABLE_BASELINE
                     - set(self.structural_unavailable_dimensions)
                 )
                 if missing_baseline:
@@ -780,6 +844,25 @@ class ThreatModelRecordRequest(BaseModel):
     repo_generation: int = Field(ge=1)
     source_manifest_digest: str = Field(pattern=_SHA256_PATTERN)
     threat_model: dict[str, Any]
+
+    @field_validator("threat_model")
+    @classmethod
+    def _not_the_request_envelope(cls, value: dict[str, Any]) -> dict[str, Any]:
+        # A model holding a nested `threat_model` beside the request's identity
+        # keys is the whole request pasted into this field; stored as sent, the
+        # real model would sit one level down, where nothing reads it.
+        envelope = sorted(
+            key for key in ("repo_id", "repo_generation", "source_manifest_digest")
+            if key in value
+        )
+        if "threat_model" in value and envelope:
+            raise ValueError(
+                "threat_model holds the request envelope (a nested threat_model beside "
+                f"{', '.join(envelope)}); send the inner threat_model object as "
+                "threat_model, with the identity in the request's own repo_id, "
+                "repo_generation and source_manifest_digest"
+            )
+        return value
 
 
 class VariantCheckReceiptRequest(BaseModel):
@@ -1164,16 +1247,8 @@ class CodeFileLookupRequest(BaseModel):
     file_paths: list[CodeFilePath] = Field(min_length=1, max_length=1000)
 
 
-_LIST_FILES_QUERY_PARAMS = frozenset({
-    "repo_id", "module_id", "classification", "analysis_status", "search",
-    "path_prefix", "path_glob", "sort", "order", "limit", "offset",
-    "include_header_snippet", "file_path",
-})
-
-
 @router.get("/files")
 def list_files(
-    request: Request,
     engagement_key: str,
     repo_id: int | None = Query(default=None),
     file_path: list[CodeFilePath] | None = Query(default=None, max_length=1000),
@@ -1207,20 +1282,33 @@ def list_files(
     limit: int = Query(default=100, ge=1, le=10000),
     offset: int = Query(default=0, ge=0),
     include_header_snippet: bool = Query(default=False),
+    context_tags_recorded: bool | None = Query(
+        default=None,
+        description=(
+            "false: classified files on an analysis repository whose classification "
+            "recorded no context tags, the set coverage's context_tags_unrecorded "
+            "counts; true: files with recorded tags (an empty list included)."
+        ),
+    ),
+    context_tag: CodeContextTag | None = Query(
+        default=None, description="Files whose recorded context tags include this tag."
+    ),
+    client_bundle_conflict: bool | None = Query(
+        default=None,
+        description=(
+            "true: client-bundle files whose language or other tags imply server code, "
+            "the set coverage's client_bundle_conflicts counts."
+        ),
+    ),
+    accounting: Literal["unclassified", "unqueued", "unaccounted"] | None = Query(
+        default=None,
+        description=(
+            "The files the readiness blocker of that name counts (files_unclassified, "
+            "admitted_files_unqueued, admitted_files_unaccounted)."
+        ),
+    ),
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
-    # Per route, not globally: a mistyped filter name silently returns an
-    # unfiltered page, which is a wrong answer rather than an empty one. Scoped
-    # to this listing because every other route's accepted set is its own.
-    unknown = sorted(set(request.query_params) - _LIST_FILES_QUERY_PARAMS)
-    if unknown:
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail=(
-                f"code/files does not accept query params: {', '.join(unknown)}. "
-                "Accepted: " + ", ".join(sorted(_LIST_FILES_QUERY_PARAMS))
-            ),
-        )
     return code_analysis.list_code_files(
         engagement.id,
         file_paths=file_path,
@@ -1236,6 +1324,10 @@ def list_files(
         limit=limit,
         offset=offset,
         include_header_snippet=include_header_snippet,
+        context_tags_recorded=context_tags_recorded,
+        context_tag=context_tag,
+        client_bundle_conflict=client_bundle_conflict,
+        accounting=accounting,
     )
 
 
@@ -1264,6 +1356,23 @@ async def bulk_classify_files(engagement_key: str, request: CodeFilesBulkClassif
             engagement_id,
             classifications=[c.model_dump() for c in request.classifications],
         ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-record classify",
+            action=(
+                f"updated={record.get('updated', 0)} total={record.get('total', 0)} "
+                f"obligation_changes={len(record.get('obligation_changes', []))}"
+            ),
+            metadata={
+                # What each tag or tier change moved: families added and
+                # removed, triggers raised and retired, directed attempts
+                # withdrawn. The retired triggers stay readable; this is where
+                # the change that retired them is kept.
+                "obligation_changes": record.get("obligation_changes", []),
+                "derived": record.get("derived", []),
+                "language_changes": record.get("language_changes", []),
+            },
+        ),
     )
 
 
@@ -1273,6 +1382,20 @@ async def update_file(engagement_key: str, file_id: int, request: dict[str, Any]
         engagement_key,
         "file",
         lambda engagement_id: code_analysis.update_code_file(engagement_id, file_id, **request),
+        audit=_audit_file_obligation_change,
+    )
+
+
+def _audit_file_obligation_change(engagement_id: int, record: dict[str, Any]) -> None:
+    """Audit a file patch whose tag or tier change moved what the file owes."""
+    change = record.get("obligation_change") if isinstance(record, dict) else None
+    if not change:
+        return
+    _audit_code_mutation(
+        engagement_id,
+        title="code-record classify",
+        action=f"file_id={record.get('id')} obligation_changes=1",
+        metadata={"obligation_changes": [change], "derived": record.get("derived", [])},
     )
 
 
@@ -1344,6 +1467,37 @@ async def bulk_create_queue_items(engagement_key: str, request: QueueItemsBulkCr
             mode=request.mode,
             reason=request.reason,
         ),
+        audit=lambda engagement_id, record: _audit_carried_triggers(
+            engagement_id, record, reason=request.reason
+        ),
+    )
+
+
+def _audit_carried_triggers(
+    engagement_id: int, record: dict[str, Any], *, reason: str | None
+) -> None:
+    """Audit each trigger a reanalysis moved from the file's suspended verdict.
+
+    The trigger resolution changes hands without a requeue or resolve call, so
+    this is the record of it beside `requeue-triggers` and `resolve-triggers`.
+    """
+    carried = [
+        {
+            "trigger_id": entry["trigger_id"],
+            "from_queue_item_id": entry["from_queue_item_id"],
+            "to_queue_item_id": outcome.get("queue_item_id"),
+        }
+        for outcome in record.get("outcomes", [])
+        for entry in outcome.get("carried_triggers", [])
+    ]
+    if not carried:
+        return
+    _audit_code_mutation(
+        engagement_id,
+        title="code-dispatch reanalyze",
+        action=f"carried_triggers={len(carried)}",
+        result=reason or "",
+        metadata={"carried_triggers": carried},
     )
 
 
@@ -1423,10 +1577,8 @@ async def fetch_queue_items(engagement_key: str, request: QueueFetchRequest) -> 
 
 @router.post("/analysis-queue/done")
 async def complete_queue_items(engagement_key: str, request: QueueCompleteRequest) -> dict[str, Any]:
-    return await _code_mutation(
-        engagement_key,
-        "queue_done",
-        lambda engagement_id: code_analysis.complete_queue_items(
+    def close(engagement_id: int) -> dict[str, Any]:
+        return code_analysis.complete_queue_items(
             engagement_id,
             item_ids=request.item_ids,
             agent_name=request.agent_name,
@@ -1435,7 +1587,15 @@ async def complete_queue_items(engagement_key: str, request: QueueCompleteReques
             notes=request.notes,
             cwe_coverage=request.cwe_coverage,
             skip_reason=request.skip_reason,
-        ),
+            dry_run=request.dry_run,
+        )
+
+    if request.dry_run:
+        return await _code_mutation(engagement_key, None, close)
+    return await _code_mutation(
+        engagement_key,
+        "queue_done",
+        close,
         audit=lambda engagement_id, record: _audit_code_mutation(
             engagement_id,
             title="code-dispatch done",
@@ -1627,6 +1787,36 @@ async def retry_needs_context_queue_items(
     )
 
 
+@router.post("/analysis-queue/withdraw")
+async def withdraw_queue_items(engagement_key: str, request: QueueWithdrawRequest) -> dict[str, Any]:
+    return await _code_mutation(
+        engagement_key,
+        "queue_withdraw",
+        lambda engagement_id: code_analysis.withdraw_queue_items(
+            engagement_id,
+            item_ids=request.item_ids,
+            reason=request.reason,
+        ),
+        audit=lambda engagement_id, record: _audit_code_mutation(
+            engagement_id,
+            title="code-dispatch withdraw",
+            action=(
+                f"withdrew={len(record.get('withdrawn', []))} "
+                f"refused={len(record.get('refused', []))}"
+            ),
+            result=request.reason,
+            metadata={
+                "item_ids": request.item_ids,
+                "reason": request.reason,
+                # What each deleted row was and where its triggers went, so the
+                # audit trail keeps the attempt the queue no longer holds.
+                "withdrawn": record.get("withdrawn", []),
+                "refused": record.get("refused", []),
+            },
+        ),
+    )
+
+
 @router.post("/analysis-queue/requeue", status_code=status.HTTP_201_CREATED)
 async def requeue_triggered_files(engagement_key: str, request: RequeueRequest) -> dict[str, Any]:
     return await _code_mutation(
@@ -1651,25 +1841,60 @@ def list_code_triggers(
     status_filter: str | None = Query(default=None, alias="status"),
     repo_id: int | None = Query(default=None),
     include_superseded: bool = Query(default=False),
-) -> list[dict[str, Any]]:
+    origin: Literal["cross_file", "depth_floor"] | None = Query(default=None),
+    limit: int = Query(
+        default=code_analysis.TRIGGER_PAGE_DEFAULT, ge=1, le=code_analysis.TRIGGER_PAGE_MAX
+    ),
+    offset: int = Query(default=0, ge=0),
+) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.list_code_triggers(
         engagement.id,
         status_filter=status_filter,
         repo_id=repo_id,
         include_superseded=include_superseded,
+        origin=origin,
+        limit=limit,
+        offset=offset,
     )
 
 
 @router.post("/triggers/resolve")
 async def resolve_code_triggers(engagement_key: str, request: TriggerResolveRequest) -> dict[str, Any]:
+    if request.amend:
+        trigger_ids = [int(item.trigger_id or item.id or 0) for item in request.items]
+        return await _code_mutation(
+            engagement_key,
+            "triggers_resolve",
+            lambda engagement_id: code_analysis.amend_code_trigger_notes(
+                engagement_id,
+                trigger_ids=trigger_ids,
+                amendment=request.resolution_note,
+            ),
+            audit=lambda engagement_id, record: _audit_code_mutation(
+                engagement_id,
+                title="code-dispatch resolve-triggers --amend",
+                action=f"amend count={len(trigger_ids)}",
+                result=request.resolution_note,
+                metadata={
+                    "count": len(trigger_ids),
+                    # Each amended trigger with the status it kept: an
+                    # amendment never moves one.
+                    "amended": record.get("amended", []) if isinstance(record, dict) else [],
+                    "not_resolved": (
+                        record.get("not_resolved", []) if isinstance(record, dict) else []
+                    ),
+                },
+            ),
+        )
     return await _code_mutation(
         engagement_key,
         "triggers_resolve",
         lambda engagement_id: code_analysis.resolve_code_triggers(
             engagement_id,
             items=[item.model_dump() for item in request.items],
-            resolution_status=request.resolution_status,
+            # Set whenever amend is not: `TriggerResolveRequest.validate_mode`.
+            resolution_status=str(request.resolution_status),
             resolution_note=request.resolution_note,
         ),
         audit=lambda engagement_id, record: _audit_code_mutation(
@@ -2054,10 +2279,14 @@ def get_readiness(
     engagement_key: str,
     target_phase: Literal["classify-map", "hunt", "verify-variant", "fuzz", "complete"] = Query(),
     include_debt_paths: bool = False,
+    include_coverage: bool = False,
 ) -> dict[str, Any]:
     engagement = get_engagement_or_404(engagement_key)
     return code_analysis.code_readiness(
-        engagement.id, target_phase=target_phase, include_debt_paths=include_debt_paths
+        engagement.id,
+        target_phase=target_phase,
+        include_debt_paths=include_debt_paths,
+        include_coverage=include_coverage,
     )
 
 

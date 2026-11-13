@@ -7,8 +7,9 @@ import re
 import sqlite3
 import uuid
 from collections import Counter
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import HTTPException, status
 
@@ -28,12 +29,14 @@ from .code_analysis_support import (
     MAX_OPEN_LEASE_ROWS,
     MAX_PROGRESS_RECEIPTS,
     MAX_VARIANT_RECEIPT_PAGE,
+    STREAMING_FALLBACK_UNAVAILABLE_BASELINE,
     STRUCTURAL_INDEX_SCHEMA,
     VARIANT_INPUT_IDENTITY_SCHEMA as VARIANT_INPUT_IDENTITY_SCHEMA,
     _CANONICAL_STRUCTURAL_LANGUAGES as _CANONICAL_STRUCTURAL_LANGUAGES,
     _CURRENT_ACCOUNTED_FILE_EXISTS_SQL,
     _CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL,
     CURRENT_ANALYSIS_STATUSES,
+    REVIEW_DEPTHS,
     _LEAD_OPEN_STATUS_PLACEHOLDERS,
     _LEAD_OPEN_STATUS_VALUES,
     _queue_lane_sql,
@@ -46,6 +49,10 @@ from .code_analysis_support import (
     _TRIGGER_STATUS_QUEUED,
     _TRIGGER_STATUS_RESOLVED,
     _TRIGGER_STATUS_SOURCE_EQUIVALENT,
+    _TRIGGER_STATUS_DEPTH_SUFFICIENT,
+    TRIGGER_ORIGIN_DEPTH_FLOOR,
+    TRIGGER_ORIGIN_CROSS_FILE,
+    EFFORT_THRESHOLDS,
     _analysis_repo_files_sql,
     _analysis_repo_sql,
     _analysis_result_row,
@@ -57,6 +64,7 @@ from .code_analysis_support import (
     _coerce_int,
     _awaiting_verdict_column_sql,
     awaiting_verdict_attempt_ids,
+    open_lead_receipts_by_file,
     _current_analysis_results_sql,
     _current_attempt_result_count_sql,
     _current_result_receipt_sql,
@@ -85,7 +93,9 @@ from .code_analysis_support import (
     _lease_activity_age_seconds_sql,
     _lease_activity_sql,
     _merge_cwe_coverage_entries,
+    CLOSEOUT_RECORDED_BY,
     _merge_file_effort_entry,
+    _closeout_not_applicable_families,
     _no_superseded_active_attempt_sql,
     _normalize_analysis_receipt_anchors,
     _normalize_variant_evidence_ref,
@@ -102,12 +112,17 @@ from .code_analysis_support import (
     _result_not_replaced_sql,
     _safe_int,
     _scalar_row,
+    _review_depth_sql,
     _structural_debt_sql,
     _successful_terminal_review_row_sql,
     _sync_file_analysis_status,
     _sync_module_rollup,
     _sync_trigger_status_for_file,
     canonical_structural_language,
+    trigger_review_basis,
+    review_depth_label,
+    review_depth_params,
+    review_depth_projection,
     code_track_enabled,
     register_path_scope_functions,
     structural_index_state,
@@ -343,7 +358,7 @@ def _invalidate_file_analysis(connection, engagement_id: int, file_id: int) -> N
         """
         UPDATE code_files
         SET classification = 'unclassified', role = '', slot_types_json = '[]',
-            analysis_priority = 0, analysis_status = 'pending', analysis_depth = 'none',
+            context_tags_json = '', analysis_priority = 0, analysis_status = 'pending', analysis_depth = 'none',
             skip_reason = '', variant_check_status = 'pending', module_id = NULL,
             notes = '', total_functions = 0, total_entry_points = 0,
             total_sinks = 0, total_exports = 0,
@@ -396,7 +411,8 @@ def _invalidate_repo_structural_index(connection, engagement_id: int, repo_id: i
 
 _METADATA_REFRESH_REVIEW_THEME = "metadata-refresh-review"
 # Hand one claimed row back to the unleased pending rotation: clear ownership,
-# the adoption chain and the claim timestamps, and re-read the file's current
+# the adoption chain and the current claim's timestamps (`first_claimed_at`
+# keeps the row's claim history for `withdraw`), and re-read the file's current
 # analysis_priority -- except on a metadata-refresh row, whose priority belongs
 # to the refresh lane and not to the file's review ranking. The one bound
 # parameter is `_METADATA_REFRESH_REVIEW_MODE`, and it is first in the
@@ -416,7 +432,24 @@ _RETURN_TO_PENDING_SET_SQL = """status = 'pending', assigned_agent = '', lease_t
 
 
 _METADATA_REFRESH_REVIEW_MODE = "metadata-refresh"
+# `code_analysis_queue.inserted_by` of a directed attempt `requeue-triggers`
+# inserted: the only rows `withdraw` takes back.
+_REQUEUE_TRIGGERS_INSERTER = "requeue-triggers"
 _SOURCE_GENERATION_REPLACED_REASON = "source_generation_replaced"
+# A file's review reopened on a review-identity change (`_reopen_file_metadata_review`).
+_FILE_REVIEW_REOPENED_REASON = "file_review_reopened"
+# A pending or queued depth_floor trigger whose family a context-tag change
+# stopped requiring (`_apply_obligation_change`).
+_FAMILY_NO_LONGER_REQUIRED_REASON = "family_no_longer_required"
+# A pending or queued depth_floor trigger a tier change stopped owing: the new
+# tier owes no floor, or the review on record meets its lower one
+# (`_apply_obligation_change`).
+_TIER_FLOOR_LOWERED_REASON = "tier_floor_lowered"
+# The supersession reasons a reclassification writes; coverage counts them as
+# `trigger_summary.depth_floor_retired`.
+_RECLASSIFICATION_RETIREMENT_REASONS = (
+    _FAMILY_NO_LONGER_REQUIRED_REASON, _TIER_FLOOR_LOWERED_REASON,
+)
 
 
 def _record_source_generation(
@@ -708,7 +741,18 @@ def _reopen_file_metadata_review(
     *,
     invalidate_architecture: bool,
 ) -> None:
-    """Retire stale conclusions while preserving them as non-covering history."""
+    """Retire stale conclusions while preserving them as non-covering history.
+
+    Called when the file's review identity changes (slot types or language on
+    a classification, `_review_identity_changed`; the header or risk metadata
+    on a refresh), and when a tier change puts a skip-closed file on a tier
+    `done skipped` refuses (`_skip_closeout_refused_by_tier`). Nothing is
+    deleted: receipts and queue attempts are marked superseded, and the
+    triggers the retired review raised on the file itself keep their status
+    and note under a `file_review_reopened` supersession marker. A tier or
+    context-tag change on its own is not a review-identity change and a role
+    change is metadata (`_apply_obligation_change`).
+    """
     file_id = int(file_row["id"])
     prior_priority = int(file_row.get("analysis_priority", 0) or 0)
     if prior_priority <= 0:
@@ -727,18 +771,31 @@ def _reopen_file_metadata_review(
         """,
         (superseded_at, engagement_id, file_id),
     )
-    connection.execute(
-        "DELETE FROM code_analysis_triggers WHERE engagement_id = ? AND source_file_id = ?",
-        (engagement_id, file_id),
-    )
+    # The obligations the retired review raised on the file itself (its
+    # depth_floor triggers) answer for that review, so they are superseded with
+    # it and stay readable (`include_superseded`) with their status and
+    # resolution note; the new review's closeout raises its own. A hypothesis it
+    # recorded about another file is still owed there and is left alone.
     connection.execute(
         """
         UPDATE code_analysis_triggers
+        SET source_superseded_at = ?, source_supersession_reason = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND source_file_id = ? AND target_file_id = ?
+          AND source_superseded_at IS NULL
+        """,
+        (superseded_at, _FILE_REVIEW_REOPENED_REASON, engagement_id, file_id, file_id),
+    )
+    connection.execute(
+        f"""
+        UPDATE code_analysis_triggers
         SET status = CASE
-                WHEN status IN (?, ?, ?) THEN status ELSE 'pending' END,
+                WHEN status IN ({','.join('?' for _ in _TERMINAL_TRIGGER_RESOLUTION_STATUSES)})
+                THEN status ELSE 'pending' END,
             resolved_queue_item_id = NULL,
             updated_at = CURRENT_TIMESTAMP
         WHERE engagement_id = ?
+          AND source_superseded_at IS NULL
           AND (
               target_file_id = ?
               OR (
@@ -772,7 +829,9 @@ def _reopen_file_metadata_review(
         (superseded_at, engagement_id, file_id),
     )
     architecture_fields = (
-        "role = '', slot_types_json = '[]', module_id = NULL," if invalidate_architecture else ""
+        "role = '', slot_types_json = '[]', context_tags_json = '', module_id = NULL,"
+        if invalidate_architecture
+        else ""
     )
     connection.execute(
         f"""
@@ -811,6 +870,487 @@ def _reopen_file_metadata_review(
         ),
     )
     _sync_trigger_status_for_file(connection, engagement_id, file_id)
+
+
+# An engagement-level ruling that a review family is out of bounds (a program
+# that accepts no DoS findings, say): a current, unresolved decision of this
+# kind with ``{"vuln_classes": [...], "ruling": "<the ruling and where it is
+# recorded>"}``. Each family it names is owed by no file of the engagement:
+# claims list it under `excluded_vuln_classes` with the ruling, and `done`, the
+# effort harness, the depth floor and code readiness never measure it. The
+# ruling is a program's or the user's, so the decision must be surfaced to the
+# user. The decision write refuses a malformed or unsurfaced one; a stored row
+# that no longer qualifies (its surfacing withdrawn) excludes nothing and is
+# named by coverage (`family_exclusions.invalid_decisions`). Resolving or
+# superseding the decision lifts the exclusion.
+FAMILY_EXCLUSION_DECISION_KIND = "vuln_family_exclusion"
+
+
+def family_exclusion_problems(payload: Any, *, surfaced_to_user: bool) -> list[str]:
+    """Why a ``vuln_family_exclusion`` decision excludes nothing; empty when it is valid."""
+    named = payload.get("vuln_classes") if isinstance(payload, dict) else None
+    ruling = str(payload.get("ruling") or "").strip() if isinstance(payload, dict) else ""
+    problems: list[str] = []
+    if not isinstance(named, list) or not named:
+        problems.append("vuln_classes must be a non-empty list of review families")
+    else:
+        unknown = sorted(
+            str(family) for family in named
+            if not isinstance(family, str) or family not in vuln_taxonomy.VULN_CLASSES
+        )
+        if unknown:
+            problems.append(
+                f"unknown review families: {', '.join(unknown)} "
+                f"(canonical: {', '.join(sorted(vuln_taxonomy.VULN_CLASSES))})"
+            )
+    if not ruling:
+        problems.append("ruling must quote the ruling and say where it is recorded")
+    if not surfaced_to_user:
+        problems.append(
+            "surfaced_to_user must be true: the exclusion records a program or user ruling "
+            "(`--surfaced-to-user`)"
+        )
+    return problems
+
+
+def _engagement_family_exclusions(connection, engagement_id: int) -> dict[str, Any]:
+    """``{"families": {family: {decision_id, ruling, recorded_at}}, "invalid": [...]}``."""
+    families: dict[str, dict[str, Any]] = {}
+    invalid: list[dict[str, Any]] = []
+    rows = connection.execute(
+        """
+        SELECT id, payload_json, surfaced_to_user, created_at FROM assessment_dispatch_decisions
+        WHERE engagement_id = ? AND kind = ? AND resolved = 0
+          AND superseded_by_id IS NULL
+        ORDER BY id
+        """,
+        (engagement_id, FAMILY_EXCLUSION_DECISION_KIND),
+    ).fetchall()
+    for row in rows:
+        payload = _json_decode(row["payload_json"], {})
+        problems = family_exclusion_problems(payload, surfaced_to_user=bool(row["surfaced_to_user"]))
+        if problems:
+            invalid.append({"decision_id": int(row["id"]), "problems": problems})
+            continue
+        ruling = str(payload["ruling"]).strip()
+        for family in payload["vuln_classes"]:
+            families.setdefault(str(family), {
+                "decision_id": int(row["id"]),
+                "ruling": ruling,
+                "recorded_at": row["created_at"],
+            })
+    return {"families": families, "invalid": invalid}
+
+
+def _family_exclusions_summary(
+    exclusions: dict[str, Any], *, depth_floor_ruled_out: int
+) -> dict[str, Any] | None:
+    """The `family_exclusions` pointer coverage and code readiness carry."""
+    if not exclusions["families"] and not exclusions["invalid"]:
+        return None
+    return {
+        "families": [
+            {"family": family, **entry}
+            for family, entry in sorted(exclusions["families"].items())
+        ],
+        "depth_floor_triggers_ruled_out": depth_floor_ruled_out,
+        "invalid_decisions": exclusions["invalid"],
+        "detail": (
+            "review families a current vuln_family_exclusion decision puts out of bounds "
+            "for every file of the engagement: claims list them as excluded_vuln_classes "
+            "with the ruling, and done, the effort harness, the depth floor and code "
+            "readiness never measure them; a pending or queued depth_floor trigger on one "
+            "is counted here, not as Phase 2B work. Resolving or superseding the decision "
+            "lifts the exclusion. An invalid decision excludes nothing until it is "
+            "superseded with a payload naming canonical vuln_classes and the ruling, "
+            "surfaced to the user"
+        ),
+    }
+
+
+def _excluded_family_entries(
+    families: Collection[str], exclusions: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """The `excluded_vuln_classes` entries for *families* an engagement ruling excludes."""
+    ruled = (exclusions or {}).get("families", {})
+    return [
+        {"family": family, **ruled[family]}
+        for family in sorted(set(families))
+        if family in ruled
+    ]
+
+
+def _without_excluded(families: Collection[str], exclusions: dict[str, Any] | None) -> list[str]:
+    ruled = (exclusions or {}).get("families", {})
+    return sorted(family for family in families if family not in ruled)
+
+
+def _file_family_obligations(
+    file_row: dict[str, Any], exclusions: dict[str, Any] | None = None
+) -> tuple[set[str], set[str]]:
+    """``(required, optional)`` families the file's stored classification names,
+    less any an engagement ruling excludes (`_engagement_family_exclusions`)."""
+    arguments = {
+        "language": str(file_row.get("language", "")),
+        "context_tags": _json_decode(file_row.get("context_tags_json"), []),
+        "unavailable_dimensions": _json_decode(
+            file_row.get("structural_unavailable_dimensions_json"), []
+        ),
+    }
+    slot_types = _json_decode(file_row.get("slot_types_json"), [])
+    return (
+        set(_without_excluded(_applicable_families_for_file(slot_types, **arguments), exclusions)),
+        set(_without_excluded(_optional_families_for_file(slot_types, **arguments), exclusions)),
+    )
+
+
+def _standing_review_row(connection, engagement_id: int, file_id: int) -> dict[str, Any] | None:
+    """The file's latest current attempt when it is a successful review, else None."""
+    row = connection.execute(
+        f"""
+        SELECT queue.*
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+        WHERE queue.engagement_id = ? AND queue.file_id = ?
+          AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
+          AND ({_latest_current_queue_attempt_sql("queue", "repos")})
+          AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+          AND ({_successful_terminal_review_row_sql("queue")})
+        """,
+        (engagement_id, file_id),
+    ).fetchone()
+    return None if row is None else dict(row)
+
+
+def _skip_closeout_refused_by_tier(
+    connection, engagement_id: int, file_id: int, classification: str
+) -> bool:
+    """Whether the file's standing `skipped` closeout is one *classification* refuses.
+
+    `done skipped` refuses a critical, high or medium file, so a skip-closed
+    file reclassified onto one of those tiers has no review to measure: its
+    review reopens instead of the tier change recomputing obligations.
+    """
+    if classification not in _UNSKIPPABLE_CLASSIFICATIONS:
+        return False
+    row = connection.execute(
+        f"""
+        SELECT 1
+        FROM code_analysis_queue AS queue
+        JOIN code_files AS files
+          ON files.id = queue.file_id AND files.engagement_id = queue.engagement_id
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+        WHERE queue.engagement_id = ? AND queue.file_id = ?
+          AND queue.repo_generation = repos.active_generation
+          AND queue.source_superseded_at IS NULL
+          AND queue.status = 'done' AND queue.disposition = 'skipped'
+          AND ({_latest_current_queue_attempt_sql("queue", "repos")})
+        LIMIT 1
+        """,
+        (engagement_id, file_id),
+    ).fetchone()
+    return row is not None
+
+
+def _live_floor_triggers(
+    connection, engagement_id: int, file_id: int, families: Collection[str] | None = None
+) -> list[dict[str, Any]]:
+    """The file's pending or queued depth_floor triggers in its current generation."""
+    family_clause = (
+        "" if families is None
+        else f" AND triggers.vuln_class IN ({','.join('?' for _ in families)})"
+    )
+    if families is not None and not families:
+        return []
+    return [
+        dict(row)
+        for row in connection.execute(
+            f"""
+            SELECT triggers.id, triggers.vuln_class, triggers.status,
+                   triggers.resolved_queue_item_id
+            FROM code_analysis_triggers AS triggers
+            JOIN code_repos AS repos
+              ON repos.id = triggers.repo_id
+             AND repos.engagement_id = triggers.engagement_id
+            WHERE triggers.engagement_id = ? AND triggers.origin = ?
+              AND triggers.target_file_id = ?
+              AND triggers.repo_generation = repos.active_generation
+              AND triggers.source_superseded_at IS NULL
+              AND triggers.status IN (?, ?){family_clause}
+            ORDER BY triggers.id
+            """,
+            (
+                engagement_id, TRIGGER_ORIGIN_DEPTH_FLOOR, file_id,
+                _TRIGGER_STATUS_PENDING, _TRIGGER_STATUS_QUEUED, *(families or ()),
+            ),
+        ).fetchall()
+    ]
+
+
+def _withdraw_emptied_requeues(
+    connection, engagement_id: int, queue_item_ids: Collection[int], *, note_reason: str
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Withdraw each directed attempt a reclassification left with nothing to carry.
+
+    Each id is a `requeue-triggers` row whose queued depth_floor triggers the
+    reclassification retired. One that still carries a live trigger is owed
+    and kept; one `_withdraw_refusal` refuses (claimed, not the latest attempt,
+    no standing review before it) is kept with that reason. Returns
+    ``(withdrawn, kept)``.
+    """
+    withdrawn: list[dict[str, Any]] = []
+    kept: list[dict[str, Any]] = []
+    for item_id in sorted(set(queue_item_ids)):
+        carried = [
+            int(row["id"])
+            for row in connection.execute(
+                """
+                SELECT id FROM code_analysis_triggers
+                WHERE engagement_id = ? AND resolved_queue_item_id = ? AND status = ?
+                  AND source_superseded_at IS NULL
+                ORDER BY id
+                """,
+                (engagement_id, item_id, _TRIGGER_STATUS_QUEUED),
+            ).fetchall()
+        ]
+        if carried:
+            kept.append({
+                "queue_item_id": item_id,
+                "reason": f"still carries live triggers {carried}",
+            })
+            continue
+        row = connection.execute(
+            """
+            SELECT queue.*, files.file_path
+            FROM code_analysis_queue AS queue
+            JOIN code_files AS files
+              ON files.id = queue.file_id AND files.engagement_id = queue.engagement_id
+            WHERE queue.engagement_id = ? AND queue.id = ?
+            """,
+            (engagement_id, item_id),
+        ).fetchone()
+        row_dict = None if row is None else dict(row)
+        refusal, predecessor_id = _withdraw_refusal(connection, engagement_id, row_dict, item_id)
+        if refusal is not None or row_dict is None or predecessor_id is None:
+            kept.append({
+                "queue_item_id": item_id,
+                "reason": f"queue item {item_id} {refusal}" if row_dict is not None else str(refusal),
+            })
+            continue
+        withdrawn.append(_withdraw_directed_attempt(
+            connection, engagement_id, row_dict, predecessor_id, note_reason=note_reason,
+        ))
+    return withdrawn, kept
+
+
+def _apply_obligation_change(
+    connection,
+    engagement_id: int,
+    before: dict[str, Any],
+    after: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Recompute what a reviewed file owes after a tag or tier change; reopen nothing.
+
+    Context tags only name review families (`CONTEXT_TAG_VULN_CLASSES`, and the
+    families `client-bundle` makes optional) and the tier only sets the depth
+    floor (`EFFORT_THRESHOLDS`, raised as triggers on `_CLOSEOUT_FAMILY_TIERS`).
+    The file's review identity is its slot types and language, so neither
+    change touches the review, its coverage or its trigger history. Required
+    families and effort gaps are read fresh on every coverage read. On a
+    critical or high file each family the change makes owed at the floor that
+    the review on record left below it is a pending depth_floor trigger,
+    sourced from that review. A pending or queued depth_floor trigger the
+    change stops requiring is superseded and stays readable:
+    `family_no_longer_required` when its family is no longer required,
+    `tier_floor_lowered` when the new tier owes no floor or the review on
+    record meets the lower one. A directed attempt left carrying none of its
+    triggers is withdrawn when `withdraw` would take it back
+    (`_withdraw_emptied_requeues`) and named otherwise. A reviewer's
+    cross-file hypothesis is never touched. Returns the change report, or None
+    when neither the family sets nor the tier changed.
+    """
+    exclusions = _engagement_family_exclusions(connection, engagement_id)
+    required_before, optional_before = _file_family_obligations(before, exclusions)
+    required_after, optional_after = _file_family_obligations(after, exclusions)
+    added = sorted(required_after - required_before)
+    removed = sorted(required_before - required_after)
+    optional_added = sorted(optional_after - optional_before)
+    tier_before = str(before.get("classification", ""))
+    tier_after = str(after.get("classification", ""))
+    tier_changed = tier_before != tier_after
+    if not added and not removed and not optional_added and not tier_changed:
+        return None
+    file_id = int(after["id"])
+    review = _standing_review_row(connection, engagement_id, file_id)
+    if (
+        not added and not removed and not optional_added
+        and review is None
+        and not _live_floor_triggers(connection, engagement_id, file_id)
+    ):
+        # A tier change on a file with no review on record and no floor owed
+        # moves nothing: the review it is queued for closes under the new tier.
+        return None
+    tags = _json_decode(after.get("context_tags_json"), [])
+    retired: dict[int, str] = {}
+    queued_on: set[int] = set()
+
+    def retire(rows: list[dict[str, Any]], reason: str) -> None:
+        for row in rows:
+            if int(row["id"]) in retired:
+                continue
+            retired[int(row["id"])] = reason
+            if str(row["status"]) == _TRIGGER_STATUS_QUEUED and row["resolved_queue_item_id"]:
+                queued_on.add(int(row["resolved_queue_item_id"]))
+
+    retire(
+        _live_floor_triggers(connection, engagement_id, file_id, removed),
+        _FAMILY_NO_LONGER_REQUIRED_REASON,
+    )
+    if tier_changed and tier_after not in _CLOSEOUT_FAMILY_TIERS:
+        retire(_live_floor_triggers(connection, engagement_id, file_id), _TIER_FLOOR_LOWERED_REASON)
+    elif (
+        tier_changed
+        and review is not None
+        and tier_before in _CLOSEOUT_FAMILY_TIERS
+        and EFFORT_THRESHOLDS[tier_after] < EFFORT_THRESHOLDS[tier_before]
+    ):
+        short, _evaluated, _threshold = _depth_floor_shortfalls(
+            connection, engagement_id, file_row=after, queue_row=review,
+            cwe_coverage=_json_decode(review["cwe_coverage_json"], []),
+            allow_processing=False, families=required_after,
+        )
+        still_short = {family for family, _effort in short}
+        retire(
+            [
+                row for row in _live_floor_triggers(connection, engagement_id, file_id)
+                if str(row["vuln_class"]) not in still_short
+            ],
+            _TIER_FLOOR_LOWERED_REASON,
+        )
+    superseded_at = _now_iso()
+    for reason in sorted(set(retired.values())):
+        ids = [trigger_id for trigger_id, why in retired.items() if why == reason]
+        connection.execute(
+            f"""
+            UPDATE code_analysis_triggers
+            SET source_superseded_at = ?, source_supersession_reason = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id IN ({','.join('?' for _ in ids)})
+            """,
+            (superseded_at, reason, engagement_id, *ids),
+        )
+    withdrawn, kept = _withdraw_emptied_requeues(
+        connection, engagement_id, queued_on,
+        note_reason=(
+            "every trigger it carried was retired by a reclassification of "
+            f"{after['file_path']}"
+        ),
+    )
+    if withdrawn:
+        # The review before the withdrawn attempt is the file's latest again.
+        review = _standing_review_row(connection, engagement_id, file_id)
+    floor_owed = tier_after in _CLOSEOUT_FAMILY_TIERS
+    raised_on_tier = (
+        tier_changed and floor_owed and (
+            tier_before not in _CLOSEOUT_FAMILY_TIERS
+            or EFFORT_THRESHOLDS[tier_after] > EFFORT_THRESHOLDS[tier_before]
+        )
+    )
+    evaluate = set(required_after) if raised_on_tier else set(added)
+    depth_floor = None
+    if evaluate and floor_owed and review is not None:
+        depth_floor = _record_depth_floor_triggers(
+            connection, engagement_id, file_row=after, queue_row=review,
+            cwe_coverage=_json_decode(review["cwe_coverage_json"], []),
+            write=True, families=evaluate,
+            reclassification={
+                family: (
+                    f"context tags [{', '.join(tags)}] made {family} required on "
+                    f"{tier_after} file"
+                    if family in added
+                    else f"the file was reclassified from {tier_before} to {tier_after}"
+                )
+                for family in evaluate
+            },
+        )
+    if retired or depth_floor is not None:
+        _sync_trigger_status_for_file(connection, engagement_id, file_id)
+    retired_ids = sorted(retired)
+    detail_parts = [
+        "A context-tag or tier change recomputes what the file owes and reopens no "
+        "review: its coverage and trigger history stand."
+    ]
+    if tier_changed:
+        detail_parts.append(
+            f"Reclassified from {tier_before} to {tier_after}: "
+            + (
+                f"the {tier_after} floor of {EFFORT_THRESHOLDS[tier_after]} is measured "
+                "against the review on record."
+                if floor_owed
+                else f"a {tier_after} file owes no depth floor."
+            )
+        )
+    if added:
+        detail_parts.append(
+            f"Newly required: {', '.join(added)}; the coverage harness measures each "
+            "against the review on record."
+        )
+    if depth_floor is not None and depth_floor.get("raised"):
+        detail_parts.append(
+            "Each family the review on record left below the floor is a pending "
+            "depth_floor trigger (`depth_floor_triggers`)."
+        )
+    if removed:
+        detail_parts.append(f"No longer required: {', '.join(removed)}.")
+    if retired_ids:
+        detail_parts.append(
+            f"Superseded depth_floor triggers {retired_ids} "
+            f"({', '.join(sorted(set(retired.values())))}; readable with "
+            "`list-triggers --include-superseded`)."
+        )
+    if withdrawn:
+        detail_parts.append(
+            "Withdrew directed attempt(s) "
+            f"{[entry['queue_item_id'] for entry in withdrawn]} that carried only "
+            "retired triggers; the review before each is the file's verdict again."
+        )
+    if kept:
+        detail_parts.append(
+            "Kept directed attempt(s) "
+            f"{[entry['queue_item_id'] for entry in kept]} (`requeue_kept` says why)."
+        )
+    return {
+        "file_id": file_id,
+        "file_path": str(after["file_path"]),
+        "context_tags": tags,
+        **(
+            {"previous_classification": tier_before, "classification": tier_after}
+            if tier_changed
+            else {}
+        ),
+        "required_families_added": added,
+        "required_families_removed": removed,
+        "optional_families_added": optional_added,
+        **({"depth_floor_triggers": depth_floor} if depth_floor is not None else {}),
+        **(
+            {
+                "depth_floor_triggers_retired": retired_ids,
+                "depth_floor_triggers_retired_reasons": {
+                    str(trigger_id): retired[trigger_id] for trigger_id in retired_ids
+                },
+            }
+            if retired_ids
+            else {}
+        ),
+        **({"requeue_withdrawn": withdrawn} if withdrawn else {}),
+        **({"requeue_kept": kept} if kept else {}),
+        "detail": " ".join(detail_parts),
+    }
 
 
 def _sync_metadata_review_queue_identity(
@@ -1346,14 +1886,17 @@ def list_code_repos(engagement_id: int) -> list[dict[str, Any]]:
             """,
             (engagement.id,),
         ).fetchall()
-        return [_hydrate_code_repo(row) for row in rows]
+        return [
+            _hydrate_code_repo(row, engagement_root=engagement.engagement_root)
+            for row in rows
+        ]
 
 
 def get_code_repo(engagement_id: int, repo_id: int) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     with get_connection() as connection:
         row = _get_published_repo_row(connection, engagement.id, repo_id)
-    return _hydrate_code_repo(row)
+    return _hydrate_code_repo(row, engagement_root=engagement.engagement_root)
 
 
 _CODE_REPO_ALLOWED_FIELDS = frozenset({
@@ -1392,7 +1935,7 @@ def update_code_repo(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
-    return _hydrate_code_repo(row)
+    return _hydrate_code_repo(row, engagement_root=engagement.engagement_root)
 
 
 def publish_code_repo_lsp_config(
@@ -1441,7 +1984,7 @@ def publish_code_repo_lsp_config(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
-    return _hydrate_code_repo(row)
+    return _hydrate_code_repo(row, engagement_root=engagement.engagement_root)
 
 
 # =========================================================================
@@ -1498,8 +2041,22 @@ def list_code_files(
     limit: int | None = None,
     offset: int = 0,
     include_header_snippet: bool = False,
+    context_tags_recorded: bool | None = None,
+    context_tag: str | None = None,
+    client_bundle_conflict: bool | None = None,
+    accounting: str | None = None,
 ) -> dict[str, Any]:
     """Page the admitted file inventory.
+
+    ``context_tag`` pages the files whose recorded tags include it;
+    ``client_bundle_conflict`` true pages exactly the files coverage's
+    `client_bundle_conflicts` counts (`_client_bundle_conflict_sql`).
+    ``accounting`` (unclassified, unqueued, unaccounted) pages exactly the
+    files the readiness blocker of that name counts (`_FILE_ACCOUNTING_GAP_SQL`).
+
+    ``context_tags_recorded`` false pages the files `_context_tags_unrecorded`
+    counts (`_context_tags_unrecorded_sql`), which is the read its
+    `full_list` names.
 
     `path_prefix` / `path_glob` scope the page, `total` and `has_more` through
     `_file_path_scope_sql` — the same owner `fetch` claims with and
@@ -1536,6 +2093,32 @@ def list_code_files(
         ("files.classification = ?", classification),
         ("files.analysis_status = ?", analysis_status),
     ))
+    if context_tags_recorded is not None:
+        clauses.append(
+            "files.context_tags_json != ''"
+            if context_tags_recorded
+            else _context_tags_unrecorded_sql("files")
+        )
+    if context_tag is not None:
+        if context_tag not in CONTEXT_TAG_VULN_CLASSES:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="context_tag must be one of: " + ", ".join(sorted(CONTEXT_TAG_VULN_CLASSES)),
+            )
+        clauses.append(_has_context_tag_sql("files", context_tag))
+    if accounting is not None:
+        if accounting not in _FILE_ACCOUNTING_GAP_SQL:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="accounting must be one of: " + ", ".join(sorted(_FILE_ACCOUNTING_GAP_SQL)),
+            )
+        clauses.append(_FILE_ACCOUNTING_GAP_SQL[accounting])
+    if client_bundle_conflict is not None:
+        clauses.append(
+            _client_bundle_conflict_sql("files")
+            if client_bundle_conflict
+            else f"NOT ({_client_bundle_conflict_sql('files')})"
+        )
     if search is not None:
         clauses.append("files.file_path LIKE ? ESCAPE '\\'")
         params.append(like_contains(search))
@@ -1678,26 +2261,6 @@ CLASSIFICATION_PRIORITY_BANDS = {
     "low": (5, 19),
     "skip": (0, 0),
 }
-# Per-family effort each reviewed tier is measured against. `done` already
-# demands one `cwe_coverage` entry per applicable family at every tier, but an
-# `effort: 0` entry satisfies that, so a tier absent from this map could close
-# with a token number and nothing would say so. `low` is absent on purpose:
-# build and test infrastructure is admitted and accounted, not held to a
-# review-depth floor.
-EFFORT_THRESHOLDS = {"critical": 70, "high": 50, "medium": 30}
-# Which of those tiers the coverage gate actually REFUSES on. `effort` is a
-# number the reviewing agent writes into its own `cwe_coverage` entry and
-# nothing but a float parse stands behind it, so ADR 0001 decision 3 (left
-# standing by ADR 0012) bars it from carrying a gate on its own: under pressure
-# a hard block on self-attested signal gets gamed, forced or mass-deferred into
-# false confidence. Critical and high keep refusing because that scope is what
-# the dispatch contract promises and what the operator reads as the depth floor;
-# every other measured tier is reported through `effort_warnings` — the harness
-# channel that reaches readiness `quality_gate.warnings` and every review-quality
-# rendering — and never withholds `gate.passed`. The terminal structural blocks
-# (an untouched, undeferred high-value unit; `uncovered_high_risk_files`) are
-# unaffected.
-_BLOCKING_EFFORT_TIERS = frozenset({"critical", "high"})
 _VALID_CLASSIFICATIONS = frozenset(CLASSIFICATION_PRIORITY_BANDS)
 _VALID_SLOT_TYPES = frozenset({
     "NETWORK-INPUT",
@@ -1787,9 +2350,9 @@ def _require_no_live_lease(
     unclaimed row and catastrophic for a live one: the holder's next heartbeat
     and every receipt it already wrote come back as "not processing" and
     "current status is done", which is exactly what a reclaim looks like. So
-    every door that can reopen a review — `analysis_priority` on one side,
-    the review identity (classification / role / slot_types / language) on the
-    other — asks this first, and the refusal names the holder with the same
+    every door that can reopen a review or move what it owes —
+    `analysis_priority` on one side, the tier and the review identity
+    (slot_types / language) on the other — asks this first, and the refusal names the holder with the same
     identity `_queue_lease_mismatch` prints so the operator can find the agent
     that owns the work.
 
@@ -1916,6 +2479,45 @@ def _normalize_slot_types(value: Any, *, field_name: str) -> list[str]:
     return normalized
 
 
+def _context_tags_text(tags: list[str] | None) -> str:
+    """The stored form: ``''`` when no tags are recorded, else the JSON list."""
+    return "" if tags is None else _json_list_text(tags)
+
+
+def _normalize_context_tags(value: Any, *, field_name: str) -> list[str] | None:
+    """The architect's context tags, deduplicated in order; unknown tags refused.
+
+    ``None`` means the write names no tags: bulk classify then keeps the tags
+    the file records, and a file with none stays unrecorded (stored as ``''``,
+    `_context_tags_text`), which coverage names until the architect records
+    them; an empty list records that no tag applies.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, list):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"{field_name} must be a list of context tag strings",
+        )
+    normalized: list[str] = []
+    invalid: list[str] = []
+    for raw_tag in value:
+        tag = raw_tag.strip() if isinstance(raw_tag, str) else ""
+        if tag not in CONTEXT_TAG_VULN_CLASSES:
+            invalid.append(tag or repr(raw_tag))
+        elif tag not in normalized:
+            normalized.append(tag)
+    if invalid:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"{field_name} contains invalid values: {', '.join(invalid)}. "
+                f"Allowed values: {', '.join(sorted(CONTEXT_TAG_VULN_CLASSES))}"
+            ),
+        )
+    return normalized
+
+
 def _require_canonical_language(value: str, *, file_label: str) -> str:
     """Hold a classify-time language to the set the structural index can bind.
 
@@ -2000,6 +2602,80 @@ def _normalize_guidance_hypotheses(value: Any, *, field_name: str) -> list[str]:
     return normalized
 
 
+def _review_identity_changed(
+    file_row: dict[str, Any], *, slot_types: list[str], language: str
+) -> bool:
+    """Whether a classification changes what the file's review read it as.
+
+    The review identity is the file's input slot types and its language: they
+    decide which families the review answered and how its source was parsed,
+    so changing either reopens the review (`_reopen_file_metadata_review`).
+    The tier and the context tags only set what the file owes, and a change to
+    them is recomputed against the review on record
+    (`_apply_obligation_change`); the role is descriptive and never read for
+    an obligation.
+    """
+    return (
+        slot_types != _json_decode(file_row.get("slot_types_json"), [])
+        or language != str(file_row.get("language", ""))
+    )
+
+
+# The classification fields an omitted (or null) value keeps, with the column
+# each is stored in and how the stored value reads.
+_KEPT_CLASSIFICATION_FIELDS = {
+    "role": "role",
+    "slot_types": "slot_types_json",
+    "context_tags": "context_tags_json",
+}
+
+
+def _kept_classification_fields(
+    file_row: dict[str, Any], submitted: dict[str, Any]
+) -> dict[str, Any]:
+    """The stored value of each *submitted* field sent as None, and its `derived` entry.
+
+    A missing field means "keep stored", never "clear": a role of "" or a slot
+    list of [] read as a review-identity change and reopened the file's review.
+    Returns ``{field: stored value, ..., "derived": [entry, ...]}``; a field
+    whose stored value is empty keeps nothing and is not named.
+    """
+    result: dict[str, Any] = {"derived": []}
+    for field, column in _KEPT_CLASSIFICATION_FIELDS.items():
+        if field not in submitted or submitted[field] is not None:
+            continue
+        raw = file_row.get(column)
+        if field == "role":
+            value: Any = str(raw or "").strip()
+            present = bool(value)
+        elif field == "slot_types":
+            value = _json_decode(raw, [])
+            present = bool(value)
+        else:
+            # '' is "no tags recorded", which an omitted field leaves as it is.
+            present = bool(str(raw or ""))
+            value = _json_decode(raw, []) if present else None
+        result[field] = value
+        if present:
+            result["derived"].append({
+                "file_id": int(file_row["id"]),
+                "file_path": str(file_row["file_path"]),
+                "field": field,
+                "value": value,
+                "derived_from": "stored",
+                "detail": (
+                    f"kept the {field} recorded by the file's earlier classification; "
+                    "this one named none"
+                    + (
+                        " (send [] to record that none applies)"
+                        if field != "role"
+                        else ""
+                    )
+                ),
+            })
+    return result
+
+
 def bulk_classify_code_files(
     engagement_id: int,
     classifications: list[dict[str, Any]],
@@ -2028,6 +2704,8 @@ def bulk_classify_code_files(
         affected_module_ids: set[int] = set()
         structurally_invalidated_repo_ids: set[int] = set()
         language_changes: list[dict[str, Any]] = []
+        derived: list[dict[str, Any]] = []
+        obligation_changes: list[dict[str, Any]] = []
         for idx, c in enumerate(classifications):
             file_id = submitted_file_ids[idx]
             classification = str(c.get("classification", "")).strip()
@@ -2039,17 +2717,42 @@ def bulk_classify_code_files(
                         f"{', '.join(sorted(_VALID_CLASSIFICATIONS))}"
                     ),
                 )
-            slot_types = _normalize_slot_types(
-                c.get("slot_types"),
-                field_name=f"classifications[{idx}].slot_types",
+            current_file = file_rows[file_id]
+            # An omitted (or null) role, slot_types or context_tags keeps what
+            # the file records, as an omitted `language` does, and each kept
+            # value is named on `derived`; an empty value is how a
+            # classification says none applies.
+            kept = _kept_classification_fields(
+                current_file,
+                {
+                    "role": c.get("role"),
+                    "slot_types": c.get("slot_types"),
+                    "context_tags": c.get("context_tags"),
+                },
+            )
+            derived.extend(kept["derived"])
+            slot_types = (
+                kept["slot_types"]
+                if c.get("slot_types") is None
+                else _normalize_slot_types(
+                    c.get("slot_types"),
+                    field_name=f"classifications[{idx}].slot_types",
+                )
             )
             _require_slot_types_for_classification(
                 classification,
                 slot_types,
                 field_name=f"classifications[{idx}].slot_types",
             )
-            role = str(c.get("role", "")).strip()
-            current_file = file_rows[file_id]
+            role = kept["role"] if c.get("role") is None else str(c.get("role")).strip()
+            context_tags = (
+                kept["context_tags"]
+                if c.get("context_tags") is None
+                else _normalize_context_tags(
+                    c.get("context_tags"),
+                    field_name=f"classifications[{idx}].context_tags",
+                )
+            )
             skip_reason = _require_classification_skip_reason(
                 classification,
                 str(c.get("skip_reason", "") or "").strip(),
@@ -2070,13 +2773,19 @@ def bulk_classify_code_files(
                 field_name=f"classifications[{idx}].analysis_priority",
             )
             language_changed = normalized_language != str(current_file.get("language", ""))
-            review_identity_changed = (
-                classification != str(current_file.get("classification", ""))
-                or role != str(current_file.get("role", ""))
-                or slot_types != _json_decode(current_file.get("slot_types_json"), [])
-                or language_changed
+            # Review identity is what the review read the file as: its input
+            # slot types and language (`_review_identity_changed`). The tier
+            # and the context tags only set what the file owes, so changing
+            # them recomputes obligations against the review on record
+            # (`_apply_obligation_change`); the role is descriptive metadata.
+            review_identity_changed = _review_identity_changed(
+                current_file, slot_types=slot_types, language=normalized_language,
             )
-            if review_identity_changed:
+            tier_changed = classification != str(current_file.get("classification", ""))
+            context_tags_changed = (context_tags or []) != _json_decode(
+                current_file.get("context_tags_json"), []
+            )
+            if review_identity_changed or tier_changed:
                 _require_no_live_lease(
                     connection,
                     engagement.id,
@@ -2086,7 +2795,15 @@ def bulk_classify_code_files(
                         f"({current_file['file_path']})"
                     ),
                 )
-            review_reopened = review_identity_changed and _has_current_file_analysis_activity(
+            review_reopened = (
+                review_identity_changed
+                or (
+                    tier_changed
+                    and _skip_closeout_refused_by_tier(
+                        connection, engagement.id, file_id, classification
+                    )
+                )
+            ) and _has_current_file_analysis_activity(
                 connection,
                 engagement.id,
                 file_id,
@@ -2123,6 +2840,7 @@ def bulk_classify_code_files(
                 SET classification = ?,
                     role = ?,
                     slot_types_json = ?,
+                    context_tags_json = ?,
                     language = ?,
                     analysis_priority = ?,
                     skip_reason = ?,
@@ -2134,6 +2852,7 @@ def bulk_classify_code_files(
                     classification,
                     role,
                     _json_list_text(slot_types),
+                    _context_tags_text(context_tags),
                     normalized_language,
                     priority,
                     skip_reason,
@@ -2143,7 +2862,7 @@ def bulk_classify_code_files(
             )
             if cursor.rowcount > 0:
                 updated += 1
-                if review_identity_changed:
+                if review_identity_changed or review_reopened:
                     connection.execute(
                         """
                         UPDATE code_files
@@ -2159,11 +2878,24 @@ def bulk_classify_code_files(
                         file_id,
                         priority=priority,
                     )
-                    _sync_file_analysis_status(
+                # The write above stamps `classified`; a file whose review was
+                # not reopened keeps the status its queue history gives it.
+                _sync_file_analysis_status(
+                    connection,
+                    engagement.id,
+                    file_id,
+                )
+                if (context_tags_changed or tier_changed) and not (
+                    review_identity_changed or review_reopened
+                ):
+                    change = _apply_obligation_change(
                         connection,
                         engagement.id,
-                        file_id,
+                        current_file,
+                        _get_file_rows(connection, engagement.id, {file_id})[file_id],
                     )
+                    if change is not None:
+                        obligation_changes.append(change)
                 module_row = connection.execute(
                     "SELECT module_id FROM code_files WHERE engagement_id = ? AND id = ?",
                     (engagement.id, file_id),
@@ -2184,13 +2916,19 @@ def bulk_classify_code_files(
         "total": len(classifications),
         "structural_index_invalidated_repo_ids": sorted(structurally_invalidated_repo_ids),
         "language_changes": language_changes,
+        # Each value stored because the classification left it out
+        # (`{file_id, file_path, field, value, derived_from, detail}`).
+        "derived": derived,
+        # Each context-tag or tier change that moved what a file owes
+        # (`_apply_obligation_change`).
+        "obligation_changes": obligation_changes,
     }
 
 
 _CODE_FILE_ALLOWED_FIELDS = frozenset({
     "classification", "role", "analysis_priority",
     "analysis_depth", "module_id",
-    "notes", "slot_types_json", "language", "skip_reason",
+    "notes", "slot_types_json", "context_tags_json", "language", "skip_reason",
 })
 
 
@@ -2212,6 +2950,24 @@ def update_code_file(
         file_row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
 
         normalized_kwargs = dict(kwargs)
+        # A null role, slot_types_json or context_tags_json keeps the stored
+        # value, as an omitted field does on bulk classify; each kept value is
+        # named on the response's `derived`.
+        kept = _kept_classification_fields(
+            file_row,
+            {
+                field: normalized_kwargs[column]
+                for field, column in (
+                    ("role", "role"),
+                    ("slot_types", "slot_types_json"),
+                    ("context_tags", "context_tags_json"),
+                )
+                if column in normalized_kwargs
+            },
+        )
+        for column in ("role", "slot_types_json", "context_tags_json"):
+            if column in normalized_kwargs and normalized_kwargs[column] is None:
+                del normalized_kwargs[column]
         if "language" in normalized_kwargs:
             normalized_kwargs["language"] = _require_canonical_language(
                 str(normalized_kwargs["language"]).strip(),
@@ -2267,6 +3023,11 @@ def update_code_file(
                 normalized_kwargs["slot_types_json"],
                 field_name="slot_types_json",
             )
+        if "context_tags_json" in normalized_kwargs:
+            normalized_kwargs["context_tags_json"] = _normalize_context_tags(
+                normalized_kwargs["context_tags_json"],
+                field_name="context_tags_json",
+            )
 
         effective_classification = str(
             normalized_kwargs.get("classification", file_row["classification"] or "")
@@ -2321,31 +3082,36 @@ def update_code_file(
                 effective_classification, patched_skip_reason, field_name="skip_reason"
             )
             normalized_kwargs["skip_reason"] = ""
-        review_identity_changed = (
-            (
-                "classification" in normalized_kwargs
-                and normalized_kwargs["classification"]
-                != str(file_row.get("classification", ""))
-            )
-            or (
-                "role" in normalized_kwargs
-                and normalized_kwargs["role"] != str(file_row.get("role", ""))
-            )
-            or (
-                "slot_types_json" in normalized_kwargs
-                and normalized_kwargs["slot_types_json"]
-                != _json_decode(file_row.get("slot_types_json"), [])
-            )
-            or language_changed
+        review_identity_changed = _review_identity_changed(
+            file_row,
+            slot_types=effective_slot_types,
+            language=str(normalized_kwargs.get("language", file_row.get("language", ""))),
         )
-        if review_identity_changed:
+        tier_changed = effective_classification != str(file_row.get("classification", ""))
+        # The tier and the context tags only set what the file owes: a change
+        # to them is recomputed against the review on record and reopens
+        # nothing (`_apply_obligation_change`). The role is metadata.
+        context_tags_changed = (
+            "context_tags_json" in normalized_kwargs
+            and (normalized_kwargs["context_tags_json"] or [])
+            != _json_decode(file_row.get("context_tags_json"), [])
+        )
+        if review_identity_changed or tier_changed:
             _require_no_live_lease(
                 connection,
                 engagement.id,
                 file_id,
                 action=f"changing the review identity of {file_row['file_path']}",
             )
-        review_reopened = review_identity_changed and _has_current_file_analysis_activity(
+        review_reopened = (
+            review_identity_changed
+            or (
+                tier_changed
+                and _skip_closeout_refused_by_tier(
+                    connection, engagement.id, file_id, effective_classification
+                )
+            )
+        ) and _has_current_file_analysis_activity(
             connection,
             engagement.id,
             file_id,
@@ -2369,10 +3135,12 @@ def update_code_file(
             set_clauses.append(f"{key} = ?")
             if key == "slot_types_json":
                 params.append(_json_list_text(value))
+            elif key == "context_tags_json":
+                params.append(_context_tags_text(value))
             else:
                 params.append(value)
 
-        if review_identity_changed:
+        if review_identity_changed or review_reopened:
             set_clauses.append("variant_check_status = 'pending'")
 
         set_clauses.append("updated_at = CURRENT_TIMESTAMP")
@@ -2404,6 +3172,17 @@ def update_code_file(
                 priority=int(normalized_kwargs["analysis_priority"]),
             )
             _sync_file_analysis_status(connection, engagement.id, file_id)
+        obligation_change = (
+            _apply_obligation_change(
+                connection,
+                engagement.id,
+                file_row,
+                _get_file_rows(connection, engagement.id, {file_id})[file_id],
+            )
+            if (context_tags_changed or tier_changed)
+            and not (review_identity_changed or review_reopened)
+            else None
+        )
         module_ids_to_sync: set[int] = set()
         if previous_module_id is not None:
             module_ids_to_sync.add(int(previous_module_id))
@@ -2421,6 +3200,10 @@ def update_code_file(
             engagement.id,
             dict(row),
         )
+        if obligation_change is not None:
+            payload["obligation_change"] = obligation_change
+        if kept["derived"]:
+            payload["derived"] = kept["derived"]
     return payload
 
 
@@ -3013,14 +3796,30 @@ _QUEUE_MODES = frozenset(
 )
 
 
+def _is_trigger_queue_entry(entry: Any) -> bool:
+    """A queue-row trigger entry the backend derived from a recorded trigger."""
+    return (
+        isinstance(entry, dict)
+        and type(entry.get("trigger_id")) is int
+        and entry.get("source") == "code_analysis_trigger"
+    )
+
+
 def _queue_item_matches(row: dict[str, Any], item: dict[str, Any]) -> bool:
+    # Entries derived from recorded triggers are written by the backend (a
+    # reanalysis carries its predecessor's), so a retried submission is compared
+    # against the context its caller supplied, not against them.
     return (
         int(row["priority"]) == int(item["priority"])
         and str(row["batch_theme"]) == str(item["batch_theme"])
         and _json_decode(row.get("slot_types_json"), []) == item["slot_types"]
         and _json_decode(row.get("guidance_hypotheses_json"), [])
         == item["guidance_hypotheses"]
-        and _json_decode(row.get("cross_file_triggers_json"), [])
+        and [
+            entry
+            for entry in _json_decode(row.get("cross_file_triggers_json"), [])
+            if not _is_trigger_queue_entry(entry)
+        ]
         == item["cross_file_triggers"]
     )
 
@@ -3418,6 +4217,16 @@ def bulk_create_queue_items(
                     predecessor_id,
                 ),
             )
+            carried_triggers = (
+                []
+                if predecessor_id is None
+                else _carry_trigger_bindings_forward(
+                    connection,
+                    engagement.id,
+                    predecessor_id=predecessor_id,
+                    successor_id=int(cursor.lastrowid),
+                )
+            )
             outcome_name = "reanalysis" if normalized_mode == "reanalysis" else "inserted"
             counts[outcome_name] += 1
             outcomes.append(
@@ -3437,6 +4246,9 @@ def bulk_create_queue_items(
                     ),
                 )
             )
+            if carried_triggers:
+                # The resolutions the file's verdict held, now owed by this attempt.
+                outcomes[-1]["carried_triggers"] = carried_triggers
             _sync_file_analysis_status(
                 connection, engagement.id, file_id, deferred_modules=affected_modules
             )
@@ -3579,19 +4391,37 @@ def _lease_activity_projection(row: Any) -> dict[str, Any]:
 
 
 def _hydrate_queue_listing_row(row: Any) -> dict[str, Any]:
+    slot_types = _json_decode(row["file_slot_types_json"], [])
+    language = str(row["file_language"] or "")
+    context_tags = _json_decode(row["file_context_tags_json"], [])
+    unavailable = _json_decode(row["file_structural_unavailable_dimensions_json"], [])
+    applicable = _applicable_families_for_file(
+        slot_types, language=language, context_tags=context_tags, unavailable_dimensions=unavailable
+    )
     return {
         "id": int(row["id"]),
         "file_id": int(row["file_id"]),
         "file_path": str(row["file_path"]),
         "loc": int(row["file_loc"]),
-        "applicable_vuln_classes": _applicable_families_for_file(
-            _json_decode(row["file_slot_types_json"], []),
-            language=str(row["file_language"] or ""), role=str(row["file_role"] or ""),
-        ),
+        "applicable_vuln_classes": applicable,
         "path_suggested_vuln_classes": _path_suggested_families_for_file(
-            _json_decode(row["file_slot_types_json"], []),
-            language=str(row["file_language"] or ""), role=str(row["file_role"] or ""),
+            slot_types,
+            language=language,
+            context_tags=context_tags,
             file_path=str(row["file_path"]),
+            unavailable_dimensions=unavailable,
+            required=applicable,
+        ),
+        "unread_code_suggested_vuln_classes": _unread_code_suggested_families_for_file(
+            slot_types,
+            language=language,
+            context_tags=context_tags,
+            unavailable_dimensions=unavailable,
+            required=applicable,
+        ),
+        "optional_vuln_classes": _optional_families_for_file(
+            slot_types, language=language, context_tags=context_tags,
+            unavailable_dimensions=unavailable,
         ),
         "classification": str(row["classification"] or ""),
         "analysis_priority": int(row["analysis_priority"]),
@@ -3745,6 +4575,9 @@ def list_queue_items(
         SELECT queue.*, files.file_path, files.classification,
                files.loc AS file_loc, files.language AS file_language,
                files.role AS file_role, files.slot_types_json AS file_slot_types_json,
+               files.context_tags_json AS file_context_tags_json,
+               files.structural_unavailable_dimensions_json
+                   AS file_structural_unavailable_dimensions_json,
                files.analysis_priority, files.repo_id, repos.repo_key,
                repos.repo_role,
                {_lease_activity_sql('queue')} AS lease_activity_at,
@@ -3859,7 +4692,8 @@ def fetch_queue_items(
                 """
                 UPDATE code_analysis_queue
                 SET status = 'processing', assigned_agent = ?, lease_token = ?,
-                    consumed_at = ?, last_heartbeat_at = ?,
+                    consumed_at = ?, first_claimed_at = COALESCE(first_claimed_at, ?),
+                    last_heartbeat_at = ?,
                     updated_at = CURRENT_TIMESTAMP
                 WHERE engagement_id = ? AND id = ? AND status = 'pending'
                   AND assigned_agent = '' AND lease_token = ''
@@ -3868,6 +4702,7 @@ def fetch_queue_items(
                 (
                     agent_name,
                     lease_token,
+                    now,
                     now,
                     now,
                     engagement.id,
@@ -3902,8 +4737,14 @@ def fetch_queue_items(
         lead_bindings = _open_lead_bindings_by_file(
             connection, engagement.id, {int(row["file_id"]) for row in rows}
         )
+        open_leads = open_lead_receipts_by_file(
+            connection, engagement.id, {int(row["file_id"]) for row in rows}
+        )
+        exclusions = _engagement_family_exclusions(connection, engagement.id)
         payload = [
-            _hydrate_claimed_queue_item(row, file_rows, repo_rows, lead_bindings)
+            _hydrate_claimed_queue_item(
+                row, file_rows, repo_rows, lead_bindings, open_leads, exclusions
+            )
             for row in rows
         ]
     return payload
@@ -3957,11 +4798,45 @@ def _open_lead_bindings_by_file(
     return by_file
 
 
+# The repository identity a claimed item carries, with the tool availability
+# (`lsp_config`) the reviewer acts on; the rest of the record (the threat model,
+# structural index paths) is the same for every item of a repository, so the
+# item names the read that returns it instead.
+_CLAIMED_REPO_FIELDS = (
+    "id", "repo_key", "name", "repo_role", "language", "lsp_config", "active_generation",
+    "source_manifest_digest", "snapshot_digest", "threat_model_generation",
+    "structural_index_generation", "commit_hash", "branch", "analysis_status",
+)
+
+
+def _without_stored_json_twins(record: dict[str, Any]) -> dict[str, Any]:
+    """Drop each stored ``<field>_json`` string whose parsed ``<field>`` is present."""
+    return {
+        key: value for key, value in record.items()
+        if not (key.endswith("_json") and key.removesuffix("_json") in record)
+    }
+
+
+def _claimed_repo_reference(repo: dict[str, Any]) -> dict[str, Any]:
+    """The compact repository identity of a claim, naming what it leaves out."""
+    full = _without_stored_json_twins(repo)
+    reference = {key: full[key] for key in _CLAIMED_REPO_FIELDS if key in full}
+    reference["omitted_fields"] = sorted(key for key in full if key not in reference)
+    reference["full_record"] = (
+        f"the omitted fields (the threat model among them) are on `vigil assess fetch "
+        f"code/repos/{int(repo['id'])}`; the current threat-model envelope is on "
+        f"`vigil assess fetch code/threat-model/{int(repo['id'])}`"
+    )
+    return reference
+
+
 def _hydrate_claimed_queue_item(
     row: Any,
     file_rows: dict[int, dict[str, Any]],
     repo_rows: dict[int, dict[str, Any]],
     lead_bindings: dict[int, list[dict[str, Any]]] | None = None,
+    open_leads: dict[int, list[dict[str, Any]]] | None = None,
+    exclusions: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The owned dispatch context a claim hands back.
 
@@ -3983,25 +4858,55 @@ def _hydrate_claimed_queue_item(
     item["cross_file_triggers"] = _json_decode(item.get("cross_file_triggers_json"), [])
     item["adopted_leases"] = _adopted_lease_identities(item.get("adopted_leases_json"))
     file_row = file_rows[int(row["file_id"])]
-    item["file"] = _hydrate_code_file(file_row)
-    item["repo"] = _hydrate_code_repo(repo_rows[int(file_row["repo_id"])])
+    item["file"] = _without_stored_json_twins(_hydrate_code_file(file_row))
+    item["repo"] = _claimed_repo_reference(
+        _hydrate_code_repo(repo_rows[int(file_row["repo_id"])])
+    )
     slot_types = item["file"].get("slot_types", [])
     language = str(item["file"].get("language", ""))
-    role = str(item["file"].get("role", ""))
-    item["applicable_vuln_classes"] = _applicable_families_for_file(
-        slot_types, language=language, role=role
+    context_tags = item["file"].get("context_tags", [])
+    unavailable = item["file"].get("structural_unavailable_dimensions", [])
+    unruled = _applicable_families_for_file(
+        slot_types, language=language, context_tags=context_tags, unavailable_dimensions=unavailable
     )
-    item["path_suggested_vuln_classes"] = _path_suggested_families_for_file(
+    unruled_optional = _optional_families_for_file(
+        slot_types, language=language, context_tags=context_tags,
+        unavailable_dimensions=unavailable,
+    )
+    applicable = _without_excluded(unruled, exclusions)
+    item["applicable_vuln_classes"] = applicable
+    # Families an engagement ruling puts out of bounds, with the ruling: not
+    # owed, not measured, and not to be pursued (`_engagement_family_exclusions`).
+    item["excluded_vuln_classes"] = _excluded_family_entries(
+        [*unruled, *unruled_optional], exclusions
+    )
+    item["path_suggested_vuln_classes"] = _without_excluded(_path_suggested_families_for_file(
         slot_types,
         language=language,
-        role=role,
+        context_tags=context_tags,
         file_path=str(item["file"].get("file_path", "")),
+        unavailable_dimensions=unavailable,
+        required=applicable,
+    ), exclusions)
+    item["unread_code_suggested_vuln_classes"] = _without_excluded(
+        _unread_code_suggested_families_for_file(
+            slot_types,
+            language=language,
+            context_tags=context_tags,
+            unavailable_dimensions=unavailable,
+            required=applicable,
+        ),
+        exclusions,
     )
+    item["optional_vuln_classes"] = _without_excluded(unruled_optional, exclusions)
     # B2: prior art bound to this file travels with the claim. Nearly every
     # admitted file already carries a queue row by hunt time (A5), so this is
     # where a bound lead actually reaches the specialist reading the code.
     item["prior_art_leads"] = (lead_bindings or {}).get(int(row["file_id"]), [])
-    return item
+    # The suspicious receipts still awaiting a verdict on this file: the leads a
+    # targeted re-review (a Phase 2B `code-dispatch reanalyze`) exists to settle.
+    item["open_lead_receipts"] = (open_leads or {}).get(int(row["file_id"]), [])
+    return _without_stored_json_twins(item)
 
 
 # The one coverage family that is not a vulnerability class: the marker some
@@ -4055,41 +4960,96 @@ def _require_canonical_vuln_class(
     )
 
 
+def _cwe_coverage_problems(
+    cwe_coverage: list[Any],
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """The canonical form of a `cwe_coverage` list, and every problem in it.
+
+    One owner for the closeout, its `--supersede` correction and a source-review
+    receipt, since the coverage harness merges all three into one effort per
+    family: each entry is an object naming a canonical family once (stripped,
+    `not_applicable` allowed), and an effort, when given, is a number from 0 to
+    100. Every problem is returned, so one refusal names them all.
+    """
+    normalized: list[dict[str, Any]] = []
+    problems: list[str] = []
+    seen_families: set[str] = set()
+    for idx, entry in enumerate(cwe_coverage):
+        if not isinstance(entry, dict):
+            problems.append(f"cwe_coverage entry {idx} must be an object")
+            continue
+        family = str(entry.get("family", "")).strip()
+        if not family:
+            problems.append(f"cwe_coverage entry {idx} is missing family")
+        else:
+            try:
+                _require_canonical_vuln_class(
+                    family,
+                    field_name=f"cwe_coverage entry {idx} family",
+                    extra=frozenset({NOT_APPLICABLE_COVERAGE_FAMILY}),
+                )
+            except HTTPException as exc:
+                problems.append(str(exc.detail))
+            if family in seen_families:
+                problems.append(f"Duplicate cwe_coverage family '{family}'")
+            seen_families.add(family)
+        if "effort" in entry:
+            effort = entry["effort"]
+            if (
+                isinstance(effort, bool)
+                or not isinstance(effort, int | float)
+                or not 0 <= effort <= 100
+            ):
+                problems.append(
+                    f"cwe_coverage entry {idx} ({family or 'no family'}) effort {effort!r} "
+                    "must be a number from 0 to 100"
+                )
+        normalized.append({**entry, "family": family})
+    return normalized, problems
+
+
+def _refuse_problems(problems: list[str]) -> None:
+    if problems:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(problems))
+
+
 def _normalize_cwe_coverage(cwe_coverage: list[dict[str, Any]] | None) -> list[dict[str, Any]]:
     if not isinstance(cwe_coverage, list) or not cwe_coverage:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="cwe_coverage is required when completing a queue item",
         )
-    normalized: list[dict[str, Any]] = []
-    seen_families: set[str] = set()
-    for idx, entry in enumerate(cwe_coverage):
-        if not isinstance(entry, dict):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cwe_coverage entry {idx} must be an object",
-            )
-        family = str(entry.get("family", "")).strip()
-        if not family:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"cwe_coverage entry {idx} is missing family",
-            )
-        _require_canonical_vuln_class(
-            family,
-            field_name=f"cwe_coverage entry {idx} family",
-            extra=frozenset({NOT_APPLICABLE_COVERAGE_FAMILY}),
-        )
-        if family in seen_families:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=f"Duplicate cwe_coverage family '{family}'",
-            )
-        seen_families.add(family)
-        normalized_entry = dict(entry)
-        normalized_entry["family"] = family
-        normalized.append(normalized_entry)
+    normalized, problems = _cwe_coverage_problems(cwe_coverage)
+    _refuse_problems(problems)
     return normalized
+
+
+_RECEIPT_CONFIDENCE = ("high", "medium", "low")
+
+
+def _normalized_receipt_input(
+    result: dict[str, Any],
+) -> tuple[list[dict[str, Any]], str]:
+    """A receipt's coverage and confidence in canonical form, or one refusal.
+
+    The coverage meets the closeout's rules (`_cwe_coverage_problems`); the
+    confidence is one of high, medium, low in any case. Both are judged before
+    either refuses, so the author reads every problem once.
+    """
+    coverage = result.get("cwe_coverage") or []
+    normalized, problems = (
+        _cwe_coverage_problems(coverage)
+        if isinstance(coverage, list)
+        else ([], ["cwe_coverage must be an array"])
+    )
+    raw_confidence = result.get("confidence", "medium")
+    confidence = str(raw_confidence).strip().lower()
+    if confidence not in _RECEIPT_CONFIDENCE:
+        problems.append(
+            f"confidence {raw_confidence!r} must be one of: {', '.join(_RECEIPT_CONFIDENCE)}"
+        )
+    _refuse_problems(problems)
+    return normalized, confidence
 
 
 def _completion_coverage_basis(
@@ -4099,8 +5059,8 @@ def _completion_coverage_basis(
 ) -> str:
     """Say where the required family set came from and how to re-read it.
 
-    The required set is derived from the FILE's review identity — the
-    architect's classification slot types, role and language — and never from
+    The required set is derived from the FILE's classification — the
+    architect's slot types, context tags and language — and never from
     the queue row's own ``slot_types``, which is batch metadata the operator
     typed at submission time. Both travel on the same claim, under names a
     reader can easily swap, so a refusal that names only the missing families
@@ -4110,13 +5070,31 @@ def _completion_coverage_basis(
     """
     slot_types = _json_decode(file_row.get("slot_types_json"), [])
     language = str(file_row.get("language", ""))
-    role = str(file_row.get("role", ""))
+    context_tags = _json_decode(file_row.get("context_tags_json"), [])
     basis = (
         f"The required set for this file is: {', '.join(applicable) or 'none'}. "
-        "It is derived from the file's own review identity — classification "
-        f"slot_types [{', '.join(slot_types) or 'none'}], role "
-        f"{role or '(unset)'!r}, language {language or '(unset)'!r}"
+        "It is derived from the file's own classification — "
+        f"slot_types [{', '.join(slot_types) or 'none'}], context_tags "
+        f"[{', '.join(context_tags) or 'none'}], language {language or '(unset)'!r}"
     )
+    unavailable = _json_decode(file_row.get("structural_unavailable_dimensions_json"), [])
+    unread = (
+        _markup_unread_code(language.lower().strip(), unavailable)
+        if language.lower().strip() in MARKUP_SIGNAL_FAMILIES
+        else None
+    )
+    if unread is not None:
+        unread_effect = {
+            "server": "server-side code, which owes the code slot families too",
+            "browser": "an inline browser script, which owes "
+            + ", ".join(sorted(BROWSER_SCRIPT_FAMILIES)),
+            "unknown": "a streaming-fallback read, whose code families are only "
+            "suggested (`unread_code_suggested_vuln_classes`)",
+        }[unread]
+        basis += (
+            f", and code its index did not read (unavailable dimensions "
+            f"{', '.join(unavailable)}): {unread_effect}"
+        )
     item_slot_types = _json_decode(queue_row.get("slot_types_json"), [])
     if sorted(item_slot_types) != sorted(slot_types):
         basis += (
@@ -4132,16 +5110,67 @@ def _completion_coverage_basis(
     return basis
 
 
+# The tiers whose closeout owes one `cwe_coverage` entry per applicable family.
+# The dispatch contract promises that depth floor for critical and high files,
+# so a closeout there that names fewer families has the rest recorded at
+# `effort: 0` (`_unreviewed_families_record`), and every family left below the
+# floor is a `depth_floor` trigger (`_record_depth_floor_triggers`); on every
+# other tier the applicable list is guidance the coverage harness reports against.
+_CLOSEOUT_FAMILY_TIERS = frozenset({"critical", "high"})
+
+_CLOSEOUT_UNREVIEWED_NOTE = (
+    "not named by the closeout; recorded at effort 0 by the backend so the family "
+    "stays a measured coverage gap"
+)
+
+
+def _closeout_missing_families(
+    classification: str, applicable: list[str], recorded: set[str]
+) -> list[str]:
+    """The applicable families `done` still requires an entry for."""
+    if classification not in _CLOSEOUT_FAMILY_TIERS:
+        return []
+    return [family for family in applicable if family not in recorded]
+
+
+def _with_unreviewed_families(
+    cwe_coverage: list[dict[str, Any]], families: list[str]
+) -> list[dict[str, Any]]:
+    """The closeout's coverage plus one backend-recorded effort-0 entry per family."""
+    return [
+        *cwe_coverage,
+        *(
+            {
+                "family": family,
+                "effort": 0,
+                "recorded_by": CLOSEOUT_RECORDED_BY,
+                "notes": _CLOSEOUT_UNREVIEWED_NOTE,
+            }
+            for family in families
+        ),
+    ]
+
+
 def _validate_completion_coverage(
     file_row: dict[str, Any],
     cwe_coverage: list[dict[str, Any]],
     *,
     queue_row: dict[str, Any],
-) -> None:
+    exclusions: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """Refuse a critical/high closeout whose classification metadata is
+    incomplete; otherwise name the applicable families it left out.
+
+    Missing slot types or an empty applicable set is the architect's durable
+    record being incomplete, so it refuses. A family the closeout simply did
+    not name is a coverage shortfall the backend can record itself: the caller
+    adds an `effort: 0` entry for each family returned here, and the coverage
+    harness reports it as an effort gap at 0 like any other.
+    """
     classification = str(file_row.get("classification", ""))
     slot_types = _json_decode(file_row.get("slot_types_json"), [])
     language = str(file_row.get("language", ""))
-    role = str(file_row.get("role", ""))
+    context_tags = _json_decode(file_row.get("context_tags_json"), [])
 
     if classification in {"critical", "high"} and not slot_types:
         raise HTTPException(
@@ -4152,7 +5181,14 @@ def _validate_completion_coverage(
             ),
         )
 
-    applicable = _applicable_families_for_file(slot_types, language=language, role=role)
+    applicable = _applicable_families_for_file(
+        slot_types,
+        language=language,
+        context_tags=context_tags,
+        unavailable_dimensions=_json_decode(
+            file_row.get("structural_unavailable_dimensions_json"), []
+        ),
+    )
     if classification in {"critical", "high"} and not applicable:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -4161,19 +5197,424 @@ def _validate_completion_coverage(
                 "applicable vulnerability families"
             ),
         )
+    _refuse_unexplained_not_applicable(file_row, cwe_coverage)
+    return _unreviewed_families_record(
+        file_row, cwe_coverage, queue_row=queue_row, exclusions=exclusions
+    )
 
-    provided = {str(entry.get("family", "")) for entry in cwe_coverage}
-    missing = [family for family in applicable if family not in provided]
-    if missing:
+
+def _refuse_unexplained_not_applicable(
+    file_row: dict[str, Any], cwe_coverage: list[dict[str, Any]]
+) -> None:
+    """Refuse a not-applicable entry without notes on a critical or high file.
+
+    On these tiers a not-applicable family answers the depth floor and settles
+    its trigger, which keeps the reason (`_record_depth_floor_triggers`). A
+    closeout's entry and a receipt's entry answer it alike
+    (`_merge_file_effort_entry`), so both are held to the rule.
+    """
+    classification = str(file_row.get("classification", ""))
+    if classification not in _CLOSEOUT_FAMILY_TIERS:
+        return
+    unexplained = sorted(
+        str(entry.get("family"))
+        for entry in cwe_coverage
+        if isinstance(entry, dict)
+        and _is_cwe_entry_not_applicable(entry)
+        and not str(entry.get("notes") or "").strip()
+    )
+    if unexplained:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
-                f"Missing cwe_coverage families for {file_row['file_path']}: "
-                + ", ".join(missing)
-                + ". "
-                + _completion_coverage_basis(file_row, queue_row, applicable)
+                f"cwe_coverage marks {', '.join(unexplained)} not applicable on "
+                f"{classification} file {file_row['file_path']} without notes: give each "
+                "such entry `notes` saying why the family cannot occur in this file "
+                "(the reason settles its depth floor and is kept on the trigger), or "
+                "record the effort you spent"
             ),
         )
+
+
+def _unreviewed_families_record(
+    file_row: dict[str, Any],
+    cwe_coverage: list[dict[str, Any]],
+    *,
+    queue_row: dict[str, Any],
+    exclusions: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    """The `unreviewed_families_recorded` report for a closeout's coverage.
+
+    Every write that sets a done row's coverage (`done`, its replay, and a
+    `--supersede` correction) returns this, so each one says which families the
+    backend recorded at effort 0 and where the required set came from.
+    """
+    classification = str(file_row.get("classification", ""))
+    applicable = _without_excluded(_applicable_families_for_file(
+        _json_decode(file_row.get("slot_types_json"), []),
+        language=str(file_row.get("language", "")),
+        context_tags=_json_decode(file_row.get("context_tags_json"), []),
+        unavailable_dimensions=_json_decode(
+            file_row.get("structural_unavailable_dimensions_json"), []
+        ),
+    ), exclusions)
+    missing = _closeout_missing_families(
+        classification, applicable, {str(entry.get("family", "")) for entry in cwe_coverage}
+    )
+    if not missing:
+        return None
+    return {
+        "families": missing,
+        "effort": 0,
+        "detail": (
+            f"The closeout of {classification} file {file_row['file_path']} named no "
+            f"cwe_coverage entry for {', '.join(missing)}, so each is recorded at "
+            "effort 0 (`recorded_by: closeout`). That placeholder gives way to a "
+            "current receipt on this file that scored the family or marked it not "
+            "applicable; a family no receipt answers is an effort gap "
+            "(`vigil assess code-coverage --cwe-matrix` lists every gap) and, below "
+            "the floor, a pending depth_floor trigger, and `depth_floor_triggers` on "
+            "this response names exactly the ones raised. A reanalysis that reviews a "
+            "family records its real effort. "
+            + _completion_coverage_basis(file_row, queue_row, applicable)
+            + "."
+        ),
+    }
+
+
+def _depth_floor_shortfalls(
+    connection,
+    engagement_id: int,
+    *,
+    file_row: dict[str, Any],
+    queue_row: dict[str, Any],
+    cwe_coverage: list[dict[str, Any]],
+    allow_processing: bool,
+    families: Collection[str] | None = None,
+) -> tuple[list[tuple[str, float]], list[str], int]:
+    """The families a critical/high closeout leaves below its depth floor.
+
+    Returns ``(short, evaluated, threshold)``: each evaluated family below the
+    tier's floor with its effort, every family the closeout answers for, and
+    the floor. Effort is merged exactly as the coverage harness merges it (the
+    closeout's coverage, then the file's current receipts), so the trigger and
+    the harness's effort gap agree. A trigger requeue is a directed pass that
+    answers only for the families its queue row carried; any other attempt
+    answers for every applicable family. A family marked not applicable is
+    answered, and one this closeout marks not applicable is answered whatever a
+    receipt scored for it: the review has said the family cannot occur here.
+    ``families`` narrows the evaluated set to those applicable families: a
+    context-tag change asks only about the families it made required.
+    """
+    classification = str(file_row.get("classification", ""))
+    if classification not in _CLOSEOUT_FAMILY_TIERS:
+        return [], [], 0
+    applicable = _without_excluded(_applicable_families_for_file(
+        _json_decode(file_row.get("slot_types_json"), []),
+        language=str(file_row.get("language", "")),
+        context_tags=_json_decode(file_row.get("context_tags_json"), []),
+        unavailable_dimensions=_json_decode(
+            file_row.get("structural_unavailable_dimensions_json"), []
+        ),
+    ), _engagement_family_exclusions(connection, engagement_id))
+    if families is not None:
+        evaluated = [family for family in applicable if family in families]
+    elif str(queue_row.get("queue_mode") or "initial") == "trigger":
+        carried = {
+            str(entry.get("vuln_class"))
+            for entry in _json_decode(queue_row.get("cross_file_triggers_json"), [])
+            if isinstance(entry, dict) and entry.get("vuln_class")
+        }
+        evaluated = [family for family in applicable if family in carried]
+    else:
+        evaluated = list(applicable)
+    file_id = int(file_row["id"])
+    efforts: dict[int, dict[str, float]] = {file_id: {}}
+    not_applicable: dict[int, set[str]] = {file_id: set()}
+    closeout_only: dict[int, set[str]] = {}
+    coverage_lists = [cwe_coverage]
+    coverage_lists.extend(
+        _json_decode(row["cwe_coverage_json"], [])
+        for row in _current_receipt_coverage_rows(
+            connection, engagement_id, json.dumps([file_id]),
+            allow_processing=allow_processing,
+        )
+    )
+    closeout_not_applicable = _closeout_not_applicable_families(cwe_coverage)
+    for coverage in coverage_lists:
+        for entry in coverage if isinstance(coverage, list) else []:
+            if isinstance(entry, dict):
+                _merge_file_effort_entry(
+                    efforts, not_applicable, closeout_only, file_id, entry,
+                    closeout_not_applicable=closeout_not_applicable,
+                )
+    threshold = EFFORT_THRESHOLDS[classification]
+    short = [
+        (family, efforts[file_id].get(family, 0.0))
+        for family in evaluated
+        if family not in not_applicable[file_id]
+        and efforts[file_id].get(family, 0.0) < threshold
+    ]
+    return short, evaluated, threshold
+
+
+def _record_depth_floor_triggers(
+    connection,
+    engagement_id: int,
+    *,
+    file_row: dict[str, Any],
+    queue_row: dict[str, Any],
+    cwe_coverage: list[dict[str, Any]],
+    write: bool,
+    families: Collection[str] | None = None,
+    reclassification: Mapping[str, str] | None = None,
+) -> dict[str, Any] | None:
+    """Turn a critical/high closeout's below-floor families into Phase 2B work.
+
+    The effort numbers are the reviewer's own record, so they never refuse the
+    closeout (ADR 0001 decision 3). A family left at effort 0, or below the
+    tier's floor, is instead a pending `depth_floor` trigger on the file
+    itself, which `code-dispatch requeue-triggers` turns into a directed pass
+    and `code-dispatch resolve-triggers` settles with a recorded reason. One
+    live trigger per file and family: a pending or queued one is still owed,
+    and one an operator settled (reviewed at sufficient depth, not applicable,
+    source equivalent, external context) is not raised again in this source
+    generation. A closeout that brings a family to its floor resolves that
+    family's pending trigger; the status sync holds a bound trigger to the
+    same floor (`trigger_review_basis`), so a pass that closes short leaves
+    the one trigger owed rather than resolving it and raising another.
+
+    With ``write`` false (a dry run or a replayed closeout) nothing is written
+    and the report says what the closeout raises or already raised.
+    ``families`` and ``reclassification`` come from a context-tag or tier
+    change on a reviewed file (`_apply_obligation_change`): only the families
+    the change made owed at the floor are judged against the review on record,
+    and each raised trigger's reason names the change (``reclassification``
+    maps each family to it).
+    """
+    short, evaluated, threshold = _depth_floor_shortfalls(
+        connection, engagement_id, file_row=file_row, queue_row=queue_row,
+        cwe_coverage=cwe_coverage, allow_processing=not write, families=families,
+    )
+    if not evaluated:
+        return None
+    file_id = int(file_row["id"])
+    queue_item_id = int(queue_row["id"])
+    closeout_not_applicable = _closeout_not_applicable_families(cwe_coverage)
+    # The reason each not-applicable family was given (`_validate_completion_coverage`
+    # requires one on these tiers); the trigger it settles keeps it.
+    not_applicable_notes = {
+        str(entry.get("family")): str(entry.get("notes") or "").strip()
+        for entry in cwe_coverage
+        if isinstance(entry, dict) and str(entry.get("family", "")) in closeout_not_applicable
+    }
+    repo_id = int(file_row["repo_id"])
+    repo = _get_published_repo_row(connection, engagement_id, repo_id)
+    generation = int(repo["active_generation"])
+    classification = str(file_row.get("classification", ""))
+    short_by_family = dict(short)
+    report: dict[str, list[dict[str, Any]]] = {
+        "raised": [], "still_pending": [], "resolved": [], "settled": [],
+    }
+    for family in evaluated:
+        rows = connection.execute(
+            """
+            SELECT id, status, source_queue_item_id, resolved_queue_item_id
+            FROM code_analysis_triggers
+            WHERE engagement_id = ? AND origin = ? AND target_file_id = ?
+              AND vuln_class = ? AND repo_id = ? AND repo_generation = ?
+              AND source_superseded_at IS NULL
+            ORDER BY id
+            """,
+            (engagement_id, TRIGGER_ORIGIN_DEPTH_FLOOR, file_id, family, repo_id, generation),
+        ).fetchall()
+        live = [row for row in rows if str(row["status"]) in {_TRIGGER_STATUS_PENDING, _TRIGGER_STATUS_QUEUED}]
+        settled = [row for row in rows if str(row["status"]) in _TERMINAL_TRIGGER_RESOLUTION_STATUSES]
+        if family in short_by_family:
+            effort = short_by_family[family]
+            entry = {"family": family, "effort": effort, "threshold": threshold}
+            if settled:
+                report["settled"].append({
+                    **entry, "trigger_id": int(settled[-1]["id"]),
+                    "status": str(settled[-1]["status"]),
+                })
+                continue
+            own = [row for row in live if row["source_queue_item_id"] == queue_item_id]
+            if own:
+                report["raised"].append({**entry, "trigger_id": int(own[-1]["id"])})
+                continue
+            if live:
+                report["still_pending"].append({**entry, "trigger_id": int(live[-1]["id"])})
+                continue
+            trigger_id = None
+            if write:
+                cursor = connection.execute(
+                    """
+                    INSERT INTO code_analysis_triggers (
+                        engagement_id, source_queue_item_id, source_file_id, target_file_id,
+                        target_file_path, vuln_class, reason, origin, status,
+                        resolution_note, repo_id, repo_generation, source_manifest_digest,
+                        created_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, '', ?, ?, ?, ?)
+                    """,
+                    (
+                        engagement_id, queue_item_id, file_id, file_id,
+                        str(file_row["file_path"]), family,
+                        (
+                            f"Depth floor: {reclassification[family]} after queue "
+                            f"item {queue_item_id} closed it with {family} effort "
+                            f"{effort:g}, below the {classification} floor of {threshold}."
+                            if reclassification and family in reclassification
+                            else f"Depth floor: {classification} file closed by queue item "
+                            f"{queue_item_id} with {family} effort {effort:g}, below the "
+                            f"{classification} floor of {threshold}."
+                        ),
+                        TRIGGER_ORIGIN_DEPTH_FLOOR, _TRIGGER_STATUS_PENDING,
+                        repo_id, generation, str(repo["source_manifest_digest"]), _now_iso(),
+                    ),
+                )
+                trigger_id = int(cursor.lastrowid)
+            report["raised"].append({**entry, "trigger_id": trigger_id})
+            continue
+        for row in live:
+            # A pending trigger, or one this attempt carried as a directed pass:
+            # the status sync would resolve that one too, but without the reason.
+            carried_here = (
+                str(row["status"]) == _TRIGGER_STATUS_QUEUED
+                and row["resolved_queue_item_id"] == queue_item_id
+            )
+            if str(row["status"]) != _TRIGGER_STATUS_PENDING and not carried_here:
+                continue
+            if write:
+                why = not_applicable_notes.get(family, "")
+                connection.execute(
+                    """
+                    UPDATE code_analysis_triggers
+                    SET status = ?, resolved_queue_item_id = ?, resolution_note = ?,
+                        updated_at = CURRENT_TIMESTAMP
+                    WHERE engagement_id = ? AND id = ? AND status = ?
+                    """,
+                    (
+                        _TRIGGER_STATUS_RESOLVED, queue_item_id,
+                        (
+                            f"Resolved by queue item {queue_item_id}: its closeout marks "
+                            f"{family} not applicable to this file"
+                            + (f": {why}" if why else ".")
+                            if family in closeout_not_applicable
+                            else f"Resolved by queue item {queue_item_id}: its closeout brings "
+                            f"{family} to the {classification} floor of {threshold}."
+                        ),
+                        engagement_id, int(row["id"]), str(row["status"]),
+                    ),
+                )
+            report["resolved"].append({
+                "family": family, "threshold": threshold, "trigger_id": int(row["id"]),
+            })
+    if not any(report.values()):
+        return None
+    owed = [entry["family"] for entry in report["raised"] + report["still_pending"]]
+    return {
+        **{key: value for key, value in report.items() if value},
+        "detail": (
+            (
+                f"{classification.capitalize()} file {file_row['file_path']} owes Phase 2B "
+                f"work on {', '.join(owed)}: each is a pending depth_floor trigger "
+                f"(effort below the {classification} floor of {threshold}). "
+                "`vigil assess code-dispatch list-triggers --origin depth_floor "
+                f"--path-prefix {file_row['file_path']}` lists them; "
+                "`code-dispatch requeue-triggers` sends a directed pass, and "
+                "`code-dispatch resolve-triggers` records why another pass would not move "
+                "one (`reviewed_at_sufficient_depth` with the reason when the file was "
+                "read at depth and the recorded effort understates it). Until then the "
+                "coverage gate and code readiness name them."
+            )
+            if owed
+            else (
+                f"No depth_floor trigger is owed on {file_row['file_path']}: "
+                + "; ".join(
+                    filter(None, (
+                        "resolved " + ", ".join(e["family"] for e in report["resolved"])
+                        if report["resolved"] else "",
+                        "already settled by a recorded resolution: "
+                        + ", ".join(e["family"] for e in report["settled"])
+                        if report["settled"] else "",
+                    ))
+                )
+                + "."
+            )
+        ),
+    }
+
+
+# The read whose `gate.untriggered_depth_shortfalls.rows` lists every row the
+# grouped pointer leaves out; `code-coverage --cwe-matrix` prints them.
+_UNTRIGGERED_DEPTH_SHORTFALLS_FULL_LIST = (
+    "vigil assess code-coverage --cwe-matrix (its Untriggered Depth Shortfalls section "
+    "lists every file and family; GET code/coverage?detail=cwe returns them as "
+    "gate.untriggered_depth_shortfalls.rows)"
+)
+
+
+def _untriggered_depth_shortfalls(
+    engagement_id: int, effort_gaps: list[dict[str, Any]], *, include_rows: bool
+) -> dict[str, Any] | None:
+    """Critical/high families below the floor that carry no depth_floor trigger.
+
+    A depth_floor trigger is raised when a critical/high closeout (or its
+    `--supersede` correction) leaves a family below the floor, so a close
+    recorded before the backend raised them, or a file classified critical/high
+    after its review, holds below-floor families with none. Raising them
+    retroactively turns an engagement's history into blocking Phase 2B work at
+    once, so they are a pointer instead: grouped tier x family with sample
+    paths (the effort-gap grouping), the verbs that act on one, and with
+    *include_rows* every row. Never a gate reason.
+    """
+    candidates = [
+        gap for gap in effort_gaps if gap["classification"] in _CLOSEOUT_FAMILY_TIERS
+    ]
+    if not candidates:
+        return None
+    with get_connection() as connection:
+        triggered = {
+            (int(row["target_file_id"]), str(row["vuln_class"]))
+            for row in connection.execute(
+                """
+                SELECT t.target_file_id, t.vuln_class
+                FROM code_analysis_triggers AS t
+                JOIN code_repos AS repos
+                  ON repos.id = t.repo_id AND repos.engagement_id = t.engagement_id
+                WHERE t.engagement_id = ? AND t.origin = ?
+                  AND t.repo_generation = repos.active_generation
+                  AND t.source_superseded_at IS NULL
+                """,
+                (engagement_id, TRIGGER_ORIGIN_DEPTH_FLOOR),
+            ).fetchall()
+        }
+    untriggered = [
+        gap for gap in candidates if (int(gap["file_id"]), str(gap["family"])) not in triggered
+    ]
+    if not untriggered:
+        return None
+    summary = _effort_gap_summary(untriggered, include_rows=include_rows)
+    if "full_list" in summary:
+        summary["full_list"] = _UNTRIGGERED_DEPTH_SHORTFALLS_FULL_LIST
+    return {
+        **summary,
+        "detail": (
+            f"{len(untriggered)} critical/high famil(ies) on "
+            f"{len({int(gap['file_id']) for gap in untriggered})} file(s) are below their "
+            "effort floor and no depth_floor trigger names them, so nothing schedules or "
+            "settles them (a review closed before the backend raised depth_floor triggers, "
+            "or a file classified critical/high after its review). They do not block. Where "
+            "the family can occur in the file, `vigil assess code-dispatch reanalyze "
+            "<queue-items-json-file> <reason>` sends a deeper pass; where it cannot, the "
+            "next review records `disposition=not_applicable` for it with notes saying why, "
+            f"and a browser bundle classified with the `{CLIENT_BUNDLE_CONTEXT_TAG}` context "
+            "tag owes no server-only family. Every row: "
+            f"{_UNTRIGGERED_DEPTH_SHORTFALLS_FULL_LIST}."
+        ),
+    }
 
 
 def _compute_coverage_integrity(
@@ -4242,15 +5683,6 @@ def _compute_coverage_integrity(
             f"functions_analyzed={max_claimed_functions} claimed but 0 analysis-result rows recorded"
         )
 
-    if distinct_structural_callables > 0 and max_claimed_functions > 0:
-        ratio = distinct_structural_callables / max_claimed_functions
-        if ratio < 0.3:
-            advisories.append(
-                f"functions_analyzed={max_claimed_functions} claimed but only "
-                f"{distinct_structural_callables} structurally bound callables recorded "
-                f"(ratio={ratio:.2f})"
-            )
-
     if total_functions > 0 and max_claimed_functions > total_functions:
         advisories.append(
             f"functions_analyzed={max_claimed_functions} exceeds file total_functions={total_functions}"
@@ -4275,7 +5707,9 @@ def _compute_coverage_integrity(
         "authoritative_blockers": authoritative_blockers,
         "advisories": advisories,
         "warnings": [*authoritative_blockers, *advisories],
-        "plausible": not authoritative_blockers,
+        # Receipt bookkeeping agrees with the closeout's claims. It says
+        # nothing about review depth.
+        "receipts_consistent": not authoritative_blockers,
     }
 
 
@@ -4493,9 +5927,9 @@ def _record_cross_file_triggers(
                 INSERT INTO code_analysis_triggers (
                     engagement_id, source_queue_item_id, source_file_id, target_file_id,
                     target_file_path, vuln_class, reason, status, resolution_note,
-                    repo_id, repo_generation, source_manifest_digest
+                    repo_id, repo_generation, source_manifest_digest, created_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     engagement_id,
@@ -4510,6 +5944,10 @@ def _record_cross_file_triggers(
                     source_repo_id,
                     source_repo_generation,
                     source_manifest_digest_value,
+                    # Sub-second, on the clock lease claims use: whether a
+                    # review was claimed after this trigger was raised is read
+                    # from the two (`trigger_review_basis`).
+                    _now_iso(),
                 ),
             )
             continue
@@ -4583,6 +6021,7 @@ def _require_correctable_completion(
     file_row: dict[str, Any],
     *,
     disposition: str,
+    row_disposition: str,
     result: dict[str, Any],
 ) -> None:
     """Hold a correction to the gates that produced the row it rewrites.
@@ -4596,8 +6035,11 @@ def _require_correctable_completion(
     `_successful_terminal_review_row_sql` re-derives all of it from the row plus
     its receipts, so the damage is never false credit: it is a row-level
     projection that contradicts its own receipt and an unexplained coverage
-    regression. Every check runs before the insert, so a refusal leaves both
-    the receipt chain and the lease exactly as they were.
+    regression. ``row_disposition`` is what the row will carry: the
+    correction's own disposition unless a remaining candidate receipt requires
+    another, so the skip and clean gates apply only when the row takes the
+    correction's disposition. Every check runs before the insert, so a refusal
+    leaves both the receipt chain and the lease exactly as they were.
     """
     item_id = int(queue_row["id"])
     if disposition not in _VALID_DISPOSITIONS:
@@ -4610,7 +6052,7 @@ def _require_correctable_completion(
                 "with `code-dispatch reanalyze` to record anything else"
             ),
         )
-    if disposition == "skipped":
+    if row_disposition == "skipped":
         # The correction payload carries no skip_reason, so the row's own reason
         # is the only one available and `done`'s rule still applies to it.
         if str(queue_row.get("skip_reason") or "") not in SKIP_REASONS:
@@ -4624,7 +6066,7 @@ def _require_correctable_completion(
                 ),
             )
         _require_skippable_classification(file_row)
-    if disposition == "clean" and not str(queue_row.get("analysis_notes") or "").strip():
+    if row_disposition == "clean" and not str(queue_row.get("analysis_notes") or "").strip():
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=(
@@ -4664,6 +6106,21 @@ def _completed_queue_retry(
                          lease_token=lease_token, action="reconcile completion")
     _require_queue_generation(connection, engagement_id, {int(queue_row["id"]): queue_row},
                               action="reconcile completion", lock=False)
+    file_row = _get_file_rows(connection, engagement_id, {int(queue_row["file_id"])})[
+        int(queue_row["file_id"])
+    ]
+    # The stored attempt carries the effort-0 entries its closeout had recorded
+    # for unnamed families; the replayed closeout is compared with them added.
+    unreviewed_families = None
+    if disposition != "skipped":
+        unreviewed_families = _unreviewed_families_record(
+            file_row, cwe_coverage, queue_row=queue_row,
+            exclusions=_engagement_family_exclusions(connection, engagement_id),
+        )
+        if unreviewed_families is not None:
+            cwe_coverage = _with_unreviewed_families(
+                cwe_coverage, unreviewed_families["families"]
+            )
     if (
         str(queue_row.get("disposition") or "") != disposition
         or str(queue_row.get("analysis_notes") or "") != notes
@@ -4674,9 +6131,14 @@ def _completed_queue_retry(
             status_code=status.HTTP_409_CONFLICT,
             detail="completed queue item differs from this closeout; inspect progress before retrying",
         )
-    file_row = _get_file_rows(connection, engagement_id, {int(queue_row["file_id"])})[
-        int(queue_row["file_id"])
-    ]
+    depth_floor = (
+        _record_depth_floor_triggers(
+            connection, engagement_id, file_row=file_row, queue_row=queue_row,
+            cwe_coverage=cwe_coverage, write=False,
+        )
+        if disposition != "skipped"
+        else None
+    )
     return {
         "updated": 0,
         "total": 1,
@@ -4684,6 +6146,123 @@ def _completed_queue_retry(
         "coverage_integrity": _compute_coverage_integrity(
             connection, engagement_id, int(queue_row["id"]), int(queue_row["file_id"]),
             _safe_int(file_row.get("total_functions", 0)), cwe_coverage,
+        ),
+        **({"unreviewed_families_recorded": unreviewed_families}
+           if unreviewed_families is not None else {}),
+        **({"depth_floor_triggers": depth_floor} if depth_floor is not None else {}),
+        **_open_lead_receipts_response(
+            [
+                result_id
+                for held, result_id in _attempt_candidate_receipts(
+                    connection, engagement_id, queue_row
+                )
+                if held == "suspicious"
+            ]
+            if disposition == "finding"
+            else []
+        ),
+    }
+
+
+def _attempt_candidate_receipts(
+    connection,
+    engagement_id: int,
+    queue_row: dict[str, Any],
+    *,
+    exclude_result_id: int | None = None,
+) -> list[tuple[str, int]]:
+    """``(disposition, id)`` of the attempt's current finding/suspicious receipts.
+
+    The attempt is the current lease plus any lease adopted into it, and only
+    unreplaced, unsuperseded receipts count: the same row set ``done`` closes on.
+    """
+    tokens = _attempt_lease_tokens(queue_row)
+    placeholders = ",".join("?" for _ in tokens)
+    rows = connection.execute(
+        f"""
+        SELECT results.id, results.disposition
+        FROM code_analysis_results AS results
+        WHERE results.engagement_id = ? AND results.queue_item_id = ?
+          AND results.file_id = ?
+          AND results.lease_token IN ({placeholders})
+          AND results.superseded_at IS NULL
+          AND ({_result_not_replaced_sql("results")})
+          AND results.disposition IN ('finding', 'suspicious')
+          AND results.id != ?
+        ORDER BY results.id
+        """,
+        (
+            engagement_id,
+            int(queue_row["id"]),
+            int(queue_row["file_id"]),
+            *tokens,
+            -1 if exclude_result_id is None else int(exclude_result_id),
+        ),
+    ).fetchall()
+    return [(str(row["disposition"]), int(row["id"])) for row in rows]
+
+
+def _required_candidate_close(held: list[tuple[str, int]]) -> str | None:
+    """The close an attempt's held candidate receipts require, if any.
+
+    A finding receipt takes precedence: its finding is decided by `finding
+    verify`, so the file closes `finding` and a `suspicious` receipt beside it
+    stays awaiting a verdict until a targeted re-review settles it.
+    """
+    dispositions = {disposition for disposition, _ in held}
+    if "finding" in dispositions:
+        return "finding"
+    if "suspicious" in dispositions:
+        return "suspicious"
+    return None
+
+
+def _candidate_close_detail(
+    file_path: str, queue_item_id: int, held: list[tuple[str, int]], required: str,
+    disposition: str,
+) -> str:
+    """Why a close that would bury a held candidate receipt is refused, and what to do."""
+    named = ", ".join(f"{held_disposition} receipt {result_id}" for held_disposition, result_id in held)
+    leads = [result_id for held_disposition, result_id in held if held_disposition == "suspicious"]
+    if required == "finding":
+        reason = (
+            "a finding receipt takes precedence, because its finding is decided with "
+            "`vigil assess finding verify`; close it as `finding`"
+            + (
+                ", and each suspicious receipt beside it stays awaiting a verdict "
+                "(blocking `verify-variant`) until a targeted `code-dispatch reanalyze` "
+                "settles it"
+                if leads
+                else ""
+            )
+        )
+    else:
+        supersede = " or ".join(f"supersedes={result_id}" for result_id in leads)
+        reason = (
+            "close it as `suspicious` so the file returns for a targeted re-review, or "
+            "settle the lead in this attempt first with a receipt that answers it on the "
+            "same anchors: a `finding` (record the finding) or a `clean` receipt citing "
+            f"the guard, recorded with {supersede}"
+        )
+    return (
+        f"candidate-bearing analysis result requires queue disposition='{required}'; "
+        f"cannot complete as '{disposition}': this attempt on {file_path} holds {named}. "
+        f"Settle it: {reason}. `vigil assess code-dispatch progress {queue_item_id}` "
+        "lists the attempt's receipts."
+    )
+
+
+def _open_lead_receipts_response(open_lead_receipts: list[int]) -> dict[str, Any]:
+    """The `done` response fields naming the suspicious receipts a finding close leaves open."""
+    if not open_lead_receipts:
+        return {}
+    return {
+        "open_lead_receipts": open_lead_receipts,
+        "open_lead_note": (
+            "the file closes as `finding`; each suspicious receipt listed in "
+            "open_lead_receipts stays awaiting a verdict and blocks `verify-variant` "
+            "until a targeted `code-dispatch reanalyze` (or a `--supersede` correction "
+            "that answers it) settles it"
         ),
     }
 
@@ -4697,7 +6276,9 @@ def complete_queue_items(
     notes: str = "",
     cwe_coverage: list[dict[str, Any]] | None = None,
     skip_reason: str = "",
+    dry_run: bool = False,
 ) -> dict[str, Any]:
+    """Close one claimed queue item; ``dry_run`` runs every check and writes nothing."""
     engagement = _engagement_or_404(engagement_id)
     if not item_ids:
         return {"updated": 0, "total": 0}
@@ -4733,25 +6314,27 @@ def complete_queue_items(
     placeholders = ",".join("?" for _ in item_ids)
     finding_associations: dict[str, dict[str, Any]] = {}
     with get_connection() as connection:
-        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
-        queue_row = next(iter(queue_rows.values()))
-        if str(queue_row["status"]) == "done":
-            return _completed_queue_retry(
+
+        def completed_retry(queue_row: dict[str, Any]) -> dict[str, Any]:
+            replay = _completed_queue_retry(
                 connection, engagement.id, queue_row, agent_name=agent_name,
                 lease_token=lease_token, disposition=disposition, notes=notes,
                 cwe_coverage=normalized_cwe_coverage, skip_reason=skip_reason,
             )
+            return {**replay, "dry_run": True} if dry_run else replay
+
+        queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
+        queue_row = next(iter(queue_rows.values()))
+        if str(queue_row["status"]) == "done":
+            return completed_retry(queue_row)
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
         _require_queue_lease(connection, queue_rows, agent_name=agent_name, lease_token=lease_token, action="complete")
         _require_queue_generation(connection, engagement.id, queue_rows, action="complete")
+        # Re-read under the lock: another close may have landed since the first read.
         queue_rows = _get_queue_rows(connection, engagement.id, set(item_ids))
         queue_row = next(iter(queue_rows.values()))
         if str(queue_row["status"]) == "done":
-            return _completed_queue_retry(
-                connection, engagement.id, queue_row, agent_name=agent_name,
-                lease_token=lease_token, disposition=disposition, notes=notes,
-                cwe_coverage=normalized_cwe_coverage, skip_reason=skip_reason,
-            )
+            return completed_retry(queue_row)
         _require_queue_status(queue_rows, expected_status="processing", action="complete")
         _require_queue_lease(connection, queue_rows, agent_name=agent_name,
                              lease_token=lease_token, action="complete")
@@ -4777,33 +6360,22 @@ def complete_queue_items(
             int(queue_row["file_id"]),
             *attempt_tokens,
         )
-        candidate_rows = connection.execute(
-            f"""
-            SELECT DISTINCT disposition
-            FROM code_analysis_results AS results
-            WHERE {attempt_receipt_where}
-              AND results.disposition IN ('finding', 'suspicious')
-            ORDER BY disposition
-            """,
-            attempt_receipt_params,
-        ).fetchall()
-        candidate_dispositions = [str(row["disposition"]) for row in candidate_rows]
-        if len(candidate_dispositions) > 1:
+        candidate_receipts = _attempt_candidate_receipts(connection, engagement.id, queue_row)
+        required_close = _required_candidate_close(candidate_receipts)
+        if required_close is not None and disposition != required_close:
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "conflicting candidate-bearing analysis result dispositions "
-                    f"exist for this lease: {', '.join(candidate_dispositions)}"
+                detail=_candidate_close_detail(
+                    str(file_row["file_path"]), int(queue_row["id"]),
+                    candidate_receipts, required_close, disposition,
                 ),
             )
-        if candidate_dispositions and disposition != candidate_dispositions[0]:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail=(
-                    "candidate-bearing analysis result requires queue disposition="
-                    f"'{candidate_dispositions[0]}'; cannot complete as '{disposition}'"
-                ),
-            )
+        # Suspicious receipts a `finding` close leaves awaiting a verdict.
+        open_lead_receipts = (
+            [result_id for held, result_id in candidate_receipts if held == "suspicious"]
+            if disposition == "finding"
+            else []
+        )
         if disposition == "skipped":
             _require_skippable_classification(file_row)
         if disposition == "finding":
@@ -4908,10 +6480,40 @@ def complete_queue_items(
         # Skipped items bypass the cwe-coverage completeness check — by
         # definition the analyst did not analyze the file. Other dispositions
         # still enforce the existing coverage rule.
+        unreviewed_families = None
         if disposition != "skipped":
-            _validate_completion_coverage(
-                file_row, normalized_cwe_coverage, queue_row=queue_row
+            unreviewed_families = _validate_completion_coverage(
+                file_row, normalized_cwe_coverage, queue_row=queue_row,
+                exclusions=_engagement_family_exclusions(connection, engagement.id),
             )
+        if unreviewed_families is not None:
+            normalized_cwe_coverage = _with_unreviewed_families(
+                normalized_cwe_coverage, unreviewed_families["families"]
+            )
+            cwe_coverage_text = _json_list_text(normalized_cwe_coverage)
+        if dry_run:
+            # Every check the close runs has passed; nothing is written.
+            depth_floor = (
+                _record_depth_floor_triggers(
+                    connection, engagement.id, file_row=file_row, queue_row=queue_row,
+                    cwe_coverage=normalized_cwe_coverage, write=False,
+                )
+                if disposition != "skipped"
+                else None
+            )
+            return {
+                "dry_run": True,
+                "updated": 0,
+                "would_update": len(item_ids),
+                "total": len(item_ids),
+                "disposition": disposition,
+                **({"finding_associations": list(finding_associations.values())}
+                   if finding_associations else {}),
+                **({"unreviewed_families_recorded": unreviewed_families}
+                   if unreviewed_families is not None else {}),
+                **({"depth_floor_triggers": depth_floor} if depth_floor is not None else {}),
+                **_open_lead_receipts_response(open_lead_receipts),
+            }
         next_status = "done"
         cursor = connection.execute(
             f"""
@@ -4937,6 +6539,14 @@ def complete_queue_items(
         for row in queue_rows.values():
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
+        depth_floor = (
+            _record_depth_floor_triggers(
+                connection, engagement.id, file_row=file_row, queue_row=queue_row,
+                cwe_coverage=normalized_cwe_coverage, write=True,
+            )
+            if disposition != "skipped"
+            else None
+        )
         total_functions = _safe_int(file_row.get("total_functions", 0))
         integrity = _compute_coverage_integrity(
             connection,
@@ -4952,6 +6562,10 @@ def complete_queue_items(
             "coverage_integrity": integrity,
             **({"finding_associations": list(finding_associations.values())}
                if finding_associations else {}),
+            **({"unreviewed_families_recorded": unreviewed_families}
+               if unreviewed_families is not None else {}),
+            **({"depth_floor_triggers": depth_floor} if depth_floor is not None else {}),
+            **_open_lead_receipts_response(open_lead_receipts),
         }
 
 
@@ -5330,6 +6944,8 @@ def adopt_queue_lease(
             _open_lead_bindings_by_file(
                 connection, engagement.id, {int(row["file_id"])}
             ),
+            open_lead_receipts_by_file(connection, engagement.id, {int(row["file_id"])}),
+            _engagement_family_exclusions(connection, engagement.id),
         )
         preserved_result_count = _scalar_row(
             connection,
@@ -5548,14 +7164,36 @@ def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
         recorded_families = sorted(merged.get(file_id, {}))
         slot_types = _json_decode(file_row.get("slot_types_json"), [])
         language = str(file_row.get("language", ""))
-        role = str(file_row.get("role", ""))
-        applicable = _applicable_families_for_file(slot_types, language=language, role=role)
+        context_tags = _json_decode(file_row.get("context_tags_json"), [])
+        unavailable = _json_decode(file_row.get("structural_unavailable_dimensions_json"), [])
+        applicable = _applicable_families_for_file(
+            slot_types, language=language, context_tags=context_tags, unavailable_dimensions=unavailable
+        )
         path_suggested = _path_suggested_families_for_file(
             slot_types,
             language=language,
-            role=role,
+            context_tags=context_tags,
             file_path=str(file_row.get("file_path", "")),
+            unavailable_dimensions=unavailable,
+            required=applicable,
         )
+        unread_code_suggested = _unread_code_suggested_families_for_file(
+            slot_types,
+            language=language,
+            context_tags=context_tags,
+            unavailable_dimensions=unavailable,
+            required=applicable,
+        )
+        optional = _optional_families_for_file(
+            slot_types, language=language, context_tags=context_tags,
+            unavailable_dimensions=unavailable,
+        )
+        exclusions = _engagement_family_exclusions(connection, engagement.id)
+        excluded = _excluded_family_entries([*applicable, *optional], exclusions)
+        applicable = _without_excluded(applicable, exclusions)
+        optional = _without_excluded(optional, exclusions)
+        path_suggested = _without_excluded(path_suggested, exclusions)
+        unread_code_suggested = _without_excluded(unread_code_suggested, exclusions)
         integrity = _compute_coverage_integrity(
             connection,
             engagement.id,
@@ -5586,10 +7224,13 @@ def queue_item_progress(engagement_id: int, item_id: int) -> dict[str, Any]:
         "adopted_leases": _adopted_lease_identities(queue_row.get("adopted_leases_json")),
         "applicable_vuln_classes": applicable,
         "path_suggested_vuln_classes": path_suggested,
+        "unread_code_suggested_vuln_classes": unread_code_suggested,
+        "optional_vuln_classes": optional,
+        "excluded_vuln_classes": excluded,
         "recorded_cwe_families": recorded_families,
-        "missing_cwe_families": [
-            family for family in applicable if family not in recorded_families
-        ],
+        "missing_cwe_families": _closeout_missing_families(
+            str(file_row.get("classification") or ""), applicable, set(recorded_families)
+        ),
         "receipts": receipts,
         # The rendered list is capped; the count is the true total, so a long
         # attempt still reports its real depth.
@@ -5698,6 +7339,260 @@ def retry_needs_context_queue_items(
             _sync_file_analysis_status(connection, engagement.id, int(row["file_id"]))
             _sync_trigger_status_for_file(connection, engagement.id, int(row["file_id"]))
     return {"retried": len(item_ids), "total": len(item_ids), "item_ids": sorted(item_ids)}
+
+
+def _withdraw_refusal(
+    connection, engagement_id: int, row: dict[str, Any] | None, item_id: int
+) -> tuple[str | None, int | None]:
+    """Why queue item *item_id* cannot be withdrawn, else its predecessor's id.
+
+    Only a directed attempt `requeue-triggers` inserted (`inserted_by`) that is
+    pending, has never been claimed (`first_claimed_at` survives a release or
+    reset), is the file's latest current attempt and follows a current
+    successful review can go: removing it leaves exactly the file state the
+    requeue found.
+    """
+    if row is None:
+        return f"no queue item {item_id} in this engagement's current repositories", None
+    row_status = str(row["status"])
+    if row_status == "processing":
+        return (
+            f"is processing under a lease held by {row.get('assigned_agent') or 'an agent'}; "
+            "a claimed attempt is the lane's to close or `release`"
+        ), None
+    if row_status != "pending":
+        return (
+            f"is {row_status}: a "
+            + ("completed review's verdict stands, and a later review replaces it"
+               if row_status == "done" else
+               "blocked attempt returns through `retry-error` or `retry-needs-context`")
+        ), None
+    if row.get("first_claimed_at") or row.get("consumed_at") or str(
+        row.get("assigned_agent") or ""
+    ) or str(row.get("lease_token") or "") or _json_decode(
+        row.get("adopted_leases_json"), []
+    ):
+        return (
+            "was claimed before and handed back (`reset-stale` or `release`); its lease "
+            "history is kept, so it is not withdrawn"
+        ), None
+    mode = str(row.get("queue_mode") or "initial")
+    if str(row.get("inserted_by") or "") != _REQUEUE_TRIGGERS_INSERTER:
+        return (
+            f"is a{'n' if mode[:1] in 'aeiou' else ''} {mode} attempt "
+            + (
+                "that `requeue-triggers` did not insert (trigger context merged into "
+                "an attempt that was already owed, or a row recorded before inserts "
+                "were attributed); "
+                if mode == "trigger"
+                else ""
+            )
+            + "withdraw takes back only a directed attempt `requeue-triggers` inserted, "
+            "and this attempt is still owed"
+        ), None
+    repo = connection.execute(
+        """
+        SELECT repos.active_generation
+        FROM code_files AS files
+        JOIN code_repos AS repos
+          ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+        WHERE files.engagement_id = ? AND files.id = ?
+        """,
+        (engagement_id, int(row["file_id"])),
+    ).fetchone()
+    if (
+        row.get("source_superseded_at") is not None
+        or repo is None
+        or int(row["repo_generation"]) != int(repo["active_generation"])
+    ):
+        return "belongs to a superseded source generation", None
+    attempts = [
+        dict(attempt)
+        for attempt in connection.execute(
+            """
+            SELECT id, status FROM code_analysis_queue
+            WHERE engagement_id = ? AND file_id = ? AND repo_generation = ?
+              AND source_superseded_at IS NULL
+            ORDER BY id
+            """,
+            (engagement_id, int(row["file_id"]), int(row["repo_generation"])),
+        ).fetchall()
+    ]
+    latest, _active, issue = _canonical_queue_attempt_state(attempts)
+    if issue is not None or latest is None or int(latest["id"]) != item_id:
+        return "is not the file's latest current attempt", None
+    recorded = connection.execute(
+        """
+        SELECT
+            (SELECT COUNT(*) FROM code_analysis_results
+             WHERE engagement_id = ? AND queue_item_id = ?)
+          + (SELECT COUNT(*) FROM code_analysis_triggers
+             WHERE engagement_id = ? AND source_queue_item_id = ?) AS total
+        """,
+        (engagement_id, item_id, engagement_id, item_id),
+    ).fetchone()
+    if int(recorded["total"] or 0):
+        # Deleting the row would cascade to what it recorded.
+        return "holds recorded results or raised triggers", None
+    if len(attempts) < 2:
+        return (
+            "is the file's first attempt: withdrawing it would leave the file unqueued; "
+            "settle its triggers with `resolve-triggers` once it closes"
+        ), None
+    predecessor_id = int(attempts[-2]["id"])
+    predecessor_stands = connection.execute(
+        f"""
+        SELECT 1 FROM code_analysis_queue AS queue
+        WHERE queue.engagement_id = ? AND queue.id = ?
+          AND queue.source_superseded_at IS NULL
+          AND ({_successful_terminal_review_row_sql("queue")})
+        """,
+        (engagement_id, predecessor_id),
+    ).fetchone()
+    if predecessor_stands is None:
+        return (
+            f"follows queue item {predecessor_id}, which is not a current successful "
+            "review: withdrawing it would leave the file without a standing verdict; "
+            "let it run, or settle its triggers with `resolve-triggers` once it closes"
+        ), None
+    return None, predecessor_id
+
+
+def _withdraw_directed_attempt(
+    connection,
+    engagement_id: int,
+    row: dict[str, Any],
+    predecessor_id: int,
+    *,
+    note_reason: str,
+) -> dict[str, Any]:
+    """Delete one unclaimed directed attempt `_withdraw_refusal` cleared.
+
+    Each trigger it carried as `queued` returns to `pending` with a note naming
+    the withdrawal; the returned record is what the audit event keeps of the
+    row the queue no longer holds.
+    """
+    item_id = int(row["id"])
+    file_id = int(row["file_id"])
+    returned = [
+        int(trigger["id"])
+        for trigger in connection.execute(
+            """
+            SELECT id FROM code_analysis_triggers
+            WHERE engagement_id = ? AND resolved_queue_item_id = ? AND status = ?
+            ORDER BY id
+            """,
+            (engagement_id, item_id, _TRIGGER_STATUS_QUEUED),
+        ).fetchall()
+    ]
+    note = f"Withdrawn from directed queue item {item_id} at {_now_iso()}: {note_reason}"
+    if returned:
+        connection.execute(
+            f"""
+            UPDATE code_analysis_triggers
+            SET status = ?, resolved_queue_item_id = NULL, resolution_note = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id IN ({','.join('?' for _ in returned)})
+            """,
+            (_TRIGGER_STATUS_PENDING, note, engagement_id, *returned),
+        )
+    cursor = connection.execute(
+        """
+        DELETE FROM code_analysis_queue
+        WHERE engagement_id = ? AND id = ? AND status = 'pending'
+          AND assigned_agent = '' AND lease_token = '' AND consumed_at IS NULL
+        """,
+        (engagement_id, item_id),
+    )
+    if cursor.rowcount != 1:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"queue item {item_id} changed state during withdraw; refetch and retry",
+        )
+    _sync_file_analysis_status(connection, engagement_id, file_id)
+    _sync_trigger_status_for_file(connection, engagement_id, file_id)
+    predecessor = connection.execute(
+        "SELECT status, disposition FROM code_analysis_queue WHERE engagement_id = ? AND id = ?",
+        (engagement_id, predecessor_id),
+    ).fetchone()
+    analysis_status = connection.execute(
+        "SELECT analysis_status FROM code_files WHERE engagement_id = ? AND id = ?",
+        (engagement_id, file_id),
+    ).fetchone()
+    return {
+        "queue_item_id": item_id,
+        "file_id": file_id,
+        "file_path": str(row["file_path"]),
+        "predecessor_queue_item_id": predecessor_id,
+        "predecessor_status": str(predecessor["status"]),
+        "predecessor_disposition": str(predecessor["disposition"] or ""),
+        "file_analysis_status": str(analysis_status["analysis_status"] or ""),
+        "returned_trigger_ids": returned,
+    }
+
+
+def withdraw_queue_items(
+    engagement_id: int, item_ids: list[int], reason: str
+) -> dict[str, Any]:
+    """Take back pending directed attempts no lease has ever claimed.
+
+    A directed attempt suspends the verdict of the review before it and binds
+    the triggers it carries as `queued`. Only a row `requeue-triggers` inserted
+    (`inserted_by`) and no lease ever claimed (`first_claimed_at`) is taken
+    back, and only when the attempt before it is a current successful review:
+    trigger context merged into an attempt that was already owed (a
+    metadata-refresh re-review, an initial review) leaves that attempt owed.
+    Withdrawing one deletes the unclaimed row: it recorded nothing, and the
+    audit event names it with the reason. The
+    earlier review is then the file's latest attempt again, so its verdict and
+    coverage stand as before the requeue, and each trigger the row carried is
+    `pending` again with a note naming the withdrawal. Each id gets one outcome;
+    a refused id names why and does not stop the others.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    note_reason = reason.strip()
+    if not note_reason:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST, detail="reason is required"
+        )
+    item_ids = list(dict.fromkeys(item_ids))
+    withdrawn: list[dict[str, Any]] = []
+    refused: list[dict[str, Any]] = []
+    with get_connection() as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        placeholders = ",".join("?" for _ in item_ids)
+        rows = {
+            int(row["id"]): dict(row)
+            for row in connection.execute(
+                f"""
+                SELECT queue.*, files.file_path
+                FROM code_analysis_queue AS queue
+                JOIN code_files AS files
+                  ON files.id = queue.file_id AND files.engagement_id = queue.engagement_id
+                WHERE queue.engagement_id = ? AND queue.id IN ({placeholders})
+                """,
+                (engagement.id, *item_ids),
+            ).fetchall()
+        }
+        for item_id in item_ids:
+            row = rows.get(item_id)
+            refusal, predecessor_id = _withdraw_refusal(connection, engagement.id, row, item_id)
+            if refusal is not None or row is None or predecessor_id is None:
+                refused.append({
+                    "queue_item_id": item_id,
+                    "file_path": None if row is None else str(row["file_path"]),
+                    "reason": f"queue item {item_id} {refusal}" if row is not None else str(refusal),
+                })
+                continue
+            withdrawn.append(_withdraw_directed_attempt(
+                connection, engagement.id, row, predecessor_id, note_reason=note_reason,
+            ))
+    return {
+        "withdrawn": withdrawn,
+        "refused": refused,
+        "total": len(item_ids),
+        "reason": note_reason,
+    }
 
 
 # =========================================================================
@@ -5874,6 +7769,8 @@ def create_analysis_result(
             )
         file_row = _get_file_rows(connection, engagement.id, {queue_file_id})[queue_file_id]
         normalized_cross_file_triggers = _normalize_cross_file_triggers(result.get("cross_file_triggers"))
+        receipt_coverage, receipt_confidence = _normalized_receipt_input(result)
+        _refuse_unexplained_not_applicable(file_row, receipt_coverage)
         agent_name = str(result.get("agent_name", ""))
         lease_token = str(result.get("lease_token", ""))
 
@@ -5902,11 +7799,25 @@ def create_analysis_result(
             source_file_row=file_row,
             cross_file_triggers=normalized_cross_file_triggers,
         )
+        row_disposition = disposition
         if correction_mode:
+            # The completed row carries the verdict its remaining receipts
+            # require, so a correction that replaces one receipt leaves a held
+            # finding (or suspicious lead) beside it in charge of the row.
+            row_disposition = _required_candidate_close(
+                [
+                    *_attempt_candidate_receipts(
+                        connection, engagement.id, queue_row,
+                        exclude_result_id=int(supersedes),
+                    ),
+                    *([(disposition, 0)] if disposition in {"finding", "suspicious"} else []),
+                ]
+            ) or disposition
             _require_correctable_completion(
                 queue_row,
                 file_row,
                 disposition=disposition,
+                row_disposition=row_disposition,
                 result=result,
             )
         receipt_kind = str(result.get("receipt_kind") or "file")
@@ -6222,6 +8133,21 @@ def create_analysis_result(
                         "this attempt's lease/adoption or this completed queue item's lease"
                     ),
                 )
+            if str(superseded_result["disposition"]) == "finding" and disposition != "finding":
+                # Replacing a finding receipt with anything else would detach the
+                # file from a finding whose verdict nobody decided.
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=(
+                        f"supersedes={int(supersedes)} is a finding receipt for "
+                        f"{superseded_result['finding_slug'] or 'its finding'}; it stands, "
+                        "because its finding is decided with `vigil assess finding verify` "
+                        "(a false positive is killed there), not by replacing the receipt. "
+                        f"Record this {disposition} receipt without supersedes: a separate "
+                        "hypothesis sits beside the finding receipt, and the file closes as "
+                        "`finding`"
+                    ),
+                )
 
         try:
             cursor = connection.execute(
@@ -6251,13 +8177,13 @@ def create_analysis_result(
                     result.get("evidence", ""),
                     result.get("evidence_ref", ""),
                     disposition,
-                    result.get("confidence", "medium"),
+                    receipt_confidence,
                     result.get("finding_slug", ""),
                     result.get("cwe_id", ""),
                     result.get("slot_type", ""),
                     result.get("notes", ""),
                     _json_text(result.get("audit_metadata")),
-                    _json_list_text(result.get("cwe_coverage")),
+                    _json_list_text(receipt_coverage),
                     _json_list_text(normalized_cross_file_triggers),
                     lease_token,
                     int(queue_row.get("repo_generation", 0) or 0),
@@ -6288,6 +8214,7 @@ def create_analysis_result(
             )
         row = _analysis_result_row(connection, int(cursor.lastrowid))
         assert row is not None
+        unreviewed_families = None
         if correction_mode:
             # The completed queue row is the operator-facing decision projection.
             # Keep it aligned with the corrected receipt while preserving its
@@ -6295,10 +8222,15 @@ def create_analysis_result(
             corrected_coverage = result.get("cwe_coverage")
             if corrected_coverage:
                 corrected_coverage = _normalize_cwe_coverage(corrected_coverage)
-                if disposition != "skipped":
-                    _validate_completion_coverage(
-                        file_row, corrected_coverage, queue_row=queue_row
+                if row_disposition != "skipped":
+                    unreviewed_families = _validate_completion_coverage(
+                        file_row, corrected_coverage, queue_row=queue_row,
+                        exclusions=_engagement_family_exclusions(connection, engagement.id),
                     )
+                    if unreviewed_families is not None:
+                        corrected_coverage = _with_unreviewed_families(
+                            corrected_coverage, unreviewed_families["families"]
+                        )
             else:
                 corrected_coverage = _json_decode(queue_row.get("cwe_coverage_json"), [])
             queue_update = connection.execute(
@@ -6310,13 +8242,13 @@ def create_analysis_result(
                   AND assigned_agent = ? AND lease_token = ?
                 """,
                 (
-                    disposition,
+                    row_disposition,
                     _json_list_text(corrected_coverage),
                     # A corrected verdict that is no longer a skip must not keep
                     # the skip's reason: `skip_reason` is what the accounting
                     # query reads to admit a skip, and a `finding` row carrying
                     # `vendored-dependency` contradicts its own receipt.
-                    str(queue_row.get("skip_reason") or "") if disposition == "skipped" else "",
+                    str(queue_row.get("skip_reason") or "") if row_disposition == "skipped" else "",
                     engagement.id,
                     int(queue_item_id),
                     agent_name,
@@ -6344,7 +8276,24 @@ def create_analysis_result(
             cross_file_triggers=normalized_cross_file_triggers,
         )
         _sync_file_analysis_status(connection, engagement.id, int(file_row["id"]))
+        depth_floor = None
+        if correction_mode and row_disposition != "skipped":
+            # The corrected coverage is the done row's record now, so the
+            # families it leaves below the floor are re-judged against it.
+            depth_floor = _record_depth_floor_triggers(
+                connection, engagement.id, file_row=file_row,
+                queue_row={**queue_row, "disposition": row_disposition},
+                cwe_coverage=corrected_coverage, write=True,
+            )
         hydrated = _hydrate_code_analysis_result(row)
+        if depth_floor is not None:
+            hydrated["depth_floor_triggers"] = depth_floor
+        if correction_mode:
+            # The completed row's verdict after this correction, which a held
+            # finding or suspicious receipt may keep apart from this receipt's.
+            hydrated["queue_disposition"] = row_disposition
+        if unreviewed_families is not None:
+            hydrated["unreviewed_families_recorded"] = unreviewed_families
         if finding_association is not None:
             hydrated["finding_association"] = finding_association
         if run_candidate is not None:
@@ -7448,7 +9397,7 @@ def record_threat_model(
         ).fetchone()
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Code repo not found")
-    return _hydrate_code_repo(row)
+    return _hydrate_code_repo(row, engagement_root=engagement.engagement_root)
 
 
 def get_threat_model(
@@ -7705,7 +9654,14 @@ def code_coverage_summary(
     engagement_id: int,
     *,
     repo_id: int | None = None,
+    effort_gap_rows: bool = False,
 ) -> dict[str, Any]:
+    """The coverage obligation view and its gate.
+
+    ``gate.effort_gaps`` groups the family shortfalls tier x family
+    (`_effort_gap_summary`); *effort_gap_rows* adds every per-file row, which
+    only the CWE matrix (`code_coverage_cwe_detail`) asks for.
+    """
     engagement = _engagement_or_404(engagement_id)
 
     # Coverage is the obligation view, so it counts only files an analysis
@@ -7787,12 +9743,18 @@ def code_coverage_summary(
             }
 
         # -- By analysis status --
+        # Each bucket also counts its accounted skips with the by-path
+        # predicate, so the `classified` bucket's skip share is read from the
+        # same files the bucket holds.
         status_rows = connection.execute(
             f"""
-            SELECT current_analysis_status AS analysis_status, COUNT(*) AS total
+            SELECT current_analysis_status AS analysis_status, COUNT(*) AS total,
+                   SUM(accounted_skip) AS accounted_skips
             FROM (
                 SELECT files.id,
-                       {_current_analysis_status_sql()} AS current_analysis_status
+                       {_current_analysis_status_sql()} AS current_analysis_status,
+                       (({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
+                        AND NOT ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL})) AS accounted_skip
                 FROM code_files AS files
                 WHERE files.engagement_id = ?{repo_clause}
             ) AS current_files
@@ -7801,8 +9763,11 @@ def code_coverage_summary(
             (engagement.id, *repo_params),
         ).fetchall()
         by_status: dict[str, int] = {}
+        classified_accounted_skips = 0
         for row in status_rows:
             by_status[row["analysis_status"]] = int(row["total"])
+            if row["analysis_status"] == "classified":
+                classified_accounted_skips = int(row["accounted_skips"] or 0)
 
         # -- Findings summary (from assessment_findings where canonical_location starts with 'file:') --
         finding_rows = connection.execute(
@@ -7966,9 +9931,16 @@ def code_coverage_summary(
             connection, engagement.id, repo_id=repo_id
         )
         trigger_repo_clause = "" if repo_id is None else " AND sf.repo_id = ?"
+        ruled_out_json = json.dumps(sorted(
+            _engagement_family_exclusions(connection, engagement.id)["families"]
+        ))
+        # A depth_floor trigger on a family an engagement ruling excludes asks
+        # for depth nobody owes: counted apart, never as Phase 2B work.
         trigger_rows = connection.execute(
             f"""
-            SELECT t.status, COUNT(*) AS total
+            SELECT t.status, t.origin, COUNT(*) AS total,
+                   (t.origin = '{TRIGGER_ORIGIN_DEPTH_FLOOR}'
+                    AND t.vuln_class IN (SELECT value FROM json_each(?))) AS ruled_out
             FROM code_analysis_triggers AS t
             JOIN code_files AS sf
               ON sf.id = t.source_file_id
@@ -7981,13 +9953,55 @@ def code_coverage_summary(
             WHERE t.engagement_id = ?{trigger_repo_clause}
               AND t.repo_generation = repos.active_generation
               AND t.source_superseded_at IS NULL
-            GROUP BY t.status
+            GROUP BY t.status, t.origin, ruled_out
             """,
-            (engagement.id, *repo_params),
+            (ruled_out_json, engagement.id, *repo_params),
         ).fetchall()
         trigger_counts: dict[str, int] = {}
+        depth_floor_pending = 0
+        depth_floor_ruled_out = 0
         for row in trigger_rows:
-            trigger_counts[str(row["status"])] = int(row["total"])
+            if row["ruled_out"] and str(row["status"]) in {
+                _TRIGGER_STATUS_PENDING, _TRIGGER_STATUS_QUEUED,
+            }:
+                depth_floor_ruled_out += int(row["total"])
+                continue
+            trigger_counts[str(row["status"])] = (
+                trigger_counts.get(str(row["status"]), 0) + int(row["total"])
+            )
+            if (
+                str(row["origin"]) == TRIGGER_ORIGIN_DEPTH_FLOOR
+                and str(row["status"]) == _TRIGGER_STATUS_PENDING
+            ):
+                depth_floor_pending += int(row["total"])
+        # The depth_floor triggers a tag or tier change stopped owing
+        # (`_apply_obligation_change`): superseded, so no count above holds
+        # them, and readable with `list-triggers --include-superseded`.
+        depth_floor_retired = int(connection.execute(
+            f"""
+            SELECT COUNT(*) AS total
+            FROM code_analysis_triggers AS t
+            JOIN code_files AS sf
+              ON sf.id = t.source_file_id
+             AND sf.engagement_id = t.engagement_id
+            JOIN code_repos AS repos
+              ON repos.id = sf.repo_id
+             AND repos.engagement_id = sf.engagement_id
+             AND repos.active_generation > 0
+             AND {_analysis_repo_sql("repos")}
+            WHERE t.engagement_id = ?{trigger_repo_clause}
+              AND t.origin = ?
+              AND t.repo_generation = repos.active_generation
+              AND t.source_superseded_at IS NOT NULL
+              AND t.source_supersession_reason IN (
+                  {','.join('?' for _ in _RECLASSIFICATION_RETIREMENT_REASONS)}
+              )
+            """,
+            (
+                engagement.id, *repo_params, TRIGGER_ORIGIN_DEPTH_FLOOR,
+                *_RECLASSIFICATION_RETIREMENT_REASONS,
+            ),
+        ).fetchone()["total"] or 0)
         skip_repo_clause = "" if repo_id is None else " AND files.repo_id = ?"
         skip_reason_rows = connection.execute(
             f"""
@@ -8050,28 +10064,33 @@ def code_coverage_summary(
         gate_reasons.append(
             f"Files with superseded active queue attempts: {invalid_active_history}"
         )
-    if trigger_counts.get(_TRIGGER_STATUS_PENDING, 0) > 0:
+    cross_file_pending = trigger_counts.get(_TRIGGER_STATUS_PENDING, 0) - depth_floor_pending
+    if cross_file_pending > 0:
+        gate_reasons.append(f"Unprocessed cross-file triggers: {cross_file_pending}")
+    if depth_floor_pending > 0:
         gate_reasons.append(
-            f"Unprocessed cross-file triggers: {trigger_counts[_TRIGGER_STATUS_PENDING]}"
+            f"Unprocessed depth-floor triggers: {depth_floor_pending} critical/high "
+            "file families closed below their effort floor (Phase 2B: "
+            "`code-dispatch list-triggers --origin depth_floor --summary` counts them by "
+            "family, and `--vuln-class <family>` or `--path-prefix <path>` lists one "
+            "group's rows; `requeue-triggers` sends a "
+            "directed pass, `resolve-triggers` records why another pass would not move one, "
+            "e.g. `reviewed_at_sufficient_depth` with the reason)"
         )
 
     # -- Effort-threshold harness --
+    # Self-attested effort only points (see `EFFORT_THRESHOLDS`). Missing
+    # classification metadata on a critical/high file is the architect's
+    # durable record being incomplete, not a self-attested number, so that gap
+    # alone also refuses the gate.
     effort_warnings: list[str] = []
+    # The family shortfalls among `effort_warnings`, one structured row each,
+    # so a reader can group them without parsing the message text.
+    effort_gaps: list[dict[str, Any]] = []
 
-    def record_effort_gap(classification: str, message: str) -> None:
-        """Report one measured effort gap under its tier's gating class.
-
-        Every gap reaches `effort_warnings` whatever the tier, because that is
-        the instrument the operator reads (readiness `quality_gate.warnings`,
-        the CWE matrix, the review-quality panel). Only a tier in
-        `_BLOCKING_EFFORT_TIERS` also becomes a reason the gate refuses on, so
-        the blocking scope has exactly one owner and a new call site here cannot
-        quietly widen it.
-        """
-
+    def record_metadata_gap(message: str) -> None:
         effort_warnings.append(message)
-        if classification in _BLOCKING_EFFORT_TIERS:
-            gate_reasons.append(message)
+        gate_reasons.append(message)
 
     # W3b structural-verification accumulators (populated alongside the effort
     # harness so the uncovered-high-risk-file sub-gate reuses the same merge pass).
@@ -8079,10 +10098,12 @@ def code_coverage_summary(
     uncovered_high_risk_files: list[dict[str, Any]] = []
     with get_connection() as connection:
         successful_queue_review = _successful_terminal_review_row_sql("q")
+        family_exclusions = _engagement_family_exclusions(connection, engagement.id)
         effort_file_rows = connection.execute(
             f"""
             SELECT files.id AS file_id, files.file_path, files.classification,
-                   files.analysis_status, files.slot_types_json, files.language, files.role,
+                   files.analysis_status, files.slot_types_json, files.language,
+                   files.context_tags_json, files.structural_unavailable_dimensions_json,
                    ({_CURRENT_SUCCESSFUL_REVIEW_EXISTS_SQL}) AS review_completed,
                    q.cwe_coverage_json
             FROM code_files AS files
@@ -8107,6 +10128,8 @@ def code_coverage_summary(
         ).fetchall()
         file_efforts: dict[int, dict[str, float]] = {}
         file_not_applicable: dict[int, set[str]] = {}
+        file_closeout_only: dict[int, set[str]] = {}
+        file_closeout_not_applicable: dict[int, frozenset[str]] = {}
         file_meta: dict[int, dict[str, Any]] = {}
         for erow in effort_file_rows:
             fid = int(erow["file_id"])
@@ -8119,7 +10142,10 @@ def code_coverage_summary(
                     "has_coverage_record": False,
                     "slot_types": _json_decode(erow["slot_types_json"], []),
                     "language": erow["language"] or "",
-                    "role": erow["role"] or "",
+                    "context_tags": _json_decode(erow["context_tags_json"], []),
+                    "unavailable_dimensions": _json_decode(
+                        erow["structural_unavailable_dimensions_json"], []
+                    ),
                 }
             if erow["cwe_coverage_json"] is not None:
                 file_meta[fid]["has_coverage_record"] = True
@@ -8128,8 +10154,16 @@ def code_coverage_summary(
                 file_efforts[fid] = {}
             if fid not in file_not_applicable:
                 file_not_applicable[fid] = set()
+            # The current closeout's answer outranks a receipt's score.
+            file_closeout_not_applicable[fid] = (
+                file_closeout_not_applicable.get(fid, frozenset())
+                | _closeout_not_applicable_families(cwe_cov)
+            )
             for entry in cwe_cov:
-                _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
+                _merge_file_effort_entry(
+                    file_efforts, file_not_applicable, file_closeout_only, fid, entry,
+                    closeout_not_applicable=file_closeout_not_applicable[fid],
+                )
 
         if file_meta:
             file_ids_json = json.dumps(list(file_meta))
@@ -8145,7 +10179,12 @@ def code_coverage_summary(
                 if fid not in file_not_applicable:
                     file_not_applicable[fid] = set()
                 for entry in cwe_cov:
-                    _merge_file_effort_entry(file_efforts, file_not_applicable, fid, entry)
+                    _merge_file_effort_entry(
+                        file_efforts, file_not_applicable, file_closeout_only, fid, entry,
+                        closeout_not_applicable=file_closeout_not_applicable.get(
+                            fid, frozenset()
+                        ),
+                    )
 
         for fid, meta in file_meta.items():
             classification = str(meta["classification"])
@@ -8156,29 +10195,32 @@ def code_coverage_summary(
             # slot types on those tiers, so flagging a medium file for not
             # carrying them would make the harness noise on every medium file it
             # measures. A medium file still has applicable families from its
-            # language and role baseline, and those are still measured.
+            # language baseline and context tags, and those are still measured.
             metadata_is_required = classification in {"critical", "high"}
             if not slot_types:
                 if metadata_is_required:
-                    record_effort_gap(
-                        classification,
+                    record_metadata_gap(
                         f"{classification.capitalize()} file {meta['file_path']}: "
                         "missing slot_types",
                     )
                     continue
 
-            applicable = _applicable_families_for_file(
+            unruled = _applicable_families_for_file(
                 slot_types,
                 language=meta.get("language", ""),
-                role=meta.get("role", ""),
+                context_tags=meta["context_tags"],
+                unavailable_dimensions=meta["unavailable_dimensions"],
             )
-            if not applicable:
+            if not unruled:
                 if metadata_is_required:
-                    record_effort_gap(
-                        classification,
+                    record_metadata_gap(
                         f"{classification.capitalize()} file {meta['file_path']}: "
                         "no applicable vulnerability families",
                     )
+                continue
+            # A family an engagement ruling excludes is never measured.
+            applicable = _without_excluded(unruled, family_exclusions)
+            if not applicable:
                 continue
 
             # Remember the applicable family set for the W3b structural sub-gate
@@ -8192,8 +10234,7 @@ def code_coverage_summary(
                     continue
                 if not meta["review_completed"] and not meta["has_coverage_record"]:
                     continue
-                record_effort_gap(
-                    classification,
+                effort_warnings.append(
                     f"{classification.capitalize()} file {meta['file_path']}: "
                     "analyzed but missing CWE coverage data",
                 )
@@ -8203,13 +10244,26 @@ def code_coverage_summary(
                 if family in not_applicable:
                     continue
                 if efforts.get(family, 0) < threshold:
-                    record_effort_gap(
-                        classification,
+                    message = (
                         f"{classification.capitalize()} file {meta['file_path']}: "
-                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}",
+                        f"family '{family}' effort {efforts.get(family, 0):.0f} < {threshold}"
                     )
+                    effort_warnings.append(message)
+                    effort_gaps.append({
+                        "file_id": fid,
+                        "file_path": meta["file_path"],
+                        "classification": classification,
+                        "family": family,
+                        "effort": efforts.get(family, 0),
+                        "threshold": threshold,
+                        "message": message,
+                    })
 
     gate_passed = len(gate_reasons) == 0
+    gap_summary = _effort_gap_summary(effort_gaps, include_rows=effort_gap_rows)
+    untriggered_depth_shortfalls = _untriggered_depth_shortfalls(
+        engagement.id, effort_gaps, include_rows=effort_gap_rows
+    )
 
     # -- Coverage integrity cross-reference (advisory, not blocking) --
     integrity_warnings: list[dict[str, Any]] = []
@@ -8273,7 +10327,7 @@ def code_coverage_summary(
             # (analyzed/done) and whose structural index found functions, but
             # which shows ZERO structurally bound callable coverage, has no linked finding, and no
             # accepted-gap resolution (all applicable families marked
-            # not_applicable), is a coverage hole the effort gate alone misses
+            # not_applicable), is a coverage hole the advisory effort harness alone misses
             # — the broad-18 near-miss where high files were closed with
             # functions_analyzed=0. Surfaced separately from gate.passed so the
             # phase gate can block on it while the effort dimension stays WARN.
@@ -8328,6 +10382,72 @@ def code_coverage_summary(
                     "total_functions": total_funcs,
                 })
 
+    # -- Depth advisories (a pointer; never a gate reason) --
+    # A critical/high file whose passes produced signal -- a `finding` or
+    # `suspicious` conclusion, or a current finding located in it -- but were
+    # all wide. Phase 2 exits once every lane that returned signal has had a
+    # deep pass; this names where that is still to go.
+    depth_advisories: list[dict[str, Any]] = []
+    with get_connection() as connection:
+        wide_rows = connection.execute(
+            f"""
+            SELECT files.id AS file_id, files.repo_id, files.file_path, files.classification,
+                   review_depth.review_passes, review_depth.review_dispatches,
+                   review_depth.signal_passes
+            FROM code_files AS files
+            JOIN ({_review_depth_sql()}) AS review_depth
+              ON review_depth.file_id = files.id
+            WHERE files.engagement_id = ?
+              AND files.classification IN ('critical', 'high')
+              AND review_depth.deep_passes = 0{repo_clause}
+            ORDER BY files.classification = 'high', files.file_path, files.id
+            """,
+            (*review_depth_params(engagement.id), engagement.id, *repo_params),
+        ).fetchall()
+    for row in wide_rows:
+        file_path = str(row["file_path"])
+        prefix = f"file:{file_path}"
+        linked_findings = sum(
+            1
+            for finding in current_findings
+            if (
+                (location := str(finding["canonical_location"] or "").strip()) == prefix
+                or location.startswith(prefix + ":")
+            )
+            and _finding_snapshot_repo_id(finding) in (None, int(row["repo_id"]))
+        )
+        signal_passes = int(row["signal_passes"] or 0)
+        if not signal_passes and not linked_findings:
+            continue
+        depth_advisories.append({
+            "file_id": int(row["file_id"]),
+            "file_path": file_path,
+            "classification": str(row["classification"]),
+            "passes": int(row["review_passes"] or 0),
+            "dispatches": int(row["review_dispatches"] or 0),
+            "signal_passes": signal_passes,
+            "findings": linked_findings,
+        })
+
+    context_tags_unrecorded = _context_tags_unrecorded(
+        engagement.id, repo_id=repo_id, repo_clause=repo_clause, repo_params=repo_params
+    )
+    optional_families, client_bundle_conflicts = _client_bundle_advisories(
+        engagement.id, repo_id=repo_id, repo_clause=repo_clause, repo_params=repo_params
+    )
+    with get_connection() as connection:
+        family_exclusions = _family_exclusions_summary(
+            _engagement_family_exclusions(connection, engagement.id),
+            depth_floor_ruled_out=depth_floor_ruled_out,
+        )
+
+    if effort_gap_rows:
+        reported_effort_warnings = effort_warnings
+        gap_summary["warnings"] = [str(gap["message"]) for gap in effort_gaps]
+    else:
+        reported_effort_warnings, gap_summary["warnings"] = _grouped_effort_warnings(
+            effort_warnings, effort_gaps, gap_summary
+        )
     return {
         "total_files": total_files,
         # Named so a shrunken denominator is never a silent one: these repos are
@@ -8354,23 +10474,401 @@ def code_coverage_summary(
             "invalid_active_history": invalid_active_history,
             "unprocessed_triggers": trigger_counts.get(_TRIGGER_STATUS_PENDING, 0),
             "skip_reasons": skip_reasons,
+            # The files in the `classified` bucket whose current attempt is an
+            # accounted skip: closed `skipped` with a reason, owing no queue row.
+            "classified_accounted_skips": classified_accounted_skips,
         },
         "trigger_summary": {
             "pending": trigger_counts.get(_TRIGGER_STATUS_PENDING, 0),
+            # The pending triggers above a critical/high closeout raised for a
+            # family it left below the floor (`_record_depth_floor_triggers`).
+            "depth_floor_pending": depth_floor_pending,
+            # Pending or queued depth_floor triggers on a family an engagement
+            # ruling excludes (`family_exclusions`): owed by nobody.
+            "depth_floor_ruled_out": depth_floor_ruled_out,
+            # Depth_floor triggers a context-tag or tier change retired
+            # (`family_no_longer_required`, `tier_floor_lowered`): no longer
+            # owed, kept readable with `list-triggers --include-superseded`.
+            "depth_floor_retired": depth_floor_retired,
             "queued": trigger_counts.get(_TRIGGER_STATUS_QUEUED, 0),
             "resolved": trigger_counts.get(_TRIGGER_STATUS_RESOLVED, 0),
             "external_context_unavailable": trigger_counts.get(_TRIGGER_STATUS_EXTERNAL_CONTEXT, 0),
             "source_equivalent_analyzed": trigger_counts.get(_TRIGGER_STATUS_SOURCE_EQUIVALENT, 0),
             "not_applicable": trigger_counts.get(_TRIGGER_STATUS_NOT_APPLICABLE, 0),
+            "reviewed_at_sufficient_depth": trigger_counts.get(
+                _TRIGGER_STATUS_DEPTH_SUFFICIENT, 0
+            ),
         },
         "gate": {
             "passed": gate_passed,
             "reasons": gate_reasons,
-            "effort_warnings": effort_warnings,
+            "effort_warnings": reported_effort_warnings,
+            "effort_gaps": gap_summary,
             "coverage_integrity": integrity_warnings,
             "uncovered_high_risk_files": uncovered_high_risk_files,
+            "depth_advisories": depth_advisories,
+            "context_tags_unrecorded": context_tags_unrecorded,
+            "optional_families": optional_families,
+            "client_bundle_conflicts": client_bundle_conflicts,
+            "family_exclusions": family_exclusions,
+            "untriggered_depth_shortfalls": untriggered_depth_shortfalls,
         },
     }
+
+
+# Sample paths the context-tags pointer names; `full_list` reads the rest, in
+# pages of the files read's largest limit.
+CONTEXT_TAGS_SAMPLE_PATHS = 10
+CONTEXT_TAGS_FULL_LIST_PAGE = 10000
+
+
+def _context_tags_unrecorded_sql(files_alias: str) -> str:
+    """The files `context_tags_unrecorded` counts and its `full_list` read lists.
+
+    A classified (not skip) file on an analysis repository whose
+    classification recorded no context tags: coverage is the obligation view,
+    so a reference repository's files are never named. One predicate, so the
+    pointer's count and the read it names cannot disagree.
+    """
+    return (
+        f"{files_alias}.context_tags_json = '' "
+        f"AND {files_alias}.classification IN ('critical', 'high', 'medium', 'low') "
+        f"AND {_analysis_repo_files_sql(files_alias)}"
+    )
+
+
+# The languages a browser runs or renders. A `client-bundle` file in any other
+# language, or one whose classification also records structure only server
+# code holds, is named by `client_bundle_conflicts`: structured signals that
+# the tag, which makes the server-only families optional, may be wrong. Never
+# words in the role or the path.
+CLIENT_BUNDLE_BROWSER_LANGUAGES = ("javascript", "typescript", "html", "css")
+# The tags whose definition is server work and whose families the bundle tag
+# makes optional (`CONTEXT_TAG_VULN_CLASSES`): a provider's delivery is
+# received by a server, a transfer of value settles on shared server state,
+# and only the server that checks a one-time secret can limit guesses at it.
+# `response-data` is not one: a bundle that queries its data store directly
+# selects records itself (`CLIENT_BUNDLE_FAMILIES_KEPT_BY_TAG`).
+CLIENT_BUNDLE_SERVER_TAGS = ("provider-callback", "value-transfer", "one-time-secret")
+# The slot types only a process with an operating system behind it receives:
+# a browser builds no command line.
+CLIENT_BUNDLE_SERVER_SLOT_TYPES = ("CMD-ARGUMENT",)
+CLIENT_BUNDLE_SAMPLE_PATHS = 10
+
+
+def _has_context_tag_sql(files_alias: str, tag: str) -> str:
+    """True when the file's recorded context tags include *tag* (a vocabulary literal)."""
+    return (
+        "EXISTS (SELECT 1 FROM json_each(CASE WHEN "
+        f"{files_alias}.context_tags_json = '' THEN '[]' ELSE {files_alias}.context_tags_json END)"
+        f" AS recorded_tags WHERE recorded_tags.value = '{tag}')"
+    )
+
+
+def _client_bundle_conflict_sql(files_alias: str) -> str:
+    """The `client-bundle` files whose language, other tags or slot types say server code.
+
+    One predicate, so `client_bundle_conflicts` and the files read its
+    `full_list` names cannot disagree.
+    """
+    languages = ", ".join(f"'{language}'" for language in CLIENT_BUNDLE_BROWSER_LANGUAGES)
+    server_tags = " OR ".join(
+        _has_context_tag_sql(files_alias, tag) for tag in CLIENT_BUNDLE_SERVER_TAGS
+    )
+    server_slots = ", ".join(f"'{slot}'" for slot in CLIENT_BUNDLE_SERVER_SLOT_TYPES)
+    return (
+        f"{_has_context_tag_sql(files_alias, CLIENT_BUNDLE_CONTEXT_TAG)} "
+        f"AND {files_alias}.classification IN ('critical', 'high', 'medium', 'low') "
+        f"AND {_analysis_repo_files_sql(files_alias)} "
+        f"AND (lower(trim({files_alias}.language)) NOT IN ({languages}) OR {server_tags} "
+        "OR EXISTS (SELECT 1 FROM json_each(CASE WHEN json_valid("
+        f"{files_alias}.slot_types_json) THEN {files_alias}.slot_types_json ELSE '[]' END) "
+        f"AS recorded_slots WHERE recorded_slots.value IN ({server_slots})))"
+    )
+
+
+def _client_bundle_advisories(
+    engagement_id: int,
+    *,
+    repo_id: int | None,
+    repo_clause: str,
+    repo_params: tuple[Any, ...],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """``(optional_families, client_bundle_conflicts)`` for coverage and readiness.
+
+    ``optional_families`` counts the `client-bundle` files and the server-only
+    families their tag makes optional, so the families nobody measures are
+    named rather than silently absent. ``client_bundle_conflicts`` names each
+    tagged file whose language, other tags or slot types imply server code. Both are
+    pointers, never gate reasons.
+    """
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT files.file_path, files.classification, files.language,
+                   files.slot_types_json, files.context_tags_json,
+                   files.structural_unavailable_dimensions_json,
+                   ({_client_bundle_conflict_sql("files")}) AS conflicting
+            FROM code_files AS files
+            WHERE files.engagement_id = ?
+              AND {_has_context_tag_sql("files", CLIENT_BUNDLE_CONTEXT_TAG)}
+              AND files.classification IN ('critical', 'high', 'medium', 'low')
+              AND {_analysis_repo_files_sql("files")}{repo_clause}
+            ORDER BY CASE files.classification
+                WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3
+            END, files.file_path, files.id
+            """,
+            (engagement_id, *repo_params),
+        ).fetchall()
+    if not rows:
+        return None, None
+    by_family: dict[str, int] = {}
+    tagged_with_optional: list[str] = []
+    conflicts: list[dict[str, Any]] = []
+    for row in rows:
+        tags = _json_decode(row["context_tags_json"], [])
+        optional = _optional_families_for_file(
+            _json_decode(row["slot_types_json"], []),
+            language=str(row["language"] or ""),
+            context_tags=tags,
+            unavailable_dimensions=_json_decode(
+                row["structural_unavailable_dimensions_json"], []
+            ),
+        )
+        if optional:
+            tagged_with_optional.append(str(row["file_path"]))
+        for family in optional:
+            by_family[family] = by_family.get(family, 0) + 1
+        if row["conflicting"]:
+            language = str(row["language"] or "").strip().lower()
+            signals = [
+                *(
+                    [f"language {language or '(unset)'}"]
+                    if language not in CLIENT_BUNDLE_BROWSER_LANGUAGES
+                    else []
+                ),
+                *(f"tag {tag}" for tag in CLIENT_BUNDLE_SERVER_TAGS if tag in tags),
+                *(
+                    f"slot type {slot}"
+                    for slot in CLIENT_BUNDLE_SERVER_SLOT_TYPES
+                    if slot in _json_decode(row["slot_types_json"], [])
+                ),
+            ]
+            conflicts.append({"file_path": str(row["file_path"]), "signals": signals})
+    repo_query = "" if repo_id is None else f"&repo_id={int(repo_id)}"
+    optional_summary = (
+        {
+            "files": len(tagged_with_optional),
+            "by_family": dict(sorted(by_family.items(), key=lambda item: (-item[1], item[0]))),
+            "sample_paths": tagged_with_optional[:CLIENT_BUNDLE_SAMPLE_PATHS],
+            "omitted": max(0, len(tagged_with_optional) - CLIENT_BUNDLE_SAMPLE_PATHS),
+            "detail": (
+                "server-only families a client-bundle tag makes optional: never owed, "
+                "never measured by the effort harness or the depth floor; a reviewer who "
+                "finds the file does more than run in the browser scores the family and "
+                "the architect corrects the tag"
+            ),
+            "full_list": (
+                "vigil assess code-coverage --cwe-matrix (Optional Families) or "
+                f"vigil assess fetch 'code/files?context_tag={CLIENT_BUNDLE_CONTEXT_TAG}"
+                f"{repo_query}&limit={CONTEXT_TAGS_FULL_LIST_PAGE}'"
+            ),
+        }
+        if tagged_with_optional
+        else None
+    )
+    conflict_summary = (
+        {
+            "count": len(conflicts),
+            "sample": conflicts[:CLIENT_BUNDLE_SAMPLE_PATHS],
+            "omitted": max(0, len(conflicts) - CLIENT_BUNDLE_SAMPLE_PATHS),
+            "full_list": (
+                "vigil assess fetch 'code/files?client_bundle_conflict=true"
+                f"{repo_query}&limit={CONTEXT_TAGS_FULL_LIST_PAGE}'"
+            ),
+            "fix": (
+                "a client-bundle tag makes the server-only families optional; when the "
+                "file also runs on a server, re-classify it without the tag through "
+                "`vigil assess code-record classify`, and when ingest guessed the "
+                "language wrong, correct `language` on the same record"
+            ),
+        }
+        if conflicts
+        else None
+    )
+    return optional_summary, conflict_summary
+
+
+def _context_tags_unrecorded(
+    engagement_id: int,
+    *,
+    repo_id: int | None,
+    repo_clause: str,
+    repo_params: tuple[Any, ...],
+) -> dict[str, Any] | None:
+    """Classified files whose classification recorded no context tags.
+
+    Context tags are the only structured record of the families a file's job
+    adds beyond its slot types, so a file classified without the field owes
+    exactly its slot and language families until the architect records them.
+    That is never read as "no tag applies": this pointer names every such
+    file, by tier, with the read that lists them all and the write that
+    records the tags. It is never a gate reason.
+    """
+    with get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT files.classification, files.file_path
+            FROM code_files AS files
+            WHERE files.engagement_id = ?
+              AND {_context_tags_unrecorded_sql("files")}{repo_clause}
+            ORDER BY CASE files.classification
+                WHEN 'critical' THEN 0 WHEN 'high' THEN 1 WHEN 'medium' THEN 2 ELSE 3
+            END, files.file_path, files.id
+            """,
+            (engagement_id, *repo_params),
+        ).fetchall()
+    if not rows:
+        return None
+    by_classification: dict[str, int] = {}
+    for row in rows:
+        tier = str(row["classification"])
+        by_classification[tier] = by_classification.get(tier, 0) + 1
+    sample = [str(row["file_path"]) for row in rows[:CONTEXT_TAGS_SAMPLE_PATHS]]
+    return {
+        "count": len(rows),
+        "by_classification": by_classification,
+        "sample_paths": sample,
+        "omitted": len(rows) - len(sample),
+        "full_list": (
+            "vigil assess fetch 'code/files?context_tags_recorded=false"
+            + ("" if repo_id is None else f"&repo_id={int(repo_id)}")
+            + f"&limit={CONTEXT_TAGS_FULL_LIST_PAGE}'"
+        ),
+        "paging": (
+            f"full_list reads pages of up to {CONTEXT_TAGS_FULL_LIST_PAGE} files and "
+            "returns total and has_more; while has_more is true, read the next page "
+            "with offset raised by the page's count"
+        ),
+        "fix": (
+            "re-classify each file with its context_tags (an empty list when none "
+            "applies) through `vigil assess code-record classify <classifications-json-file>`; "
+            "until then it owes only its slot-type and language families"
+        ),
+    }
+
+
+# Sample paths each effort-gap group names; the group's file_count says how
+# many more it holds and `full_list` is the read that lists them.
+EFFORT_GAP_SAMPLE_PATHS = 3
+_EFFORT_GAP_TIER_ORDER = ("critical", "high", "medium")
+_EFFORT_GAP_FULL_LIST = (
+    "vigil assess code-coverage --cwe-matrix (GET code/coverage?detail=cwe)"
+)
+
+
+# Every grouped effort-gap line in `gate.effort_warnings` starts with this;
+# `gate.effort_gaps.warnings` names those lines for readers.
+EFFORT_GAP_WARNING_PREFIX = "Effort below tier threshold"
+
+
+def _grouped_effort_warnings(
+    warnings: list[str], gaps: list[dict[str, Any]], summary: dict[str, Any]
+) -> tuple[list[str], list[str]]:
+    """`effort_warnings` with the per-file family shortfalls folded into groups.
+
+    A shortfall is one message per file and family, so on a large repository
+    the list outgrows the payload (and readiness `quality_gate.warnings`, which
+    is built from it). The other warnings stay as they are; the shortfalls
+    become one header line with the totals and the read that lists every row,
+    and one line per tier x family group with its file count and up to
+    `EFFORT_GAP_SAMPLE_PATHS` of its messages verbatim.
+
+    Returns the folded warnings and, separately, the lines among them that
+    carry the shortfalls, so a reader tells them apart without parsing text.
+    """
+    if not gaps:
+        return warnings, []
+    gap_messages = {str(gap["message"]) for gap in gaps}
+    message_by_key = {
+        (str(gap["classification"]), str(gap["family"]), str(gap["file_path"])): str(gap["message"])
+        for gap in gaps
+    }
+    groups = summary["groups"]
+    lines = [
+        f"{EFFORT_GAP_WARNING_PREFIX}: {summary['total']} family gap(s) across "
+        f"{summary['file_count']} file(s) in {len(groups)} tier x family group(s); "
+        f"every per-file gap: {_EFFORT_GAP_FULL_LIST}",
+    ]
+    for group in groups:
+        samples = [
+            message_by_key[(group["classification"], group["family"], path)]
+            for path in group["sample_file_paths"]
+        ]
+        hidden = group["file_count"] - len(samples)
+        lines.append(
+            f"{EFFORT_GAP_WARNING_PREFIX} — {group['classification'].capitalize()} x "
+            f"{group['family']} (threshold {group['threshold']}): "
+            f"{group['file_count']} file(s), e.g. {'; '.join(samples)}"
+            + (f"; +{hidden} more" if hidden > 0 else "")
+        )
+    return [warning for warning in warnings if warning not in gap_messages] + lines, lines
+
+
+def _effort_gap_summary(
+    gaps: list[dict[str, Any]], *, include_rows: bool
+) -> dict[str, Any]:
+    """Group family shortfalls tier x family, with counts and a few sample paths.
+
+    A shortfall is one row per file and family, so on a large repository the
+    rows outgrow the rest of the coverage payload. The grouped form states the
+    totals, how many rows it leaves out and the read that lists them;
+    *include_rows* carries every row as well.
+    """
+    groups: dict[tuple[str, str], dict[str, Any]] = {}
+    for gap in gaps:
+        key = (str(gap["classification"]), str(gap["family"]))
+        group = groups.setdefault(key, {
+            "classification": key[0],
+            "family": key[1],
+            "threshold": gap["threshold"],
+            "file_paths": {},
+        })
+        # Keyed on the file, not its path: two repositories can each hold the
+        # same relative path, and they are two files short of the threshold.
+        group["file_paths"][int(gap["file_id"])] = str(gap["file_path"])
+    ordered = sorted(
+        groups.values(),
+        key=lambda group: (
+            _EFFORT_GAP_TIER_ORDER.index(group["classification"])
+            if group["classification"] in _EFFORT_GAP_TIER_ORDER
+            else len(_EFFORT_GAP_TIER_ORDER),
+            -len(group["file_paths"]),
+            group["family"],
+        ),
+    )
+    summary: dict[str, Any] = {
+        "total": len(gaps),
+        "file_count": len({int(gap["file_id"]) for gap in gaps}),
+        "groups": [
+            {
+                "classification": group["classification"],
+                "family": group["family"],
+                "threshold": group["threshold"],
+                "file_count": len(group["file_paths"]),
+                "sample_file_paths": sorted(group["file_paths"].values())[
+                    :EFFORT_GAP_SAMPLE_PATHS
+                ],
+            }
+            for group in ordered
+        ],
+        "rows_omitted": 0 if include_rows else len(gaps),
+    }
+    if include_rows:
+        summary["rows"] = gaps
+    elif gaps:
+        summary["full_list"] = _EFFORT_GAP_FULL_LIST
+    return summary
 
 
 MAX_INHERITED_COVERAGE_PAGE = 2000
@@ -8599,6 +11097,9 @@ def code_coverage_by_path(
     without a successful review). The terminal-verdict split reads the same
     current attempt under the same accounting guard, so a directory can never
     report a verdict for a file its own status column calls unreviewed.
+    ``by_review_depth`` and ``critical_high_wide_only`` count each file's
+    review depth (`_review_depth_sql`); they point at where deeper review is
+    still to go and owe nothing.
     Reference repositories owe nothing and are left out, as in the summary.
     Rows sort by uncovered critical+high files, most first, then by path, so
     the directory owing the most high-risk review leads.
@@ -8648,16 +11149,19 @@ def code_coverage_by_path(
                          -- would report a verdict beside a status that says the
                          -- file was never reviewed.
                          AND ({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
-                   ) AS latest_disposition
+                   ) AS latest_disposition,
+                   review_depth.review_passes, review_depth.deep_passes
             FROM code_files AS files
             JOIN code_repos AS repos
               ON repos.id = files.repo_id
              AND repos.engagement_id = files.engagement_id
              AND repos.active_generation > 0
              AND {_analysis_repo_sql("repos")}
+            LEFT JOIN ({_review_depth_sql()}) AS review_depth
+              ON review_depth.file_id = files.id
             WHERE {' AND '.join(clauses)}
             """,
-            tuple(params),
+            (*review_depth_params(engagement.id), *params),
         ).fetchall()
 
     directories: dict[tuple[int, str], dict[str, Any]] = {}
@@ -8679,6 +11183,8 @@ def code_coverage_by_path(
                     "count": 0, "degraded": 0, "unsupported": 0, "truncated": 0,
                 },
                 "accounted_skips": 0,
+                "by_review_depth": dict.fromkeys(REVIEW_DEPTHS, 0),
+                "critical_high_wide_only": 0,
             }
         analyzed = bool(row["analyzed"])
         classification = str(row["classification"])
@@ -8701,6 +11207,10 @@ def code_coverage_by_path(
             if row["structural_artifact_truncated"]:
                 debt["truncated"] += 1
         entry["accounted_skips"] += int(bool(row["accounted_skip"]))
+        review_depth = review_depth_label(row["review_passes"], row["deep_passes"])
+        entry["by_review_depth"][review_depth] += 1
+        if classification in {"critical", "high"} and review_depth == "wide_only":
+            entry["critical_high_wide_only"] += 1
         disposition = str(row["latest_disposition"] or "")
         if disposition in _VALID_DISPOSITIONS:
             entry["by_disposition"][disposition] = (
@@ -9159,6 +11669,57 @@ def next_code_readiness_phase(current_phase: str) -> str | None:
     )
 
 
+# The file sets three readiness blockers count, as predicates over a
+# ``files`` alias. `GET code/files?accounting=<gap>` pages exactly these, so a
+# blocker's count and the read it names cannot disagree.
+_FILE_ACCOUNTING_GAP_SQL: dict[str, str] = {
+    "unclassified": "files.classification = 'unclassified'",
+    "unqueued": """NOT EXISTS (
+        SELECT 1
+        FROM code_analysis_queue AS queue
+        JOIN code_repos AS queue_repo
+          ON queue_repo.id = files.repo_id AND queue_repo.engagement_id = files.engagement_id
+        WHERE queue.engagement_id = files.engagement_id
+          AND queue.file_id = files.id
+          AND queue.repo_generation = queue_repo.active_generation
+          AND queue.source_superseded_at IS NULL
+    )""",
+    "unaccounted": f"NOT ({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})",
+}
+READINESS_BLOCKER_SAMPLE_PATHS = 10
+READINESS_BLOCKER_FULL_LIST_PAGE = 10000
+
+
+def _accounting_gap_paths(
+    connection, engagement_id: int, repo_id: int, gap: str
+) -> tuple[int, dict[str, Any]]:
+    """``(count, fields)`` for a blocker over one `_FILE_ACCOUNTING_GAP_SQL` set.
+
+    ``fields`` names sample paths, how many it omits and the read that lists
+    every file, so the blocker is actionable without reading backend SQL.
+    """
+    rows = connection.execute(
+        f"""
+        SELECT files.file_path
+        FROM code_files AS files
+        WHERE files.engagement_id = ? AND files.repo_id = ?
+          AND files.retired_at IS NULL
+          AND {_FILE_ACCOUNTING_GAP_SQL[gap]}
+        ORDER BY files.file_path, files.id
+        """,
+        (engagement_id, repo_id),
+    ).fetchall()
+    sample = [str(row["file_path"]) for row in rows[:READINESS_BLOCKER_SAMPLE_PATHS]]
+    return len(rows), {
+        "sample_paths": sample,
+        "omitted": len(rows) - len(sample),
+        "full_list": (
+            f"vigil assess fetch 'code/files?accounting={gap}&repo_id={int(repo_id)}"
+            f"&limit={READINESS_BLOCKER_FULL_LIST_PAGE}'"
+        ),
+    }
+
+
 def _readiness_blocker(
     code: str,
     message: str,
@@ -9179,9 +11740,18 @@ def _readiness_blocker(
 
 
 def code_readiness(
-    engagement_id: int, *, target_phase: str, include_debt_paths: bool = False
+    engagement_id: int,
+    *,
+    target_phase: str,
+    include_debt_paths: bool = False,
+    include_coverage: bool = False,
 ) -> dict[str, Any]:
-    """Project durable code-analysis state into explicit phase-transition blockers."""
+    """Project durable code-analysis state into explicit phase-transition blockers.
+
+    Readiness reads the engagement-wide coverage summary; *include_coverage*
+    returns that summary as ``coverage`` so a caller that renders both reads
+    them from one computation.
+    """
     engagement = _engagement_or_404(engagement_id)
     if target_phase not in _CODE_READINESS_PHASES:
         raise HTTPException(
@@ -9466,14 +12036,8 @@ def code_readiness(
                         repo_id=repo_id,
                     )
                 )
-            unclassified = _scalar_row(
-                connection,
-                """
-                SELECT COUNT(*) FROM code_files
-                WHERE engagement_id = ? AND repo_id = ? AND classification = 'unclassified'
-                  AND retired_at IS NULL
-                """,
-                (engagement.id, repo_id),
+            unclassified, unclassified_paths = _accounting_gap_paths(
+                connection, engagement.id, repo_id, "unclassified"
             )
             if unclassified:
                 blockers.append(
@@ -9482,6 +12046,7 @@ def code_readiness(
                         f"Repository has {unclassified} unclassified source file(s).",
                         repo_id=repo_id,
                         overrideable=True,
+                        **unclassified_paths,
                     )
                 )
 
@@ -9490,23 +12055,8 @@ def code_readiness(
                 # admitted file with no current-generation row can never be
                 # dispatched and never reaches accounting. The on-disk queue
                 # artifact is planning input and proves nothing about this.
-                unqueued_files = _scalar_row(
-                    connection,
-                    """
-                    SELECT COUNT(*)
-                    FROM code_files AS files
-                    WHERE files.engagement_id = ? AND files.repo_id = ?
-                      AND files.retired_at IS NULL
-                      AND NOT EXISTS (
-                        SELECT 1
-                        FROM code_analysis_queue AS queue
-                        WHERE queue.engagement_id = files.engagement_id
-                          AND queue.file_id = files.id
-                          AND queue.repo_generation = ?
-                          AND queue.source_superseded_at IS NULL
-                      )
-                    """,
-                    (engagement.id, repo_id, active_generation),
+                unqueued_files, unqueued_paths = _accounting_gap_paths(
+                    connection, engagement.id, repo_id, "unqueued"
                 )
                 if unqueued_files:
                     blockers.append(
@@ -9519,20 +12069,13 @@ def code_readiness(
                             ),
                             repo_id=repo_id,
                             overrideable=True,
+                            **unqueued_paths,
                         )
                     )
                 continue
 
-            unaccounted_files = _scalar_row(
-                connection,
-                f"""
-                SELECT COUNT(*)
-                FROM code_files AS files
-                WHERE files.engagement_id = ? AND files.repo_id = ?
-                  AND files.retired_at IS NULL
-                  AND NOT ({_CURRENT_ACCOUNTED_FILE_EXISTS_SQL})
-                """,
-                (engagement.id, repo_id),
+            unaccounted_files, unaccounted_paths = _accounting_gap_paths(
+                connection, engagement.id, repo_id, "unaccounted"
             )
             if unaccounted_files:
                 blockers.append(
@@ -9543,6 +12086,7 @@ def code_readiness(
                             "current terminal review or evidence-based structured skip."
                         ),
                         repo_id=repo_id,
+                        **unaccounted_paths,
                     )
                 )
 
@@ -9735,17 +12279,21 @@ def code_readiness(
                         _readiness_blocker(
                             "unresolved_suspicious_analysis",
                             (
-                                f"Repository has {unresolved_suspicious} current "
-                                "suspicious analysis attempt(s) requiring a finding "
-                                "or clean terminal reanalysis."
+                                f"Repository has {unresolved_suspicious} file(s) whose "
+                                "latest review holds a suspicious receipt awaiting a "
+                                "verdict (a `suspicious` close, or a lead beside a "
+                                "`finding` close); settle each with a targeted "
+                                "`code-dispatch reanalyze` that records the finding or a "
+                                "clean receipt citing the guard. "
+                                "`vigil assess fetch 'code/analysis-results/page?scope=awaiting_verdict'` "
+                                "lists them."
                             ),
                             repo_id=repo_id,
                         )
                     )
-            pending_triggers = _scalar_row(
-                connection,
+            pending_trigger_rows = connection.execute(
                 """
-                SELECT COUNT(*)
+                SELECT triggers.origin, COUNT(*) AS total
                 FROM code_analysis_triggers AS triggers
                 JOIN code_files AS files ON files.id = triggers.source_file_id
                 JOIN code_repos AS repos
@@ -9756,14 +12304,53 @@ def code_readiness(
                   AND triggers.status = 'pending'
                   AND triggers.repo_generation = repos.active_generation
                   AND triggers.source_superseded_at IS NULL
+                  AND NOT (
+                      triggers.origin = ?
+                      AND triggers.vuln_class IN (SELECT value FROM json_each(?))
+                  )
+                GROUP BY triggers.origin
                 """,
-                (engagement.id, repo_id),
+                (
+                    engagement.id, repo_id, TRIGGER_ORIGIN_DEPTH_FLOOR,
+                    json.dumps(sorted(
+                        _engagement_family_exclusions(connection, engagement.id)["families"]
+                    )),
+                ),
+            ).fetchall()
+            pending_by_origin = {
+                str(row["origin"]): int(row["total"]) for row in pending_trigger_rows
+            }
+            pending_triggers = sum(
+                total for origin, total in pending_by_origin.items()
+                if origin != TRIGGER_ORIGIN_DEPTH_FLOOR
             )
             if pending_triggers:
                 blockers.append(
                     _readiness_blocker(
                         "pending_triggers",
                         f"Repository has {pending_triggers} unprocessed cross-file trigger(s).",
+                        repo_id=repo_id,
+                        overrideable=True,
+                    )
+                )
+            depth_floor_triggers = pending_by_origin.get(TRIGGER_ORIGIN_DEPTH_FLOOR, 0)
+            if depth_floor_triggers:
+                blockers.append(
+                    _readiness_blocker(
+                        "depth_floor_triggers",
+                        (
+                            f"Repository has {depth_floor_triggers} critical/high file "
+                            "famil(ies) closed below their effort floor, each a pending "
+                            "depth_floor trigger. Phase 2B: `vigil assess code-dispatch "
+                            f"list-triggers --origin depth_floor --repo-id {repo_id} "
+                            "--summary` counts them by family, and `--vuln-class <family>` "
+                            "or `--path-prefix <path>` lists one group's rows; "
+                            "`code-dispatch requeue-triggers` "
+                            "sends a directed pass, and `code-dispatch resolve-triggers` "
+                            "records why another pass would not move one "
+                            "(`reviewed_at_sufficient_depth` with the reason when the "
+                            "file was read at depth and the recorded effort understates it)."
+                        ),
                         repo_id=repo_id,
                         overrideable=True,
                     )
@@ -10004,12 +12591,39 @@ def code_readiness(
         "transition_ready": not blockers,
         "blockers": blockers,
         "structural_debt_count": structural_debt_count,
-        "quality_gate": {"passed": not warnings, "warnings": warnings},
+        # The lines of `warnings` that carry effort shortfalls, so a renderer that
+        # already showed them (as groups or per file) skips them structurally.
+        "quality_gate": {
+            "passed": not warnings,
+            "warnings": warnings,
+            "effort_gap_warnings": list(
+                (coverage_gate.get("effort_gaps") or {}).get("warnings", [])
+            ),
+        },
+        # Signal files reviewed only wide (`code_coverage_summary`): a pointer
+        # for the next lane, kept out of blockers and quality warnings alike.
+        "depth_advisories": list(coverage_gate.get("depth_advisories", [])),
+        # Classified files with no recorded context tags (`_context_tags_unrecorded`):
+        # a pointer for the architect, kept out of blockers and quality warnings.
+        "context_tags_unrecorded": coverage_gate.get("context_tags_unrecorded"),
+        # Server-only families `client-bundle` tags make optional, and tagged
+        # files whose language or other tags imply server code
+        # (`_client_bundle_advisories`): pointers, never blockers.
+        "optional_families": coverage_gate.get("optional_families"),
+        "client_bundle_conflicts": coverage_gate.get("client_bundle_conflicts"),
+        # Review families an engagement ruling excludes, each with the ruling it
+        # cites (`_engagement_family_exclusions`): a pointer, never a blocker.
+        "family_exclusions": coverage_gate.get("family_exclusions"),
+        # Below-floor families no depth_floor trigger names (closes recorded
+        # before the backend raised them): a pointer, never a blocker.
+        "untriggered_depth_shortfalls": coverage_gate.get("untriggered_depth_shortfalls"),
     }
     if include_debt_paths:
         payload["structural_debt"] = structural_debt
     if fuzz_completion is not None:
         payload["fuzz_completion"] = fuzz_completion
+    if include_coverage:
+        payload["coverage"] = coverage
     return payload
 
 
@@ -10082,36 +12696,105 @@ STRUCTURALLY_ANALYZED_LANGUAGES = frozenset(
     }
 )
 
-ROLE_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
-    (("crypto", "cipher", "tls", "ssl", "digest", "hmac", "jwt", "x509"), {"all": ["crypto-misuse"]}),
-    (("auth", "oauth", "session", "login", "signin", "permission", "rbac", "acl", "sso"), {"all": ["auth-bypass", "web-app-auth"]}),
+# What a file's job makes it owe beyond its slot types, keyed by the context
+# tags the architect records on the classification (`CodeContextTag` in
+# `app/api/code_analysis.py` is the same vocabulary). Tags are structure the
+# architect chose after reading the file; the free-text role label beside them
+# is descriptive and never read for an obligation, because matching words in
+# prose both missed rewordings and caught words that merely contained a token.
+CONTEXT_TAG_VULN_CLASSES: dict[str, dict[str, list[str]]] = {
+    "crypto": {"all": ["crypto-misuse"]},
     # A credential or session token presented to the server is only as strong
     # as the limit on guessing it, so the entry point that accepts one owes
-    # brute-force and credential-stuffing review — the cheapest attacks on
-    # exactly that file. Split from the row above rather than added to it: an
-    # authorization policy point (`permission`, `rbac`, `acl`) decides on an
-    # already-authenticated principal and presents nothing to guess, so
-    # demanding throttling review there would be noise. The one-time-code
-    # workflow row covers the OTP spellings separately.
-    (("auth", "oauth", "session", "login", "signin", "sso"), {"all": ["rate-limit"]}),
-    (("error", "exception", "fallback", "retry", "recovery"), {"all": ["error-handling"], "native": ["null-dereference"]}),
-    (("allocator", "allocation", "memory", "arena", "pool"), {"native": ["uninitialized-memory"], "all": ["algorithmic-dos"]}),
-    (("parser", "decoder", "deserializer", "deserialize", "serializer", "serialization", "codec", "marshal", "unmarshal", "regex", "regexp"), {"all": ["algorithmic-dos"]}),
-    (("graphql", "resolver", "serializer", "orm", "resource", "controller", "view"), {"managed": ["web-app-data-exposure"]}),
-    (("llm", "prompt", "rag", "mcp", "embedding"), {"all": ["ai-ml-security"]}),
-)
+    # brute-force and credential-stuffing review. An authorization policy point
+    # decides on an already-authenticated principal and presents nothing to
+    # guess, so it owes no throttling review.
+    "authentication": {"all": ["auth-bypass", "web-app-auth", "rate-limit"]},
+    "authorization": {"all": ["auth-bypass", "web-app-auth"]},
+    "error-handling": {"all": ["error-handling"], "native": ["null-dereference"]},
+    "allocator": {"native": ["uninitialized-memory"], "all": ["algorithmic-dos"]},
+    "parser": {"all": ["algorithmic-dos"]},
+    # Code that selects or serializes records into a response.
+    "response-data": {"managed": ["web-app-data-exposure"]},
+    "ai-model": {"all": ["ai-ml-security"]},
+    # Request handlers run concurrently across requests, so a file that moves
+    # money, stock, quota or one-time grants owes check-then-act and workflow
+    # review whatever its slot types say.
+    "value-transfer": {"all": ["race-condition", "business-logic"]},
+    # Providers retry and replay deliveries, often concurrently, and each one
+    # usually settles a payment or grants something.
+    "provider-callback": {"all": ["race-condition", "business-logic"]},
+    # A short secret (one-time code, reset token) is only as strong as the
+    # limit on guessing it.
+    "one-time-secret": {"all": ["rate-limit"]},
+    # Code shipped to and run in the browser (a webpack chunk, an SPA bundle):
+    # DOM and script injection, including data a postMessage handler or the
+    # URL puts in a sink, forced navigation, prototype pollution, and secrets
+    # compiled into what every visitor downloads; and the `injection` sinks a
+    # browser runs (string evaluation through `new Function`, `eval` or a
+    # string `setTimeout`, escaping for the wrong output context, CSV or
+    # formula cells built from input). The tag also makes the server-only
+    # families optional (`CLIENT_BUNDLE_OPTIONAL_FAMILIES`).
+    "client-bundle": {
+        "all": [
+            "web-app-injection", "open-redirect", "prototype-pollution",
+            "secrets-exposure", "injection",
+        ]
+    },
+}
 
-# Matched against whole words (`_context_words`), never as substrings as the
-# role rows above are: `load_balancer` is not a balance and `placeholder` holds
-# nothing. A hyphenated entry is a phrase of consecutive words. Request handlers
-# run concurrently across requests, so a file that moves money, stock, quota or
-# one-time grants owes check-then-act and workflow review whatever its slot
-# types say. The architect's role label makes these families required. The
-# file's own path (`_workflow_path_words`) only suggests them: a directory word
-# such as `Checkout` names whole trees of value objects and helpers that never
-# move anything, so a path match is a hint that never blocks closeout or the
-# effort gate.
-WORKFLOW_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]], ...] = (
+CLIENT_BUNDLE_CONTEXT_TAG = "client-bundle"
+
+# The families a `client-bundle` file owes no review of, whatever its slot
+# types, language or other tags name: each needs the server to happen. They
+# stay listed as optional (`_optional_families_for_file`) so a reviewer who
+# finds the bundle does more than run in the browser can still score them; a
+# file without the tag owes every one of them as before.
+CLIENT_BUNDLE_OPTIONAL_FAMILIES: dict[str, str] = {
+    "ssrf": (
+        "the request has to leave from the server's network position; a browser "
+        "fetch runs as the visitor, from the visitor's network"
+    ),
+    "file-upload": "an upload is stored and processed by the server that receives it",
+    "deserialization": (
+        "unsafe deserialization instantiates the server's objects; a browser parses "
+        "data into plain values, and merging attacker keys into them is prototype-pollution"
+    ),
+    "path-traversal": "it reaches the server's file system, which browser code cannot open",
+    "xxe": "external entities resolve in a server XML parser; the browser's DOMParser resolves none",
+    "race-condition": (
+        "it needs concurrent requests on shared server state; a page's event loop "
+        "runs its own handlers one at a time"
+    ),
+    "rate-limit": "only the server that accepts the guesses can throttle them",
+    "algorithmic-dos": (
+        "it exhausts the machine that runs the code; in a bundle that is the one "
+        "visitor's tab, not the service"
+    ),
+    "web-app-data-exposure": (
+        "a bundle that renders what its server sent does not choose the records; one "
+        "that queries a data store directly (a Supabase or Firebase client) does, and "
+        "a `response-data` tag keeps the family required on it"
+    ),
+}
+
+# The tags that keep a `CLIENT_BUNDLE_OPTIONAL_FAMILIES` family required on a
+# bundle: they record that the browser code itself does what the family needs.
+# A bundle that selects records straight from a data store is the data-exposure
+# surface, so `response-data` keeps that family owed.
+CLIENT_BUNDLE_FAMILIES_KEPT_BY_TAG: dict[str, frozenset[str]] = {
+    "web-app-data-exposure": frozenset({"response-data"}),
+}
+
+# The context tag a source file's path words point at. A path is an
+# identifier, not prose, and these only SUGGEST the tag's families
+# (`_path_suggested_families_for_file`): a directory word such as `Checkout`
+# names whole trees of value objects and helpers that never move anything, so a
+# path match never blocks closeout or the advisory effort harness. Matched
+# against whole words (`_context_words`): `load_balancer` is not a balance and
+# `placeholder` holds nothing. A hyphenated entry is a phrase of consecutive
+# words.
+WORKFLOW_PATH_CONTEXT_TAGS: tuple[tuple[tuple[str, ...], str], ...] = (
     (
         (
             "booking", "reservation", "hold", "quota", "credit", "refund", "coupon",
@@ -10119,17 +12802,107 @@ WORKFLOW_CONTEXT_VULN_CLASSES: tuple[tuple[tuple[str, ...], dict[str, list[str]]
             "payment", "checkout", "payout", "withdraw", "withdrawal", "inventory",
             "entitlement",
         ),
-        {"all": ["race-condition", "business-logic"]},
+        "value-transfer",
     ),
-    # Providers retry and replay deliveries, often concurrently, and each one
-    # usually settles a payment or grants something.
-    (("webhook", "ipn"), {"all": ["race-condition", "business-logic"]}),
-    # A short secret is only as strong as the limit on guessing it.
-    (
-        ("otp", "mfa", "totp", "passcode", "password-reset", "reset-password"),
-        {"all": ["rate-limit"]},
-    ),
+    (("webhook", "ipn"), "provider-callback"),
+    (("otp", "mfa", "totp", "passcode", "password-reset", "reset-password"), "one-time-secret"),
 )
+
+# Markup, style and template languages: the vuln classes each one's structural
+# index can tag a sink with -- its lightweight extractor, the HTML pass it builds
+# on, and its streaming fallback rows together (`test_vuln_taxonomy` holds this
+# table to those readers). A slot type makes applicable the families these
+# classes point at, and only those: the slot catalogue's server-side families
+# -- SSRF, deserialization, upload, resource exhaustion -- describe code that
+# handles a request, which a template only renders. A context tag still adds the
+# families it names, and code the file holds but its index did not read adds
+# what that code can do (`_markup_unread_code`).
+MARKUP_SINK_VULN_CLASSES: dict[str, frozenset[str]] = {
+    "html": frozenset({"xss", "ssti", "supply-chain", "clickjacking"}),
+    "css": frozenset({"xss", "supply-chain"}),
+    "blade": frozenset({"xss", "ssti", "supply-chain", "clickjacking"}),
+    "freemarker": frozenset(
+        {"xss", "ssti", "injection", "open-redirect", "supply-chain", "clickjacking"}
+    ),
+    "twig": frozenset({"xss", "ssti", "injection", "supply-chain", "clickjacking"}),
+}
+
+# The review family each markup sink class points at. `supply-chain` (a remote
+# script or stylesheet) and `clickjacking` (framing posture) describe how a page
+# is built and served, not request data reaching the file, so they point at no
+# family; `test_vuln_taxonomy` records why for each.
+MARKUP_SINK_CLASS_FAMILIES: dict[str, tuple[str, ...]] = {
+    "xss": ("web-app-injection",),
+    "ssti": ("injection",),
+    "injection": ("injection",),
+    "open-redirect": ("open-redirect",),
+}
+
+# Template languages whose include directives take a runtime expression
+# (`@include($view)`, `{% include name %}`, `<#include path>`): a request value
+# choosing the template is a path-traversal review.
+DYNAMIC_INCLUDE_TEMPLATE_LANGUAGES = frozenset({"blade", "freemarker", "twig"})
+
+MARKUP_SIGNAL_FAMILIES: dict[str, frozenset[str]] = {
+    language: frozenset(
+        family
+        for sink_class in sink_classes
+        for family in MARKUP_SINK_CLASS_FAMILIES.get(sink_class, ())
+    )
+    | (
+        frozenset({"path-traversal"})
+        if language in DYNAMIC_INCLUDE_TEMPLATE_LANGUAGES
+        else frozenset()
+    )
+    for language, sink_classes in MARKUP_SINK_VULN_CLASSES.items()
+}
+
+# What an inline `<script>` the markup reader did not read can do with request
+# data: the browser runs it, so it writes the DOM or navigates, and never
+# handles the request the slot families' server-side classes describe.
+BROWSER_SCRIPT_FAMILIES = frozenset({"web-app-injection", "open-redirect"})
+# Markup languages whose reader holds server-side code it does not read: Blade
+# runs `@php` blocks and `<?php` tags. In every other markup language the only
+# body a reader holds unread is an inline `<script>` (`_holds_unread_code` in
+# `agent/scripts/assess/lib/treesitter_lightweight.py`).
+SERVER_CODE_MARKUP_LANGUAGES = frozenset({"blade"})
+
+
+def _markup_unread_code(
+    language: str, unavailable_dimensions: Sequence[str]
+) -> Literal["server", "browser", "unknown"] | None:
+    """What kind of code a markup file holds that its index did not read.
+
+    ``unknown`` is a streaming-fallback index (a giant line, an oversized file,
+    a parser error or timeout): it read too little to say whether the file
+    holds code at all, so the code families only point at it. Otherwise the
+    unavailable dimensions come from a body the lightweight reader held but did
+    not read, and the language says whose code that is.
+    """
+    if not unavailable_dimensions:
+        return None
+    if STREAMING_FALLBACK_UNAVAILABLE_BASELINE <= set(unavailable_dimensions):
+        return "unknown"
+    return "server" if language in SERVER_CODE_MARKUP_LANGUAGES else "browser"
+
+
+def _code_slot_families(slot_types: Sequence[str], language: str) -> set[str]:
+    """The families a code file in *language* with these slot types owes."""
+    families: set[str] = (
+        {"algorithmic-dos", "error-handling"}
+        if language in STRUCTURALLY_ANALYZED_LANGUAGES
+        else set()
+    )
+    for slot in slot_types:
+        _apply_grouped_families(
+            families,
+            SLOT_VULN_CLASSES.get(slot, {}),
+            is_native=language in NATIVE_LANGUAGES,
+            lang_known=bool(language),
+            is_memory_unsafe=language in MEMORY_UNSAFE_LANGUAGES,
+        )
+    return families
+
 
 # Path words come only from source the index reads as code. Markup, style and
 # template languages name pages rather than request handling.
@@ -10191,93 +12964,176 @@ def _apply_grouped_families(
             families.update(group_families)
 
 
-def _workflow_families(words: list[str], language: str) -> set[str]:
-    """The `WORKFLOW_CONTEXT_VULN_CLASSES` families whole ``words`` name."""
+def _context_tag_families(context_tags: Sequence[str], language: str) -> set[str]:
+    """The `CONTEXT_TAG_VULN_CLASSES` families these tags name for *language*."""
     families: set[str] = set()
-    for keywords, mapping in WORKFLOW_CONTEXT_VULN_CLASSES:
-        if any(_has_context_keyword(words, keyword) for keyword in keywords):
-            _apply_grouped_families(
-                families,
-                mapping,
-                is_native=language in NATIVE_LANGUAGES,
-                lang_known=bool(language),
-                is_memory_unsafe=language in MEMORY_UNSAFE_LANGUAGES,
-            )
+    for tag in context_tags:
+        _apply_grouped_families(
+            families,
+            CONTEXT_TAG_VULN_CLASSES.get(tag, {}),
+            is_native=language in NATIVE_LANGUAGES,
+            lang_known=bool(language),
+            is_memory_unsafe=language in MEMORY_UNSAFE_LANGUAGES,
+        )
     return families
+
+
+def _path_context_tags(words: list[str]) -> list[str]:
+    """The `WORKFLOW_PATH_CONTEXT_TAGS` tags whole path ``words`` point at."""
+    return [
+        tag
+        for keywords, tag in WORKFLOW_PATH_CONTEXT_TAGS
+        if any(_has_context_keyword(words, keyword) for keyword in keywords)
+    ]
 
 
 def _applicable_families_for_file(
     slot_types: list[str],
     *,
     language: str = "",
-    role: str = "",
+    context_tags: Sequence[str] = (),
+    unavailable_dimensions: Sequence[str] = (),
 ) -> list[str]:
     """Compute canonical applicable vulnerability classes for a classified file.
 
-    These are required: `done` refuses a result that omits one, and the
-    coverage harness measures each against its tier's effort threshold —
-    refusing the gate for the tiers in `_BLOCKING_EFFORT_TIERS` and reporting
-    the rest as advisories. Recomputed on every read, never stored, so a row
-    added here applies to every open engagement at once.
+    On a tier in `_CLOSEOUT_FAMILY_TIERS`, `done` records each one the closeout
+    names no entry for at effort 0 (`_unreviewed_families_record`) and raises a
+    `depth_floor` trigger for each one left below the floor
+    (`_record_depth_floor_triggers`); on every tier they are the list the
+    coverage harness measures against the tier's effort threshold and reports
+    as advisories. A classification that recorded no context tags contributes
+    none (`_context_tags_unrecorded` names those files). Recomputed on every
+    read, never stored, so a row added here applies to every open engagement at
+    once. ``unavailable_dimensions`` is the file's
+    ``structural_unavailable_dimensions``: in a markup file they name code its
+    index did not read (`_markup_unread_code`). Unread server-side code (Blade
+    `@php`) owes the code slot families on top of the markup ones, and an
+    unread inline `<script>` owes the browser families; what a streaming
+    fallback could not see is suggested instead
+    (`_unread_code_suggested_families_for_file`).
     """
     lang_lower = language.lower().strip()
-    is_native = lang_lower in NATIVE_LANGUAGES
-    is_memory_unsafe = lang_lower in MEMORY_UNSAFE_LANGUAGES
-    lang_known = bool(lang_lower)
-    role_lower = role.lower().strip()
+    markup_families = MARKUP_SIGNAL_FAMILIES.get(lang_lower)
+    families: set[str] = set()
+    if markup_families is None:
+        families |= _code_slot_families(slot_types, lang_lower)
+    else:
+        unread = _markup_unread_code(lang_lower, unavailable_dimensions)
+        if slot_types:
+            # A slot type says input reaches the file; in markup, what it can do
+            # there is bounded by what the template's structure can express.
+            families.update(markup_families)
+            if unread == "browser":
+                families.update(BROWSER_SCRIPT_FAMILIES)
+        if unread == "server":
+            families |= _code_slot_families(slot_types, lang_lower)
 
-    families: set[str] = (
-        {"algorithmic-dos", "error-handling"}
-        if lang_lower in STRUCTURALLY_ANALYZED_LANGUAGES
-        else set()
-    )
-    for slot in slot_types:
-        _apply_grouped_families(
-            families,
-            SLOT_VULN_CLASSES.get(slot, {}),
-            is_native=is_native,
-            lang_known=lang_known,
-            is_memory_unsafe=is_memory_unsafe,
+    families |= _context_tag_families(context_tags, lang_lower)
+    if CLIENT_BUNDLE_CONTEXT_TAG in context_tags:
+        families.difference_update(
+            family
+            for family in CLIENT_BUNDLE_OPTIONAL_FAMILIES
+            if not CLIENT_BUNDLE_FAMILIES_KEPT_BY_TAG.get(family, frozenset()) & set(context_tags)
         )
 
-    for keywords, mapping in ROLE_CONTEXT_VULN_CLASSES:
-        if any(keyword in role_lower for keyword in keywords):
-            _apply_grouped_families(
-                families,
-                mapping,
-                is_native=is_native,
-                lang_known=lang_known,
-                is_memory_unsafe=is_memory_unsafe,
-            )
-
-    families |= _workflow_families(_context_words(role), lang_lower)
-
-    if lang_lower == "freemarker":
-        # FILE-CONTENT describes a template's input, not a native parser. Its
-        # generic families omit the rendering bug class and demand impossible
-        # type/serialization work from template-only source.
-        families.add("web-app-injection")
-        families.difference_update({"type-confusion", "deserialization"})
-
     return sorted(families)
+
+
+def _optional_families_for_file(
+    slot_types: list[str],
+    *,
+    language: str = "",
+    context_tags: Sequence[str] = (),
+    unavailable_dimensions: Sequence[str] = (),
+) -> list[str]:
+    """The families the file's `client-bundle` tag made optional.
+
+    Exactly the server-only families (`CLIENT_BUNDLE_OPTIONAL_FAMILIES`) the
+    file would owe without the tag and no other tag keeps required
+    (`CLIENT_BUNDLE_FAMILIES_KEPT_BY_TAG`). `done` never records them at effort
+    0, the effort harness and depth floor never measure them, and a reviewer
+    may still score them. Empty for a file without the tag.
+    """
+    if CLIENT_BUNDLE_CONTEXT_TAG not in context_tags:
+        return []
+    untagged = _applicable_families_for_file(
+        slot_types,
+        language=language,
+        context_tags=[tag for tag in context_tags if tag != CLIENT_BUNDLE_CONTEXT_TAG],
+        unavailable_dimensions=unavailable_dimensions,
+    )
+    required = _applicable_families_for_file(
+        slot_types,
+        language=language,
+        context_tags=context_tags,
+        unavailable_dimensions=unavailable_dimensions,
+    )
+    return sorted(set(untagged) - set(required))
+
+
+def _unread_code_suggested_families_for_file(
+    slot_types: list[str],
+    *,
+    language: str = "",
+    context_tags: Sequence[str] = (),
+    unavailable_dimensions: Sequence[str] = (),
+    required: Sequence[str] | None = None,
+) -> list[str]:
+    """Code families a markup file's streaming-fallback index could not rule out.
+
+    Advisory only, like the path hints: the fallback read too little to say
+    whether the file holds code, so these point a hunter at what such code would
+    owe and never block `done`, count toward the effort harness, or become a
+    readiness reason. Empty for every file whose index saw what it holds.
+    ``required`` is the file's `_applicable_families_for_file` result when the
+    caller already holds it; it is derived here otherwise.
+    """
+    lang_lower = language.lower().strip()
+    if lang_lower not in MARKUP_SIGNAL_FAMILIES or _markup_unread_code(
+        lang_lower, unavailable_dimensions
+    ) != "unknown":
+        return []
+    if required is None:
+        required = _applicable_families_for_file(
+            slot_types,
+            language=language,
+            context_tags=context_tags,
+            unavailable_dimensions=unavailable_dimensions,
+        )
+    return sorted(_code_slot_families(slot_types, lang_lower).difference(required))
 
 
 def _path_suggested_families_for_file(
     slot_types: list[str],
     *,
     language: str = "",
-    role: str = "",
+    context_tags: Sequence[str] = (),
     file_path: str = "",
+    unavailable_dimensions: Sequence[str] = (),
+    required: Sequence[str] | None = None,
 ) -> list[str]:
     """Workflow families the file's path suggests beyond what it already requires.
 
     Advisory only: a hint points a hunter at a family worth considering, and
-    never blocks `done`, counts toward the effort gate, or becomes a
-    readiness reason. Writing a transactional role is what makes them required.
+    never blocks `done`, counts toward the effort harness, or becomes a
+    readiness reason. Recording the matching context tag is what makes them
+    required.
+    ``required`` is the file's `_applicable_families_for_file` result when the
+    caller already holds it; it is derived here otherwise.
     """
     lang_lower = language.lower().strip()
-    suggested = _workflow_families(_workflow_path_words(file_path, lang_lower), lang_lower)
-    required = _applicable_families_for_file(slot_types, language=language, role=role)
+    suggested = _context_tag_families(
+        _path_context_tags(_workflow_path_words(file_path, lang_lower)), lang_lower
+    )
+    if not suggested:
+        return []
+    if required is None:
+        required = _applicable_families_for_file(
+            slot_types,
+            language=language,
+            context_tags=context_tags,
+            unavailable_dimensions=unavailable_dimensions,
+        )
     return sorted(suggested.difference(required))
 
 
@@ -10529,20 +13385,21 @@ def _apply_requeue_target(
     engagement_id: int,
     file_id: int,
     target: dict[str, Any],
+    resolved_trigger_ids: list[int],
 ) -> tuple[str, int | None, str, bool]:
     """Write one aggregated target. Returns (outcome, queue_item_id, detail, reopened).
 
-    Raises :class:`_TriggerTargetBlocked` when durable state refuses the write,
-    so the caller can roll back this target alone.
+    The ids of pending triggers the target's current review already addressed
+    are appended to *resolved_trigger_ids*. Raises :class:`_TriggerTargetBlocked`
+    when durable state refuses the write, so the caller can roll back this
+    target alone.
     """
     if target["blocked_reason"] is not None:
         raise _TriggerTargetBlocked(target["blocked_reason"])
 
     pending_trigger_rows = connection.execute(
-        """
-        SELECT triggers.id, triggers.source_queue_item_id,
-               triggers.source_file_id, source_files.file_path AS source_file_path,
-               triggers.target_file_path, triggers.vuln_class, triggers.reason
+        f"""
+        SELECT {_TRIGGER_QUEUE_ENTRY_COLUMNS}
         FROM code_analysis_triggers AS triggers
         JOIN code_files AS source_files
           ON source_files.id = triggers.source_file_id
@@ -10569,32 +13426,6 @@ def _apply_requeue_target(
         """,
         (file_id, engagement_id, _TRIGGER_STATUS_PENDING),
     ).fetchall()
-    bucket_triggers = target["cross_file_triggers"]
-    existing_trigger_ids = {
-        int(entry["trigger_id"])
-        for entry in bucket_triggers
-        if isinstance(entry, dict) and entry.get("trigger_id") is not None
-    }
-    for trigger_row in pending_trigger_rows:
-        trigger_id = int(trigger_row["id"])
-        if trigger_id in existing_trigger_ids:
-            continue
-        trigger_payload = {
-            "trigger_id": trigger_id,
-            "file_path": str(trigger_row["target_file_path"]),
-            "source": "code_analysis_trigger",
-            "source_file_id": int(trigger_row["source_file_id"]),
-            "source_file_path": str(trigger_row["source_file_path"]),
-            "vuln_class": str(trigger_row["vuln_class"]),
-            "reason": str(trigger_row["reason"]),
-        }
-        if trigger_row["source_queue_item_id"] is not None:
-            trigger_payload["source_queue_item_id"] = int(
-                trigger_row["source_queue_item_id"]
-            )
-        bucket_triggers.append(trigger_payload)
-        existing_trigger_ids.add(trigger_id)
-
     current_rows = [
         dict(queue_row)
         for queue_row in connection.execute(
@@ -10612,6 +13443,34 @@ def _apply_requeue_target(
         raise _TriggerTargetBlocked(
             f"{active_issue} queue history requires operator reconciliation"
         )
+
+    if (
+        active is None
+        and latest is not None
+        and str(latest["status"]) == "done"
+        and _has_current_successful_review(connection, engagement_id, file_id)
+    ):
+        pending_trigger_rows = _resolve_triggers_covered_by_review(
+            connection,
+            engagement_id,
+            file_id,
+            int(latest["id"]),
+            pending_trigger_rows,
+            resolved_trigger_ids,
+        )
+
+    bucket_triggers = target["cross_file_triggers"]
+    existing_trigger_ids = {
+        int(entry["trigger_id"])
+        for entry in bucket_triggers
+        if isinstance(entry, dict) and entry.get("trigger_id") is not None
+    }
+    for trigger_row in pending_trigger_rows:
+        trigger_id = int(trigger_row["id"])
+        if trigger_id in existing_trigger_ids:
+            continue
+        bucket_triggers.append(_trigger_queue_entry(trigger_row))
+        existing_trigger_ids.add(trigger_id)
 
     # A15b: a requeue is added depth on the file's existing lane, not a move to
     # a synthetic one. Provenance rides in queue_mode='trigger' instead.
@@ -10662,7 +13521,7 @@ def _apply_requeue_target(
             UPDATE code_analysis_queue
             SET priority = ?, batch_theme = ?, slot_types_json = ?,
                 guidance_hypotheses_json = ?, cross_file_triggers_json = ?,
-                queue_mode = 'trigger', updated_at = CURRENT_TIMESTAMP
+                updated_at = CURRENT_TIMESTAMP
             WHERE engagement_id = ? AND id = ? AND status = 'pending'
               AND assigned_agent = '' AND lease_token = ''
             """,
@@ -10716,8 +13575,9 @@ def _apply_requeue_target(
         and latest_contains_request
         and _has_current_successful_review(connection, engagement_id, file_id)
     ):
-        # A completed review that already carries this context is not reopened,
-        # so its pending triggers stay pending for an explicit disposition.
+        # A completed review that already carries this context is not reopened.
+        # Pending triggers it did not cover above stay pending for an explicit
+        # disposition.
         _sync_trigger_status_for_file(connection, engagement_id, file_id)
         return (
             "already_completed",
@@ -10731,8 +13591,8 @@ def _apply_requeue_target(
         INSERT INTO code_analysis_queue (
             engagement_id, file_id, priority,
             batch_theme, slot_types_json, guidance_hypotheses_json,
-            cross_file_triggers_json, repo_generation, queue_mode
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trigger')
+            cross_file_triggers_json, repo_generation, queue_mode, inserted_by
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'trigger', ?)
         """,
         (
             engagement_id,
@@ -10743,6 +13603,7 @@ def _apply_requeue_target(
             _json_list_text(target["guidance_hypotheses"]),
             _json_list_text(target["cross_file_triggers"]),
             int(target["repo_generation"]),
+            _REQUEUE_TRIGGERS_INSERTER,
         ),
     )
     reopened = latest is not None
@@ -10758,6 +13619,201 @@ def _apply_requeue_target(
         pending_trigger_rows,
         ("inserted", int(cursor.lastrowid), detail, reopened),
     )
+
+
+# The columns `_trigger_queue_entry` projects, over a `triggers` alias joined to
+# its source file as `source_files`.
+_TRIGGER_QUEUE_ENTRY_COLUMNS = """
+    triggers.id, triggers.source_queue_item_id,
+    triggers.source_file_id, source_files.file_path AS source_file_path,
+    triggers.target_file_path, triggers.vuln_class, triggers.reason
+"""
+
+
+def _trigger_queue_entry(trigger_row: Any) -> dict[str, Any]:
+    """The queue-row entry that binds an attempt to one recorded trigger."""
+    entry: dict[str, Any] = {
+        "trigger_id": int(trigger_row["id"]),
+        "file_path": str(trigger_row["target_file_path"]),
+        "source": "code_analysis_trigger",
+        "source_file_id": int(trigger_row["source_file_id"]),
+        "source_file_path": str(trigger_row["source_file_path"]),
+        "vuln_class": str(trigger_row["vuln_class"]),
+        "reason": str(trigger_row["reason"]),
+    }
+    if trigger_row["source_queue_item_id"] is not None:
+        entry["source_queue_item_id"] = int(trigger_row["source_queue_item_id"])
+    return entry
+
+
+def _resolve_triggers_covered_by_review(
+    connection,
+    engagement_id: int,
+    file_id: int,
+    covering_queue_item_id: int,
+    pending_trigger_rows: list[Any],
+    resolved_trigger_ids: list[int],
+) -> list[Any]:
+    """Bind each pending trigger the file's current review already addressed.
+
+    The covering attempt is the file's current successful review; it discharges
+    a trigger only when it addressed it (`trigger_review_basis`): its queue row
+    carried the trigger, or it was claimed after the trigger was raised and
+    scored the trigger's exact vuln_class with real effort; a `depth_floor`
+    trigger only when that review brings the family to its tier's floor, so a
+    review that scored it short is sent the directed pass. Each such trigger is
+    resolved against that attempt with a note naming it and the way it
+    addressed the trigger, so the resolution is read back from the trigger
+    itself, and its id is appended to *resolved_trigger_ids*. Returns the
+    triggers still owed.
+    """
+    owed: list[Any] = []
+    for trigger_row in pending_trigger_rows:
+        trigger_id = int(trigger_row["id"])
+        basis = trigger_review_basis(
+            connection, engagement_id, trigger_id, covering_queue_item_id
+        )
+        if basis is None:
+            owed.append(trigger_row)
+            continue
+        how = {
+            "carried": "its queue row carried this trigger to the reviewer",
+            "covered": (
+                "its review of this file was claimed after the trigger was raised "
+                f"and covered {trigger_row['vuln_class']}"
+            ),
+            "at_floor": (
+                f"its review of this file records {trigger_row['vuln_class']} at or "
+                "above the file's depth floor"
+            ),
+        }[basis]
+        cursor = connection.execute(
+            """
+            UPDATE code_analysis_triggers
+            SET target_file_id = ?, resolved_queue_item_id = ?, status = ?,
+                resolution_note = ?, updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ? AND status = ?
+            """,
+            (
+                file_id,
+                covering_queue_item_id,
+                _TRIGGER_STATUS_RESOLVED,
+                f"Resolved by queue item {covering_queue_item_id}: {how}.",
+                engagement_id,
+                trigger_id,
+                _TRIGGER_STATUS_PENDING,
+            ),
+        )
+        if cursor.rowcount == 1:
+            resolved_trigger_ids.append(trigger_id)
+    return owed
+
+
+def _carry_trigger_bindings_forward(
+    connection,
+    engagement_id: int,
+    *,
+    predecessor_id: int,
+    successor_id: int,
+) -> list[dict[str, int]]:
+    """Move the triggers the reanalysed file's verdict discharged onto the successor.
+
+    The successor suspends the predecessor's verdict, so every resolution in
+    force on the file is owed again by the new attempt: the predecessor's own,
+    and one still bound to an earlier review that only trigger requeues
+    followed (`_bound_trigger_status`). The successor carries their queue
+    entries and is bound to them, and they resolve when it closes successfully.
+    Each trigger's resolution note keeps what it already said and gains a line
+    naming the move. Returns each carried trigger with the attempt it left.
+    """
+    rows = connection.execute(
+        f"""
+        SELECT {_TRIGGER_QUEUE_ENTRY_COLUMNS}, triggers.resolved_queue_item_id
+        FROM code_analysis_triggers AS triggers
+        JOIN code_files AS source_files
+          ON source_files.id = triggers.source_file_id
+         AND source_files.engagement_id = triggers.engagement_id
+        WHERE triggers.engagement_id = ?
+          AND triggers.status IN (?, ?)
+          AND triggers.source_superseded_at IS NULL
+          AND triggers.resolved_queue_item_id IN (
+              SELECT bound.id
+              FROM code_analysis_queue AS bound
+              JOIN code_analysis_queue AS predecessor
+                ON predecessor.engagement_id = bound.engagement_id
+               AND predecessor.file_id = bound.file_id
+               AND predecessor.repo_generation = bound.repo_generation
+              WHERE predecessor.engagement_id = ? AND predecessor.id = ?
+                AND bound.source_superseded_at IS NULL
+                AND bound.id <= predecessor.id
+          )
+        ORDER BY triggers.id
+        """,
+        (
+            engagement_id,
+            _TRIGGER_STATUS_QUEUED,
+            _TRIGGER_STATUS_RESOLVED,
+            engagement_id,
+            predecessor_id,
+        ),
+    ).fetchall()
+    if not rows:
+        return []
+    successor = connection.execute(
+        "SELECT cross_file_triggers_json FROM code_analysis_queue "
+        "WHERE engagement_id = ? AND id = ?",
+        (engagement_id, successor_id),
+    ).fetchone()
+    connection.execute(
+        """
+        UPDATE code_analysis_queue
+        SET cross_file_triggers_json = ?, updated_at = CURRENT_TIMESTAMP
+        WHERE engagement_id = ? AND id = ?
+        """,
+        (
+            _json_list_text(
+                _merge_unique_values(
+                    _json_decode(successor["cross_file_triggers_json"], []),
+                    [_trigger_queue_entry(row) for row in rows],
+                )
+            ),
+            engagement_id,
+            successor_id,
+        ),
+    )
+    carried = [
+        {
+            "trigger_id": int(row["id"]),
+            "from_queue_item_id": int(row["resolved_queue_item_id"]),
+        }
+        for row in rows
+    ]
+    for entry in carried:
+        carry_note = (
+            f"Carried from queue item {entry['from_queue_item_id']} to reanalysis "
+            f"queue item {successor_id}, which owes it until it closes."
+        )
+        connection.execute(
+            """
+            UPDATE code_analysis_triggers
+            SET resolved_queue_item_id = ?, status = ?,
+                resolution_note = CASE
+                    WHEN resolution_note = '' THEN ?
+                    ELSE resolution_note || char(10) || ?
+                END,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE engagement_id = ? AND id = ?
+            """,
+            (
+                successor_id,
+                _TRIGGER_STATUS_QUEUED,
+                carry_note,
+                carry_note,
+                engagement_id,
+                entry["trigger_id"],
+            ),
+        )
+    return carried
 
 
 def _finish_requeue_target(
@@ -10818,6 +13874,7 @@ def requeue_triggered_files(
         "blocked": 0,
     }
     reopened_terminal_files = 0
+    resolved_trigger_ids: list[int] = []
     not_found: list[str] = []
     ambiguous: list[str] = []
     input_file_ids: list[int | None] = []
@@ -10899,9 +13956,10 @@ def requeue_triggered_files(
 
         for file_id, target in aggregated.items():
             connection.execute("SAVEPOINT requeue_target")
+            target_resolved_ids: list[int] = []
             try:
                 outcome, queue_item_id, detail, reopened = _apply_requeue_target(
-                    connection, engagement.id, file_id, target
+                    connection, engagement.id, file_id, target, target_resolved_ids
                 )
             except _TriggerTargetBlocked as blocked:
                 connection.execute("ROLLBACK TO requeue_target")
@@ -10914,12 +13972,14 @@ def requeue_triggered_files(
                         "queue_item_id": None,
                         "outcome": "blocked",
                         "detail": str(blocked),
+                        "resolved_trigger_ids": [],
                     }
                 )
                 continue
             connection.execute("RELEASE requeue_target")
             counts[outcome] += 1
             reopened_terminal_files += 1 if reopened else 0
+            resolved_trigger_ids.extend(target_resolved_ids)
             target_outcomes.append(
                 {
                     "file_id": file_id,
@@ -10927,6 +13987,7 @@ def requeue_triggered_files(
                     "queue_item_id": queue_item_id,
                     "outcome": outcome,
                     "detail": detail,
+                    "resolved_trigger_ids": target_resolved_ids,
                 }
             )
 
@@ -10947,11 +14008,16 @@ def requeue_triggered_files(
         "target_count": len(aggregated),
         **counts,
         "reopened_terminal_files": reopened_terminal_files,
+        "resolved_trigger_ids": resolved_trigger_ids,
         "not_found": not_found,
         "ambiguous": ambiguous,
         "outcomes": target_outcomes,
         "inputs": inputs,
     }
+
+
+TRIGGER_PAGE_DEFAULT = 100
+TRIGGER_PAGE_MAX = 1000
 
 
 def list_code_triggers(
@@ -10960,14 +14026,32 @@ def list_code_triggers(
     status_filter: str | None = None,
     repo_id: int | None = None,
     include_superseded: bool = False,
-) -> list[dict[str, Any]]:
+    origin: str | None = None,
+    limit: int = TRIGGER_PAGE_DEFAULT,
+    offset: int = 0,
+) -> dict[str, Any]:
+    """One page of an engagement's triggers, most actionable first.
+
+    The rows are those of analysis repositories, the set `trigger_summary`
+    counts, so a count and the list behind it agree. ``by_origin`` counts every
+    row under the same status, repository and generation filters whatever
+    ``origin`` selects, so a reader shows both kinds' totals from one page.
+    """
     engagement = _engagement_or_404(engagement_id)
     if status_filter and status_filter not in _TRIGGER_STATUSES:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"invalid trigger status: {status_filter}",
         )
-    clauses = ["t.engagement_id = ?"]
+    if origin is not None and origin not in {TRIGGER_ORIGIN_DEPTH_FLOOR, TRIGGER_ORIGIN_CROSS_FILE}:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"invalid trigger origin: {origin}; one of "
+                f"{TRIGGER_ORIGIN_CROSS_FILE}, {TRIGGER_ORIGIN_DEPTH_FLOOR}"
+            ),
+        )
+    clauses = ["t.engagement_id = ?", _analysis_repo_sql("repos")]
     params: list[Any] = [engagement.id]
     if not include_superseded:
         clauses.extend(
@@ -11005,15 +14089,7 @@ def list_code_triggers(
              AND target_generation_file.file_id = t.target_file_id
         """
 
-    with get_connection() as connection:
-        if repo_id is not None:
-            _get_published_repo_row(connection, engagement.id, int(repo_id))
-        rows = connection.execute(
-            f"""
-            SELECT
-                t.*,
-                {source_file_path} AS source_file_path,
-                {resolved_target_file_path} AS resolved_target_file_path
+    from_clause = """
             FROM code_analysis_triggers AS t
             JOIN code_files AS sf
               ON sf.id = t.source_file_id
@@ -11022,11 +14098,34 @@ def list_code_triggers(
               ON repos.id = sf.repo_id
              AND repos.engagement_id = sf.engagement_id
              AND repos.active_generation > 0
+    """
+    where = " AND ".join(clauses)
+    page_clause = "" if origin is None else " AND t.origin = ?"
+    page_params = (*params, *(() if origin is None else (origin,)))
+    with get_connection() as connection:
+        if repo_id is not None:
+            _get_published_repo_row(connection, engagement.id, int(repo_id))
+        by_origin = {TRIGGER_ORIGIN_CROSS_FILE: 0, TRIGGER_ORIGIN_DEPTH_FLOOR: 0}
+        for count_row in connection.execute(
+            f"SELECT t.origin, COUNT(*) AS total {from_clause} WHERE {where} GROUP BY t.origin",
+            tuple(params),
+        ).fetchall():
+            by_origin[str(count_row["origin"])] = int(count_row["total"])
+        total = (
+            sum(by_origin.values()) if origin is None else by_origin.get(origin, 0)
+        )
+        rows = connection.execute(
+            f"""
+            SELECT
+                t.*,
+                {source_file_path} AS source_file_path,
+                {resolved_target_file_path} AS resolved_target_file_path
+            {from_clause}
             LEFT JOIN code_files AS tf
               ON tf.id = t.target_file_id
              AND tf.engagement_id = t.engagement_id
             {generation_file_joins}
-            WHERE {' AND '.join(clauses)}
+            WHERE {where}{page_clause}
             ORDER BY
                 CASE t.status
                     WHEN 'pending' THEN 0
@@ -11036,10 +14135,19 @@ def list_code_triggers(
                 END,
                 t.updated_at DESC,
                 t.id DESC
+            LIMIT ? OFFSET ?
             """,
-            tuple(params),
+            (*page_params, int(limit), int(offset)),
         ).fetchall()
-    return [dict(row) for row in rows]
+    items = [dict(row) for row in rows]
+    return {
+        "total": total,
+        "offset": offset,
+        "count": len(items),
+        "has_more": offset + len(items) < total,
+        "items": items,
+        "by_origin": by_origin,
+    }
 
 
 def resolve_code_triggers(
@@ -11065,16 +14173,28 @@ def resolve_code_triggers(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="resolution_note is required",
         )
+    # `reviewed_at_sufficient_depth` answers how deeply the file was read, so it
+    # settles only a depth_floor trigger; a selector that names a cross-file
+    # hypothesis leaves it pending and reported in `not_resolved`.
+    depth_only = normalized_status == _TRIGGER_STATUS_DEPTH_SUFFICIENT
+    origin_clause = "AND origin = ?" if depth_only else ""
+    origin_params = (TRIGGER_ORIGIN_DEPTH_FLOOR,) if depth_only else ()
 
     resolved = 0
     not_resolved: list[str] = []
+    # Selected triggers bound to a directed attempt, which only `withdraw` frees.
+    queued: list[dict[str, Any]] = []
+    # Items naming no trigger at all: not a depth_floor mismatch, a missing selector.
+    unselected: list[str] = []
     with get_connection() as connection:
         for idx, item in enumerate(items):
-            trigger_id = item.get("trigger_id", item.get("id"))
+            # The request model dumps every selector key, unset ones as None or "",
+            # so the first one present with a value is the selector.
+            trigger_id = item.get("trigger_id") or item.get("id")
             if trigger_id is not None:
                 validated_id = _coerce_int(trigger_id, field_name="trigger_id")
                 cursor = connection.execute(
-                    """
+                    f"""
                     UPDATE code_analysis_triggers
                     SET status = ?,
                         resolution_note = ?,
@@ -11097,6 +14217,7 @@ def resolve_code_triggers(
                            AND repos.active_generation > 0
                           WHERE files.engagement_id = ?
                       )
+                      {origin_clause}
                     """,
                     (
                         normalized_status,
@@ -11105,17 +14226,33 @@ def resolve_code_triggers(
                         validated_id,
                         _TRIGGER_STATUS_PENDING,
                         engagement.id,
+                        *origin_params,
                     ),
                 )
                 if cursor.rowcount == 0:
                     not_resolved.append(str(validated_id))
+                    queued.extend(
+                        _queued_trigger_entry(row)
+                        for row in connection.execute(
+                            """
+                            SELECT id, resolved_queue_item_id, target_file_path, vuln_class
+                            FROM code_analysis_triggers
+                            WHERE engagement_id = ? AND id = ? AND status = ?
+                              AND source_superseded_at IS NULL
+                            """,
+                            (engagement.id, validated_id, _TRIGGER_STATUS_QUEUED),
+                        ).fetchall()
+                    )
                 else:
                     resolved += cursor.rowcount
                 continue
 
-            file_path = _trigger_repository_path(item.get("file_path", item.get("target_file_path", "")))
+            file_path = _trigger_repository_path(
+                item.get("file_path") or item.get("target_file_path") or ""
+            )
             if not file_path:
                 not_resolved.append(f"item[{idx}]")
+                unselected.append(f"item[{idx}]")
                 continue
             vuln_class = str(item.get("vuln_class", "")).strip()
             repo_id = item.get("repo_id")
@@ -11146,6 +14283,9 @@ def resolve_code_triggers(
             if vuln_class:
                 clauses.append("vuln_class = ?")
                 params.append(vuln_class)
+            if depth_only:
+                clauses.append("origin = ?")
+                params.append(TRIGGER_ORIGIN_DEPTH_FLOOR)
             if repo_id is not None:
                 validated_repo_id = _coerce_int(repo_id, field_name="repo_id")
                 clauses.append(
@@ -11168,15 +14308,153 @@ def resolve_code_triggers(
             if cursor.rowcount == 0:
                 label = f"{file_path}:{vuln_class}" if vuln_class else file_path
                 not_resolved.append(label)
+                queued_params = list(params)
+                queued_params[2] = _TRIGGER_STATUS_QUEUED
+                queued.extend(
+                    _queued_trigger_entry(row)
+                    for row in connection.execute(
+                        f"""
+                        SELECT id, resolved_queue_item_id, target_file_path, vuln_class
+                        FROM code_analysis_triggers
+                        WHERE {' AND '.join(clauses)}
+                        ORDER BY id
+                        """,
+                        tuple(queued_params),
+                    ).fetchall()
+                )
             else:
                 resolved += cursor.rowcount
 
+    detail: list[str] = []
+    if queued:
+        attempts = sorted({
+            entry["queue_item_id"] for entry in queued if entry["queue_item_id"] is not None
+        })
+        detail.append(
+            f"{len(queued)} selected trigger(s) are queued on a directed attempt, which "
+            "resolve-triggers does not touch (`queued` lists each with its queue item). "
+            + (
+                "While no lane has claimed it, `vigil assess code-dispatch withdraw "
+                f"{','.join(str(item) for item in attempts)} --reason \"<why>\"` returns "
+                "them to pending; then resolve them again. "
+                if attempts
+                else ""
+            )
+            + "An attempt withdraw refuses (claimed, or an owed review the trigger was "
+            "merged into) settles the trigger when it closes."
+        )
+    if unselected:
+        detail.append(
+            f"{', '.join(unselected)} carr{'ies' if len(unselected) == 1 else 'y'} no "
+            "selector: name a trigger_id/id or a file_path/target_file_path."
+        )
+    if depth_only and len(not_resolved) > len(unselected):
+        detail.append(
+            f"{_TRIGGER_STATUS_DEPTH_SUFFICIENT} settles only a pending depth_floor "
+            "trigger; every other item in not_resolved named none (a cross-file "
+            "trigger, or one no longer pending). A cross-file trigger is answered by "
+            "`code-dispatch requeue-triggers` or resolved as "
+            + ", ".join(sorted(
+                _TERMINAL_TRIGGER_RESOLUTION_STATUSES - {_TRIGGER_STATUS_DEPTH_SUFFICIENT}
+            ))
+            + "."
+        )
     return {
         "resolved": resolved,
         "items_requested": len(items),
         "total": len(items),
         "not_resolved": not_resolved,
         "resolution_status": normalized_status,
+        **({"queued": queued} if queued else {}),
+        **({"detail": " ".join(detail)} if detail else {}),
+    }
+
+
+def _queued_trigger_entry(row: Any) -> dict[str, Any]:
+    return {
+        "trigger_id": int(row["id"]),
+        "queue_item_id": (
+            None if row["resolved_queue_item_id"] is None else int(row["resolved_queue_item_id"])
+        ),
+        "file_path": str(row["target_file_path"]),
+        "vuln_class": str(row["vuln_class"]),
+    }
+
+
+# The trigger statuses a closed trigger can hold: resolved by a covering review,
+# or closed with an accepted-gap resolution. Only these carry a note that
+# records a decision, so only these take an amendment.
+_AMENDABLE_TRIGGER_STATUSES = (
+    _TRIGGER_STATUS_RESOLVED,
+    *sorted(_TERMINAL_TRIGGER_RESOLUTION_STATUSES),
+)
+
+
+def amend_code_trigger_notes(
+    engagement_id: int,
+    *,
+    trigger_ids: list[int],
+    amendment: str,
+) -> dict[str, Any]:
+    """Append a dated correction to closed triggers' resolution notes.
+
+    Append-only: the status, the resolving queue item and the existing note
+    stay as recorded, and the note gains one ``Amended <timestamp>: ...`` line,
+    the same append idiom `_carry_trigger_bindings_forward` uses. A trigger that
+    is pending or queued has no decision to correct and is reported in
+    ``not_resolved``, as is an id naming no current trigger.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    note = amendment.strip()
+    if not note:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="resolution_note is required",
+        )
+    line = f"Amended {_now_iso()}: {note}"
+    status_placeholders = ", ".join("?" for _ in _AMENDABLE_TRIGGER_STATUSES)
+    amended: list[dict[str, Any]] = []
+    not_resolved: list[str] = []
+    with get_connection() as connection:
+        for trigger_id in trigger_ids:
+            validated_id = _coerce_int(trigger_id, field_name="trigger_id")
+            row = connection.execute(
+                f"""
+                SELECT triggers.id, triggers.status
+                FROM code_analysis_triggers AS triggers
+                JOIN code_repos AS repos
+                  ON repos.id = triggers.repo_id
+                 AND repos.engagement_id = triggers.engagement_id
+                 AND repos.active_generation > 0
+                WHERE triggers.engagement_id = ? AND triggers.id = ?
+                  AND triggers.status IN ({status_placeholders})
+                  AND triggers.source_superseded_at IS NULL
+                  AND triggers.repo_generation = repos.active_generation
+                """,
+                (engagement.id, validated_id, *_AMENDABLE_TRIGGER_STATUSES),
+            ).fetchone()
+            if row is None:
+                not_resolved.append(str(validated_id))
+                continue
+            connection.execute(
+                """
+                UPDATE code_analysis_triggers
+                SET resolution_note = CASE
+                        WHEN resolution_note = '' THEN ?
+                        ELSE resolution_note || char(10) || ?
+                    END,
+                    updated_at = CURRENT_TIMESTAMP
+                WHERE engagement_id = ? AND id = ?
+                """,
+                (line, line, engagement.id, validated_id),
+            )
+            amended.append({"trigger_id": validated_id, "status": str(row["status"])})
+
+    return {
+        "amended": amended,
+        "items_requested": len(trigger_ids),
+        "total": len(trigger_ids),
+        "not_resolved": not_resolved,
     }
 
 
@@ -11211,17 +14489,22 @@ def code_coverage_cwe_detail(
     with get_connection() as connection:
         if repo_id is not None:
             _get_published_repo_row(connection, engagement.id, repo_id)
+        family_exclusions = _engagement_family_exclusions(connection, engagement.id)
         file_rows = connection.execute(
             f"""
             SELECT f.id AS file_id, f.file_path, f.classification, f.slot_types_json,
-                   f.analysis_status, f.loc, f.language, f.role,
+                   f.analysis_status, f.loc, f.language, f.role, f.context_tags_json,
                    f.total_functions, f.total_entry_points, f.total_sinks, f.total_exports,
-                   f.structural_unavailable_dimensions_json
+                   f.structural_unavailable_dimensions_json,
+                   review_depth.review_passes, review_depth.deep_passes,
+                   review_depth.review_dispatches, review_depth.signal_passes
             FROM code_files f
+            LEFT JOIN ({_review_depth_sql()}) AS review_depth
+              ON review_depth.file_id = f.id
             WHERE f.engagement_id = ? AND f.classification IN ('critical', 'high'){repo_clause}
             ORDER BY f.analysis_priority DESC, f.id ASC
             """,
-            (engagement.id, *repo_params),
+            (*review_depth_params(engagement.id), engagement.id, *repo_params),
         ).fetchall()
 
         file_ids = [int(r["file_id"]) for r in file_rows]
@@ -11265,14 +14548,35 @@ def code_coverage_cwe_detail(
             fid = int(fr["file_id"])
             slot_types = _json_decode(fr["slot_types_json"], [])
             language = fr["language"] or ""
-            role = fr["role"] or ""
-            applicable = _applicable_families_for_file(slot_types, language=language, role=role)
+            context_tags = _json_decode(fr["context_tags_json"], [])
+            unavailable = _json_decode(fr["structural_unavailable_dimensions_json"], [])
+            applicable = _applicable_families_for_file(
+                slot_types, language=language, context_tags=context_tags, unavailable_dimensions=unavailable
+            )
             path_suggested = _path_suggested_families_for_file(
                 slot_types,
                 language=language,
-                role=role,
+                context_tags=context_tags,
                 file_path=str(fr["file_path"] or ""),
+                unavailable_dimensions=unavailable,
+                required=applicable,
             )
+            unread_code_suggested = _unread_code_suggested_families_for_file(
+                slot_types,
+                language=language,
+                context_tags=context_tags,
+                unavailable_dimensions=unavailable,
+                required=applicable,
+            )
+            optional = _optional_families_for_file(
+                slot_types, language=language, context_tags=context_tags,
+                unavailable_dimensions=unavailable,
+            )
+            excluded = _excluded_family_entries([*applicable, *optional], family_exclusions)
+            applicable = _without_excluded(applicable, family_exclusions)
+            optional = _without_excluded(optional, family_exclusions)
+            path_suggested = _without_excluded(path_suggested, family_exclusions)
+            unread_code_suggested = _without_excluded(unread_code_suggested, family_exclusions)
             merged_entries = list(cwe_by_file.get(fid, {}).values())
             total_functions = int(fr["total_functions"] or 0)
             result_effort = result_effort_by_file.get(fid, _empty_receipt_effort())
@@ -11303,16 +14607,21 @@ def code_coverage_cwe_detail(
                 "slot_types": slot_types,
                 "applicable_families": applicable,
                 "path_suggested_families": path_suggested,
+                "unread_code_suggested_families": unread_code_suggested,
+                "optional_families": optional,
+                "excluded_families": excluded,
                 "cwe_coverage": merged_entries,
                 "analysis_effort": {
                     **result_effort,
                     "total_functions": total_functions,
                     "callable_coverage_pct": round(callable_coverage_pct, 1),
                 },
+                # How deep the file's passes went; a pointer, never credit.
+                "review_depth": review_depth_projection(fr),
             })
 
         # Also include the standard coverage summary fields
-        summary = code_coverage_summary(engagement_id, repo_id=repo_id)
+        summary = code_coverage_summary(engagement_id, repo_id=repo_id, effort_gap_rows=True)
 
     return {
         "files": files_detail,

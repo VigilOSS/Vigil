@@ -9,11 +9,13 @@ from ..services import sent_reply_versions, submission_versions
 from ..services.engagements import get_engagement_or_404
 from ..ws import broadcaster
 from .assessment import _offload
+from .query_params import DeclaredQueryParamsRoute
 
 
 router = APIRouter(
     prefix="/engagements/{engagement_key}/assessment/submissions",
     tags=["assessment-submissions"],
+    route_class=DeclaredQueryParamsRoute,
 )
 
 

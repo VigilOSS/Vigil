@@ -268,8 +268,10 @@ def test_over_soften_guard_unverified_high_finding_still_blocks(client, eng) -> 
 
     body = _readiness(client)
     assert body["ready"] is False, body
+    # On a web engagement the ungraded-finding gate names it, with the command
+    # that grades it; the bare verification-status item is not repeated.
     assert any(
-        b["kind"] == "finding_verification_status" and b["slug"] == "HR-003"
+        b["kind"] == "unreviewed_findings" and b["slug"] == "HR-003"
         for b in body["blockers"]
     ), body
 
@@ -302,11 +304,13 @@ def test_legacy_severity_rationale_does_not_fabricate_variance_approval(client, 
 
     body = _readiness(client)
 
-    blocker = next(
-        row for row in body["blockers"]
+    # The divergence stays unattributed: an advisory naming the variance
+    # command (ADR 0046), never the approved-divergence item.
+    advisory = next(
+        row for row in body["advisories"]
         if row["kind"] == "severity_cvss_mismatch" and row["slug"] == "HR-004"
     )
-    assert "--severity-variance-file" in blocker["detail"]
+    assert "--severity-variance-file" in advisory["detail"]
     assert not any(
         row["kind"] == "severity_cvss_band_divergence" and row["slug"] == "HR-004"
         for row in body["advisories"]
@@ -368,7 +372,7 @@ def test_same_status_reverification_repairs_legacy_severity_variance(client, eng
         )
     assert any(
         row["kind"] == "severity_cvss_mismatch"
-        for row in _readiness(client)["blockers"]
+        for row in _readiness(client)["advisories"]
     )
 
     _ensure_dispatch(client, "HUNT-1", "vulnerability-analyst")
@@ -427,7 +431,7 @@ def test_same_status_reverification_repairs_legacy_severity_variance(client, eng
     body = _readiness(client)
     assert not any(
         row["kind"] == "severity_cvss_mismatch" and row["slug"] == "HR-006"
-        for row in body["blockers"]
+        for row in (*body["blockers"], *body["advisories"])
     )
     assert any(
         row["kind"] == "severity_cvss_band_divergence"

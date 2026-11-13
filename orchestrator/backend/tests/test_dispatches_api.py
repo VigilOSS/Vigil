@@ -401,17 +401,29 @@ def test_dispatch_list_filters(client, isolate_settings) -> None:
     assert [r["agent_id"] for r in resp.json()] == ["F2"]
 
 
-def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isolate_settings) -> None:
+def test_dispatch_validation_folds_status_spelling_and_rejects_unknown_values(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
-    # Bad status enum
+    # A separator variant of a status word folds to its canonical spelling.
+    folded = _dispatch(
+        client,
+        agent_id="FOLD-1",
+        agent_role="recon-specialist",
+        status="in_progress",
+        skills="subdomain-enumeration",
+    )
+    assert folded.status_code == 201, folded.text
+    assert folded.json()["status"] == "in-progress"
+
+    # A word outside the status vocabulary is still refused.
     bad = _dispatch(
         client,
         agent_id="BAD-1",
         agent_role="recon-specialist",
-        status="in_progress",  # underscore instead of hyphen
+        status="running",
         skills="subdomain-enumeration",
     )
     assert bad.status_code == 422
+    assert "status" in bad.text
 
     # Unknown field (extra="forbid")
     bad = _dispatch(
@@ -422,6 +434,7 @@ def test_dispatch_validation_rejects_bad_status_and_unknown_fields(client, isola
         skills="subdomain-enumeration",
     )
     assert bad.status_code == 422
+    assert "garbage_key" in bad.text
 
 
 def test_dispatch_without_skills_is_accepted(client, isolate_settings) -> None:

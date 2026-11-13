@@ -502,6 +502,16 @@ def test_the_backend_mirror_of_the_function_scoped_dimensions_is_exact() -> None
     assert FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS == FUNCTION_SCOPED_DIMENSIONS
 
 
+def test_the_backend_mirror_of_the_streaming_fallback_baseline_is_exact() -> None:
+    """The payload validator and the markup family rule both read this set to
+    recognise a streaming-fallback index."""
+    from assess.lib.treesitter_streaming import STREAMING_FALLBACK_BASELINE_UNAVAILABLE
+
+    from app.services.code_analysis_support import STREAMING_FALLBACK_UNAVAILABLE_BASELINE
+
+    assert STREAMING_FALLBACK_UNAVAILABLE_BASELINE == STREAMING_FALLBACK_BASELINE_UNAVAILABLE
+
+
 def test_code_index_sync_accepts_a_complete_file_with_no_signal_at_all() -> None:
     """A blank or comment-only file really does measure empty."""
     module = _sync_module()

@@ -98,6 +98,12 @@ DETAIL_KEY_EFFECTS: Mapping[str, Effect] = {
     "unblock_requirements": KEEP,
     "cwe_id": INVALIDATE,
 }
+# Detail keys that explain a status the finding itself holds: its verdict (kill,
+# block) or its submission (withdrawal). They describe one finding's own record,
+# so merge never fills them from the source; the merged source keeps its own.
+STATUS_RATIONALE_DETAIL_KEYS = frozenset(
+    {"kill_reason", "kill_check", "block_reason", "unblock_requirements", "withdrawal_reason"}
+)
 DEFAULT_DETAIL_AXIS = "details.*"
 DEFAULT_DETAIL_EFFECT = CLAIM_REVIEW
 

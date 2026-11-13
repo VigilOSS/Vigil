@@ -685,7 +685,7 @@ def test_invalid_nested_workflow_extension_values_are_rejected(
 
 
 # ──────────────────────────────────────────────────────────────────────────
-# A kill that admits the experiment never ran is `blocked`, not `false_positive`
+# A kill rests on a completed counter-check; its follow-up stays visible
 # ──────────────────────────────────────────────────────────────────────────
 
 
@@ -748,50 +748,54 @@ def _kill(seeded, kill_reason: str, **details):
     )
 
 
-@pytest.mark.parametrize(
-    "details",
-    [
-        {"kill_check": 2},
-        {"kill_reason": "The authorization guard dominates every path."},
-    ],
-)
-def test_false_positive_requires_kill_reason_and_kill_check(seeded, details) -> None:
+def test_a_kill_without_kill_reason_records_the_verify_reason(seeded) -> None:
     response = seeded.post(
         f"{_base()}/findings/VA-001/verify",
         json={
             "verification_status": "false_positive",
             "reason_text": "Verifier disposition.",
-            "details": details,
+            "details": {"kill_check": 2},
             "counter_check": _completed_counter_check(seeded),
         },
     )
 
-    assert response.status_code == 400, response.text
-    assert "details.kill_reason and details.kill_check" in response.json()["detail"]
-    assert "integer from 1 to 5" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["finding"]["details"]["kill_reason"] == "Verifier disposition."
+    assert [(e["field"], e["derived_from"]) for e in body["derived"]] == [
+        ("details.kill_reason", "reason_text")
+    ]
+    assert body["advisories"] == []
 
 
-def test_a_kill_citing_an_absent_capability_must_name_a_settling_test(seeded) -> None:
-    """``false_positive`` is the path of least resistance — it is the only
-    disposition the verify flow NAMES as the negative outcome — so nothing
-    objected when a kill's own text said the experiment never ran."""
-    refused = _kill(seeded, "Could not test: no second organization to pivot from.")
+def test_a_kill_without_kill_check_is_recorded(seeded) -> None:
+    response = seeded.post(
+        f"{_base()}/findings/VA-001/verify",
+        json={
+            "verification_status": "false_positive",
+            "reason_text": "Verifier disposition.",
+            "details": {"kill_reason": "The authorization guard dominates every path."},
+            "counter_check": _completed_counter_check(seeded),
+        },
+    )
 
-    assert refused.status_code == 400, refused.text
-    detail = refused.json()["detail"]
-    assert "`blocked`, not `false_positive`" in detail
-    assert "required_followup" in detail
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["finding"]["verification_status"] == "false_positive"
+    assert "kill_check" not in body["finding"]["details"]
 
 
-def test_naming_the_settling_test_satisfies_it(seeded) -> None:
-    """Satisfiable by naming the test, never by rewording the kill."""
+def test_a_named_settling_test_stays_visible_in_report_readiness(seeded) -> None:
+    """A false_positive leaves every report projection, so a settling test the
+    kill names in details.required_followup is repeated by readiness."""
     accepted = _kill(
         seeded,
-        "Could not test: no second organization to pivot from.",
+        "The cross-org read is refused by the Acme tenant guard.",
         required_followup=["Provision a second tenant and replay the cross-org read."],
     )
 
     assert accepted.status_code == 200, accepted.text
+    assert accepted.json()["advisories"] == []
     readiness = seeded.get(f"{_base()}/report-readiness").json()
     advisory = next(
         item

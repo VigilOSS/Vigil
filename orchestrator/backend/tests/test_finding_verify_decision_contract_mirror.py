@@ -7,8 +7,10 @@ teaches a document the API refuses with a bare 422.
 """
 from __future__ import annotations
 
+import re
 from typing import get_args
 
+import pytest
 from annotated_types import MaxLen
 
 from app.api.assessment import (
@@ -16,7 +18,10 @@ from app.api.assessment import (
     FindingCounterCheckRequest,
     FindingSeverityVarianceRequest,
 )
+from app.services.state_manager.findings import _DERIVED_VARIANCE_FIELDS
 from app.services.state_manager.proofs import TERMINAL_VERIFICATION_STATUSES
+from assess.lib import contracts
+from assess.lib.contract_registry import DECISION_CHECK_FIELDS
 from assess.commands.verify_finding import (
     _DECISION_FIELDS,
     _SEVERITY_BANDS,
@@ -38,16 +43,29 @@ def test_each_decision_roster_mirrors_its_backend_model() -> None:
         ), field_name
 
 
-def test_every_decision_field_is_required_by_both_sides() -> None:
-    """The pre-check reports a missing field, so neither side may default one."""
+def test_both_sides_require_the_same_decision_fields() -> None:
+    """The pre-check reports exactly the fields the backend model requires.
+
+    A severity variance requires only its reason; the backend derives the rest
+    from the verification (ADR 0046).
+    """
     for field_name, model in _MODELS.items():
-        assert not [
-            name for name, field in model.model_fields.items() if not field.is_required()
-        ], field_name
+        required = [name for name, field in model.model_fields.items() if field.is_required()]
         assert decision_problems(field_name, {}) == [
-            f"{field_name}.{name} is required"
-            for name, _kind, _bound in _DECISION_FIELDS[field_name]
-        ]
+            f"{field_name}.{name} is required" for name in required
+        ], field_name
+
+
+def test_every_optional_variance_field_is_one_the_backend_derives() -> None:
+    """A field the author may omit must be one the verification fills in;
+    an optional field nothing derives would be stored empty and unattributed."""
+    optional = {
+        name
+        for name, field in FindingSeverityVarianceRequest.model_fields.items()
+        if not field.is_required()
+    }
+    assert optional == {"normal_band", "chosen_severity", "actor", "proof_receipt_id"}
+    assert optional == set(_DERIVED_VARIANCE_FIELDS)
 
 
 def test_text_length_bounds_mirror_the_backend_models() -> None:
@@ -68,7 +86,8 @@ def test_text_length_bounds_mirror_the_backend_models() -> None:
 
 def test_the_severity_band_vocabulary_mirrors_the_variance_model() -> None:
     annotation = FindingSeverityVarianceRequest.model_fields["normal_band"].annotation
-    assert _SEVERITY_BANDS == get_args(annotation)
+    (bands,) = [arg for arg in get_args(annotation) if arg is not type(None)]
+    assert _SEVERITY_BANDS == get_args(bands)
 
 
 def test_the_cli_terminal_statuses_mirror_the_backend_gate() -> None:
@@ -104,3 +123,19 @@ def test_the_precheck_accepts_exactly_what_each_model_accepts() -> None:
     for field_name, document in documents.items():
         assert decision_problems(field_name, document) == [], field_name
         _MODELS[field_name].model_validate(document)
+
+
+@pytest.mark.parametrize("field_name", ["counter_check", "confirm_check"])
+def test_the_contract_names_every_check_field_and_whether_it_is_required(field_name) -> None:
+    """`contract finding verify --field <check>` is where a verifier learns the
+    check's shape before writing it, so it lists every field the model takes
+    and marks each one the model requires."""
+    model = _MODELS[field_name]
+    assert [name for name, _domain, _meaning in DECISION_CHECK_FIELDS[field_name]] == (
+        list(model.model_fields)
+    )
+    text = contracts.render_field_sections("finding verify", [field_name])
+    for name, field in model.model_fields.items():
+        match = re.search(rf"\b{name} \(([^)]*)\)", text)
+        assert match, (field_name, name, text)
+        assert ("required" in match.group(1)) == field.is_required(), (name, match.group(1))

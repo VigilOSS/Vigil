@@ -12,7 +12,7 @@ from .. import credentials as _credential_store
 
 from . import _common
 from . import findings as _findings
-from ._common import _fetch_all, _json_text, _merge_object_text, _normalize_severity, _resolve_existing_finding_slug, _slugify
+from ._common import _fetch_all, _json_text, _merge_object_text, _require_severity, _resolve_existing_finding_slug, _slugify
 
 
 def _require_retry_state(value: str) -> str:
@@ -94,6 +94,7 @@ def create_attack_chain(
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     resolved_key = chain_key or _slugify(title)
+    resolved_severity = _require_severity(severity)
     with _common.get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute(
@@ -111,7 +112,7 @@ def create_attack_chain(
                 provenance_json = excluded.provenance_json,
                 updated_at = CURRENT_TIMESTAMP
             """,
-            (engagement.id, resolved_key, title, status_value, _normalize_severity(severity), narrative, evidence_ref, _json_text(provenance)),
+            (engagement.id, resolved_key, title, status_value, resolved_severity, narrative, evidence_ref, _json_text(provenance)),
         )
         row = connection.execute(
             "SELECT * FROM assessment_attack_chains WHERE engagement_id = ? AND chain_key = ?",

@@ -23,7 +23,7 @@ def test_documented_change_effects_mirror_the_policy_table():
     "verb", ["finding update", "finding link", "finding merge", "finding relocate"]
 )
 def test_every_finding_write_contract_renders_each_effect(verb):
-    notes = contracts.render_contract(verb).split("Notes:", 1)[1]
+    notes = contracts.render_contract_notes(verb).split("Notes:", 1)[1]
     for effect in finding_change_policy.Effect:
         line = next(
             (row for row in notes.splitlines() if row.startswith(f"  - Verdict effect {effect.value} (")),

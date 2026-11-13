@@ -19,8 +19,12 @@ from pydantic import BaseModel, ConfigDict, Field
 from ..services import artifact_index
 from ..services import state_manager
 from ..services.engagements import get_engagement_view_or_404
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/engagements/{engagement_key}/assessment", tags=["assessment"])
+router = APIRouter(
+    prefix="/engagements/{engagement_key}/assessment", tags=["assessment"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 # The sentinel string the single-file report template ships with, anchored to
 # the closing </script> tag of the data node so we replace ONLY the data node
@@ -88,7 +92,7 @@ class ReportExportRequest(BaseModel):
 # assessment_summary(), which additionally returns whole surface rows, recent
 # probe evidence refs, open coverage URLs and an egress rollup. These three
 # describe the engagement — how much attack surface was left open, how many
-# credentials it held, how many chains it proved — and the Statistics tab renders
+# credentials it held, how many chains it recorded — and the Statistics tab renders
 # all three as stat cards.
 _SUMMARY_FIELDS = (
     "attack_chain_count",
@@ -96,8 +100,8 @@ _SUMMARY_FIELDS = (
     "credential_count",
 )
 
-# ReportSummary, derived half: the finding rollups, computed from THIS report's
-# own findings rather than copied from assessment_summary.
+# ReportSummary, derived half: the finding and chain rollups, computed from THIS
+# report's own findings rather than copied from assessment_summary.
 #
 # assessment_summary is not mode-filtered. Its status rollups are unfiltered
 # ``GROUP BY``s over every row of assessment_findings, and its count/severity
@@ -124,6 +128,17 @@ _DERIVED_SUMMARY_FIELDS = (
     "finding_severities",
     "finding_workflow_statuses",
     "finding_verification_statuses",
+    # The chain rollup, derived the same way and for the same reason. A chain's
+    # ``severity`` is what its author stated; ``chain_proven_severity`` is the
+    # worst stated severity among the chains THIS report proves (see
+    # ``_proven_chain_keys``), and ``chain_stated_severity`` the worst stated
+    # across every delivered chain, so a reader sees the claim beside what the
+    # delivered findings carry. The first is ``None`` when no chain qualifies, the
+    # second when the report carries no chain. Neither touches a leg's own
+    # ``severity``: a chain of two medium findings stays two medium findings inside
+    # a high chain.
+    "chain_proven_severity",
+    "chain_stated_severity",
 )
 
 # ReportFinding. The trailing root-cause keys exist on siblings only — they are
@@ -186,6 +201,19 @@ _CHAIN_FIELDS = (
     "updated_at",
 )
 
+# ReportAttackChain, derived half: whether this report's own findings prove the
+# chain. Computed at the delivery boundary from the delivered findings and the
+# chain's step links, never stored, so it cannot disagree with the body.
+_DERIVED_CHAIN_FIELDS = ("chain_proven",)
+
+# The verification statuses a report-durable finding carries. Both report
+# projections already admit only these; the chain derivation checks them again
+# so "proven" never rests on what a projection happens to admit. An
+# operator-authority verdict (ADR 0043) carries the same statuses, so an
+# operator-attested leg counts as verified; its stamp travels on the delivered
+# finding, which is where a reader sees how that leg was settled.
+_VERIFIED_STATUSES = frozenset({"confirmed", "downgraded"})
+
 # ReportAttackChainLink. `entity_id` is deliberately absent: the report resolves
 # a step through `entity_ref`, which report_readiness requires on every step
 # link of a finalizable engagement, and the payload carries no finding row ids
@@ -222,6 +250,18 @@ def _report_finding_groups(engagement_id: int, mode: str) -> dict[str, Any]:
     }
 
 
+def _delivered_records(groups: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Every finding the projected payload delivers: roots, siblings, standalone."""
+    return [
+        *(
+            record
+            for group in groups["groups"]
+            for record in (group["root"], *group["siblings"])
+        ),
+        *groups["standalone"],
+    ]
+
+
 def _summary_finding_rollups(groups: Mapping[str, Any]) -> dict[str, Any]:
     """Roll the delivered findings up into the numbers the Statistics tab shows.
 
@@ -233,14 +273,7 @@ def _summary_finding_rollups(groups: Mapping[str, Any]) -> dict[str, Any]:
     ``ORDER BY``; absent values are not counted rather than being given an
     invented default.
     """
-    records = [
-        *(
-            record
-            for group in groups["groups"]
-            for record in (group["root"], *group["siblings"])
-        ),
-        *groups["standalone"],
-    ]
+    records = _delivered_records(groups)
     rollups: dict[str, Counter[str]] = {
         field: Counter() for field in ("severity", "workflow_status", "verification_status")
     }
@@ -257,6 +290,69 @@ def _summary_finding_rollups(groups: Mapping[str, Any]) -> dict[str, Any]:
             sorted(rollups["verification_status"].items())
         ),
     }
+
+
+def _proven_chain_keys(
+    groups: Mapping[str, Any], links: list[Mapping[str, Any]]
+) -> set[str]:
+    """The chains whose recorded path this report's own findings prove.
+
+    A chain qualifies when it has at least one ``step`` link and EVERY step is a
+    ``finding`` link naming a finding this report delivers with a verified
+    status. ``step`` is the one relation with semantics anywhere in Vigil (see
+    ReportAttackChainLink); every other relation is supporting context and
+    neither proves nor disproves the path. A chain with no step proves nothing.
+    """
+    verified = {
+        str(record.get("slug") or "")
+        for record in _delivered_records(groups)
+        if record.get("verification_status") in _VERIFIED_STATUSES
+    }
+    verified.discard("")
+    steps_by_chain: dict[str, list[Mapping[str, Any]]] = {}
+    for link in links:
+        if link.get("relation") == "step":
+            steps_by_chain.setdefault(str(link.get("chain_key") or ""), []).append(link)
+    return {
+        chain_key
+        for chain_key, steps in steps_by_chain.items()
+        if chain_key
+        and all(
+            step.get("entity_kind") == "finding"
+            and str(step.get("entity_ref") or "") in verified
+            for step in steps
+        )
+    }
+
+
+def _worst_severity(severities: list[str]) -> str | None:
+    ranked = [sev for sev in severities if sev in state_manager.SEVERITY_RANK]
+    if not ranked:
+        return None
+    return max(ranked, key=lambda sev: state_manager.SEVERITY_RANK[sev])
+
+
+def _report_attack_chains(
+    engagement_id: int, groups: Mapping[str, Any], links: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """The delivered chains, each marked proven or not, and the chain rollup."""
+    proven_keys = _proven_chain_keys(groups, links)
+    chains = [
+        {
+            **_project(chain, _CHAIN_FIELDS),
+            "chain_proven": str(chain.get("chain_key") or "") in proven_keys,
+        }
+        for chain in state_manager.list_attack_chains(engagement_id)
+    ]
+    rollup = {
+        "chain_proven_severity": _worst_severity(
+            [str(chain.get("severity") or "") for chain in chains if chain["chain_proven"]]
+        ),
+        "chain_stated_severity": _worst_severity(
+            [str(chain.get("severity") or "") for chain in chains]
+        ),
+    }
+    return chains, rollup
 
 
 def _report_attack_chain_links(engagement_id: int) -> list[dict[str, Any]]:
@@ -278,11 +374,16 @@ def _assemble_report_payload(engagement, mode: str, summary: dict[str, Any]) -> 
     Calls list_report_finding_groups, list_attack_chains, list_attack_chain_links,
     and report_readiness, then
     narrows each to the fields the orchestrator/report/src/types.ts ReportData
-    contract declares (see the allow-lists above). The summary's finding rollups
-    are the one thing not copied from a projection: they are recounted from this
-    report's own findings, so its headline numbers and its body agree.
+    contract declares (see the allow-lists above). The summary's finding and
+    chain rollups and each chain's ``chain_proven`` are the only values not
+    copied from a projection: they are derived from this report's own findings,
+    so its headline numbers and its body agree.
     """
     finding_groups = _report_finding_groups(engagement.id, mode)
+    chain_links = _report_attack_chain_links(engagement.id)
+    attack_chains, chain_rollup = _report_attack_chains(
+        engagement.id, finding_groups, chain_links
+    )
     payload = {
         "generated_at": _utc_now().strftime("%Y-%m-%dT%H:%M:%SZ"),
         "vigil_version": _vigil_version(),
@@ -300,13 +401,11 @@ def _assemble_report_payload(engagement, mode: str, summary: dict[str, Any]) -> 
         "summary": {
             **_project(summary, _SUMMARY_FIELDS),
             **_summary_finding_rollups(finding_groups),
+            **chain_rollup,
         },
         "finding_groups": finding_groups,
-        "attack_chains": [
-            _project(chain, _CHAIN_FIELDS)
-            for chain in state_manager.list_attack_chains(engagement.id)
-        ],
-        "attack_chain_links": _report_attack_chain_links(engagement.id),
+        "attack_chains": attack_chains,
+        "attack_chain_links": chain_links,
     }
     if mode == "draft":
         # Draft only, mirroring the Statistics tab's ReadinessNotice. A `final`

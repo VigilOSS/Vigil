@@ -1,10 +1,9 @@
 """Canonical vocabulary for the finding ``details`` blob, and its enforcement.
 
 ``details`` is stored as an open JSON column, so the allow-list is the only thing
-that keeps it a contract rather than a junk drawer. It used to be enforced in the
-CLI alone, and only on two of the three write verbs — so a key ``finding verify``
-happily created was refused by ``finding update``, and evidence was *creatable but
-not maintainable*. The vocabulary therefore lives here, beside the enforcement,
+that keeps it a contract rather than a junk drawer. It is enforced server-side on
+every write verb, so a key one verb can create is a key every verb can maintain.
+The vocabulary lives here, beside the enforcement,
 and ``scripts/generate_agent_schemas.py`` renders it into
 ``agent/schemas/finding-record.schema.json`` so the client-side validator is a
 projection of the server rule instead of a second copy of it.
@@ -49,13 +48,13 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "kill_reason": {
         "type": "string",
-        "description": "Verifier rationale for false_positive verdict: which check failed and why the issue is not exploitable.",
+        "description": "Verifier rationale for false_positive verdict: which check failed and why the issue is not exploitable. A kill that names none stores the verify's reason_text here, or a summary of its counter_check.",
     },
     "kill_check": {
         "type": "integer",
         "minimum": 1,
         "maximum": 5,
-        "description": "Verification check number (1-5) that produced the false-positive verdict.",
+        "description": "Verification check number (1-5) that produced the false-positive verdict. Optional.",
     },
     "entry_point": {
         "type": "string",
@@ -289,7 +288,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "severity_band_rationale": {
         "type": "string",
-        "description": "Why the assigned severity band DIVERGES from the band the CVSS base score implies (e.g. business context the vector cannot express). Present and non-empty demotes report-readiness' severity_cvss_mismatch blocker to an advisory; it never excuses the two CVSS-arithmetic blockers.",
+        "description": "Why the assigned severity band diverges from the band the CVSS base score implies (e.g. business context the vector cannot express), as prose for the reader. Report readiness does not read it: only a severity_variance attached to the current verification (`finding verify --severity-variance-file`) attributes the divergence, and an unattributed one stays the severity_cvss_mismatch advisory. It never excuses the two CVSS-arithmetic blockers.",
     },
     "honest_bounds": {
         "type": "string",
@@ -440,7 +439,7 @@ FINDING_DETAIL_CORE_PROPERTIES: dict[str, dict[str, Any]] = {
     },
     "withdrawal_reason": {
         "type": "string",
-        "description": "Why the researcher withdrew this submission. REQUIRED when submission_status is set to 'withdrawn' \u2014 a retraction is researcher-initiated, so the record must say why rather than assert a program decision.",
+        "description": "Why the researcher withdrew this submission. A move to submission_status 'withdrawn' needs it \u2014 a retraction is researcher-initiated, so the record says why rather than asserting a program decision; a write that states reason_text and names no withdrawal_reason stores that reason here.",
     },
 }
 
@@ -830,7 +829,13 @@ def _validate_schema_value(value: Any, schema: dict[str, Any], *, path: str) -> 
         if item_schema is not None:
             _validate_schema_value(item, item_schema, path=item_path)
         elif additional is False:
-            _invalid(item_path, "is not an allowed field")
+            close = difflib.get_close_matches(key, sorted(properties), n=1, cutoff=0.6)
+            _invalid(
+                item_path,
+                "is not an allowed field"
+                + (f" (did you mean {path}.{close[0]}?)" if close else "")
+                + f"; {path} takes: {', '.join(sorted(properties))}",
+            )
         elif isinstance(additional, dict):
             _validate_schema_value(item, additional, path=item_path)
     for key in schema.get("required", []):

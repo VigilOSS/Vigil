@@ -239,26 +239,16 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
             )
         ]
 
-    variant_by_id = {int(v["id"]): v for v in variants}
-    status_by_variant: dict[int, list[int]] = {}
-    for obs in observations:
-        vid = obs.get("request_variant_id")
-        st = obs.get("response_status")
-        if vid is not None and st is not None:
-            status_by_variant.setdefault(int(vid), []).append(int(st))
-
-    parsed_surfaces: list[tuple[str, str, str]] = []
-    for s in surfaces:
-        host, path = _surface_host_path(str(s.get("target_descriptor") or ""))
-        if host:
-            parsed_surfaces.append((host, path, str(s.get("surface_type") or "")))
-
-    cred_hosts: set[str] = set()
-    for c in creds:
-        for raw in (c.get("credential_key"), c.get("principal"), c.get("provenance_json")):
-            for tok in _extract_host_tokens(str(raw or "")):
-                cred_hosts.add(tok)
-
+    index = _AttributionIndex(
+        variants=variants,
+        observations=observations,
+        surfaces=surfaces,
+        coverage_items=coverage_items,
+        probes=probes,
+        findings=findings,
+        dispatches=dispatches,
+    )
+    cred_hosts = _credential_hosts(creds)
     active_deferrals = _active_depth_deferrals(eng_id)
 
     result_units: list[dict[str, Any]] = []
@@ -266,14 +256,8 @@ def depth_ledger(engagement_id: int) -> dict[str, Any]:
     for unit in units:
         ledger = _unit_ledger(
             unit,
-            variant_by_id=variant_by_id,
-            status_by_variant=status_by_variant,
-            parsed_surfaces=parsed_surfaces,
+            index=index,
             cred_hosts=cred_hosts,
-            coverage_items=coverage_items,
-            probes=probes,
-            dispatches=dispatches,
-            findings=findings,
             active_deferrals=active_deferrals,
         )
         if ledger["depth_satisfied"]:
@@ -331,46 +315,212 @@ def _extract_host_tokens(value: str) -> set[str]:
     return out
 
 
-def _unit_scope(
-    unit: dict[str, Any],
-    *,
-    variant_by_id: dict[int, dict[str, Any]],
-    status_by_variant: dict[int, list[int]],
-    parsed_surfaces: list[tuple[str, str, str]],
-) -> dict[str, Any]:
+def _credential_hosts(creds: list[dict[str, Any]]) -> set[str]:
+    """Every host token named by a credential's key, principal or provenance."""
+    cred_hosts: set[str] = set()
+    for c in creds:
+        for raw in (c.get("credential_key"), c.get("principal"), c.get("provenance_json")):
+            for tok in _extract_host_tokens(str(raw or "")):
+                cred_hosts.add(tok)
+    return cred_hosts
+
+
+def _prefix_key(prefix: str) -> str:
+    """The containment key ``_path_under_prefix`` compares a prefix by."""
+    return "/" + "/".join(seg for seg in prefix.split("/") if seg)
+
+
+class _PathContainmentIndex:
+    """Row positions keyed by ``(group, ancestor path)``.
+
+    A path ``/a/b`` is filed under ``/``, ``/a`` and ``/a/b``, so the rows a
+    prefix can contain are one lookup instead of a scan. ``/`` holds every row
+    of the group, which keeps a prefix that normalises to the root (``""``,
+    ``//``) a superset too. Callers still confirm each candidate with the
+    attribution predicate, so the index only decides which rows are checked.
+    """
+
+    def __init__(self) -> None:
+        self._positions: dict[tuple[Any, str], list[int]] = {}
+
+    def add(self, group: Any, path: str, position: int) -> None:
+        segments = [seg for seg in (path or "/").split("/") if seg]
+        self._positions.setdefault((group, "/"), []).append(position)
+        for depth in range(1, len(segments) + 1):
+            key = "/" + "/".join(segments[:depth])
+            self._positions.setdefault((group, key), []).append(position)
+
+    def under(self, group: Any, prefix: str) -> list[int]:
+        key = "/" if prefix == "/" else _prefix_key(prefix)
+        return self._positions.get((group, key), [])
+
+
+class _AttributionIndex:
+    """The engagement's rows, indexed once by every key that attributes a row
+    to an application unit.
+
+    A unit's variants, surfaces, probes, coverage items, findings and
+    dispatches are looked up instead of rescanned per unit: the projections
+    stay linear in rows rather than ``units x rows``. Membership and order are
+    exactly those of a full scan — candidates come back in row order and each
+    is confirmed by the same predicate (``_path_under_prefix``,
+    ``_probe_maps_to_unit``, ``_coverage_maps_to_unit``,
+    ``_finding_maps_to_unit``, ``_dispatch_targets_unit``) the scan applied.
+    """
+
+    def __init__(
+        self,
+        *,
+        variants: list[dict[str, Any]],
+        observations: list[dict[str, Any]],
+        surfaces: list[dict[str, Any]],
+        coverage_items: list[dict[str, Any]],
+        probes: list[dict[str, Any]],
+        findings: list[dict[str, Any]],
+        dispatches: list[dict[str, Any]],
+    ) -> None:
+        self.variant_by_id: dict[int, dict[str, Any]] = {int(v["id"]): v for v in variants}
+        self.status_by_variant: dict[int, list[int]] = {}
+        for obs in observations:
+            vid = obs.get("request_variant_id")
+            st = obs.get("response_status")
+            if vid is not None and st is not None:
+                self.status_by_variant.setdefault(int(vid), []).append(int(st))
+
+        self._variants = list(self.variant_by_id.values())
+        self._variant_paths = _PathContainmentIndex()
+        for position, v in enumerate(self._variants):
+            group = (
+                str(v.get("host") or "").lower(),
+                _port_class(str(v.get("scheme") or ""), int(v.get("port") or 0)),
+            )
+            self._variant_paths.add(group, str(v.get("normalized_path") or "/"), position)
+
+        self._surfaces: list[tuple[str, str, str]] = []
+        self._surface_paths = _PathContainmentIndex()
+        for s in surfaces:
+            s_host, s_path = _surface_host_path(str(s.get("target_descriptor") or ""))
+            if s_host:
+                self._surface_paths.add(s_host, s_path, len(self._surfaces))
+                self._surfaces.append((s_host, s_path, str(s.get("surface_type") or "")))
+
+        self._probes = probes
+        self._probes_by_unit: dict[int, list[int]] = {}
+        self._probes_by_variant: dict[int, list[int]] = {}
+        self._probe_targets = _PathContainmentIndex()
+        for position, probe in enumerate(probes):
+            aui = probe.get("application_unit_id")
+            if aui is not None:
+                self._probes_by_unit.setdefault(int(aui), []).append(position)
+            vid = probe.get("request_variant_id")
+            if vid is not None:
+                self._probes_by_variant.setdefault(int(vid), []).append(position)
+            t_host = str(probe.get("target_host") or "").strip().lower()
+            if t_host:
+                t_port = probe.get("target_port")
+                group = (t_host, _port_class("", int(t_port)) if t_port else "web")
+                t_path = str(probe.get("target_path") or "/") or "/"
+                self._probe_targets.add(group, t_path, position)
+
+        self._coverage = coverage_items
+        self._coverage_by_unit: dict[int, list[int]] = {}
+        self._coverage_by_variant: dict[int, list[int]] = {}
+        for position, ci in enumerate(coverage_items):
+            aui = ci.get("application_unit_id")
+            if aui is not None:
+                self._coverage_by_unit.setdefault(int(aui), []).append(position)
+            vid = ci.get("request_variant_id")
+            if vid is not None:
+                self._coverage_by_variant.setdefault(int(vid), []).append(position)
+
+        self._findings = findings
+        self._finding_locations = _PathContainmentIndex()
+        for position, finding in enumerate(findings):
+            loc = str(finding.get("canonical_location") or "")
+            if not loc:
+                continue
+            f_host, f_path = _split_host_path(loc)
+            if f_host:
+                self._finding_locations.add(f_host, f_path, position)
+
+        self._dispatches_by_unit: dict[int, list[dict[str, Any]]] = {}
+        for dispatch in dispatches:
+            aui = dispatch.get("application_unit_id")
+            if aui is not None:
+                self._dispatches_by_unit.setdefault(int(aui), []).append(dispatch)
+
+    def unit_variants(self, host: str, port_class: str, prefix: str) -> list[dict[str, Any]]:
+        return [
+            self._variants[position]
+            for position in self._variant_paths.under((host, port_class), prefix)
+            if _path_under_prefix(
+                str(self._variants[position].get("normalized_path") or "/"), prefix
+            )
+        ]
+
+    def unit_surface_types(self, host: str, prefix: str) -> set[str]:
+        return {
+            self._surfaces[position][2]
+            for position in self._surface_paths.under(host, prefix)
+            if _path_under_prefix(self._surfaces[position][1], prefix)
+        }
+
+    def unit_probes(
+        self, unit_id: int, unit_variant_ids: set[int],
+        host: str, port_class: str, prefix: str,
+    ) -> list[dict[str, Any]]:
+        candidates = set(self._probes_by_unit.get(unit_id, ()))
+        for vid in unit_variant_ids:
+            candidates.update(self._probes_by_variant.get(vid, ()))
+        candidates.update(self._probe_targets.under((host, port_class), prefix))
+        return [
+            self._probes[position]
+            for position in sorted(candidates)
+            if _probe_maps_to_unit(
+                self._probes[position], unit_id, unit_variant_ids, host, port_class, prefix
+            )
+        ]
+
+    def unit_coverage(self, unit_id: int, unit_variant_ids: set[int]) -> list[dict[str, Any]]:
+        candidates = set(self._coverage_by_unit.get(unit_id, ()))
+        for vid in unit_variant_ids:
+            candidates.update(self._coverage_by_variant.get(vid, ()))
+        return [
+            self._coverage[position]
+            for position in sorted(candidates)
+            if _coverage_maps_to_unit(self._coverage[position], unit_id, unit_variant_ids)
+        ]
+
+    def unit_findings(self, host: str, prefix: str) -> list[dict[str, Any]]:
+        return [
+            self._findings[position]
+            for position in self._finding_locations.under(host, prefix)
+            if _finding_maps_to_unit(self._findings[position], host, prefix)
+        ]
+
+    def unit_dispatches(self, unit_id: int) -> list[dict[str, Any]]:
+        return self._dispatches_by_unit.get(unit_id, [])
+
+
+def _unit_scope(unit: dict[str, Any], *, index: _AttributionIndex) -> dict[str, Any]:
     """Assemble the per-unit derived scope both ``_unit_ledger`` and the
     by-family grid builder need: the unit's identity (host/port_class/prefix),
     its mapped request variants (+ ids), their paths/methods/observed statuses,
     and the surface types under it.
 
-    Pure and side-effect-free — factored out of ``_unit_ledger`` so the by-family
-    grid (``by_family_coverage``) computes ``_expected_families`` over the SAME
-    inputs without duplicating the variant/surface assembly. ``_unit_ledger``'s
-    behavior (and therefore ``depth_ledger()``'s output) is unchanged.
+    Pure and side-effect-free, so the by-family grid (``by_family_coverage``)
+    computes ``_expected_families`` over the SAME inputs as the depth ledger.
     """
     host = str(unit["host"]).lower()
     port_class = str(unit["port_class"])
     prefix = str(unit["path_prefix"])
 
-    unit_variants: list[dict[str, Any]] = []
-    for v in variant_by_id.values():
-        if str(v.get("host") or "").lower() != host:
-            continue
-        if _port_class(str(v.get("scheme") or ""), int(v.get("port") or 0)) != port_class:
-            continue
-        if _path_under_prefix(str(v.get("normalized_path") or "/"), prefix):
-            unit_variants.append(v)
-
+    unit_variants = index.unit_variants(host, port_class, prefix)
     paths = [str(v.get("normalized_path") or "/") for v in unit_variants]
     methods = {str(v.get("method") or "").upper() for v in unit_variants}
     statuses: list[int] = []
     for v in unit_variants:
-        statuses.extend(status_by_variant.get(int(v["id"]), []))
-
-    unit_surface_types: set[str] = set()
-    for s_host, s_path, s_type in parsed_surfaces:
-        if s_host == host and _path_under_prefix(s_path, prefix):
-            unit_surface_types.add(s_type)
+        statuses.extend(index.status_by_variant.get(int(v["id"]), []))
 
     return {
         "unit_id": int(unit["id"]),
@@ -381,7 +531,7 @@ def _unit_scope(
         "paths": paths,
         "methods": methods,
         "statuses": statuses,
-        "unit_surface_types": unit_surface_types,
+        "unit_surface_types": index.unit_surface_types(host, prefix),
         "unit_variant_ids": {int(v["id"]) for v in unit_variants},
     }
 
@@ -397,11 +547,10 @@ def _covered_families_for_unit(
     (for the access-control cross-identity test), the disclosure-concrete flag,
     the covering coverage_item families, and their union ``covered_families``.
 
-    Pure extraction of the inline block ``_unit_ledger`` used to carry; both
-    ``_unit_ledger`` and ``by_family_coverage`` now share it. NEVER counts a
+    Shared by ``_unit_ledger`` and ``by_family_coverage``. NEVER counts a
     self-attested-without-evidence signal: only whitelisted covering probe
     ``result_status`` values and notes-bearing covered/not-applicable
-    coverage_items contribute (S5/S7). ``depth_ledger()`` output is unchanged.
+    coverage_items contribute (S5/S7).
     """
     covering_probe_families: set[str] = set()
     covering_identities_by_family: dict[str, set[str]] = {}
@@ -552,22 +701,11 @@ def _identity_outcome_differences(
 def _unit_ledger(
     unit: dict[str, Any],
     *,
-    variant_by_id: dict[int, dict[str, Any]],
-    status_by_variant: dict[int, list[int]],
-    parsed_surfaces: list[tuple[str, str, str]],
+    index: _AttributionIndex,
     cred_hosts: set[str],
-    coverage_items: list[dict[str, Any]],
-    probes: list[dict[str, Any]],
-    dispatches: list[dict[str, Any]],
-    findings: list[dict[str, Any]],
     active_deferrals: list[dict[str, Any]],
 ) -> dict[str, Any]:
-    scope = _unit_scope(
-        unit,
-        variant_by_id=variant_by_id,
-        status_by_variant=status_by_variant,
-        parsed_surfaces=parsed_surfaces,
-    )
+    scope = _unit_scope(unit, index=index)
     unit_id = scope["unit_id"]
     host = scope["host"]
     port_class = scope["port_class"]
@@ -581,23 +719,14 @@ def _unit_ledger(
     unit_surface_types = scope["unit_surface_types"]
     unit_variant_ids = scope["unit_variant_ids"]
 
-    # Bucket each cross-cutting list to THIS unit ONCE. The covering scan, the
-    # touched fallback, the signal-class scan, and the dispatch work-evidence
-    # check each previously re-ran the same `_probe_maps_to_unit` /
-    # `_coverage_maps_to_unit` / `_finding_maps_to_unit` predicate over the FULL
-    # lists (and the dispatch check re-scanned every probe per dispatch), making
-    # the ledger O(units x dispatches x probes) and timing out at ~900 probes.
-    # Membership is IDENTICAL — only the recomputation is removed.
-    unit_probes = [
-        p for p in probes
-        if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix)
-    ]
-    unit_coverage = [
-        ci for ci in coverage_items if _coverage_maps_to_unit(ci, unit_id, unit_variant_ids)
-    ]
-    unit_findings = [f for f in findings if _finding_maps_to_unit(f, host, prefix)]
+    # Bucket each cross-cutting list to THIS unit ONCE, through the index: the
+    # covering scan, the touched fallback, the signal-class scan, and the
+    # dispatch work-evidence check all read these buckets.
+    unit_probes = index.unit_probes(unit_id, unit_variant_ids, host, port_class, prefix)
+    unit_coverage = index.unit_coverage(unit_id, unit_variant_ids)
+    unit_findings = index.unit_findings(host, prefix)
     identity_outcome_differences = _identity_outcome_differences(
-        unit_probes, variant_by_id
+        unit_probes, index.variant_by_id
     )
     unit_has_covering_probe = any(
         str(p.get("result_status") or "").strip().lower() in PROBE_RESULT_STATUSES_COVERING
@@ -682,7 +811,7 @@ def _unit_ledger(
 
     dedicated = _dedicated_dispatch_satisfied(
         unit_id=unit_id,
-        dispatches=dispatches,
+        dispatches=index.unit_dispatches(unit_id),
         unit_has_work_evidence=unit_has_work_evidence,
     )
 
@@ -692,8 +821,7 @@ def _unit_ledger(
     # probe/coverage family, a covering probe whose family didn't resolve, or a
     # finding. A completed dispatch adds nothing here — its work-evidence test is
     # the SAME probe/finding-under-unit check already captured by
-    # `unit_has_covering_probe` / `unit_findings` — so the redundant
-    # O(dispatches x probes) dispatch scan is gone.
+    # `unit_has_covering_probe` / `unit_findings`.
     touched = (
         bool(covering_probe_families)
         or bool(covering_cov_families)
@@ -1029,6 +1157,7 @@ def _active_depth_deferrals(engagement_id: int) -> list[dict[str, Any]]:
         cursor = connection.execute(
             "SELECT * FROM assessment_dispatch_decisions "
             "WHERE engagement_id = ? AND kind = ? AND resolved = 0 "
+            "AND superseded_by_id IS NULL "
             "ORDER BY created_at DESC, id DESC",
             (engagement.id, "depth_deferral"),
         )
@@ -1194,7 +1323,9 @@ def _warn_detail(unit_ledger: dict[str, Any], *, reason: str) -> dict[str, Any]:
     }
 
 
-def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
+def by_family_coverage(
+    connection, engagement_id: int, *, host: str = "", path_prefix: str = "",
+) -> dict[str, Any]:
     """Engagement-wide (application-unit × vuln-family) coverage grid (A1).
 
     Unlike ``depth_ledger()`` — which scores only ``deep_required`` units for the
@@ -1219,13 +1350,26 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
                     ...]}, ...],
          "totals": {units, cells, covered, missing_block, missing_warn,
                     deferred, with_finding}}
+
+    ``host`` (case-insensitive) and ``path_prefix`` (exact) select the units
+    the grid reports; ``totals`` then count only those units, and the payload
+    echoes the applied filter as ``scope``. Each selected unit's cells are the
+    same as in the whole-engagement grid, because attribution still reads every
+    row of the engagement.
     """
+    host_filter = host.strip().lower()
+    prefix_filter = path_prefix.strip()
+    applied_filter = (
+        {"scope": {"host": host_filter or None, "path_prefix": prefix_filter or None}}
+        if host_filter or prefix_filter
+        else {}
+    )
     zero_totals = {
         "units": 0, "cells": 0, "covered": 0, "missing_block": 0,
         "missing_warn": 0, "deferred": 0, "with_finding": 0,
     }
     if vuln_taxonomy is None:
-        return {"units": [], "totals": dict(zero_totals)}
+        return {**applied_filter, "units": [], "totals": dict(zero_totals)}
 
     units = _fetch_all(
         connection,
@@ -1233,6 +1377,10 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
         "ORDER BY host, port_class, path_prefix",
         (engagement_id,),
     )
+    if host_filter:
+        units = [u for u in units if str(u.get("host") or "").strip().lower() == host_filter]
+    if prefix_filter:
+        units = [u for u in units if str(u.get("path_prefix") or "") == prefix_filter]
     variants = _fetch_all(
         connection,
         "SELECT id, scheme, host, port, method, normalized_path, auth_context, "
@@ -1271,26 +1419,16 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
         (engagement_id,),
     ) if _table_exists(connection, "assessment_credentials") else []
 
-    variant_by_id = {int(v["id"]): v for v in variants}
-    status_by_variant: dict[int, list[int]] = {}
-    for obs in observations:
-        vid = obs.get("request_variant_id")
-        st = obs.get("response_status")
-        if vid is not None and st is not None:
-            status_by_variant.setdefault(int(vid), []).append(int(st))
-
-    parsed_surfaces: list[tuple[str, str, str]] = []
-    for s in surfaces:
-        s_host, s_path = _surface_host_path(str(s.get("target_descriptor") or ""))
-        if s_host:
-            parsed_surfaces.append((s_host, s_path, str(s.get("surface_type") or "")))
-
-    cred_hosts: set[str] = set()
-    for c in creds:
-        for raw in (c.get("credential_key"), c.get("principal"), c.get("provenance_json")):
-            for tok in _extract_host_tokens(str(raw or "")):
-                cred_hosts.add(tok)
-
+    index = _AttributionIndex(
+        variants=variants,
+        observations=observations,
+        surfaces=surfaces,
+        coverage_items=coverage_items,
+        probes=probes,
+        findings=[],
+        dispatches=[],
+    )
+    cred_hosts = _credential_hosts(creds)
     active_deferrals = _active_depth_deferrals(engagement_id)
 
     totals = dict(zero_totals)
@@ -1298,12 +1436,7 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
     result_units: list[dict[str, Any]] = []
 
     for unit in units:
-        scope = _unit_scope(
-            unit,
-            variant_by_id=variant_by_id,
-            status_by_variant=status_by_variant,
-            parsed_surfaces=parsed_surfaces,
-        )
+        scope = _unit_scope(unit, index=index)
         unit_id = scope["unit_id"]
         host = scope["host"]
         port_class = scope["port_class"]
@@ -1321,13 +1454,8 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
         )
 
         # ONE bucketing pass per unit (identical predicate to the depth ledger).
-        unit_probes = [
-            p for p in probes
-            if _probe_maps_to_unit(p, unit_id, unit_variant_ids, host, port_class, prefix)
-        ]
-        unit_coverage = [
-            ci for ci in coverage_items if _coverage_maps_to_unit(ci, unit_id, unit_variant_ids)
-        ]
+        unit_probes = index.unit_probes(unit_id, unit_variant_ids, host, port_class, prefix)
+        unit_coverage = index.unit_coverage(unit_id, unit_variant_ids)
         covered = _covered_families_for_unit(unit_probes, unit_coverage)
 
         deferred_families: set[str] = set()
@@ -1418,7 +1546,7 @@ def by_family_coverage(connection, engagement_id: int) -> dict[str, Any]:
             "families": families_out,
         })
 
-    return {"units": result_units, "totals": totals}
+    return {**applied_filter, "units": result_units, "totals": totals}
 
 
 __all__ = ["depth_ledger", "terminal_depth_block", "by_family_coverage"]

@@ -20,6 +20,7 @@ from fastapi import HTTPException, status
 from ..db import get_connection
 from . import activity as activity_service
 from . import artifact_index, state_manager
+from .engagement_tracks import has_track
 from .events import _engagement_or_404
 from .state_manager.proofs import proof_evidence_health_issues_for_finding
 from .state_manager.report_readiness import report_readiness
@@ -315,7 +316,9 @@ def _target_readiness_blockers(
     ``report`` lets one listing pass share a single engagement-wide
     ``report_readiness`` evaluation across every finding it classifies.
     """
-    readiness = report if report is not None else report_readiness(engagement_id)
+    readiness = (
+        report if report is not None else report_readiness(engagement_id)
+    )
     blockers = readiness.get("blockers", [])
     result: list[dict[str, Any]] = []
     for blocker in blockers if isinstance(blockers, list) else []:
@@ -613,6 +616,7 @@ def _latest_decision(
             SELECT id, payload_json, created_at FROM assessment_dispatch_decisions
             WHERE engagement_id = ? AND kind = ?
               AND json_extract(payload_json, '$.finding_slug') = ?
+              AND superseded_by_id IS NULL
             ORDER BY id DESC LIMIT 1
             """,
             (engagement_id, kind, slug),
@@ -638,6 +642,53 @@ def _packet_attachment_identities(
     return sorted(identities)
 
 
+# Decision kinds that bind a review to one content-addressed triage packet,
+# and the label each one's export blockers carry.
+_PACKET_REVIEW_LABELS = {
+    "blind_triage_verdict": "blind triage",
+    "submission_qc_verdict": "submission QC",
+}
+
+
+def submission_qc_required(root: Path) -> bool:
+    """Every offensive submission owes an independent report-writer QC review."""
+    return not has_track(root, "blue")
+
+
+def _packet_manifest(
+    root: Path, slug: str, packet_id: str, label: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """The verified manifest of one finding's triage packet, or why it is unusable."""
+    if not re.fullmatch(r"[0-9a-f]{64}", packet_id):
+        return None, f"latest {label} verdict has no content-addressed packet"
+    try:
+        _, raw = _read_stable_file(
+            root,
+            f"submissions/{slug}/blind-triage/{packet_id}/manifest.json",
+            max_bytes=WORKSPACE_CONTEXT_MAX_BYTES,
+            label="blind triage packet manifest",
+        )
+        manifest = json.loads(raw)
+    except (HTTPException, ValueError) as exc:
+        return None, f"{label} packet manifest is unavailable or invalid: {exc}"
+    if not isinstance(manifest, dict) or manifest.get("packet_id") != packet_id:
+        return None, f"{label} packet manifest does not match its verdict"
+    identity = {key: value for key, value in manifest.items() if key not in {"packet_id", "outputs"}}
+    if _sha256(_canonical_json(identity).encode("utf-8")) != packet_id:
+        return None, f"{label} packet identity is invalid"
+    if manifest.get("finding_slug") != slug:
+        return None, f"{label} packet belongs to a different finding"
+    return manifest, None
+
+
+def triage_packet_issue(engagement_id: int, slug: str, packet_id: str) -> str | None:
+    """Why ``packet_id`` names no verified triage packet of ``slug``, else None."""
+    _, issue = _packet_manifest(
+        _engagement_root(engagement_id), slug, packet_id, "submission QC",
+    )
+    return issue
+
+
 def _packet_review_issue(
     engagement_id: int,
     slug: str,
@@ -649,45 +700,48 @@ def _packet_review_issue(
     *,
     decision_kind: str = "blind_triage_verdict",
 ) -> str | None:
-    """Compare the latest verdict with the exact external package being exported."""
-    is_qa = decision_kind == "pass1_qa_verdict"
-    label = "Pass 1 QA" if is_qa else "blind triage"
-    if not is_qa and not _blind_triage_required(workspace["finding"]):
+    """The export blocker a required packet review leaves for this package."""
+    if decision_kind == "submission_qc_verdict":
+        if not submission_qc_required(root):
+            return None
+    elif not _blind_triage_required(workspace["finding"]):
         return None
     decision = _latest_decision(engagement_id, decision_kind, slug, connection)
+    return _packet_currency_issue(
+        decision, slug, root, workspace, platform, attachments, decision_kind=decision_kind,
+    )
+
+
+def _packet_currency_issue(
+    decision: Mapping[str, Any] | None,
+    slug: str,
+    root: Path,
+    workspace: Mapping[str, Any],
+    platform: str,
+    attachments: list[tuple[dict[str, Any], bytes]],
+    *,
+    decision_kind: str,
+) -> str | None:
+    """Compare the latest verdict with the exact external package being exported."""
+    is_qc = decision_kind == "submission_qc_verdict"
+    label = _PACKET_REVIEW_LABELS[decision_kind]
     if decision is None:
         return f"{label} has no verdict for the current finding"
     payload = json.loads(decision["payload_json"])
     accepted = (
-        payload.get("verdict") == "pass" if is_qa
+        payload.get("verdict") == "pass" if is_qc
         else bool(re.fullmatch(r"Accept@P[1-5]", str(payload.get("verdict") or "")))
     )
     if not accepted:
         return f"latest {label} verdict does not accept this finding"
-    packet_id = str(payload.get("packet_id") or "")
-    if not re.fullmatch(r"[0-9a-f]{64}", packet_id):
-        return f"latest {label} verdict has no content-addressed packet"
-    try:
-        _, raw = _read_stable_file(
-            root,
-            f"submissions/{slug}/blind-triage/{packet_id}/manifest.json",
-            max_bytes=WORKSPACE_CONTEXT_MAX_BYTES,
-            label="blind triage packet manifest",
-        )
-        manifest = json.loads(raw)
-    except (HTTPException, ValueError) as exc:
-        return f"{label} packet manifest is unavailable or invalid: {exc}"
-    if not isinstance(manifest, dict) or manifest.get("packet_id") != packet_id:
-        return f"{label} packet manifest does not match its verdict"
-    identity = {key: value for key, value in manifest.items() if key not in {"packet_id", "outputs"}}
-    if _sha256(_canonical_json(identity).encode("utf-8")) != packet_id:
-        return f"{label} packet identity is invalid"
+    manifest, issue = _packet_manifest(root, slug, str(payload.get("packet_id") or ""), label)
+    if manifest is None:
+        return issue
     inputs = manifest.get("inputs")
     if not isinstance(inputs, dict):
         return f"{label} packet inputs are missing"
     if (
-        manifest.get("finding_slug") != slug
-        or manifest.get("platform") != platform
+        manifest.get("platform") != platform
         or (inputs.get("submission") or {}).get("sha256") != workspace["external_body_sha256"]
     ):
         return f"{label} verdict covers a different submission body or platform"
@@ -711,22 +765,20 @@ def _packet_review_issue(
         root, "ENGAGEMENT.md", max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES,
         label="blind triage program brief",
     )
-    prompt_root = Path(__file__).resolve().parents[4]
-    _, rubric = _read_stable_file(
-        prompt_root, "agent/skills/blind-triage/SKILL.md",
-        max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES, label="blind triage verdict rubric",
-    )
-    # New decisions require attribution at creation. Stored pre-attribution
-    # Accepts retain their original rubric when the exact external package and
-    # program brief still match; an upgrade must not fabricate audit history.
-    if (
-        (inputs.get("program_brief") or {}).get("sha256") != _sha256(brief)
-        or (
-            payload.get("reviewer_dispatch_agent_id")
-            and (inputs.get("verdict_rubric") or {}).get("sha256") != _sha256(rubric)
-        )
-    ):
+    if (inputs.get("program_brief") or {}).get("sha256") != _sha256(brief):
         return f"{label} verdict covers an older program brief or rubric"
+    # The rubric is the blind reviewer's; QC reviews against the report-writer
+    # checklist. Stored pre-attribution Accepts retain their original rubric when
+    # the exact external package and program brief still match; an upgrade must
+    # not fabricate audit history.
+    if not is_qc and payload.get("reviewer_dispatch_agent_id"):
+        prompt_root = Path(__file__).resolve().parents[4]
+        _, rubric = _read_stable_file(
+            prompt_root, "agent/skills/blind-triage/SKILL.md",
+            max_bytes=WORKSPACE_MARKDOWN_MAX_BYTES, label="blind triage verdict rubric",
+        )
+        if (inputs.get("verdict_rubric") or {}).get("sha256") != _sha256(rubric):
+            return f"{label} verdict covers an older program brief or rubric"
     return None
 
 
@@ -1318,19 +1370,23 @@ def _complete_version(engagement_id: int, row: Mapping[str, Any]) -> dict[str, A
             "recipient_guidance_sha256": workspace_source.get("recipient_guidance_sha256"),
             "platform_fields_sha256": workspace_source.get("platform_fields_sha256"),
         }
-        triage_issue = _packet_review_issue(
-            engagement_id, str(finding["slug"]), root, reviewed_workspace,
-            str(row["platform"]), [(item, b"") for item in attachment_sources],
-            connection,
-        )
-        reproduction_issue = _reproduction_issue(
+        reviewed_attachments = [(item, b"") for item in attachment_sources]
+        review_issues = [
+            _packet_review_issue(
+                engagement_id, str(finding["slug"]), root, reviewed_workspace,
+                str(row["platform"]), reviewed_attachments, connection,
+                decision_kind=decision_kind,
+            )
+            for decision_kind in _PACKET_REVIEW_LABELS
+        ]
+        review_issues.append(_reproduction_issue(
             engagement_id, str(finding["slug"]), dict(finding), connection,
-        )
-        if triage_issue or reproduction_issue:
+        ))
+        if any(review_issues):
             raise HTTPException(
                 status_code=409,
                 detail="submission review changed during finalization: " + "; ".join(
-                    issue for issue in (triage_issue, reproduction_issue) if issue
+                    issue for issue in review_issues if issue
                 ),
             )
         artifact = artifact_index.register_artifact(
@@ -1446,14 +1502,16 @@ def export_version(
                 ),
             )
         attachments.append(attachment)
-    triage_issue = _packet_review_issue(
-        engagement_id, slug, root, workspace, platform, attachments,
-    )
-    if triage_issue:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="submission export is not final-ready: " + triage_issue,
+    for decision_kind in _PACKET_REVIEW_LABELS:
+        review_issue = _packet_review_issue(
+            engagement_id, slug, root, workspace, platform, attachments,
+            decision_kind=decision_kind,
         )
+        if review_issue:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="submission export is not final-ready: " + review_issue,
+            )
     reproduction_issue = _reproduction_issue(engagement_id, slug, workspace["finding"])
     if reproduction_issue:
         raise HTTPException(
@@ -1836,7 +1894,7 @@ def _blind_triage_state(
     return state
 
 
-def _pass1_qa_state(
+def _submission_qc_state(
     engagement_id: int,
     slug: str,
     root: Path,
@@ -1844,22 +1902,27 @@ def _pass1_qa_state(
     workspace: dict[str, Any] | None,
     workspace_error: str,
 ) -> dict[str, Any]:
-    """Visible editing QA history; it never substitutes for independent triage."""
-    decision = _latest_decision(engagement_id, "pass1_qa_verdict", slug)
+    """The latest independent QC review, judged against this attachment selection."""
+    decision = _latest_decision(engagement_id, "submission_qc_verdict", slug)
     state: dict[str, Any] = {
+        "required": submission_qc_required(root),
         "status": "missing", "verdict": None, "packet_id": None,
-        "auditor_dispatch_agent_id": None, "reason": "", "decided_at": None, "issue": "",
+        "reviewer_dispatch_agent_id": None, "writer_dispatch_agent_id": None,
+        "failed_rows": [], "decided_at": None, "issue": "",
     }
     if decision is None:
         return state
     payload = json.loads(decision["payload_json"])
+    failed_rows = payload.get("failed_rows")
     state.update(
         verdict=payload.get("verdict"), packet_id=payload.get("packet_id"),
-        auditor_dispatch_agent_id=payload.get("auditor_dispatch_agent_id"),
-        reason=payload.get("reason", ""), decided_at=decision["created_at"],
+        reviewer_dispatch_agent_id=payload.get("reviewer_dispatch_agent_id"),
+        writer_dispatch_agent_id=payload.get("writer_dispatch_agent_id"),
+        failed_rows=failed_rows if isinstance(failed_rows, list) else [],
+        decided_at=decision["created_at"],
     )
     if payload.get("verdict") != "pass":
-        state.update(status="blocked", issue=payload.get("reason", "QA did not pass"))
+        state.update(status="blocked", issue="latest submission QC verdict does not accept this finding")
         return state
     if workspace is None:
         state.update(status="stale", issue=workspace_error or "submission workspace is unavailable")
@@ -1868,9 +1931,9 @@ def _pass1_qa_state(
         rows, errors, _total = _resolve_attachments(
             engagement_id, root, attachment_ids, verify_bytes=True,
         )
-        issue = errors[0] if errors else _packet_review_issue(
-            engagement_id, slug, root, workspace, str(workspace["context"].get("platform") or ""),
-            [(row, b"") for row in rows], decision_kind="pass1_qa_verdict",
+        issue = errors[0] if errors else _packet_currency_issue(
+            decision, slug, root, workspace, str(workspace["context"].get("platform") or ""),
+            [(row, b"") for row in rows], decision_kind="submission_qc_verdict",
         )
     except HTTPException as exc:
         issue = str(exc.detail)
@@ -1964,12 +2027,48 @@ def _matching_version_number(
     return int(row["version_number"]) if row is not None else None
 
 
+def _captured_version_number(
+    latest: Mapping[str, Any] | None,
+    workspace: Mapping[str, Any] | None,
+    attachment_ids: Iterable[int],
+) -> int | None:
+    """The completed version that already captured the current body, or None.
+
+    The latest complete version captured it when its external body hash and
+    source finding row version are the workspace's current ones and it carries
+    exactly ``attachment_ids``. The listing's ``exported`` state and readiness's
+    body match both answer from this, so the two reads cannot disagree.
+    ``latest`` is a version row (``attachment_ids_json``) or a serialized
+    version (``attachment_ids``).
+    """
+    if latest is None or workspace is None:
+        return None
+    captured_ids = (
+        latest["attachment_ids"] if "attachment_ids" in latest
+        else _json_list(latest.get("attachment_ids_json"))
+    )
+    if (
+        str(latest["submission_sha256"]) != workspace["external_body_sha256"]
+        or int(latest["source_finding_row_version"]) != int(workspace["finding"]["row_version"])
+        or sorted(int(value) for value in captured_ids) != sorted(attachment_ids)
+    ):
+        return None
+    return int(latest["version_number"])
+
+
 _RENDER_FINAL = "vigil assess export submission {slug} --platform {platform}"
 _RENDER_DRAFT = _RENDER_FINAL + " --draft"
 _RECORD_DECISION = "vigil assess contract agent decision"
 # First matching fragment wins; order keeps decision-specific messages (which
 # can mention bodies, attachments, or platforms) ahead of workspace ones.
 _BLOCKER_GUIDANCE: tuple[tuple[tuple[str, ...], str, str], ...] = (
+    (
+        ("submission qc",),
+        "Have a report-writer dispatch separate from the writer review the triage "
+        "packet for exactly this body and attachment selection, then record its "
+        "submission_qc_verdict. Fixes go back to the writer and need a new packet and review.",
+        _RECORD_DECISION,
+    ),
     (
         ("blind triage",),
         "Build a blind-triage packet for exactly this body and attachment selection, "
@@ -2069,17 +2168,25 @@ def _publication_readiness(
     workspace: Mapping[str, Any] | None,
     workspace_error: str,
     verify_bytes: bool,
+    latest: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     """Every gate an export of ``attachment_ids`` would hit, without writing.
 
     This mirrors ``export_version``'s refusals; export re-checks all of them
     (and records attachment mismatches) inside its own write path.
+
+    ``existing_version_number`` names the version that already holds this
+    selection: one an export of exactly these sources would replay
+    (``existing_version_match`` ``sources``), else ``latest`` when it captured
+    the current body with these attachments (``body``, the listing's
+    ``exported`` rule), whatever the other gates now say.
     """
     ids = sorted(attachment_ids)
     blockers: list[str] = []
     platform = ""
     total_bytes = 0
     existing_version_number: int | None = None
+    existing_version_match: str | None = None
     if workspace is None:
         blockers.append(workspace_error or "submission workspace is unavailable")
     else:
@@ -2103,15 +2210,17 @@ def _publication_readiness(
         )
         blockers.extend(attachment_errors)
         if not attachment_errors:
-            try:
-                triage_issue = _packet_review_issue(
-                    engagement_id, slug, root, dict(workspace), platform,
-                    [(row, b"") for row in attachment_rows],
-                )
-            except HTTPException as exc:
-                triage_issue = str(exc.detail)
-            if triage_issue:
-                blockers.append(triage_issue)
+            for decision_kind in _PACKET_REVIEW_LABELS:
+                try:
+                    review_issue = _packet_review_issue(
+                        engagement_id, slug, root, dict(workspace), platform,
+                        [(row, b"") for row in attachment_rows],
+                        decision_kind=decision_kind,
+                    )
+                except HTTPException as exc:
+                    review_issue = str(exc.detail)
+                if review_issue:
+                    blockers.append(review_issue)
         reproduction_issue = _reproduction_issue(engagement_id, slug, workspace["finding"])
         if reproduction_issue:
             blockers.append(reproduction_issue)
@@ -2122,6 +2231,12 @@ def _publication_readiness(
                 platform,
                 _export_sources(slug, workspace, int(artifact["id"]), attachment_rows),
             )
+        if existing_version_number is not None:
+            existing_version_match = "sources"
+        else:
+            existing_version_number = _captured_version_number(latest, workspace, ids)
+            if existing_version_number is not None:
+                existing_version_match = "body"
     unique = list(dict.fromkeys(blockers))
     return {
         "attachment_ids": ids,
@@ -2132,6 +2247,7 @@ def _publication_readiness(
             for item in unique
         ],
         "existing_version_number": existing_version_number,
+        "existing_version_match": existing_version_match,
         "attachment_total_bytes": total_bytes,
         "attachment_limit_bytes": ATTACHMENTS_TOTAL_MAX_BYTES,
         "platform": platform or None,
@@ -2163,8 +2279,9 @@ def publication_readiness(
         workspace=workspace,
         workspace_error=workspace_error,
         verify_bytes=True,
+        latest=_latest_complete_version(engagement_id, int(finding["id"])),
     )
-    readiness["pass1_qa"] = _pass1_qa_state(
+    readiness["submission_qc"] = _submission_qc_state(
         engagement_id, canonical_slug, _engagement_root(engagement_id), ids,
         workspace, workspace_error,
     )
@@ -2242,8 +2359,9 @@ def submission_detail(
         workspace=workspace,
         workspace_error=workspace_error,
         verify_bytes=True,
+        latest=latest_version,
     )
-    readiness["pass1_qa"] = _pass1_qa_state(
+    readiness["submission_qc"] = _submission_qc_state(
         engagement_id, canonical_slug, root, default_ids, workspace, workspace_error,
     )
     submission_path, context_path = _workspace_paths(canonical_slug)
@@ -2341,7 +2459,7 @@ def submission_detail(
         "workspace": workspace_payload,
         "platform": platform,
         "blind_triage": triage,
-        "pass1_qa": readiness["pass1_qa"],
+        "submission_qc": readiness["submission_qc"],
         "latest_version": latest_version,
         "default_attachment_ids": default_ids,
         "default_attachment_source": default_source,
@@ -2409,17 +2527,8 @@ def _classify_submission(
     if workspace is None:
         return "blocked", workspace_error, [workspace_error], None
     platform = _supported_platform(workspace["context"].get("platform"))
-    if (
-        latest is not None
-        and str(latest["submission_sha256"]) == workspace["external_body_sha256"]
-        and int(latest["source_finding_row_version"]) == int(row["row_version"])
-    ):
-        return (
-            "exported",
-            f"Current body captured as v{int(latest['version_number'])}",
-            [],
-            platform,
-        )
+    # The selection the submission desk defaults to: the blind-triage packet's
+    # reviewed set, else the latest version's, else none.
     triage = _blind_triage_state(engagement_id, slug, root, workspace["finding"])
     if triage["attachment_ids"] is not None:
         ids = list(triage["attachment_ids"])
@@ -2427,6 +2536,9 @@ def _classify_submission(
         ids = [int(value) for value in _json_list(latest["attachment_ids_json"])]
     else:
         ids = []
+    captured = _captured_version_number(latest, workspace, ids)
+    if captured is not None:
+        return "exported", f"Current body captured as v{captured}", [], platform
     readiness = _publication_readiness(
         engagement_id,
         slug,
@@ -2435,6 +2547,7 @@ def _classify_submission(
         workspace=workspace,
         workspace_error="",
         verify_bytes=False,
+        latest=latest,
     )
     if readiness["final_ready"]:
         return "ready", "Ready to export", [], platform

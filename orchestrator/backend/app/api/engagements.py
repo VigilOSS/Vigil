@@ -14,8 +14,12 @@ from ..services.engagements import (
     list_sessions_for_engagement,
     mark_engagement_deleted,
 )
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/engagements", tags=["engagements"])
+router = APIRouter(
+    prefix="/engagements", tags=["engagements"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class EngagementResponse(BaseModel):

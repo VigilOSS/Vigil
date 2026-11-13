@@ -47,41 +47,10 @@ _KNOWN_UNPAIRED = {
     "gf-patterns/trust_surface.md",  # generic sensitive-lifecycle-path signal (bucket -> None)
     "gf-patterns/ssi.md",  # class ssi-injection has no skill declaring it yet
 
-    # active-directory/ + offensive-tactics/ — classic Windows/AD/internal-network
-    # red-team tradecraft; no skill in the current roster (web/code/mobile/blue-focused)
-    # executes this yet. Verified via targeted greps (mimikatz/kerberoast/dcsync/LOLBin/
-    # psexec/etc.) across every SKILL.md — the only hits were from a defensive
-    # perspective (edr-alert-triage, cobalt-strike-analysis, phishing-triage discussing
-    # these as attacker indicators to detect, not procedures to run).
-    "active-directory/ad-detection.md",
-    "active-directory/ad-enumeration.md",
-    "active-directory/ad-persistence.md",
-    "active-directory/adcs-attacks.md",
-    "active-directory/kerberos-attacks.md",
-    "offensive-tactics/code-execution/lolbins-execution.md",
-    "offensive-tactics/code-execution/powershell-bypass.md",
-    "offensive-tactics/credential-access/credential-theft-misc.md",
-    "offensive-tactics/credential-access/lsass-dumping.md",
-    "offensive-tactics/credential-access/sam-ntds-dumping.md",
-    "offensive-tactics/defense-evasion/av-edr-bypass.md",
-    "offensive-tactics/defense-evasion/evasion-techniques.md",
-    "offensive-tactics/initial-access/credential-harvesting.md",
-    "offensive-tactics/initial-access/phishing-macros.md",
-    "offensive-tactics/initial-access/phishing-vectors.md",
-    "offensive-tactics/lateral-movement/rdp-lateral.md",
-    "offensive-tactics/lateral-movement/smb-wmi-lateral.md",
-    "offensive-tactics/lateral-movement/tunneling-relaying.md",
-    "offensive-tactics/persistence/hijacking-persistence.md",
-    "offensive-tactics/persistence/other-persistence.md",
-    "offensive-tactics/persistence/service-persistence.md",
-    "offensive-tactics/privilege-escalation/privesc-windows.md",
-    "offensive-tactics/red-team-infra/infra-setup.md",
-
     # Root-level — genuinely N-to-N cross-cutting docs, not owned by one skill.
     "_template-engagement.md",  # per-engagement ROE template, operator-authored not skill-discovered
     "finding-fp-and-severity-gate.md",  # shared web+code verification gate, cited by 5+ skills
     "handoff-protocols.md",  # cross-role handoff mechanics, referenced only from operator docs
-    "owasp-quick-reference.md",  # generic OWASP Top-10 lookup, load-on-demand for any offensive skill
 
     # recon/ — shared calibration table across every recon-class skill, not one skill's.
     "recon/rate-calibration.md",
@@ -90,10 +59,10 @@ _KNOWN_UNPAIRED = {
     # skill's procedure (dispatch templates, handoff schema, resource policy, etc.).
     "runtime-guides/auth-recovery.md",
     "runtime-guides/cdn-ip-blocking.md",
+    "runtime-guides/code-runtime-proof.md",  # code operator trigger-loaded proof-work and web-integration mechanics
     "runtime-guides/command-history-auditing.md",
     "runtime-guides/dispatch-resource-policy.md",
     "runtime-guides/dispatch-template.md",
-    "runtime-guides/engagement-methodology.md",
     "runtime-guides/handoff-schema.md",
     "runtime-guides/phase-verify-exploit.md",
     "runtime-guides/subagent-registry.md",

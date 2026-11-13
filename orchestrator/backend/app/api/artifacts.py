@@ -6,8 +6,12 @@ from fastapi import APIRouter
 from pydantic import BaseModel
 
 from ..services.artifacts import ArtifactEntry, list_artifacts_for_engagement, read_artifact_for_engagement
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/engagements/{engagement_key}/artifacts", tags=["artifacts"])
+router = APIRouter(
+    prefix="/engagements/{engagement_key}/artifacts", tags=["artifacts"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class ArtifactResponse(BaseModel):

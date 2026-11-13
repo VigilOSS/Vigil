@@ -34,6 +34,7 @@ from ._common import (
     _json_text,
     _merge_object_text,
     _normalize_severity,
+    _require_severity,
     _normalize_submission_status,
     _normalize_verification_status,
     _normalize_workflow_status,
@@ -365,30 +366,62 @@ def _stripped_path_is_the_known_one(
     return int(row["stripped"] or 0) > 0 and int(row["authored"] or 0) == 0
 
 
+# A file of at most this many lines is one line of code (a minified bundle
+# behind a license comment): a line number inside it locates nothing.
+SINGLE_LINE_FILE_MAX_LOC = 3
+
+
 def _duplicate_advisories(
     connection: sqlite3.Connection,
     engagement_id: int,
     *,
     finding_id: int,
+    finding_slug: str,
     canonical_location: str,
     root_cause_key: str,
     defect_family: str,
     auth_context: str,
     details: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Siblings that were already FILED and this record probably duplicates.
+    """Siblings this record probably duplicates, submitted ones first.
 
     Advisory, never a refusal: a legitimate variant shares an endpoint with its
     root by definition, and the exact-tuple clobber guard already owns the refusal
     semantics. What was missing is any signal at all — ``root_cause_key`` is
-    author-invented free text with no collision surface, so a rediscovery of an
-    already-submitted defect landed silently beside it.
+    author-invented free text with no collision surface, so a rediscovery landed
+    silently beside the finding it repeats. A FILED sibling is linked as a
+    duplicate. An unsubmitted live sibling is the common case — two lanes deriving
+    one defect independently — and the second lane's work belongs on the first
+    finding as corroboration, with the operator folding the second row in.
+    Merged and false_positive siblings are not live findings to fold into.
+    In a single-line file (a minified bundle) the line locates nothing, so a
+    location match counts only with an equal ``source_anchor`` or ``function``.
     """
 
     entry_point = str(details.get("entry_point", "") or "").strip()
     parameter = str(details.get("parameter", "") or "").strip()
     root_key = str(root_cause_key or "").strip()
     location = str(canonical_location or "").strip()
+    anchor = str(details.get("source_anchor", "") or "").strip()
+    function = str(details.get("function", "") or "").strip()
+    location_is_line_bound = True
+    if location.startswith("file:"):
+        path = location[len("file:"):].rsplit(":", 1)[0]
+        file_row = connection.execute(
+            """
+            SELECT MAX(files.loc) AS loc
+            FROM code_files AS files
+            JOIN code_repos AS repos
+              ON repos.id = files.repo_id AND repos.engagement_id = files.engagement_id
+            WHERE files.engagement_id = ? AND files.file_path = ?
+              AND files.retired_at IS NULL AND repos.active_generation > 0
+            """,
+            (engagement_id, path),
+        ).fetchone()
+        location_is_line_bound = not (
+            file_row is not None and file_row["loc"] is not None
+            and int(file_row["loc"]) <= SINGLE_LINE_FILE_MAX_LOC
+        )
     rows = connection.execute(
         """
         SELECT slug, title, submission_status, submission_ref, canonical_location,
@@ -396,9 +429,12 @@ def _duplicate_advisories(
         FROM assessment_findings
         WHERE engagement_id = ?
           AND id != ?
-          AND submission_status != 'none'
+          AND (
+            submission_status != 'none'
+            OR status NOT IN ('merged', 'false_positive')
+          )
           AND defect_family = ? AND auth_context = ?
-        ORDER BY id DESC
+        ORDER BY CASE WHEN submission_status != 'none' THEN 0 ELSE 1 END, id DESC
         """,
         (engagement_id, finding_id, defect_family, auth_context),
     )
@@ -407,7 +443,12 @@ def _duplicate_advisories(
         sibling_details = _json_object(row["details_json"])
         reasons: list[str] = []
         if location and str(row["canonical_location"] or "").strip() == location:
-            reasons.append("canonical_location")
+            if location_is_line_bound:
+                reasons.append("canonical_location")
+            elif anchor and str(sibling_details.get("source_anchor", "") or "").strip() == anchor:
+                reasons.append("canonical_location+source_anchor")
+            elif function and str(sibling_details.get("function", "") or "").strip() == function:
+                reasons.append("canonical_location+function")
         if root_key and str(row["root_cause_key"] or "").strip() == root_key:
             reasons.append("root_cause_key")
         if (
@@ -420,20 +461,32 @@ def _duplicate_advisories(
         if not reasons:
             continue
         sibling_slug = str(row["slug"])
+        submission_status = str(row["submission_status"] or "")
+        if submission_status != "none":
+            detail = (
+                f"{sibling_slug} is already submission_status="
+                f"'{submission_status}' and matches on "
+                f"{', '.join(reasons)}. If this is the same defect, link it: "
+                f"`vigil assess finding link <slug> --link-kind {DUPLICATE_LINK_KIND} "
+                f"--target-kind finding --target-ref {sibling_slug}`."
+            )
+        else:
+            detail = (
+                f"{sibling_slug} (not yet submitted) matches on {', '.join(reasons)}. "
+                "If this is the same defect, credit your independent derivation on it "
+                f"with `vigil assess finding corroborate {sibling_slug} --dispatch <your "
+                "agent_id> --reason '<what you re-derived>'` and report the duplicate; "
+                f"the operator folds this record in with `vigil assess finding merge "
+                f"{finding_slug} {sibling_slug} '<reason>'`."
+            )
         advisories.append(
             {
                 "slug": sibling_slug,
                 "title": str(row["title"] or ""),
-                "submission_status": str(row["submission_status"] or ""),
+                "submission_status": submission_status,
                 "submission_ref": str(row["submission_ref"] or ""),
                 "matched_on": reasons,
-                "detail": (
-                    f"{sibling_slug} is already submission_status="
-                    f"'{row['submission_status']}' and matches on "
-                    f"{', '.join(reasons)}. If this is the same defect, link it: "
-                    f"`vigil assess finding link <slug> --link-kind {DUPLICATE_LINK_KIND} "
-                    f"--target-kind finding --target-ref {sibling_slug}`."
-                ),
+                "detail": detail,
             }
         )
         if len(advisories) == 10:
@@ -986,6 +1039,7 @@ def _current_claim_decisions(
           AND json_valid(payload_json)
           AND json_extract(payload_json, '$.finding_slug') = ?
           AND json_extract(payload_json, '$.claim_transition_id') = ?
+          AND superseded_by_id IS NULL
         ORDER BY id DESC
         """,
         (engagement_id, str(row["slug"]), transition_id),
@@ -1041,6 +1095,36 @@ def _claim_review_status(connection, engagement_id: int, row) -> dict[str, Any]:
     audit["claim_review_pending"] = pending
     audit["claim_transition_id"] = transition_id
     return audit
+
+
+def _claim_editors(connection, engagement_id: int, finding_id: int) -> set[str]:
+    """Dispatches that raised a claim review since the latest verification.
+
+    The current claim is the sum of those edits, so each editor is a party to
+    the claim an equivalence decision rules on. Only the validated
+    ``dispatch_agent_id`` attribution names an editor: a transition's actor can
+    be the caller's free-text ``source_name``, so an edit with no attributed
+    dispatch contributes nothing, which leaves only the author excluded.
+    """
+    rows = connection.execute(
+        """
+        SELECT metadata_json FROM assessment_finding_transitions
+        WHERE engagement_id = ? AND finding_id = ?
+          AND action = 'claim_review_pending'
+          AND id > (
+            SELECT COALESCE(MAX(id), 0) FROM assessment_finding_transitions
+            WHERE engagement_id = ? AND finding_id = ?
+              AND action IN ('verified_confirmed', 'verified_downgraded')
+          )
+        """,
+        (engagement_id, finding_id, engagement_id, finding_id),
+    ).fetchall()
+    editors: set[str] = set()
+    for transition in rows:
+        editor = _json_object(transition["metadata_json"]).get("dispatch_agent_id")
+        if isinstance(editor, str) and editor.strip():
+            editors.add(editor.strip())
+    return editors
 
 
 def validate_claim_equivalence_decision(
@@ -1131,6 +1215,14 @@ def validate_claim_equivalence_decision(
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="claim_equivalence requires a separate verifier dispatch",
+        )
+    if verifier_agent_id in _claim_editors(connection, engagement_id, int(row["id"])):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=(
+                f"claim_equivalence verifier {verifier_agent_id} edited the claim under "
+                "review; an independent verifier dispatch must rule on it"
+            ),
         )
     if payload["verdict"] == "equivalent":
         if any(
@@ -1629,7 +1721,168 @@ def _validate_cvss_pair(
         # The STORED vector was already broken; readiness owns it. Blocking here
         # would strand every later edit to the finding.
         return
+    if kind == "score_mismatch" and "cvss_score" not in authored_details:
+        message += (
+            "; the score is the stored one, so a write that changes the vector "
+            "sends the cvss_score it computes to beside it"
+        )
     raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=message)
+
+
+def derived_field(
+    field: str, value: Any, derived_from: str, detail: str | None = None
+) -> dict[str, Any]:
+    """One entry of a write envelope's ``derived`` list: a value the service stored
+    because the caller left it out and the rest of the write states it."""
+    return {
+        "field": field,
+        "value": value,
+        "derived_from": derived_from,
+        "detail": detail or f"{field} was not supplied; stored the value of {derived_from}",
+    }
+
+
+# The detail key that states why a finding holds each verdict.
+_VERDICT_REASON_KEYS = {"false_positive": "kill_reason", "blocked": "block_reason"}
+
+
+def _stale_verdict_reasons(connection, engagement_id: int, finding_id: int) -> set[str]:
+    """The verdict reason keys whose stored value predates the finding's latest
+    move out of the verdict it explains.
+
+    Such a value states a kill or block the finding has since left, so a new
+    kill or block must not reuse it. A value written after that move (by
+    ``finding update`` while revived, ahead of the next verdict) is current.
+    """
+    rows = connection.execute(
+        """
+        SELECT id, from_verification_status, to_verification_status,
+               details_before_json, details_after_json
+        FROM assessment_finding_transitions
+        WHERE engagement_id = ? AND finding_id = ?
+        ORDER BY id
+        """,
+        (engagement_id, finding_id),
+    ).fetchall()
+    stale: set[str] = set()
+    for verdict, key in _VERDICT_REASON_KEYS.items():
+        left_at = max(
+            (
+                int(row["id"]) for row in rows
+                if row["from_verification_status"] == verdict
+                and row["to_verification_status"] != verdict
+            ),
+            default=None,
+        )
+        if left_at is None:
+            continue
+        written_since = any(
+            int(row["id"]) > left_at
+            and row["details_after_json"] is not None
+            and _json_object(row["details_after_json"]).get(key)
+            != _json_object(row["details_before_json"]).get(key)
+            for row in rows
+        )
+        if not written_since:
+            stale.add(key)
+    return stale
+
+
+def _derived_verdict_reason(
+    key: str, value: str, derived_from: str, existing_details: dict[str, Any], verdict: str
+) -> dict[str, Any]:
+    """The ``derived`` entry for a kill or block reason this verify stored,
+    naming the stored reason it replaced when an earlier verdict left one."""
+    previous = existing_details.get(key)
+    if not (isinstance(previous, str) and previous.strip()):
+        return derived_field(f"details.{key}", value, derived_from)
+    return derived_field(
+        f"details.{key}", value, derived_from,
+        f"replaced the stored details.{key} ({previous!r}), which states an "
+        f"earlier {verdict} the finding has since left, with the value of "
+        f"{derived_from}",
+    )
+
+
+_DERIVED_VARIANCE_FIELDS = ("normal_band", "chosen_severity", "actor", "proof_receipt_id")
+
+
+def _derived_variance_fields(
+    authored: dict[str, Any] | None, recorded: dict[str, Any] | None
+) -> list[dict[str, Any]]:
+    """``derived`` entries for the variance fields the verification filled in,
+    and for an authored actor stored under the verifier's canonical agent_id."""
+    if not authored or not recorded:
+        return []
+    entries = [
+        derived_field(
+            f"severity_variance.{key}", recorded[key], "this verification",
+            f"severity_variance.{key}={recorded[key]!r} taken from this verification",
+        )
+        for key in _DERIVED_VARIANCE_FIELDS
+        if authored.get(key) is None and recorded.get(key) is not None
+    ]
+    actor = authored.get("actor")
+    if actor is not None and str(actor).strip() != str(recorded.get("actor")):
+        entries.append(derived_field(
+            "severity_variance.actor", recorded["actor"], "this verification",
+            f"severity_variance.actor {actor!r} names the verifier dispatch by id; "
+            f"stored its agent_id {recorded['actor']!r}",
+        ))
+    return entries
+
+
+def _unattributed_band_departure(
+    *,
+    slug: str,
+    normal_band: str | None,
+    chosen_severity: str,
+    variance: dict[str, Any] | None,
+    operator_authority: bool,
+) -> dict[str, Any] | None:
+    """Name a verdict whose severity leaves its CVSS band with no recorded reason."""
+    if normal_band is None or chosen_severity == normal_band or variance is not None:
+        return None
+    if operator_authority:
+        # The operator-authority stamp's reason stands for the band (ADR 0043).
+        return None
+    return {
+        "kind": "severity_cvss_band_departure",
+        "detail": (
+            f"severity '{chosen_severity}' departs from the CVSS band '{normal_band}' with "
+            "no severity_variance; report readiness lists it as severity_cvss_mismatch. "
+            "Record why on this verification with `vigil assess agent decision --kind "
+            f"severity_variance --payload-json '{{\"finding_slug\":\"{slug}\",\"reason\":"
+            "\"...\"}'`, or with `--severity-variance-file <file>` holding "
+            "{\"reason\": \"...\"} on the next verification, or bring the severity and "
+            "the CVSS score into one band."
+        ),
+    }
+
+
+def _derived_cvss_score(
+    authored_details: dict[str, Any],
+    effective_details: dict[str, Any],
+) -> float | None:
+    """The score a vector-only write stores: what the authored vector computes to.
+
+    The score is the vector's result, so a write that authors the vector over no
+    stored score has already said what the score is, and only then is it filled.
+    Returns ``None`` when the write authors a score, when the vector does not
+    parse, and whenever a score is already stored: one that agrees needs
+    nothing, and one that disagrees is a recorded value the vector contradicts,
+    which ``_validate_cvss_pair`` refuses rather than overwrites (append mode
+    likewise refuses to replace a scalar).
+    """
+    if "cvss_vector" not in authored_details or authored_details.get("cvss_score") is not None:
+        return None
+    try:
+        computed = base_score(str(authored_details["cvss_vector"]))
+    except CvssVectorError:
+        return None
+    if effective_details.get("cvss_score") is not None:
+        return None
+    return computed
 
 
 _CHAIN_KEYS = ("chain_required", "chain_rationale")
@@ -1723,11 +1976,18 @@ def create_finding(
     verification_operator_authority: bool = False,
     run_candidate: dict[str, Any] | None = None,
     change_operation: str | None = None,
+    service_derived: list[dict[str, Any]] | None = None,
+    service_advisories: list[dict[str, Any]] | None = None,
     _implicit_notes_append: bool = False,
     _notes_append_identity: tuple[int, bool, int | None] | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     canonical_location = str(canonical_location).strip()
+    # What the service filled in on the caller's behalf, and what it noticed
+    # without refusing. Both ride the write envelope (and ``derived`` the
+    # transition metadata), so a caller never has to diff the row to learn it.
+    derived = list(service_derived or [])
+    advisories = list(service_advisories or [])
     if code_snapshot_write_mode not in _CODE_SNAPSHOT_WRITE_MODES:
         raise ValueError(f"unknown code snapshot write mode: {code_snapshot_write_mode}")
     if slug:
@@ -1736,7 +1996,7 @@ def create_finding(
             slug = _require_canonical_finding_slug(slug, field="slug")
     incoming_workflow_status = _normalize_workflow_status(workflow_status)
     incoming_verification_status = _normalize_verification_status(verification_status)
-    incoming_severity = _normalize_severity(severity)
+    incoming_severity = _require_severity(severity)
     # submission_status is its own axis: validate + default to 'none' on a true
     # INSERT. On an UPDATE (upsert match), only overwrite when the caller
     # explicitly set it — otherwise preserve the stored value so a re-record /
@@ -2047,12 +2307,35 @@ def create_finding(
             effective_details = _json_object(
                 _merge_object_text(existing["details_json"], details)
             )
-        # The details allow-list moved SERVER-side here so no CLI can be a hole in
-        # it again: `finding verify` skipped the client-side validator entirely,
-        # which is how the adjudication keys and an out-of-range kill_check got
-        # onto records that `finding update` then refused to maintain. Scoped to
-        # the keys this write AUTHORS, and permissive for keys already stored, so
-        # closing the door cannot strand what came through it.
+        derived_score = _derived_cvss_score(authored_details, effective_details)
+        if derived_score is not None:
+            details = {**(details or {}), "cvss_score": derived_score}
+            authored_details["cvss_score"] = derived_score
+            effective_details["cvss_score"] = derived_score
+            derived.append(derived_field(
+                "details.cvss_score", derived_score, "details.cvss_vector",
+                f"details.cvss_score={derived_score} computed from details.cvss_vector "
+                f"'{authored_details['cvss_vector']}'",
+            ))
+        withdrawal_reason = _derived_withdrawal_reason(
+            incoming_status=incoming_submission_status,
+            explicit_override=explicit_submission_override,
+            existing=existing,
+            effective_details=effective_details,
+            reason_text=transition_reason_text,
+        )
+        if withdrawal_reason is not None:
+            details = {**(details or {}), "withdrawal_reason": withdrawal_reason}
+            authored_details["withdrawal_reason"] = withdrawal_reason
+            effective_details["withdrawal_reason"] = withdrawal_reason
+            derived.append(derived_field(
+                "details.withdrawal_reason", withdrawal_reason, "reason_text"
+            ))
+        # The details allow-list is enforced here, server-side, so every write
+        # verb meets the same vocabulary whichever client sent it (a client-side
+        # check is a convenience, not the gate). Scoped to the keys this write
+        # AUTHORS, and permissive for keys already stored, so a row holding a key
+        # outside the vocabulary stays editable.
         existing_details = (
             _json_object(existing["details_json"]) if existing is not None else {}
         )
@@ -2292,6 +2575,7 @@ def create_finding(
             connection,
             engagement.id,
             finding_id=int(finding["id"]),
+            finding_slug=str(finding["slug"]),
             canonical_location=str(finding["canonical_location"] or ""),
             root_cause_key=str(finding["root_cause_key"] or ""),
             defect_family=str(finding["defect_family"] or ""),
@@ -2435,22 +2719,39 @@ def create_finding(
             verdict = finding_change_policy.response_fields(change, outcome)
         after_state = _finding_state_snapshot(finding)
         after_content = _finding_content_snapshot(finding)
+        # A verify write skips the change policy above because its evidence is
+        # what attests the claim it leaves standing. A terminal verify is
+        # therefore a fresh verification event even when the status is the one
+        # the finding already holds: without evidence it would settle a pending
+        # claim review (the verified_* row it writes is what the review is
+        # measured from) and carry a re-band or a CVSS change no proof attests.
         terminal_verification_asserted = (
             after_state["verification_status"] in TERMINAL_VERIFICATION_STATUSES
             and (
                 before_state is None
                 or before_state["verification_status"]
                 != after_state["verification_status"]
+                or code_snapshot_write_mode == "verify"
             )
         )
         if terminal_verification_asserted and not verification_evidence_requested:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
+            if code_snapshot_write_mode == "verify":
+                detail = (
+                    f"'{after_state['verification_status']}' is a terminal verdict, and "
+                    "every terminal verify is a fresh verification event, including one "
+                    "that re-asserts the status the finding already holds: pass fresh "
+                    "proof_receipt_ids with a completed confirm_check (confirmed, "
+                    "downgraded) or a completed counter_check (false_positive), or "
+                    "record operator authority. To change only what the finding says, "
+                    "use `vigil assess finding update`, whose change policy decides "
+                    "whether the verdict stands"
+                )
+            else:
+                detail = (
                     "terminal verification must use the verification endpoint with "
                     "independent proof_receipt_ids"
-                ),
-            )
+                )
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=detail)
         parked_for_runtime_proof = (
             after_state["verification_status"] == PENDING_RUNTIME_PROOF
         )
@@ -2509,6 +2810,11 @@ def create_finding(
                     **transition_metadata,
                     "verification_result_row_version": int(finding["row_version"]),
                 }
+            if derived:
+                transition_metadata = {
+                    **(transition_metadata or {}),
+                    "derived": [entry["field"] for entry in derived],
+                }
             transition = _record_finding_transition(
                 connection,
                 engagement_id=engagement.id,
@@ -2561,6 +2867,30 @@ def create_finding(
                 normal_severity_band=verification_normal_severity_band,
                 operator_authority=verification_operator_authority,
             )
+            variance_derived = _derived_variance_fields(
+                verification_severity_variance, verification_evidence.get("severity_variance")
+            )
+            if variance_derived:
+                # The variance row is keyed to the transition, so its fills are
+                # known only after the transition is written; the ledger names
+                # them with the rest of this write's derivations.
+                derived.extend(variance_derived)
+                metadata = json.loads(str(transition["metadata_json"] or "{}"))
+                metadata["derived"] = [entry["field"] for entry in derived]
+                connection.execute(
+                    "UPDATE assessment_finding_transitions SET metadata_json = ? WHERE id = ?",
+                    (_json_text(metadata), int(transition["id"])),
+                )
+                transition = {**transition, "metadata_json": _json_text(metadata)}
+            departure = _unattributed_band_departure(
+                slug=str(finding["slug"]),
+                normal_band=verification_normal_severity_band,
+                chosen_severity=str(finding["severity"]),
+                variance=verification_evidence.get("severity_variance"),
+                operator_authority=verification_operator_authority,
+            )
+            if departure is not None:
+                advisories.append(departure)
         else:
             receipt_projection = (
                 _capture_current_proof_receipts_for_finding
@@ -2591,6 +2921,7 @@ def create_finding(
             )
             duplicate_advisories = _duplicate_advisories(
                 connection, engagement.id, finding_id=int(finding["id"]),
+                finding_slug=str(finding["slug"]),
                 canonical_location=str(finding["canonical_location"] or ""),
                 root_cause_key=str(finding["root_cause_key"] or ""),
                 defect_family=str(finding["defect_family"] or ""),
@@ -2647,10 +2978,10 @@ def create_finding(
                 producer_agent_role=source_name or None,
                 related_finding_slug=str(finding["slug"]),
             )
-    # The write envelope carries the snapshot standing too — it used to be on 2 of
-    # 9 finding projections, which is what made a rebind unreadable at the one verb
-    # whose purpose is to move it. Reuses the status computed inside the
-    # transaction; the optional evidence-artifact back-fill above cannot change it.
+    # The write envelope carries the snapshot standing too, like every finding
+    # projection, so a rebind is readable at the one verb whose purpose is to
+    # move it. Reuses the status computed inside the transaction; the optional
+    # evidence-artifact back-fill above cannot change it.
     record = _serialize_finding_record(finding)
     record["code_snapshot_status"] = code_snapshot_status
     record["code_snapshot_attestation_status"] = code_snapshot_attestation_status(
@@ -2667,6 +2998,8 @@ def create_finding(
         # Always present so a caller can read it unconditionally; empty on a clean
         # record. A backstop for the CLI-side preflight, so a raw POST is warned too.
         "duplicate_advisories": duplicate_advisories,
+        "derived": derived,
+        "advisories": advisories,
         "run_candidate": promoted_run_candidate,
         **(verdict or {}),
         **verification_evidence,
@@ -2700,10 +3033,8 @@ def update_finding(
     # coalesces the (default) incoming value against the semantically-matched
     # existing row via ``_coalesce_*`` / ``_stronger_severity`` — i.e. the existing
     # stronger/sticky value is preserved. The defaults below therefore only take
-    # effect when there is NO existing finding to match (a true create).
-    # Previously these were required ``str`` with no default, so the
-    # ``is not None`` guards were always True and every call hard-overwrote the
-    # lifecycle columns — silently downgrading confirmed/reported findings.
+    # effect when there is NO existing finding to match (a true create), so an
+    # update that omits them never overwrites a confirmed/reported lifecycle.
     result = create_finding(
         engagement_id,
         slug=slug,
@@ -2775,6 +3106,8 @@ def patch_finding(
     verification_normal_severity_band: str | None = None,
     verification_next_test: dict[str, Any] | None = None,
     verification_operator_authority: bool = False,
+    service_derived: list[dict[str, Any]] | None = None,
+    service_advisories: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if canonical_location is not None:
         canonical_location = str(canonical_location).strip()
@@ -2867,6 +3200,23 @@ def patch_finding(
             or existing_verification == "disputed"
         ):
             change_operation = "reopen"
+            killed_as = (
+                "verification_status" if existing_verification == "false_positive"
+                else "workflow_status" if existing_workflow == "false_positive"
+                else ""
+            )
+            if killed_as and not transition_reason_text.strip():
+                # A reopen clears the kill as surely as a reviving verify does, and
+                # its derived reason would leave nothing saying why the kill was wrong.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"reason_text (`finding update --reason`) is required to reopen "
+                        f"{slug} from {killed_as} 'false_positive' to workflow "
+                        f"'{workflow_status}': a killed finding brought back needs its "
+                        "reason stated (what the kill got wrong), not derived"
+                    ),
+                )
             if existing_verification == "disputed" and transition_action is None:
                 # Re-queues a contested verdict for verification without forcing one.
                 transition_action = "verification_recleared"
@@ -2938,6 +3288,8 @@ def patch_finding(
         verification_next_test=verification_next_test,
         verification_operator_authority=verification_operator_authority,
         change_operation=change_operation,
+        service_derived=service_derived,
+        service_advisories=service_advisories,
         _implicit_notes_append=implicit_notes_append,
         _notes_append_identity=(
             (int(existing["id"]), existing_workflow == "merged", existing["merged_into_finding_id"])
@@ -2976,54 +3328,51 @@ def _validate_unblock_requirements(value: Any) -> None:
         )
 
 
-_UNTESTABILITY_MARKERS: tuple[str, ...] = (
-    "could not",
-    "couldn't",
-    "no second organization",
-    "no test account",
-    "unable to provision",
-    "not testable",
-    "untestable",
-    "fixture unbuildable",
-    "no identity",
-    "lacked",
-    "unavailable",
-)
+def _submission_status_move(
+    *, incoming_status: str, explicit_override: bool, existing: Any
+) -> tuple[str, str]:
+    """``(stored, resulting)`` submission status for this write.
 
-
-def _validate_kill_names_a_settling_test(
-    *,
-    incoming_details: dict[str, Any],
-    existing_details: dict[str, Any],
-) -> None:
-    """Keep unrun experiments out of the false-positive terminal state."""
-
-    kill_reason = incoming_details.get("kill_reason")
-    if not (isinstance(kill_reason, str) and kill_reason.strip()):
-        kill_reason = existing_details.get("kill_reason")
-    if not isinstance(kill_reason, str) or not any(
-        marker in kill_reason.lower() for marker in _UNTESTABILITY_MARKERS
-    ):
-        return
-
-    followup = incoming_details.get("required_followup")
-    if followup is None:
-        followup = existing_details.get("required_followup")
-    if isinstance(followup, list) and any(
-        isinstance(item, str) and item.strip() for item in followup
-    ):
-        return
-
-    raise HTTPException(
-        status_code=status.HTTP_400_BAD_REQUEST,
-        detail=(
-            "this kill_reason says the experiment could not be run, which is "
-            "`blocked`, not `false_positive`. Either re-verify with "
-            "`--status blocked --details-inline '{\"block_reason\": \"...\"}'`, "
-            "or name the test that would settle it in "
-            "details.required_followup (a non-empty list of strings)."
-        ),
+    On a true INSERT the incoming value always lands; on an upsert it lands only
+    when the caller explicitly set the axis (otherwise COALESCE preserves the
+    stored one). Computing what the write actually RESULTS in gates a net-new
+    finding recorded straight into 'submitted' exactly like a patch.
+    """
+    stored_status = (
+        _normalize_submission_status(existing["submission_status"])
+        if existing is not None
+        else SubmissionStatus.NONE
     )
+    resulting_status = (
+        incoming_status if (existing is None or explicit_override) else stored_status
+    )
+    return stored_status, resulting_status
+
+
+def _derived_withdrawal_reason(
+    *,
+    incoming_status: str,
+    explicit_override: bool,
+    existing: Any,
+    effective_details: dict[str, Any],
+    reason_text: str,
+) -> str | None:
+    """The write's own reason, for a move to ``withdrawn`` that names no other.
+
+    ``withdrawn`` needs ``details.withdrawal_reason``; a write that moves the
+    axis there and states its reason (``reason_text``) has already given it.
+    """
+    stored_status, resulting_status = _submission_status_move(
+        incoming_status=incoming_status, explicit_override=explicit_override,
+        existing=existing,
+    )
+    if resulting_status != SubmissionStatus.WITHDRAWN or resulting_status == stored_status:
+        return None
+    current = effective_details.get("withdrawal_reason")
+    if isinstance(current, str) and current.strip():
+        return None
+    reason = str(reason_text or "")
+    return reason if reason.strip() else None
 
 
 def _validate_submission_identity(
@@ -3047,17 +3396,9 @@ def _validate_submission_identity(
     to say why; mirrors ``block_reason`` in accepting a reason already stored.
     """
 
-    stored_status = (
-        _normalize_submission_status(existing["submission_status"])
-        if existing is not None
-        else SubmissionStatus.NONE
-    )
-    # On a true INSERT the incoming value always lands; on an upsert it lands only
-    # when the caller explicitly set the axis (otherwise COALESCE preserves the
-    # stored one). Compute what this write actually RESULTS in, so a net-new
-    # finding recorded straight into 'submitted' is gated exactly like a patch.
-    resulting_status = (
-        incoming_status if (existing is None or explicit_override) else stored_status
+    stored_status, resulting_status = _submission_status_move(
+        incoming_status=incoming_status, explicit_override=explicit_override,
+        existing=existing,
     )
     if resulting_status == SubmissionStatus.NONE or resulting_status == stored_status:
         return
@@ -3090,6 +3431,11 @@ def _validate_submission_identity(
         )
 
 
+# A blocked verdict's ``details.block_reason`` names what the attempt waits on
+# in one line; the full account belongs in the transition reason.
+BLOCK_REASON_MAX_CHARS = 500
+
+
 def _validate_blocked_verification_details(
     *,
     incoming_details: dict[str, Any],
@@ -3111,10 +3457,10 @@ def _validate_blocked_verification_details(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="details.block_reason is required when disposition='blocked'",
         )
-    if len(block_reason) > 500:
+    if len(block_reason) > BLOCK_REASON_MAX_CHARS:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="details.block_reason exceeds 500 characters",
+            detail=f"details.block_reason exceeds {BLOCK_REASON_MAX_CHARS} characters",
         )
     _validate_unblock_requirements(
         incoming_details.get("unblock_requirements", existing_details.get("unblock_requirements"))
@@ -3171,12 +3517,16 @@ def _verification_replay(
         "operator_authority": operator_authority_stamp(finding["provenance_json"]),
         "duplicate_advisories": _duplicate_advisories(
             connection, engagement_id, finding_id=int(finding["id"]),
+            finding_slug=str(finding["slug"]),
             canonical_location=str(finding["canonical_location"] or ""),
             root_cause_key=str(finding["root_cause_key"] or ""),
             defect_family=str(finding["defect_family"] or ""),
             auth_context=str(finding["auth_context"] or ""),
             details=_json_object(finding["details_json"]),
         ),
+        # A replay stores nothing, so it fills nothing in.
+        "derived": [],
+        "advisories": [],
         "run_candidate": None,
     }
 
@@ -3209,6 +3559,115 @@ def _resume_verification_artifacts(
             producer_agent_role=source_name or None, related_finding_slug=slug,
         )
     return result
+
+
+def _same_band_downgrade_refusal(slug: str, finding) -> str:
+    """Route an in-band rating correction by what the correction does to the verdict.
+
+    The suggested patch is chosen from the change policy's CVSS axes: on a
+    claim-review verdict, moving impact metrics (or a bare score) inside the band
+    raises a claim review that an equivalence decision settles, while scoring an
+    unscored finding or adding a vector it lacks invalidates the verdict.
+    """
+    refusal = (
+        "new_severity must be lower than the current severity unless a prior "
+        "severity-lowering transition proves it was pre-lowered: 'downgraded' "
+        "records a band that MOVED. "
+    )
+    reverify = (
+        f"`vigil assess finding verify {slug} --status confirmed "
+        "--proof-receipt-id <id> --confirm-check-file <file>`"
+    )
+    details = _json_object(finding["details_json"])
+    score = details.get("cvss_score")
+    scored = isinstance(score, int | float) and not isinstance(score, bool)
+    claim_reviewed = (
+        _row_verification_status(finding)
+        in finding_change_policy.CLAIM_REVIEW_VERIFICATION_STATUSES
+    )
+    if claim_reviewed and scored:
+        if details.get("cvss_vector"):
+            correction = '{"cvss_score": <n>, "cvss_vector": "<v>"}'
+            scope = (
+                "moving only the impact metrics (C, I, A) of the stored vector, "
+                "with the score kept inside the band"
+            )
+            invalidating = "Moving any other vector metric or leaving the band"
+        else:
+            correction = '{"cvss_score": <n>}'
+            scope = "with the score kept inside the band"
+            invalidating = "Adding a cvss_vector the finding lacks or leaving the band"
+        return refusal + (
+            "To correct the rating inside the band, run `vigil assess finding update "
+            f"{slug} --details-inline '{correction}'`, {scope}. That raises a claim "
+            "review, which a verifier dispatch other than the finding author and the "
+            "editor settles with `vigil assess agent decision --kind claim_equivalence "
+            "--payload-json <payload>` (fields: `vigil assess contract agent "
+            "decision`), keeping the verdict without fresh proof. "
+            f"{invalidating} invalidates the verdict instead; re-establish it with "
+            f"{reverify} on fresh proof"
+        )
+    reason = (
+        "scoring a finding verified without a score sets its band, which invalidates "
+        "the verdict the fresh verification then re-establishes"
+        if claim_reviewed
+        else "the fresh verification attests the corrected rating"
+    )
+    return refusal + (
+        "To correct the rating inside the band, run `vigil assess finding update "
+        f"{slug} --details-inline "
+        "'{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'` and then "
+        f"{reverify} — in that order, because {reason}"
+    )
+
+
+def _counter_check_summary(counter_check: dict[str, Any]) -> str:
+    return (
+        f"Counter-check ({str(counter_check.get('method') or '').strip()}) observed: "
+        f"{str(counter_check.get('observed_result') or '').strip()}; falsifies: "
+        f"{str(counter_check.get('falsified_claim') or '').strip()}"
+    )
+
+
+def _derived_verify_reason(
+    verification_status: str,
+    *,
+    confirm_check: dict[str, Any] | None,
+    counter_check: dict[str, Any] | None,
+    next_test: dict[str, Any] | None,
+    write_details: dict[str, Any],
+) -> tuple[str, str]:
+    """``(reason, source)`` a verify with no authored reason records, or ``("", "")``.
+
+    Each status's structured payload already states why: the confirm check that
+    failed to disprove the claim, the counter-check (or kill rationale) that did,
+    the runtime test still owed, or what a blocked attempt is waiting on. Only
+    this write's payload counts (``write_details`` is this verify's details, with
+    the kill or block reason it derived): a reason stored by an earlier verdict
+    describes that verdict, not this one.
+    """
+    if verification_status in {"confirmed", "downgraded"} and confirm_check is not None:
+        return (
+            f"Confirm-check ({str(confirm_check.get('method') or '').strip()}) observed: "
+            f"{str(confirm_check.get('observed_result') or '').strip()}",
+            "confirm_check",
+        )
+    if verification_status == "false_positive":
+        kill_reason = write_details.get("kill_reason")
+        if isinstance(kill_reason, str) and kill_reason.strip():
+            return kill_reason, "details.kill_reason"
+        if counter_check is not None:
+            return _counter_check_summary(counter_check), "counter_check"
+    if verification_status == PENDING_RUNTIME_PROOF and next_test is not None:
+        return (
+            f"Runtime proof owed: {str(next_test.get('hypothesis') or '').strip()}",
+            "next_test.hypothesis",
+        )
+    if verification_status == "blocked":
+        block_reason = write_details.get("block_reason")
+        if isinstance(block_reason, str) and block_reason.strip():
+            return block_reason, "details.block_reason"
+    return "", ""
 
 
 def verify_finding(
@@ -3292,6 +3751,8 @@ def verify_finding(
                 f"--severity {new_severity}`, which invalidates the verdict"
             ),
         )
+    if new_severity:
+        new_severity = _require_severity(new_severity, field="new_severity")
     if normalized_verification_status == PENDING_RUNTIME_PROOF and next_test is None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -3322,6 +3783,9 @@ def verify_finding(
             """,
             (engagement.id, int(existing["id"])),
         ).fetchall()
+        stale_verdict_reasons = _stale_verdict_reasons(
+            connection, engagement.id, int(existing["id"])
+        )
         if operator_authority:
             # Resolved BEFORE the write: the stamp is the durable record of which
             # out-of-snapshot evidence the waiver rests on, so a citation that
@@ -3368,6 +3832,68 @@ def verify_finding(
         verification_provenance[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_stamp
         transition_metadata[OPERATOR_AUTHORITY_PROVENANCE_KEY] = operator_stamp
     details_payload = dict(details or {})
+    existing_details = _json_object(existing["details_json"])
+    existing_verification = _row_verification_status(existing)
+    derived: list[dict[str, Any]] = []
+    advisories: list[dict[str, Any]] = []
+    authored_reason = str(reason_text or "")
+    if not authored_reason.strip():
+        # The reason is the only record of WHY for a disagreement or a terminal
+        # verdict walked back to an open status; everywhere else the structured
+        # check states it.
+        if normalized_verification_status == "disputed":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    "reason_text is required for a disputed verify: no structured "
+                    "check states the disagreement, so the reason is its only record"
+                ),
+            )
+        if (
+            existing_verification in TERMINAL_VERIFICATION_STATUSES
+            and normalized_verification_status not in TERMINAL_VERIFICATION_STATUSES
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"reason_text is required to move {slug} off its "
+                    f"'{existing_verification}' verdict to "
+                    f"'{normalized_verification_status}': a verdict walked back "
+                    "needs its reason stated, not derived"
+                ),
+            )
+        killed_as = (
+            "verification_status" if existing_verification == "false_positive"
+            else "workflow_status" if existing_workflow == "false_positive"
+            else ""
+        )
+        if killed_as and normalized_verification_status != "false_positive":
+            # Reviving a killed finding reverses an earlier judgment; the check
+            # that proves the claim now does not say why the kill was wrong.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"reason_text is required to revive {slug} from {killed_as} "
+                    f"'false_positive' to '{normalized_verification_status}': a "
+                    "killed finding brought back needs its reason stated (what the "
+                    "kill got wrong), not derived from the new check"
+                ),
+            )
+    if (
+        normalized_verification_status == "confirmed"
+        and new_severity
+        and SEVERITY_RANK[_normalize_severity(new_severity)]
+        < SEVERITY_RANK[_normalize_severity(str(existing["severity"]))]
+    ):
+        # A live finding whose band moved down IS the downgraded verdict; record it
+        # as one, so the move is named on a verified_downgraded transition.
+        normalized_verification_status = VerificationStatus.DOWNGRADED
+        derived.append(derived_field(
+            "verification_status", "downgraded", "new_severity",
+            f"confirmed with new_severity '{new_severity}' below the current "
+            f"'{_normalize_severity(str(existing['severity']))}' is the downgraded "
+            "verdict; recorded as downgraded",
+        ))
 
     if normalized_verification_status == "downgraded":
         if not new_severity:
@@ -3396,18 +3922,7 @@ def verify_finding(
         ):
             raise HTTPException(
                 status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "new_severity must be lower than the current severity unless "
-                    "a prior severity-lowering transition proves it was pre-lowered: "
-                    "'downgraded' records a band that MOVED. To correct the rating "
-                    "inside the band, run `vigil assess finding update "
-                    f"{slug} --details-inline "
-                    "'{\"cvss_score\": <n>, \"cvss_vector\": \"<v>\"}'` and then "
-                    f"`vigil assess finding verify {slug} --status confirmed "
-                    "--proof-receipt-id <id> --confirm-check-file <file>` — in that "
-                    "order, because the correction raises a claim review that the "
-                    "fresh verification is what settles"
-                ),
+                detail=_same_band_downgrade_refusal(slug, existing),
             )
         target_severity = normalized_new_severity
         transition_action = "verified_downgraded"
@@ -3417,26 +3932,34 @@ def verify_finding(
         if normalized_new_severity == current_severity:
             transition_metadata["prelowered"] = True
     elif normalized_verification_status == "false_positive":
-        existing_details = _json_object(existing["details_json"])
-        kill_reason = details_payload.get(
-            "kill_reason", existing_details.get("kill_reason")
-        )
-        kill_check = details_payload.get(
-            "kill_check", existing_details.get("kill_check")
-        )
-        if not kill_reason or kill_check is None:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "false_positive verification requires "
-                    "details.kill_reason and details.kill_check "
-                    "(kill_check must be an integer from 1 to 5)"
-                ),
-            )
-        _validate_kill_names_a_settling_test(
-            incoming_details=details_payload,
-            existing_details=existing_details,
-        )
+        kill_reason = details_payload.get("kill_reason")
+        if not (isinstance(kill_reason, str) and kill_reason.strip()) and (
+            existing_verification == "false_positive"
+            or "kill_reason" not in stale_verdict_reasons
+        ):
+            # A stored kill_reason describes the kill the finding still holds (or
+            # was written ahead of this one); one left from an earlier,
+            # since-revived kill says nothing about this one.
+            kill_reason = existing_details.get("kill_reason")
+        if not (isinstance(kill_reason, str) and kill_reason.strip()):
+            # The kill's rationale is what this verify's reason (or, without one,
+            # its counter-check) already says.
+            if authored_reason.strip():
+                kill_reason, kill_source = authored_reason, "reason_text"
+            elif counter_check is not None:
+                kill_reason, kill_source = _counter_check_summary(counter_check), "counter_check"
+            else:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "false_positive verification needs a kill rationale: pass "
+                        "reason_text, a counter_check, or details.kill_reason"
+                    ),
+                )
+            details_payload["kill_reason"] = kill_reason
+            derived.append(_derived_verdict_reason(
+                "kill_reason", kill_reason, kill_source, existing_details, "kill"
+            ))
         target_workflow = "false_positive"
         transition_action = "verified_false_positive"
     elif normalized_verification_status == "blocked":
@@ -3446,9 +3969,44 @@ def verify_finding(
         # reviewed so it leaves the unreviewed DoD queue, but report-readiness /
         # the report projection exclude it ('blocked' is neither
         # confirmed nor downgraded), keeping it OUT of the report until unblocked.
+        stated_block = details_payload.get("block_reason")
+        if not (isinstance(stated_block, str) and stated_block.strip()) and (
+            existing_verification == "blocked"
+            or "block_reason" not in stale_verdict_reasons
+        ):
+            # A stored block_reason names what the block the finding still holds
+            # (or this one, written ahead of it) waits on; one left from an
+            # earlier, since-lifted block is not what this attempt waits on.
+            stated_block = existing_details.get("block_reason")
+        if not (isinstance(stated_block, str) and stated_block.strip()):
+            if not authored_reason.strip():
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "a blocked verify needs what the attempt is waiting on: pass "
+                        "reason_text (stored as details.block_reason) or "
+                        "details.block_reason"
+                    ),
+                )
+            # What the attempt is waiting on is what this verify's reason says.
+            if len(authored_reason) > BLOCK_REASON_MAX_CHARS:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"reason_text is {len(authored_reason)} characters; with no "
+                        "details.block_reason it is stored as details.block_reason, "
+                        f"which is capped at {BLOCK_REASON_MAX_CHARS}. Pass a short "
+                        "details.block_reason naming what the attempt waits on and keep "
+                        "the full account in reason_text."
+                    ),
+                )
+            details_payload["block_reason"] = authored_reason
+            derived.append(_derived_verdict_reason(
+                "block_reason", authored_reason, "reason_text", existing_details, "block"
+            ))
         _validate_blocked_verification_details(
             incoming_details=details_payload,
-            existing_details=_json_object(existing["details_json"]),
+            existing_details=existing_details,
         )
         transition_action = "verified_blocked"
     elif normalized_verification_status == "confirmed":
@@ -3467,40 +4025,15 @@ def verify_finding(
         # program calibration is one attested write instead of a severity patch
         # that invalidates the verdict it is calibrating. The band that moved is
         # named on the ledger row exactly as the downgraded branch names it.
+        # Only `confirmed` and `false_positive` reach here: a confirmed verdict
+        # with a lower band was recorded as `downgraded` above, so a confirmed
+        # re-band here is level or upward. A kill may move the band either way:
+        # `false_positive` takes the finding out of the report, so its band
+        # carries no verdict, and the change policy refuses `finding update
+        # --severity` on a killed finding — this route is the only way to
+        # correct the band a refuted finding is left at.
         normalized_new_severity = _normalize_severity(new_severity)
         current_severity = _normalize_severity(str(existing["severity"]))
-        if (
-            normalized_verification_status != "false_positive"
-            and SEVERITY_RANK[normalized_new_severity] < SEVERITY_RANK[current_severity]
-        ):
-            # The direction is the disposition. ``downgraded`` refuses an upward
-            # move above for exactly this reason, and the inverse is the same
-            # rule: a band that moved DOWN on a finding that stays alive is the
-            # downgraded verdict, and writing it as 'confirmed' reaches the lower
-            # band while the ledger records ``verified_confirmed`` — no
-            # ``verified_downgraded`` row, so nothing that reads the history for
-            # band movements, or asks whether the move was pre-lowered, can see
-            # it. The CVSS-band variance gate does not cover this: ``cvss_score``
-            # is optional at record time, so an unscored finding has no band to
-            # depart from and the lowering would land unattributed.
-            #
-            # A kill is the exception: ``false_positive`` takes the finding out
-            # of the report entirely, so its band carries no verdict, and the
-            # change policy refuses `finding update --severity` on a killed
-            # finding — this route is the only way to correct the band a refuted
-            # finding is left at.
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    f"new_severity '{normalized_new_severity}' is below the current "
-                    f"'{current_severity}', which is the 'downgraded' verdict: record "
-                    f"it with `vigil assess finding verify {slug} --status downgraded "
-                    f"--new-severity {normalized_new_severity}` and the same evidence, "
-                    "so the band that moved is named on a verified_downgraded "
-                    f"transition. '{normalized_verification_status}' carries a band "
-                    "at or above the current one."
-                ),
-            )
         target_severity = normalized_new_severity
         if normalized_new_severity != current_severity:
             transition_metadata["previous_severity"] = current_severity
@@ -3508,6 +4041,63 @@ def verify_finding(
     effective_details = _json_object(
         _resolved_details(existing["details_json"], details_payload, "merge")
     )
+    if not authored_reason.strip():
+        reason_text, reason_source = _derived_verify_reason(
+            normalized_verification_status,
+            confirm_check=confirm_check,
+            counter_check=counter_check,
+            next_test=next_test,
+            write_details=details_payload,
+        )
+        if (
+            not reason_text
+            and normalized_verification_status in {"confirmed", "downgraded"}
+            and confirm_check is None
+            and not operator_authority
+        ):
+            # The confirm_check is required for these verdicts anyway; it is
+            # what is missing, and naming the reason instead sends the caller
+            # to add text the next refusal still rejects.
+            recorded_as = (
+                " (recorded as downgraded because new_severity is below the current band)"
+                if any(entry["field"] == "verification_status" for entry in derived)
+                else ""
+            )
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"this {normalized_verification_status} verify{recorded_as} needs a "
+                    "structured confirm_check naming its decision receipts; without "
+                    "reason_text, the check's observed result is also the recorded reason"
+                ),
+            )
+        if not reason_text:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=(
+                    f"reason_text is required for this {normalized_verification_status} "
+                    "verify: it is derived only from this write's confirm_check "
+                    "(confirmed, downgraded), counter_check or details.kill_reason "
+                    "(false_positive), next_test (pending_runtime_proof) or "
+                    "details.block_reason (blocked), and this write carries none; a "
+                    "reason stored by an earlier verdict is not reused"
+                ),
+            )
+        derived.append(derived_field("reason_text", reason_text, reason_source))
+    derived_score = _derived_cvss_score(
+        {key: value for key, value in details_payload.items() if value not in (None, "", [], {})},
+        effective_details,
+    )
+    if derived_score is not None:
+        # Scored here, before the band below is read from it; the write funnel
+        # then sees an authored score that agrees with its vector.
+        details_payload["cvss_score"] = derived_score
+        effective_details["cvss_score"] = derived_score
+        derived.append(derived_field(
+            "details.cvss_score", derived_score, "details.cvss_vector",
+            f"details.cvss_score={derived_score} computed from details.cvss_vector "
+            f"'{details_payload['cvss_vector']}'",
+        ))
     cvss_score = effective_details.get("cvss_score")
     normal_severity_band = None
     if isinstance(cvss_score, int | float) and not isinstance(cvss_score, bool):
@@ -3539,6 +4129,8 @@ def verify_finding(
             verification_normal_severity_band=normal_severity_band,
             verification_next_test=next_test,
             verification_operator_authority=operator_authority,
+            service_derived=derived,
+            service_advisories=advisories,
         )
     except HTTPException as exc:
         if exc.status_code not in {400, 409}:
@@ -4176,6 +4768,9 @@ def merge_findings(
         # fill missing narrative keys but never overwrite canonical narrative, and
         # merge never changes the target's technical claim: a stronger severity,
         # CVSS or CWE on the source comes back as a warning for an explicit edit.
+        # The source's kill, block or withdrawal rationale explains the source's
+        # own status, which the target never takes; carried over, a later verify
+        # of the target would read it as its own. It stays on the merged source.
         merged_details_obj = _json_object(
             _merge_details_precedence(
                 target_details,
@@ -4183,6 +4778,7 @@ def merge_findings(
                     key: value
                     for key, value in source_details.items()
                     if key not in finding_change_policy.TECHNICAL_DETAIL_KEYS
+                    and key not in finding_change_policy.STATUS_RATIONALE_DETAIL_KEYS
                 },
             )
         )
@@ -4517,17 +5113,59 @@ _LAST_TRANSITION_JOIN = """LEFT JOIN assessment_finding_transitions AS last_tran
                 )"""
 
 
-def count_findings(engagement_id: int) -> int:
-    """Count the whole ledger without materializing findings or their evidence."""
+# The listing order shared by the full and list views: workflow state, then
+# verification state, then most recently updated.
+_FINDING_LIST_ORDER_SQL = """ORDER BY
+                CASE findings.status
+                    WHEN 'exploited' THEN 0
+                    WHEN 'active' THEN 1
+                    WHEN 'blocked' THEN 2
+                    WHEN 'reported' THEN 3
+                    WHEN 'draft' THEN 4
+                    WHEN 'false_positive' THEN 5
+                    WHEN 'merged' THEN 6
+                    ELSE 7
+                END,
+                CASE findings.verification_status
+                    WHEN 'confirmed' THEN 0
+                    WHEN 'downgraded' THEN 1
+                    WHEN 'disputed' THEN 2
+                    WHEN 'pending_runtime_proof' THEN 3
+                    WHEN 'blocked' THEN 4
+                    ELSE 5
+                END,
+                findings.updated_at DESC,
+                findings.id DESC"""
+
+
+def count_findings(engagement_id: int, **filters: Any) -> dict[str, Any]:
+    """Count the rows ``list_findings`` selects with the same ``filters``.
+
+    Returns the exact ``total`` and a ``by_severity`` breakdown (critical
+    first, zero counts omitted) without materializing findings or their
+    evidence, so a bounded listing can state what lies beyond its page.
+    """
     engagement = _engagement_or_404(engagement_id)
+    where, params = _finding_list_predicates(engagement.id, **filters)
     with _common.get_connection() as connection:
-        return _common._scalar_row(
-            connection, "SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ?",
-            (engagement.id,),
-        )
+        rows = connection.execute(
+            f"""
+            SELECT LOWER(findings.severity) AS severity, COUNT(*) AS total
+            FROM assessment_findings AS findings
+            WHERE {' AND '.join(where)}
+            GROUP BY LOWER(findings.severity)
+            """,
+            tuple(params),
+        ).fetchall()
+    counts = {str(row["severity"]): int(row["total"]) for row in rows}
+    ordered = sorted(counts, key=lambda severity: (-SEVERITY_RANK.get(severity, -1), severity))
+    return {
+        "total": sum(counts.values()),
+        "by_severity": {severity: counts[severity] for severity in ordered},
+    }
 
 
-def list_findings(
+def _finding_list_predicates(
     engagement_id: int,
     *,
     severity: str | None = None,
@@ -4539,10 +5177,8 @@ def list_findings(
     search: str | None = None,
     holding: bool = False,
     runtime_proof_owed: bool = False,
-    limit: int | None = None,
-    offset: int = 0,
-) -> list[dict[str, Any]]:
-    engagement = _engagement_or_404(engagement_id)
+) -> tuple[list[str], list[Any]]:
+    """The WHERE terms and bound values shared by the finding list and count."""
     severity = _validated_enum_filter("severity", severity, SEVERITY_RANK)
     workflow_status = _validated_enum_filter(
         "workflow_status", workflow_status, WORKFLOW_STATUSES
@@ -4551,7 +5187,7 @@ def list_findings(
         "verification_status", verification_status, VERIFICATION_STATUSES
     )
     where = ["findings.engagement_id = ?"]
-    params: list[Any] = [engagement.id]
+    params: list[Any] = [engagement_id]
     # The equality filters, in predicate order. The LOWER-on-both-sides shape
     # is per-filter and deliberate: the three enum axes above are already
     # normalised by ``_validated_enum_filter``, so only the free-text axes
@@ -4591,6 +5227,18 @@ def list_findings(
         )
     if runtime_proof_owed:
         where.append(runtime_proof_owed_sql("findings"))
+    return where, params
+
+
+def list_findings(
+    engagement_id: int,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    **filters: Any,
+) -> list[dict[str, Any]]:
+    engagement = _engagement_or_404(engagement_id)
+    where, params = _finding_list_predicates(engagement.id, **filters)
     limit_sql = ""
     if limit is not None:
         limit_sql = " LIMIT ? OFFSET ?"
@@ -4604,32 +5252,131 @@ def list_findings(
             LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
             {_LAST_TRANSITION_JOIN}
             WHERE {' AND '.join(where)}
-            ORDER BY
-                CASE findings.status
-                    WHEN 'exploited' THEN 0
-                    WHEN 'active' THEN 1
-                    WHEN 'blocked' THEN 2
-                    WHEN 'reported' THEN 3
-                    WHEN 'draft' THEN 4
-                    WHEN 'false_positive' THEN 5
-                    WHEN 'merged' THEN 6
-                    ELSE 7
-                END,
-                CASE findings.verification_status
-                    WHEN 'confirmed' THEN 0
-                    WHEN 'downgraded' THEN 1
-                    WHEN 'disputed' THEN 2
-                    WHEN 'pending_runtime_proof' THEN 3
-                    WHEN 'blocked' THEN 4
-                    ELSE 5
-                END,
-                findings.updated_at DESC,
-                findings.id DESC
+            {_FINDING_LIST_ORDER_SQL}
             {limit_sql}
             """,
             tuple(params),
         ).fetchall()
         return _serialize_findings_with_code_snapshot_status(connection, engagement.id, rows)
+
+
+# The fields of one ``view=list`` row (``GET /findings?view=list``). Every value
+# equals the full row's value for the same field; ``block_reason`` is a blocked
+# finding's ``details.block_reason`` (null on any other row) so a list can say
+# why a finding is held out of the report. Everything else on the full record —
+# summary, details, notes, provenance, evidence_ref, proof receipts,
+# reproduction basis, next test, the last-transition fields — is left out; a
+# reader that needs it reads ``GET /findings/{slug}``.
+FINDING_LIST_VIEW_FIELDS = (
+    "id",
+    "slug",
+    "title",
+    "severity",
+    "workflow_status",
+    "verification_status",
+    "defect_family",
+    "root_cause_key",
+    "canonical_location",
+    "auth_context",
+    "source_name",
+    "evidence_type",
+    "submission_status",
+    "submission_platform",
+    "submission_ref",
+    "merged_into_slug",
+    "code_snapshot_status",
+    "row_version",
+    "created_at",
+    "updated_at",
+    "block_reason",
+)
+
+# The details body leaves SQLite only for a row whose stored status is not
+# exactly one of the other canonical statuses, which is every blocked row and
+# any odd stored spelling the serializer might fold to ``blocked``. Python then
+# parses it with the full view's own ``_json_object``, so the list's
+# block_reason equals the full row's even where SQLite's JSON reader differs
+# from Python's (NaN/Infinity, a repeated key).
+_MAYBE_BLOCKED_SQL = "findings.verification_status NOT IN ({})".format(
+    ", ".join(
+        f"'{value}'" for value in sorted(str(status) for status in VERIFICATION_STATUSES)
+        if value != "blocked"
+    )
+)
+
+
+def list_finding_list_rows(
+    engagement_id: int,
+    *,
+    limit: int | None = None,
+    offset: int = 0,
+    **filters: Any,
+) -> list[dict[str, Any]]:
+    """The ``list_findings`` rows, filters, order and window as list fields only.
+
+    The SELECT names the list columns, so ``notes`` and the other bodies never
+    leave SQLite (``details_json`` only for a blocked row, for its block_reason),
+    and none of the full projection's per-read receipt, next-test or evidence
+    work runs. ``provenance_json`` is read (and
+    dropped) because ``code_snapshot_status`` classifies its binding.
+    """
+    engagement = _engagement_or_404(engagement_id)
+    where, params = _finding_list_predicates(engagement.id, **filters)
+    limit_sql = ""
+    if limit is not None:
+        limit_sql = " LIMIT ? OFFSET ?"
+        params.extend([int(limit), int(offset)])
+    with _common.get_connection() as connection:
+        rows = connection.execute(
+            f"""
+            SELECT findings.id, findings.slug, findings.title, findings.severity,
+                findings.status, findings.verification_status, findings.defect_family,
+                findings.root_cause_key, findings.canonical_location,
+                findings.auth_context, findings.source_name, findings.evidence_type,
+                findings.submission_status, findings.submission_platform,
+                findings.submission_ref, merged.slug AS merged_into_slug,
+                findings.provenance_json, findings.row_version,
+                findings.created_at, findings.updated_at,
+                CASE WHEN {_MAYBE_BLOCKED_SQL}
+                    THEN findings.details_json
+                END AS maybe_blocked_details_json
+            FROM assessment_findings AS findings
+            LEFT JOIN assessment_findings AS merged ON merged.id = findings.merged_into_finding_id
+            WHERE {' AND '.join(where)}
+            {_FINDING_LIST_ORDER_SQL}
+            {limit_sql}
+            """,
+            tuple(params),
+        ).fetchall()
+        if not rows:
+            return []
+        repo_states = load_code_repo_snapshot_states(connection, engagement.id)
+        return [
+            _serialize_finding_list_row(connection, engagement.id, row, repo_states)
+            for row in rows
+        ]
+
+
+def _serialize_finding_list_row(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    row: sqlite3.Row,
+    repo_states: dict[int, dict[str, Any]],
+) -> dict[str, Any]:
+    record = dict(row)
+    details_json = record.pop("maybe_blocked_details_json")
+    # The full row's own serializer normalises the status axes and parses the
+    # provenance; the details it would parse were never selected.
+    record = _serialize_finding_record(record)
+    record.pop("details")
+    record["code_snapshot_status"] = finding_code_snapshot_status(
+        connection, engagement_id, record, repo_states=repo_states
+    )
+    record["block_reason"] = (
+        _json_object(details_json).get("block_reason")
+        if record["verification_status"] == "blocked" else None
+    )
+    return {field: record[field] for field in FINDING_LIST_VIEW_FIELDS}
 
 
 def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
@@ -4657,6 +5404,12 @@ def get_finding(engagement_id: int, slug: str) -> dict[str, Any]:
         )
         record["verification_audit"].update(
             _claim_review_status(connection, engagement.id, row)
+        )
+        # Imported here: report_readiness imports this module.
+        from .report_readiness import finding_severity_band
+
+        record["verification_audit"]["severity_band"] = finding_severity_band(
+            connection, engagement.id, record
         )
         contradictions = connection.execute(
             """

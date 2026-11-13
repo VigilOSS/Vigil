@@ -579,6 +579,30 @@ def test_list_command_runs_finding_aliases_rank_and_explain_matches(
     assert {direct.json()["id"], compact.json()["id"]} <= result_sets[0]
 
 
+def test_target_host_filter_matches_one_host_of_a_list_mode_crawl(client, isolate_settings):
+    """A list-mode crawl stores its seed hosts comma-joined; each one finds it, a suffix does not."""
+    _write_engagement(isolate_settings["engagements_dir"])
+    ids = {}
+    for name, hosts in (("crawl", "api.example.com,app.example.com"), ("single", "app.example.com"),
+                        ("apex", "example.com")):
+        response = _post(client, _base_payload(
+            command=f"katana {name}", argv=["katana", name], tool_name="katana", target_host=hosts,
+        ))
+        assert response.status_code == 201, response.text
+        ids[name] = response.json()["id"]
+
+    def listed(host: str) -> set[int]:
+        response = client.get(
+            f"/engagements/{ENGAGEMENT_KEY}/assessment/command-runs", params={"target_host": host},
+        )
+        assert response.status_code == 200, response.text
+        return {row["id"] for row in response.json()}
+
+    assert listed("APP.example.com") == {ids["crawl"], ids["single"]}
+    assert listed("api.example.com") == {ids["crawl"]}
+    assert listed("example.com") == {ids["apex"]}
+
+
 def test_list_command_runs_distant_returns_nonmatching_scope_candidates(
     client, isolate_settings
 ):

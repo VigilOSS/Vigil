@@ -621,38 +621,40 @@ def test_fresh_reverification_supersedes_old_receipt_health_dependency(
     ]["proof_receipt_ids"] == [fresh_receipt["id"]]
 
 
-def test_cvss_band_departure_requires_attributed_variance_event(
+def test_cvss_band_departure_is_attributed_by_a_variance_event(
     client, isolate_settings
 ) -> None:
+    """A departure with no variance records the verdict and says so (ADR 0046);
+    an authored variance is stored as the attributed reason."""
     _seed(client, isolate_settings)
-    _finding(
-        client,
-        "VA-030",
-        severity="high",
-        details={
-            "evidence": "source proof",
-            "impact": "limited disclosure",
-            "cvss_score": 5.3,
-            "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
-            "severity_band_rationale": "legacy free text is not an approval",
-        },
-    )
-    receipt = _receipt(client, "VERIFY-1", "variance", finding_slug="VA-030")
+    details = {
+        "evidence": "source proof",
+        "impact": "limited disclosure",
+        "cvss_score": 5.3,
+        "cvss_vector": "CVSS:3.1/AV:N/AC:L/PR:N/UI:N/S:U/C:L/I:N/A:N",
+        "severity_band_rationale": "legacy free text is not an approval",
+    }
+    _finding(client, "VA-029", severity="high", details=dict(details))
+    unattributed_receipt = _receipt(client, "VERIFY-1", "no-variance", finding_slug="VA-029")
 
     missing = client.post(
-        f"{BASE}/findings/VA-030/verify",
+        f"{BASE}/findings/VA-029/verify",
         json={
             "verification_status": "confirmed",
             "reason_text": "business impact supports high",
-            "proof_receipt_ids": [receipt["id"]],
-            "confirm_check": completed_confirm_check(receipt["id"]),
+            "proof_receipt_ids": [unattributed_receipt["id"]],
+            "confirm_check": completed_confirm_check(unattributed_receipt["id"]),
         },
     )
-    assert missing.status_code == 400, missing.text
-    assert "severity_variance" in missing.json()["detail"]
-    assert '"normal_band":"medium"' in missing.json()["detail"]
-    assert '"chosen_severity":"high"' in missing.json()["detail"]
-    assert f'"proof_receipt_id":{receipt["id"]}' in missing.json()["detail"]
+    assert missing.status_code == 200, missing.text
+    assert missing.json()["severity_variance"] is None
+    departure = next(
+        a for a in missing.json()["advisories"] if a["kind"] == "severity_cvss_band_departure"
+    )
+    assert "'medium'" in departure["detail"] and "'high'" in departure["detail"]
+
+    _finding(client, "VA-030", severity="high", details=dict(details))
+    receipt = _receipt(client, "VERIFY-1", "variance", finding_slug="VA-030")
 
     accepted = client.post(
         f"{BASE}/findings/VA-030/verify",
@@ -664,7 +666,7 @@ def test_cvss_band_departure_requires_attributed_variance_event(
             "severity_variance": {
                 "normal_band": "medium",
                 "chosen_severity": "high",
-                "actor": "code-vuln-verifier",
+                "actor": "VERIFY-1",
                 "reason": "The exposed records trigger a contractual incident.",
                 "proof_receipt_id": receipt["id"],
             },
@@ -674,7 +676,7 @@ def test_cvss_band_departure_requires_attributed_variance_event(
     variance = accepted.json()["severity_variance"]
     assert variance["normal_band"] == "medium"
     assert variance["chosen_severity"] == "high"
-    assert variance["actor"] == "code-vuln-verifier"
+    assert variance["actor"] == "VERIFY-1"
 
     detail_response = client.get(f"{BASE}/findings/VA-030")
     assert detail_response.status_code == 200, detail_response.text
@@ -688,7 +690,7 @@ def test_cvss_band_departure_requires_attributed_variance_event(
             "transition_id": accepted.json()["transition"]["id"],
             "normal_band": "medium",
             "chosen_severity": "high",
-            "actor": "code-vuln-verifier",
+            "actor": "VERIFY-1",
             "reason": "The exposed records trigger a contractual incident.",
             "proof_receipt_id": receipt["id"],
             "created_at": audit["severity_variances"][0]["created_at"],
@@ -852,19 +854,18 @@ def test_a_downgrade_cannot_raise_the_band_it_is_recording(
     assert stored["verification_status"] == "unreviewed"
 
 
-def test_a_confirmed_verdict_cannot_lower_the_band_behind_the_downgrade_route(
+def test_a_confirmed_verdict_with_a_lower_band_is_recorded_as_downgraded(
     client, isolate_settings
 ) -> None:
     """A band that moved DOWN is a downgrade whichever status is being written.
 
     ``confirmed`` re-bands upward on purpose — a program calibration that raises
     the class is still a confirmation. Downward it is the ``downgraded`` verdict
-    by definition, and routing it through ``confirmed`` instead reaches the same
-    lower band while the ledger row reads ``verified_confirmed``: no
-    ``verified_downgraded`` transition, so nothing that reads the history for
-    band movements sees it. ``cvss_score`` is optional at record time, so the
-    CVSS-band variance gate is not covering this: with no score stored there is
-    no band to depart from and the write lands unattributed.
+    by definition, so the write is recorded as one: the ledger row reads
+    ``verified_downgraded`` and names the band that moved, which is what every
+    reader of the history for band movements looks for. ``cvss_score`` is
+    optional at record time, so the CVSS-band variance gate does not cover this:
+    with no score stored there is no band to depart from.
     """
     _seed(client, isolate_settings)
     _finding(client, "VA-045", severity="high")
@@ -881,28 +882,11 @@ def test_a_confirmed_verdict_cannot_lower_the_band_behind_the_downgrade_route(
         },
     )
 
-    assert response.status_code == 400, response.text
-    detail = response.json()["detail"]
-    assert "vigil assess finding verify VA-045 --status downgraded" in detail
-    stored = client.get(f"{BASE}/findings/VA-045").json()
-    assert stored["severity"] == "high"
-    assert stored["verification_status"] == "unreviewed"
-
-    # Same evidence, honest disposition: the lower band is reachable, and the
-    # ledger says a band moved.
-    accepted = client.post(
-        f"{BASE}/findings/VA-045/verify",
-        json={
-            "verification_status": "downgraded",
-            "reason_text": "Reproduced, but the blast radius is smaller than filed.",
-            "new_severity": "info",
-            "proof_receipt_ids": [receipt["id"]],
-            "confirm_check": completed_confirm_check(receipt["id"]),
-        },
-    )
-
-    assert accepted.status_code == 200, accepted.text
-    assert accepted.json()["finding"]["severity"] == "info"
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["finding"]["severity"] == "info"
+    assert body["finding"]["verification_status"] == "downgraded"
+    assert [entry["field"] for entry in body["derived"]] == ["verification_status"]
     transition = client.get(f"{BASE}/findings/VA-045/transitions").json()[0]
     assert transition["action"] == "verified_downgraded"
     assert json.loads(transition["metadata_json"])["previous_severity"] == "high"

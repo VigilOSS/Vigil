@@ -289,6 +289,24 @@ def _read_regular_at(
         os.close(fd)
 
 
+def _sealed_source_binding_matches(
+    recorded: object, *, repo_key: str, snapshot_digest: str
+) -> bool:
+    """Whether a manifest's ``source_path`` binds this snapshot's own source tree.
+
+    Mirrors ``agent/scripts/assess/lib/code_snapshot.py:_require_source_binding``.
+    The relative ``"source"`` always binds it. An absolute binding goes stale when
+    the engagement moves, so it stays acceptable only while its trailing components
+    name this same content-addressed snapshot. The attested location is the
+    engagement-owned path opened by ``attest_verified_snapshot``, never this string.
+    """
+    if recorded == "source":
+        return True
+    if not isinstance(recorded, str) or not os.path.isabs(recorded):
+        return False
+    return Path(recorded).parts[-3:] == (repo_key, snapshot_digest, "source")
+
+
 def _canonical_snapshot_digest(manifest: Mapping[str, Any]) -> str:
     payload = {
         "schema": manifest.get("schema"),
@@ -636,7 +654,11 @@ def attest_verified_snapshot(
             raise SnapshotAttestationError("sealed snapshot manifest repo_key mismatch")
         if manifest.get("snapshot_digest") != snapshot_digest:
             raise SnapshotAttestationError("sealed snapshot manifest digest mismatch")
-        if manifest.get("source_path") != os.fspath(expected_source_path):
+        if not _sealed_source_binding_matches(
+            manifest.get("source_path"),
+            repo_key=repo_key,
+            snapshot_digest=snapshot_digest,
+        ):
             raise SnapshotAttestationError("sealed snapshot manifest source_path mismatch")
         if manifest.get("repo_name") != metadata.get("name"):
             raise SnapshotAttestationError("sealed snapshot manifest repo_name mismatch")

@@ -140,7 +140,6 @@ def _verify(client, slug: str, **overrides):
         payload["severity_variance"] = {
             "normal_band": "high",
             "chosen_severity": payload["new_severity"],
-            "actor": "fixture-verifier",
             "reason": "The fixture exercises an attributed downgrade from the CVSS band.",
             "proof_receipt_id": receipt_id,
         }

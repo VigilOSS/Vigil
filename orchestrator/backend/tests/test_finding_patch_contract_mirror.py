@@ -24,9 +24,10 @@ def test_documented_patch_fields_mirror_the_backend_model():
 
 def test_every_documented_patch_field_renders():
     text = contracts.render_contract("finding update")
-    assert "Allowed top-level fields:" in text
-    fields = text.split("Allowed top-level fields:", 1)[1].split("\n\n", 1)[0]
+    assert "Fields (" in text
+    fields = text.split("Fields (", 1)[1].split("\n\n", 1)[0]
     for name, annotation, description in contracts.FINDING_PATCH_FIELDS:
         assert f"  - {name} (" in fields
+        assert description in contracts.render_field_sections("finding update", [name])
         assert annotation.strip(), f"{name} carries no type annotation"
         assert description.strip(), f"{name} carries no description"

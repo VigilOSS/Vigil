@@ -9,8 +9,12 @@ from ..services.events import create_event_for_engagement, list_events_for_engag
 from ..services.timestamps import iso_utc
 from ..ws import broadcaster
 from .assessment import _offload
+from .query_params import DeclaredQueryParamsRoute
 
-router = APIRouter(prefix="/engagements/{engagement_key}/events", tags=["events"])
+router = APIRouter(
+    prefix="/engagements/{engagement_key}/events", tags=["events"],
+    route_class=DeclaredQueryParamsRoute,
+)
 
 
 class CreateEventRequest(BaseModel):

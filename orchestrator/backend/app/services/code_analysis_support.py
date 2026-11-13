@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from fnmatch import fnmatchcase
@@ -42,6 +44,14 @@ _SIGNAL_GATED_LANGUAGES = frozenset({"css", "html"})
 _REVIEW_SIGNAL_COUNTS = ("entry_points", "security_sinks", "security_sources")
 FUNCTION_SCOPED_STRUCTURAL_DIMENSIONS = frozenset(
     {"call_sites", "dataflow", "security_sinks"}
+)
+# The dimensions every streaming-fallback index names unavailable: the payload
+# validator requires them of that mode, and the applicable-family rule reads a
+# markup file that names them as one whose code its index could not see. Mirrors
+# `STREAMING_FALLBACK_BASELINE_UNAVAILABLE` in
+# `agent/scripts/assess/lib/treesitter_streaming.py`; keep the two identical.
+STREAMING_FALLBACK_UNAVAILABLE_BASELINE = frozenset(
+    {"call_sites", "classes", "dataflow", "exports", "functions"}
 )
 # The file scope's callable name: the structural index publishes the file-scope
 # lines between callables as records of this name, one per contiguous segment,
@@ -745,14 +755,17 @@ def structural_review_gaps(
         else:
             function_cited.add(file_id)
     reviewed: dict[int, list[tuple[int, int]]] = {}
+    # CROSS JOIN pins the join order: each receipt's spans resolve their file by
+    # primary key. Left free, the planner drives span_files from the engagement
+    # index once per receipt, which is quadratic in the receipt corpus.
     for row in connection.execute(
         f"""
         SELECT span_files.id AS file_id,
                CAST(json_extract(span.value, '$.start_line') AS INTEGER) AS start_line,
                CAST(json_extract(span.value, '$.end_line') AS INTEGER) AS end_line
         FROM code_analysis_results AS results
-        JOIN json_each(results.reviewed_spans_json) AS span
-        JOIN code_files AS span_files
+        CROSS JOIN json_each(results.reviewed_spans_json) AS span
+        CROSS JOIN code_files AS span_files
           ON span_files.id = CAST(json_extract(span.value, '$.file_id') AS INTEGER)
          AND span_files.engagement_id = results.engagement_id
         {receipt_joins}
@@ -946,8 +959,23 @@ def _safe_int(value: Any, default: int = 0) -> int:
         return default
 
 
+# Marks a `cwe_coverage` entry the backend wrote at closeout for a family the
+# closeout did not name (`code_analysis._with_unreviewed_families`).
+CLOSEOUT_RECORDED_BY = "closeout"
+
+
 def _merge_cwe_entry(existing: dict[str, Any], entry: dict[str, Any]) -> None:
-    """Merge one CWE coverage entry using the same max/sum rules everywhere."""
+    """Merge one CWE coverage entry using the same max/sum rules everywhere.
+
+    A closeout-recorded entry says only that nobody reviewed the family, so it
+    adds nothing to a reviewed one, and a reviewed entry replaces it whole.
+    """
+    if entry.get("recorded_by") == CLOSEOUT_RECORDED_BY:
+        return
+    if existing.get("recorded_by") == CLOSEOUT_RECORDED_BY:
+        existing.clear()
+        existing.update(entry)
+        return
     if _is_cwe_entry_not_applicable(entry):
         if _is_cwe_entry_not_applicable(existing):
             existing["not_applicable"] = True
@@ -987,15 +1015,59 @@ def _is_cwe_entry_not_applicable(entry: dict[str, Any]) -> bool:
     return disposition in {"not_applicable", "not-applicable", "n/a", "na"}
 
 
+def _closeout_not_applicable_families(coverage: Any) -> frozenset[str]:
+    """The families a closeout's own coverage marks not applicable.
+
+    The closeout is the review's answer for the file, so a family it says cannot
+    occur there is answered whatever a receipt scored for it
+    (`_merge_file_effort_entry`).
+    """
+    if not isinstance(coverage, list):
+        return frozenset()
+    return frozenset(
+        str(entry.get("family"))
+        for entry in coverage
+        if isinstance(entry, dict) and entry.get("family") and _is_cwe_entry_not_applicable(entry)
+    )
+
+
 def _merge_file_effort_entry(
     file_efforts: dict[int, dict[str, float]],
     file_not_applicable: dict[int, set[str]],
+    file_closeout_only: dict[int, set[str]],
     file_id: int,
     entry: dict[str, Any],
+    *,
+    closeout_not_applicable: frozenset[str] = frozenset(),
 ) -> None:
+    """Fold one coverage entry into a file's per-family effort.
+
+    A closeout-recorded entry (`recorded_by: closeout`) only says nobody named
+    the family, so it counts as effort 0 while nothing else records the family
+    and gives way, in either merge order, to any reviewed entry — an effort or
+    a not_applicable disposition. *file_closeout_only* tracks which recorded
+    efforts are such placeholders. A family in *closeout_not_applicable*
+    (`_closeout_not_applicable_families` of the attempt's closeout) is not
+    applicable whatever any entry scored for it, so the coverage harness, the
+    depth floor and a trigger's review basis read the closeout's answer alike.
+    """
     family = entry.get("family", "")
     if not family:
         return
+    closeout_only = file_closeout_only.setdefault(file_id, set())
+    if family in closeout_not_applicable:
+        file_efforts[file_id].pop(family, None)
+        closeout_only.discard(family)
+        file_not_applicable[file_id].add(family)
+        return
+    if entry.get("recorded_by") == CLOSEOUT_RECORDED_BY:
+        if family not in file_efforts[file_id] and family not in file_not_applicable[file_id]:
+            file_efforts[file_id][family] = 0.0
+            closeout_only.add(family)
+        return
+    if family in closeout_only:
+        closeout_only.discard(family)
+        del file_efforts[file_id][family]
     if _is_cwe_entry_not_applicable(entry):
         if family not in file_efforts[file_id]:
             file_not_applicable[file_id].add(family)
@@ -1026,8 +1098,49 @@ def _merge_cwe_coverage_entries(
             _merge_cwe_entry(existing, entry)
 
 
-def _hydrate_code_repo(row: Any) -> dict[str, Any]:
+# Where an engagement keeps its sealed snapshots, relative to the engagement root.
+_ENGAGEMENT_SNAPSHOTS_ROOT = ("tools", "analysis-state", "code-snapshots")
+
+
+def _engagement_local_sealed_paths(
+    payload: dict[str, Any], engagement_root: str | os.PathLike[str] | None
+) -> None:
+    """Read the sealed snapshot paths under the engagement's current root.
+
+    A refresh records the absolute ``repo_path`` and ``snapshot_manifest_path``
+    of the engagement as it was then; after the engagement moves they name the
+    old location. Each one whose tail is this repository's
+    ``<repo_key>/<snapshot_digest>/source`` (or ``/manifest.json``) is read
+    under the current root, and the stored value stays readable as
+    ``recorded_repo_path`` / ``recorded_snapshot_manifest_path`` when it
+    differs. Nothing stored changes; a path that names no sealed snapshot of
+    this repository is returned as recorded.
+    """
+    if not engagement_root:
+        return
+    repo_key = str(payload.get("repo_key") or "")
+    digest = str(payload.get("snapshot_digest") or "")
+    if not repo_key or not digest:
+        return
+    snapshot = Path(engagement_root).resolve().joinpath(
+        *_ENGAGEMENT_SNAPSHOTS_ROOT, repo_key, digest
+    )
+    for field, leaf in (("repo_path", "source"), ("snapshot_manifest_path", "manifest.json")):
+        recorded = str(payload.get(field) or "")
+        if not recorded or Path(recorded).parts[-3:] != (repo_key, digest, leaf):
+            continue
+        local = snapshot / leaf
+        # The same directory reached through a symlinked prefix is not a move.
+        if os.path.realpath(recorded) != str(local):
+            payload[f"recorded_{field}"] = recorded
+            payload[field] = str(local)
+
+
+def _hydrate_code_repo(
+    row: Any, *, engagement_root: str | os.PathLike[str] | None = None
+) -> dict[str, Any]:
     payload = dict(row)
+    _engagement_local_sealed_paths(payload, engagement_root)
     payload["lsp_config"] = _json_decode(payload.get("lsp_config_json"), {})
     payload["git_churn"] = _json_decode(payload.get("git_churn_json"), {})
     payload["threat_model"] = _json_decode(payload.get("threat_model_json"), {})
@@ -1048,6 +1161,9 @@ def _hydrate_code_repo(row: Any) -> dict[str, Any]:
 def _hydrate_code_file(row: Any) -> dict[str, Any]:
     payload = dict(row)
     payload["slot_types"] = _json_decode(payload.get("slot_types_json"), [])
+    payload["context_tags"] = _json_decode(payload.get("context_tags_json"), [])
+    # '' is a classification that recorded no tags, not one recording none.
+    payload["context_tags_recorded"] = bool(payload.get("context_tags_json"))
     payload["structural_unavailable_dimensions"] = _json_decode(
         payload.get("structural_unavailable_dimensions_json"), []
     )
@@ -1859,12 +1975,43 @@ def _sync_module_rollup(connection, engagement_id: int, module_id: int) -> None:
     )
 
 
+# Per-family effort each reviewed tier is measured against. `low` is absent on
+# purpose: build and test infrastructure is admitted and accounted, not held to
+# a review-depth floor. `effort` is a number the reviewing agent writes into its
+# own `cwe_coverage` entry and nothing but a float parse stands behind it, so
+# ADR 0001 decision 3 (left standing by ADR 0012) bars it from carrying a gate
+# on its own: under pressure a hard block on self-attested signal gets gamed,
+# forced or mass-deferred into false confidence. Every measured shortfall, on
+# every tier, is reported through `effort_warnings` — the harness channel that
+# reaches readiness `quality_gate.warnings` and every review-quality rendering —
+# and no warning is itself a gate reason. On a critical or high file a
+# shortfall the closeout records is routed to work instead of trusted or
+# refused: `code_analysis._record_depth_floor_triggers` raises a `depth_floor`
+# trigger per short family, which the gate names until a directed pass that
+# reaches the floor (`trigger_review_basis`) or a recorded resolution settles
+# it (ADR 0046 decision 4). The structural blocks built on
+# durable state (an untouched, undeferred high-value unit;
+# `uncovered_high_risk_files`) are unaffected.
+EFFORT_THRESHOLDS = {"critical": 70, "high": 50, "medium": 30}
+
+
 _TRIGGER_STATUS_PENDING = "pending"
 _TRIGGER_STATUS_QUEUED = "queued"
 _TRIGGER_STATUS_RESOLVED = "resolved"
 _TRIGGER_STATUS_EXTERNAL_CONTEXT = "external_context_unavailable"
 _TRIGGER_STATUS_SOURCE_EQUIVALENT = "source_equivalent_analyzed"
 _TRIGGER_STATUS_NOT_APPLICABLE = "not_applicable"
+# The operator's judgement that a family left below its depth floor was read
+# at depth all the same (the recorded effort understates the review). It
+# settles only a `depth_floor` trigger, with the reason as its note; a
+# cross-file hypothesis is not answered by how deeply this file was read.
+_TRIGGER_STATUS_DEPTH_SUFFICIENT = "reviewed_at_sufficient_depth"
+# `code_analysis_triggers.origin` of a family a critical/high closeout left
+# below its depth floor (`code_analysis._record_depth_floor_triggers`); every
+# other trigger is a reviewer's hypothesis about another file (`cross_file`,
+# the column default).
+TRIGGER_ORIGIN_DEPTH_FLOOR = "depth_floor"
+TRIGGER_ORIGIN_CROSS_FILE = "cross_file"
 
 
 def _valid_nonempty_json_array_sql(expression: str) -> str:
@@ -2147,6 +2294,14 @@ def _successful_terminal_review_row_sql(
     *,
     include_superseded_results: bool = False,
 ) -> str:
+    """A done attempt whose disposition its own current receipts back.
+
+    A finding receipt takes precedence over a suspicious one, so only a
+    `suspicious` row is contradicted by a held finding receipt (and a `clean`
+    row by either). A suspicious receipt beside a `finding` row is a lead
+    awaiting a verdict (`_suspicious_awaiting_verdict_sql`), not a
+    contradiction of the review.
+    """
     valid_coverage = _valid_nonempty_json_array_sql(
         f"{queue_alias}.cwe_coverage_json"
     )
@@ -2208,12 +2363,14 @@ def _successful_terminal_review_row_sql(
                           )
                       )
                 )
-                AND NOT EXISTS (
-                    SELECT 1
-                    FROM code_analysis_results AS contradictory_result
-                    WHERE {attempt_receipt("contradictory_result")}
-                      AND contradictory_result.disposition IN ('finding', 'suspicious')
-                      AND contradictory_result.disposition != {queue_alias}.disposition
+                AND NOT (
+                    {queue_alias}.disposition = 'suspicious'
+                    AND EXISTS (
+                        SELECT 1
+                        FROM code_analysis_results AS contradictory_result
+                        WHERE {attempt_receipt("contradictory_result")}
+                          AND contradictory_result.disposition = 'finding'
+                    )
                 )
             )
         )
@@ -2563,6 +2720,99 @@ def _current_analysis_status_sql() -> str:
     """
 
 
+# Every label `review_depth_label` can yield, deepest first.
+REVIEW_DEPTHS: tuple[str, ...] = ("deep", "wide_only", "none")
+
+
+def _review_depth_sql() -> str:
+    """Per-file review passes and how deep they went, over the current generation.
+
+    The single owner of review depth. A pass is a successful terminal review
+    (`_successful_terminal_review_row_sql`) of the file's active source
+    generation, whichever attempt it was: the queue keeps every closed attempt,
+    so a reanalysis adds a pass instead of replacing one. A pass is deep when
+    it was a reanalysis, ran under a dispatch recorded ``deep-manual``, or ran
+    under a prompt packet whose ``hunt_scope`` is ``deep`` once trimmed and
+    lowercased; first passes and trigger requeues are wide. The dispatch is
+    the one whose ``agent_id`` holds the attempt's lease. Depth is a pointer
+    for planning the next lane: it is derived only from these receipts, grants
+    no coverage credit and never enters a gate.
+
+    Selects ``file_id, review_passes, deep_passes, review_dispatches,
+    signal_passes`` (passes that concluded ``finding`` or ``suspicious``) for
+    files with at least one pass. Its bound parameters are the engagement id
+    twice, as `review_depth_params` returns them. The deep packets
+    are one bound set read once per query, so each packet's JSON is parsed once
+    however many review rows ran under its dispatch.
+    """
+    successful_review = _successful_terminal_review_row_sql("depth_review")
+    deep_pass = """
+        depth_review.queue_mode = 'reanalysis'
+        OR depth_dispatch.dispatch_mode = 'deep-manual'
+        OR depth_dispatch.id IN (
+            SELECT deep_packet.dispatch_id
+            FROM assessment_dispatch_prompt_packets AS deep_packet
+            WHERE deep_packet.engagement_id = ?
+              AND json_valid(deep_packet.context_json)
+              AND lower(trim(json_extract(deep_packet.context_json, '$.hunt_scope'))) = 'deep'
+        )
+    """
+    return f"""
+        SELECT depth_review.file_id,
+               COUNT(DISTINCT depth_review.id) AS review_passes,
+               COUNT(DISTINCT CASE WHEN {deep_pass} THEN depth_review.id END) AS deep_passes,
+               COUNT(DISTINCT CASE
+                   WHEN trim(depth_review.assigned_agent) != ''
+                   THEN depth_review.assigned_agent
+               END) AS review_dispatches,
+               COUNT(DISTINCT CASE
+                   WHEN depth_review.disposition IN ('finding', 'suspicious')
+                   THEN depth_review.id
+               END) AS signal_passes
+        FROM code_analysis_queue AS depth_review
+        JOIN code_files AS depth_files
+          ON depth_files.id = depth_review.file_id
+         AND depth_files.engagement_id = depth_review.engagement_id
+        JOIN code_repos AS depth_repo
+          ON depth_repo.id = depth_files.repo_id
+         AND depth_repo.engagement_id = depth_files.engagement_id
+         AND depth_repo.active_generation > 0
+        LEFT JOIN assessment_dispatches AS depth_dispatch
+          ON depth_dispatch.engagement_id = depth_review.engagement_id
+         AND depth_dispatch.agent_id = depth_review.assigned_agent
+        WHERE depth_review.engagement_id = ?
+          AND depth_review.repo_generation = depth_repo.active_generation
+          AND depth_review.source_superseded_at IS NULL
+          AND ({successful_review})
+        GROUP BY depth_review.file_id
+    """
+
+
+def review_depth_params(engagement_id: int) -> tuple[int, ...]:
+    """The bound parameters `_review_depth_sql` takes, in its placeholder order."""
+    return (engagement_id, engagement_id)
+
+
+def review_depth_label(review_passes: Any, deep_passes: Any) -> str:
+    """``deep`` with a deep pass, ``wide_only`` with passes but none deep, else ``none``."""
+    if int(deep_passes or 0) > 0:
+        return "deep"
+    return "wide_only" if int(review_passes or 0) > 0 else "none"
+
+
+def review_depth_projection(row: Any) -> dict[str, Any]:
+    """One file's depth fields from a row joined to `_review_depth_sql`."""
+    passes = int(row["review_passes"] or 0)
+    deep = int(row["deep_passes"] or 0)
+    return {
+        "depth": review_depth_label(passes, deep),
+        "passes": passes,
+        "deep_passes": deep,
+        "dispatches": int(row["review_dispatches"] or 0),
+        "signal_passes": int(row["signal_passes"] or 0),
+    }
+
+
 def _structural_debt_sql() -> str:
     """True for a ``files`` row that is unreviewed structural-analysis debt.
 
@@ -2582,17 +2832,48 @@ def _structural_debt_sql() -> str:
     """
 
 
-def _suspicious_awaiting_verdict_sql() -> str:
+def _open_lead_beside_finding_sql(queue_alias: str, result_alias: str) -> str:
+    """Whether suspicious receipt ``result_alias`` is an open lead on finding row ``queue_alias``.
+
+    A `finding` close leaves each suspicious receipt of the attempt awaiting a
+    verdict until something answers it: a later successful review of the file,
+    or a correction that replaces the receipt. So the receipt counts while it
+    is evidenced, owned by the attempt, and unreplaced.
+    """
+    return f"""
+        {queue_alias}.disposition = 'finding'
+        AND {result_alias}.disposition = 'suspicious'
+        AND {result_alias}.engagement_id = {queue_alias}.engagement_id
+        AND {result_alias}.queue_item_id = {queue_alias}.id
+        AND {result_alias}.file_id = {queue_alias}.file_id
+        AND {result_alias}.repo_generation = {queue_alias}.repo_generation
+        AND ({_valid_claimed_result_receipt_sql(queue_alias, result_alias)})
+        AND (trim({result_alias}.evidence) != '' OR trim({result_alias}.evidence_ref) != '')
+        AND ({_result_not_replaced_sql(result_alias)})
+    """
+
+
+def _suspicious_awaiting_verdict_sql(*, file_scoped: bool = False) -> str:
     """Attempts whose file still awaits a verdict on a suspicious review.
 
     The single owner of "suspicious, awaiting a verdict": per file of an
     analysis repository, the latest successful terminal review of the current
-    generation concluded ``suspicious``. A queued, running, or failed
-    re-review does not resolve it; only a later successful review does. The
-    readiness obligation counts these attempts and the operator results page
-    lists the receipts behind them. Selects ``repo_id, file_id, attempt_id``
-    and takes the engagement id as its one parameter.
+    generation concluded ``suspicious``, or concluded ``finding`` while holding
+    an unreplaced suspicious receipt beside the finding
+    (`_open_lead_beside_finding_sql`). A queued, running, or failed re-review
+    does not resolve it; only a later successful review does, or, for a lead
+    beside a finding, a correction that replaces it. The readiness obligation
+    counts these attempts and the operator results page lists the receipts
+    behind them. Selects ``repo_id, file_id, attempt_id`` and takes the
+    engagement id; ``file_scoped`` also takes a JSON array of file ids and
+    reads only those files' attempts, which is the same answer for them because
+    the window ranks attempts per file.
     """
+    file_clause = (
+        "AND semantic_attempt.file_id IN (SELECT value FROM json_each(?))"
+        if file_scoped
+        else ""
+    )
     semantic_review = _successful_terminal_review_row_sql(
         "semantic_attempt",
         include_superseded_results=True,
@@ -2603,7 +2884,14 @@ def _suspicious_awaiting_verdict_sql() -> str:
             SELECT files.repo_id,
                    semantic_attempt.file_id,
                    semantic_attempt.id AS attempt_id,
-                   semantic_attempt.disposition,
+                   CASE
+                       WHEN semantic_attempt.disposition = 'suspicious' THEN 1
+                       WHEN EXISTS (
+                           SELECT 1 FROM code_analysis_results AS open_lead
+                           WHERE {_open_lead_beside_finding_sql("semantic_attempt", "open_lead")}
+                       ) THEN 1
+                       ELSE 0
+                   END AS awaits_verdict,
                    ROW_NUMBER() OVER (
                        PARTITION BY semantic_attempt.file_id
                        ORDER BY semantic_attempt.id DESC
@@ -2618,11 +2906,12 @@ def _suspicious_awaiting_verdict_sql() -> str:
              AND semantic_repo.active_generation > 0
              AND {_analysis_repo_sql("semantic_repo")}
             WHERE semantic_attempt.engagement_id = ?
+              {file_clause}
               AND semantic_attempt.repo_generation = semantic_repo.active_generation
               AND semantic_attempt.source_superseded_at IS NULL
               AND ({semantic_review})
         )
-        WHERE semantic_rank = 1 AND disposition = 'suspicious'
+        WHERE semantic_rank = 1 AND awaits_verdict = 1
     """
 
 
@@ -2650,6 +2939,7 @@ _TERMINAL_TRIGGER_RESOLUTION_STATUSES = frozenset(
         _TRIGGER_STATUS_EXTERNAL_CONTEXT,
         _TRIGGER_STATUS_SOURCE_EQUIVALENT,
         _TRIGGER_STATUS_NOT_APPLICABLE,
+        _TRIGGER_STATUS_DEPTH_SUFFICIENT,
     }
 )
 _TRIGGER_STATUSES = frozenset(
@@ -2743,6 +3033,154 @@ def _trigger_status_for_file(connection, engagement_id: int, file_id: int) -> st
     return _TRIGGER_STATUS_PENDING
 
 
+def _queue_row_carries_trigger(queue_triggers_json: Any, trigger_id: int) -> bool:
+    return any(
+        isinstance(entry, dict)
+        and type(entry.get("trigger_id")) is int
+        and int(entry["trigger_id"]) == trigger_id
+        and entry.get("source") == "code_analysis_trigger"
+        for entry in _json_decode(queue_triggers_json, [])
+    )
+
+
+# A trigger row written before its creation time carried sub-second precision
+# holds a whole-second CURRENT_TIMESTAMP; it may have been raised anywhere in
+# that second, so a lease counts as later only from the next second on.
+_TRIGGER_CREATED_AT_BOUND_SQL = (
+    "julianday(triggers.created_at, CASE WHEN instr(triggers.created_at, 'T') = 0 "
+    "THEN '+1 second' ELSE '+0 seconds' END)"
+)
+
+
+# The queue statuses of an attempt still under way: a trigger bound to one is
+# `queued` (`_bound_trigger_status`).
+_TRIGGER_HOLDING_QUEUE_STATUSES = frozenset({"pending", "processing", "needs_context"})
+
+
+def trigger_review_basis(
+    connection, engagement_id: int, trigger_id: int, queue_item_id: int
+) -> Literal["carried", "covered", "at_floor"] | None:
+    """How attempt *queue_item_id* on the trigger's target addressed the trigger.
+
+    ``carried``: its queue row carried the trigger (the packet put the
+    hypothesis in front of the reviewer; a trigger entry is only ever written
+    onto an unleased row, so that lease was claimed after the trigger existed).
+    ``covered``: its lease was claimed after the trigger was raised AND its
+    coverage scores the trigger's vuln_class -- that exact class, no broader
+    family -- with effort above zero and not `not_applicable`. ``None``: a
+    review that never scored the class, marked it not applicable, or was
+    already under way when the hypothesis was raised did not test it.
+
+    A `depth_floor` trigger owes depth, not attention, so only depth answers
+    it: ``at_floor`` when the attempt's merged effort for the family reaches
+    the floor of the file's tier (`EFFORT_THRESHOLDS`; real effort on a tier
+    with none) or marks it not applicable, which is the rule
+    `_record_depth_floor_triggers` raises and resolves the trigger by. Being
+    carried holds it only while that attempt is still under way; a carried
+    pass that closes short, and a review that scored the family below the
+    floor whenever it was claimed, leave it owed.
+    """
+    row = connection.execute(
+        f"""
+        SELECT triggers.vuln_class, triggers.origin, queue.id AS queue_item_id,
+               queue.status AS queue_status, files.classification,
+               queue.cross_file_triggers_json, queue.cwe_coverage_json,
+               CASE WHEN julianday(queue.consumed_at) > {_TRIGGER_CREATED_AT_BOUND_SQL}
+                    THEN 1 ELSE 0 END AS claimed_after_trigger
+        FROM code_analysis_triggers AS triggers
+        JOIN code_analysis_queue AS queue
+          ON queue.engagement_id = triggers.engagement_id
+         AND queue.id = ?
+        JOIN code_files AS files
+          ON files.id = queue.file_id
+         AND files.engagement_id = queue.engagement_id
+        WHERE triggers.engagement_id = ? AND triggers.id = ?
+          AND (triggers.target_file_id IS NULL OR triggers.target_file_id = queue.file_id)
+        """,
+        (queue_item_id, engagement_id, trigger_id),
+    ).fetchone()
+    if row is None:
+        return None
+    carried = _queue_row_carries_trigger(row["cross_file_triggers_json"], trigger_id)
+    depth_floor = str(row["origin"]) == TRIGGER_ORIGIN_DEPTH_FLOOR
+    if carried and not (
+        depth_floor and str(row["queue_status"]) not in _TRIGGER_HOLDING_QUEUE_STATUSES
+    ):
+        return "carried"
+    if not depth_floor and not bool(row["claimed_after_trigger"]):
+        return None
+    vuln_class = str(row["vuln_class"])
+    efforts: dict[int, dict[str, float]] = {queue_item_id: {}}
+    not_applicable: dict[int, set[str]] = {queue_item_id: set()}
+    closeout_only: dict[int, set[str]] = {}
+    coverage_lists = [_json_decode(row["cwe_coverage_json"], [])]
+    coverage_lists.extend(
+        _json_decode(result["cwe_coverage_json"], [])
+        for result in connection.execute(
+            """
+            SELECT cwe_coverage_json
+            FROM code_analysis_results
+            WHERE engagement_id = ? AND queue_item_id = ? AND superseded_at IS NULL
+            """,
+            (engagement_id, queue_item_id),
+        ).fetchall()
+    )
+    # The attempt's closeout is the first list; its not-applicable families are
+    # answered whatever a receipt scored (`_merge_file_effort_entry`).
+    closeout_not_applicable = _closeout_not_applicable_families(coverage_lists[0])
+    for coverage in coverage_lists:
+        for entry in coverage if isinstance(coverage, list) else []:
+            if isinstance(entry, dict) and entry.get("family") == vuln_class:
+                _merge_file_effort_entry(
+                    efforts, not_applicable, closeout_only, queue_item_id, entry,
+                    closeout_not_applicable=closeout_not_applicable,
+                )
+    answered_not_applicable = vuln_class in not_applicable[queue_item_id]
+    effort = efforts[queue_item_id].get(vuln_class, 0.0)
+    if depth_floor:
+        floor = EFFORT_THRESHOLDS.get(str(row["classification"]), 0)
+        if answered_not_applicable or (effort > 0 and effort >= floor):
+            return "at_floor"
+        return None
+    if not answered_not_applicable and effort > 0:
+        return "covered"
+    return None
+
+
+def _only_trigger_attempts_follow_sql(queue_alias: str, repos_alias: str) -> str:
+    """Every later current attempt on the file is a `trigger` requeue, and no
+    earlier one is still active.
+
+    A trigger requeue adds depth on a file for the triggers it carries; it
+    leaves the verdict of the review before it standing. A reanalysis or a
+    metadata-refresh review replaces that verdict instead, so either one after
+    the attempt ends what the attempt resolved (a reanalysis carries those
+    resolutions to itself, `_carry_trigger_bindings_forward`).
+    """
+    return f"""
+        NOT EXISTS (
+            SELECT 1
+            FROM code_analysis_queue AS later_attempt
+            WHERE later_attempt.engagement_id = {queue_alias}.engagement_id
+              AND later_attempt.file_id = {queue_alias}.file_id
+              AND later_attempt.repo_generation = {repos_alias}.active_generation
+              AND later_attempt.source_superseded_at IS NULL
+              AND later_attempt.id > {queue_alias}.id
+              AND later_attempt.queue_mode != 'trigger'
+        )
+        AND NOT EXISTS (
+            SELECT 1
+            FROM code_analysis_queue AS earlier_active
+            WHERE earlier_active.engagement_id = {queue_alias}.engagement_id
+              AND earlier_active.file_id = {queue_alias}.file_id
+              AND earlier_active.repo_generation = {repos_alias}.active_generation
+              AND earlier_active.source_superseded_at IS NULL
+              AND earlier_active.id < {queue_alias}.id
+              AND earlier_active.status IN ('pending', 'processing')
+        )
+    """
+
+
 def _bound_trigger_status(
     connection,
     engagement_id: int,
@@ -2750,12 +3188,19 @@ def _bound_trigger_status(
     file_id: int,
     queue_item_id: int | None,
 ) -> tuple[str, bool]:
+    """The status a trigger bound to *queue_item_id* holds, and whether to unbind it.
+
+    The binding is in force while its attempt is the file's latest current
+    attempt, or while it is a successful review that addressed the trigger and
+    only trigger requeues followed it: a sibling trigger's new attempt does not
+    reopen what the review before it resolved.
+    """
     if queue_item_id is None:
         return _TRIGGER_STATUS_PENDING, False
     successful_review = _successful_terminal_review_row_sql("queue")
     row = connection.execute(
         f"""
-        SELECT queue.status, queue.cross_file_triggers_json,
+        SELECT queue.status,
                CASE WHEN ({successful_review}) THEN 1 ELSE 0 END AS successful_review
         FROM code_analysis_queue AS queue
         JOIN code_files AS files
@@ -2768,23 +3213,24 @@ def _bound_trigger_status(
         WHERE queue.engagement_id = ? AND queue.id = ? AND queue.file_id = ?
           AND queue.repo_generation = repos.active_generation
           AND queue.source_superseded_at IS NULL
-          AND ({_latest_current_queue_attempt_sql("queue", "repos")})
-          AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+          AND (
+              (
+                  ({_latest_current_queue_attempt_sql("queue", "repos")})
+                  AND ({_no_superseded_active_attempt_sql("queue", "repos")})
+              )
+              OR (
+                  ({successful_review})
+                  AND ({_only_trigger_attempts_follow_sql("queue", "repos")})
+              )
+          )
         """,
         (engagement_id, queue_item_id, file_id),
     ).fetchone()
     if row is None:
         return _TRIGGER_STATUS_PENDING, True
-    queue_triggers = _json_decode(row["cross_file_triggers_json"], [])
-    if not any(
-        isinstance(entry, dict)
-        and type(entry.get("trigger_id")) is int
-        and int(entry["trigger_id"]) == trigger_id
-        and entry.get("source") == "code_analysis_trigger"
-        for entry in queue_triggers
-    ):
+    if trigger_review_basis(connection, engagement_id, trigger_id, queue_item_id) is None:
         return _TRIGGER_STATUS_PENDING, True
-    if str(row["status"]) in {"pending", "processing", "needs_context"}:
+    if str(row["status"]) in _TRIGGER_HOLDING_QUEUE_STATUSES:
         return _TRIGGER_STATUS_QUEUED, False
     if bool(row["successful_review"]):
         return _TRIGGER_STATUS_RESOLVED, False
@@ -3116,26 +3562,81 @@ def _current_analysis_results_sql(*, bound_receipts_only: bool = True) -> str:
     """
 
 
-def awaiting_verdict_attempt_ids(connection, engagement_id: int) -> str:
+def awaiting_verdict_attempt_ids(
+    connection, engagement_id: int, file_ids: Iterable[int] | None = None
+) -> str:
     """The attempt ids of ``_suspicious_awaiting_verdict_sql`` as a JSON array.
 
     Read once per request: the window over every attempt is the expensive
-    part, and a page uses the set in several queries.
+    part, and a page uses the set in several queries. ``file_ids`` limits the
+    window to those files, for a caller that needs only their attempts.
     """
+    if file_ids is None:
+        sql, params = _suspicious_awaiting_verdict_sql(), (engagement_id,)
+    else:
+        sql = _suspicious_awaiting_verdict_sql(file_scoped=True)
+        params = (engagement_id, json.dumps(sorted({int(file_id) for file_id in file_ids})))
     return json.dumps([
         int(row[0])
-        for row in connection.execute(
-            f"SELECT attempt_id FROM ({_suspicious_awaiting_verdict_sql()})", (engagement_id,)
-        ).fetchall()
+        for row in connection.execute(f"SELECT attempt_id FROM ({sql})", params).fetchall()
     ])
+
+
+def open_lead_receipts_by_file(
+    connection, engagement_id: int, file_ids: set[int]
+) -> dict[int, list[dict[str, Any]]]:
+    """The suspicious receipts awaiting a verdict on each of ``file_ids``.
+
+    The receipts `_awaiting_verdict_receipt_sql` lists for the file's latest
+    successful review: what a targeted re-review of the file exists to settle,
+    so every claim of the file hands them over with its anchors and evidence.
+    """
+    if not file_ids:
+        return {}
+    placeholders = ",".join("?" for _ in file_ids)
+    rows = connection.execute(
+        f"""
+        SELECT results.file_id, results.id, results.queue_item_id, results.hypothesis,
+               results.evidence, results.evidence_ref, results.cwe_id,
+               results.confidence, results.callable_refs_json, results.reviewed_spans_json
+        FROM code_analysis_results AS results
+        JOIN code_analysis_queue AS result_queue
+          ON result_queue.id = results.queue_item_id
+         AND result_queue.engagement_id = results.engagement_id
+        WHERE results.engagement_id = ?
+          AND results.file_id IN ({placeholders})
+          AND ({_awaiting_verdict_receipt_sql()})
+        ORDER BY results.file_id, results.id
+        """,
+        (
+            engagement_id,
+            *sorted(file_ids),
+            awaiting_verdict_attempt_ids(connection, engagement_id, file_ids),
+        ),
+    ).fetchall()
+    by_file: dict[int, list[dict[str, Any]]] = {}
+    for row in rows:
+        by_file.setdefault(int(row["file_id"]), []).append({
+            "id": int(row["id"]),
+            "queue_item_id": int(row["queue_item_id"]),
+            "hypothesis": str(row["hypothesis"] or ""),
+            "evidence": str(row["evidence"] or ""),
+            "evidence_ref": str(row["evidence_ref"] or ""),
+            "cwe_id": str(row["cwe_id"] or ""),
+            "confidence": str(row["confidence"] or ""),
+            "callable_refs": _json_decode(row["callable_refs_json"], []),
+            "reviewed_spans": _json_decode(row["reviewed_spans_json"], []),
+        })
+    return by_file
 
 
 def _awaiting_verdict_results_sql() -> str:
     """Receipts behind each attempt in ``_suspicious_awaiting_verdict_sql``.
 
     These are the receipts that let the attempt count as a successful
-    suspicious review, so every counted file lists at least one; they stay
-    listed while a re-review is queued, running, or failed. Takes the
+    suspicious review, or the open leads beside a finding review, so every
+    counted file lists at least one; they stay listed while a re-review is
+    queued, running, or failed. Takes the
     engagement id, then ``awaiting_verdict_attempt_ids``.
     """
     return f"""{_ANALYSIS_RESULT_SOURCE_JOINS}
@@ -3155,6 +3656,10 @@ def _awaiting_verdict_receipt_sql() -> str:
         AND results.repo_generation = result_queue.repo_generation
         AND ({_valid_claimed_result_receipt_sql("result_queue", "results")})
         AND (trim(results.evidence) != '' OR trim(results.evidence_ref) != '')
+        AND (
+            result_queue.disposition != 'finding'
+            OR ({_open_lead_beside_finding_sql("result_queue", "results")})
+        )
     """
 
 
@@ -3313,16 +3818,25 @@ def _analysis_page_select_sql() -> str:
     """
 
 
-def _unlisted_legacy_receipts(connection, engagement_id: int) -> list[dict[str, Any]]:
-    """Receipts that would be current but predate receipt binding."""
+def _unlisted_legacy_receipts(
+    connection,
+    engagement_id: int,
+    filter_sql: str = "",
+    filter_params: Sequence[Any] = (),
+) -> list[dict[str, Any]]:
+    """Receipts that would be current but predate receipt binding.
+
+    ``filter_sql`` is the listing's active filters (`_filter_sql`), so the count
+    explains exactly the rows that listing leaves out.
+    """
     rows = connection.execute(
         f"""
         SELECT results.receipt_binding_status AS binding, COUNT(*) AS total
         {_current_analysis_results_sql(bound_receipts_only=False)}
-          AND results.receipt_binding_status IN (?, ?, ?)
+          AND results.receipt_binding_status IN (?, ?, ?){filter_sql}
         GROUP BY results.receipt_binding_status
         """,
-        (engagement_id, _UNBOUND_LEGACY_RECEIPT, *_UNMATCHED_LEGACY_RECEIPTS),
+        (engagement_id, _UNBOUND_LEGACY_RECEIPT, *_UNMATCHED_LEGACY_RECEIPTS, *filter_params),
     ).fetchall()
     counts = {str(row["binding"]): int(row["total"]) for row in rows}
     unbound = counts.get(_UNBOUND_LEGACY_RECEIPT, 0)
@@ -3364,8 +3878,9 @@ def analysis_result_page(
     ``scope="current"`` lists current receipts; ``"awaiting_verdict"`` lists
     the receipts behind every file still awaiting a verdict on a suspicious
     review (the readiness obligation). Each facet counts under every other
-    filter but its own. ``awaiting_verdict`` always summarises that scope and
-    ``not_listed`` names receipts no scope lists.
+    filter but its own. ``awaiting_verdict`` always summarises that scope;
+    ``not_listed`` names receipts no scope lists and, on the current scope, the
+    receipts awaiting a verdict it leaves out.
     """
     awaiting_ids = awaiting_verdict_attempt_ids(connection, engagement_id)
     source_sql, source_params = _analysis_result_source(engagement_id, filters.scope, awaiting_ids)
@@ -3413,6 +3928,29 @@ def analysis_result_page(
         f"SELECT COUNT(DISTINCT results.file_id) AS files, COUNT(*) AS results {awaiting_sql}",
         tuple(awaiting_params),
     ).fetchone()
+    not_listed = _unlisted_legacy_receipts(connection, engagement_id, filter_sql, filter_params)
+    if filters.scope == "current":
+        # Receipts awaiting a verdict that are not current ones: the scope that
+        # lists them is named where they are left out.
+        current_sql, current_params = _analysis_result_source(engagement_id, "current", awaiting_ids)
+        outside = int(connection.execute(
+            f"""
+            SELECT COUNT(*) AS total {awaiting_sql}
+              AND results.id NOT IN (SELECT results.id {current_sql}){filter_sql}
+            """,
+            (*awaiting_params, *current_params, *filter_params),
+        ).fetchone()["total"])
+        if outside:
+            not_listed.append({
+                "code": "awaiting_verdict_not_current",
+                "count": outside,
+                "message": (
+                    f"{outside} result(s) awaiting a verdict are not current results (a "
+                    "suspicious lead left open beside a finding, or a suspicious review "
+                    "whose file is queued again), so this listing leaves them out; the "
+                    "Needs attention scope (scope=awaiting_verdict) lists them."
+                ),
+            })
     return {
         "scope": filters.scope,
         "total": total,
@@ -3423,7 +3961,7 @@ def analysis_result_page(
         "items": items,
         "facets": facets,
         "awaiting_verdict": {"files": int(awaiting["files"]), "results": int(awaiting["results"])},
-        "not_listed": _unlisted_legacy_receipts(connection, engagement_id),
+        "not_listed": not_listed,
     }
 
 

@@ -1574,6 +1574,31 @@ def finding_write_connection(engagement_id: int, receipt_ids: list[int]):
             observations.verify_current()
 
 
+def _refuse_check_problems(
+    name: str,
+    check: dict[str, Any],
+    text_fields: tuple[str, ...],
+    *,
+    incomplete: str,
+    receipts_named: bool,
+) -> None:
+    """Refuse a confirm or counter check naming every problem at once.
+
+    The request model refuses a missing field; this catches what it lets
+    through, so one refusal says everything the verifier has to fix.
+    """
+    problems = [] if check.get("completed") is True else [incomplete]
+    problems.extend(
+        f"{name}.{field} is required"
+        for field in text_fields
+        if not str(check.get(field) or "").strip()
+    )
+    if not receipts_named:
+        problems.append(f"{name} proof_receipt_ids must name the decision proof receipts")
+    if problems:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="; ".join(problems))
+
+
 def record_finding_verification_evidence(
     connection: sqlite3.Connection,
     *,
@@ -1726,24 +1751,15 @@ def record_finding_verification_evidence(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="confirmed/downgraded verification requires a structured confirm_check",
             )
-        if confirm_check.get("completed") is not True:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="confirm_check must be completed to establish terminal verification",
-            )
-        for name in ("method", "attempted_falsification", "expected_result", "observed_result"):
-            if not str(confirm_check.get(name) or "").strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"confirm_check.{name} is required",
-                )
         check_receipt_ids = confirm_check.get("proof_receipt_ids") or []
         confirm_receipt_ids = {int(value) for value in check_receipt_ids}
-        if not check_receipt_ids or not confirm_receipt_ids <= receipt_id_set:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="confirm_check proof_receipt_ids must name the decision proof receipts",
-            )
+        _refuse_check_problems(
+            "confirm_check",
+            confirm_check,
+            ("method", "attempted_falsification", "expected_result", "observed_result"),
+            incomplete="confirm_check must be completed to establish terminal verification",
+            receipts_named=bool(check_receipt_ids) and confirm_receipt_ids <= receipt_id_set,
+        )
     elif confirm_check is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1794,25 +1810,17 @@ def record_finding_verification_evidence(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="false_positive verification requires a structured counter_check",
             )
-        if not bool(counter_check.get("completed")):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "an incomplete counter_check cannot establish false_positive; "
-                    "record blocked or pending_runtime_proof instead"
-                ),
-            )
-        for name in ("method", "expected_result", "observed_result", "falsified_claim"):
-            if not str(counter_check.get(name) or "").strip():
-                raise HTTPException(
-                    status_code=status.HTTP_400_BAD_REQUEST,
-                    detail=f"counter_check.{name} is required",
-                )
-        if not counter_receipt_ids or not set(counter_receipt_ids) <= receipt_id_set:
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="counter_check proof_receipt_ids must name the decision proof receipts",
-            )
+        _refuse_check_problems(
+            "counter_check",
+            counter_check,
+            ("method", "expected_result", "observed_result", "falsified_claim"),
+            incomplete=(
+                "an incomplete counter_check cannot establish false_positive; "
+                "record blocked or pending_runtime_proof instead"
+            ),
+            receipts_named=bool(counter_receipt_ids)
+            and set(counter_receipt_ids) <= receipt_id_set,
+        )
         cursor = connection.execute(
             """
             INSERT INTO assessment_finding_counterchecks (
@@ -1855,55 +1863,86 @@ def record_finding_verification_evidence(
     variance_record = None
     chosen_severity = str(finding["severity"])
     if normal_severity_band is not None and chosen_severity != normal_severity_band:
-        if severity_variance is None:
-            example = json.dumps(
-                {
-                    "normal_band": normal_severity_band,
-                    "chosen_severity": chosen_severity,
-                    "actor": verifier_dispatch_id,
-                    "reason": "Explain why the chosen severity differs from the CVSS band",
-                    "proof_receipt_id": min(receipt_id_set),
-                },
-                separators=(",", ":"),
+        # A severity that departs from its CVSS band is an advisory (ADR 0046):
+        # without a variance the verdict records as it is, and report readiness
+        # names the unattributed divergence as `severity_cvss_mismatch`. With
+        # one, only the reason is a human judgment; the band, the chosen
+        # severity, the verifier and the decision receipt are this
+        # verification's own, so each is derived, and an authored value must
+        # agree with it.
+        if severity_variance is not None:
+            actor_row = connection.execute(
+                "SELECT agent_id FROM assessment_dispatches WHERE engagement_id = ? AND id = ?",
+                (engagement_id, int(verifier_dispatch_id)),
+            ).fetchone()
+            verifier_agent_id = (
+                str(actor_row["agent_id"]) if actor_row else str(verifier_dispatch_id)
             )
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail=(
-                    "verification severity departs from its CVSS band; an attributed "
-                    "severity_variance event is required. Pass --severity-variance-file "
-                    f"with a JSON object such as {example}, and also pass its "
-                    "proof_receipt_id with --proof-receipt-id. Replace the example reason."
+            derived = {
+                "normal_band": normal_severity_band,
+                "chosen_severity": chosen_severity,
+                "actor": verifier_agent_id,
+                "proof_receipt_id": min(receipt_id_set),
+            }
+            authored_actor = severity_variance.get("actor")
+            if authored_actor is not None and str(authored_actor).strip() not in {
+                verifier_agent_id,
+                str(verifier_dispatch_id),
+            }:
+                # The variance records who approved the departure, and that is
+                # the dispatch whose receipts decide this verification; naming
+                # anyone else would attribute a judgment they never recorded.
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        f"severity_variance.actor {str(authored_actor)!r} is not the "
+                        f"verifier of this verification ({verifier_agent_id}, dispatch "
+                        f"{verifier_dispatch_id}, which produced the decision receipts). "
+                        "Omit actor and the backend records the verifier."
+                    ),
+                )
+            resolved = {
+                **derived,
+                **{
+                    key: value
+                    for key, value in severity_variance.items()
+                    if value is not None and key != "actor"
+                },
+            }
+            proof_receipt_id = int(resolved["proof_receipt_id"])
+            if (
+                str(resolved["normal_band"]) != normal_severity_band
+                or str(resolved["chosen_severity"]) != chosen_severity
+                or proof_receipt_id not in receipt_id_set
+            ):
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=(
+                        "severity_variance must match this verification: normal_band "
+                        f"{normal_severity_band}, chosen_severity {chosen_severity}, "
+                        f"proof_receipt_id one of {sorted(receipt_id_set)}. Omit those "
+                        "fields and the backend derives them; only reason is required."
+                    ),
+                )
+            cursor = connection.execute(
+                """
+                INSERT INTO assessment_finding_severity_variances (
+                    engagement_id, finding_id, transition_id, normal_band,
+                    chosen_severity, actor, reason, proof_receipt_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    engagement_id,
+                    int(finding["id"]),
+                    transition_id,
+                    normal_severity_band,
+                    chosen_severity,
+                    str(resolved["actor"]).strip(),
+                    str(resolved["reason"]).strip(),
+                    proof_receipt_id,
                 ),
             )
-        proof_receipt_id = int(severity_variance["proof_receipt_id"])
-        if (
-            str(severity_variance.get("normal_band")) != normal_severity_band
-            or str(severity_variance.get("chosen_severity")) != chosen_severity
-            or proof_receipt_id not in receipt_id_set
-        ):
-            raise HTTPException(
-                status_code=status.HTTP_400_BAD_REQUEST,
-                detail="severity_variance must match the CVSS band, chosen severity, and proof receipts",
-            )
-        cursor = connection.execute(
-            """
-            INSERT INTO assessment_finding_severity_variances (
-                engagement_id, finding_id, transition_id, normal_band,
-                chosen_severity, actor, reason, proof_receipt_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                engagement_id,
-                int(finding["id"]),
-                transition_id,
-                normal_severity_band,
-                chosen_severity,
-                str(severity_variance["actor"]).strip(),
-                str(severity_variance["reason"]).strip(),
-                proof_receipt_id,
-            ),
-        )
-        variance_record = {"id": int(cursor.lastrowid), **severity_variance}
+            variance_record = {"id": int(cursor.lastrowid), **resolved}
     elif severity_variance is not None:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
@@ -1919,3 +1958,191 @@ def record_finding_verification_evidence(
         # states the authority behind the verdict it just recorded.
         "operator_authority": operator_authority_stamp(finding["provenance_json"]),
     }
+
+
+_SEVERITY_VARIANCE_DECISION_KEYS = frozenset(
+    {"finding_slug", "reason", "actor", "normal_band", "chosen_severity", "proof_receipt_id"}
+)
+
+
+def attach_severity_variance(
+    connection: sqlite3.Connection,
+    engagement_id: int,
+    payload: Any,
+) -> dict[str, Any]:
+    """Attach a reason for a band departure to the finding's current verification.
+
+    The `severity_variance` decision records only the human judgment, why the
+    severity departs from its CVSS band, on a verdict that already stands. The
+    band, the chosen severity, the verifier and the decision receipt are the
+    current verification's own, so each is derived and an authored value must
+    agree with it, exactly as on `finding verify`; no fresh proof is needed
+    because nothing about the verdict changes. Returns the stored variance, which
+    becomes the decision's payload.
+    """
+    from .finding_change_policy import cvss_band
+
+    if not isinstance(payload, dict):
+        raise HTTPException(status_code=422, detail="severity_variance payload must be an object")
+    problems: list[str] = []
+    unknown = sorted(set(payload) - _SEVERITY_VARIANCE_DECISION_KEYS)
+    if unknown:
+        problems.append(
+            f"unknown fields {', '.join(repr(key) for key in unknown)}; its fields are "
+            + ", ".join(sorted(_SEVERITY_VARIANCE_DECISION_KEYS))
+        )
+    slug = payload.get("finding_slug")
+    reason = payload.get("reason")
+    if not isinstance(slug, str) or not slug.strip():
+        problems.append("finding_slug is required")
+    if not isinstance(reason, str) or not reason.strip():
+        problems.append("reason is required: why the severity departs from its CVSS band")
+    if problems:
+        raise HTTPException(
+            status_code=422, detail="severity_variance payload invalid: " + "; ".join(problems)
+        )
+    finding = connection.execute(
+        "SELECT id, severity, verification_status, details_json FROM assessment_findings "
+        "WHERE engagement_id = ? AND slug = ?",
+        (engagement_id, slug),
+    ).fetchone()
+    if finding is None:
+        raise HTTPException(status_code=404, detail=f"severity_variance finding {slug!r} not found")
+    status_value = str(finding["verification_status"])
+    current = connection.execute(
+        """
+        SELECT proof_links.transition_id, MIN(proof_links.proof_receipt_id) AS proof_receipt_id
+        FROM assessment_finding_proof_receipts AS proof_links
+        JOIN assessment_finding_transitions AS transitions
+          ON transitions.id = proof_links.transition_id
+        WHERE proof_links.engagement_id = ? AND proof_links.finding_id = ?
+          AND transitions.to_verification_status = ?
+          AND proof_links.transition_id = (
+              SELECT MAX(latest.transition_id)
+              FROM assessment_finding_proof_receipts AS latest
+              JOIN assessment_finding_transitions AS latest_transitions
+                ON latest_transitions.id = latest.transition_id
+              WHERE latest.engagement_id = proof_links.engagement_id
+                AND latest.finding_id = proof_links.finding_id
+                AND latest_transitions.to_verification_status = ?
+          )
+        GROUP BY proof_links.transition_id
+        """,
+        (engagement_id, int(finding["id"]), status_value, status_value),
+    ).fetchone()
+    if status_value not in {"confirmed", "downgraded"} or current is None:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"severity_variance attaches to a receipt-backed confirmed or downgraded "
+                f"verification; {slug} is {status_value} with no such verification. "
+                f"Record the reason with `vigil assess finding verify {slug} ... "
+                "--severity-variance-file <path>` when you verify it."
+            ),
+        )
+    details = _common._json_object(finding["details_json"])
+    score = details.get("cvss_score")
+    chosen_severity = str(finding["severity"])
+    normal_band = (
+        cvss_band(float(score))
+        if isinstance(score, int | float) and not isinstance(score, bool)
+        else None
+    )
+    if normal_band is None or normal_band == chosen_severity:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                f"severity_variance explains a severity that departs from its CVSS band; "
+                f"{slug} has severity {chosen_severity} and "
+                + (f"cvss_score {score} in the same band" if normal_band else "no cvss_score")
+            ),
+        )
+    transition_id = int(current["transition_id"])
+    proof_receipt_id = int(current["proof_receipt_id"])
+    receipt_ids = {
+        int(row["proof_receipt_id"])
+        for row in connection.execute(
+            "SELECT proof_receipt_id FROM assessment_finding_proof_receipts "
+            "WHERE engagement_id = ? AND finding_id = ? AND transition_id = ?",
+            (engagement_id, int(finding["id"]), transition_id),
+        ).fetchall()
+    }
+    verifier = connection.execute(
+        """
+        SELECT dispatches.id, dispatches.agent_id
+        FROM assessment_proof_receipts AS receipts
+        JOIN assessment_dispatches AS dispatches
+          ON dispatches.id = receipts.producer_dispatch_id
+         AND dispatches.engagement_id = receipts.engagement_id
+        WHERE receipts.engagement_id = ? AND receipts.id = ?
+        """,
+        (engagement_id, proof_receipt_id),
+    ).fetchone()
+    verifier_agent_id = str(verifier["agent_id"]) if verifier else ""
+    contradictions: list[str] = []
+    for key, expected in (("normal_band", normal_band), ("chosen_severity", chosen_severity)):
+        if payload.get(key) is not None and str(payload[key]) != expected:
+            contradictions.append(f"{key} {payload[key]!r} (the verification's is {expected!r})")
+    authored_receipt = payload.get("proof_receipt_id")
+    if authored_receipt is not None and authored_receipt not in receipt_ids:
+        contradictions.append(
+            f"proof_receipt_id {authored_receipt!r} (the verification's receipts are "
+            f"{sorted(receipt_ids)})"
+        )
+    authored_actor = payload.get("actor")
+    if authored_actor is not None and str(authored_actor).strip() not in {
+        verifier_agent_id, str(verifier["id"]) if verifier else "",
+    }:
+        contradictions.append(
+            f"actor {str(authored_actor)!r} (the verifier whose receipts decide the "
+            f"current verification is {verifier_agent_id or 'unrecorded'})"
+        )
+    if contradictions:
+        raise HTTPException(
+            status_code=422,
+            detail=(
+                "severity_variance contradicts the current verification: "
+                + "; ".join(contradictions)
+                + ". Omit those fields and the backend derives them; only reason is required."
+            ),
+        )
+    existing = connection.execute(
+        "SELECT reason, actor FROM assessment_finding_severity_variances "
+        "WHERE engagement_id = ? AND finding_id = ? AND transition_id = ? "
+        "ORDER BY id DESC LIMIT 1",
+        (engagement_id, int(finding["id"]), transition_id),
+    ).fetchone()
+    if existing is not None:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"the current verification of {slug} already carries a severity variance "
+                f"by {existing['actor']}: {existing['reason']!r}. A fresh verification "
+                "records a new one."
+            ),
+        )
+    resolved = {
+        "finding_slug": slug,
+        "normal_band": normal_band,
+        "chosen_severity": chosen_severity,
+        "actor": verifier_agent_id,
+        "reason": reason.strip(),
+        "proof_receipt_id": (
+            int(authored_receipt) if authored_receipt is not None else proof_receipt_id
+        ),
+        "transition_id": transition_id,
+    }
+    cursor = connection.execute(
+        """
+        INSERT INTO assessment_finding_severity_variances (
+            engagement_id, finding_id, transition_id, normal_band,
+            chosen_severity, actor, reason, proof_receipt_id
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            engagement_id, int(finding["id"]), transition_id, normal_band,
+            chosen_severity, verifier_agent_id, resolved["reason"],
+            resolved["proof_receipt_id"],
+        ),
+    )
+    return {**resolved, "severity_variance_id": int(cursor.lastrowid)}

@@ -4,7 +4,6 @@ import enum
 import fnmatch
 import hashlib
 import json
-import re
 from dataclasses import dataclass
 from typing import Any, Literal, get_args
 from urllib.parse import urlparse
@@ -3459,6 +3458,7 @@ def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str
             FROM assessment_dispatch_decisions
             WHERE engagement_id = ?
               AND kind = 'scope_decision'
+              AND superseded_by_id IS NULL
             """,
             (engagement.id,),
         ).fetchall()
@@ -3485,71 +3485,59 @@ def vendor_saas_hosts_pending_decision(engagement_id: int) -> list[dict[str, str
             pending[host] = vendor
     return [{"host": host, "vendor": vendor} for host, vendor in sorted(pending.items())]
 
-_EGRESS_BLOCK_INTENT_PATTERNS = (
-    "egress reputation",
-    "egress-block",
-    "egress block",
-    "cdn-ip-block",
-    "ip-reputation",
-)
-
 def egress_block_status(engagement_id: int) -> dict[str, Any]:
-    """Return ``{blocked_pct, pattern, samples_total, samples_blocked}``.
+    """Return ``{blocked_pct, pattern, samples_total, samples_blocked, checked_at}``.
 
-    Reads the most recent egress reputation check from
-    ``assessment_command_runs`` (matched by intent text) and parses the
-    ``egress_block_pct=N`` line out of stdout. When no recent run is
-    available the projection returns zeros so the frontend can show a
-    "not yet sampled" state instead of a stale percentage.
+    Reads the most recent ``egress_decision`` row whose ``payload.subtype`` is
+    ``connectivity_check``: the structured result `vigil assess egress-check`
+    records with its exact per-host classifications. When no check has been
+    recorded the projection returns zeros so the frontend can show a "not yet
+    sampled" state instead of a stale percentage.
 
     ``pattern`` is one of ``unknown`` / ``cdn-403`` / ``geoblock-reset`` /
-    ``mixed``, derived from the 403/000 ratio in the run output. The
-    pattern is informational; the operator confirms the cause via the
-    Egress reputation checkpoint.
+    ``mixed``: WAF/edge-block observations read as ``cdn-403``, blackholed
+    hosts as ``geoblock-reset``. The pattern is informational; the operator
+    confirms the cause via the Egress reputation checkpoint.
     """
     engagement = _engagement_or_404(engagement_id)
     with _common.get_connection() as connection:
         rows = connection.execute(
             """
-            SELECT intent, stdout_preview, created_at
-            FROM assessment_command_runs
+            SELECT payload_json, created_at
+            FROM assessment_dispatch_decisions
             WHERE engagement_id = ?
+              AND kind = 'egress_decision'
+              AND json_extract(payload_json, '$.subtype') = 'connectivity_check'
+              AND superseded_by_id IS NULL
             ORDER BY created_at DESC, id DESC
-            LIMIT 50
             """,
             (engagement.id,),
-        ).fetchall()
-    for row in rows:
-        intent = (row["intent"] if "intent" in row.keys() else "") or ""
-        if not isinstance(intent, str):
-            continue
-        intent_lower = intent.lower()
-        if not any(needle in intent_lower for needle in _EGRESS_BLOCK_INTENT_PATTERNS):
-            continue
-        stdout = row["stdout_preview"] if "stdout_preview" in row.keys() else ""
-        if not isinstance(stdout, str):
-            stdout = ""
-        match = re.search(r"egress_block_pct\s*=\s*(\d+)", stdout)
-        if not match:
-            continue
-        pct = int(match.group(1))
-        n_403 = len(re.findall(r"\b403\b", stdout))
-        n_000 = len(re.findall(r"\b000\b", stdout))
-        if n_403 and not n_000:
-            pattern = "cdn-403"
-        elif n_000 and not n_403:
-            pattern = "geoblock-reset"
-        elif n_403 and n_000:
-            pattern = "mixed"
-        else:
-            pattern = "unknown"
-        return {
-            "blocked_pct": pct,
-            "pattern": pattern,
-            "samples_total": n_403 + n_000,
-            "samples_blocked": n_403 + n_000,
-            "checked_at": row["created_at"] if "created_at" in row.keys() else None,
-        }
+        )
+        for row in rows:
+            try:
+                payload = json.loads(row["payload_json"] or "{}")
+            except json.JSONDecodeError:
+                continue
+            pct = payload.get("blocked_pct") if isinstance(payload, dict) else None
+            if type(pct) is not int:
+                continue
+            blackholed = payload.get("blackholed_hosts")
+            blackholed_n = len(blackholed) if isinstance(blackholed, list) else 0
+            edge = payload.get("waf_or_edge_observations")
+            edge_n = len(edge) if isinstance(edge, dict) else 0
+            pattern = {
+                (True, False): "cdn-403",
+                (False, True): "geoblock-reset",
+                (True, True): "mixed",
+            }.get((edge_n > 0, blackholed_n > 0), "unknown")
+            sampled = payload.get("sampled")
+            return {
+                "blocked_pct": pct,
+                "pattern": pattern,
+                "samples_total": sampled if type(sampled) is int else 0,
+                "samples_blocked": blackholed_n,
+                "checked_at": row["created_at"],
+            }
     return {
         "blocked_pct": 0,
         "pattern": "unknown",

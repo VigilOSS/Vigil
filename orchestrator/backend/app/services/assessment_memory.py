@@ -63,6 +63,23 @@ def _finding_summary(row: Any) -> dict[str, Any]:
     }
 
 
+_FINDING_BUCKET_LIMIT = 12
+
+
+def _finding_bucket_where(
+    where_sql: str, params: tuple[Any, ...], *, since: str, mode: str | None
+) -> tuple[str, tuple[Any, ...]]:
+    extra_where = ""
+    extra_params: tuple[Any, ...] = ()
+    if since:
+        extra_where = " AND updated_at >= ?"
+        extra_params = (since,)
+    return (
+        f"engagement_id = ? AND {where_sql}{extra_where}{finding_mode_sql(mode)}",
+        (*params, *extra_params),
+    )
+
+
 def _limited_findings(
     connection,
     engagement_id: int,
@@ -72,24 +89,53 @@ def _limited_findings(
     since: str = "",
     mode: str | None = None,
 ) -> list[dict[str, Any]]:
-    extra_where = ""
-    extra_params: tuple[Any, ...] = ()
-    if since:
-        extra_where = " AND updated_at >= ?"
-        extra_params = (since,)
+    """The bucket's display window: most severe first, then most recent.
+
+    Ranking by severity before the LIMIT keeps a high that has not been
+    touched lately from falling behind newer low rows.
+    ``_finding_bucket_total`` counts the whole bucket.
+    """
+    where, bound = _finding_bucket_where(where_sql, params, since=since, mode=mode)
     rows = connection.execute(
         f"""
         SELECT slug, title, severity, status, verification_status,
                source_name, evidence_ref,
                details_json, updated_at
         FROM assessment_findings
-        WHERE engagement_id = ? AND {where_sql}{extra_where}{finding_mode_sql(mode)}
-        ORDER BY updated_at DESC, id DESC
-        LIMIT 12
+        WHERE {where}
+        ORDER BY
+            CASE LOWER(severity)
+                WHEN 'critical' THEN 0
+                WHEN 'high' THEN 1
+                WHEN 'medium' THEN 2
+                WHEN 'low' THEN 3
+                ELSE 4
+            END,
+            updated_at DESC,
+            id DESC
+        LIMIT {_FINDING_BUCKET_LIMIT}
         """,
-        (engagement_id, *params, *extra_params),
+        (engagement_id, *bound),
     ).fetchall()
     return [_finding_summary(row) for row in rows]
+
+
+def _finding_bucket_total(
+    connection,
+    engagement_id: int,
+    where_sql: str,
+    params: tuple[Any, ...] = (),
+    *,
+    since: str = "",
+    mode: str | None = None,
+) -> int:
+    where, bound = _finding_bucket_where(where_sql, params, since=since, mode=mode)
+    return int(
+        connection.execute(
+            f"SELECT COUNT(*) FROM assessment_findings WHERE {where}",
+            (engagement_id, *bound),
+        ).fetchone()[0]
+    )
 
 
 _DECISION_RENDER_CAP = 10
@@ -103,9 +149,14 @@ def _recent_decisions(engagement_id: int, *, since: str = "") -> list[dict[str, 
 def _decision_count(connection, engagement_id: int, *, since: str = "") -> int:
     """Count the same decision window represented by ``recent_decisions``."""
     if not since:
-        return _row_count(connection, "assessment_dispatch_decisions", engagement_id)
+        return int(connection.execute(
+            "SELECT COUNT(*) FROM assessment_dispatch_decisions "
+            "WHERE engagement_id = ? AND superseded_by_id IS NULL",
+            (engagement_id,),
+        ).fetchone()[0])
     rows = connection.execute(
-        "SELECT created_at FROM assessment_dispatch_decisions WHERE engagement_id = ?",
+        "SELECT created_at FROM assessment_dispatch_decisions "
+        "WHERE engagement_id = ? AND superseded_by_id IS NULL",
         (engagement_id,),
     ).fetchall()
     timestamps = [{"created_at": row["created_at"]} for row in rows]
@@ -280,6 +331,7 @@ def _reconciled_agent_ids(connection, engagement_id: int) -> set[str]:
         SELECT payload_json
         FROM assessment_dispatch_decisions
         WHERE engagement_id = ? AND kind = 'dispatch_reconciliation'
+          AND superseded_by_id IS NULL
         """,
         (engagement_id,),
     ).fetchall()
@@ -858,7 +910,21 @@ def _code_analysis_section(
     repos = code_analysis.list_code_repos(engagement_id)
     if not code_enabled and not repos:
         return section
-    coverage = code_analysis.code_coverage_summary(engagement_id)
+    readiness_target = code_analysis.next_code_readiness_phase(current_code_phase)
+    # Readiness gates on the engagement-wide summary, so when there is a next
+    # gate one computation answers both.
+    readiness = (
+        code_analysis.code_readiness(
+            engagement_id, target_phase=readiness_target, include_coverage=True
+        )
+        if readiness_target
+        else None
+    )
+    coverage = (
+        readiness.pop("coverage")
+        if readiness is not None
+        else code_analysis.code_coverage_summary(engagement_id)
+    )
     confidence = coverage.get("confidence") or {}
     triggers = coverage.get("trigger_summary") or {}
     coverage_gate = coverage.get("gate") or {}
@@ -873,14 +939,6 @@ def _code_analysis_section(
             "analyzed": analyzed,
             "remaining": max(0, total - analyzed),
         }
-    readiness_target = code_analysis.next_code_readiness_phase(current_code_phase)
-    readiness = (
-        code_analysis.code_readiness(
-            engagement_id, target_phase=readiness_target
-        )
-        if readiness_target
-        else None
-    )
     section.update({
         "queue_count": int(confidence.get("active_queue_items") or 0),
         "coverage_by_classification": coverage_by_classification,
@@ -892,11 +950,12 @@ def _code_analysis_section(
             "passed": coverage_gate.get("passed") is True,
             "reasons": list(coverage_gate.get("reasons") or []),
             # The advisory half of the same gate. `reasons` carries only what
-            # refuses the gate (critical and high), so projecting it alone would
-            # make a medium-only gap invisible to the brief the operator reads
-            # on resume -- and ADR 0001 makes this machinery a harness whose
-            # whole job is to say what was likely missed. Advisory, never a
-            # refusal: nothing keys a transition on this list.
+            # refuses the gate, and effort shortfalls are advisory on every
+            # tier, so projecting `reasons` alone would make them invisible to
+            # the brief the operator reads on resume -- and ADR 0001 makes this
+            # machinery a harness whose whole job is to say what was likely
+            # missed. Advisory, never a refusal: nothing keys a transition on
+            # this list.
             "advisories": list(coverage_gate.get("effort_warnings") or []),
         },
         "next_gate": None if readiness is None else {
@@ -958,6 +1017,7 @@ def _credential_needs_section(connection, engagement_id: int) -> dict[str, Any]:
     decisions = connection.execute(
         "SELECT id, payload_json FROM assessment_dispatch_decisions "
         "WHERE engagement_id = ? AND kind = 'dispatch_blocked' AND resolved = 0 "
+        "AND superseded_by_id IS NULL "
         "ORDER BY created_at DESC, id DESC LIMIT 10",
         (engagement_id,),
     ).fetchall()
@@ -969,7 +1029,7 @@ def _credential_needs_section(connection, engagement_id: int) -> dict[str, Any]:
     ).fetchall()
     count = connection.execute(
         "SELECT (SELECT COUNT(*) FROM assessment_dispatch_decisions WHERE engagement_id = ? "
-        "AND kind = 'dispatch_blocked' AND resolved = 0) + "
+        "AND kind = 'dispatch_blocked' AND resolved = 0 AND superseded_by_id IS NULL) + "
         "(SELECT COUNT(*) FROM assessment_findings WHERE engagement_id = ? "
         "AND verification_status = 'blocked')",
         (engagement_id, engagement_id),
@@ -1098,29 +1158,24 @@ def build_resume_brief(
                 (engagement_id, canonical_finding),
             ).fetchone()
             target_finding = _finding_summary(row) if row else None
-        findings = {
-            "active": _limited_findings(connection, engagement_id, "status IN ('active', 'exploited', 'reported')", since=since, mode=mode),
-            "unreviewed": _limited_findings(
-                connection,
-                engagement_id,
+        bucket_predicates = {
+            "active": "status IN ('active', 'exploited', 'reported')",
+            "unreviewed": (
                 "verification_status = 'unreviewed' "
-                "AND status NOT IN ('merged', 'false_positive')",
-                since=since, mode=mode,
+                "AND status NOT IN ('merged', 'false_positive')"
             ),
-            "verified": _limited_findings(
-                connection,
-                engagement_id,
-                "verification_status IN ('confirmed', 'downgraded')",
-                since=since, mode=mode,
-            ),
-            "killed": _limited_findings(connection, engagement_id, "status = 'false_positive'", since=since, mode=mode),
-            "merged": _limited_findings(connection, engagement_id, "status = 'merged'", since=since, mode=mode),
-            "chain_required": _limited_findings(
-                connection,
-                engagement_id,
-                "json_extract(details_json,'$.chain_required') = 1",
-                since=since, mode=mode,
-            ),
+            "verified": "verification_status IN ('confirmed', 'downgraded')",
+            "killed": "status = 'false_positive'",
+            "merged": "status = 'merged'",
+            "chain_required": "json_extract(details_json,'$.chain_required') = 1",
+        }
+        findings = {
+            bucket: _limited_findings(connection, engagement_id, predicate, since=since, mode=mode)
+            for bucket, predicate in bucket_predicates.items()
+        }
+        finding_bucket_counts = {
+            bucket: _finding_bucket_total(connection, engagement_id, predicate, since=since, mode=mode)
+            for bucket, predicate in bucket_predicates.items()
         }
         counts = _counts(connection, engagement_id, mode=mode)
         cross_track = (
@@ -1275,6 +1330,7 @@ def build_resume_brief(
         "per_input_coverage": per_input_coverage_section,
         "target_finding": target_finding,
         "findings": findings,
+        "finding_bucket_counts": finding_bucket_counts,
         "recent_decisions": recent_decisions,
         "recent_decisions_count": decision_total,
         "operator_checkpoint": checkpoint,

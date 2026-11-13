@@ -695,7 +695,7 @@ def test_code_index_rejects_backend_repo_key_mismatch_before_artifact_creation(
     origin.mkdir()
     source_file = origin / "main.py"
     source_file.write_text("print('safe')\n", encoding="utf-8")
-    builder = SnapshotBuilder(tmp_path / "snapshots", "snapshot-key")
+    builder = SnapshotBuilder(tmp_path / "tools" / "analysis-state" / "code-snapshots", "snapshot-key")
     builder.add("main.py", capture_regular_file(source_file), language="python")
     sealed = builder.finish(
         repo_key="snapshot-key",
@@ -730,7 +730,9 @@ def test_code_index_rejects_backend_repo_key_mismatch_before_artifact_creation(
     monkeypatch.setattr(
         code_index,
         "load_config",
-        lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"),
+        lambda *_: SimpleNamespace(
+            base_url="http://example.test", engagement_key="eng", engagement_dir=str(tmp_path),
+        ),
     )
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
     monkeypatch.setattr(
@@ -759,3 +761,97 @@ def test_code_index_rejects_backend_repo_key_mismatch_before_artifact_creation(
 
     assert excinfo.value.code == 1
     assert not (output / "structural-index").exists()
+
+
+def _rebind_manifest_source_path(metadata: dict[str, object], value: str) -> None:
+    manifest_path = Path(str(metadata["snapshot_manifest_path"]))
+    manifest_path.parent.chmod(0o755)
+    manifest_path.chmod(0o644)
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source_path"] = value
+    manifest_path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    manifest_path.chmod(0o444)
+    manifest_path.parent.chmod(0o555)
+
+
+def test_new_seals_record_the_relative_binding_the_backend_attests(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    metadata, staged = _build_backend_attestation_fixture(tmp_path, request)
+    engagement_root = metadata.pop("_engagement_root")
+    manifest_path = Path(str(metadata["snapshot_manifest_path"]))
+
+    assert json.loads(manifest_path.read_text(encoding="utf-8"))["source_path"] == "source"
+    with attest_verified_snapshot(
+        engagement_root=Path(str(engagement_root)), metadata=metadata
+    ) as attestation:
+        attestation.assert_staged_inventory(staged, metadata)
+        attestation.verify_unchanged()
+
+
+def test_backend_attestation_accepts_a_seal_whose_binding_predates_an_engagement_move(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    metadata, staged = _build_backend_attestation_fixture(tmp_path, request)
+    engagement_root = metadata.pop("_engagement_root")
+    digest = str(metadata["snapshot_digest"])
+    _rebind_manifest_source_path(
+        metadata,
+        f"/srv/acme/agent/engagements/acme-eng/tools/analysis-state/code-snapshots/attested-repo/{digest}/source",
+    )
+
+    with attest_verified_snapshot(
+        engagement_root=Path(str(engagement_root)), metadata=metadata
+    ) as attestation:
+        attestation.assert_staged_inventory(staged, metadata)
+        attestation.verify_unchanged()
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "elsewhere",
+        "../source",
+        "",
+        "/srv/acme/code-snapshots/other-repo/{digest}/source",
+        "/srv/acme/code-snapshots/attested-repo/{other}/source",
+        "/srv/acme/code-snapshots/attested-repo/{digest}/manifest.json",
+    ],
+)
+def test_backend_attestation_refuses_a_binding_to_another_snapshot(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+    binding: str,
+) -> None:
+    metadata, _staged = _build_backend_attestation_fixture(tmp_path, request)
+    engagement_root = metadata.pop("_engagement_root")
+    _rebind_manifest_source_path(
+        metadata, binding.format(digest=metadata["snapshot_digest"], other="e" * 64)
+    )
+
+    with pytest.raises(SnapshotAttestationError, match="source_path mismatch"):
+        attest_verified_snapshot(engagement_root=Path(str(engagement_root)), metadata=metadata)
+
+
+def test_a_repaired_legacy_seal_keeps_its_digest_and_attests(
+    tmp_path: Path,
+    request: pytest.FixtureRequest,
+) -> None:
+    metadata, staged = _build_backend_attestation_fixture(tmp_path, request)
+    engagement_root = metadata.pop("_engagement_root")
+    digest = str(metadata["snapshot_digest"])
+    legacy = f"/srv/acme/agent/engagements/acme-eng/tools/analysis-state/code-snapshots/attested-repo/{digest}/source"
+    _rebind_manifest_source_path(metadata, legacy)
+    snapshot_root = Path(str(metadata["snapshot_manifest_path"])).parent
+
+    rebind = producer_snapshot.rebind_snapshot_source(snapshot_root)
+
+    assert rebind is not None and rebind.previous_source_path == legacy
+    assert validate_snapshot(snapshot_root, expected_digest=digest)["source_path"] == "source"
+    with attest_verified_snapshot(
+        engagement_root=Path(str(engagement_root)), metadata=metadata
+    ) as attestation:
+        attestation.assert_staged_inventory(staged, metadata)
+        attestation.verify_unchanged()

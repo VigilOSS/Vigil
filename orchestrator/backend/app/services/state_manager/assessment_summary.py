@@ -21,6 +21,26 @@ from .report_readiness import report_readiness
 
 _OPEN_SURFACE_STATUS_VALUES = tuple(sorted(OPEN_SURFACE_STATUSES))
 
+# The summary's bounded lists: each key's row bound and the route that serves the
+# whole set. Every list is read one row past its bound, so ``list_truncation``
+# can say exactly whether rows were left out instead of leaving a reader to
+# guess whether eight chains are all of them.
+_SUMMARY_LIST_BOUNDS: dict[str, tuple[int, str]] = {
+    "top_surfaces": (8, "surfaces"),
+    "top_findings": (10, "findings"),
+    "recent_probes": (10, "probe-runs"),
+    "open_coverage_items": (12, "coverage-items"),
+    "attack_chains": (8, "attack-chains"),
+    "service_coverage_gaps": (10, "services"),
+}
+
+
+def _bounded_rows(connection, name: str, sql: str, engagement_id: int) -> tuple[list[Any], bool]:
+    """Run one summary list query to its bound; report whether rows were left out."""
+    limit = _SUMMARY_LIST_BOUNDS[name][0]
+    rows = connection.execute(sql, (engagement_id, limit + 1)).fetchall()
+    return rows[:limit], len(rows) > limit
+
 SummaryCacheKey = tuple[tuple[str, int, int, int], int]
 
 _SUMMARY_CACHE_TTL_SECONDS = 1.0
@@ -172,6 +192,7 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
         tunnel_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_tunnels WHERE engagement_id = ?", (engagement_id,))
         blocked_technique_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_blocked_techniques WHERE engagement_id = ?", (engagement_id,))
         chain_count = _scalar_row(connection, "SELECT COUNT(*) FROM assessment_attack_chains WHERE engagement_id = ?", (engagement_id,))
+        truncated: dict[str, bool] = {}
         coverage_rows = connection.execute(
             "SELECT status, COUNT(*) AS total FROM assessment_coverage_items WHERE engagement_id = ? GROUP BY status ORDER BY status ASC",
             (engagement_id,),
@@ -203,7 +224,9 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
             """,
             (engagement_id,),
         ).fetchall()
-        top_surfaces = connection.execute(
+        top_surfaces, truncated["top_surfaces"] = _bounded_rows(
+            connection,
+            "top_surfaces",
             """
             SELECT *
             FROM assessment_surfaces
@@ -216,11 +239,13 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
                     ELSE 3
                 END,
                 updated_at DESC
-            LIMIT 8
+            LIMIT ?
             """,
-            (engagement_id,),
-        ).fetchall()
-        top_findings = connection.execute(
+            engagement_id,
+        )
+        top_findings, truncated["top_findings"] = _bounded_rows(
+            connection,
+            "top_findings",
             """
             SELECT slug, title, severity, status, verification_status, canonical_location, summary, source_name, updated_at
             FROM assessment_findings
@@ -236,21 +261,25 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
                     ELSE 5
                 END,
                 updated_at DESC
-            LIMIT 10
+            LIMIT ?
             """,
-            (engagement_id,),
-        ).fetchall()
-        recent_probes = connection.execute(
+            engagement_id,
+        )
+        recent_probes, truncated["recent_probes"] = _bounded_rows(
+            connection,
+            "recent_probes",
             """
             SELECT result_status, attack_family, signal_type, agent_name, evidence_ref, created_at
             FROM assessment_probe_runs
             WHERE engagement_id = ?
             ORDER BY created_at DESC, id DESC
-            LIMIT 10
+            LIMIT ?
             """,
-            (engagement_id,),
-        ).fetchall()
-        open_coverage_items = connection.execute(
+            engagement_id,
+        )
+        open_coverage_items, truncated["open_coverage_items"] = _bounded_rows(
+            connection,
+            "open_coverage_items",
             """
             SELECT
                 coverage.status,
@@ -266,30 +295,34 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
             LEFT JOIN assessment_services AS services ON services.id = coverage.service_id
             WHERE coverage.engagement_id = ? AND coverage.status IN ('pending', 'queued', 'deferred', 'blocked')
             ORDER BY coverage.updated_at DESC, coverage.id DESC
-            LIMIT 12
+            LIMIT ?
             """,
-            (engagement_id,),
-        ).fetchall()
-        attack_chains = connection.execute(
+            engagement_id,
+        )
+        attack_chains, truncated["attack_chains"] = _bounded_rows(
+            connection,
+            "attack_chains",
             """
             SELECT chain_key, title, status, severity, narrative, updated_at
             FROM assessment_attack_chains
             WHERE engagement_id = ?
             ORDER BY updated_at DESC, id DESC
-            LIMIT 8
+            LIMIT ?
             """,
-            (engagement_id,),
-        ).fetchall()
-        service_coverage_gaps = connection.execute(
+            engagement_id,
+        )
+        service_coverage_gaps, truncated["service_coverage_gaps"] = _bounded_rows(
+            connection,
+            "service_coverage_gaps",
             """
             SELECT services.endpoint, services.service, services.coverage_status, services.updated_at
             FROM assessment_services AS services
             WHERE services.engagement_id = ? AND services.coverage_status IN ('pending', 'partial', 'blocked')
             ORDER BY services.updated_at DESC, services.id DESC
-            LIMIT 10
+            LIMIT ?
             """,
-            (engagement_id,),
-        ).fetchall()
+            engagement_id,
+        )
     return {
         "target_count": target_count,
         "service_count": service_count,
@@ -323,6 +356,10 @@ def _build_assessment_summary(engagement_id: int) -> dict[str, Any]:
         "open_coverage_items": [dict(row) for row in open_coverage_items],
         "attack_chains": [dict(row) for row in attack_chains],
         "service_coverage_gaps": [dict(row) for row in service_coverage_gaps],
+        "list_truncation": {
+            name: {"limit": limit, "truncated": truncated[name], "full_route": route}
+            for name, (limit, route) in _SUMMARY_LIST_BOUNDS.items()
+        },
         "vendor_saas_hosts_pending_decision": vendor_saas_hosts_pending_decision(engagement_id),
         "egress_status": egress_block_status(engagement_id),
     }

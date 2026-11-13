@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+from collections import OrderedDict
 from collections.abc import Iterable
 from pathlib import Path
 from typing import Any
 
 from fastapi import HTTPException, status
 
+from ... import db
 from ...finding_merge import strict_finding_id
 from ..artifact_index import _normalize_relative_path
 from ..events import _engagement_or_404
@@ -81,6 +84,135 @@ _DETAIL_CODE_REFERENCE_RE = re.compile(
 _PATH_EXTENSION_RE = re.compile(r"\.[A-Za-z][A-Za-z0-9_+]{0,8}$")
 
 
+def _vector_score(details: dict[str, Any]) -> float | None:
+    """The base score a stored vector computes to; None without one or when it does not parse."""
+    vector = details.get("cvss_vector")
+    if not vector:
+        return None
+    try:
+        return base_score(str(vector))
+    except CvssVectorError:
+        return None
+
+
+# The severity variance attached to each finding's current verification: the
+# newest transition into its present verification status that carries proof
+# receipts. Only this variance settles a band departure.
+_CURRENT_SEVERITY_VARIANCE_SQL = """
+    SELECT variances.id, variances.finding_id, variances.normal_band,
+           variances.chosen_severity, variances.actor,
+           variances.reason, variances.proof_receipt_id
+    FROM assessment_finding_severity_variances AS variances
+    JOIN assessment_findings AS findings
+      ON findings.id = variances.finding_id
+    WHERE variances.engagement_id = ?
+      {finding_filter}
+      AND variances.transition_id = (
+          SELECT MAX(proof_links.transition_id)
+          FROM assessment_finding_proof_receipts AS proof_links
+          JOIN assessment_finding_transitions AS transitions
+            ON transitions.id = proof_links.transition_id
+          WHERE proof_links.engagement_id = variances.engagement_id
+            AND proof_links.finding_id = variances.finding_id
+            AND transitions.to_verification_status =
+                findings.verification_status
+      )
+    ORDER BY variances.id ASC
+"""
+
+
+def current_severity_variances(
+    connection, engagement_id: int, *, finding_id: int | None = None
+) -> dict[int, dict[str, Any]]:
+    """``{finding_id: variance}`` for the variance on each current verification."""
+    finding_filter = "AND variances.finding_id = ?" if finding_id is not None else ""
+    params: tuple[Any, ...] = (
+        (engagement_id, finding_id) if finding_id is not None else (engagement_id,)
+    )
+    rows = connection.execute(
+        _CURRENT_SEVERITY_VARIANCE_SQL.format(finding_filter=finding_filter), params
+    ).fetchall()
+    return {int(row["finding_id"]): dict(row) for row in rows}
+
+
+def _severity_band(
+    *,
+    severity: str,
+    details: dict[str, Any],
+    verification_status: str,
+    provenance: Any,
+    variance: dict[str, Any] | None,
+    is_blue: bool,
+) -> dict[str, Any]:
+    """Whether ``severity`` departs from its CVSS band and what explains it.
+
+    A departure is explained by the variance on the current verification when
+    it records this band and severity, or by an operator-authority stamp on a
+    terminal verification. A blue engagement's severity follows MITRE impact
+    (``agent/rules/triage.md``), not a CVSS band, so it never departs; the band
+    the score maps to is still reported.
+    """
+    from .finding_change_policy import cvss_band
+
+    score_value = details.get("cvss_score")
+    if score_value is None:
+        # A row stored before writes derived the score is judged on the score
+        # its vector states.
+        score_value = _vector_score(details)
+    try:
+        score = float(score_value) if score_value is not None else None
+    except (TypeError, ValueError):
+        score = None
+    band = cvss_band(score) if score is not None and score >= 0 else None
+    departs = bool(not is_blue and band and severity and severity != band)
+    approved = bool(
+        departs
+        and variance
+        and str(variance["normal_band"]) == band
+        and str(variance["chosen_severity"]) == severity
+    )
+    authority = (
+        operator_authority_stamp(provenance)
+        if departs and verification_status in TERMINAL_VERIFICATION_STATUSES
+        else None
+    )
+    return {
+        "score": score,
+        "cvss_band": band,
+        "departs": departs,
+        "current_variance_id": int(variance["id"]) if variance else None,
+        "explained": bool(approved or authority),
+        "authority": authority,
+    }
+
+
+def finding_severity_band(connection, engagement_id: int, record: dict[str, Any]) -> dict[str, Any]:
+    """The finding point read's ``verification_audit.severity_band``.
+
+    ``record`` is a serialized finding (``id``, ``severity``, ``details``,
+    ``verification_status``, ``provenance``). The same rule report readiness
+    applies decides ``departs`` and ``explained``, including that a blue
+    engagement's severity is not judged on its CVSS band.
+    """
+    finding_id = int(record["id"])
+    details = record.get("details")
+    engagement = _engagement_or_404(engagement_id)
+    band = _severity_band(
+        severity=str(record.get("severity") or "").lower(),
+        details=details if isinstance(details, dict) else {},
+        verification_status=str(record.get("verification_status") or ""),
+        provenance=record.get("provenance"),
+        variance=current_severity_variances(
+            connection, engagement_id, finding_id=finding_id
+        ).get(finding_id),
+        is_blue=has_track(Path(engagement.engagement_root), "blue"),
+    )
+    return {
+        key: band[key]
+        for key in ("cvss_band", "departs", "current_variance_id", "explained")
+    }
+
+
 def _item(kind: str, detail: str, **fields: Any) -> dict[str, Any]:
     """Build one readiness item with the payload's canonical key order.
 
@@ -92,6 +224,31 @@ def _item(kind: str, detail: str, **fields: Any) -> dict[str, Any]:
     """
 
     return {"kind": kind, **fields, "detail": detail}
+
+
+def _claim_review_detail(row: dict[str, Any]) -> str:
+    """The pending-claim-review blocker, with the decision that clears it.
+
+    The payload is the shape ``validate_claim_equivalence_decision`` accepts,
+    with every value this finding already determines filled in; the reviewing
+    dispatch supplies its own agent_id, its verdict and its reason.
+    """
+    payload = {
+        "finding_slug": str(row.get("slug") or ""),
+        "verdict": "equivalent|changed",
+        "claim_transition_id": row.get("claim_transition_id"),
+        "new_claim_sha256": row.get("current_claim_sha256"),
+        "verifier_dispatch_agent_id": "<separate verifier dispatch agent_id>",
+        "reason": "<why the edited claim does or does not match the verified one>",
+    }
+    return (
+        "verified claim wording changed since the verdict; a recorded verifier dispatch "
+        "that neither authored the finding nor edited the claim compares the edited claim "
+        "with the verified one and records `vigil assess agent decision --kind claim_equivalence --payload-json "
+        f"'{json.dumps(payload, separators=(',', ':'))}'` (verdict equivalent clears "
+        "this blocker; changed requires a new terminal verification). Alternatively, "
+        "re-verify the finding with fresh proof receipts."
+    )
 
 
 def _gated(item: dict[str, Any], severity: str) -> dict[str, Any]:
@@ -316,6 +473,90 @@ def _cited_markdown_exists(engagement_root: Path, cited_path: str) -> bool:
 
 
 
+_NOTES_SCAN_CACHE_MAX_ENTRIES = 4096
+_NOTES_TEXT_BATCH = 16
+
+
+# The markdown paths each registered note cites, by content identity: the row
+# id, digest, size, media type and last indexing time (every write of the row's
+# text goes through indexing), plus the database identity, so a swapped
+# database never serves another's rows. Whether a cited file exists is
+# evaluated per call, so there is nothing else for the key to cover.
+_notes_scan_cache: OrderedDict[tuple[Any, ...], tuple[str, ...]] = OrderedDict()
+_notes_scan_lock = threading.Lock()
+
+
+def clear_notes_scan_cache() -> None:
+    with _notes_scan_lock:
+        _notes_scan_cache.clear()
+
+
+def _cached_note_citations(key: tuple[Any, ...]) -> tuple[str, ...] | None:
+    with _notes_scan_lock:
+        cited = _notes_scan_cache.get(key)
+        if cited is not None:
+            _notes_scan_cache.move_to_end(key)
+        return cited
+
+
+def _cache_note_citations(key: tuple[Any, ...], cited: tuple[str, ...]) -> None:
+    with _notes_scan_lock:
+        _notes_scan_cache[key] = cited
+        _notes_scan_cache.move_to_end(key)
+        while len(_notes_scan_cache) > _NOTES_SCAN_CACHE_MAX_ENTRIES:
+            _notes_scan_cache.popitem(last=False)
+
+
+def _indexed_note_citations(
+    connection,
+    engagement_id: int,
+    markdown_artifacts: dict[int, dict[str, Any]],
+) -> dict[int, tuple[str, ...]]:
+    """The markdown paths every present, non-scratch registered note cites.
+
+    Only notes whose content identity is not cached have their text loaded, a
+    few rows per statement, so a call over unchanged notes reads no note text.
+    """
+    token = db.database_cache_token()
+    citations: dict[int, tuple[str, ...]] = {}
+    missing: dict[int, tuple[Any, ...]] = {}
+    for artifact_id, artifact in markdown_artifacts.items():
+        if not bool(artifact.get("present")) or bool(artifact.get("scratch")):
+            continue
+        key = (
+            "indexed",
+            token,
+            artifact_id,
+            artifact.get("sha256"),
+            artifact.get("size_bytes"),
+            artifact.get("media_type"),
+            artifact.get("last_indexed_at"),
+        )
+        cached = _cached_note_citations(key)
+        if cached is None:
+            missing[artifact_id] = key
+        else:
+            citations[artifact_id] = cached
+    wanted = sorted(missing)
+    for start in range(0, len(wanted), _NOTES_TEXT_BATCH):
+        batch = wanted[start:start + _NOTES_TEXT_BATCH]
+        texts = {
+            int(row["id"]): str(row["indexed_text"] or "")
+            for row in connection.execute(
+                "SELECT artifacts.id, artifacts.indexed_text FROM json_each(?) AS wanted "
+                "CROSS JOIN assessment_artifacts AS artifacts ON artifacts.id = wanted.value "
+                "WHERE artifacts.engagement_id = ?",
+                (json.dumps(batch), engagement_id),
+            ).fetchall()
+        }
+        for artifact_id in batch:
+            computed = tuple(_MARKDOWN_PATH_REFERENCE_RE.findall(texts.get(artifact_id, "")))
+            if artifact_id in texts:
+                _cache_note_citations(missing[artifact_id], computed)
+            citations[artifact_id] = computed
+    return citations
+
+
 def _normalize_report_evidence_ref(root: Path, evidence_ref: str) -> str:
     mount = f"/engagements/{root.name}/"
     if evidence_ref.startswith(mount):
@@ -331,6 +572,10 @@ _REPORT_ARTIFACT_COLUMNS = (
     "relative_path",
     "present",
     "scratch",
+    "sha256",
+    "size_bytes",
+    "media_type",
+    "last_indexed_at",
     "producer_agent_id",
     "producer_command_run_id",
     "related_finding_slug",
@@ -344,21 +589,16 @@ def _artifact_rows_by_id(
     connection,
     engagement_id: int,
     artifact_ids: Iterable[int],
-    *,
-    include_text: bool,
 ) -> dict[int, dict[str, Any]]:
-    """Load the named artifacts of one engagement by id, in id order.
+    """Load the named artifacts of one engagement by id, in id order, without text.
 
-    ``indexed_text`` is the file's full extracted text; only the markdown
-    citation scan reads it.
+    A note's text is loaded only by ``_indexed_note_citations``, and only for
+    notes whose content it has not already read.
     """
     ids = sorted({int(artifact_id) for artifact_id in artifact_ids})
     if not ids:
         return {}
-    columns = ", ".join(
-        f"artifacts.{column}"
-        for column in (*_REPORT_ARTIFACT_COLUMNS, *(("indexed_text",) if include_text else ()))
-    )
+    columns = ", ".join(f"artifacts.{column}" for column in _REPORT_ARTIFACT_COLUMNS)
     # CROSS JOIN pins the requested ids as the outer loop so each artifact is a
     # rowid seek; left to itself the planner prefers walking the engagement.
     rows = connection.execute(
@@ -396,9 +636,10 @@ def _report_candidate_records(
         records = []
         for row in rows:
             record = _serialize_finding_record(row)
-            record["claim_review_pending"] = _claim_review_status(
-                connection, engagement.id, row,
-            )["claim_review_pending"]
+            claim_review = _claim_review_status(connection, engagement.id, row)
+            record["claim_review_pending"] = claim_review["claim_review_pending"]
+            record["claim_transition_id"] = claim_review["claim_transition_id"]
+            record["current_claim_sha256"] = claim_review["current_claim_sha256"]
             record["reproduction_basis"] = reproduction_basis_for_receipts(
                 str(record.get("canonical_location") or ""), receipts[int(row["id"])]
             )
@@ -524,7 +765,79 @@ def _finding_merge_integrity_blockers(engagement_id: int) -> list[dict[str, Any]
             blockers.append(_item("finding_merge_integrity", detail, slug=slug))
     return blockers
 
+_REPORT_QC_NO_PASS = "has no passing independent report-writer QC verdict"
+
+
+def report_qc_state(engagement_id: int) -> dict[str, Any]:
+    """Whether a registered report.md has a current independent QC review (ADR 0045).
+
+    The newest current ``report_qc_verdict`` must pass, name the registered
+    report.md artifact and its sha256, and the bytes on disk must still be the
+    registered ones, so an edit after the review needs a fresh one. ``status``
+    uses submission QC's vocabulary: ``missing`` (no verdict), ``blocked`` (the
+    newest verdict does not pass), ``stale`` (the file is gone, or the reviewed
+    bytes are no longer the registered or on-disk ones) and ``current``.
+    ``required`` is whether report.md is registered; the `complete` gate of a
+    web or code track applies it. ``issue`` says what the gate would refuse.
+    """
+    from .dispatches import CURRENT_DECISION_SQL, _report_disk_check
+
+    engagement = _engagement_or_404(engagement_id)
+    state: dict[str, Any] = {
+        "required": False, "status": "missing", "verdict": None,
+        "artifact_id": None, "sha256": None, "reviewed_sha256": None,
+        "decision_id": None, "reviewer_dispatch_agent_id": None,
+        "writer_dispatch_agent_id": None, "decided_at": None, "issue": "",
+    }
+    with _common.get_connection() as connection:
+        report = connection.execute(
+            "SELECT id, sha256, size_bytes, present FROM assessment_artifacts "
+            "WHERE engagement_id = ? AND relative_path = 'report.md' ORDER BY id DESC LIMIT 1",
+            (engagement.id,),
+        ).fetchone()
+        if report is None:
+            return state
+        decision = connection.execute(
+            "SELECT id, payload_json, created_at FROM assessment_dispatch_decisions "
+            f"WHERE engagement_id = ? AND kind = 'report_qc_verdict' AND {CURRENT_DECISION_SQL} "
+            "ORDER BY created_at DESC, id DESC LIMIT 1",
+            (engagement.id,),
+        ).fetchone()
+    payload = _json_object(decision["payload_json"]) if decision is not None else {}
+    state.update(
+        required=True,
+        artifact_id=int(report["id"]),
+        sha256=str(report["sha256"] or ""),
+    )
+    if decision is not None:
+        state.update(
+            verdict=payload.get("verdict"),
+            reviewed_sha256=payload.get("sha256"),
+            decision_id=int(decision["id"]),
+            reviewer_dispatch_agent_id=payload.get("reviewer_dispatch_agent_id"),
+            writer_dispatch_agent_id=payload.get("writer_dispatch_agent_id"),
+            decided_at=decision["created_at"],
+        )
+    root = Path(engagement.engagement_root).expanduser().resolve()
+    if not report["present"] or not (root / "report.md").is_file():
+        state.update(status="stale", issue="is missing from the engagement directory")
+    elif decision is None:
+        state.update(status="missing", issue=_REPORT_QC_NO_PASS)
+    elif payload.get("verdict") != "pass":
+        state.update(status="blocked", issue=_REPORT_QC_NO_PASS)
+    elif payload.get("artifact_id") != int(report["id"]) or str(
+        payload.get("sha256") or ""
+    ) != state["sha256"]:
+        state.update(status="stale", issue="was registered with different bytes after its QC review")
+    elif _report_disk_check(root, int(report["size_bytes"]), state["sha256"]) is not None:
+        state.update(status="stale", issue="changed on disk after its QC review")
+    else:
+        state["status"] = "current"
+    return state
+
+
 def report_readiness(engagement_id: int) -> dict[str, Any]:
+    """The final-report gate: blockers, advisories and their counts."""
     engagement = _engagement_or_404(engagement_id)
     root = Path(engagement.engagement_root)
     is_blue = has_track(root, "blue")
@@ -608,7 +921,9 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 "finding_code_snapshot",
                 "reportable finding is not bound to the current verified "
                     f"repository snapshot: {snapshot_status}; re-review it and "
-                    "use finding verify with current provenance.code_snapshot",
+                    "use finding verify with current provenance.code_snapshot, "
+                    "with fresh proof receipts for a terminal status "
+                    "(confirmed, downgraded, false_positive)",
                 slug=row.get("slug", ""),
                 title=row.get("title", ""),
                 snapshot_status=snapshot_status,
@@ -629,9 +944,10 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         suspicious_count = int(obligation["suspicious_count"])
         blockers.append(_item(
             "unresolved_suspicious_analysis",
-            f"repository has {suspicious_count} current suspicious "
-                "code-analysis attempt(s); promote each to a finding or "
-                "complete a clean terminal reanalysis",
+            f"repository has {suspicious_count} code file(s) whose latest "
+                "review holds a suspicious receipt awaiting a verdict; settle "
+                "each with a targeted reanalysis that records the finding or a "
+                "clean receipt citing the guard",
             repo_id=int(obligation["repo_id"]),
             suspicious_count=suspicious_count,
         ))
@@ -740,35 +1056,13 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             """,
             (engagement_id, ROOT_CAUSE_LINK_KIND),
         ).fetchall()
-        severity_variance_rows = connection.execute(
-            """
-            SELECT variances.finding_id, variances.normal_band,
-                   variances.chosen_severity, variances.actor,
-                   variances.reason, variances.proof_receipt_id
-            FROM assessment_finding_severity_variances AS variances
-            JOIN assessment_findings AS findings
-              ON findings.id = variances.finding_id
-            WHERE variances.engagement_id = ?
-              AND variances.transition_id = (
-                  SELECT MAX(proof_links.transition_id)
-                  FROM assessment_finding_proof_receipts AS proof_links
-                  JOIN assessment_finding_transitions AS transitions
-                    ON transitions.id = proof_links.transition_id
-                  WHERE proof_links.engagement_id = variances.engagement_id
-                    AND proof_links.finding_id = variances.finding_id
-                    AND transitions.to_verification_status =
-                        findings.verification_status
-              )
-            """,
-            (engagement_id,),
-        ).fetchall()
+        current_severity_variance_by_finding = current_severity_variances(
+            connection, engagement_id
+        )
     root_link_by_slug = {
         str(row["finding_slug"]): str(row["target_ref"])
         for row in root_link_rows
         if str(row["finding_slug"]) in candidate_slugs
-    }
-    current_severity_variance_by_finding = {
-        int(row["finding_id"]): dict(row) for row in severity_variance_rows
     }
 
     for row in candidates:
@@ -784,9 +1078,11 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
         elif row.get("claim_review_pending"):
             blockers.append(_item(
                 "finding_claim_review_pending",
-                "verified claim wording changed; record a current independent claim_equivalence review or re-verify the finding",
+                _claim_review_detail(row),
                 slug=row.get("slug", ""),
                 title=row.get("title", ""),
+                claim_transition_id=row.get("claim_transition_id"),
+                current_claim_sha256=row.get("current_claim_sha256"),
             ))
 
     # A terminal verdict reached on the operator's OWN out-of-snapshot evidence
@@ -895,7 +1191,8 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
             if not isinstance(mitre, list) or not mitre:
                 missing_fields.append("mitre_techniques")
         else:
-            if details.get("cvss_score") is None:
+            # A valid vector states its score; only a finding with neither lacks one.
+            if details.get("cvss_score") is None and _vector_score(details) is None:
                 missing_fields.append("cvss_score")
             if not details.get("cvss_vector"):
                 missing_fields.append("cvss_vector")
@@ -963,59 +1260,55 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                         slug=slug,
                         title=title,
                     ))
-        if not is_blue and cvss_score is not None and severity:
-            try:
-                score = float(cvss_score)
-            except (TypeError, ValueError):
-                score = -1
-            expected = (
-                "critical" if score >= 9.0
-                else "high" if score >= 7.0
-                else "medium" if score >= 4.0
-                else "low" if score >= 0.1
-                else "info"
+        band = _severity_band(
+            severity=severity,
+            details=details,
+            verification_status=str(row.get("verification_status") or ""),
+            provenance=row.get("provenance"),
+            variance=current_severity_variance_by_finding.get(int(row["id"])),
+            is_blue=is_blue,
+        )
+        if band["departs"]:
+            variance = current_severity_variance_by_finding.get(int(row["id"]))
+            detail = (
+                f"severity={severity} but cvss_score={band['score']} expects {band['cvss_band']}"
             )
-            if score >= 0 and severity != expected:
-                # The band and CVSS score are independent scales, but old prose
-                # cannot stand in for an approval. Only the attributed variance
-                # attached to the current verification transition settles this
-                # disagreement; arithmetic errors above remain blockers.
-                variance = current_severity_variance_by_finding.get(int(row["id"]))
-                approved = bool(
-                    variance
-                    and str(variance["normal_band"]) == expected
-                    and str(variance["chosen_severity"]) == severity
+            # The band and CVSS score are independent scales, but old prose
+            # cannot stand in for an approval. Only the attributed variance
+            # attached to the current verification transition settles this
+            # disagreement; arithmetic errors above remain blockers.
+            if band["explained"]:
+                authority = band["authority"]
+                attribution = (
+                    f"operator authority: {authority.get('reason') or 'no reason recorded'}"
+                    if authority
+                    else f"structured variance approved by {variance['actor']}: {variance['reason']}"
                 )
-                authority = (
-                    operator_authority_stamp(row.get("provenance"))
-                    if str(row.get("verification_status")) in TERMINAL_VERIFICATION_STATUSES
-                    else None
-                )
-                detail = (
-                    f"severity={severity} but cvss_score={score} expects {expected}"
-                )
-                if approved or authority:
-                    attribution = (
-                        f"operator authority: {authority.get('reason') or 'no reason recorded'}"
-                        if authority
-                        else f"structured variance approved by {variance['actor']}: {variance['reason']}"
-                    )
-                    advisories.append(_item(
-                        "severity_cvss_band_divergence",
-                        f"{detail}; {attribution}",
-                        slug=slug,
-                        title=title,
-                    ))
-                else:
-                    blockers.append(_item(
-                        "severity_cvss_mismatch",
-                        f"{detail}. Correct whichever is wrong, or record an "
-                            "attributed variance on a fresh verification with "
-                            f"`vigil assess finding verify {slug} ... "
-                            "--severity-variance-file <path>`.",
-                        slug=slug,
-                        title=title,
-                    ))
+                advisories.append(_item(
+                    "severity_cvss_band_divergence",
+                    f"{detail}; {attribution}",
+                    slug=slug,
+                    title=title,
+                ))
+            else:
+                # ADVISORY (ADR 0046): the band and the score are independent
+                # scales and the choice between them is a human judgment the
+                # backend cannot make. Submission QC and the operator still
+                # see the unattributed divergence here.
+                advisories.append(_item(
+                    "severity_cvss_mismatch",
+                    f"{detail}, with no attributed variance on the current "
+                        "verification. Advisory, not a report blocker: correct "
+                        "whichever is wrong, or record why the severity departs "
+                        "from its band on the current verification with "
+                        "`vigil assess agent decision --kind severity_variance "
+                        f"--payload-json '{{\"finding_slug\":\"{slug}\","
+                        "\"reason\":\"<why>\"}'`, or on a fresh verification with "
+                        f"`vigil assess finding verify {slug} ... "
+                        "--severity-variance-file <path>`.",
+                    slug=slug,
+                    title=title,
+                ))
 
     for slug, root_slug in sorted(root_link_by_slug.items()):
         if root_slug not in candidate_slugs:
@@ -1088,14 +1381,14 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 for path, artifact_id in artifact_ids_by_path.items()
                 if _is_durable_markdown_path(path)
             ],
-            include_text=True,
         )
         artifact_rows_by_id = {
-            **_artifact_rows_by_id(
-                connection, engagement_id, evidence_artifact_ids, include_text=False
-            ),
+            **_artifact_rows_by_id(connection, engagement_id, evidence_artifact_ids),
             **markdown_artifacts,
         }
+        note_citations = _indexed_note_citations(
+            connection, engagement_id, markdown_artifacts
+        )
         missing_citations: dict[str, set[str]] = {}
         for artifact in markdown_artifacts.values():
             artifact_path = str(artifact["relative_path"])
@@ -1126,9 +1419,7 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                     artifact_id=artifact.get("id"),
                     path=artifact_path,
                 ))
-            for cited_path in _MARKDOWN_PATH_REFERENCE_RE.findall(
-                str(artifact.get("indexed_text") or "")
-            ):
+            for cited_path in note_citations[int(artifact["id"])]:
                 if cited_path == artifact_path or _cited_markdown_exists(
                     engagement_root, cited_path
                 ):
@@ -1369,6 +1660,18 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 """,
                 (engagement_id,),
             ).fetchall()
+        # One item per ungraded finding: a reportable one is otherwise also a
+        # ``finding_verification_status`` blocker, and this gate's item is the
+        # one that says how to grade it.
+        unreviewed_slugs = {str(row["slug"] or "") for row in unreviewed_rows}
+        blockers[:] = [
+            item for item in blockers
+            if not (
+                item.get("kind") == "finding_verification_status"
+                and item.get("detail") == "verification_status=unreviewed"
+                and str(item.get("slug") or "") in unreviewed_slugs
+            )
+        ]
         for row in unreviewed_rows:
             slug = str(row["slug"] or "")
             blockers.append(_item(
@@ -1476,14 +1779,17 @@ def report_readiness(engagement_id: int) -> dict[str, Any]:
                 title=str(row.get("title", "")),
             ))
 
-    return {
+    payload = {
         "ready": len(blockers) == 0,
         "blocker_count": len(blockers),
         "blockers": [_gated(item, "block") for item in blockers],
         "advisories": [_gated(item, "advisory") for item in advisories],
         "advisory_count": len(advisories),
         "coverage": coverage,
+        # Served standing, not a readiness blocker: the `complete` edge gates on it.
+        "report_qc": report_qc_state(engagement_id),
     }
+    return payload
 
 def _as_string_list(value: Any) -> list[str]:
     """Coerce a details field that *should* be a string list into one.
@@ -1515,7 +1821,11 @@ def _report_record(record: dict[str, Any], report_id: str) -> dict[str, Any]:
     # legible — and ``None`` is the ordinary case.
     item["operator_authority"] = operator_authority_stamp(item.get("provenance"))
     item["cvss_vector"] = details.get("cvss_vector", "")
-    item["cvss_score"] = details.get("cvss_score")
+    item["cvss_score"] = (
+        details.get("cvss_score")
+        if details.get("cvss_score") is not None
+        else _vector_score(details)
+    )
     item["remediation"] = details.get("remediation", "")
     item["steps_to_reproduce"] = _as_string_list(details.get("steps_to_reproduce"))
     # The command-run ids behind those steps, projected alongside them so a report
