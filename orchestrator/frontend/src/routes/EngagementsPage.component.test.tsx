@@ -32,6 +32,8 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  // The search box is kept for the browser session; each test starts without one.
+  window.sessionStorage.clear();
   cleanup();
   vi.clearAllMocks();
 });
@@ -43,6 +45,26 @@ function openDeleteDialog(key = "demo") {
   fireEvent.click(within(screen.getByRole("menu")).getByRole("menuitem", { name: `Delete engagement ${key}` }));
   return actions;
 }
+
+describe("EngagementsPage search", () => {
+  it("keeps the search when the list is left and reopened", () => {
+    window.sessionStorage.removeItem("engagements.search");
+    try {
+      const rows = [{ ...engagement, key: "acme-portal", target: "https://portal.acme.example" }, { ...engagement, key: "other", target: "https://app.example.com" }];
+      const first = render(<EngagementsPage engagements={rows} onOpenEngagement={vi.fn()} />);
+      fireEvent.change(screen.getByRole("searchbox", { name: "Search engagements" }), { target: { value: "acme" } });
+      expect(screen.queryByRole("button", { name: "Actions for engagement other" })).toBeNull();
+      // Opening an engagement unmounts the list; coming back restores what was searched for.
+      first.unmount();
+      render(<EngagementsPage engagements={rows} onOpenEngagement={vi.fn()} />);
+      expect((screen.getByRole("searchbox", { name: "Search engagements" }) as HTMLInputElement).value).toBe("acme");
+      expect(screen.getByRole("button", { name: "Actions for engagement acme-portal" })).toBeTruthy();
+      expect(screen.queryByRole("button", { name: "Actions for engagement other" })).toBeNull();
+    } finally {
+      window.sessionStorage.removeItem("engagements.search");
+    }
+  });
+});
 
 describe("EngagementsPage ledger", () => {
   it("keeps delete out of the row until its Actions menu opens", () => {

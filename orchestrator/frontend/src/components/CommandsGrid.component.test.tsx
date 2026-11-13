@@ -1,17 +1,31 @@
 // @vitest-environment jsdom
-import { cleanup, render } from "@testing-library/react";
-import type { ColDef } from "ag-grid-community";
+import { act, cleanup, render } from "@testing-library/react";
+import type { ColDef, ICellRendererParams } from "ag-grid-community";
+import type { ComponentType } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { COMMAND_COLUMN_SORT, DEFAULT_COMMAND_FILTERS, type CommandLedgerRow } from "../lib/commandsApi";
 import CommandsGrid from "./CommandsGrid";
 
-const grid = vi.hoisted(() => ({
-  props: {} as { columnDefs?: ColDef<CommandLedgerRow>[]; rowModelType?: string; cacheBlockSize?: number },
-}));
+type GridApiStub = {
+  ensureIndexVisible: (index: number, position?: string) => void;
+  getColumnState: () => { colId: string; sort?: "asc" | "desc" | null }[];
+  getVerticalPixelRange: () => { top: number; bottom: number };
+  redrawRows: () => void;
+  refreshInfiniteCache: () => void;
+};
+type GridProps = {
+  columnDefs?: ColDef<CommandLedgerRow>[];
+  rowModelType?: string;
+  cacheBlockSize?: number;
+  onGridReady?: (event: { api: GridApiStub }) => void;
+  onSortChanged?: (event: { api: GridApiStub }) => void;
+};
+
+const grid = vi.hoisted(() => ({ props: {} as GridProps }));
 
 vi.mock("ag-grid-react", () => ({
-  AgGridReact: (props: { columnDefs: ColDef<CommandLedgerRow>[]; rowModelType: string; cacheBlockSize: number }) => {
+  AgGridReact: (props: GridProps) => {
     grid.props = props;
     return <div>grid</div>;
   },
@@ -85,4 +99,43 @@ it("starts in the sort the tab hands it, so a rebuilt grid keeps the operator's 
 it("puts the most urgent runs first on the first Status header click", () => {
   const status = renderGrid().find((column) => column.colId === "status");
   expect(status?.sortingOrder?.[0]).toBe("desc");
+});
+
+it("returns to the first row when the filters or the sort change", () => {
+  const props = {
+    engagementKey: "acme-web",
+    refreshToken: 0,
+    selectedId: null,
+    onRowOpen: () => {},
+    onWindow: () => {},
+    onError: () => {},
+    onSortChange: () => {},
+    onTargetClick: () => {},
+  };
+  const view = render(<CommandsGrid {...props} filters={DEFAULT_COMMAND_FILTERS} filtersKey="[]" />);
+  const api = {
+    ensureIndexVisible: vi.fn(),
+    getColumnState: () => [{ colId: "duration", sort: "desc" as const }],
+    getVerticalPixelRange: () => ({ top: 0, bottom: 0 }),
+    redrawRows: vi.fn(),
+    refreshInfiniteCache: vi.fn(),
+  };
+  act(() => grid.props.onGridReady?.({ api }));
+  // The grid opens at the top by itself.
+  expect(api.ensureIndexVisible).not.toHaveBeenCalled();
+  view.rerender(<CommandsGrid {...props} filters={{ ...DEFAULT_COMMAND_FILTERS, status: ["failed"] }} filtersKey='["failed"]' />);
+  expect(api.ensureIndexVisible).toHaveBeenLastCalledWith(0, "top");
+  api.ensureIndexVisible.mockClear();
+  act(() => grid.props.onSortChanged?.({ api }));
+  expect(api.ensureIndexVisible).toHaveBeenLastCalledWith(0, "top");
+});
+
+it("keeps the time of day on runs too old for a relative age", () => {
+  const time = renderGrid().find((column) => column.colId === "time");
+  const Cell = time?.cellRenderer as ComponentType<Partial<ICellRendererParams<CommandLedgerRow>>>;
+  const old = { id: 1, created_at: "2026-01-05 14:07:09", started_at: null } as CommandLedgerRow;
+  const recent = { id: 2, created_at: new Date(Date.now() - 2 * 3_600_000).toISOString(), started_at: null } as CommandLedgerRow;
+  const cells = render(<><span data-testid="old"><Cell data={old} /></span><span data-testid="recent"><Cell data={recent} /></span></>);
+  expect(cells.getByTestId("old").textContent).toBe("2026-01-05 14:07 UTC");
+  expect(cells.getByTestId("recent").textContent).toBe("2h ago");
 });

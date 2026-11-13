@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import type { AssessmentSummary } from "../lib/api";
@@ -10,6 +10,7 @@ import {
   fetchCoverageItem,
   fetchCoveragePosition,
   fetchCoverageReasons,
+  fetchServiceCoverage,
   type CoverageFacets,
   type CoverageFilters,
   type CoverageItemDetail,
@@ -25,6 +26,7 @@ vi.mock("../lib/coverageApi", async (importOriginal) => ({
   fetchCoverageItem: vi.fn(),
   fetchCoveragePage: vi.fn(),
   fetchCoveragePosition: vi.fn(),
+  fetchServiceCoverage: vi.fn(),
 }));
 
 const BLOCKED_REASON = "Needs a second tenant account; only one Acme tenant is provisioned.";
@@ -251,6 +253,17 @@ function renderTab(props: Partial<Parameters<typeof CoverageTab>[0]> = {}) {
   return render(<CoverageTab engagementKey="demo" summary={null} {...props} />, { wrapper: ToastProvider });
 }
 
+/** What the address says after `?`. */
+const addressParams = () => Object.fromEntries(new URLSearchParams(window.location.hash.split("?")[1] ?? ""));
+
+/** Browser Back / Forward (or a pasted link) landing on `hash` while the tab is shown. */
+function visit(hash: string) {
+  act(() => {
+    window.history.replaceState(null, "", hash);
+    window.dispatchEvent(new HashChangeEvent("hashchange"));
+  });
+}
+
 describe("CoverageTab", () => {
   it("states engagement-wide totals from the server, not from loaded rows", async () => {
     renderTab();
@@ -360,7 +373,7 @@ describe("CoverageTab", () => {
 
     fireEvent.click(within(record).getByRole("button", { name: "Back to results" }));
     expect(screen.queryByRole("region", { name: "Coverage item record" })).toBeNull();
-    expect(window.location.hash).toBe("#/engagements/demo?tab=coverage");
+    expect(window.location.hash).toBe("#/engagements/demo?tab=coverage&view=items");
     expect(screen.getByRole("region", { name: "All coverage items" })).toBeTruthy();
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "open row 41" })));
   });
@@ -454,6 +467,63 @@ describe("CoverageTab", () => {
     await waitFor(() => expect(document.activeElement?.closest("[data-record-key]")?.getAttribute("data-record-key")).toBe("42"));
   });
 
+  it("names the view and a drill-down in the address, and history walks between them", async () => {
+    renderTab();
+    const reasonsAddress = window.location.hash;
+    const entries = window.history.length;
+    fireEvent.click(await screen.findByRole("button", { name: /View 930 items/ }));
+    await screen.findByRole("button", { name: "Remove reason filter" });
+    // A drill-down is a step the operator can go Back from.
+    expect(window.history.length).toBe(entries + 1);
+    expect(addressParams()).toEqual({ tab: "coverage", view: "items", status: "blocked", reason: BLOCKED_REASON });
+    const drillAddress = window.location.hash;
+
+    visit(reasonsAddress);
+    expect(screen.getByRole("button", { name: /^Open work by reason/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(await screen.findByRole("button", { name: /View 930 items/ })).toBeTruthy();
+
+    visit(drillAddress);
+    expect(screen.getByRole("button", { name: /^All items/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(gridFilters.at(-1)).toEqual(expect.objectContaining({ status: ["blocked"], reason: BLOCKED_REASON }));
+
+    // The plain list has no drill-down.
+    visit("#/engagements/demo?tab=coverage&view=items");
+    expect(gridFilters.at(-1)).toEqual(expect.objectContaining({ status: [], reason: null, reason_missing: false }));
+  });
+
+  it("adds a history entry for a view switch and none for narrowing the list", async () => {
+    renderTab();
+    const entries = window.history.length;
+    fireEvent.click(await screen.findByRole("button", { name: /^All items/ }));
+    expect(window.history.length).toBe(entries + 1);
+    expect(addressParams()).toEqual({ tab: "coverage", view: "items" });
+    fireEvent.click(within(await screen.findByRole("group", { name: "Status" })).getByRole("button", { name: /^Blocked/ }));
+    expect(window.history.length).toBe(entries + 1);
+    expect(addressParams()).toEqual({ tab: "coverage", view: "items", status: "blocked" });
+    fireEvent.click(screen.getByRole("button", { name: /^Open work by reason/ }));
+    expect(window.history.length).toBe(entries + 2);
+    expect(addressParams()).toEqual({ tab: "coverage" });
+  });
+
+  it("opens the view and drill-down a link names, over the view kept from the last visit", async () => {
+    window.sessionStorage.setItem("coverage.view.demo", JSON.stringify({ view: "reasons", filters: { status: ["deferred"], host: ["api.acme.example"] } }));
+    window.history.replaceState(
+      null,
+      "",
+      `#/engagements/demo?tab=coverage&view=items&status=pending&no_reason=1&created_from=${encodeURIComponent("gf bucket 'idor' matched at ingest")}`,
+    );
+    renderTab();
+    await screen.findByRole("button", { name: "open row 41" });
+    expect(gridFilters.at(-1)).toEqual(expect.objectContaining({
+      status: ["pending"],
+      reason: null,
+      reason_missing: true,
+      created_from: "gf bucket 'idor' matched at ingest",
+      // Filters the address does not carry stay as the operator left them.
+      host: ["api.acme.example"],
+    }));
+  });
+
   it("says once that an empty engagement has no coverage items yet", async () => {
     vi.mocked(fetchCoverageFacets).mockResolvedValue({
       total: 0,
@@ -505,9 +575,13 @@ describe("CoverageTab", () => {
     gridFilters.length = 0;
     gridSorts.length = 0;
 
+    // The workspace's tab link names only the tab.
+    window.history.replaceState(null, "", "#/engagements/demo?tab=coverage");
     renderTab();
     expect(screen.getByRole("button", { name: /^All items/ }).getAttribute("aria-pressed")).toBe("true");
     await screen.findByRole("button", { name: "open row 41" });
+    // The address then names the view shown, so it can be copied or reloaded.
+    expect(addressParams()).toEqual({ tab: "coverage", view: "items", status: "blocked" });
     expect(gridFilters.at(-1)).toEqual(expect.objectContaining({ status: ["blocked"], q: "orders" }));
     expect(gridSorts.at(-1)).toEqual({ sort: "host", dir: "asc" });
     expect((screen.getByRole("searchbox", { name: "Search coverage items" }) as HTMLInputElement).value).toBe("orders");
@@ -542,5 +616,40 @@ describe("CoverageTab", () => {
     renderTab({ summary });
     await screen.findByRole("list", { name: "Status legend" });
     expect(screen.getByText("api.acme.example:443")).toBeTruthy();
+  });
+
+  it("says when the service-level list is cut short and shows every service on request", async () => {
+    const gap = { endpoint: "api.acme.example:443", service: "https", coverage_status: "blocked", updated_at: "2026-09-21 10:00:00" };
+    const summary = {
+      service_coverage_gaps: [gap],
+      list_truncation: { service_coverage_gaps: { limit: 1, truncated: true, full_route: "services" } },
+    } as unknown as AssessmentSummary;
+    vi.mocked(fetchServiceCoverage).mockResolvedValue([
+      gap,
+      { endpoint: "mail.acme.example:25", service: "smtp", coverage_status: "pending", updated_at: "2026-09-20 10:00:00" },
+      { endpoint: "vpn.acme.example:443", service: "https", coverage_status: "covered", updated_at: "2026-09-19 10:00:00" },
+    ]);
+    renderTab({ summary });
+    await screen.findByRole("list", { name: "Status legend" });
+    const services = screen.getByRole("list", { name: "Service-level status" });
+    expect(within(services).getAllByRole("listitem")).toHaveLength(1);
+    expect(screen.queryByText("mail.acme.example:25")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: /every service/i }));
+    expect(fetchServiceCoverage).toHaveBeenCalledWith("demo", "services");
+    expect(await screen.findByText("mail.acme.example:25")).toBeTruthy();
+    expect(within(services).getAllByRole("listitem")).toHaveLength(3);
+    expect(screen.queryByRole("button", { name: /every service/i })).toBeNull();
+  });
+
+  it("offers nothing more when the service-level list is complete", async () => {
+    const summary = {
+      service_coverage_gaps: [{ endpoint: "api.acme.example:443", service: "https", coverage_status: "blocked", updated_at: "2026-09-21 10:00:00" }],
+      list_truncation: { service_coverage_gaps: { limit: 10, truncated: false, full_route: "services" } },
+    } as unknown as AssessmentSummary;
+    renderTab({ summary });
+    await screen.findByRole("list", { name: "Status legend" });
+    expect(screen.getByRole("list", { name: "Service-level status" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /every service/i })).toBeNull();
   });
 });

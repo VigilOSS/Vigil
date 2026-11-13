@@ -44,7 +44,7 @@ import { formatDuration, parseServerTime } from "../lib/serverTime";
 import { engagementHref } from "../lib/workspaceRoutes";
 import { JsonView } from "./JsonView";
 import { CardSkeleton } from "./Skeletons";
-import { TimeStamp } from "./formatting";
+import { CopyInline, TimeStamp } from "./formatting";
 import { RecordBody, RecordCopyLinkButton, RecordHeader, RecordTabs } from "./record/RecordView";
 import { RunHealthChip } from "./RunHealthChip";
 import { EmptyState, SegmentedControl, StatusPill, humanizeStatus, statusLabel, statusTone } from "./ui";
@@ -277,6 +277,10 @@ function ReceiptCard({
     ? receipt.command as Record<string, unknown>
     : null;
   const originRun = typeof receipt.origin_run_id === "number" ? receipt.origin_run_id : null;
+  const artifactPath = scalarText(receipt.artifact_relative_path);
+  // Files opens the engagement's root documents; an artifact in a
+  // subdirectory has no view there.
+  const artifactInFiles = artifactPath !== "" && !artifactPath.includes("/");
   const integrity = [
     ["Evidence SHA-256", receipt.evidence_sha256],
     ["Command hash", command?.command_hash],
@@ -321,11 +325,18 @@ function ReceiptCard({
           <a href={engagementHref(engagementKey, { tab: "commands", command: scalarText(command.id) || undefined })}>Open command</a>
         </div>
       )}
-      {scalarText(receipt.artifact_relative_path) && (
+      {artifactPath && (
         <div className="run-receipt-source">
           <span>Artifact</span>
-          <code>{scalarText(receipt.artifact_relative_path)}</code>
-          <a href={engagementHref(engagementKey, { tab: "artifacts" })}>Open Files</a>
+          <code>{artifactPath}</code>
+          {artifactInFiles ? (
+            <a href={engagementHref(engagementKey, { tab: "artifacts", file: artifactPath })}>Open in Files</a>
+          ) : (
+            <>
+              <CopyInline text={artifactPath} ariaLabel="Copy artifact path">Copy path</CopyInline>
+              <span className="run-cell-muted">Path in the engagement directory; Files opens root documents only.</span>
+            </>
+          )}
         </div>
       )}
       {receipt.source_read_id != null && (
@@ -346,6 +357,13 @@ function ReceiptCard({
 }
 
 const UNHEALTHY_RECEIPT_STATES = ["stale", "missing", "tombstoned"] as const;
+
+// What each evidence view lists, for its empty state.
+const EVIDENCE_NOUNS: Partial<Record<RunAuditSection, string>> = {
+  "proof-receipts": "evidence",
+  commands: "command evidence",
+  "observed-events": "HTTP, browser & OOB evidence",
+};
 
 /**
  * Names the receipts whose evidence is no longer intact (the run's
@@ -702,7 +720,10 @@ export function RunDetail({
   const targetIdentity = Object.entries(run.target_identity ?? {});
   const task = run.producer_dispatch_task ?? "";
   const purposeIsScan = run.run_purpose === "scan";
-  const receiptCount = run.counts?.proof_receipts ?? (evidence.loaded ? evidence.total : undefined);
+  const allEvidence = evidenceSection === "proof-receipts";
+  const receiptCount = run.counts?.proof_receipts ?? (allEvidence && evidence.loaded ? evidence.total : undefined);
+  // The Evidence section counts the kind on screen; the section tab counts every receipt.
+  const shownEvidenceCount = evidence.loaded ? evidence.total : allEvidence ? receiptCount : undefined;
   const evidenceMix = evidenceMixLabel(run.evidence_kind_counts);
   const auditLabel = AUDIT_RECORD_SECTIONS.find((entry) => entry.key === auditSection)?.label ?? humanizeStatus(auditSection);
 
@@ -793,7 +814,7 @@ export function RunDetail({
         )}
 
         {tab === "evidence" && (
-          <RecordSection title="Evidence receipts" count={receiptCount}>
+          <RecordSection title="Evidence receipts" count={shownEvidenceCount}>
             <SegmentedControl<RunAuditSection>
               label="Evidence kind"
               className="run-section-switch"
@@ -805,7 +826,7 @@ export function RunDetail({
             {evidenceMissing && (
               <p className="error-text" role="alert">Requested record #{evidenceFocus} is not present in this run's recorded ledger.</p>
             )}
-            <StreamStatus stream={evidence} noun="evidence" />
+            <StreamStatus stream={evidence} noun={EVIDENCE_NOUNS[evidenceSection] ?? "evidence"} />
             <div className={`run-receipt-list ${evidence.loading && evidence.loaded ? "is-refreshing" : ""}`}>
               {evidence.items.map((receipt, index) => (
                 <ReceiptCard

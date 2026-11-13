@@ -921,6 +921,7 @@ function EngagementWorkspace({
             <OverviewTab
               engagementKey={engagementKey}
               assessmentSummary={displaySummary}
+              summaryLoadError={refreshErrors.summary ?? null}
               findings={displayFindings}
               findingsLoading={!findingRowsLoaded && findingRowsError === null}
               findingsLoadError={findingRowsError}
@@ -937,7 +938,7 @@ function EngagementWorkspace({
           {activeTab === "findings" && (
             <FindingsTab
               engagementKey={engagementKey}
-              findings={ledgerRows && ledgerRows.length > 0 ? ledgerRows : (displaySummary?.top_findings ?? [])}
+              findings={ledgerRows ?? []}
               ledgerLoading={ledgerRows === null && findingRowsError === null}
               ledgerError={findingRowsError}
               readyToExport={submissionsReady}
@@ -979,6 +980,7 @@ function EngagementWorkspace({
               initialSubmissionSlug={routed("submissions", initialSubmissionSlug)}
               initialDrawerTab={routed("submissions", initialDrawerTab)}
               onToDoCount={setSubmissionsToDo}
+              onReadyCount={setSubmissionsReady}
             />
           )}
 

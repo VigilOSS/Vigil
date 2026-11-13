@@ -1,7 +1,8 @@
 // Record navigation sources for RecordView's "N of M" and Previous / Next.
 //
 // `listNavigation` walks a list the tab already holds in display order (after
-// its filters and the grid's sort). `useRecordPosition` asks the server where
+// its filters and the grid's sort); `useListNavigation` also keeps the open
+// record's neighbours when it leaves that list. `useRecordPosition` asks the server where
 // the open record sits when the list is paged (only a window of rows is ever
 // loaded), so stepping crosses page and block boundaries instead of stopping
 // at the edge of what happens to be loaded. `useWindowedNavigation` walks a
@@ -27,6 +28,28 @@ export function listNavigation<K>(order: readonly K[], current: K | null | undef
   };
 }
 
+/**
+ * listNavigation for a list whose records can leave it while one is open (a
+ * status change under a status scope or filter). The open record then reads
+ * as outside the results, and Previous / Next open the neighbours it had in
+ * the order last walked with it that are still in the results.
+ */
+export function useListNavigation<K>(order: readonly K[], current: K | null | undefined, open: (key: K) => void): RecordNavigation {
+  const walked = useRef<readonly K[]>([]);
+  if (current == null) walked.current = [];
+  else if (order.includes(current)) walked.current = order;
+  const navigation = listNavigation(order, current, open);
+  if (current == null || navigation.index !== null || !walked.current.includes(current)) return navigation;
+  const listed = new Set(order);
+  const reachable = walked.current.filter((key) => key === current || listed.has(key));
+  const index = reachable.indexOf(current);
+  return {
+    ...navigation,
+    onPrevious: index > 0 ? () => open(reachable[index - 1]) : undefined,
+    onNext: index < reachable.length - 1 ? () => open(reachable[index + 1]) : undefined,
+  };
+}
+
 /** A paged list's answer to "where is this record, and what is beside it". */
 export type RecordPosition<T> = {
   /** 0-based; null when the record does not match the current filters. */
@@ -36,7 +59,8 @@ export type RecordPosition<T> = {
   next: T | null;
 };
 
-type Settled<T> = { key: string; identity: string; position: RecordPosition<T> };
+/** An answer for `key`, and the stay in the record view (open until back in the results) it was given in. */
+type Settled<T> = { key: string; identity: string; stay: number; position: RecordPosition<T> };
 
 /**
  * Server-located navigation for the open record `key`. `identity` names
@@ -48,7 +72,9 @@ type Settled<T> = { key: string; identity: string; position: RecordPosition<T> }
  * answer for the record stays on screen and its neighbours stay steppable.
  * Opening another record supersedes the lookup for the old one. Stepping to a
  * neighbour shows its expected position immediately and settles when the
- * server answers.
+ * server answers. A record that a re-locate finds outside the results while
+ * it stays open (its status changed under a status filter) keeps the
+ * neighbours it last had, so Previous / Next still step from it.
  */
 export function useRecordPosition<T>({
   key,
@@ -69,6 +95,11 @@ export function useRecordPosition<T>({
   latest.current = { key, identity, load };
   const openRef = useRef(open);
   openRef.current = open;
+  // Counts stays in the record view: a record opened from the results starts one.
+  const stay = useRef({ count: 0, open: false });
+  if ((key !== null) !== stay.current.open) {
+    stay.current = { count: stay.current.count + (key !== null ? 1 : 0), open: key !== null };
+  }
   const mounted = useRef(true);
   useEffect(() => {
     mounted.current = true;
@@ -85,7 +116,15 @@ export function useRecordPosition<T>({
     try {
       const position = await requestLoad();
       if (!mounted.current || latest.current.key !== requestKey) return;
-      setSettled({ key: requestKey, identity: requestIdentity, position });
+      const requestStay = stay.current.count;
+      setSettled((last) => ({
+        key: requestKey,
+        identity: requestIdentity,
+        stay: requestStay,
+        position: position.index === null && last?.key === requestKey && last.stay === requestStay
+          ? { ...position, previous: last.position.previous, next: last.position.next }
+          : position,
+      }));
       setFailure(null);
     } catch (error) {
       if (!mounted.current || latest.current.key !== requestKey) return;

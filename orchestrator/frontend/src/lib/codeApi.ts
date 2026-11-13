@@ -97,6 +97,69 @@ export type CodeAnalysisResultPosition = RecordPosition<CodeAnalysisResult>;
 
 export type CodeQueueLane = Exclude<CodeQueueStatus, "done">;
 
+/**
+ * One lead a review left (`code_analysis_triggers`). `origin` says why:
+ * `cross_file` — data flows into another file, so that file gets reviewed with
+ * this context; `depth_floor` — a critical or high closeout left `vuln_class`
+ * below its tier's effort floor, so that family is owed a deeper pass.
+ */
+export type CodeTrigger = {
+  id: number;
+  status: string;
+  origin: string;
+  vuln_class: string;
+  reason: string;
+  repo_id: number;
+  /** The file to review, as the lead named it; `resolved_target_file_path` when it matched a snapshot file. */
+  target_file_path: string;
+  resolved_target_file_path: string | null;
+  /** The file whose review left the lead. */
+  source_file_path: string | null;
+  source_queue_item_id: number | null;
+  /** The review job that followed it, once one did. */
+  resolved_queue_item_id: number | null;
+  /** Why it was settled without another review. */
+  resolution_note: string;
+  created_at: string;
+  updated_at: string;
+};
+
+/** One row of the paged code-file listing (`GET code/files`). */
+export type CodeFileRow = {
+  id: number;
+  repo_id: number;
+  file_path: string;
+  language: string | null;
+  loc: number;
+  classification: string;
+  /** The architect's free-text role for the file. */
+  role: string;
+  analysis_status: string;
+  slot_types: string[];
+  context_tags: string[];
+  /** False when the classification recorded no tags at all (not "none apply"). */
+  context_tags_recorded: boolean;
+};
+
+export type CodeFilePage = {
+  total: number;
+  offset: number;
+  count: number;
+  has_more: boolean;
+  items: CodeFileRow[];
+};
+
+export type CodeFileQuery = {
+  repo_id?: number;
+  classification?: string;
+  search?: string;
+  context_tags_recorded?: boolean;
+  /** Files whose recorded context tags include this tag. */
+  context_tag?: string;
+  limit: number;
+  offset: number;
+};
+
 function base(engagementKey: string) {
   return `/engagements/${encodeURIComponent(engagementKey)}/assessment/code`;
 }
@@ -134,6 +197,38 @@ export function getCodeAnalysisResultPosition(
   query: Omit<CodeAnalysisResultQuery, "limit" | "offset">,
 ) {
   return request<CodeAnalysisResultPosition>(`${base(engagementKey)}/analysis-results/${resultId}/position${resultParams(query)}`);
+}
+
+/** One page of the current leads in one status, most recently updated first (`GET code/triggers`). */
+export type CodeTriggerPage = {
+  total: number;
+  offset: number;
+  count: number;
+  has_more: boolean;
+  items: CodeTrigger[];
+  /** Every lead in the status by kind, whatever `origin` the page selected. */
+  by_origin: { cross_file: number; depth_floor: number };
+};
+
+export function listCodeTriggers(
+  engagementKey: string,
+  status: string,
+  page: { limit: number; offset: number; origin?: "cross_file" | "depth_floor" },
+) {
+  const params = new URLSearchParams({ status, limit: String(page.limit), offset: String(page.offset) });
+  if (page.origin) params.set("origin", page.origin);
+  return request<CodeTriggerPage>(`${base(engagementKey)}/triggers?${params.toString()}`);
+}
+
+/** One page of the code files, highest review priority first. */
+export function listCodeFiles(engagementKey: string, query: CodeFileQuery) {
+  const params = new URLSearchParams({ limit: String(query.limit), offset: String(query.offset) });
+  if (query.repo_id != null) params.set("repo_id", String(query.repo_id));
+  if (query.classification) params.set("classification", query.classification);
+  if (query.search) params.set("search", query.search);
+  if (query.context_tags_recorded != null) params.set("context_tags_recorded", String(query.context_tags_recorded));
+  if (query.context_tag) params.set("context_tag", query.context_tag);
+  return request<CodeFilePage>(`${base(engagementKey)}/files?${params.toString()}`);
 }
 
 /**

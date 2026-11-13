@@ -40,6 +40,15 @@ export interface ReportEngagement {
 // disagreed with the body of their own report, and a Workflow chart with a
 // literal `false positive` row on it.
 //
+// The two chain severities are derived the same way. `chain_proven_severity` is
+// the worst author-stated severity among the chains this report proves — at
+// least one step, and every step a finding this report delivers verified (each
+// such chain carries `chain_proven: true`). `chain_stated_severity` is the worst
+// severity any chain's author stated, proven or not, so the claim is shown beside
+// what the delivered findings carry. The first is null when no chain qualifies,
+// the second when the report carries no chain; neither changes any finding's own
+// severity.
+//
 // The remaining three describe the engagement rather than its triage state, and
 // are copied verbatim.
 export interface ReportSummary {
@@ -47,6 +56,8 @@ export interface ReportSummary {
   finding_severities?: Record<string, number>;
   finding_workflow_statuses?: Record<string, number>;
   finding_verification_statuses?: Record<string, number>;
+  chain_proven_severity?: string | null;
+  chain_stated_severity?: string | null;
   attack_chain_count?: number;
   open_surface_count?: number;
   credential_count?: number;
@@ -138,12 +149,18 @@ export interface ReportFindingGroups {
   finding_count: number;
 }
 
-// A row from list_attack_chains() (assessment_attack_chains table).
+// A row from list_attack_chains() (assessment_attack_chains table), plus one
+// field derived at the delivery boundary.
 export interface ReportAttackChain {
   chain_key?: string;
   title?: string;
   status?: string;
+  // What the chain's author stated. Never recomputed from the legs.
   severity?: string;
+  // Derived, not stored: true when the chain has at least one `step` link and
+  // every step is a finding this report delivers with a verified status. Only a
+  // proven chain counts toward ReportSummary.chain_proven_severity.
+  chain_proven?: boolean;
   narrative?: string;
   // `created_at` is not here: the chain header shows when the path was last
   // established, and when a row was first inserted is engagement chronology the

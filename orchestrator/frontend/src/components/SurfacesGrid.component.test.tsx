@@ -20,12 +20,19 @@ afterEach(cleanup);
 
 const surface = (id: number, updated_at: string, status = "discovered") => ({ id, updated_at, status }) as AssessmentSurface;
 
+function columns(initialSort?: { colId: string; sort: "asc" | "desc" } | null): ColDef<AssessmentSurface>[] {
+  render(<SurfacesGrid rows={[]} linkCounts={new Map()} selectedId={null} initialSort={initialSort} onRowOpen={() => {}} />);
+  return grid.props.columnDefs ?? [];
+}
+
 function column(colId: string): ColDef<AssessmentSurface> {
-  render(<SurfacesGrid rows={[]} linkCounts={new Map()} selectedId={null} onRowOpen={() => {}} />);
-  const found = (grid.props.columnDefs ?? []).find((definition) => definition.colId === colId);
+  const found = columns().find((definition) => definition.colId === colId);
   if (!found) throw new Error(`no ${colId} column`);
   return found;
 }
+
+const startSorts = (definitions: ColDef<AssessmentSurface>[]) =>
+  definitions.filter((definition) => definition.initialSort).map((definition) => [definition.colId, definition.initialSort]);
 
 // Sorts the way ag-grid does: the comparator gets each row's value and node,
 // and a descending sort negates its result.
@@ -58,5 +65,22 @@ describe("SurfacesGrid Status column", () => {
     expect(status.sortingOrder?.[0]).toBe("desc");
     expect(sortedBy(status, rows, "desc")).toEqual([3, 4, 1, 2]);
     expect(sortedBy(status, rows, "asc")).toEqual([2, 1, 4, 3]);
+  });
+});
+
+describe("SurfacesGrid sort", () => {
+  it("starts in the sort the tab hands it, on exactly one column", () => {
+    expect(startSorts(columns({ colId: "target", sort: "asc" }))).toEqual([["target", "asc"]]);
+    cleanup();
+    expect(startSorts(columns())).toEqual([["updated", "desc"]]);
+    cleanup();
+    // A sort the grid cannot show (a column it does not sort) falls back to the default.
+    expect(startSorts(columns({ colId: "findings", sort: "asc" }))).toEqual([["updated", "desc"]]);
+  });
+
+  it("always shows some order: a header click flips the direction and never clears the sort", () => {
+    for (const definition of columns().filter((entry) => entry.sortable !== false)) {
+      expect([...(definition.sortingOrder ?? [null])].sort(), definition.colId).toEqual(["asc", "desc"]);
+    }
   });
 });

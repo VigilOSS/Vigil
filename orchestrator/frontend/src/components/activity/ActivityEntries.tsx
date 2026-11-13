@@ -102,7 +102,11 @@ export function EntityChips({ engagementKey, entities, limit = ENTITY_CHIP_LIMIT
           </span>
         );
       })}
-      {entities.length > shown.length && <span className="activity-entity-more">+{entities.length - shown.length}</span>}
+      {entities.length > shown.length && (
+        <span className="activity-entity-more" title={`Not shown here: ${entities.slice(shown.length).map((entity) => entity.label).join(", ")}`}>
+          +{entities.length - shown.length}
+        </span>
+      )}
     </span>
   );
 }

@@ -4,6 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { listActivityFeed, type ActivityCategory, type ActivityFeedPage, type ActivityItem } from "../lib/activityApi";
+import { ApiError } from "../lib/api";
 import { ActivityTab } from "./ActivityTab";
 
 vi.mock("../lib/activityApi", () => ({ listActivityFeed: vi.fn() }));
@@ -280,6 +281,38 @@ describe("ActivityTab", () => {
     expect(listActivityFeed).toHaveBeenCalledWith("acme", expect.objectContaining({ q: "acme", limit: 100 }));
   });
 
+  it("returns to the scroll position the reader left, once the entries are back on screen", async () => {
+    // A scroll box cannot scroll past its content: 100px per entry on screen.
+    const scrolled = new WeakMap<Element, number>();
+    const original = Object.getOwnPropertyDescriptor(Element.prototype, "scrollTop")!;
+    Object.defineProperty(Element.prototype, "scrollTop", {
+      configurable: true,
+      get() { return scrolled.get(this) ?? 0; },
+      set(value: number) { scrolled.set(this, Math.min(value, this.querySelectorAll(".activity-entry").length * 100)); },
+    });
+    try {
+      const rows = [row(5, "2026-10-20T10:05:00Z"), row(4, "2026-10-20T10:04:00Z"), row(3, "2026-10-20T10:03:00Z")];
+      vi.mocked(listActivityFeed).mockResolvedValue(page(rows));
+      const first = render(<ActivityTab engagementKey="acme" />);
+      await screen.findByText("Note 5 about the Acme portal");
+      const list = screen.getByRole("region", { name: "Activity entries" });
+      list.scrollTop = 250;
+      fireEvent.scroll(list);
+      first.unmount();
+
+      // The position comes back with the entries, not on a later timer that
+      // can run before they are on screen.
+      vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+      render(<ActivityTab engagementKey="acme" />);
+      await act(async () => {});
+      expect(screen.getByText("Note 5 about the Acme portal")).toBeTruthy();
+      expect(screen.getByRole("region", { name: "Activity entries" }).scrollTop).toBe(250);
+    } finally {
+      vi.useRealTimers();
+      Object.defineProperty(Element.prototype, "scrollTop", original);
+    }
+  });
+
   it("says why the last selected category stays on instead of ignoring the click", async () => {
     vi.mocked(listActivityFeed).mockResolvedValue(page([row(1, "2026-10-20T10:00:00Z")]));
     render(<ActivityTab engagementKey="acme" initialCategories={["notes"]} />);
@@ -311,6 +344,59 @@ describe("ActivityTab", () => {
     expect(screen.queryByRole("link", { name: /scans\/acme\.txt/ })).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: /Registered note file/ }));
     expect(screen.getByText(reason)).toBeTruthy();
+  });
+
+  it("shows a changed filter's results from their first entry", async () => {
+    vi.mocked(listActivityFeed).mockResolvedValue(page([row(1, "2026-10-20T10:00:00Z")]));
+    render(<ActivityTab engagementKey="acme" />);
+    await screen.findByText("Note 1 about the Acme portal");
+    const list = screen.getByRole("region", { name: "Activity entries" });
+    list.scrollTop = 400;
+    fireEvent.scroll(list);
+
+    fireEvent.click(screen.getByRole("button", { name: /^Agents/ }));
+
+    await waitFor(() => expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ actor: "agent" })));
+    await waitFor(() => expect(list.scrollTop).toBe(0));
+  });
+
+  it("drops categories the feed does not have from a linked selection, and says which", async () => {
+    vi.mocked(listActivityFeed).mockImplementation(async (_key, query = {}) => {
+      if (query.categories?.includes("bogus")) throw new ApiError("unknown activity categories: bogus", 422, null);
+      return page([row(1, "2026-10-20T10:00:00Z")]);
+    });
+    render(<ActivityTab engagementKey="acme" initialCategories={["notes", "bogus"]} />);
+
+    expect(await screen.findByText("Note 1 about the Acme portal")).toBeTruthy();
+    expect(listActivityFeed).toHaveBeenLastCalledWith("acme", expect.objectContaining({ categories: ["notes"] }));
+    expect(screen.getByRole("button", { name: /Notes & other/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getByRole("button", { name: /Findings & chains/ }).getAttribute("aria-pressed")).toBe("false");
+    expect(screen.getByText(/bogus/).closest('[role="status"]')).toBeTruthy();
+    expect(window.location.hash).toBe("#/engagements/acme?tab=activity&cats=notes");
+  });
+
+  it("still offers the category chips when the first read is refused, and bounds the search to what the feed accepts", async () => {
+    const long = "a".repeat(1500);
+    vi.mocked(listActivityFeed).mockImplementation(async (_key, query = {}) => {
+      if ((query.q ?? "").length > 1024) throw new ApiError("query.q: String should have at most 1024 characters", 422, null);
+      return page([row(1, "2026-10-20T10:00:00Z")]);
+    });
+    render(<ActivityTab engagementKey="acme" initialQuery={long} />);
+
+    expect((await screen.findByText(/at most 1024 characters/)).getAttribute("role")).toBe("alert");
+    expect(await screen.findByRole("button", { name: /Notes & other/ })).toBeTruthy();
+    expect((screen.getByRole("searchbox", { name: "Search activity" }) as HTMLInputElement).maxLength).toBe(1024);
+  });
+
+  it("names the linked records a row has no room to show", async () => {
+    const slugs = ["VA-001", "VA-002", "VA-003", "VA-004", "VA-005", "VA-006"];
+    vi.mocked(listActivityFeed).mockResolvedValueOnce(page([
+      row(8, "2026-10-20T10:08:00Z", { entities: slugs.map((slug) => ({ type: "finding", key: slug, label: slug })) }),
+    ]));
+    render(<ActivityTab engagementKey="acme" />);
+    await screen.findByRole("link", { name: "VA-004" });
+    expect(screen.queryByRole("link", { name: "VA-005" })).toBeNull();
+    expect(screen.getByText("+2").getAttribute("title")).toContain("VA-005, VA-006");
   });
 
   it("offers Clear filters when nothing matches, and the plain empty state otherwise", async () => {

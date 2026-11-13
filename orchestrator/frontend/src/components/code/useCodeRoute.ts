@@ -1,7 +1,10 @@
 // The Code view's state lives in the URL (`?tab=code&view=…`), so a section,
-// a focused repository (`repo`) or table (`focus`), the results' scope,
-// filters, search and page, and an open result (`result`, `dtab`) can be
-// deep-linked, and Back/Forward restore them.
+// a focused repository (`repo`) or table (`focus`), the review queue's lead
+// list (`leads`, `kind`), the file list's filters (`risk`, `tags`), the
+// results' scope and filters, and an open result (`result`, `dtab`) can be
+// deep-linked, and Back/Forward restore them. `q` and `page` belong to the
+// list of the section shown: the file list on Files, the leads on Review
+// queue, the results on Results.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -16,16 +19,37 @@ export type CodeResultsScope = "all" | "attention";
 /** A table on the Files view to scroll to and mark: the risk table or the direct-read list. */
 export type CodeFilesFocus = "risk" | "direct";
 
+/**
+ * The file list narrowed by what the classification recorded for context
+ * tags: none at all, or the `client-bundle` tag (the files whose server-only
+ * families are optional).
+ */
+export type CodeFileTags = "unrecorded" | "client-bundle";
+const CODE_FILE_TAGS: readonly CodeFileTags[] = ["unrecorded", "client-bundle"];
+
+/** Why a review left a lead: data flowing into another file, or a family closed below its depth floor. */
+export type CodeLeadKind = "cross_file" | "depth_floor";
+export const CODE_LEAD_KINDS: readonly CodeLeadKind[] = ["cross_file", "depth_floor"];
+
 export type CodeRouteTarget = {
   view: CodeView;
   repo?: number;
   focus?: CodeFilesFocus;
+  /** The review queue's lead list: the lead status shown (`pending` is the default and omitted). */
+  leads?: string;
+  /** The review queue's lead list narrowed to one kind. */
+  kind?: CodeLeadKind;
+  /** The file list narrowed to one risk tier. */
+  risk?: string;
+  /** The file list narrowed by recorded context tags. */
+  tags?: CodeFileTags;
   scope?: CodeResultsScope;
   disposition?: string[];
   confidence?: string[];
   workflow?: string[];
+  /** The shown list's search: results search, or the file list's path filter. */
   q?: string;
-  /** 1-based results page; 1 is omitted from the URL. */
+  /** 1-based page of the shown list (results, files or leads); 1 is omitted from the URL. */
   page?: number;
   /** Open analysis result. */
   result?: number;
@@ -46,6 +70,10 @@ export function codeViewHref(engagementKey: string, target: CodeRouteTarget): st
     view: target.view === "overview" ? undefined : target.view,
     repo: target.repo,
     focus: target.focus,
+    leads: target.leads && target.leads !== "pending" ? target.leads : undefined,
+    kind: target.kind,
+    risk: target.risk,
+    tags: target.tags,
     scope: target.scope === "attention" ? "attention" : undefined,
     disposition: list(target.disposition),
     confidence: list(target.confidence),
@@ -86,10 +114,19 @@ export function useCodeRoute(engagementKey: string) {
   const parsed = useMemo(() => {
     const requested = params.get("view");
     const focus = params.get("focus");
+    const kind = params.get("kind");
     return {
       view: (CODE_VIEWS.includes(requested as CodeView) ? requested : "overview") as CodeView,
       repo: positiveRouteId(params, "repo"),
+      // A `repo` value that is not a repository number names no repository;
+      // the views that read `repo` report it instead of quietly dropping it.
+      repoUnreadable: positiveRouteId(params, "repo") === undefined ? params.get("repo") || null : null,
       focus: focus === "risk" || focus === "direct" ? (focus as CodeFilesFocus) : undefined,
+      // An empty value names no status; the list shows its default one.
+      leads: params.get("leads")?.trim() || undefined,
+      kind: CODE_LEAD_KINDS.includes(kind as CodeLeadKind) ? (kind as CodeLeadKind) : undefined,
+      risk: params.get("risk")?.trim().toLowerCase() || undefined,
+      tags: CODE_FILE_TAGS.find((value) => value === params.get("tags")),
       scope: (params.get("scope") === "attention" ? "attention" : "all") as CodeResultsScope,
       disposition: splitList(params.get("disposition")),
       confidence: splitList(params.get("confidence")),

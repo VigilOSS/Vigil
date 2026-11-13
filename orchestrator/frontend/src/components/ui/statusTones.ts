@@ -235,6 +235,17 @@ const VOCABULARIES = {
     filed: entry("Filed", "success", "The finding records an external submission status."),
     not_candidate: entry("Not eligible", "neutral", "Not confirmed/downgraded or not in a reportable workflow status."),
   },
+  /**
+   * Standing of an independent QC review against what it reviewed: a
+   * submission package (`services/submission_versions.py:_submission_qc_state`)
+   * or the registered report (`state_manager/report_readiness.py:report_qc_state`).
+   */
+  "qc-review": {
+    blocked: entry("Not accepted", "danger", "The latest independent QC verdict does not pass."),
+    stale: entry("Passed, now stale", "warning", "The latest QC verdict passed, but no longer covers the current content."),
+    missing: entry("No verdict recorded", "pending", "No independent QC verdict is recorded."),
+    current: entry("Passed", "success", "The latest independent QC verdict passes and covers the current content."),
+  },
   /** Submission package versions (`db.py` submission version CHECK). */
   "submission-version": {
     failed: entry("Failed", "danger"),

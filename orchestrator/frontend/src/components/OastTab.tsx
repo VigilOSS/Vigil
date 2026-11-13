@@ -76,6 +76,7 @@ import "../styles/oast.css";
 const OastGrid = lazy(() => import("./OastGrid"));
 
 const ATTENTION_RULE = "Probes that received a callback and have no operator verdict yet.";
+const RECORD_TITLE_ID = "oast-record-title";
 
 // ── Protocol colors ───────────────────────────────────────────────────
 // dns/http/https/ftp/ldap/smtp. Drives the colored .oob-proto-badge.
@@ -256,6 +257,8 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
   const [verdictDraft, setVerdictDraft] = useState<VerdictDraft | null>(null);
   const [verdictSaving, setVerdictSaving] = useState(false);
   const [verdictError, setVerdictError] = useState<string | null>(null);
+  // Counts recorded verdicts: each one hands keyboard focus back to the record.
+  const [verdictsRecorded, setVerdictsRecorded] = useState(0);
 
   const searchRef = useRef<HTMLInputElement | null>(null);
   const invokerRef = useRef<HTMLElement | null>(null);
@@ -311,10 +314,16 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
     [],
   );
 
-  // Cache-first read when a probe's record first opens.
+  // Read whenever a probe's record opens. A probe opened before shows the
+  // history it last read while this read replaces it; callbacks that arrived
+  // while its record was closed are never left out.
   const ensureDetail = useCallback(
     (nonce: string) => {
-      if (detailCache.has(nonce) || detailLoading.has(nonce)) return;
+      if (detailLoading.has(nonce)) return;
+      if (detailCache.has(nonce)) {
+        void fetchDetail(nonce, "Failed to refresh callback history");
+        return;
+      }
       setDetailLoading((s) => new Set(s).add(nonce));
       void fetchDetail(nonce, "Failed to load callback history").finally(() => {
         setDetailLoading((s) => {
@@ -388,10 +397,17 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
   const selected = selectedNonce === null ? null : probes.find((probe) => probe.nonce === selectedNonce) ?? null;
   const investigating = selected !== null;
 
+  // The probe the tab itself just opened or stepped to. When the address comes
+  // back naming it, that is the tab's own choice, not a link to widen the list for.
+  const ownProbe = useRef<number | null>(null);
+  const reviewedOpenRef = useRef(reviewedOpen);
+  reviewedOpenRef.current = reviewedOpen;
+
   // From the list: remember the row for the return trip and start on Probe.
   // Stepping between records keeps the open section.
   const openProbe = useCallback((probe: OobProbe, invoker: HTMLElement | null) => {
     invokerRef.current = invoker ?? searchRef.current;
+    ownProbe.current = probe.id;
     setSelectedNonce(probe.nonce);
     setRecordTab("probe");
     writeWorkspaceHash(engagementHref(engagementKey, { tab: "oast", probe: probe.id }));
@@ -399,10 +415,12 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
   const stepToProbe = useCallback((nonce: string) => {
     const probe = probes.find((item) => item.nonce === nonce);
     if (!probe) return;
+    ownProbe.current = probe.id;
     setSelectedNonce(nonce);
     writeWorkspaceHash(engagementHref(engagementKey, { tab: "oast", probe: probe.id, dtab: recordTab === "probe" ? undefined : recordTab }));
   }, [engagementKey, probes, recordTab]);
   const closeProbe = useCallback((mode: "push" | "replace" = "push") => {
+    ownProbe.current = null;
     setSelectedNonce(null);
     writeWorkspaceHash(engagementHref(engagementKey, { tab: "oast" }), mode);
   }, [engagementKey]);
@@ -414,7 +432,8 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
   // The URL owns which probe is open. A link to a probe the list hides (the
   // scope, a status filter or the search excludes it) widens the list so the
   // record has a place in the results, and says so above them. A link to a
-  // probe the ledger does not hold shows no record at all.
+  // probe the ledger does not hold shows no record at all. A probe given a
+  // verdict in this visit is still in the review list, so it widens nothing.
   const listStateRef = useRef({ scope, statusFilters, searchTerm });
   listStateRef.current = { scope, statusFilters, searchTerm };
   const appliedRouteProbe = useRef<number | null>(null);
@@ -427,6 +446,11 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
       return;
     }
     if (appliedRouteProbe.current === initialProbeId) return;
+    if (ownProbe.current === initialProbeId) {
+      ownProbe.current = null;
+      appliedRouteProbe.current = initialProbeId;
+      return;
+    }
     const linked = probes.find((probe) => probe.id === initialProbeId);
     if (!linked) {
       if (loaded) {
@@ -442,7 +466,7 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
     const status = oobStatus(linked);
     const changes: string[] = [];
     let widenedScope = false;
-    if (shownScope === "attention" && !isCallbackToReview(linked)) {
+    if (shownScope === "attention" && !isCallbackToReview(linked) && !reviewedOpenRef.current.has(linked.nonce)) {
       scopeChosen.current = true;
       setScope("all");
       widenedScope = true;
@@ -515,6 +539,7 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
       setProbes((rows) => rows.map((row) => (row.nonce === nonce ? { ...row, status: updated.status, updated_at: updated.updated_at || row.updated_at } : row)));
       setReviewedOpen((current) => new Set(current).add(nonce));
       setVerdictDraft(null);
+      setVerdictsRecorded((count) => count + 1);
       toast(`Verdict recorded: ${statusLabel("oast", verdict)}`, "success");
       void reload();
     } catch (error) {
@@ -523,6 +548,16 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
       setVerdictSaving(false);
     }
   }, [verdictDraft, reload, toast]);
+
+  // A recorded verdict replaces the button that opened its dialog (the probe
+  // now offers the other verdict), so the dialog has nothing to return focus
+  // to: the record heading takes it.
+  useEffect(() => {
+    if (verdictsRecorded === 0) return;
+    const active = document.activeElement;
+    if (active && active !== document.body && active.isConnected) return;
+    document.getElementById(RECORD_TITLE_ID)?.focus({ preventScroll: true });
+  }, [verdictsRecorded]);
 
   // Previous / Next walk the list as shown: current scope and filters, grid
   // sort. Until the grid reports its order (a deep link opens the record
@@ -554,7 +589,7 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
       const tag = (target?.tagName || "").toLowerCase();
       const isTyping = tag === "input" || tag === "textarea" || tag === "select";
       if (document.querySelector('[aria-modal="true"]')) return;
-      if (!isTyping && e.key === "/") {
+      if (!isTyping && e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         if (investigatingRef.current) closeProbe();
         queueMicrotask(() => {
@@ -763,7 +798,7 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
           noun="probe"
           navigation={reviewNavigation}
           onBack={closeProbe}
-          titleId="oast-record-title"
+          titleId={RECORD_TITLE_ID}
           returnFocusRef={invokerRef}
         >
           <OastRecord
@@ -775,7 +810,7 @@ function OastWorkspace({ engagementKey, refreshVersion, initialProbeId, initialD
             tab={recordTab}
             onTabChange={chooseRecordTab}
             onVerdict={(verdict) => startVerdict(selected.nonce, verdict)}
-            titleId="oast-record-title"
+            titleId={RECORD_TITLE_ID}
           />
         </RecordView>
       )}

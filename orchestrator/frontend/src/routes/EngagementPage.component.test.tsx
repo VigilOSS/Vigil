@@ -8,9 +8,9 @@ import * as submissionsApi from "../lib/submissionsApi";
 import { EngagementPage } from "./EngagementPage";
 
 vi.mock("../contexts/ToastContext", () => ({ useToast: () => ({ toast: vi.fn() }) }));
-vi.mock("../components/OverviewTab", () => ({ OverviewTab: ({ findings, findingsLoading, findingsLoadError }: { findings: api.AssessmentFinding[]; findingsLoading?: boolean; findingsLoadError?: string | null }) => <div>{findingsLoading && <span>Finding ledger loading</span>}{findingsLoadError && <span>Finding ledger unavailable: {findingsLoadError}</span>}{findings.map(f => <span key={f.slug}>{f.title}</span>)}</div> }));
+vi.mock("../components/OverviewTab", () => ({ OverviewTab: ({ findings, findingsLoading, findingsLoadError, summaryLoadError }: { findings: api.AssessmentFinding[]; findingsLoading?: boolean; findingsLoadError?: string | null; summaryLoadError?: string | null }) => <div>{summaryLoadError && <span data-testid="overview-summary-failure" title={summaryLoadError} />}{findingsLoading && <span>Finding ledger loading</span>}{findingsLoadError && <span>Finding ledger unavailable: {findingsLoadError}</span>}{findings.map(f => <span key={f.slug}>{f.title}</span>)}</div> }));
 vi.mock("../components/CodeAnalysisTab", () => ({ CodeAnalysisTab: ({ persistedPhase }: { persistedPhase: string }) => <div>Code phase: {persistedPhase}</div> }));
-vi.mock("../components/FindingsTab", () => ({ FindingsTab: ({ renderRuntimeProof }: { renderRuntimeProof?: (finding: { slug: string }) => ReactNode }) => <div>Finding ledger{renderRuntimeProof?.({ slug: "acme-proof" })}</div> }));
+vi.mock("../components/FindingsTab", () => ({ FindingsTab: ({ renderRuntimeProof, findings, fallbackFindings, readyToExport }: { renderRuntimeProof?: (finding: { slug: string }) => ReactNode; findings: unknown[]; fallbackFindings: unknown[]; readyToExport?: number | null }) => <div>Finding ledger{renderRuntimeProof?.({ slug: "acme-proof" })}<span>Ledger rows {findings.length}, summary preview rows {fallbackFindings.length}</span>{readyToExport != null && <span>Ready to export {readyToExport}</span>}</div> }));
 vi.mock("../components/FindingRuntimeProof", () => ({ FindingRuntimeProof: ({ slug, refreshVersion }: { slug: string; refreshVersion?: number }) => <div>Runtime proof {slug} refresh {refreshVersion}</div> }));
 vi.mock("../components/RunsTab", async () => {
   const { useEffect } = await vi.importActual<typeof import("react")>("react");
@@ -35,8 +35,9 @@ vi.mock("../components/OastTab", async () => {
 });
 vi.mock("../components/SubmissionsTab", async () => {
   const { useEffect } = await vi.importActual<typeof import("react")>("react");
-  return { SubmissionsTab: ({ onToDoCount }: { onToDoCount?: (count: number) => void }) => {
+  return { SubmissionsTab: ({ onToDoCount, onReadyCount }: { onToDoCount?: (count: number) => void; onReadyCount?: (count: number) => void }) => {
     useEffect(() => { onToDoCount?.(8); }, [onToDoCount]);
+    useEffect(() => { onReadyCount?.(5); }, [onReadyCount]);
     return <div>Submission desk</div>;
   } };
 });
@@ -204,6 +205,27 @@ it("labels a loaded finding fallback without implying a filtered current count",
   vi.mocked(api.getAssessmentSummary).mockRejectedValue(new Error("summary unavailable"));
   render(<EngagementPage engagementKey="one" onBack={vi.fn()} />);
   expect(await screen.findByRole("tab", { name: /^Findings 1 finding loaded/ })).toBeTruthy();
+});
+
+it("hands Findings no ledger rows while the ledger is still loading, only the summary's preview as a preview", async () => {
+  vi.mocked(api.getAssessmentSummary).mockResolvedValue({ finding_count: 40, top_findings: [{ slug: "acme-1", title: "Acme claim one" }, { slug: "acme-2", title: "Acme claim two" }], attack_chains: [] } as unknown as api.AssessmentSummary);
+  vi.mocked(api.listAssessmentFindings).mockReturnValue(new Promise(() => {}));
+  render(<EngagementPage engagementKey="one" initialTab="findings" onBack={vi.fn()} />);
+  // The preview is not the ledger: Findings can tell the two apart and label what it shows.
+  expect(await screen.findByText("Ledger rows 0, summary preview rows 2")).toBeTruthy();
+});
+
+it("tells Overview when the engagement summary could not be read", async () => {
+  vi.mocked(api.getAssessmentSummary).mockRejectedValue(new Error("summary unavailable"));
+  render(<EngagementPage engagementKey="one" onBack={vi.fn()} />);
+  expect((await screen.findByTestId("overview-summary-failure")).getAttribute("title")).toBe("summary unavailable");
+});
+
+it("shows Findings the ready-to-export count the Submissions desk last read", async () => {
+  render(<EngagementPage engagementKey="one" initialTab="submissions" onBack={vi.fn()} />);
+  await screen.findByText("Submission desk");
+  fireEvent.click(screen.getByRole("tab", { name: /^Findings/ }));
+  expect(await screen.findByText("Ready to export 5")).toBeTruthy();
 });
 
 it("keeps the overview ledger loading state separate from the available summary", async () => {

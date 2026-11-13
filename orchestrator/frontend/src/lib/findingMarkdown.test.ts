@@ -65,6 +65,20 @@ test("a backtick run in a captured body cannot escape its fence", () => {
   assert.ok(!outside.some((l) => l.startsWith("## Not a finding")));
 });
 
+test("the recorded response body is copied byte for byte from the key the backend records it under", () => {
+  const excerpt = '{"user":"root@acme.example","token":"acme-session-token"}\n';
+  const md = findingToMarkdown({
+    slug: "VA-002",
+    title: "T",
+    poc_response: { status: 200, headers: { server: "acme" }, body_excerpt: excerpt },
+  } as never);
+
+  const response = fencedBlocks(md).find((block) => block.content.includes("HTTP 200"));
+  assert.ok(response, md);
+  assert.ok(response.content.includes("server: acme"), md);
+  assert.ok(response.content.includes(excerpt.trimEnd()), "the body excerpt is evidence and must be in the copy");
+});
+
 test("the recorded request method is copied verbatim, not upper-cased", () => {
   // A case-sensitive-routing probe records `get` on purpose; upper-casing it
   // hands back a command that exercises a different route than the finding did.

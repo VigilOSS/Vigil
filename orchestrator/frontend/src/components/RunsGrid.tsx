@@ -23,7 +23,7 @@ import {
   rowOpenHandlers,
 } from "../lib/agGrid";
 import { DEFAULT_RUN_SORT, type RunRow, type RunSort } from "../lib/runAudit";
-import { formatDuration, gridTimeComparator } from "../lib/serverTime";
+import { formatDuration, gridTimeComparator, gridTimeMode } from "../lib/serverTime";
 import { readGridView, type GridView } from "./record/recordNavigation";
 import { engagementHref } from "../lib/workspaceRoutes";
 import { TimeStamp } from "./formatting";
@@ -54,9 +54,10 @@ type RunsGridProps = {
   onApi?: (api: GridApi<RunRow> | null) => void;
 };
 
+// Relative while recent; the absolute minute once the age would show only a date.
 function StartedCell({ data }: ICellRendererParams<RunRow>) {
   if (!data) return null;
-  return <TimeStamp value={data.startedAt} fallback="Not recorded" className="run-cell-time" />;
+  return <TimeStamp value={data.startedAt} mode={gridTimeMode(data.startedAt)} fallback="Not recorded" className="run-cell-time" />;
 }
 
 function StatusCell({ data }: ICellRendererParams<RunRow>) {
@@ -163,7 +164,7 @@ export default function RunsGrid({ engagementKey, rows, selectedId, onRowOpen, o
           headerName: "Started",
           colId: "started",
           sortingOrder: NEWEST_FIRST,
-          width: 100,
+          width: 150,
           initialSort: sortFor("started"),
           cellRenderer: StartedCell,
           valueGetter: (params) => params.data?.startedAt ?? null,

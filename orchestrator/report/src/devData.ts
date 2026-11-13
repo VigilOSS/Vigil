@@ -198,6 +198,10 @@ export const devData: ReportData = {
     finding_severities: { critical: 1, high: 2, medium: 1, low: 1, info: 1 },
     finding_workflow_statuses: { exploited: 2, active: 4 },
     finding_verification_statuses: { confirmed: 4, downgraded: 1, unreviewed: 1 },
+    // Derived from the chains below: only the admin takeover has every step
+    // delivered and verified, so it alone sets the chain-derived severity.
+    chain_proven_severity: "critical",
+    chain_stated_severity: "critical",
     attack_chain_count: 2,
     open_surface_count: 11,
     credential_count: 3,
@@ -277,6 +281,7 @@ export const devData: ReportData = {
       title: "Unauthenticated admin takeover",
       status: "validated",
       severity: "critical",
+      chain_proven: true,
       narrative:
         "1. Reach `/api/v1/admin/users` unauthenticated (VA-001).\n2. Promote the attacker account to `admin`.\n3. Export all user PII via `/api/v1/admin/export` (VA-002).",
       updated_at: "2026-06-02T18:40:00Z",
@@ -286,6 +291,8 @@ export const devData: ReportData = {
       title: "Session theft via reflected XSS",
       status: "draft",
       severity: "high",
+      // VA-009 is not in this report, so the path is not proven by it.
+      chain_proven: false,
       narrative:
         "Steal a session via the reflected XSS in `q` (VA-003) because the session cookie lacks HttpOnly (VA-004).",
       updated_at: "2026-06-02T11:05:00Z",

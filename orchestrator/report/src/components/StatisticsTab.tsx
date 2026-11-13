@@ -59,6 +59,7 @@ function ReadinessNotice({ data }: Props) {
 interface StatCard {
   label: string;
   value: number | string;
+  detail?: string;
 }
 
 // Horizontal breakdown bar for a `{key: count}` map (workflow/verification).
@@ -116,6 +117,22 @@ export function StatisticsTab({ data }: Props) {
     { label: "Credentials", value: summary.credential_count ?? 0 },
     { label: "Hosts in scope", value: engagement.scope_hosts.length },
   ];
+  // Beside the chain count, and only when there are chains. The value is derived
+  // by the backend from the chains this report proves, so it is labelled as
+  // chain-derived and the severity the chains' authors stated rides with it:
+  // a stated critical the delivered findings do not carry stays visible as a
+  // claim. No finding's own severity is touched by either.
+  if (attack_chains.length > 0) {
+    cards.splice(3, 0, {
+      label: "Chain-derived severity",
+      value: summary.chain_proven_severity
+        ? formatLabel(summary.chain_proven_severity)
+        : "none proven",
+      detail: summary.chain_stated_severity
+        ? `Stated by chain authors: ${formatLabel(summary.chain_stated_severity)}`
+        : undefined,
+    });
+  }
 
   return (
     <div className="rpt-section">
@@ -161,6 +178,7 @@ export function StatisticsTab({ data }: Props) {
           <div key={card.label} className="rpt-stat-card">
             <span className="rpt-stat-value">{card.value}</span>
             <span className="rpt-stat-label">{card.label}</span>
+            {card.detail && <span className="rpt-stat-detail">{card.detail}</span>}
           </div>
         ))}
       </section>

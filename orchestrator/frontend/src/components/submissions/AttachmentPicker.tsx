@@ -177,7 +177,7 @@ export function AttachmentPicker({
             <p className="subm-pkg-note is-ok">
               <CheckCircle2 size={14} aria-hidden="true" />
               <span>
-                Reviewed by blind triage (packet <code>{shortHash(triage.packet_id)}</code>
+                Reviewed by blind triage (packet <code title={triage.packet_id ?? undefined}>{shortHash(triage.packet_id)}</code>
                 {triage.verdict ? `, ${triage.verdict}` : ""}). Every file is re-hashed at export.
               </span>
             </p>
@@ -186,7 +186,7 @@ export function AttachmentPicker({
               <AlertTriangle size={14} aria-hidden="true" />
               <span>
                 This selection differs from the {reviewedIds.length} file{reviewedIds.length === 1 ? "" : "s"} blind
-                triage reviewed (packet <code>{shortHash(triage.packet_id)}</code>).
+                triage reviewed (packet <code title={triage.packet_id ?? undefined}>{shortHash(triage.packet_id)}</code>).
                 {triage.required
                   ? " Export stays blocked until a new packet with this exact selection is accepted."
                   : " This finding's severity does not require blind triage."}

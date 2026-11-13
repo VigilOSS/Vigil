@@ -31,6 +31,14 @@ function errorText(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
 }
 
+/** A read that brought back the text and metadata already held. */
+function sameContent(held: EngagementFileContent | null, read: EngagementFileContent): boolean {
+  if (!held) return false;
+  const keys = new Set([...Object.keys(held), ...Object.keys(read)]) as Set<keyof EngagementFileContent>;
+  for (const key of keys) if (held[key] !== read[key]) return false;
+  return true;
+}
+
 /** A file the URL named that the engagement does not have (or has not created yet). */
 type RouteMiss = { name: string; listed: boolean };
 
@@ -130,7 +138,9 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
         try {
           const next = await readEngagementFile(key, name);
           if (!current()) return;
-          setContent(next);
+          // An unchanged file keeps the content object the viewer rendered,
+          // so a refresh does not render the document again.
+          setContent((held) => (sameContent(held, next) ? held : next));
           setContentError(null);
         } catch (error) {
           if (current()) setContentError({ name, message: errorText(error, "Failed to read file") });

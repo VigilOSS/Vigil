@@ -6,6 +6,7 @@ import type {
   AssessmentFindingDetail,
   AssessmentFindingGroup,
   AssessmentFindingLink,
+  AssessmentFindingSeverityVariance,
   AssessmentFindingTransition,
   AssessmentFindingTransitionSummary,
   AssessmentProofReceipt,
@@ -250,7 +251,7 @@ const NO_FINDING_LINKS: AssessmentFindingLink[] = [];
 const NO_FINDING_GROUPS: AssessmentFindingGroup[] = [];
 const NO_TRANSITIONS: AssessmentFindingTransitionSummary[] = [];
 import { useToast } from "../contexts/ToastContext";
-import { findingToMarkdown } from "../lib/findingMarkdown";
+import { findingToMarkdown, pocBody } from "../lib/findingMarkdown";
 import { FindingRemediation } from "./FindingRemediation";
 import { RecordBody, RecordCopyButton, RecordCopyLinkButton, RecordTabs, RecordView, useResultsScrollMemory } from "./record/RecordView";
 import { FindingRecordHeader } from "./FindingRecordHeader";
@@ -453,7 +454,7 @@ function formatHttp(
   } else if (typeof headers === "string" && headers.trim()) {
     lines.push(headers.trim());
   }
-  const body = (obj as FindingPocRequest | FindingPocResponse).body;
+  const body = pocBody(obj as FindingPocRequest | FindingPocResponse);
   if (body) {
     lines.push("");
     lines.push(body);
@@ -1448,7 +1449,6 @@ export function FindingsTab({
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       const target = e.target instanceof HTMLElement ? e.target : null;
-      const tag = (target?.tagName || "").toLowerCase();
       const isTyping = Boolean(target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
       const isInteractive = isTyping || Boolean(target?.closest("button, a, [role='button'], [role='combobox'], [role='listbox']"));
       const selectFinding = openFinding;
@@ -1505,7 +1505,11 @@ export function FindingsTab({
           e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
         selectFinding(list[next].slug);
       }
-      if (!isTyping && tag !== "button" && tag !== "a" && e.key === "Enter" && selectedRef.current != null) {
+      // Enter opens the highlighted finding from the results. A control that
+      // acts on Enter itself keeps it: a disclosure inside the open record, a
+      // results-table cell (it opens the row that has focus), a button or link.
+      const ownsEnter = isInteractive || Boolean(target?.closest("summary, [role='grid'], [role='tab']"));
+      if (e.key === "Enter" && !e.defaultPrevented && !ownsEnter && !detailOpenRef.current && selectedRef.current != null) {
         e.preventDefault();
         openFinding(selectedRef.current);
       }
@@ -1629,6 +1633,10 @@ export function FindingsTab({
     sevFilters.size + workflowFilters.size + verifFilters.size + (recencyFilter ? 1 : 0) + (query ? 1 : 0);
 
   const ledgerPending = derivedList.length === 0 && (ledgerLoading || Boolean(ledgerError));
+  // Until the ledger arrives the list holds only the engagement summary's top
+  // findings. They can be read and opened, but they are a preview: the page
+  // states no ledger totals from them and says what they are.
+  const previewOnly = findings.length === 0 && fallbackFindings.length > 0 && (Boolean(ledgerLoading) || Boolean(ledgerError));
   // Nothing recorded: the page explains that instead of showing empty filters.
   const ledgerEmpty = derivedList.length === 0 && !ledgerPending;
   // An unsorted grid shows the rows in the named order they arrive in.
@@ -1653,14 +1661,14 @@ export function FindingsTab({
         title="Findings"
         purpose="Review security claims and their evidence."
         hidden={investigating}
-        stats={ledgerPending || ledgerEmpty ? [] : [
+        stats={ledgerPending || ledgerEmpty || previewOnly ? [] : [
           { value: currentCount, label: "current", title: "Findings that are not merged or false positive; the rail and Overview count these" },
           { value: derivedList.length, label: "recorded", title: "Every finding in the ledger, including merged and false-positive ones" },
-          { value: derivedList.filter((d) => (AWAITING_VERIFICATION as readonly string[]).includes(d.verificationKey)).length, label: "awaiting verification", title: "Unreviewed, disputed, pending runtime proof or blocked findings" },
+          { value: derivedList.filter((d) => !RETIRED_WORKFLOWS.has(d.workflow_status) && (AWAITING_VERIFICATION as readonly string[]).includes(d.verificationKey)).length, label: "awaiting verification", title: "Current findings that are unreviewed, disputed, pending runtime proof or blocked; merged and false-positive findings are not counted" },
           ...(readyToExport == null ? [] : [{ value: readyToExport, label: "ready to export", title: "Submission packages passing the backend export gates; separate from finding verification" }]),
         ]}
         status={ledgerLoading && derivedList.length > 0 ? "Updating…" : null}
-        actions={ledgerPending || ledgerEmpty ? null : <SevSpark counts={severityCounts} />}
+        actions={ledgerPending || ledgerEmpty || previewOnly ? null : <SevSpark counts={severityCounts} />}
       >
       {!investigating && !ledgerPending && derivedList.length > 0 && (
         <section className="intel-workbar findings-recent-bar" aria-label="Recent finding changes">
@@ -1689,7 +1697,13 @@ export function FindingsTab({
       {routeLookupLoading && !routedSlugListed && <p className="meta-text" role="status">Loading finding {initialFindingSlug}…</p>}
       {routeLookupError && !routedSlugListed && <p className="error-text" role="alert">Finding {initialFindingSlug} unavailable: {routeLookupError} <button type="button" className="ghost-button" onClick={() => setRouteLookupAttempt((value) => value + 1)}>Retry finding lookup</button></p>}
       <SlowLoadHint active={ledgerLoading} what="the finding ledger" detail="Large ledgers can take several seconds." />
-      {ledgerError && <p className="error-text" role="alert">Finding ledger unavailable: {ledgerError}{derivedList.length > 0 ? " Showing previously loaded records; this list may be stale." : ""}</p>}
+      {ledgerError && <p className="error-text" role="alert">Finding ledger unavailable: {ledgerError}{findings.length > 0 ? " Showing previously loaded records; this list may be stale." : ""}</p>}
+      {previewOnly && !investigating && (
+        <p className="meta-text findings-preview-note" role="status" aria-label="Finding preview">
+          <strong>Preview:</strong> {fallbackFindings.length.toLocaleString()} {fallbackFindings.length === 1 ? "finding" : "findings"} from the engagement summary.{" "}
+          {ledgerError ? "The full ledger could not be loaded" : "The full ledger is still loading"}; the counts, filters and positions below cover only these until it arrives.
+        </p>
+      )}
       <div className="panel findings-toolbar-panel" hidden={investigating || ledgerEmpty}>
         <div className="toolbar">
           <div className="search-wrap">
@@ -2110,6 +2124,9 @@ function RootCauseGroupCard({
   timeKind: RowTimeKind;
 }) {
   const residualCount = group.siblings.filter((d) => d.root_cause_effect === "eliminates_attack_path").length;
+  // The root's own sibling count covers the whole group; the card lists only
+  // the siblings the search and filters keep, and says so when they differ.
+  const siblingTotal = Math.max(group.root.sibling_count ?? 0, group.siblings.length);
   // The card sorts by its most severe member; the badge is the root's own
   // severity, and a more severe sibling is named separately.
   const siblingOutranksRoot = compareSeverity(group.highestSeverity, group.root.severity) < 0;
@@ -2137,7 +2154,11 @@ function RootCauseGroupCard({
           {group.root.code_snapshot_status && group.root.code_snapshot_status !== "not_applicable" && (
             <SourceSnapshotPill status={group.root.code_snapshot_status} />
           )}
-          <span className="tag root">{plural(group.siblings.length, "sibling")}</span>
+          <span className="tag root" title={siblingTotal > group.siblings.length ? "The search and filters hide the other siblings of this root" : undefined}>
+            {siblingTotal > group.siblings.length
+              ? `${group.siblings.length.toLocaleString()} of ${plural(siblingTotal, "sibling")} shown`
+              : plural(group.siblings.length, "sibling")}
+          </span>
           {residualCount > 0 && <span className="tag chain">{plural(residualCount, "residual path")}</span>}
           <RowTime d={group.root} kind={timeKind} />
         </div>
@@ -2303,6 +2324,7 @@ function Drawer({
   const reviewFinding = claimFinding && (!isDetail(d.finding) || (claimFinding.row_version === d.finding.row_version && claimFinding.verification_status === d.verification_status)) ? claimFinding : null;
   const currentAudit = reviewFinding ? reviewFinding.verification_audit : d.verification_audit;
   const reviewRequestPending = detailRequestPending || (claimFinding !== null && reviewFinding === null);
+  const severityBand = severityBandStanding(currentAudit);
   // A newer or fuller read replaces the ledger row it came from.
   const onDetailLoadedRef = useRef(onDetailLoaded);
   onDetailLoadedRef.current = onDetailLoaded;
@@ -2427,6 +2449,42 @@ function Drawer({
               <p>Independent review required for claim transition {currentAudit.claim_transition_id ?? "unknown"}.</p>
               {currentAudit.current_claim_sha256 && <code>Current claim SHA-256: {currentAudit.current_claim_sha256}</code>}
             </details>
+          </div>
+        )}
+        {severityBand && (
+          // The header shows a severity and a CVSS score that sit in different
+          // bands. The server says whether the current verification explains
+          // that; an explanation is shown in the verifier's own words.
+          <div className="submission-blockers operator-authority-notice severity-variance-notice" role="status" aria-label="Severity variance">
+            <strong>
+              Severity recorded outside its CVSS band: {severityLabel(severityBand.band)} band, reported as {severityLabel(d.severity)}
+            </strong>
+            {severityBand.variance ? (
+              <>
+                <span>
+                  Current severity variance (#{severityBand.variance.id}) · by {severityBand.variance.actor} ·{" "}
+                  <TimeStamp value={severityBand.variance.created_at} /> · proof receipt #{severityBand.variance.proof_receipt_id}
+                  {severityBand.total > 1 ? ` · ${(severityBand.total - 1).toLocaleString()} other in History` : ""}
+                </span>
+                <p className="operator-authority-reason">{severityBand.variance.reason}</p>
+              </>
+            ) : severityBand.explained && severityBand.varianceId !== null ? (
+              <span>
+                Explained by severity variance #{severityBand.varianceId} on the current verification. Its record is not among the{" "}
+                {severityBand.listed.toLocaleString()} of {severityBand.total.toLocaleString()} variance records loaded here; History shows
+                it on that verification.
+              </span>
+            ) : severityBand.explained ? (
+              <span>Explained by the operator-authority verdict on this finding.</span>
+            ) : (
+              <span>
+                No severity variance on the current verification explains it
+                {severityBand.varianceId !== null ? ` (variance #${severityBand.varianceId} there records a different band or severity)` : ""}.
+                This is an advisory, not a report blocker: for a finding the report includes,{" "}
+                <a href={engagementHref(engagementKey, {})}>Report checks</a> list it as <code>severity_cvss_mismatch</code> with the
+                command that records the reason.
+              </span>
+            )}
           </div>
         )}
       </FindingRecordHeader>
@@ -3311,6 +3369,22 @@ function parseOperatorAuthority(metadataJson: string): FindingOperatorAuthority 
   }
 }
 
+/**
+ * The fields a write left out and the service stored for it (`metadata.derived`,
+ * the write envelope's derived list by field name). Named in the ledger so a
+ * stored value is never mistaken for one its author wrote.
+ */
+function parseDerivedFields(metadataJson: string): string[] {
+  try {
+    const metadata: unknown = JSON.parse(metadataJson);
+    if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) return [];
+    const value = (metadata as Record<string, unknown>).derived;
+    return Array.isArray(value) ? value.filter((field): field is string => typeof field === "string" && field !== "") : [];
+  } catch {
+    return [];
+  }
+}
+
 function parseConfirmCheck(metadataJson: string): AssessmentConfirmCheck | null {
   try {
     const metadata: unknown = JSON.parse(metadataJson);
@@ -3365,13 +3439,15 @@ function HistoryRow({
     : [transition.details_before_json, transition.details_after_json, transition.notes_before_json, transition.notes_after_json].some(Boolean);
   const confirmCheck = detail ? parseConfirmCheck(detail.metadata_json) : null;
   const changePolicy = detail ? parseChangePolicy(detail.metadata_json) : null;
+  const derivedFields = detail ? parseDerivedFields(detail.metadata_json) : [];
   const operatorAuthority = detail ? parseOperatorAuthority(detail.metadata_json)
     : isTransitionSummary(transition) ? transition.operator_authority ?? null : null;
   // The compact projection deliberately omits verification-audit bodies and
   // counts. Keep every summary row drill-downable so an audit-only transition
   // cannot disappear merely because it has no narrative or content snapshot.
   const canExpand = isTransitionSummary(transition) || Boolean(
-    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck || changePolicy || operatorAuthority,
+    preview || hasSnapshot || hasVerificationAudit(detail?.verification_audit) || confirmCheck || changePolicy || operatorAuthority
+      || derivedFields.length > 0,
   );
 
   const loadDetail = (open: boolean) => {
@@ -3460,6 +3536,18 @@ function HistoryRow({
             {detail?.verification_audit && <VerificationAudit audit={detail.verification_audit} />}
             {confirmCheck && <ConfirmCheckAudit check={confirmCheck} />}
             {changePolicy && <ChangePolicyAudit policy={changePolicy} />}
+            {derivedFields.length > 0 && (
+              <div className="tl-audit-record">
+                <div className="tl-audit-title">Stored by the service, not authored</div>
+                <p>
+                  This write left {derivedFields.length === 1 ? "this field" : "these fields"} out, and the service stored
+                  the value the rest of the write states:{" "}
+                  {derivedFields.map((field, index) => (
+                    <Fragment key={field}>{index > 0 && ", "}<code>{field}</code></Fragment>
+                  ))}
+                </p>
+              </div>
+            )}
             {detail && [detail.details_before_json, detail.details_after_json, detail.notes_before_json, detail.notes_after_json].some(Boolean) && (
               <details className="detail-disclosure history-snapshot">
                 <summary>Changed content</summary>
@@ -3549,6 +3637,37 @@ export function HistoryPane({
   );
 }
 
+/**
+ * What the record header says about a severity outside its CVSS band, from
+ * the point read's `severity_band`: the band, whether the current
+ * verification explains the departure, and the variance on it when its record
+ * is among those loaded. Null while the severity sits in its band (earlier
+ * variances stay in History) or the read has not said.
+ */
+export function severityBandStanding(audit: AssessmentVerificationAudit | undefined): {
+  band: string;
+  explained: boolean;
+  varianceId: number | null;
+  variance: AssessmentFindingSeverityVariance | null;
+  /** Variance records loaded here, of `total` recorded. */
+  listed: number;
+  total: number;
+} | null {
+  const band = audit?.severity_band;
+  if (!audit || !band || !band.departs || !band.cvss_band) return null;
+  const variance = band.explained
+    ? audit.severity_variances.find((record) => record.id === band.current_variance_id) ?? null
+    : null;
+  return {
+    band: band.cvss_band,
+    explained: band.explained,
+    varianceId: band.current_variance_id,
+    variance,
+    listed: audit.severity_variances.length,
+    total: audit.severity_variance_total,
+  };
+}
+
 function VerificationAudit({ audit }: { audit: AssessmentVerificationAudit }) {
   if (
     !audit.proof_receipt_ids.length &&
@@ -3583,7 +3702,8 @@ function VerificationAudit({ audit }: { audit: AssessmentVerificationAudit }) {
         <div key={`variance-${record.id}`} className="tl-audit-record">
           <div className="tl-audit-title">Attributed severity variance #{record.id}</div>
           <dl>
-            <dt>Band</dt><dd>{record.normal_band} → {record.chosen_severity}</dd>
+            <dt>CVSS band</dt><dd>{severityLabel(record.normal_band)}</dd>
+            <dt>Reported as</dt><dd>{severityLabel(record.chosen_severity)}</dd>
             <dt>Actor</dt><dd>{record.actor}</dd>
             <dt>Reason</dt><dd>{record.reason}</dd>
             <dt>Proof receipt</dt><dd>{record.proof_receipt_id}</dd>

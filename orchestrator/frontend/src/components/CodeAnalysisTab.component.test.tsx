@@ -7,13 +7,12 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import * as api from "../lib/api";
 import * as codeApi from "../lib/codeApi";
 import type { CodeAnalysisResult, CodeCoverage, CodeQueuePage, CodeQueueStats, CodeReadiness, CodeRepo } from "../lib/api";
-import type { CodeAnalysisResultDetail, CodeAnalysisResultPage } from "../lib/codeApi";
+import type { CodeAnalysisResultDetail, CodeAnalysisResultPage, CodeFilePage, CodeFileRow, CodeTrigger, CodeTriggerPage } from "../lib/codeApi";
 import { ToastProvider } from "../contexts/ToastContext";
 import { CodeAnalysisTab } from "./CodeAnalysisTab";
 
 vi.mock("../lib/api", () => ({
   listCodeRepos: vi.fn(),
-  getCodeCoverage: vi.fn(),
   getCodeQueueStats: vi.fn(),
   getCodeReadiness: vi.fn(),
   listCodeModules: vi.fn(),
@@ -24,6 +23,8 @@ vi.mock("../lib/codeApi", () => ({
   getCodeAnalysisResult: vi.fn(),
   getCodeAnalysisResultPosition: vi.fn(),
   listCodeQueueLane: vi.fn(),
+  listCodeTriggers: vi.fn(),
+  listCodeFiles: vi.fn(),
 }));
 
 function repo(overrides: Partial<CodeRepo> = {}): CodeRepo {
@@ -78,6 +79,7 @@ function readiness(overrides: Partial<CodeReadiness> = {}): CodeReadiness {
     structural_debt_count: 0,
     structural_debt: [],
     quality_gate: { passed: true, warnings: [] },
+    coverage,
     ...overrides,
   };
 }
@@ -185,6 +187,16 @@ function resultPage(items: CodeAnalysisResult[], total = items.length, overrides
   };
 }
 
+// The coverage gate's pointer to the server-only families a `client-bundle` tag makes optional.
+const optionalFamilies = {
+  files: 14,
+  by_family: { "algorithmic-dos": 14, ssrf: 9, deserialization: 3 },
+  sample_paths: ["web/app.bundle.js", "web/vendor.bundle.js"],
+  omitted: 12,
+  detail: "server-only families a client-bundle tag makes optional: never owed, never measured by the effort harness or the depth floor",
+  full_list: "vigil assess code-coverage --cwe-matrix (Optional Families) or vigil assess fetch 'code/files?context_tag=client-bundle&limit=10000'",
+};
+
 function emptyLane(): CodeQueuePage {
   return { total: 0, offset: 0, count: 0, has_more: false, item_ids: [], items: [] };
 }
@@ -231,6 +243,64 @@ function lanePage(total: number, ids: number[]): CodeQueuePage {
   };
 }
 
+function lead(id: number, overrides: Partial<CodeTrigger> = {}): CodeTrigger {
+  return {
+    id,
+    status: "pending",
+    origin: "cross_file",
+    vuln_class: "web-app-injection",
+    reason: `Lead ${id}: the handler passes request data into this file.`,
+    repo_id: 7,
+    target_file_path: `src/target_${id}.py`,
+    resolved_target_file_path: `src/target_${id}.py`,
+    source_file_path: `src/source_${id}.py`,
+    source_queue_item_id: 100 + id,
+    resolved_queue_item_id: null,
+    resolution_note: "",
+    created_at: "2026-09-12T12:00:00Z",
+    updated_at: "2026-09-12T12:00:00Z",
+    ...overrides,
+  };
+}
+
+/** The server's page of one status's leads: narrowed to the asked kind, counted by kind either way. */
+function leadPage(all: CodeTrigger[], page: { limit: number; offset: number; origin?: string } = { limit: 25, offset: 0 }): CodeTriggerPage {
+  const selected = page.origin ? all.filter((entry) => entry.origin === page.origin) : all;
+  const items = selected.slice(page.offset, page.offset + page.limit);
+  return {
+    total: selected.length,
+    offset: page.offset,
+    count: items.length,
+    has_more: page.offset + items.length < selected.length,
+    items,
+    by_origin: {
+      cross_file: all.filter((entry) => entry.origin === "cross_file").length,
+      depth_floor: all.filter((entry) => entry.origin === "depth_floor").length,
+    },
+  };
+}
+
+function fileRow(id: number, overrides: Partial<CodeFileRow> = {}): CodeFileRow {
+  return {
+    id,
+    repo_id: 7,
+    file_path: `src/file_${id}.py`,
+    language: "python",
+    loc: 120,
+    classification: "high",
+    role: "request_handler",
+    analysis_status: "analyzed",
+    slot_types: ["NETWORK-INPUT"],
+    context_tags: [],
+    context_tags_recorded: true,
+    ...overrides,
+  };
+}
+
+function filePage(items: CodeFileRow[], total = items.length, offset = 0): CodeFilePage {
+  return { total, offset, count: items.length, has_more: total > offset + items.length, items };
+}
+
 function go(hash: string) {
   window.history.replaceState(null, "", hash);
 }
@@ -245,12 +315,13 @@ beforeEach(() => {
   vi.mocked(codeApi.listCodeRepoReviewProgress).mockResolvedValue([
     { repo_id: 7, repo_role: "analysis", admitted_files: 10, reviewed_files: 4 },
   ]);
-  vi.mocked(api.getCodeCoverage).mockResolvedValue(coverage);
   vi.mocked(codeApi.listCodeAnalysisResultPage).mockResolvedValue(resultPage([result(1)]));
   vi.mocked(api.getCodeQueueStats).mockResolvedValue(queueStats);
   vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) => readiness({ target_phase: target }));
   vi.mocked(api.listCodeModules).mockResolvedValue([]);
   vi.mocked(codeApi.listCodeQueueLane).mockResolvedValue(emptyLane());
+  vi.mocked(codeApi.listCodeTriggers).mockImplementation(async (_key, _status, page) => leadPage([], page));
+  vi.mocked(codeApi.listCodeFiles).mockResolvedValue(filePage([]));
   vi.mocked(codeApi.getCodeAnalysisResult).mockImplementation(async (_key, id) => detailOf(result(id)));
   vi.mocked(codeApi.getCodeAnalysisResultPosition).mockResolvedValue({ index: 0, total: 1, previous: null, next: null });
 });
@@ -316,7 +387,10 @@ describe("CodeAnalysisTab header", () => {
 
   it("shows review job counts as loading, not unavailable, while they are still being read", async () => {
     vi.mocked(api.getCodeQueueStats).mockImplementation(() => new Promise<CodeQueueStats>(() => {}));
-    vi.mocked(api.getCodeCoverage).mockImplementation(() => new Promise<CodeCoverage>(() => {}));
+    // Lead counts come from the coverage summary completion readiness carries.
+    vi.mocked(api.getCodeReadiness).mockImplementation((_key, target) =>
+      target === "complete" ? new Promise<CodeReadiness>(() => {}) : Promise.resolve(readiness({ target_phase: target })),
+    );
     go("#/engagements/demo?tab=code&view=queue");
     renderTab();
     expect(await screen.findByLabelText("Loading review job counts")).toBeTruthy();
@@ -411,6 +485,27 @@ describe("CodeAnalysisTab sections", () => {
       workflow: "active,blocked,exploited,contained,eradicated,recovered,reported",
       verification: "unreviewed,disputed,pending_runtime_proof",
     });
+  });
+
+  it("links each lead blocker to the leads of the kind it counts", async () => {
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        blockers: target === "verify-variant"
+          ? [
+              { code: "pending_triggers", message: "Repository has 20 unprocessed cross-file trigger(s).", overrideable: true, repo_id: 7 },
+              { code: "depth_floor_triggers", message: "Repository has 821 critical/high file families closed below their effort floor.", overrideable: true, repo_id: 7 },
+            ]
+          : [],
+      }),
+    );
+    renderTab();
+    const left = await screen.findByRole("list", { name: "Blocking Verify + Variant" });
+    const hrefs = within(left).getAllByRole("link", { name: "Open Review queue" }).map((link) => link.getAttribute("href"));
+    expect(hrefs).toEqual([
+      "#/engagements/demo?tab=code&view=queue&kind=cross_file",
+      "#/engagements/demo?tab=code&view=queue&kind=depth_floor",
+    ]);
   });
 
   it("opens Findings filtered to what each findings blocker counts", async () => {
@@ -559,6 +654,261 @@ describe("CodeAnalysisTab files and quality", () => {
     ]);
   });
 
+  it("names the files classified without context tags, what its sample leaves out, and lists them on demand", async () => {
+    go("#/engagements/demo?tab=code&view=files");
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        coverage: {
+          ...coverage,
+          gate: {
+            ...coverage.gate,
+            context_tags_unrecorded: {
+              count: 12,
+              by_classification: { critical: 2, high: 10 },
+              sample_paths: ["src/a.py", "src/b.py"],
+              omitted: 10,
+              full_list: "vigil assess fetch 'code/files?context_tags_recorded=false&limit=10000'",
+              paging: "full_list reads pages of up to 10000 files",
+              fix: "re-classify each file with its context_tags through `vigil assess code-record classify <file>`",
+            },
+          },
+        },
+      }),
+    );
+    vi.mocked(codeApi.listCodeFiles).mockResolvedValue(filePage([
+      fileRow(1, { context_tags: ["authentication", "response-data"] }),
+      fileRow(2, { context_tags: [] }),
+      fileRow(3, { context_tags: [], context_tags_recorded: false }),
+    ]));
+    renderTab();
+    const note = await screen.findByRole("note", { name: "Files with no context tags recorded" });
+    expect(note.textContent).toContain("12 files have no context tags recorded (2 critical · 10 high)");
+    // The pointer is a sample: it says how many it left out and names the read that lists them all.
+    expect(within(note).getByText("2 examples (10 more not shown here)")).toBeTruthy();
+    expect(within(note).getByText("vigil assess fetch 'code/files?context_tags_recorded=false&limit=10000'")).toBeTruthy();
+    expect(note.textContent).toContain("re-classify each file with its context_tags");
+
+    const table = (await screen.findByRole("heading", { name: "All files" })).closest("section")!.querySelector("table")!;
+    const tags = within(table).getAllByRole("row").slice(1).map((row) => within(row).getAllByRole("cell").at(-1)!.textContent);
+    // Recorded tags, a recorded empty list, and no record at all read differently.
+    expect(tags).toEqual(["AuthenticationResponse data", "None apply", "Not recorded"]);
+
+    fireEvent.click(within(note).getByRole("button", { name: "List all 12 below" }));
+    await waitFor(() => expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ context_tags_recorded: false, offset: 0 })));
+    expect(screen.getByRole("button", { name: /Not recorded/ }).getAttribute("aria-pressed")).toBe("true");
+  });
+
+  it("names the vulnerability types client-bundle files leave optional, what its sample leaves out, and lists the files on demand", async () => {
+    go("#/engagements/demo?tab=code&view=files");
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({ target_phase: target, coverage: { ...coverage, gate: { ...coverage.gate, optional_families: optionalFamilies } } }),
+    );
+    vi.mocked(codeApi.listCodeFiles).mockResolvedValue(filePage([fileRow(1, { context_tags: ["client-bundle"] })]));
+    renderTab();
+    const note = await screen.findByRole("note", { name: "Vulnerability types optional on client-bundle files" });
+    expect(note.textContent).toContain("14 client-bundle files leave server-only vulnerability types optional");
+    // Every family the tag made optional, with how many files it is optional on.
+    expect(within(note).getAllByRole("listitem").slice(0, 3).map((item) => item.textContent)).toEqual([
+      "Algorithmic DoS · 14 files", "SSRF · 9 files", "Deserialization · 3 files",
+    ]);
+    // The backend's own account, and what the sample leaves out with the read that lists them all.
+    expect(note.textContent).toContain("never measured by the effort harness or the depth floor");
+    expect(within(note).getByText("2 examples (12 more not shown here)")).toBeTruthy();
+    expect(within(note).getByText(optionalFamilies.full_list)).toBeTruthy();
+
+    fireEvent.click(within(note).getByRole("button", { name: "List the client-bundle files below" }));
+    await waitFor(() => expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ context_tag: "client-bundle", offset: 0 })));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=files&tags=client-bundle");
+    expect(screen.getByRole("button", { name: /^Client bundle/ }).getAttribute("aria-pressed")).toBe("true");
+    // The filter counts as one and clears like the others.
+    fireEvent.click(screen.getByRole("button", { name: "Clear filters (1)" }));
+    await waitFor(() => expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ context_tag: undefined })));
+  });
+
+  it("offers no client-bundle pointer or filter when the coverage summary names none", async () => {
+    go("#/engagements/demo?tab=code&view=files");
+    renderTab();
+    await screen.findByRole("heading", { name: "All files" });
+    expect(screen.queryByRole("note", { name: "Vulnerability types optional on client-bundle files" })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Client bundle/ })).toBeNull();
+  });
+
+  it("pages the file list on the server and filters it by risk and path", async () => {
+    go("#/engagements/demo?tab=code&view=files");
+    vi.mocked(codeApi.listCodeFiles).mockImplementation(async (_key, query) =>
+      filePage(Array.from({ length: 25 }, (_, index) => fileRow(query.offset + index + 1)), 60, query.offset),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "All files" })).closest("section")!;
+    expect(await within(section).findByText("Showing 1–25 of 60")).toBeTruthy();
+    fireEvent.click(within(section).getByRole("button", { name: "Next files page" }));
+    expect(await within(section).findByText("Showing 26–50 of 60")).toBeTruthy();
+    expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ limit: 25, offset: 25 }));
+    // A filter starts again from the first page.
+    fireEvent.click(within(section).getByRole("button", { name: /^Critical/ }));
+    await waitFor(() => expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ classification: "critical", offset: 0 })));
+    // The new filter is never asked for the old page.
+    expect(vi.mocked(codeApi.listCodeFiles).mock.calls.filter(([, query]) => query.classification === "critical").map(([, query]) => query.offset)).toEqual([0]);
+    fireEvent.change(within(section).getByRole("searchbox", { name: "Filter files by path" }), { target: { value: " auth/ " } });
+    fireEvent.keyDown(within(section).getByRole("searchbox", { name: "Filter files by path" }), { key: "Enter" });
+    await waitFor(() => expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ search: "auth/", classification: "critical", offset: 0 })));
+  });
+
+  it("keeps the file list's risk, context-tag and path filters and its page in the URL", async () => {
+    go("#/engagements/demo?tab=code&view=files&risk=critical&tags=unrecorded&q=auth%2F&page=2");
+    vi.mocked(codeApi.listCodeFiles).mockImplementation(async (_key, query) =>
+      filePage(Array.from({ length: 25 }, (_, index) => fileRow(query.offset + index + 1)), 60, query.offset),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "All files" })).closest("section")!;
+    // A reload or a shared link restores exactly the list that was shown.
+    expect(await within(section).findByText("Showing 26–50 of 60")).toBeTruthy();
+    expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({
+      classification: "critical", context_tags_recorded: false, search: "auth/", offset: 25,
+    }));
+    expect((within(section).getByRole("searchbox", { name: "Filter files by path" }) as HTMLInputElement).value).toBe("auth/");
+    expect(within(section).getByRole("button", { name: /^Critical/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(within(section).getByRole("button", { name: /Not recorded/ }).getAttribute("aria-pressed")).toBe("true");
+
+    fireEvent.click(within(section).getByRole("button", { name: "Next files page" }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=files&risk=critical&tags=unrecorded&q=auth%2F&page=3");
+    // A filter change starts again from the first page and keeps the other filters.
+    fireEvent.click(within(section).getByRole("button", { name: /^High/ }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=files&risk=high&tags=unrecorded&q=auth%2F");
+    // Back returns to the list as it was.
+    act(() => {
+      go("#/engagements/demo?tab=code&view=files&risk=critical&tags=unrecorded&q=auth%2F&page=3");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    await waitFor(() => expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ classification: "critical", offset: 50 })));
+    fireEvent.click(within(section).getByRole("button", { name: /Clear filters/ }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=files");
+  });
+
+  it("says so when the URL names a repository this engagement does not have", async () => {
+    go("#/engagements/demo?tab=code&view=files&repo=999");
+    renderTab();
+    const note = await screen.findByText(/Repository #999 is not one of this engagement's repositories/);
+    // Nothing is filtered, and the view says that instead of quietly listing everything.
+    expect(note.textContent).toContain("Files of every repository are shown.");
+    expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ repo_id: undefined }));
+  });
+
+  it("says so when the URL's repository value is not a repository number", async () => {
+    go("#/engagements/demo?tab=code&view=files&repo=07");
+    renderTab();
+    const note = await screen.findByText(/Repository link “07” does not name a repository/);
+    // The value is shown as written, and the unfiltered list is stated rather than implied.
+    expect(note.textContent).toContain("such as repo=7");
+    expect(note.textContent).toContain("Files of every repository are shown.");
+    expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ repo_id: undefined }));
+    fireEvent.click(within(note).getByRole("link", { name: "Clear the repository filter" }));
+    expect(within(note).getByRole("link", { name: "Clear the repository filter" }).getAttribute("href")).toBe("#/engagements/demo?tab=code&view=files");
+    // A repository number the engagement holds needs no note.
+    act(() => {
+      go("#/engagements/demo?tab=code&view=files&repo=7");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    await waitFor(() => expect(screen.queryByText(/does not name a repository/)).toBeNull());
+    expect(codeApi.listCodeFiles).toHaveBeenLastCalledWith("demo", expect.objectContaining({ repo_id: 7 }));
+  });
+
+  it("says so when a repository link on Repositories names none of them", async () => {
+    go("#/engagements/demo?tab=code&view=repositories&repo=07");
+    renderTab();
+    expect((await screen.findByText(/Repository link “07” does not name a repository/)).textContent).toContain("such as repo=7");
+    act(() => {
+      go("#/engagements/demo?tab=code&view=repositories&repo=999");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    expect(await screen.findByText(/Repository #999 is not one of this engagement's repositories/)).toBeTruthy();
+    expect(screen.queryByText(/does not name a repository/)).toBeNull();
+    act(() => {
+      go("#/engagements/demo?tab=code&view=repositories&repo=7");
+      window.dispatchEvent(new HashChangeEvent("hashchange"));
+    });
+    await waitFor(() => expect(screen.queryByText(/is not one of this engagement's repositories/)).toBeNull());
+  });
+
+  it("offers Try again when the file list fails to load", async () => {
+    go("#/engagements/demo?tab=code&view=files");
+    vi.mocked(codeApi.listCodeFiles).mockRejectedValueOnce(new Error("files down"));
+    vi.mocked(codeApi.listCodeFiles).mockResolvedValue(filePage([fileRow(1)]));
+    renderTab();
+    const alert = await screen.findByText(/Files unavailable: files down/);
+    const retry = within(alert).getByRole("button", { name: "Try again" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(await screen.findByText("src/file_1.py")).toBeTruthy();
+    expect(screen.queryByText(/Files unavailable/)).toBeNull();
+    // The button leaves with the error; keyboard focus stays on the file list instead of falling to the page.
+    expect((document.activeElement as HTMLElement).getAttribute("aria-labelledby")).toBe("cv-files-title");
+  });
+
+  it("keeps the shown files and the pager in place while the next page loads", async () => {
+    go("#/engagements/demo?tab=code&view=files");
+    const later: Array<(value: CodeFilePage) => void> = [];
+    vi.mocked(codeApi.listCodeFiles).mockImplementation((_key, query) =>
+      query.offset === 0
+        ? Promise.resolve(filePage(Array.from({ length: 25 }, (_, index) => fileRow(index + 1)), 60))
+        : new Promise<CodeFilePage>((resolve) => { later.push(resolve); }),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "All files" })).closest("section")!;
+    expect(await within(section).findByText("Showing 1–25 of 60")).toBeTruthy();
+    const next = within(section).getByRole("button", { name: "Next files page" });
+    next.focus();
+    fireEvent.click(next);
+    await waitFor(() => expect(later).toHaveLength(1));
+    // The rows on screen are still the loaded page, and the view says so; keyboard focus stays on the pager.
+    expect(within(section).getByText("Showing 1–25 of 60")).toBeTruthy();
+    expect(within(section).getByText("src/file_1.py")).toBeTruthy();
+    expect(within(section).getByText("Updating…")).toBeTruthy();
+    expect(next.isConnected).toBe(true);
+    expect(document.activeElement).toBe(next);
+    await act(async () => later[0](filePage(Array.from({ length: 25 }, (_, index) => fileRow(index + 26)), 60, 25)));
+    expect(await within(section).findByText("Showing 26–50 of 60")).toBeTruthy();
+    expect(document.activeElement).toBe(next);
+  });
+
+  it("moves a file page past the end of the list to its last page", async () => {
+    go("#/engagements/demo?tab=code&view=files&page=9");
+    vi.mocked(codeApi.listCodeFiles).mockImplementation(async (_key, query) =>
+      filePage(Array.from({ length: Math.max(0, Math.min(25, 60 - query.offset)) }, (_, index) => fileRow(query.offset + index + 1)), 60, query.offset),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "All files" })).closest("section")!;
+    expect(await within(section).findByText("Showing 51–60 of 60")).toBeTruthy();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=files&page=3");
+  });
+
+  it("lists signal files read only wide as advice, outside the warning count", async () => {
+    go("#/engagements/demo?tab=code&view=quality");
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        quality_gate: { passed: false, warnings: ["High file src/auth.py: missing slot_types"] },
+        coverage: {
+          ...coverage,
+          gate: {
+            ...coverage.gate,
+            depth_advisories: [
+              { file_id: 4, file_path: "src/session.py", classification: "critical", passes: 2, dispatches: 1, signal_passes: 1, findings: 2 },
+            ],
+          },
+        },
+      }),
+    );
+    renderTab();
+    const group = (await screen.findByText("Files with signal not yet read deep")).closest("details")!;
+    expect(group.textContent).toContain("1 file · advice, not counted as a warning");
+    const cells = within(group).getAllByRole("row")[1];
+    expect(within(cells).getAllByRole("cell").map((cell) => cell.textContent)).toEqual(["src/session.py", "Critical", "2", "1", "1", "2"]);
+    // The section badge still counts only the review-quality warnings.
+    expect(screen.getByRole("tab", { name: /Quality/ }).textContent).toContain("1");
+  });
+
   it("counts direct reads as unknown, not zero, while the code index is out of date", async () => {
     go("#/engagements/demo?tab=code&view=files");
     vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
@@ -596,6 +946,128 @@ describe("CodeAnalysisTab files and quality", () => {
     expect(screen.getByText("58 of 70")).toBeTruthy();
     // Unrecognised warnings are kept verbatim.
     expect(screen.getByText("src/d.js: an unrecognised integrity note")).toBeTruthy();
+  });
+
+  it("tables the grouped effort gaps by risk and type, with samples and the full-list command", async () => {
+    go("#/engagements/demo?tab=code&view=quality");
+    const header =
+      "Effort below tier threshold: 5 family gap(s) across 5 file(s) in 2 tier x family group(s); " +
+      "every per-file gap: vigil assess code-coverage --cwe-matrix (GET code/coverage?detail=cwe)";
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        quality_gate: {
+          passed: false,
+          warnings: [
+            header,
+            "Effort below tier threshold — Critical x deserialization (threshold 70): 1 file(s), e.g. Critical file src/e.js: family 'deserialization' effort 0 < 70",
+            "Effort below tier threshold — High x algorithmic-dos (threshold 50): 4 file(s), e.g. High file src/a.js: family 'algorithmic-dos' effort 10 < 50; +3 more",
+            "src/d.js: an unrecognised integrity note",
+          ],
+        },
+        coverage: {
+          ...coverage,
+          gate: {
+            ...coverage.gate,
+            effort_gaps: {
+              total: 5,
+              file_count: 5,
+              groups: [
+                { classification: "critical", family: "deserialization", threshold: 70, file_count: 1, sample_file_paths: ["src/e.js"] },
+                { classification: "high", family: "algorithmic-dos", threshold: 50, file_count: 4, sample_file_paths: ["src/a.js", "src/b.js", "src/c.js"] },
+              ],
+              rows_omitted: 5,
+              full_list: "vigil assess code-coverage --cwe-matrix (GET code/coverage?detail=cwe)",
+            },
+          },
+        },
+      }),
+    );
+    renderTab();
+    const caption = await screen.findByText(/5 effort gaps across 5 files/);
+    const table = caption.closest("table")!;
+    const rows = within(table).getAllByRole("row");
+    expect(within(rows[0]).getAllByRole("columnheader").map((cell) => cell.textContent)).toEqual([
+      "Risk", "Vulnerability type", "Threshold", "Files", "Examples",
+    ]);
+    expect(rows.slice(1).map((row) => within(row).getAllByRole("cell").slice(0, 4).map((cell) => cell.textContent))).toEqual([
+      ["Critical", "Deserialization", "70", "1"],
+      ["High", "Algorithmic DoS", "50", "4"],
+    ]);
+    // Each example is its own list entry (no separators stranded between whole-line paths),
+    // and a sample says how many files it left out.
+    expect(rows.slice(1).map((row) => within(row).getAllByRole("listitem").map((item) => item.textContent))).toEqual([
+      ["src/e.js"],
+      ["src/a.js", "src/b.js", "src/c.js", "+1 more"],
+    ]);
+    // The groups are the table, not a second copy as plain text; the list of
+    // every gap is one command away.
+    expect(screen.queryByText(/^Effort below tier threshold/)).toBeNull();
+    expect(screen.getByText(/vigil assess code-coverage --cwe-matrix/)).toBeTruthy();
+    expect(screen.getByText("src/d.js: an unrecognised integrity note")).toBeTruthy();
+  });
+
+  it("names the vulnerability types below their floor that no lead tracks, as advice with the full-list read", async () => {
+    go("#/engagements/demo?tab=code&view=quality");
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        coverage: {
+          ...coverage,
+          gate: {
+            ...coverage.gate,
+            untriggered_depth_shortfalls: {
+              total: 9,
+              file_count: 4,
+              groups: [
+                { classification: "critical", family: "deserialization", threshold: 70, file_count: 4, sample_file_paths: ["src/a.js", "src/b.js", "src/c.js"] },
+              ],
+              rows_omitted: 9,
+              full_list: "vigil assess code-coverage --cwe-matrix (GET code/coverage?detail=cwe)",
+              detail: "9 critical/high famil(ies) on 4 file(s) are below their effort floor with no depth_floor trigger. They do not block.",
+            },
+          },
+        },
+      }),
+    );
+    renderTab();
+    const group = (await screen.findByText("Vulnerability types below their floor with no lead")).closest("details")!;
+    expect(group.textContent).toContain("9 on 4 files · advice, not counted as a warning");
+    // The backend's own account of why and what to do is shown as it wrote it.
+    expect(within(group).getByText(/are below their effort floor with no depth_floor trigger/)).toBeTruthy();
+    expect(within(group).getByText("vigil assess code-coverage --cwe-matrix (GET code/coverage?detail=cwe)")).toBeTruthy();
+    const row = within(group).getAllByRole("row")[1];
+    expect(within(row).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["src/a.js", "src/b.js", "src/c.js", "+1 more"]);
+    // Advice only: the section's warning count stays at zero.
+    expect(within(screen.getByRole("tab", { name: /Quality/ })).getByText("0")).toBeTruthy();
+  });
+
+  it("lists the vulnerability types optional on client-bundle files as advice, with the full-list read", async () => {
+    go("#/engagements/demo?tab=code&view=quality");
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({ target_phase: target, coverage: { ...coverage, gate: { ...coverage.gate, optional_families: optionalFamilies } } }),
+    );
+    renderTab();
+    const group = (await screen.findByText("Vulnerability types optional on client-bundle files")).closest("details")!;
+    expect(group.textContent).toContain("3 on 14 files · advice, not counted as a warning");
+    expect(within(group).getByText(/never measured by the effort harness or the depth floor/)).toBeTruthy();
+    expect(within(group).getAllByRole("row").slice(1).map((row) => within(row).getAllByRole("cell").map((cell) => cell.textContent))).toEqual([
+      ["Algorithmic DoS", "14"], ["SSRF", "9"], ["Deserialization", "3"],
+    ]);
+    expect(within(group).getByText(optionalFamilies.full_list)).toBeTruthy();
+    expect(within(group).getByRole("link", { name: "List the client-bundle files" }).getAttribute("href")).toBe("#/engagements/demo?tab=code&view=files&tags=client-bundle");
+    // Advice only: the section's warning count stays at zero.
+    expect(within(screen.getByRole("tab", { name: /Quality/ })).getByText("0")).toBeTruthy();
+  });
+
+  it("keeps the grouped effort lines visible when the coverage groups are missing", async () => {
+    go("#/engagements/demo?tab=code&view=quality");
+    const line = "Effort below tier threshold — High x algorithmic-dos (threshold 50): 4 file(s), e.g. High file src/a.js: family 'algorithmic-dos' effort 10 < 50; +3 more";
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({ target_phase: target, coverage: undefined, quality_gate: { passed: false, warnings: [line] } }),
+    );
+    renderTab();
+    expect(await screen.findByText(line)).toBeTruthy();
   });
 });
 
@@ -760,6 +1232,44 @@ describe("CodeAnalysisTab results", () => {
     expect(within(scope).getByRole("button", { name: /Needs attention\s*7/ }).getAttribute("aria-pressed")).toBe("true");
   });
 
+  it("counts the awaiting-verdict scope on its own, never as a share of the current results it is not part of", async () => {
+    go("#/engagements/demo?tab=code&view=results&scope=attention");
+    vi.mocked(codeApi.listCodeAnalysisResultPage).mockImplementation(async (_key, query = {}) =>
+      query.scope === "awaiting_verdict"
+        ? resultPage([result(3, { disposition: "suspicious", awaiting_verdict: true })], 1, { scope: "awaiting_verdict", awaiting_verdict: { files: 1, results: 1 } })
+        : resultPage([result(1)], 185),
+    );
+    renderTab();
+    await screen.findByRole("button", { name: /Open result #3/ });
+    const summary = document.querySelector(".cv-results-summary .ui-results-summary")!;
+    // A result left open beside a finding is not one of the 185 current results.
+    expect(summary.textContent).toContain("1 result awaiting a verdict");
+    expect(summary.textContent).not.toContain("185");
+  });
+
+  it("says how many awaiting-verdict results the filters leave out", async () => {
+    go("#/engagements/demo?tab=code&view=results&scope=attention&confidence=high");
+    vi.mocked(codeApi.listCodeAnalysisResultPage).mockImplementation(async (_key, query = {}) =>
+      query.scope === "awaiting_verdict"
+        ? resultPage([result(3, { disposition: "suspicious", awaiting_verdict: true })], 2, { scope: "awaiting_verdict", awaiting_verdict: { files: 7, results: 7 } })
+        : resultPage([result(1)], 185),
+    );
+    renderTab();
+    await screen.findByRole("button", { name: /Open result #3/ });
+    expect(document.querySelector(".cv-results-summary .ui-results-summary")!.textContent).toContain("2 of 7 results awaiting a verdict");
+  });
+
+  it("says a suspicious result left open beside a finding awaits a verdict, not that it was replaced", async () => {
+    const open = result(9, { disposition: "suspicious", awaiting_verdict: true });
+    // The file closed as a finding; this receipt is not among the current ones, and nothing replaced it.
+    vi.mocked(codeApi.getCodeAnalysisResult).mockResolvedValue(detailOf(open, { queue_disposition: "finding", current: false }));
+    go("#/engagements/demo?tab=code&view=results&scope=attention&result=9");
+    renderTab();
+    const record = await screen.findByRole("region", { name: "Analysis result record" });
+    expect(await within(record).findByText(/Open lead beside a finding: the review closed this file as a finding/)).toBeTruthy();
+    expect(within(record).queryByText(/Not a current result/)).toBeNull();
+  });
+
   it("offers Try again when the results page fails to load", async () => {
     vi.mocked(codeApi.listCodeAnalysisResultPage).mockRejectedValueOnce(new Error("upstream timeout"));
     renderTab();
@@ -786,6 +1296,30 @@ describe("CodeAnalysisTab results", () => {
     renderTab();
     expect(await screen.findByText("No current analysis results.")).toBeTruthy();
     expect(screen.getByText(/120 receipt\(s\) were recorded before receipts were tied to the code index/)).toBeTruthy();
+  });
+
+  it("names the awaiting-verdict results the current listing leaves out, even when the filters match nothing, and opens them", async () => {
+    go("#/engagements/demo?tab=code&view=results&disposition=suspicious");
+    const left_out = {
+      code: "awaiting_verdict_not_current",
+      count: 1,
+      message: "1 result(s) awaiting a verdict are not current results, so this listing leaves them out; the Needs attention scope lists them.",
+    };
+    vi.mocked(codeApi.listCodeAnalysisResultPage).mockImplementation(async (_key, query = {}) =>
+      query.scope === "awaiting_verdict"
+        ? resultPage([result(9, { disposition: "suspicious", awaiting_verdict: true })], 1, { scope: "awaiting_verdict" })
+        : resultPage([], 0, { not_listed: [left_out] }),
+    );
+    renderTab();
+    // "Nothing matches" is not the whole story: a suspicious result exists outside this listing.
+    expect(await screen.findByText("No results match these filters.")).toBeTruthy();
+    const note = screen.getByRole("note", { name: "Results not listed" });
+    expect(note.textContent).toContain("1 result(s) awaiting a verdict are not current results");
+    fireEvent.click(within(note).getByRole("button", { name: "Show them in Needs attention" }));
+    // The link lands on exactly the results the note counts: that scope, with no filter narrowing it.
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=results&scope=attention");
+    expect(await screen.findByRole("button", { name: /Open result #9/ })).toBeTruthy();
+    expect(screen.queryByRole("note", { name: "Results not listed" })).toBeNull();
   });
 
   it("keeps an open result's receipt read in flight across refreshes and re-reads it once", async () => {
@@ -826,6 +1360,21 @@ describe("CodeAnalysisTab results", () => {
 describe("CodeAnalysisTab review queue", () => {
   beforeEach(() => go("#/engagements/demo?tab=code&view=queue"));
 
+  it("names the vulnerability types a job's client-bundle tag leaves optional", async () => {
+    vi.mocked(codeApi.listCodeQueueLane).mockImplementation(async (_key, status) => {
+      if (status !== "processing") return emptyLane();
+      const page = lanePage(2, [1, 2]);
+      page.items[0] = { ...page.items[0], optional_vuln_classes: ["algorithmic-dos", "ssrf"] };
+      page.items[1] = { ...page.items[1], optional_vuln_classes: [] };
+      return page;
+    });
+    renderTab();
+    const jobs = within(await screen.findByRole("region", { name: "Running now" })).getAllByRole("listitem");
+    expect(within(jobs[0]).getByText("Optional on this client bundle:").parentElement!.textContent).toBe("Optional on this client bundle: Algorithmic DoS, SSRF");
+    // A job whose file owes every family says nothing about optional ones.
+    expect(jobs[1].textContent).not.toContain("Optional on this client bundle");
+  });
+
   it("pages every current job in a lane instead of stopping at the first few", async () => {
     vi.mocked(codeApi.listCodeQueueLane).mockImplementation(async (_key, status, page) =>
       status === "pending" ? lanePage(45, Array.from({ length: 10 }, (_, index) => page.offset + index + 1)) : emptyLane(),
@@ -857,6 +1406,210 @@ describe("CodeAnalysisTab review queue", () => {
     await act(async () => later[0]({ ...lanePage(45, Array.from({ length: 10 }, (_, index) => index + 11)), offset: 10 }));
     expect(await within(lane).findByText("Showing 11–20 of 45 · highest priority first")).toBeTruthy();
     await waitFor(() => expect(laterCalls()).toBe(2));
+  });
+
+  it("splits the leads not yet followed by kind and lists every one of them", async () => {
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        coverage: {
+          ...coverage,
+          trigger_summary: { pending: 30, depth_floor_pending: 25, queued: 0, resolved: 3, reviewed_at_sufficient_depth: 1 },
+        },
+      }),
+    );
+    const pendingLeads = Array.from({ length: 30 }, (_, index) =>
+      lead(index + 1, index < 5 ? {} : {
+        origin: "depth_floor",
+        reason: `Depth floor: critical file closed with ssrf effort 10, below the critical floor of 70 (${index + 1}).`,
+      }),
+    );
+    vi.mocked(codeApi.listCodeTriggers).mockImplementation(async (_key, status, page) => leadPage(status === "pending" ? pendingLeads : [], page));
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "Leads to follow" })).closest("section")!;
+    expect(await within(section).findByText(/not yet followed:/)).toBeTruthy();
+    expect(section.querySelector(".cv-lead-totals")!.textContent).toBe(
+      "30 not yet followed: 5 cross-file, 25 depth floor. 0 queued for review, 4 settled.",
+    );
+    // The depth-floor split is part of "not yet followed", never a status of its own.
+    const statuses = within(within(section).getByRole("group", { name: "Status" })).getAllByRole("button").map((chip) => chip.textContent);
+    expect(statuses).toEqual(["Not yet followed30", "Queued for review0", "Followed3", "Read at sufficient depth1"]);
+    // The server pages the leads: one page is asked for, never the whole status.
+    expect(codeApi.listCodeTriggers).toHaveBeenCalledWith("demo", "pending", { limit: 25, offset: 0, origin: undefined });
+
+    const list = await within(section).findByRole("list", { name: "Leads not yet followed" });
+    expect(within(list).getAllByRole("listitem")).toHaveLength(25);
+    expect(within(section).getByText("Showing 1–25 of 30")).toBeTruthy();
+    fireEvent.click(within(section).getByRole("button", { name: "Next leads page" }));
+    expect(await within(section).findByText("Showing 26–30 of 30")).toBeTruthy();
+    expect(codeApi.listCodeTriggers).toHaveBeenLastCalledWith("demo", "pending", { limit: 25, offset: 25, origin: undefined });
+
+    // Narrowing to one kind keeps the status and says how many it left out.
+    fireEvent.click(within(within(section).getByRole("group", { name: "Kind" })).getByRole("button", { name: /Cross-file/ }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=queue&kind=cross_file");
+    expect(await within(section).findByText("Showing 1–5 of 5")).toBeTruthy();
+    // The kind is the server's filter, from the first page.
+    expect(codeApi.listCodeTriggers).toHaveBeenLastCalledWith("demo", "pending", { limit: 25, offset: 0, origin: "cross_file" });
+    expect(within(section).getByText(/of/, { selector: ".ui-results-summary" }).textContent).toContain("5 of 30 leads not yet followed");
+  });
+
+  it("keeps the leads page in the URL and reads an empty status as the default one", async () => {
+    go("#/engagements/demo?tab=code&view=queue&leads=&page=2");
+    vi.mocked(codeApi.listCodeTriggers).mockImplementation(async (_key, status, page) =>
+      leadPage(status === "pending" ? Array.from({ length: 30 }, (_, index) => lead(index + 1)) : [], page),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "Leads to follow" })).closest("section")!;
+    // A reload lands on the page that was shown.
+    expect(await within(section).findByText("Showing 26–30 of 30")).toBeTruthy();
+    expect(vi.mocked(codeApi.listCodeTriggers).mock.calls.map(([, status, page]) => [status, page.offset])).toEqual([["pending", 25]]);
+    expect(within(section).getByRole("button", { name: /Not yet followed/ }).getAttribute("aria-pressed")).toBe("true");
+    fireEvent.click(within(section).getByRole("button", { name: "Previous leads page" }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=queue");
+    expect(await within(section).findByText("Showing 1–25 of 30")).toBeTruthy();
+    fireEvent.click(within(section).getByRole("button", { name: "Next leads page" }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=queue&page=2");
+    // Narrowing starts again from the first page.
+    fireEvent.click(within(within(section).getByRole("group", { name: "Kind" })).getByRole("button", { name: /Cross-file/ }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=queue&kind=cross_file");
+  });
+
+  it("brings linked leads into view only once the review jobs above them have loaded", async () => {
+    go("#/engagements/demo?tab=code&view=queue&kind=depth_floor");
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      const lanes: Array<(value: CodeQueuePage) => void> = [];
+      vi.mocked(codeApi.listCodeQueueLane).mockImplementation(() => new Promise<CodeQueuePage>((resolve) => { lanes.push(resolve); }));
+      renderTab();
+      await screen.findByRole("heading", { name: "Leads to follow" });
+      await waitFor(() => expect(lanes).toHaveLength(4));
+      // The job lanes are still a placeholder: scrolling now would land above where the leads end up.
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      await act(async () => lanes.forEach((resolve) => resolve(lanePage(45, Array.from({ length: 10 }, (_, index) => index + 1)))));
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+      expect((scrollIntoView.mock.instances[0] as Element).getAttribute("aria-labelledby")).toBe("cv-leads-title");
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("waits for the review jobs to be re-read when linked leads open over jobs loaded earlier", async () => {
+    const scrollIntoView = vi.fn();
+    const original = Element.prototype.scrollIntoView;
+    Element.prototype.scrollIntoView = scrollIntoView;
+    try {
+      renderTab();
+      await screen.findByRole("heading", { name: "Leads to follow" });
+      await waitFor(() => expect(codeApi.listCodeQueueLane).toHaveBeenCalledTimes(4));
+      fireEvent.click(screen.getByRole("tab", { name: /Overview/ }));
+      await screen.findByRole("heading", { name: /What's left before/ });
+      // The lanes from the first visit are still held; this visit re-reads them.
+      const lanes: Array<(value: CodeQueuePage) => void> = [];
+      vi.mocked(codeApi.listCodeQueueLane).mockImplementation(() => new Promise<CodeQueuePage>((resolve) => { lanes.push(resolve); }));
+      act(() => {
+        go("#/engagements/demo?tab=code&view=queue&kind=depth_floor");
+        window.dispatchEvent(new HashChangeEvent("hashchange"));
+      });
+      await screen.findByRole("heading", { name: "Leads to follow" });
+      await waitFor(() => expect(lanes).toHaveLength(4));
+      expect(scrollIntoView).not.toHaveBeenCalled();
+      await act(async () => lanes.forEach((resolve) => resolve(lanePage(45, Array.from({ length: 10 }, (_, index) => index + 1)))));
+      await waitFor(() => expect(scrollIntoView).toHaveBeenCalledTimes(1));
+    } finally {
+      Element.prototype.scrollIntoView = original;
+    }
+  });
+
+  it("offers Try again when the leads fail to load", async () => {
+    vi.mocked(codeApi.listCodeTriggers).mockRejectedValueOnce(new Error("leads down"));
+    vi.mocked(codeApi.listCodeTriggers).mockResolvedValue(leadPage([lead(1)]));
+    renderTab();
+    const alert = await screen.findByText(/Leads unavailable: leads down/);
+    const retry = within(alert).getByRole("button", { name: "Try again" });
+    retry.focus();
+    fireEvent.click(retry);
+    expect(await screen.findByRole("list", { name: "Leads not yet followed" })).toBeTruthy();
+    expect(screen.queryByText(/Leads unavailable/)).toBeNull();
+    // The button leaves with the error; keyboard focus stays on the leads instead of falling to the page.
+    expect((document.activeElement as HTMLElement).getAttribute("aria-labelledby")).toBe("cv-leads-title");
+  });
+
+  it("says the review jobs are unavailable when their read fails, instead of loading forever", async () => {
+    vi.mocked(codeApi.listCodeQueueLane).mockRejectedValue(new Error("lanes down"));
+    renderTab();
+    expect(await screen.findByText("Review jobs are unavailable.")).toBeTruthy();
+  });
+
+  it("counts a settled status's kinds from the server and keeps the pager in place while a page loads", async () => {
+    go("#/engagements/demo?tab=code&view=queue&leads=resolved");
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({ target_phase: target, coverage: { ...coverage, trigger_summary: { pending: 0, depth_floor_pending: 0, queued: 0, resolved: 60 } } }),
+    );
+    const followed = Array.from({ length: 60 }, (_, index) => lead(index + 1, { status: "resolved", origin: index < 40 ? "cross_file" : "depth_floor" }));
+    const later: Array<() => void> = [];
+    vi.mocked(codeApi.listCodeTriggers).mockImplementation((_key, _status, page) =>
+      page.offset === 0
+        ? Promise.resolve(leadPage(followed, page))
+        : new Promise<CodeTriggerPage>((resolve) => { later.push(() => resolve(leadPage(followed, page))); }),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "Leads to follow" })).closest("section")!;
+    expect(await within(section).findByText("Showing 1–25 of 60")).toBeTruthy();
+    // Both kinds are counted for the whole status, not for the 25 leads on this page.
+    const kinds = within(within(section).getByRole("group", { name: "Kind" })).getAllByRole("button").map((chip) => chip.textContent);
+    expect(kinds.map((text) => text!.match(/^(Cross-file|Depth floor)(\d+)/)!.slice(1, 3))).toEqual([["Cross-file", "40"], ["Depth floor", "20"]]);
+
+    const next = within(section).getByRole("button", { name: "Next leads page" });
+    next.focus();
+    fireEvent.click(next);
+    await waitFor(() => expect(later).toHaveLength(1));
+    // The loaded page stays on screen, and keyboard focus stays on the pager, until the next one lands.
+    expect(within(section).getByText("Showing 1–25 of 60")).toBeTruthy();
+    expect(document.activeElement).toBe(next);
+    await act(async () => later[0]());
+    expect(await within(section).findByText("Showing 26–50 of 60")).toBeTruthy();
+    expect(document.activeElement).toBe(next);
+  });
+
+  it("moves a leads page past the end of the list to its last page", async () => {
+    go("#/engagements/demo?tab=code&view=queue&page=9");
+    vi.mocked(codeApi.listCodeTriggers).mockImplementation(async (_key, status, page) =>
+      leadPage(status === "pending" ? Array.from({ length: 30 }, (_, index) => lead(index + 1)) : [], page),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "Leads to follow" })).closest("section")!;
+    expect(await within(section).findByText("Showing 26–30 of 30")).toBeTruthy();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=queue&page=2");
+  });
+
+  it("opens a settled status and shows why each lead was settled without another review", async () => {
+    vi.mocked(api.getCodeReadiness).mockImplementation(async (_key, target) =>
+      readiness({
+        target_phase: target,
+        coverage: { ...coverage, trigger_summary: { pending: 0, depth_floor_pending: 0, queued: 0, resolved: 0, reviewed_at_sufficient_depth: 1 } },
+      }),
+    );
+    vi.mocked(codeApi.listCodeTriggers).mockImplementation(async (_key, status, page) =>
+      leadPage(
+        status === "reviewed_at_sufficient_depth"
+          ? [lead(7, { status, origin: "depth_floor", resolution_note: "No upload sink is reachable from this chunk." })]
+          : [],
+        page,
+      ),
+    );
+    renderTab();
+    const section = (await screen.findByRole("heading", { name: "Leads to follow" })).closest("section")!;
+    expect(await within(section).findByText("No leads with status “Not yet followed”.")).toBeTruthy();
+    fireEvent.click(await within(section).findByRole("button", { name: /Read at sufficient depth/ }));
+    expect(window.location.hash).toBe("#/engagements/demo?tab=code&view=queue&leads=reviewed_at_sufficient_depth");
+    const list = await within(section).findByRole("list", { name: "Leads read at sufficient depth" });
+    expect(list.textContent).toContain("Read at sufficient depth: No upload sink is reachable from this chunk.");
+    // A lead links to the results of the file whose review left it, where that review can be read.
+    expect(within(list).getByRole("link", { name: "Results for the reviewed file" }).getAttribute("href")).toBe(
+      "#/engagements/demo?tab=code&view=results&q=file%3Asrc%2Fsource_7.py",
+    );
   });
 
   it("explains finished jobs that do not count as reviewed", async () => {
@@ -946,7 +1699,25 @@ describe("CodeAnalysisTab refresh", () => {
     await waitFor(() => expect(api.getCodeReadiness).toHaveBeenCalledTimes(2));
     expect(api.listCodeRepos).toHaveBeenCalledTimes(1);
     expect(api.getCodeQueueStats).toHaveBeenCalledTimes(1);
-    expect(api.getCodeCoverage).toHaveBeenCalledTimes(1);
     expect(codeApi.listCodeRepoReviewProgress).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads coverage inside completion readiness instead of a request of its own", async () => {
+    renderTab("hunt", 0);
+    await waitFor(() => expect(api.getCodeReadiness).toHaveBeenCalledTimes(2));
+    expect(vi.mocked(api.getCodeReadiness).mock.calls).toEqual(
+      expect.arrayContaining([
+        ["demo", "verify-variant", { includeCoverage: false }],
+        ["demo", "complete", { includeCoverage: true }],
+      ]),
+    );
+    const numbers = await screen.findByRole("list", { name: "Key numbers" });
+    expect(within(numbers).getByRole("link", { name: /Files reviewed\s*60 \/ 102/ })).toBeTruthy();
+  });
+
+  it("asks once, with coverage, when the next transition is completion", async () => {
+    renderTab("unknown");
+    await waitFor(() => expect(api.getCodeReadiness).toHaveBeenCalled());
+    expect(vi.mocked(api.getCodeReadiness).mock.calls).toEqual([["demo", "complete", { includeCoverage: true }]]);
   });
 });

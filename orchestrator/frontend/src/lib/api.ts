@@ -90,6 +90,9 @@ export type FindingPocRequest = {
 export type FindingPocResponse = {
   status?: number | string;
   headers?: Record<string, string> | string;
+  /** The recorded response body, as the finding contract names it (`finding_details.py` `poc_response`). */
+  body_excerpt?: string;
+  /** The same evidence on a record that carries it under this key. */
   body?: string;
 };
 
@@ -376,6 +379,21 @@ export type AssessmentFindingSeverityVariance = {
   created_at: string;
 };
 
+/**
+ * Whether a finding's severity sits outside the band its CVSS score maps to,
+ * and what settles that (the finding point read; the rule report readiness
+ * applies). `current_variance_id` is the variance on the current
+ * verification; `explained` is true when that variance records this band and
+ * severity, or an operator-authority verdict stands behind it.
+ */
+export type AssessmentFindingSeverityBand = {
+  /** The band the CVSS score maps to; null without a score. */
+  cvss_band: string | null;
+  departs: boolean;
+  current_variance_id: number | null;
+  explained: boolean;
+};
+
 export type AssessmentVerificationAudit = {
   proof_receipt_ids: number[];
   proof_receipt_total: number;
@@ -383,6 +401,8 @@ export type AssessmentVerificationAudit = {
   counter_check_total: number;
   severity_variances: AssessmentFindingSeverityVariance[];
   severity_variance_total: number;
+  // Stamped by the point read; absent on the per-transition projection.
+  severity_band?: AssessmentFindingSeverityBand;
   claim_review_pending?: boolean;
   claim_transition_id?: number | null;
   current_claim_sha256?: string;
@@ -528,6 +548,21 @@ export type PerHostOutcome = {
   met: boolean;
   evidence: string[];
   deferred: boolean;
+  // `waf_tier` only: whether a WAF fronts the host, apart from whether the
+  // tier was measured. A measured negative is met with no WAF.
+  waf_detected?: boolean;
+};
+
+/** A tech-component row whose `provenance.waf` is not a structured WAF measurement, so it closes no host's WAF tier. */
+export type IgnoredWafMeasurement = { intel_id: number; problem: string | null };
+
+export type PerHostEngagementSignals = {
+  waf_intel_count?: number;
+  /** Tech-component rows carrying a valid structured measurement (`provenance.waf`). */
+  waf_measurement_count?: number;
+  waf_measurements_ignored?: IgnoredWafMeasurement[];
+  tech_scan_intel_count?: number;
+  osint_intel_total?: number;
 };
 
 export type PerHostCoverageDeferral = {
@@ -548,7 +583,7 @@ export type PerHostCoverageHost = {
 export type PerHostCoverage = {
   objectives: string[];
   hosts: PerHostCoverageHost[];
-  engagement_signals: Record<string, number | undefined>;
+  engagement_signals: PerHostEngagementSignals;
   // P1#3 — raw scope.json `hosts` entries (bare host / url / wildcard
   // forms preserved). Used by the Readiness panel to render a
   // scope-literals-only toggle. Empty list = backend has no scope.json
@@ -562,6 +597,30 @@ export type ReportReadinessCoverage = {
   unresolved_surfaces?: unknown[];
   partially_covered_surfaces?: unknown[];
   high_risk_deferred_surfaces?: unknown[];
+};
+
+/**
+ * Whether the registered report.md has a current independent QC review
+ * (`report_readiness.report_qc_state`). `required` is whether report.md is
+ * registered; an unregistered report owes no review. `status` is the standing
+ * of the newest verdict against the registered bytes, and `issue` says, in
+ * the gate's words, what completing the engagement would refuse.
+ */
+export type ReportQc = {
+  required: boolean;
+  status: "missing" | "current" | "stale" | "blocked";
+  // The reviewer's verdict as recorded: only "pass" accepts the report.
+  verdict: string | null;
+  /** The registered report.md artifact and its bytes. */
+  artifact_id: number | null;
+  sha256: string | null;
+  /** The bytes the verdict reviewed. */
+  reviewed_sha256: string | null;
+  decision_id: number | null;
+  reviewer_dispatch_agent_id: string | null;
+  writer_dispatch_agent_id: string | null;
+  decided_at: string | null;
+  issue: string;
 };
 
 export type ReportReadiness = {
@@ -579,6 +638,7 @@ export type ReportReadiness = {
   // Readiness panel renders both Definition-of-Done gates and per-host
   // outcomes from one fetch.
   per_host_coverage?: PerHostCoverage;
+  report_qc?: ReportQc;
 };
 
 export type AssessmentProbe = {
@@ -659,6 +719,8 @@ export type AssessmentSummary = {
   coverage_statuses: Record<string, number>;
   finding_workflow_statuses: Record<string, number>;
   finding_verification_statuses: Record<string, number>;
+  /** Per bounded list (`top_findings`, `service_coverage_gaps`, …): its cap, whether it was cut, and the route that lists every row. */
+  list_truncation?: Record<string, { limit: number; truncated: boolean; full_route: string }>;
   top_surfaces: AssessmentSurface[];
   top_findings: AssessmentFinding[];
   recent_probes: AssessmentProbe[];
@@ -1485,6 +1547,9 @@ export type AssessmentCommandRunDetail = {
   stdout_artifact_ref: string;
   stderr_artifact_ref: string;
   stdout_bytes: number;
+  /** Where the complete stdout / stderr are stored on the engagement host; the previews are a part of them. */
+  stdout_path?: string | null;
+  stderr_path?: string | null;
   stderr_bytes: number;
   stdout_spill_device?: number | null;
   stdout_spill_inode?: number | null;
@@ -1891,6 +1956,8 @@ export type CodeQueueItem = {
   priority: number;
   batch_theme: string;
   slot_types: string[];
+  /** The server-only families the file's `client-bundle` tag makes optional; empty without the tag. */
+  optional_vuln_classes?: string[];
   guidance_hypotheses: string[];
   cross_file_triggers: Array<Record<string, unknown>>;
   agent_name: string;
@@ -1917,6 +1984,76 @@ export type CodeQueuePage = {
   has_more: boolean;
   item_ids: number[];
   items: CodeQueueItem[];
+};
+
+export type CodeEffortGaps = {
+  total: number;
+  file_count: number;
+  groups: Array<{
+    classification: string;
+    family: string;
+    threshold: number;
+    file_count: number;
+    sample_file_paths: string[];
+  }>;
+  rows_omitted: number;
+  full_list?: string;
+};
+
+/**
+ * Critical/high file families below their effort floor that no depth-floor
+ * lead tracks (their reviews closed before the backend raised one). Grouped
+ * like `CodeEffortGaps`; `detail` is the backend's account of why and what to
+ * do. A pointer; never a gate reason.
+ */
+export type CodeUntriggeredDepthShortfalls = CodeEffortGaps & { detail?: string };
+
+/**
+ * A critical or high file whose reviews produced signal (a finding or
+ * suspicious conclusion, or a current finding located in it) but were all
+ * wide. A pointer to where a deep pass is still to go; never a gate reason.
+ */
+export type CodeDepthAdvisory = {
+  file_id: number;
+  file_path: string;
+  classification: string;
+  passes: number;
+  dispatches: number;
+  signal_passes: number;
+  findings: number;
+};
+
+/**
+ * Classified files on an analysis repository whose classification recorded no
+ * context tags, so they owe only their slot-type and language families. A
+ * pointer for the architect; never a gate reason. `sample_paths` is a sample:
+ * `omitted` files are left out and `full_list` names the read that lists them.
+ */
+export type CodeContextTagsUnrecorded = {
+  count: number;
+  by_classification: Record<string, number>;
+  sample_paths: string[];
+  omitted: number;
+  full_list: string;
+  paging: string;
+  fix: string;
+};
+
+/**
+ * The server-only vulnerability families a `client-bundle` context tag makes
+ * optional on the files that carry it: never owed and never measured by the
+ * effort harness or the depth floor, though a reviewer may still score them.
+ * `by_family` counts the files each family is optional on, most files first.
+ * `sample_paths` is a sample: `omitted` files are left out and `full_list`
+ * names the reads that list them. A pointer; never a gate reason.
+ */
+export type CodeOptionalFamilies = {
+  files: number;
+  by_family: Record<string, number>;
+  sample_paths: string[];
+  omitted: number;
+  detail: string;
+  full_list: string;
 };
 
 export type CodeCoverage = {
@@ -1952,12 +2089,22 @@ export type CodeCoverage = {
     passed: boolean;
     reasons: string[];
     effort_warnings?: string[];
+    // Family shortfalls grouped risk tier x family; `effort_warnings` carries
+    // the same groups as text. Per-file rows are left out (`rows_omitted`) and
+    // `full_list` names the read that lists them.
+    effort_gaps?: CodeEffortGaps;
     coverage_integrity?: Array<{
       file_path?: string;
       warnings?: string[];
     }>;
+    depth_advisories?: CodeDepthAdvisory[];
+    context_tags_unrecorded?: CodeContextTagsUnrecorded | null;
+    optional_families?: CodeOptionalFamilies | null;
+    untriggered_depth_shortfalls?: CodeUntriggeredDepthShortfalls | null;
   };
-  // Unprocessed trigger counts by kind, and open analysis leases.
+  // Lead (trigger) counts by status, and open analysis leases. `pending`
+  // counts every lead not yet followed; `depth_floor_pending` is the part of
+  // it a critical/high closeout raised for a family left below its floor.
   trigger_summary?: Record<string, number>;
   open_leases_count?: number;
 };
@@ -2001,6 +2148,9 @@ export type CodeReadiness = {
     passed: boolean;
     warnings: string[];
   };
+  // Present only when requested with include_coverage=true: the coverage
+  // summary this readiness was computed from.
+  coverage?: CodeCoverage;
 };
 
 // One analysis receipt as the results page lists it (lib/codeApi.ts reads).
@@ -2062,13 +2212,13 @@ export function getCodeQueueStats(engagementKey: string) {
   return request<CodeQueueStats>(`/engagements/${engagementKey}/assessment/code/analysis-queue/stats`);
 }
 
-export function getCodeCoverage(engagementKey: string, repoId?: number) {
-  const qs = repoId != null ? `?repo_id=${repoId}` : "";
-  return request<CodeCoverage>(`/engagements/${engagementKey}/assessment/code/coverage${qs}`);
-}
-
-export function getCodeReadiness(engagementKey: string, targetPhase: CodeReadinessTarget) {
+export function getCodeReadiness(
+  engagementKey: string,
+  targetPhase: CodeReadinessTarget,
+  { includeCoverage = false }: { includeCoverage?: boolean } = {},
+) {
   const query = new URLSearchParams({ target_phase: targetPhase, include_debt_paths: "true" });
+  if (includeCoverage) query.set("include_coverage", "true");
   return request<CodeReadiness>(
     `/engagements/${engagementKey}/assessment/code/readiness?${query.toString()}`,
   );

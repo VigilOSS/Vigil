@@ -339,6 +339,52 @@ describe("useRecordPosition", () => {
     expect(result.current).toMatchObject({ index: null, total: 12, pending: false });
   });
 
+  it("keeps the neighbours a record last had when a refresh finds it outside the results", async () => {
+    const answers: Array<(value: RecordPosition<Row>) => void> = [];
+    const load = vi.fn(() => new Promise<RecordPosition<Row>>((resolve) => { answers.push(resolve); }));
+    const open = vi.fn();
+    const { result, rerender } = renderHook(({ key, identity }: { key: string | null; identity: string }) => useRecordPosition<Row>({
+      key,
+      identity,
+      load,
+      keyOf: (row) => row.id,
+      open,
+    }), { initialProps: { key: "a" as string | null, identity: "refresh=1" } });
+    await act(async () => answers[0](position(41, "z", "b")));
+
+    // The record's status changed under a status filter: it no longer matches.
+    rerender({ key: "a", identity: "refresh=2" });
+    await act(async () => answers[1](position(null, null, null, 499)));
+    expect(result.current).toMatchObject({ index: null, total: 499, pending: false });
+    result.current.onNext?.();
+    expect(open).toHaveBeenLastCalledWith({ id: "b" });
+    result.current.onPrevious?.();
+    expect(open).toHaveBeenLastCalledWith({ id: "z" });
+    // Later refreshes keep them.
+    rerender({ key: "a", identity: "refresh=3" });
+    await act(async () => answers[2](position(null, null, null, 498)));
+    expect(result.current).toMatchObject({ index: null, total: 498 });
+    expect(result.current.onNext).toBeDefined();
+
+    // A record that was never in the results has no neighbours there.
+    rerender({ key: "q", identity: "refresh=3" });
+    await act(async () => answers[3](position(null, null, null, 498)));
+    expect(result.current).toMatchObject({ index: null, total: 498, pending: false });
+    expect(result.current.onNext).toBeUndefined();
+    expect(result.current.onPrevious).toBeUndefined();
+
+    // Back in the results the operator narrows them, then opens the first
+    // record again: its old neighbours belong to results no longer shown.
+    rerender({ key: "a", identity: "refresh=3" });
+    await act(async () => answers[4](position(7, "y", "c")));
+    rerender({ key: null, identity: "refresh=3" });
+    rerender({ key: "a", identity: "filters=2" });
+    await act(async () => answers[5](position(null, null, null, 12)));
+    expect(result.current).toMatchObject({ index: null, total: 12, pending: false });
+    expect(result.current.onNext).toBeUndefined();
+    expect(result.current.onPrevious).toBeUndefined();
+  });
+
   it("settles under a burst of refreshes and re-locates once after, stepping with the last answer meanwhile", async () => {
     const answers: Array<(value: RecordPosition<Row>) => void> = [];
     const load = vi.fn(() => new Promise<RecordPosition<Row>>((resolve) => { answers.push(resolve); }));

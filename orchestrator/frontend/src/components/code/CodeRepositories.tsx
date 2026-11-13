@@ -9,13 +9,20 @@ import { debtByRepo, debtUnknownRepoIds, isReference, percent, repoDisambiguator
 import type { CodeData } from "./useCodeData";
 import { codeViewHref } from "./useCodeRoute";
 
-type Props = { engagementKey: string; data: CodeData; focusRepoId?: number };
+type Props = {
+  engagementKey: string;
+  data: CodeData;
+  /** The repository the URL names (`repo`). */
+  focusRepoId?: number;
+  /** The URL's `repo` value when it is not a repository number. */
+  unreadableRepo?: string | null;
+};
 
 type Warning = { key: string; text: string; details: string[] };
 
 const REFERENCE_GROUP = "reference";
 
-export function CodeRepositories({ engagementKey, data, focusRepoId }: Props) {
+export function CodeRepositories({ engagementKey, data, focusRepoId, unreadableRepo = null }: Props) {
   const repos = useMemo(() => data.repos ?? [], [data.repos]);
   const analysis = repos.filter((repo) => !isReference(repo));
   const reference = repos.filter(isReference);
@@ -93,6 +100,20 @@ export function CodeRepositories({ engagementKey, data, focusRepoId }: Props) {
           </button>
         </div>
       </header>
+
+      {/* A repository link that opens nothing says why. */}
+      {unreadableRepo !== null ? (
+        <p className="cv-inline-note is-warn" role="status">
+          Repository link “{unreadableRepo}” does not name a repository; repository links use the repository number, such
+          as repo=7.{" "}
+          <a href={codeViewHref(engagementKey, { view: "repositories" })}>Dismiss</a>
+        </p>
+      ) : focusRepoId != null && data.repos !== null && !repos.some((repo) => repo.id === focusRepoId) ? (
+        <p className="cv-inline-note is-warn" role="status">
+          Repository #{focusRepoId} is not one of this engagement's repositories.{" "}
+          <a href={codeViewHref(engagementKey, { view: "repositories" })}>Dismiss</a>
+        </p>
+      ) : null}
 
       <ul className="cv-repo-list" aria-label="Repositories under review">
         {analysis.map((repo) => (

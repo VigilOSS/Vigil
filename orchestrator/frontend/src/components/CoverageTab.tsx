@@ -8,7 +8,10 @@
 // is capped to a loaded slice. Opening an item replaces the list with the
 // shared record view; Back, Escape and browser Back return to the list.
 // The view, filters, search, closed-items choice and grid sort survive leaving
-// the tab (sessionStorage, per engagement).
+// the tab (sessionStorage, per engagement). The address names the view and
+// the drill-down a status or reason pick applied (`view=items&status=…&reason=…`),
+// so both can be linked and Back / Forward walk between them; the bare tab
+// link is the reason rollup, or on arrival the view kept from the last visit.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AssessmentSummary } from "../lib/api";
@@ -23,7 +26,7 @@ import {
   type CoverageSortDir,
   type CoverageSortKey,
 } from "../lib/coverageApi";
-import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
+import { engagementHref, parseWorkspaceRoute, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import { TimeStamp } from "./formatting";
 import { PageHeader, SegmentedControl } from "./ui";
 import { CoverageItemRecord, isCoverageRecordTab, type CoverageRecordTab } from "./coverage/CoverageItemRecord";
@@ -31,7 +34,14 @@ import { CoverageItemsView } from "./coverage/CoverageItemsView";
 import { CoverageReasonRollup } from "./coverage/CoverageReasonRollup";
 import { CoverageStatusBar } from "./coverage/CoverageStatusBar";
 import { OPEN_COVERAGE_STATUSES } from "./coverage/coverageStatus";
-import { coverageFiltersKey, parseCoverageView, type CoverageSavedView } from "./coverage/coverageGridModel";
+import {
+  coverageFiltersKey,
+  coverageListFromParams,
+  coverageListParams,
+  parseCoverageView,
+  withCoverageDrill,
+  type CoverageSavedView,
+} from "./coverage/coverageGridModel";
 import { useCoalescedRequest } from "../lib/useCoalescedRequest";
 import { useLiveRefreshToken } from "../lib/useLiveRefreshToken";
 import { RecordView, useResultsScrollMemory } from "./record/RecordView";
@@ -50,6 +60,7 @@ type CoverageTabProps = {
   /** Open record section (`dtab` in the URL). */
   initialDrawerTab?: string;
 };
+
 
 /** The open record: its id, and its row once known (a deep link starts without one). */
 type OpenItem = { id: number; row: CoverageLedgerItem | null };
@@ -71,6 +82,17 @@ function readSavedView(engagementKey: string): CoverageSavedView {
   }
 }
 
+/** The list the address names for this engagement's Coverage tab; null for any other address, or one with an open item. */
+function readListRoute(engagementKey: string) {
+  const route = parseWorkspaceRoute(window.location.hash);
+  if (route.kind !== "engagement" || route.key !== engagementKey) return null;
+  if (route.params.get("tab") !== "coverage" || route.params.has("item")) return null;
+  return coverageListFromParams(route.params);
+}
+
+const listHref = (engagementKey: string, view: View, filters: CoverageFilters) =>
+  engagementHref(engagementKey, { tab: "coverage", ...coverageListParams(view, filters) });
+
 export function CoverageTab(props: CoverageTabProps) {
   // A different engagement mounts afresh, starting from the view kept for it.
   return <CoverageWorkspace key={props.engagementKey} {...props} />;
@@ -78,8 +100,13 @@ export function CoverageTab(props: CoverageTabProps) {
 
 function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initialItemId, initialDrawerTab }: CoverageTabProps) {
   const [saved] = useState(() => readSavedView(engagementKey));
-  const [view, setView] = useState<View>(initialItemId !== undefined ? "items" : saved.view);
-  const [filters, setFilters] = useState<CoverageFilters>(saved.filters);
+  // A link that names a view opens it with its drill-down; the filters the
+  // address does not carry are the ones kept from the last visit.
+  const [linked] = useState(() => readListRoute(engagementKey));
+  const [view, setView] = useState<View>(initialItemId !== undefined ? "items" : linked?.view ?? saved.view);
+  const [filters, setFilters] = useState<CoverageFilters>(() => (
+    linked?.view === "items" ? withCoverageDrill(saved.filters, linked.drill) : saved.filters
+  ));
   const [searchText, setSearchText] = useState(saved.filters.q);
   const [includeClosed, setIncludeClosed] = useState(saved.includeClosed);
   const [showAllReasons, setShowAllReasons] = useState(false);
@@ -111,6 +138,29 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
     }
   }, [engagementKey, view, filters, includeClosed, gridSort]);
 
+  // Back / Forward and pasted links: the address names the view and its drill-down.
+  useEffect(() => {
+    const sync = () => {
+      const route = readListRoute(engagementKey);
+      if (!route) return;
+      setView(route.view ?? "reasons");
+      if (route.view === "items") setFilters((current) => withCoverageDrill(current, route.drill));
+    };
+    window.addEventListener("hashchange", sync);
+    window.addEventListener("popstate", sync);
+    return () => {
+      window.removeEventListener("hashchange", sync);
+      window.removeEventListener("popstate", sync);
+    };
+  }, [engagementKey]);
+  // Arriving on the bare tab link with "All items" kept from the last visit:
+  // the address then names what is shown, without a history entry.
+  useEffect(() => {
+    if (linked && linked.view === null && saved.view === "items") {
+      writeWorkspaceHash(listHref(engagementKey, "items", saved.filters), "replace");
+    }
+  }, [engagementKey, linked, saved]);
+
   // The URL owns which item's record is open and which section it shows.
   useEffect(() => {
     if (initialItemId === undefined) {
@@ -137,8 +187,8 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
   }, [engagementKey, recordTab]);
   const closeItem = useCallback(() => {
     setSelected(null);
-    writeWorkspaceHash(engagementHref(engagementKey, { tab: "coverage" }));
-  }, [engagementKey]);
+    writeWorkspaceHash(listHref(engagementKey, "items", filters));
+  }, [engagementKey, filters]);
   const chooseRecordTab = useCallback((next: CoverageRecordTab) => {
     setRecordTab(next);
     if (selected) writeWorkspaceHash(engagementHref(engagementKey, { tab: "coverage", item: selected.id, dtab: next === "why" ? undefined : next }));
@@ -208,11 +258,23 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
     ? OPEN_COVERAGE_STATUSES.reduce((sum, status) => sum + (statusTotals[status] ?? 0), 0)
     : null;
 
+  // Switching views and drilling down are steps Back returns from; narrowing
+  // the list in place only updates the address.
+  const chooseView = useCallback((next: View) => {
+    setView(next);
+    writeWorkspaceHash(listHref(engagementKey, next, filters));
+  }, [engagementKey, filters]);
   const showItems = useCallback((next: CoverageFilters) => {
     setSearchText(next.q);
     setFilters(next);
     setView("items");
-  }, []);
+    writeWorkspaceHash(listHref(engagementKey, "items", next));
+  }, [engagementKey]);
+  const changeFilters = useCallback((next: CoverageFilters) => {
+    if (next.q !== filters.q) setSearchText(next.q);
+    setFilters(next);
+    writeWorkspaceHash(listHref(engagementKey, "items", next), "replace");
+  }, [engagementKey, filters.q]);
 
   const pickReason = useCallback(
     (status: string, entry: CoverageReasonEntry) => {
@@ -237,12 +299,12 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
       if (event.key !== "/" || tag === "input" || tag === "textarea" || target?.isContentEditable) return;
       if (event.metaKey || event.ctrlKey || event.altKey || drawerOpenRef.current) return;
       event.preventDefault();
-      setView("items");
+      chooseView("items");
       window.setTimeout(() => searchRef.current?.focus(), 0);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, []);
+  }, [chooseView]);
 
   return (
     <div className="cov-page">
@@ -262,7 +324,7 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
           <SegmentedControl<View>
             label="Coverage view"
             value={view}
-            onChange={setView}
+            onChange={chooseView}
             options={[
               {
                 value: "reasons",
@@ -302,7 +364,9 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
           showingAllReasons={showAllReasons}
           onShowAllReasons={() => setShowAllReasons(true)}
           onPickReason={pickReason}
+          engagementKey={engagementKey}
           serviceGaps={summary?.service_coverage_gaps ?? []}
+          serviceGapsTruncation={summary?.list_truncation?.service_coverage_gaps}
           ledgerTotal={ledgerTotal}
         />
       ) : (
@@ -310,10 +374,7 @@ function CoverageWorkspace({ engagementKey, summary, refreshVersion = 0, initial
           engagementKey={engagementKey}
           filters={filters}
           filtersKey={filtersKey}
-          onFiltersChange={(next) => {
-            if (next.q !== filters.q) setSearchText(next.q);
-            setFilters(next);
-          }}
+          onFiltersChange={changeFilters}
           searchText={searchText}
           onSearchTextChange={setSearchText}
           searchRef={searchRef}

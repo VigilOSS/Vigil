@@ -97,9 +97,10 @@ const BODY_SHA = "b".repeat(64);
 function readinessFor(overrides: Partial<SubmissionReadiness> = {}): SubmissionReadiness {
   return {
     attachment_ids: [11],
-    pass1_qa: {
-      status: "missing", verdict: null, packet_id: null,
-      auditor_dispatch_agent_id: null, reason: "", decided_at: null, issue: "",
+    submission_qc: {
+      required: true, status: "missing", verdict: null, packet_id: null,
+      reviewer_dispatch_agent_id: null, writer_dispatch_agent_id: null,
+      failed_rows: [], decided_at: null, issue: "",
     },
     final_ready: true,
     blockers: [],
@@ -174,9 +175,10 @@ function detail(slug = "VA-001", overrides: Partial<SubmissionDeskDetail> = {}):
       blockers: [],
     },
     platform: "hackerone",
-    pass1_qa: {
-      status: "missing", verdict: null, packet_id: null,
-      auditor_dispatch_agent_id: null, reason: "", decided_at: null, issue: "",
+    submission_qc: {
+      required: true, status: "missing", verdict: null, packet_id: null,
+      reviewer_dispatch_agent_id: null, writer_dispatch_agent_id: null,
+      failed_rows: [], decided_at: null, issue: "",
     },
     blind_triage: {
       required: true,
@@ -226,7 +228,7 @@ function detail(slug = "VA-001", overrides: Partial<SubmissionDeskDetail> = {}):
   };
 }
 
-function renderTab(refreshVersion = 0, route: { initialSubmissionSlug?: string; initialDrawerTab?: string } = {}) {
+function renderTab(refreshVersion = 0, route: { initialSubmissionSlug?: string; initialDrawerTab?: string; onReadyCount?: (count: number) => void } = {}) {
   return render(
     <ToastProvider>
       <SubmissionsTab engagementKey="acme" refreshVersion={refreshVersion} {...route} />
@@ -304,6 +306,23 @@ describe("SubmissionsTab", () => {
     expect(summary.textContent).toContain("120 not eligible");
     expect(summary.textContent).toContain("4 ready to export");
   });
+  it("reports the ready-to-export count of every listing read, so other views do not keep an old one", async () => {
+    const onReadyCount = vi.fn();
+    vi.mocked(listSubmissionDesk)
+      .mockResolvedValueOnce(listing([row("VA-001")]))
+      .mockResolvedValue(listing([row("VA-001")], { counts: { ...listing([]).counts, ready: 3 } }));
+    vi.mocked(getSubmissionDesk).mockImplementation(async (_key, slug) => detail(slug));
+    const view = renderTab(0, { onReadyCount });
+    await waitFor(() => expect(onReadyCount).toHaveBeenLastCalledWith(4));
+    view.rerender(
+      <ToastProvider>
+        <SubmissionsTab engagementKey="acme" refreshVersion={1} onReadyCount={onReadyCount} />
+        <ToastViewport />
+      </ToastProvider>,
+    );
+    await waitFor(() => expect(onReadyCount).toHaveBeenLastCalledWith(3));
+  });
+
   it("shows server-computed queue counts and filters the queue on the server", async () => {
     vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
     vi.mocked(getSubmissionDesk).mockResolvedValue(detail());
@@ -794,6 +813,56 @@ describe("SubmissionsTab", () => {
     expect(screen.getByRole("region", { name: "Submission VA-001" })).toBeTruthy();
   });
 
+  it("does not blame the filters for a linked finding that is only further down the list, and offers to load more", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(
+      listing([row("VA-001")], { findings_page: page(1, 3) }),
+    );
+    vi.mocked(getSubmissionDesk).mockImplementation(async (_key, slug) => detail(slug));
+    renderTab(0, { initialSubmissionSlug: "VA-003" });
+    const card = await screen.findByRole("region", { name: "Submission VA-003" });
+    const notice = await within(card).findByText(/VA-003 is not among the 1 of 3 findings loaded/);
+    expect(card.textContent).not.toContain("the filters exclude it");
+    // The notice's own action loads the next page of the list.
+    fireEvent.click(within(notice.closest("[role='status']") as HTMLElement).getByRole("button", { name: "Load more findings" }));
+    await waitFor(() => expect(listSubmissionDesk).toHaveBeenLastCalledWith("acme", expect.objectContaining({ findingOffset: 1 })));
+  });
+
+  it("says the filters exclude a linked finding only when the whole list is loaded", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    vi.mocked(getSubmissionDesk).mockImplementation(async (_key, slug) => detail(slug));
+    renderTab(0, { initialSubmissionSlug: "VA-003" });
+    const card = await screen.findByRole("region", { name: "Submission VA-003" });
+    expect(await within(card).findByText(/VA-003 is not in this list/)).toBeTruthy();
+  });
+
+  it("says a merged finding is in no submission list, instead of blaming the filters", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    vi.mocked(getSubmissionDesk).mockImplementation(async (_key, slug) => {
+      const response = detail(slug);
+      return slug === "VA-009" ? { ...response, finding: { ...response.finding, workflow_status: "merged" } } : response;
+    });
+    renderTab(0, { initialSubmissionSlug: "VA-009" });
+    const card = await screen.findByRole("region", { name: "Submission VA-009" });
+    expect(await within(card).findByText(/VA-009 is merged, so no submission list includes it/)).toBeTruthy();
+    expect(card.textContent).not.toContain("change the filters");
+  });
+
+  it("reports a linked finding that cannot be read, with a retry, instead of saying nothing is selected", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    vi.mocked(getSubmissionDesk).mockImplementation(async (_key, slug) => {
+      if (slug === "ACME-404") throw new Error("finding not found");
+      return detail(slug);
+    });
+    renderTab(0, { initialSubmissionSlug: "ACME-404" });
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toContain("ACME-404");
+    expect(alert.textContent).toContain("finding not found");
+    expect(screen.queryByText("No finding selected.")).toBeNull();
+    const calls = vi.mocked(getSubmissionDesk).mock.calls.length;
+    fireEvent.click(within(alert).getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(vi.mocked(getSubmissionDesk).mock.calls.length).toBeGreaterThan(calls));
+  });
+
   it("opens the finding and section a link names, and writes the selection to the address", async () => {
     vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001"), row("VA-002", { title: "Second Acme finding" })]));
     vi.mocked(getSubmissionDesk).mockImplementation(async (_key, slug) => detail(slug));
@@ -888,24 +957,116 @@ describe("SubmissionsTab", () => {
     // Icon plus one text block: the hash is inline in the sentence, not its own flex item.
     expect([...note.children].map((child) => child.tagName.toLowerCase())).toEqual(["svg", "span"]);
   });
-  it("shows stale editing QA separately from independent blind triage", async () => {
+  it("shows the independent QC verdict separately from blind triage", async () => {
     vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
     const response = detail();
-    Object.assign(response, { pass1_qa: {
-      status: "stale", verdict: "pass", packet_id: "b".repeat(64),
-      auditor_dispatch_agent_id: "WRITE-VA-001", reason: "Checked preconditions after editing",
-      decided_at: "2026-09-09T13:00:00Z", issue: "Submission body changed after QA",
+    Object.assign(response, { submission_qc: {
+      required: true, status: "blocked", verdict: "blocked", packet_id: "b".repeat(64),
+      reviewer_dispatch_agent_id: "QC-VA-001", writer_dispatch_agent_id: "WRITE-VA-001",
+      failed_rows: [{ row: "Impact is demonstrated", quote: "could potentially allow" }],
+      decided_at: "2026-09-09T13:00:00Z", issue: "latest submission QC verdict does not accept this finding",
     } });
-    response.readiness.pass1_qa = response.pass1_qa;
+    response.readiness.submission_qc = response.submission_qc;
     vi.mocked(getSubmissionDesk).mockResolvedValue(response);
     vi.mocked(getSubmissionReadiness).mockResolvedValue({ finding_slug: "VA-001", ...response.readiness });
     renderTab();
     await (await cardHeader()).findByRole("button", { name: "Export v3…" });
     fireEvent.click(screen.getByRole("tab", { name: /Readiness/ }));
-    expect(screen.getByText("Pass 1 QA")).toBeTruthy();
-    expect(screen.getByText(/Submission body changed after QA/)).toBeTruthy();
+    expect(screen.getByText("Submission QC")).toBeTruthy();
+    const qc = screen.getByText("Submission QC").closest("div")!;
+    // The standing reads in plain words beside the verdict the reviewer recorded.
+    expect(within(qc).getByText("Not accepted")).toBeTruthy();
+    expect(qc.textContent).toContain("verdict blocked");
+    expect(screen.getByText(/QC-VA-001/)).toBeTruthy();
     expect(screen.getByText(/WRITE-VA-001/)).toBeTruthy();
+    expect(screen.getByText(/Impact is demonstrated/)).toBeTruthy();
+    expect(screen.getByText(/could potentially allow/)).toBeTruthy();
     expect(screen.getByText("Blind triage")).toBeTruthy();
+  });
+
+  it("shows a QC status it has no label for as recorded, and the packet id in full on hover", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    const packet = "c".repeat(64);
+    const response = detail();
+    Object.assign(response, { submission_qc: {
+      required: true, status: "superseded", verdict: "pass", packet_id: packet,
+      reviewer_dispatch_agent_id: "QC-VA-001", writer_dispatch_agent_id: null,
+      failed_rows: [], decided_at: "2026-10-02T10:00:00Z", issue: "",
+    } });
+    response.readiness.submission_qc = response.submission_qc;
+    vi.mocked(getSubmissionDesk).mockResolvedValue(response);
+    vi.mocked(getSubmissionReadiness).mockResolvedValue({ finding_slug: "VA-001", ...response.readiness });
+    renderTab(0, { initialSubmissionSlug: "VA-001", initialDrawerTab: "readiness" });
+    const card = await screen.findByRole("region", { name: "Submission VA-001" });
+    expect(await within(card).findByText("Superseded")).toBeTruthy();
+    // A shortened id still gives the whole value.
+    expect(within(card).getByTitle(packet)).toBeTruthy();
+  });
+
+  it("shows failed QC rows as the reviewer recorded them, whatever shape an entry has", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    const response = detail();
+    Object.assign(response, { submission_qc: {
+      required: true, status: "blocked", verdict: "blocked", packet_id: "b".repeat(64),
+      reviewer_dispatch_agent_id: "QC-VA-001", writer_dispatch_agent_id: null,
+      // A well-formed row, a row whose quote is structured, a bare string and an empty entry.
+      failed_rows: [
+        { row: "Impact is demonstrated", quote: "could potentially allow" },
+        { row: "Scope is stated", quote: { text: "all Acme tenants", line: 4 } },
+        "Reproduction steps are complete",
+        null,
+      ],
+      decided_at: "2026-09-09T13:00:00Z", issue: "latest submission QC verdict does not accept this finding",
+    } });
+    response.readiness.submission_qc = response.submission_qc;
+    vi.mocked(getSubmissionDesk).mockResolvedValue(response);
+    vi.mocked(getSubmissionReadiness).mockResolvedValue({ finding_slug: "VA-001", ...response.readiness });
+    renderTab(0, { initialSubmissionSlug: "VA-001", initialDrawerTab: "readiness" });
+    const rows = within(await screen.findByRole("list", { name: "Failed QC rows" })).getAllByRole("listitem").map((item) => item.textContent);
+    expect(rows).toEqual([
+      "Impact is demonstrated: could potentially allow",
+      'Scope is stated: {"text":"all Acme tenants","line":4}',
+      "Reproduction steps are complete",
+    ]);
+  });
+
+  it("shows why a stale QC verdict does not cover the current package", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    const response = detail();
+    Object.assign(response, { submission_qc: {
+      required: true, status: "stale", verdict: "pass", packet_id: "b".repeat(64),
+      reviewer_dispatch_agent_id: "QC-VA-001", writer_dispatch_agent_id: "WRITE-VA-001",
+      failed_rows: [], decided_at: "2026-09-09T13:00:00Z",
+      issue: "submission QC verdict covers a different submission body or platform",
+    } });
+    response.readiness.submission_qc = response.submission_qc;
+    vi.mocked(getSubmissionDesk).mockResolvedValue(response);
+    vi.mocked(getSubmissionReadiness).mockResolvedValue({ finding_slug: "VA-001", ...response.readiness });
+    renderTab();
+    await (await cardHeader()).findByRole("button", { name: "Export v3…" });
+    fireEvent.click(screen.getByRole("tab", { name: /Readiness/ }));
+    expect(screen.getByText(/covers a different submission body/)).toBeTruthy();
+    expect(screen.getByText("Passed, now stale")).toBeTruthy();
+  });
+
+  it("shows a QC verdict recorded without dispatch ids as recorded, with no empty reviewer or writer", async () => {
+    vi.mocked(listSubmissionDesk).mockResolvedValue(listing([row("VA-001")]));
+    const response = detail();
+    Object.assign(response, { submission_qc: {
+      required: true, status: "blocked", verdict: "QA_BLOCKED_BELOW_P3", packet_id: null,
+      reviewer_dispatch_agent_id: null, writer_dispatch_agent_id: null,
+      failed_rows: [], decided_at: "2026-09-06T21:46:06Z", issue: "latest submission QC verdict does not accept this finding",
+    } });
+    response.readiness.submission_qc = response.submission_qc;
+    vi.mocked(getSubmissionDesk).mockResolvedValue(response);
+    vi.mocked(getSubmissionReadiness).mockResolvedValue({ finding_slug: "VA-001", ...response.readiness });
+    renderTab();
+    await (await cardHeader()).findByRole("button", { name: "Export v3…" });
+    fireEvent.click(screen.getByRole("tab", { name: /Readiness/ }));
+    const qc = screen.getByText("Submission QC").closest("div")!;
+    expect(within(qc).getByText("QA_BLOCKED_BELOW_P3")).toBeTruthy();
+    expect(qc.textContent).not.toContain("· reviewer");
+    expect(qc.textContent).not.toContain("· writer");
   });
 
 });

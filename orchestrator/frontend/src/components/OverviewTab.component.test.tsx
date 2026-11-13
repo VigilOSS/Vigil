@@ -389,3 +389,171 @@ it("reads field=value blocker details as labels and keeps the raw detail on hove
   expect(within(panel).getByText("Root cause key: acme-tenant-selector")).toBeTruthy();
   expect(within(panel).getByText("missing structured fields: remediation")).toBeTruthy();
 });
+
+it("counts current findings as awaiting verification and names the merged and false-positive ones apart", () => {
+  const row = (slug: string, workflow: string, verification: string) => ({ ...finding, slug, title: `Claim ${slug}`, workflow_status: workflow, verification_status: verification }) as AssessmentFinding;
+  const ledger = [
+    row("acme-active", "active", "unreviewed"),
+    row("acme-merged", "merged", "unreviewed"),
+    row("acme-dropped", "false_positive", "disputed"),
+    row("acme-settled", "active", "confirmed"),
+  ];
+  render(<OverviewTab {...props} findings={ledger} assessmentSummary={{
+    finding_verification_statuses: { unreviewed: 2, disputed: 1, confirmed: 1 },
+    finding_workflow_statuses: { active: 2, merged: 1, false_positive: 1 },
+  } as unknown as AssessmentSummary} />);
+  // The summary counts every row; what needs the operator is the current ones.
+  const link = screen.getByRole("link", { name: /findings awaiting verification/ });
+  expect(link.textContent).toBe("1 findings awaiting verification");
+  // The link lands on exactly those: the same verification filter, current workflows only.
+  expect(new URLSearchParams(link.getAttribute("href")!.split("?")[1]).get("workflow")).toBe("active");
+  const attention = link.closest("div")!;
+  expect(attention.textContent).toContain("2 more are merged or false positive");
+  expect(screen.getByRole("region", { name: "Finding queue" }).textContent).toContain("2 merged or false positive, listed last");
+});
+
+it("remembers the per-host matrix as collapsed or expanded only once the operator chooses", async () => {
+  window.localStorage.removeItem("overview.perHostMatrix.collapsed");
+  const hosts = Array.from({ length: 13 }, (_, index) => ({ host: `app${index}.example.com`, outcomes: {}, unmet_objectives: [], deferred_objectives: [], deferrals: [] }));
+  vi.mocked(getReportReadiness).mockResolvedValue({ ready: true, blocker_count: 0, blockers: [], per_host_coverage: { hosts, scope_hosts: [], objectives: [], engagement_signals: {} } } as unknown as ReportReadiness);
+  try {
+    render(<OverviewTab {...props} />);
+    const toggle = await screen.findByTestId("readiness-matrix-collapse");
+    // A large matrix opens collapsed by its size alone; that default is not a stored choice,
+    // so it cannot decide how another engagement's matrix opens.
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    expect(window.localStorage.getItem("overview.perHostMatrix.collapsed")).toBeNull();
+    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(window.localStorage.getItem("overview.perHostMatrix.collapsed")).toBe("0");
+  } finally {
+    window.localStorage.removeItem("overview.perHostMatrix.collapsed");
+  }
+});
+
+const reportQc = (over = {}) => ({
+  required: true, status: "current", verdict: "pass", artifact_id: 812, sha256: "a".repeat(64), reviewed_sha256: "a".repeat(64),
+  decision_id: 5471, reviewer_dispatch_agent_id: "report-writer:qc-2", writer_dispatch_agent_id: "report-writer:draft-1",
+  decided_at: "2026-10-02T12:00:00Z", issue: "", ...over,
+});
+const ready = (over = {}) => ({ ready: true, blocker_count: 0, blockers: [], ...over }) as unknown as ReportReadiness;
+
+it("shows the report QC standing: who reviewed which bytes, and whether that review still covers them", async () => {
+  vi.mocked(getReportReadiness).mockResolvedValue(ready({ report_qc: reportQc() }));
+  const view = render(<OverviewTab {...props} />);
+  const qc = await screen.findByRole("group", { name: "Report QC" });
+  expect(within(qc).getByText("Passed")).toBeTruthy();
+  expect(qc.textContent).toContain("verdict pass");
+  expect(qc.textContent).toContain("reviewer report-writer:qc-2");
+  expect(qc.textContent).toContain("writer report-writer:draft-1");
+  expect(qc.textContent).toContain("decision #5471");
+  // The registered bytes are named in full, with whether the review covered them.
+  expect(qc.textContent).toContain(`report.md artifact #812 · sha256 ${"a".repeat(64)}`);
+  expect(qc.textContent).toContain("the reviewed bytes");
+
+  // The file changed after its review: the backend's issue is shown in its own words.
+  vi.mocked(getReportReadiness).mockResolvedValue(ready({
+    report_qc: reportQc({ status: "stale", reviewed_sha256: "b".repeat(64), issue: "was registered with different bytes after its QC review" }),
+  }));
+  view.rerender(<OverviewTab {...props} readinessRefreshVersion={1} />);
+  await waitFor(() => expect(within(screen.getByRole("group", { name: "Report QC" })).getByText("Passed, now stale")).toBeTruthy());
+  const stale = screen.getByRole("group", { name: "Report QC" });
+  expect(stale.textContent).toContain("The registered report.md was registered with different bytes after its QC review.");
+  expect(stale.textContent).toContain(`reviewed sha256 ${"b".repeat(64)}`);
+});
+
+it("says a registered report has no QC verdict, and that an unregistered one owes none", async () => {
+  vi.mocked(getReportReadiness).mockResolvedValue(ready({
+    report_qc: reportQc({
+      status: "missing", verdict: null, reviewed_sha256: null, decision_id: null, reviewer_dispatch_agent_id: null,
+      writer_dispatch_agent_id: null, decided_at: null, issue: "has no passing independent report-writer QC verdict",
+    }),
+  }));
+  const view = render(<OverviewTab {...props} />);
+  const qc = await screen.findByRole("group", { name: "Report QC" });
+  expect(within(qc).getByText("No verdict recorded")).toBeTruthy();
+  expect(qc.textContent).toContain("The registered report.md has no passing independent report-writer QC verdict.");
+  expect(qc.textContent).not.toContain("reviewer");
+
+  vi.mocked(getReportReadiness).mockResolvedValue(ready({
+    report_qc: reportQc({
+      required: false, status: "missing", verdict: null, artifact_id: null, sha256: null, reviewed_sha256: null, decision_id: null,
+      reviewer_dispatch_agent_id: null, writer_dispatch_agent_id: null, decided_at: null,
+    }),
+  }));
+  view.rerender(<OverviewTab {...props} readinessRefreshVersion={1} />);
+  await waitFor(() => expect(screen.getByRole("group", { name: "Report QC" }).textContent).toContain("No report.md is registered, so no report QC is owed yet."));
+  expect(within(screen.getByRole("group", { name: "Report QC" })).queryByText("No verdict recorded")).toBeNull();
+});
+
+it("says nothing about report QC when the readiness read carries no standing", async () => {
+  render(<OverviewTab {...props} />);
+  await screen.findByTestId("readiness-panel");
+  expect(screen.queryByRole("group", { name: "Report QC" })).toBeNull();
+});
+
+it("says whether a WAF fronts each host whose WAF tier was measured, and names measurements that were ignored", async () => {
+  window.localStorage.setItem("overview.perHostMatrix.collapsed", "0");
+  const outcome = (met: boolean, extra = {}) => ({ met, evidence: [], deferred: false, ...extra });
+  const host = (name: string, waf: Record<string, unknown>) => ({
+    host: name, outcomes: { waf_tier: waf, osint: outcome(true) }, unmet_objectives: [], deferred_objectives: [], deferrals: [],
+  });
+  vi.mocked(getReportReadiness).mockResolvedValue(ready({
+    per_host_coverage: {
+      objectives: ["waf_tier", "osint"],
+      scope_hosts: [],
+      hosts: [
+        host("shop.acme.example", outcome(true, { waf_detected: true, evidence: ["detected: Acme Edge WAF (intel #41, run #7)(host)"] })),
+        host("api.acme.example", outcome(true, { waf_detected: false, evidence: ["none_detected: wafw00f sweep (intel #42, run #8)(host)"] })),
+        host("old.acme.example", outcome(false, { waf_detected: false })),
+      ],
+      engagement_signals: {
+        waf_intel_count: 0, waf_measurement_count: 2, tech_scan_intel_count: 3, osint_intel_total: 4,
+        waf_measurements_ignored: [{ intel_id: 43, problem: "provenance.waf.hosts must list each measured host (non-empty strings)" }],
+      },
+    },
+  }));
+  try {
+    render(<OverviewTab {...props} />);
+    const cell = async (name: string) => (await screen.findByTestId(`readiness-cell-${name}-waf_tier`)).closest("td")!;
+    expect((await cell("shop.acme.example")).textContent).toBe("YWAF detected");
+    // A measured negative is met, and says no WAF was found rather than reading as one.
+    expect((await cell("api.acme.example")).textContent).toBe("YNo WAF detected");
+    // An unmeasured host has no verdict to show.
+    expect((await cell("old.acme.example")).textContent).toBe("N");
+    // Other objectives carry no WAF verdict.
+    expect(screen.getByTestId("readiness-cell-shop.acme.example-osint").closest("td")!.textContent).toBe("Y");
+
+    expect(within(screen.getByTestId("readiness-signal-waf_measurement_count")).getByText("2")).toBeTruthy();
+    const ignored = screen.getByRole("group", { name: "Ignored WAF measurements" });
+    expect(ignored.textContent).toContain("1 WAF measurement is ignored");
+    expect(ignored.textContent).toContain("provenance.waf.hosts must list each measured host (non-empty strings)");
+    expect(within(ignored).getByRole("link", { name: "Tech stack record #43" }).getAttribute("href")).toBe("#/engagements/one?tab=intel&intel_type=tech_component&intel_id=43");
+  } finally {
+    window.localStorage.removeItem("overview.perHostMatrix.collapsed");
+  }
+});
+
+it("says the engagement summary could not be read instead of loading forever", () => {
+  const view = render(<OverviewTab {...props} summaryLoadError="summary read failed (500)" />);
+  const attention = screen.getByRole("heading", { name: "Needs attention" }).closest("section")!;
+  expect(within(attention).getByRole("alert").textContent).toContain("summary read failed (500)");
+  expect(within(attention).queryByRole("status", { name: "Loading engagement summary" })).toBeNull();
+  // Still loading (no failure reported): the placeholder stays.
+  view.rerender(<OverviewTab {...props} />);
+  expect(within(attention).getByRole("status", { name: "Loading engagement summary" })).toBeTruthy();
+});
+
+it("says the awaiting-verification figure includes merged and false-positive findings until the ledger can split it", () => {
+  const summary = { finding_verification_statuses: { unreviewed: 5 }, finding_workflow_statuses: { active: 2, merged: 3 } } as unknown as AssessmentSummary;
+  // While the ledger loads the page holds only the summary's top findings, which cannot say how many are retired.
+  const view = render(<OverviewTab {...props} findingsLoading assessmentSummary={summary} />);
+  const attention = () => screen.getByRole("heading", { name: "Needs attention" }).closest("section")!;
+  expect(attention().textContent).toContain("5 findings awaiting verification");
+  expect(attention().textContent).toContain("merged and false-positive findings included until the finding ledger loads");
+  view.rerender(<OverviewTab {...props} findingsLoadError="ledger down" assessmentSummary={summary} />);
+  expect(attention().textContent).toContain("merged and false-positive findings included; the finding ledger could not be read");
+  // With the ledger on screen the figure is the current findings and needs no caveat.
+  view.rerender(<OverviewTab {...props} assessmentSummary={summary} />);
+  expect(attention().textContent).not.toContain("included");
+});

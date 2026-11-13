@@ -144,6 +144,61 @@ export function coverageTargetLabel(item: Pick<CoverageLedgerItem, "method" | "c
   return { method: item.method ?? "", target: item.service_endpoint || "Unbound item" };
 }
 
+/** The part of the filters the address carries: what picking a status or a reason applies. */
+export type CoverageDrill = {
+  status: string[];
+  reason: string | null;
+  reason_missing: boolean;
+  created_from: string | null;
+};
+
+/**
+ * The address parameters (beside `tab=coverage`) for a list view. "Open work
+ * by reason" is the bare tab link; "All items" names itself and its drill-down.
+ */
+export function coverageListParams(
+  view: "reasons" | "items",
+  filters: CoverageFilters,
+): Record<string, string | number | undefined> {
+  if (view === "reasons") return {};
+  return {
+    view: "items",
+    status: filters.status.length > 0 ? filters.status.join(",") : undefined,
+    reason: filters.reason ?? undefined,
+    no_reason: filters.reason_missing ? 1 : undefined,
+    created_from: filters.created_from ?? undefined,
+  };
+}
+
+/**
+ * The list an address names: its view (null when the address names none) and
+ * the drill-down it carries. Items with no reason are picked together with
+ * their creation note, so `no_reason` without one means the empty note.
+ */
+export function coverageListFromParams(params: URLSearchParams): { view: "reasons" | "items" | null; drill: CoverageDrill } {
+  const named = params.get("view");
+  const reasonMissing = params.get("no_reason") === "1";
+  return {
+    view: named === "items" || named === "reasons" ? named : null,
+    drill: {
+      status: (params.get("status") ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+      reason: params.get("reason") || null,
+      reason_missing: reasonMissing,
+      created_from: params.get("created_from") ?? (reasonMissing ? "" : null),
+    },
+  };
+}
+
+/** `filters` with the drill-down replaced; the same object when it already holds it. */
+export function withCoverageDrill(filters: CoverageFilters, drill: CoverageDrill): CoverageFilters {
+  const same = filters.status.length === drill.status.length
+    && filters.status.every((value, index) => value === drill.status[index])
+    && (filters.reason ?? null) === drill.reason
+    && Boolean(filters.reason_missing) === drill.reason_missing
+    && (filters.created_from ?? null) === drill.created_from;
+  return same ? filters : { ...filters, ...drill };
+}
+
 /** What the tab keeps across visits (sessionStorage, per engagement). */
 export type CoverageSavedView = {
   view: "reasons" | "items";
@@ -174,7 +229,7 @@ export function parseCoverageView(raw: string | null): CoverageSavedView {
   filters.reason_missing = saved.reason_missing === true;
   filters.created_from = optionalString(saved.created_from);
   const order = (value.sort && typeof value.sort === "object" ? value.sort : {}) as Record<string, unknown>;
-  const sortKey = typeof order.sort === "string" && order.sort in COVERAGE_SORT_LABELS ? (order.sort as CoverageSortKey) : null;
+  const sortKey = typeof order.sort === "string" && Object.hasOwn(COVERAGE_SORT_LABELS, order.sort) ? (order.sort as CoverageSortKey) : null;
   const sortDir = order.dir === "asc" || order.dir === "desc" ? order.dir : null;
   return {
     view: value.view === "items" ? "items" : "reasons",

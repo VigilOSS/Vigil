@@ -21,17 +21,19 @@ vi.mock("../lib/api", () => ({
 // The grid is ag-grid in production; here a plain list exposes the rows in
 // the order it shows them, marked with their record key. `gridSort.reverse`
 // stands in for a header click: the grid reports the order it shows. Like
-// ag-grid, the stand-in keeps a header sort only while it stays mounted.
+// ag-grid, the stand-in keeps a header sort only while it stays mounted, and
+// a new grid starts in the sort the tab hands it.
 const gridSort = { reverse: false };
 vi.mock("./SurfacesGrid", async () => {
   const { useEffect, useState } = await import("react");
   return {
-    default: function SurfacesGridMock({ rows, onRowOpen, onViewChange }: {
+    default: function SurfacesGridMock({ rows, initialSort, onRowOpen, onViewChange }: {
       rows: Array<{ id: number; target_descriptor: string }>;
+      initialSort?: { colId: string; sort: "asc" | "desc" } | null;
       onRowOpen: (row: unknown, invoker: HTMLElement) => void;
       onViewChange?: (view: { ids: number[]; sort: { colId: string; sort: "asc" | "desc" }[] }) => void;
     }) {
-      const [sort, setSort] = useState<{ colId: string; sort: "asc" | "desc" }>({ colId: "updated", sort: "desc" });
+      const [sort, setSort] = useState<{ colId: string; sort: "asc" | "desc" }>(initialSort ?? { colId: "updated", sort: "desc" });
       const shown = gridSort.reverse ? [...rows].reverse() : rows;
       const order = shown.map((row) => row.id).join(",");
       useEffect(() => {
@@ -282,6 +284,31 @@ describe("SurfacesTab loading and saved view", () => {
     expect(screen.getByRole("button", { name: "Clear filters (2)" })).toBeTruthy();
   });
 
+  it("keeps the grid's sort when the tab is left and reopened", async () => {
+    const summary = () => document.querySelector(".ui-results-summary")?.textContent ?? "";
+    const first = render(<ToastProvider><SurfacesTab engagementKey="acme" surfaces={queue()} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "Sort by target" }));
+    await waitFor(() => expect(summary()).toContain("Sorted by Target, A to Z"));
+    first.unmount();
+
+    render(<ToastProvider><SurfacesTab engagementKey="acme" surfaces={queue()} /></ToastProvider>);
+    await screen.findByText("surface grid");
+    await waitFor(() => expect(summary()).toContain("Sorted by Target, A to Z"));
+    // Another engagement starts from the default order.
+    cleanup();
+    render(<ToastProvider><SurfacesTab engagementKey="acme-other" surfaces={queue()} /></ToastProvider>);
+    await screen.findByText("surface grid");
+    await waitFor(() => expect(summary()).toContain("Sorted by Updated"));
+  });
+
+  it("starts from the default order when the kept sort names no column", async () => {
+    // A kept view is browser storage: any string can be in it, a name every object answers to included.
+    window.sessionStorage.setItem("surfaces.view.acme", JSON.stringify({ sort: { colId: "constructor", sort: "asc" } }));
+    render(<ToastProvider><SurfacesTab engagementKey="acme" surfaces={queue()} /></ToastProvider>);
+    await screen.findByText("surface grid");
+    await waitFor(() => expect(document.querySelector(".ui-results-summary")?.textContent).toContain("Sorted by Updated, newest first"));
+  });
+
   it("keeps the grid's sort through a search that matches nothing", async () => {
     render(<ToastProvider><SurfacesTab engagementKey="demo" surfaces={queue()} /></ToastProvider>);
     fireEvent.click(await screen.findByRole("button", { name: "Sort by target" }));
@@ -473,6 +500,61 @@ describe("SurfacesTab record view", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("keeps Previous / Next for a surface whose new status takes it out of the results", async () => {
+    vi.mocked(patchAssessmentSurface).mockImplementation(async (_key, id) => (
+      surface({ id, target_descriptor: "https://app.example.com/api", status: "covered" }) as never
+    ));
+    const acme = [
+      surface({ id: 1, target_descriptor: "https://app.example.com/login" }),
+      surface({ id: 2, target_descriptor: "https://app.example.com/api" }),
+      surface({ id: 3, target_descriptor: "https://app.example.com/upload" }),
+    ] as never;
+    render(<ToastProvider><SurfacesTab engagementKey="acme" surfaces={acme} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "https://app.example.com/api" }));
+    const record = await screen.findByRole("region", { name: "Surface record" });
+    expect(within(record).getByText("2 of 3 results")).toBeTruthy();
+
+    fireEvent.click(within(record).getByRole("button", { name: "Change status" }));
+    fireEvent.change(screen.getByLabelText("Transition rationale"), { target: { value: "Tested with the Acme admin identity" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mark covered" }));
+    // Covered surfaces are not in Needs attention: the record is outside the
+    // results it was opened from, and its neighbours there stay reachable.
+    expect(await within(record).findByText("Outside current results")).toBeTruthy();
+    const next = within(record).getByRole("button", { name: "Next surface" }) as HTMLButtonElement;
+    const previous = within(record).getByRole("button", { name: "Previous surface" }) as HTMLButtonElement;
+    expect(next.disabled).toBe(false);
+    expect(previous.disabled).toBe(false);
+
+    fireEvent.click(next);
+    expect(await within(record).findByRole("heading", { level: 2, name: "https://app.example.com/upload" })).toBeTruthy();
+    expect(within(record).getByText("2 of 2 results")).toBeTruthy();
+    fireEvent.click(within(record).getByRole("button", { name: "Previous surface" }));
+    expect(await within(record).findByRole("heading", { level: 2, name: "https://app.example.com/login" })).toBeTruthy();
+    expect(within(record).getByText("1 of 2 results")).toBeTruthy();
+  });
+
+  it("returns focus to the search when the row that opened the record has left the results", async () => {
+    vi.mocked(patchAssessmentSurface).mockImplementation(async (_key, id) => (
+      surface({ id, target_descriptor: "https://app.example.com/api", status: "covered" }) as never
+    ));
+    const acme = [
+      surface({ id: 1, target_descriptor: "https://app.example.com/login" }),
+      surface({ id: 2, target_descriptor: "https://app.example.com/api" }),
+    ] as never;
+    render(<ToastProvider><SurfacesTab engagementKey="acme" surfaces={acme} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: "https://app.example.com/api" }));
+    const record = await screen.findByRole("region", { name: "Surface record" });
+    fireEvent.click(within(record).getByRole("button", { name: "Change status" }));
+    fireEvent.change(screen.getByLabelText("Transition rationale"), { target: { value: "Tested with the Acme admin identity" } });
+    fireEvent.click(screen.getByRole("button", { name: "Mark covered" }));
+    await within(record).findByText("Outside current results");
+
+    fireEvent.click(within(record).getByRole("button", { name: "Back to results" }));
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Surface record" })).toBeNull());
+    expect(screen.queryByRole("button", { name: "https://app.example.com/api" })).toBeNull();
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("searchbox", { name: "Search surfaces" })));
   });
 
   it("explains a deep link to a surface the ledger does not hold", () => {

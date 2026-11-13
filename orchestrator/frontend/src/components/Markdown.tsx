@@ -58,6 +58,13 @@ export function MarkdownBlock({ text, headingOffset = 0 }: { text: string; headi
               <code>{src || "Source blocked by Markdown URL policy"}</code>
             </span>
           ),
+          // A GFM task-list checkbox carries its state only as a glyph; name it
+          // so the state is announced (the item's own text follows it).
+          input: ({ node: _node, ...props }) => (
+            props.type === "checkbox"
+              ? <input {...props} aria-label={props.checked ? "Done" : "Not done"} />
+              : <input {...props} />
+          ),
           table: ({ node: _node, ...props }) => (
             <div
               className="md-table-scroll"

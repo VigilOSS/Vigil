@@ -7,19 +7,28 @@ import {
   DIRECT_READ_TITLE,
   directReadReason,
 } from "./codeLabels";
+import { CodeFileList } from "./CodeFileList";
 import { debtUnknownRepoIds, isReference, percent, repoLabel } from "./codeModel";
 import { RiskTag } from "./RiskTag";
-import type { CodeData } from "./useCodeData";
-import { codeViewHref, type CodeFilesFocus } from "./useCodeRoute";
+import type { CodeData, CodeSource } from "./useCodeData";
+import { codeViewHref, type CodeRoute } from "./useCodeRoute";
 
-type Props = { engagementKey: string; data: CodeData; repoFilter?: number; focus?: CodeFilesFocus };
+type Props = {
+  engagementKey: string;
+  data: CodeData;
+  pending: ReadonlySet<CodeSource>;
+  refreshVersion: number;
+  /** The repository filter (`repo`), a marked table (`focus`) and the file list's state. */
+  route: CodeRoute;
+};
 
 // The tiers whose unreviewed files block Verify (the "Critical/high files not yet reviewed" blocker).
 const BLOCKING_TIERS = new Set(["critical", "high"]);
 
 const RISK_ORDER = ["critical", "high", "medium", "low", "skip", "unclassified"];
 
-export function CodeFiles({ engagementKey, data, repoFilter, focus }: Props) {
+export function CodeFiles({ engagementKey, data, pending, refreshVersion, route }: Props) {
+  const { repo: repoFilter, focus } = route;
   const coverage = data.coverage;
   const repos = data.repos ?? [];
   const analysisRepos = repos.filter((repo) => !isReference(repo));
@@ -58,6 +67,19 @@ export function CodeFiles({ engagementKey, data, repoFilter, focus }: Props) {
 
   return (
     <>
+      {route.repoUnreadable !== null ? (
+        <p className="cv-inline-note is-warn" role="status">
+          Repository link “{route.repoUnreadable}” does not name a repository; repository links use the repository number,
+          such as repo=7. Files of every repository are shown.{" "}
+          <a href={codeViewHref(engagementKey, { view: "files" })}>Clear the repository filter</a>
+        </p>
+      ) : null}
+      {repoFilter != null && data.repos !== null && !filterRepo ? (
+        <p className="cv-inline-note is-warn" role="status">
+          Repository #{repoFilter} is not one of this engagement's repositories. Files of every repository are shown.{" "}
+          <a href={codeViewHref(engagementKey, { view: "files" })}>Clear the repository filter</a>
+        </p>
+      ) : null}
       <section
         ref={riskRef}
         className={`panel cv-section cv-focusable${focus === "risk" ? " is-focused" : ""}`}
@@ -99,7 +121,7 @@ export function CodeFiles({ engagementKey, data, repoFilter, focus }: Props) {
                       <td className="cv-num">{entry.analyzed.toLocaleString()}</td>
                       <td className="cv-num">{(entry.count - entry.analyzed).toLocaleString()}</td>
                       <td>
-                        <span className="cv-mini-bar" aria-label={`${percent(entry.analyzed, entry.count)}% reviewed`}>
+                        <span className="cv-mini-bar" role="img" aria-label={`${percent(entry.analyzed, entry.count)}% reviewed`}>
                           <span style={{ width: `${percent(entry.analyzed, entry.count)}%` }} />
                         </span>
                       </td>
@@ -194,6 +216,17 @@ export function CodeFiles({ engagementKey, data, repoFilter, focus }: Props) {
           </table>
         )}
       </section>
+
+      {/* A repository filter waits for the repositories, so the list is never read unfiltered first. */}
+      {repoFilter != null && data.repos === null ? null : <CodeFileList
+        engagementKey={engagementKey}
+        coverage={coverage}
+        repos={repos}
+        repoId={filterRepo?.id}
+        refreshVersion={refreshVersion}
+        route={route}
+        ready={!pending.has("readiness") && !pending.has("coverage")}
+      />}
     </>
   );
 }

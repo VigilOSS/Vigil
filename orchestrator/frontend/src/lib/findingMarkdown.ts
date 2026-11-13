@@ -70,12 +70,18 @@ function formatHttp(
   } else if (typeof headers === "string" && headers.trim()) {
     lines.push(headers.trim());
   }
-  const body = (obj as FindingPocRequest | FindingPocResponse).body;
+  const body = pocBody(obj as FindingPocRequest | FindingPocResponse);
   if (body) {
     lines.push("");
     lines.push(body);
   }
   return lines.join("\n");
+}
+
+/** The body a recorded request or response carries, whichever key holds it; the page and the copy read it here. */
+export function pocBody(capture: FindingPocRequest | FindingPocResponse): string {
+  const excerpt = (capture as FindingPocResponse).body_excerpt;
+  return (typeof excerpt === "string" && excerpt ? excerpt : capture.body) ?? "";
 }
 
 // A capture is target-controlled text. A fixed ``` fence closes on the first

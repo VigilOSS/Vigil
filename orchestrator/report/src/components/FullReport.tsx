@@ -230,7 +230,17 @@ function AttackChainBlock({
       <header className="rpt-doc-finding-head">
         <h3>{chain.title ?? chain.chain_key}</h3>
         <div className="rpt-doc-finding-tags">
+          {/* Two severities, each labelled: what the author stated, and the
+              chain-derived value, which is the stated one only when the backend
+              found every step to be a finding this report delivers verified
+              (`chain_proven`). The legs keep their own severities below. */}
+          <span className="rpt-chain-sev-label">Stated: </span>
           <span className={`rpt-sev-badge rpt-sev-${sev}`}>{formatLabel(sev)}</span>
+          <span className="rpt-chip">
+            {chain.chain_proven
+              ? `Chain-derived: ${formatLabel(sev)}`
+              : "Chain-derived: not proven by this report's verified findings"}
+          </span>
           {chain.status && <span className="rpt-chip">{formatLabel(chain.status)}</span>}
           {chain.updated_at && <span className="rpt-chip">{formatDateTime(chain.updated_at)}</span>}
         </div>
@@ -431,6 +441,16 @@ export function FullReport({ data }: Props) {
       {attack_chains.length > 0 && (
         <section className="rpt-doc-section" id="appendix-attack-chains">
           <h2 className="rpt-appendix-title">Appendix A — Attack chains</h2>
+          <p className="rpt-doc-rootcause">
+            Chain-derived severity:{" "}
+            {data.summary.chain_proven_severity
+              ? formatLabel(data.summary.chain_proven_severity)
+              : "none proven"}
+            , the worst stated severity among chains whose every step is a verified finding in
+            this report.
+            {data.summary.chain_stated_severity &&
+              ` Stated by chain authors: ${formatLabel(data.summary.chain_stated_severity)}.`}
+          </p>
           {attack_chains.map((chain) => (
             <AttackChainBlock
               key={String(chain.chain_key ?? chain.title)}

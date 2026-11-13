@@ -3,7 +3,14 @@
 
 import { useLayoutEffect, useRef, useState } from "react";
 import type { AssessmentServiceGap } from "../../lib/api";
-import type { CoverageReasonEntry, CoverageReasonGroup, CoverageReasonRollup as Rollup } from "../../lib/coverageApi";
+import {
+  fetchServiceCoverage,
+  type CoverageReasonEntry,
+  type CoverageReasonGroup,
+  type CoverageReasonRollup as Rollup,
+  type ServiceCoverageRow,
+  type SummaryListTruncation,
+} from "../../lib/coverageApi";
 import { TimeStamp } from "../formatting";
 import { CardSkeleton, SlowLoadHint } from "../Skeletons";
 import { EmptyState, StatusPill } from "../ui";
@@ -24,7 +31,11 @@ type Props = {
   showingAllReasons: boolean;
   onShowAllReasons: () => void;
   onPickReason: (status: string, entry: CoverageReasonEntry) => void;
+  engagementKey: string;
+  /** The summary's open services: all of them, or the most recently updated when `serviceGapsTruncation` says rows were left out. */
   serviceGaps: AssessmentServiceGap[];
+  /** Whether the summary cut `serviceGaps` short, and the route that serves every service. */
+  serviceGapsTruncation?: SummaryListTruncation | null;
   /** Engagement-wide item count, when known (an empty ledger reads differently). */
   ledgerTotal: number | null;
 };
@@ -147,6 +158,73 @@ function StatusGroup({
   );
 }
 
+/**
+ * Service-level status. The summary carries the open services up to a bound;
+ * when it left some out, "Show every service" reads the whole list (any
+ * status) from the route the summary names.
+ */
+function ServiceGaps({
+  engagementKey,
+  gaps,
+  truncation,
+}: {
+  engagementKey: string;
+  gaps: AssessmentServiceGap[];
+  truncation?: SummaryListTruncation | null;
+}) {
+  const [every, setEvery] = useState<ServiceCoverageRow[] | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const route = truncation?.truncated ? truncation.full_route : null;
+  const loadEvery = () => {
+    if (!route || loading) return;
+    setLoading(true);
+    setError(null);
+    fetchServiceCoverage(engagementKey, route)
+      .then(setEvery)
+      .catch((reason: unknown) => setError(reason instanceof Error ? reason.message : String(reason)))
+      .finally(() => setLoading(false));
+  };
+  const rows: ServiceCoverageRow[] = every ?? gaps;
+  const count = rows.length.toLocaleString();
+  const scope = every
+    ? `all ${count} services, any status`
+    : route
+      ? `the ${count} most recently updated open services`
+      : truncation
+        ? `${count} open ${rows.length === 1 ? "service" : "services"}`
+        : `${count} most recently updated open services`;
+  return (
+    <details className="panel cov-service-gaps">
+      <summary>
+        Service-level status <span className="meta-text">· {scope}</span>
+      </summary>
+      <p className="meta-text">
+        A service's status rolls up its service-bound items, which are already counted in the reasons above.
+      </p>
+      <ul aria-label="Service-level status">
+        {rows.map((gap, index) => (
+          <li key={`${gap.endpoint}-${index}`}>
+            <StatusPill domain="coverage" value={gap.coverage_status} size="sm" />
+            <span className="mono-text">{gap.endpoint}</span>
+            <span className="meta-text">{gap.service || "Unclassified service"}</span>
+            <TimeStamp value={gap.updated_at} fallback="Not recorded" />
+          </li>
+        ))}
+      </ul>
+      {route && !every ? (
+        <p className="meta-text cov-service-more">
+          More open services are not listed here.{" "}
+          <button type="button" className="ui-clear-filters" onClick={loadEvery} disabled={loading}>
+            {loading ? "Loading every service…" : "Show every service"}
+          </button>
+          {error ? <span className="error-text" role="alert"> Could not load the services: {error}</span> : null}
+        </p>
+      ) : null}
+    </details>
+  );
+}
+
 export function CoverageReasonRollup({
   rollup,
   loading,
@@ -157,7 +235,9 @@ export function CoverageReasonRollup({
   showingAllReasons,
   onShowAllReasons,
   onPickReason,
+  engagementKey,
   serviceGaps,
+  serviceGapsTruncation,
   ledgerTotal,
 }: Props) {
   const groups = [...(rollup?.statuses ?? [])].sort((a, b) => compareCoverageStatus(a.status, b.status));
@@ -215,24 +295,7 @@ export function CoverageReasonRollup({
         ))}
       </div>
       {serviceGaps.length > 0 ? (
-        <details className="panel cov-service-gaps">
-          <summary>
-            Service-level status <span className="meta-text">· {serviceGaps.length} most recently updated open services</span>
-          </summary>
-          <p className="meta-text">
-            A service's status rolls up its service-bound items, which are already counted in the reasons above.
-          </p>
-          <ul>
-            {serviceGaps.map((gap, index) => (
-              <li key={`${gap.endpoint}-${index}`}>
-                <StatusPill domain="coverage" value={gap.coverage_status} size="sm" />
-                <span className="mono-text">{gap.endpoint}</span>
-                <span className="meta-text">{gap.service || "Unclassified service"}</span>
-                <TimeStamp value={gap.updated_at} fallback="Not recorded" />
-              </li>
-            ))}
-          </ul>
-        </details>
+        <ServiceGaps engagementKey={engagementKey} gaps={serviceGaps} truncation={serviceGapsTruncation} />
       ) : null}
     </div>
   );

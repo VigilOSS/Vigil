@@ -426,6 +426,16 @@ a {
   letter-spacing: 0.05em;
 }
 
+.rpt-stat-detail {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.rpt-chain-sev-label {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 /* ── Panels ───────────────────────────────────────────────── */
 
 .rpt-panels {

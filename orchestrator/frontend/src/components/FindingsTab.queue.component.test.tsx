@@ -379,6 +379,18 @@ describe("runtime proof inside a finding", () => {
     expect(card.compareDocumentPosition(claim) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
+  it("says how many of a root's siblings the filters show, never the shown count as the total", async () => {
+    const root = record("VA-061", "Root claim");
+    const siblings = [record("VA-164", "Billing sibling"), record("VA-165", "Portal sibling"), record("VA-166", "Export sibling")];
+    vi.mocked(listAssessmentFindingGroups).mockResolvedValue([{ root, siblings, sibling_count: 3, residual_path_count: 0 }] as never);
+    render(tab({ findings: [root, ...siblings] as never[] }));
+    await waitFor(() => expect(screen.queryByText("Loading groups")).toBeNull());
+    const head = () => (screen.getByRole("button", { name: /Root claim/ }).closest(".root-group-card") as HTMLElement).querySelector(".group-card-head") as HTMLElement;
+    expect(within(head()).getByText("3 siblings")).toBeTruthy();
+    fireEvent.change(screen.getByRole("textbox", { name: "Search findings" }), { target: { value: "billing" } });
+    await waitFor(() => expect(within(head()).getByText("1 of 3 siblings shown")).toBeTruthy());
+  });
+
   it("counts a single residual path and sibling in the singular", async () => {
     const root = record("VA-061", "Root claim");
     const sibling = record("VA-164", "Sibling claim");
@@ -403,5 +415,51 @@ describe("record actions", () => {
     await screen.findByRole("heading", { name: "Merged claim" });
     expect(screen.getByRole("link", { name: "Disclosure package" }).getAttribute("href")).toBe("#/engagements/acme?tab=submissions&submission=VA-013");
     expect(screen.getByRole("group", { name: "Workflow status" }).textContent).toContain("Merged");
+  });
+});
+
+describe("FindingsTab header counts", () => {
+  it("counts only current findings as awaiting verification, as Overview does", async () => {
+    render(tab({ findings: [
+      record("ACME-1", "Current claim", { verification_status: "unreviewed" }),
+      record("ACME-2", "Merged claim", { workflow_status: "merged", verification_status: "unreviewed" }),
+      record("ACME-3", "Settled claim"),
+    ] as never[] }));
+    const label = await screen.findByText("awaiting verification");
+    // The stats row reads "<n> <label>: <meaning>" per stat.
+    expect(label.parentElement!.textContent).toContain("1 awaiting verification");
+    expect(label.parentElement!.textContent).not.toContain("2 awaiting verification");
+  });
+});
+
+describe("FindingsTab before the ledger arrives", () => {
+  // The engagement summary's rows: the few top findings, without the ledger's detail.
+  const preview = ["ACME-1", "ACME-2"].map((slug) => ({
+    slug, title: `Acme portal claim ${slug}`, severity: "medium", workflow_status: "active", submission_status: "none",
+    verification_status: "unreviewed", canonical_location: "https://app.example/account", summary: "Acme portal claim.",
+    source_name: "vulnerability-analyst", updated_at: "2026-10-01 10:00:00",
+  }));
+
+  it("labels the summary's top findings as a preview and states no ledger totals from them", async () => {
+    const view = render(tab({ fallbackFindings: preview as never[], ledgerLoading: true }));
+    const notice = await screen.findByRole("status", { name: "Finding preview" });
+    expect(notice.textContent).toContain("2 findings from the engagement summary");
+    expect(notice.textContent).toContain("still loading");
+    // Counts of the whole ledger are not derived from the preview.
+    expect(screen.queryByText("recorded")).toBeNull();
+    expect(screen.queryByText("awaiting verification")).toBeNull();
+
+    view.rerender(tab({ fallbackFindings: preview as never[], ledgerError: "boom" }));
+    const alert = screen.getByRole("alert");
+    expect(alert.textContent).toContain("Finding ledger unavailable: boom");
+    // Nothing of the ledger was loaded before, so nothing "previously loaded" is on screen.
+    expect(alert.textContent).not.toContain("previously loaded");
+    expect(screen.getByRole("status", { name: "Finding preview" }).textContent).toContain("could not be loaded");
+  });
+
+  it("says previously loaded records are shown only when ledger rows are on screen", async () => {
+    render(tab({ findings: [record("ACME-1", "Acme portal claim")] as never[], ledgerError: "boom" }));
+    expect((await screen.findByRole("alert")).textContent).toContain("Showing previously loaded records");
+    expect(screen.queryByRole("status", { name: "Finding preview" })).toBeNull();
   });
 });

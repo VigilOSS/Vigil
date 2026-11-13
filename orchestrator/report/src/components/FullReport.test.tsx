@@ -66,3 +66,33 @@ for (const [name, render] of views) {
     assert.doesNotMatch(html, /rather than a proof receipt/);
   });
 }
+
+// Each chain shows the severity its author stated and, labelled separately, the
+// chain-derived value: the stated severity when every step is a finding this
+// report delivers verified (`chain_proven`, derived by the backend), otherwise
+// none. The legs keep their own severities.
+
+test("a proven chain shows its chain-derived severity beside the stated one", () => {
+  const html = renderToStaticMarkup(<FullReport data={devData} />);
+  const proven = html.slice(
+    html.indexOf("Unauthenticated admin takeover</h3>"),
+    html.indexOf("Session theft via reflected XSS</h3>"),
+  );
+  assert.match(proven, /Stated: <\/span><span class="rpt-sev-badge rpt-sev-critical">critical<\/span>/);
+  assert.match(proven, /Chain-derived: critical/);
+});
+
+test("an unproven chain keeps its stated severity and derives none", () => {
+  const html = renderToStaticMarkup(<FullReport data={devData} />);
+  const unproven = html.slice(html.indexOf("Session theft via reflected XSS</h3>"));
+  assert.match(unproven, /Stated: <\/span><span class="rpt-sev-badge rpt-sev-high">high<\/span>/);
+  assert.match(unproven, /Chain-derived: not proven by this report&#x27;s verified findings/);
+  assert.doesNotMatch(unproven, /Chain-derived: high/);
+});
+
+test("a chain's severity never replaces the severity of a finding on its path", () => {
+  // VA-004 is a medium leg of the high session-theft chain.
+  const html = renderToStaticMarkup(<FullReport data={devData} />);
+  const leg = html.slice(html.indexOf('id="finding-va-004"'));
+  assert.match(leg, /rpt-sev-badge rpt-sev-medium">medium</);
+});

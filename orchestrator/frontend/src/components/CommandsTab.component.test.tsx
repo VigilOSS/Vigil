@@ -17,6 +17,7 @@ import {
 } from "../lib/commandsApi";
 import type { AssessmentCommandRunDetail } from "../lib/api";
 import { CommandsTab } from "./CommandsTab";
+import { formatBytes } from "./formatting";
 
 // The record view's copy actions report through toasts.
 function render(ui: ReactElement) {
@@ -367,6 +368,31 @@ describe("CommandsTab palette", () => {
     expect(window.location.hash).toBe("#/engagements/demo?tab=commands&command=1");
   });
 
+  it("opens the run the typed text finds when Enter comes before that search answers", async () => {
+    serveLedger([row(9), row(4)]);
+    render(<CommandsTab engagementKey="demo" />);
+    await screen.findByRole("button", { name: /command grid 9/ });
+    fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
+    const dialog = screen.getByRole("dialog", { name: "Jump to command" });
+    const input = within(dialog).getByRole("combobox", { name: "Search commands to jump to" });
+    // The palette opens on the newest runs.
+    await within(dialog).findByRole("option", { name: /probe endpoint 9/ });
+    let answer: (page: Awaited<ReturnType<typeof fetchCommandPage>>) => void = () => {};
+    vi.mocked(fetchCommandPage).mockReturnValueOnce(new Promise((resolve) => { answer = resolve; }));
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
+    fireEvent.change(input, { target: { value: "#4" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+    // The list still holds the earlier search: nothing opens from it.
+    expect(window.location.hash).toBe("#/engagements/demo?tab=commands");
+    expect(screen.queryByRole("region", { name: "Command run record" })).toBeNull();
+    await vi.advanceTimersByTimeAsync(200);
+    vi.useRealTimers();
+    answer({ total: 1, offset: 0, count: 1, has_more: false, items: [row(4)] });
+    expect(await screen.findByRole("heading", { level: 2, name: "probe endpoint 4" })).toBeTruthy();
+    expect(window.location.hash).toBe("#/engagements/demo?tab=commands&command=4");
+    expect(screen.queryByRole("dialog", { name: "Jump to command" })).toBeNull();
+  });
+
   it("contains focus and restores its opener on Escape", async () => {
     serveLedger([row(1)]);
     render(<CommandsTab engagementKey="demo" />);
@@ -499,6 +525,63 @@ describe("CommandsTab record", () => {
     const view = await screen.findByRole("region", { name: "Command run record" });
     expect(await within(view).findByText("operator-evidence")).toBeTruthy();
     expect(within(view).getByText(`Output integrity is ${integrity}`)).toBeTruthy();
+  });
+
+  it("says when an output preview is partial, how much of the output it holds, and where the full output is stored", async () => {
+    serveLedger([row(51), row(52)]);
+    vi.mocked(getCommandRunRecord).mockImplementation(async (_key, id) => (id === 51
+      ? record(51, {
+        stdout_bytes: 500_000,
+        stdout_preview: "first lines\n...\n[truncated 499000 bytes from middle of 500000-byte file]\n...\nlast lines\n",
+        stdout_path: "/engagements/acme-web/scans/kali/51.out",
+      } as Partial<AssessmentCommandRunDetail>)
+      : record(52)));
+    const page = render(<CommandsTab engagementKey="demo" commandId={51} initialDrawerTab="stdout" />);
+    const view = await screen.findByRole("region", { name: "Command run record" });
+    const note = await within(view).findByRole("note");
+    expect(note.textContent).toContain(formatBytes(500_000));
+    expect(note.textContent).toContain("/engagements/acme-web/scans/kali/51.out");
+    expect(within(note).getByRole("button", { name: "Copy full output path" })).toBeTruthy();
+    // A preview that holds the whole output carries no such note.
+    page.rerender(<CommandsTab engagementKey="demo" commandId={52} initialDrawerTab="stdout" />);
+    expect(await screen.findByText("stdout of 52")).toBeTruthy();
+    expect(within(commandRecord()).queryByRole("note")).toBeNull();
+  });
+
+  it("shows each argv element exactly as recorded, whitespace included", async () => {
+    const argv = ["curl", "-w", "\nCODE=%{http_code}\n", "https://app.example.com/a  b"];
+    serveLedger([row(61)]);
+    vi.mocked(getCommandRunRecord).mockResolvedValue(record(61, { argv }));
+    render(<CommandsTab engagementKey="demo" commandId={61} />);
+    const view = await screen.findByRole("region", { name: "Command run record" });
+    await within(view).findByText("curl https://app.example.com/61 --full-argument-list");
+    // Each element sits in preformatted text, so runs of spaces and newlines show.
+    expect(within(view).getAllByRole("listitem").map((item) => item.querySelector("pre")?.textContent)).toEqual(argv);
+  });
+
+  it("names the Command section plainly and keeps the whole command on a shortened title", async () => {
+    const command = `curl ${"https://app.example.com/a-long-path/".repeat(12)}end`;
+    serveLedger([row(71, { intent: null, command_preview: command.slice(0, 240), command_chars: command.length })]);
+    vi.mocked(getCommandRunRecord).mockResolvedValue(record(71, { intent: null, command }));
+    render(<CommandsTab engagementKey="demo" commandId={71} />);
+    const view = await screen.findByRole("region", { name: "Command run record" });
+    await within(view).findByText(command);
+    expect(within(view).getByRole("button", { name: "Command" }).getAttribute("aria-current")).toBe("page");
+    const heading = within(view).getByRole("heading", { level: 2 });
+    expect(heading.textContent).not.toBe(command);
+    expect(heading.querySelector("[title]")?.getAttribute("title")).toBe(command);
+  });
+
+  it("leaves an open record alone when / is pressed with a modifier key", async () => {
+    serveLedger([row(1)]);
+    render(<CommandsTab engagementKey="demo" commandId={1} />);
+    await screen.findByRole("region", { name: "Command run record" });
+    fireEvent.keyDown(document.body, { key: "/", ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: "/", metaKey: true });
+    expect(screen.getByRole("region", { name: "Command run record" })).toBeTruthy();
+    // A bare / still leaves the record for the search box.
+    fireEvent.keyDown(document.body, { key: "/" });
+    expect(screen.queryByRole("region", { name: "Command run record" })).toBeNull();
   });
 
   it("labels full-output artifact references and offers the runs that share this command", async () => {

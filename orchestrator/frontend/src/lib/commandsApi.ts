@@ -247,7 +247,7 @@ export function parseCommandView(raw: string | null): CommandView {
   }
   const filters = (value.filters && typeof value.filters === "object" ? value.filters : {}) as Record<string, unknown>;
   const sort = (value.sort && typeof value.sort === "object" ? value.sort : {}) as Record<string, unknown>;
-  const sortKey = typeof sort.sort === "string" && sort.sort in COMMAND_SORT_LABELS ? (sort.sort as CommandSortKey) : null;
+  const sortKey = typeof sort.sort === "string" && Object.hasOwn(COMMAND_SORT_LABELS, sort.sort) ? (sort.sort as CommandSortKey) : null;
   return {
     filters: {
       status: stringList(filters.status),

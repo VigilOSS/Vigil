@@ -153,8 +153,8 @@
   text-transform: uppercase;
 }
 .activity-actor.actor-operator .activity-actor-kind { color: var(--accent); background: var(--count-bg); }
-.activity-actor.actor-agent .activity-actor-kind { color: var(--chip-teal); background: color-mix(in srgb, var(--chip-teal) 12%, transparent); }
-.activity-actor.actor-system .activity-actor-kind { color: var(--muted); background: color-mix(in srgb, var(--muted) 12%, transparent); }
+.activity-actor.actor-agent .activity-actor-kind { color: color-mix(in srgb, var(--chip-teal) 70%, var(--ink)); background: color-mix(in srgb, var(--chip-teal) 12%, transparent); }
+.activity-actor.actor-system .activity-actor-kind { color: color-mix(in srgb, var(--muted) 70%, var(--ink)); background: color-mix(in srgb, var(--muted) 12%, transparent); }
 .activity-actor-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .activity-members .activity-actor { flex-basis: 170px; }
 

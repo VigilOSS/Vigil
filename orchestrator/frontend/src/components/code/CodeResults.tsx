@@ -48,8 +48,11 @@ type SearchScope = (typeof SCOPES)[number];
 /** The order the server lists results in (`ANALYSIS_RESULT_DISPOSITION_ORDER`, then newest). */
 const RESULT_ORDER = `${describeSort("Result", "desc", "status")}, newest first within each`;
 
+/** `not_listed` code: results awaiting a verdict that are not current results, listed only by the Needs attention scope. */
+const AWAITING_VERDICT_NOT_CURRENT = "awaiting_verdict_not_current";
+
 export const NEEDS_ATTENTION_RULE =
-  "Suspicious results whose file still awaits a verdict: the file's latest review is suspicious, and no finding or later clean review has settled it.";
+  "Suspicious results still awaiting a verdict: the file's latest review concluded suspicious, or closed as a finding and left the suspicious result open beside it. A later successful review of the file settles it, as does a correction that replaces a result left beside a finding.";
 
 /** Split the search box into server filters: `scope:value` tokens and free terms. */
 export function parseResultSearch(text: string): CodeAnalysisResultQuery {
@@ -151,6 +154,10 @@ export function CodeResults({ engagementKey, refreshVersion, route }: Props) {
   const page = results.data;
   const allCount = narrowed ? everything.data?.total ?? null : page?.total ?? null;
   const awaitingCount = page?.awaiting_verdict.results ?? everything.data?.awaiting_verdict.results ?? null;
+  // What "N of M" measures the filtered list against: its own scope. A result
+  // awaiting a verdict need not be a current result, so that scope is never
+  // counted as a share of the current results.
+  const summaryOf = filterCount === 0 ? null : scope === "attention" ? awaitingCount : allCount;
 
   // A page past the end (filters changed under a bookmarked page) moves to the last page.
   useEffect(() => {
@@ -221,6 +228,11 @@ export function CodeResults({ engagementKey, refreshVersion, route }: Props) {
   const clearFilters = () => {
     setText("");
     go({ disposition: [], confidence: [], workflow: [], q: "", page: 1 });
+  };
+  // The left-out count covers the whole engagement, so its link opens that scope with no filter narrowing it.
+  const showAwaitingVerdict = () => {
+    setText("");
+    go({ scope: "attention", disposition: [], confidence: [], workflow: [], q: "", page: 1 });
   };
 
   const facets = page?.facets;
@@ -345,8 +357,8 @@ export function CodeResults({ engagementKey, refreshVersion, route }: Props) {
             {page ? (
               <ResultsSummary
                 shown={total}
-                total={narrowed && allCount != null && allCount !== total ? allCount : null}
-                noun={total === 1 && (allCount == null || allCount === 1) ? "result" : "results"}
+                total={summaryOf != null && summaryOf !== total ? summaryOf : null}
+                noun={`${total === 1 && (summaryOf == null || summaryOf === 1) ? "result" : "results"}${scope === "attention" ? " awaiting a verdict" : ""}`}
                 sort={RESULT_ORDER}
               />
             ) : results.error ? null : (
@@ -363,10 +375,25 @@ export function CodeResults({ engagementKey, refreshVersion, route }: Props) {
           {scope === "attention" && page && page.file_total !== total ? (
             <p className="meta-text">These results come from {page.file_total.toLocaleString()} files awaiting a verdict.</p>
           ) : null}
-          {page && total > 0 && page.not_listed.length > 0 ? (
-            <ul className="cv-not-listed" aria-label="Results not listed">
-              {page.not_listed.map((gap) => <li key={gap.code}>{gap.message}</li>)}
-            </ul>
+          {/* What the listing leaves out is said whatever it shows, so "nothing matches" is never the whole story. */}
+          {page && page.not_listed.length > 0 ? (
+            <div className="cv-not-listed" role="note" aria-label="Results not listed">
+              <ul>
+                {page.not_listed.map((gap) => (
+                  <li key={gap.code}>
+                    {gap.message}
+                    {gap.code === AWAITING_VERDICT_NOT_CURRENT && scope !== "attention" ? (
+                      <>
+                        {" "}
+                        <button type="button" className="ui-clear-filters" onClick={showAwaitingVerdict}>
+                          Show them in Needs attention
+                        </button>
+                      </>
+                    ) : null}
+                  </li>
+                ))}
+              </ul>
+            </div>
           ) : null}
           {results.error ? (
             <p className="error-text" role="alert">
@@ -393,12 +420,12 @@ export function CodeResults({ engagementKey, refreshVersion, route }: Props) {
                 title="No results await a verdict."
                 action={<button type="button" className="ui-button" onClick={() => go({ scope: "all", page: 1 })}>Show all results</button>}
               >
-                Every suspicious review has been settled by a finding or a later clean review.
+                Every suspicious result has been settled by a later successful review of its file or replaced by a correction.
               </EmptyState>
             ) : (
               <EmptyState variant="empty" title="No current analysis results.">
                 {page.not_listed.length > 0 ? (
-                  page.not_listed.map((gap) => <p key={gap.code}>{gap.message}</p>)
+                  <p>The note above says which results exist and are not listed here.</p>
                 ) : (
                   <p>Reviewers record one result per file review; results appear here as the review queue is worked.</p>
                 )}

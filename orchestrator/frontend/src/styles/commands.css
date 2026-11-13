@@ -131,6 +131,19 @@
 /* Output previews get room to read; the section scrolls past 60% of the
  * viewport instead of the page growing without bound. */
 .commands-record .pre.commands-output { max-height: 60vh; }
+/* Argv elements show exactly as recorded: spaces and newlines are kept. */
+.commands-argv pre {
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.commands-record .callout.commands-partial-preview { border-left: 4px solid var(--pending); margin-bottom: 10px; }
+.commands-partial-preview .mono { overflow-wrap: anywhere; }
 .commands-record .section > .meta-text { margin: 0; }
 .commands-record .callout.commands-callout-danger { border-left: 4px solid var(--danger); }
 .commands-record .callout.commands-callout-pending { border-left: 4px solid var(--pending); }

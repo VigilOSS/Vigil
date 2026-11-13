@@ -34,6 +34,7 @@ export const BLOCKER_LABELS: Record<string, BlockerLabel> = {
   analysis_queue_active: { label: "Review jobs still queued or running", view: "queue", counted: true },
   code_leads_unresolved: { label: "Prior-art leads not yet answered", counted: true },
   critical_high_incomplete: { label: "Critical/high files not yet reviewed", view: "files", counted: true },
+  depth_floor_triggers: { label: "Critical/high families reviewed below their depth floor", view: "queue", counted: true },
   draft_code_findings_unresolved: { label: "Draft code findings to promote, merge, or drop", view: "findings", counted: true },
   files_unclassified: { label: "Files not yet risk-ranked", view: "files", counted: true },
   finding_snapshot_stale: { label: "Findings tied to an older code snapshot", view: "findings", counted: true },
@@ -96,6 +97,39 @@ export function directReadReason(status: string, truncated: boolean): string {
   else if (status === "unsupported") reasons.push("not parsed");
   if (truncated) reasons.push("too large to fully index");
   return reasons.length ? capitalize(reasons.join(", ")) : "Index incomplete";
+}
+
+// Lead (trigger) statuses, as `coverage.trigger_summary` and `code/triggers` name them.
+export const LEAD_STATUS_LABELS: Record<string, string> = {
+  pending: "not yet followed",
+  queued: "queued for review",
+  resolved: "followed",
+  external_context_unavailable: "need source outside the snapshot",
+  source_equivalent_analyzed: "covered by an equivalent review",
+  not_applicable: "not applicable",
+  reviewed_at_sufficient_depth: "read at sufficient depth",
+};
+
+/** "Not yet followed": a lead status in sentence case. */
+export function leadStatusLabel(status: string): string {
+  const label = LEAD_STATUS_LABELS[status];
+  return label ? capitalize(label) : humanizeStatus(status);
+}
+
+// Why a review left a lead (`code_analysis_triggers.origin`).
+export const LEAD_KIND_LABELS: Record<string, string> = {
+  cross_file: "Cross-file",
+  depth_floor: "Depth floor",
+};
+
+export const LEAD_KIND_MEANINGS: Record<string, string> = {
+  cross_file: "data flows into another file, so that file gets reviewed with that context.",
+  depth_floor:
+    "a critical or high file closed with a vulnerability type reviewed below its tier's effort floor, so that type is owed a deeper pass or a recorded reason why another pass would not move it.",
+};
+
+export function leadKindLabel(kind: string): string {
+  return LEAD_KIND_LABELS[kind] ?? humanizeStatus(kind);
 }
 
 export const QUEUE_MODE_LABELS: Record<string, string> = {
@@ -170,6 +204,7 @@ export type QualityWarning =
   | { kind: "effort"; text: string; risk: string; file: string; family: string; effort: number; threshold: number }
   | { kind: "missing_slots" | "no_families" | "missing_effort"; text: string; risk: string; file: string }
   | { kind: "direct_read"; text: string }
+  | { kind: "effort_group"; text: string }
   | { kind: "other"; text: string };
 
 export const QUALITY_GROUP_LABELS: Record<Exclude<QualityWarning["kind"], "effort">, string> = {
@@ -177,6 +212,7 @@ export const QUALITY_GROUP_LABELS: Record<Exclude<QualityWarning["kind"], "effor
   no_families: "Files with no applicable vulnerability types",
   missing_effort: "Reviewed files missing per-type effort data",
   direct_read: DIRECT_READ_TITLE,
+  effort_group: "Review effort below the bar, by risk and type",
   other: "Other review-quality notes",
 };
 
@@ -187,6 +223,13 @@ const FILE_WARNING_KINDS: Record<string, "missing_slots" | "no_families" | "miss
   "no applicable vulnerability families": "no_families",
   "analyzed but missing CWE coverage data": "missing_effort",
 };
+
+/**
+ * Every line the backend folds family shortfalls into starts with this
+ * (`code_analysis.EFFORT_GAP_WARNING_PREFIX`); the structured groups behind
+ * them are `gate.effort_gaps`.
+ */
+export const EFFORT_GAP_GROUP_PREFIX = "Effort below tier threshold";
 
 /** Structure a backend review-quality warning; unknown shapes stay verbatim. */
 export function parseQualityWarning(text: string): QualityWarning {
@@ -207,6 +250,7 @@ export function parseQualityWarning(text: string): QualityWarning {
     return { kind: FILE_WARNING_KINDS[fileWarning[3]], text, risk: fileWarning[1].toLowerCase(), file: fileWarning[2] };
   }
   if (/^Repository \d+ structural coverage debt:/.test(text)) return { kind: "direct_read", text };
+  if (text.startsWith(EFFORT_GAP_GROUP_PREFIX)) return { kind: "effort_group", text };
   return { kind: "other", text };
 }
 

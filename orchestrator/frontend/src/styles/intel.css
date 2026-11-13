@@ -59,7 +59,11 @@
 .findings-redesign .intel-static-card { cursor: default; }
 .findings-redesign .intel-static-card:hover { background: inherit; border-color: var(--border); }
 
-/* The list: a summary line, sortable headers, rows. */
+/* The list: a summary line, sortable headers, rows. The rows, not the
+ * summary line above them, take the panel's spare height when the results
+ * are few, so the table starts right under its summary. */
+.findings-redesign .list-panel.intel-list-panel { display: flex; flex-direction: column; }
+.findings-redesign .list-panel.intel-list-panel > .list-scroll-x { flex: 1 1 auto; }
 .intel-list-head {
   display: flex;
   flex-wrap: wrap;
@@ -120,3 +124,20 @@
   font-size: 0.78rem;
   text-align: left;
 }
+/* A superseded row's tag links to the record that replaced it. */
+.findings-redesign .intel-table a.tag { text-decoration: underline; text-underline-offset: 2px; }
+.findings-redesign .intel-table a.tag:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A row's tags stay on one line: the row shows the ones that fit, then
+ * "+N" for the tags it has beyond those. */
+.findings-redesign .intel-table .frow-tags { flex-wrap: nowrap; }
+.findings-redesign .intel-table .frow-tags > * { flex: none; }
+.findings-redesign .intel-more-tags { background: transparent; color: var(--ink-2); cursor: help; }
+/* The jump palette's note that it lists only the first matches. */
+.findings-redesign .cmd-more {
+  margin: 0;
+  padding: 8px 16px;
+  border-top: 1px solid var(--border);
+}
+/* The hosts a structured WAF measurement names, one per line, across the section. */
+.findings-redesign .intel-waf-measured { grid-column: 1 / -1; }
+.findings-redesign .intel-waf-hosts { margin: 2px 0 0; padding-left: 18px; font-size: 0.82rem; overflow-wrap: anywhere; }

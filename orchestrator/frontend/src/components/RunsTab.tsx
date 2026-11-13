@@ -318,6 +318,15 @@ function RunsWorkspace({
     return [...filtered].sort(compareRunRowsNewestFirst).map((row) => row.id);
   }, [filtered, gridView]);
   const reviewNavigation = listNavigation(reviewOrder, selectedRunId, stepToRun);
+  // A record outside the current results has no row to return to: closing it
+  // hands focus to the search box. A record with a row keeps the row (or
+  // nothing, so the return lands on the row the results reveal).
+  const outsideResults = investigating && reviewNavigation.index === null;
+  useEffect(() => {
+    if (!investigating) return;
+    if (outsideResults) invokerRef.current = searchRef.current;
+    else if (invokerRef.current === searchRef.current) invokerRef.current = null;
+  }, [investigating, outsideResults]);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const revealRow = useCallback((key: string) => {
     const api = gridApiRef.current;

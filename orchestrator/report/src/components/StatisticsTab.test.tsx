@@ -98,3 +98,38 @@ test("a report with no attested verdict carries no note about them", () => {
   const html = renderToStaticMarkup(<StatisticsTab data={data} />);
   assert.doesNotMatch(html, /operator&#x27;s attestation/);
 });
+
+// The chain rollup. `chain_proven_severity` is derived by the backend from the
+// chains this report proves; `chain_stated_severity` is what the chains' authors
+// stated. The card names the first as chain-derived and shows the second beside
+// it, so a reader can see a claim the delivered findings do not carry.
+
+function withChains(summary: Partial<ReportData["summary"]>): string {
+  const data: ReportData = { ...devData, summary: { ...devData.summary, ...summary } };
+  return renderToStaticMarkup(<StatisticsTab data={data} />);
+}
+
+test("the chain-derived severity is labelled as derived and shown beside the stated one", () => {
+  const html = withChains({ chain_proven_severity: "high", chain_stated_severity: "critical" });
+  assert.match(
+    html,
+    /<span class="rpt-stat-value">high<\/span><span class="rpt-stat-label">Chain-derived severity<\/span>/,
+  );
+  assert.match(html, /Stated by chain authors: critical/);
+});
+
+test("a report whose chains prove nothing says so instead of inventing a severity", () => {
+  const html = withChains({ chain_proven_severity: null, chain_stated_severity: "high" });
+  assert.match(
+    html,
+    /<span class="rpt-stat-value">none proven<\/span><span class="rpt-stat-label">Chain-derived severity<\/span>/,
+  );
+  assert.match(html, /Stated by chain authors: high/);
+});
+
+test("a report with no attack chains shows no chain severity card", () => {
+  const html = renderToStaticMarkup(
+    <StatisticsTab data={{ ...devData, attack_chains: [], attack_chain_links: [] }} />,
+  );
+  assert.doesNotMatch(html, /Chain-derived severity/);
+});

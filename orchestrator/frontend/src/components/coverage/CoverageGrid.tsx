@@ -113,6 +113,8 @@ export default function CoverageGrid({
 
   const reportWindow = useCallback(() => {
     const api = apiRef.current;
+    // A grid being torn down has nothing to measure.
+    if (api?.isDestroyed()) return;
     const total = totalRef.current;
     if (!api || total == null) {
       callbacks.current.onWindow({ total, first: 0, last: 0 });
@@ -151,6 +153,12 @@ export default function CoverageGrid({
     totalRef.current = null;
     callbacks.current.onWindow({ total: null, first: 0, last: 0 });
   }, [datasource]);
+
+  // A page that answers after the grid is gone has no grid to report on.
+  useEffect(() => () => {
+    activeDatasourceRef.current = null;
+    apiRef.current = null;
+  }, []);
 
   // Live refresh re-reads the loaded blocks while keeping rows on screen.
   const firstRefreshToken = useRef(refreshToken);

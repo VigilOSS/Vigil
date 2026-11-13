@@ -7,7 +7,7 @@
   --page-bg-color: #f3f5f7;
   --ink: #17212b;
   --ink-2: #425263;
-  --muted: #5f6e7e;
+  --muted: #576574;
 
   /* ── Surfaces ───────────────────────────────────────────── */
   --panel: #fff;
@@ -20,7 +20,10 @@
   --divider: rgba(17, 32, 49, 0.1);
   --overlay-bg: rgba(0, 0, 0, 0.45);
 
-  /* ── Accent + semantic ──────────────────────────────────── */
+  /* ── Accent + semantic ──────────────────────────────────── *
+   * Every text tone here (and --muted above, the severity and chip hues
+   * below) holds 4.5:1 as plain text on --page-bg-color, --panel and
+   * --panel-hover. Tinted pills mix their tone toward --ink (styles/ui.css). */
   --accent: #17354c;
   --accent-muted: rgba(23, 53, 76, 0.35);
   --accent-soft: #f4a259;
@@ -29,9 +32,9 @@
   /* Ink on solid --accent fills (primary buttons): ≥ 4.5:1 on the fill and
    * on its darkened hover in both themes. */
   --on-accent: #fff;
-  --ok: #2f7f52;
-  --warn: #c64d15;
-  --pending: #8c7b62;
+  --ok: #2d794e;
+  --warn: #b64713;
+  --pending: #776953;
   --danger: #991b1b;
   /* Disputed status (amber; dark theme uses lighter amber) */
   --disputed: #8a5a1f;
@@ -40,24 +43,24 @@
 
   /* ── Severity + chip palette (light) ────────────────────── */
   --sev-critical: #991b1b;
-  --sev-high: #c64d15;
-  --sev-medium: #a16207;
+  --sev-high: #b64713;
+  --sev-medium: #995d07;
   --sev-low: #17354c;
   --sev-info: #5a584f;
 
   /* Chip hues — consumed by inline style via var(--chip-*) in
    * CommandsTab / IntelTab for status/tool/technique/probe-kind
    * colors, so a dark-mode swap only needs to rewrite these. */
-  --chip-green: #2f7f52;
+  --chip-green: #2d794e;
   --chip-red: #991b1b;
-  --chip-orange: #c64d15;
-  --chip-muted: #8c7b62;
+  --chip-orange: #b64713;
+  --chip-muted: #776953;
   --chip-teal: #0d6b6b;
   --chip-navy: #17354c;
   --chip-purple: #7c3aed;
   --chip-pink: #be185d;
   --chip-maroon: #6b0d0d;
-  --chip-ochre: #a16207;
+  --chip-ochre: #995d07;
   --chip-slate: #4b5563;
   --chip-muted-grey: #6b685d;
   --chip-unreviewed: #9a988d;
@@ -65,11 +68,11 @@
 
   /* ── JSON syntax highlight (light) ──────────────────────── */
   --json-key: #17354c;
-  --json-string: #2f7f52;
-  --json-number: #a16207;
+  --json-string: #2d794e;
+  --json-number: #995d07;
   --json-boolean: #7c3aed;
   --json-null: #7c3aed;
-  --json-punctuation: #8c7b62;
+  --json-punctuation: #776953;
   --json-gutter: #9a988d;
   --json-bg: rgba(16, 18, 26, 0.045);
   --json-border: rgba(16, 18, 26, 0.08);
@@ -85,10 +88,10 @@
   /* HTTP method / status + OAST protocol colors (light).
      Mapped onto the Vigil palette. Consumed by the HTTP and OAST tab method, status, and
      protocol badges plus filter chips; redefined under the dark block. */
-  --m-get: #2f7f52;     /* green   — safe reads */
+  --m-get: #2d794e;     /* green   — safe reads */
   --m-post: #17354c;    /* navy    — creates */
   --m-put: #0d6b6b;     /* teal    — replaces */
-  --m-patch: #a16207;   /* amber   — partial update */
+  --m-patch: #995d07;   /* amber   — partial update */
   --m-delete: #991b1b;  /* red     — destructive */
   --m-head: #6b685d;    /* muted   — metadata */
   --m-options: #7c3aed; /* purple  — preflight */
@@ -611,7 +614,7 @@ textarea {
 .filter-chip[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--count-bg-active);
-  color: var(--accent);
+  color: var(--count-ink-active);
   font-weight: 600;
 }
 
@@ -1104,7 +1107,7 @@ textarea {
 .findings-redesign .filter-chip[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--count-bg-active);
-  color: var(--accent);
+  color: var(--count-ink-active);
   font-weight: 600;
 }
 .findings-redesign .filter-count {
@@ -1283,10 +1286,10 @@ textarea {
 }
 .findings-redesign .tag.cwe { background: rgba(23, 53, 76, 0.08); }
 .findings-redesign .tag.owasp { background: rgba(244, 162, 89, 0.16); color: var(--warn); }
-.findings-redesign .tag.cve { background: color-mix(in srgb, var(--chip-red) 10%, transparent); color: var(--chip-red); }
+.findings-redesign .tag.cve { background: color-mix(in srgb, var(--chip-red) 10%, transparent); color: color-mix(in srgb, var(--chip-red) 70%, var(--ink)); }
 .findings-redesign .tag.chain { background: rgba(244, 162, 89, 0.2); color: var(--tag-chain-ink); }
 .findings-redesign .tag.root { background: rgba(23, 53, 76, 0.1); color: var(--accent); }
-.findings-redesign .tag.warning { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: var(--sev-medium); }
+.findings-redesign .tag.warning { background: color-mix(in srgb, var(--sev-medium) 14%, transparent); color: color-mix(in srgb, var(--sev-medium) 70%, var(--ink)); }
 
 .findings-redesign .pill {
   display: inline-flex;
@@ -1316,13 +1319,15 @@ textarea {
 .findings-redesign .pager-group { display: flex; gap: 6px; }
 .findings-redesign .pager-btn {
   border: 1px solid var(--border);
-  background: rgba(255, 255, 255, 0.7);
+  background: var(--panel);
   border-radius: 8px;
   padding: 4px 10px;
   cursor: pointer;
   color: var(--accent);
   font-size: 0.78rem;
 }
+.findings-redesign .pager-btn:hover:not(:disabled) { background: var(--panel-hover); }
+.findings-redesign .pager-btn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .findings-redesign .pager-btn:disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* Empty state (scoped) */
@@ -1486,11 +1491,11 @@ textarea {
   padding: 4px 10px;
   border-radius: 999px;
 }
-.findings-redesign .hero-sev.critical { background: color-mix(in srgb, var(--sev-critical) 14%, transparent); color: var(--sev-critical); }
-.findings-redesign .hero-sev.high     { background: color-mix(in srgb, var(--sev-high) 14%, transparent);     color: var(--sev-high); }
-.findings-redesign .hero-sev.medium   { background: color-mix(in srgb, var(--sev-medium) 14%, transparent);   color: var(--sev-medium); }
-.findings-redesign .hero-sev.low      { background: color-mix(in srgb, var(--sev-low) 10%, transparent);      color: var(--sev-low); }
-.findings-redesign .hero-sev.info     { background: color-mix(in srgb, var(--sev-info) 10%, transparent);     color: var(--sev-info); }
+.findings-redesign .hero-sev.critical { background: color-mix(in srgb, var(--sev-critical) 14%, transparent); color: color-mix(in srgb, var(--sev-critical) 70%, var(--ink)); }
+.findings-redesign .hero-sev.high     { background: color-mix(in srgb, var(--sev-high) 14%, transparent);     color: color-mix(in srgb, var(--sev-high) 70%, var(--ink)); }
+.findings-redesign .hero-sev.medium   { background: color-mix(in srgb, var(--sev-medium) 14%, transparent);   color: color-mix(in srgb, var(--sev-medium) 70%, var(--ink)); }
+.findings-redesign .hero-sev.low      { background: color-mix(in srgb, var(--sev-low) 10%, transparent);      color: color-mix(in srgb, var(--sev-low) 70%, var(--ink)); }
+.findings-redesign .hero-sev.info     { background: color-mix(in srgb, var(--sev-info) 10%, transparent);     color: color-mix(in srgb, var(--sev-info) 70%, var(--ink)); }
 .findings-redesign .cvss-chip {
   display: inline-flex;
   align-items: center;
@@ -1533,7 +1538,7 @@ textarea {
 .findings-redesign .qa-btn[aria-pressed="true"] {
   border-color: var(--accent);
   background: var(--count-bg-active);
-  color: var(--accent);
+  color: var(--count-ink-active);
   font-weight: 600;
 }
 
@@ -2378,27 +2383,27 @@ textarea {
 .findings-redesign .frow-sev.itype-org_fact        { color: var(--chip-ochre); }
 .findings-redesign .frow-sev.itype-note            { color: var(--chip-muted); }
 
-.findings-redesign .hero-sev.itype-tech_component  { background: color-mix(in srgb, var(--chip-navy) 10%, transparent);    color: var(--chip-navy); }
-.findings-redesign .hero-sev.itype-person          { background: color-mix(in srgb, var(--chip-purple) 12%, transparent);  color: var(--chip-purple); }
-.findings-redesign .hero-sev.itype-email           { background: color-mix(in srgb, var(--chip-green) 14%, transparent);   color: var(--chip-green); }
-.findings-redesign .hero-sev.itype-domain          { background: color-mix(in srgb, var(--chip-teal) 12%, transparent);    color: var(--chip-teal); }
-.findings-redesign .hero-sev.itype-credentials     { background: color-mix(in srgb, var(--chip-orange) 14%, transparent);  color: var(--chip-orange); }
-.findings-redesign .hero-sev.itype-cve             { background: color-mix(in srgb, var(--chip-red) 14%, transparent);     color: var(--chip-red); }
-.findings-redesign .hero-sev.itype-dns_record      { background: color-mix(in srgb, var(--chip-slate) 12%, transparent);   color: var(--chip-slate); }
-.findings-redesign .hero-sev.itype-social_profile  { background: color-mix(in srgb, var(--chip-pink) 12%, transparent);    color: var(--chip-pink); }
-.findings-redesign .hero-sev.itype-breach_record   { background: color-mix(in srgb, var(--chip-maroon) 14%, transparent);  color: var(--chip-maroon); }
-.findings-redesign .hero-sev.itype-org_fact        { background: color-mix(in srgb, var(--chip-ochre) 14%, transparent);   color: var(--chip-ochre); }
-.findings-redesign .hero-sev.itype-note            { background: color-mix(in srgb, var(--chip-muted) 12%, transparent);   color: var(--chip-muted); }
+.findings-redesign .hero-sev.itype-tech_component  { background: color-mix(in srgb, var(--chip-navy) 10%, transparent);    color: color-mix(in srgb, var(--chip-navy) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-person          { background: color-mix(in srgb, var(--chip-purple) 12%, transparent);  color: color-mix(in srgb, var(--chip-purple) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-email           { background: color-mix(in srgb, var(--chip-green) 14%, transparent);   color: color-mix(in srgb, var(--chip-green) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-domain          { background: color-mix(in srgb, var(--chip-teal) 12%, transparent);    color: color-mix(in srgb, var(--chip-teal) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-credentials     { background: color-mix(in srgb, var(--chip-orange) 14%, transparent);  color: color-mix(in srgb, var(--chip-orange) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-cve             { background: color-mix(in srgb, var(--chip-red) 14%, transparent);     color: color-mix(in srgb, var(--chip-red) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-dns_record      { background: color-mix(in srgb, var(--chip-slate) 12%, transparent);   color: color-mix(in srgb, var(--chip-slate) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-social_profile  { background: color-mix(in srgb, var(--chip-pink) 12%, transparent);    color: color-mix(in srgb, var(--chip-pink) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-breach_record   { background: color-mix(in srgb, var(--chip-maroon) 14%, transparent);  color: color-mix(in srgb, var(--chip-maroon) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-org_fact        { background: color-mix(in srgb, var(--chip-ochre) 14%, transparent);   color: color-mix(in srgb, var(--chip-ochre) 70%, var(--ink)); }
+.findings-redesign .hero-sev.itype-note            { background: color-mix(in srgb, var(--chip-muted) 12%, transparent);   color: color-mix(in srgb, var(--chip-muted) 70%, var(--ink)); }
 
 /* Intel filter chips: active-state tints. Inactive chips keep their sev-dot
  * visible so you can scan the whole filter bar by color, not just by label.
  * Active state swaps border + bg + text to the dot's hue. */
 
 /* Return-code tag classes used by CommandsGrid RcCell */
-.tag-rc-ok      { background: color-mix(in srgb, var(--ok) 16%, transparent);      color: var(--ok); }
-.tag-rc-warn    { background: color-mix(in srgb, var(--warn) 14%, transparent);    color: var(--warn); }
-.tag-rc-danger  { background: color-mix(in srgb, var(--danger) 14%, transparent);  color: var(--danger); }
-.tag-rc-pending { background: color-mix(in srgb, var(--pending) 12%, transparent); color: var(--pending); }
+.tag-rc-ok      { background: color-mix(in srgb, var(--ok) 16%, transparent);      color: color-mix(in srgb, var(--ok) 70%, var(--ink)); }
+.tag-rc-warn    { background: color-mix(in srgb, var(--warn) 14%, transparent);    color: color-mix(in srgb, var(--warn) 70%, var(--ink)); }
+.tag-rc-danger  { background: color-mix(in srgb, var(--danger) 14%, transparent);  color: color-mix(in srgb, var(--danger) 70%, var(--ink)); }
+.tag-rc-pending { background: color-mix(in srgb, var(--pending) 12%, transparent); color: color-mix(in srgb, var(--pending) 70%, var(--ink)); }
 
 /* ──────────────────────────────────────────────────────────
  * Theme toggle button — lives in the page headers. Keeps the
@@ -3561,14 +3566,14 @@ body.detail-modal-open {
   border-radius: 6px;
   white-space: nowrap;
 }
-.findings-redesign .method-badge.m-get     { color: var(--m-get);     background: color-mix(in srgb, var(--m-get) 14%, transparent); }
-.findings-redesign .method-badge.m-post    { color: var(--m-post);    background: color-mix(in srgb, var(--m-post) 14%, transparent); }
-.findings-redesign .method-badge.m-put     { color: var(--m-put);     background: color-mix(in srgb, var(--m-put) 14%, transparent); }
-.findings-redesign .method-badge.m-patch   { color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
-.findings-redesign .method-badge.m-delete  { color: var(--m-delete);  background: color-mix(in srgb, var(--m-delete) 14%, transparent); }
-.findings-redesign .method-badge.m-head    { color: var(--m-head);    background: color-mix(in srgb, var(--m-head) 14%, transparent); }
-.findings-redesign .method-badge.m-options { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
-.findings-redesign .method-badge.m-other   { color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
+.findings-redesign .method-badge.m-get     { color: color-mix(in srgb, var(--m-get) 70%, var(--ink));     background: color-mix(in srgb, var(--m-get) 14%, transparent); }
+.findings-redesign .method-badge.m-post    { color: color-mix(in srgb, var(--m-post) 70%, var(--ink));    background: color-mix(in srgb, var(--m-post) 14%, transparent); }
+.findings-redesign .method-badge.m-put     { color: color-mix(in srgb, var(--m-put) 70%, var(--ink));     background: color-mix(in srgb, var(--m-put) 14%, transparent); }
+.findings-redesign .method-badge.m-patch   { color: color-mix(in srgb, var(--m-patch) 70%, var(--ink));   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
+.findings-redesign .method-badge.m-delete  { color: color-mix(in srgb, var(--m-delete) 70%, var(--ink));  background: color-mix(in srgb, var(--m-delete) 14%, transparent); }
+.findings-redesign .method-badge.m-head    { color: color-mix(in srgb, var(--m-head) 70%, var(--ink));    background: color-mix(in srgb, var(--m-head) 14%, transparent); }
+.findings-redesign .method-badge.m-options { color: color-mix(in srgb, var(--m-options) 70%, var(--ink)); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
+.findings-redesign .method-badge.m-other   { color: color-mix(in srgb, var(--m-other) 70%, var(--ink));   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
 
 /* ---- HTTP drawer: request-schema grid + observation cards ---- */
 .findings-redesign .http-schema-grid {
@@ -3627,13 +3632,13 @@ body.detail-modal-open {
   border-radius: 6px;
   white-space: nowrap;
 }
-.findings-redesign .oob-proto-badge.p-dns   { color: var(--m-post);    background: color-mix(in srgb, var(--m-post) 14%, transparent); }
-.findings-redesign .oob-proto-badge.p-http  { color: var(--m-put);     background: color-mix(in srgb, var(--m-put) 14%, transparent); }
-.findings-redesign .oob-proto-badge.p-https { color: var(--m-get);     background: color-mix(in srgb, var(--m-get) 14%, transparent); }
-.findings-redesign .oob-proto-badge.p-ftp   { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
-.findings-redesign .oob-proto-badge.p-ldap  { color: var(--m-options); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
-.findings-redesign .oob-proto-badge.p-smtp  { color: var(--m-patch);   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
-.findings-redesign .oob-proto-badge.p-other { color: var(--m-other);   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-dns   { color: color-mix(in srgb, var(--m-post) 70%, var(--ink));    background: color-mix(in srgb, var(--m-post) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-http  { color: color-mix(in srgb, var(--m-put) 70%, var(--ink));     background: color-mix(in srgb, var(--m-put) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-https { color: color-mix(in srgb, var(--m-get) 70%, var(--ink));     background: color-mix(in srgb, var(--m-get) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-ftp   { color: color-mix(in srgb, var(--m-options) 70%, var(--ink)); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-ldap  { color: color-mix(in srgb, var(--m-options) 70%, var(--ink)); background: color-mix(in srgb, var(--m-options) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-smtp  { color: color-mix(in srgb, var(--m-patch) 70%, var(--ink));   background: color-mix(in srgb, var(--m-patch) 14%, transparent); }
+.findings-redesign .oob-proto-badge.p-other { color: color-mix(in srgb, var(--m-other) 70%, var(--ink));   background: color-mix(in srgb, var(--m-other) 14%, transparent); }
 
 /* ── Markdown image references and submission blockers ───── */
 
@@ -3660,3 +3665,5 @@ body.detail-modal-open {
 .operator-authority-notice { display: grid; gap: 4px; font-size: 0.78rem; line-height: 1.45; }
 .operator-authority-notice > strong { color: var(--warn); font-weight: 650; }
 .operator-authority-notice > span { color: var(--ink-2); }
+/* A recorded variance explains the severity; its reason reads as record text, not as an alert. */
+.severity-variance-notice > p { color: var(--ink-2); }

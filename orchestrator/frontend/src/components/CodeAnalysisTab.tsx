@@ -14,13 +14,14 @@ import {
   fileReviewTotals,
   finishedNotReviewed,
   groupBlockers,
+  leadCounts,
   pendingLeads,
   type ReviewTotals,
 } from "./code/codeModel";
 import { CodeFiles } from "./code/CodeFiles";
 import { CodeModules } from "./code/CodeModules";
 import { CodeOverview } from "./code/CodeOverview";
-import { CodeQuality, qualityWarnings } from "./code/CodeQuality";
+import { CodeQuality, effortGapGroups, qualityCount, qualityWarnings } from "./code/CodeQuality";
 import { CodeQueue } from "./code/CodeQueue";
 import { CodeRepositories } from "./code/CodeRepositories";
 import { CodeResults } from "./code/CodeResults";
@@ -98,6 +99,7 @@ export function CodeAnalysisTab({ engagementKey, persistedPhase, refreshVersion 
   const groups = groupBlockers(data.readiness?.blockers ?? []);
   const requiredCount = groups.filter((group) => group.required).length;
   const warnings = qualityWarnings(data.readiness, data.coverage);
+  const effortGaps = effortGapGroups(data.coverage);
   const unknownDebt = debtUnknownRepoIds(data.readiness);
   const queueOpen = data.queueStats
     ? data.queueStats.pending + data.queueStats.processing + data.queueStats.error + data.queueStats.needs_context
@@ -111,14 +113,14 @@ export function CodeAnalysisTab({ engagementKey, persistedPhase, refreshVersion 
     queue: queueOpen,
     files: data.readiness && unknownDebt.size === 0 ? data.readiness.structural_debt_count ?? null : null,
     results: awaiting,
-    quality: data.readiness || data.coverage ? warnings.length : null,
+    quality: data.readiness || data.coverage ? qualityCount(warnings, effortGaps) : null,
     modules: data.modules?.length ?? null,
   };
   const viewCountTitles: Partial<Record<CodeView, string>> = {
     overview: `Things that block ${nextLabel}`,
     queue: "Review jobs queued, running, waiting on context or failed",
     files: "Files needing a direct read",
-    results: "Files whose suspicious review awaits a verdict",
+    results: "Files with a suspicious result awaiting a verdict",
     quality: "Review-quality warnings",
   };
 
@@ -149,7 +151,7 @@ export function CodeAnalysisTab({ engagementKey, persistedPhase, refreshVersion 
       hidden={recordOpen}
       stats={trackDisabled ? [] : [
         { value: queueOpen, label: "open review jobs", title: "Review jobs queued, running, waiting on context or failed" },
-        { value: awaiting, label: "awaiting a verdict", tone: awaiting ? "warning" : undefined, title: "Files whose suspicious review awaits a verdict" },
+        { value: awaiting, label: "awaiting a verdict", tone: awaiting ? "warning" : undefined, title: "Files with a suspicious result awaiting a verdict" },
       ]}
       status={pending.size > 0 && !firstLoad ? "Updating…" : null}
     >
@@ -294,7 +296,7 @@ export function CodeAnalysisTab({ engagementKey, persistedPhase, refreshVersion 
               />
             )}
             {route.view === "repositories" && (
-              <CodeRepositories engagementKey={engagementKey} data={data} focusRepoId={route.repo} />
+              <CodeRepositories engagementKey={engagementKey} data={data} focusRepoId={route.repo} unreadableRepo={route.repoUnreadable} />
             )}
             {route.view === "queue" && (
               <CodeQueue
@@ -303,15 +305,31 @@ export function CodeAnalysisTab({ engagementKey, persistedPhase, refreshVersion 
                 errors={errorBySource}
                 pending={pending}
                 refreshVersion={liveVersion}
+                route={route}
               />
             )}
             {route.view === "files" && (
-              <CodeFiles engagementKey={engagementKey} data={data} repoFilter={route.repo} focus={route.focus} />
+              <CodeFiles
+                engagementKey={engagementKey}
+                data={data}
+                pending={pending}
+                refreshVersion={liveVersion}
+                route={route}
+              />
             )}
             {route.view === "results" && (
               <CodeResults engagementKey={engagementKey} refreshVersion={liveVersion} route={route} />
             )}
-            {route.view === "quality" && <CodeQuality engagementKey={engagementKey} warnings={warnings} />}
+            {route.view === "quality" && (
+              <CodeQuality
+                engagementKey={engagementKey}
+                warnings={warnings}
+                effortGaps={effortGaps}
+                depthAdvisories={data.coverage?.gate.depth_advisories ?? []}
+                untriggeredShortfalls={data.coverage?.gate.untriggered_depth_shortfalls ?? null}
+                optionalFamilies={data.coverage?.gate.optional_families ?? null}
+              />
+            )}
             {route.view === "modules" && <CodeModules modules={data.modules} loading={pending.has("modules")} />}
           </>
         )}
@@ -335,6 +353,7 @@ function KeyNumbers({
   const high = classReviewTotals(data.coverage, "high");
   const findings = data.coverage?.findings_summary;
   const leads = pendingLeads(data.coverage);
+  const leadSplit = leadCounts(data.coverage?.trigger_summary);
   const debt = data.readiness?.structural_debt_count;
   const severities = ["critical", "high", "medium", "low", "info"].filter(
     (severity) => (findings?.by_severity[severity] ?? 0) > 0,
@@ -370,6 +389,10 @@ function KeyNumbers({
     {
       label: "Leads to follow",
       value: leads == null ? "—" : leads.toLocaleString(),
+      // Depth-floor leads are a different kind of work than cross-file ones; say how the count splits.
+      detail: leadSplit && leadSplit.depthFloorPending > 0
+        ? `${leadSplit.crossFilePending.toLocaleString()} cross-file · ${leadSplit.depthFloorPending.toLocaleString()} depth floor`
+        : undefined,
       href: codeViewHref(engagementKey, { view: "queue" }),
     },
   ];

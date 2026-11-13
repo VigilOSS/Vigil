@@ -351,6 +351,11 @@
   font-size: 0.82rem;
 }
 
+/* "Show every service" under a service list the summary cut short. */
+.cov-service-gaps .cov-service-more {
+  margin: 10px 0 0;
+}
+
 /* ── All items ── */
 
 .cov-items {
@@ -627,7 +632,7 @@
   padding: 0 6px;
   border-radius: 4px;
   background: color-mix(in srgb, var(--m) 14%, transparent);
-  color: var(--m);
+  color: color-mix(in srgb, var(--m) 70%, var(--ink));
   font: 600 0.66rem/1.6 "Source Code Pro", "SFMono-Regular", monospace;
   letter-spacing: 0.02em;
 }
@@ -740,7 +745,7 @@
   padding: 0 7px;
   border-radius: 999px;
   background: color-mix(in srgb, var(--t) 12%, transparent);
-  color: var(--t);
+  color: color-mix(in srgb, var(--t) 70%, var(--ink));
   font-size: 0.72rem;
   font-weight: 600;
   line-height: 1.6;

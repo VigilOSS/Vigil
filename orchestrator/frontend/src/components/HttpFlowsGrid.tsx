@@ -5,9 +5,11 @@
 // side filtering happens upstream in HttpTab (the fetch passes the filters as
 // query params); this component only renders rows, wires row→record clicks,
 // and reports the order it shows (after a header sort) for the record's
-// Previous / Next — the exact HttpGrid / CommandsGrid contract.
+// Previous / Next — the exact HttpGrid / CommandsGrid contract. The grid
+// always shows some order: it starts in the sort the tab hands it (newest
+// first when there is none) and a header click flips a column's direction.
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, GridApi, ICellRendererParams, ModelUpdatedEvent } from "ag-grid-community";
 import type { HttpFlow } from "../lib/api";
@@ -17,13 +19,26 @@ import { formatRelativeTime, gridTimeComparator } from "../lib/serverTime";
 import { HttpStatusPill, methodClass } from "./HttpTab";
 import { StatusPill } from "./ui";
 
-import { readGridView, type GridView } from "./record/recordNavigation";
+import { readGridView, type GridSort, type GridView } from "./record/recordNavigation";
 
 registerAgGrid();
+
+const DEFAULT_SORT: GridSort = { colId: "seen", sort: "desc" };
+
+/** The column definitions with the starting sort on its column (and no other); a sort no column shows starts on `DEFAULT_SORT`. */
+function withStartSort(columns: ColDef<HttpFlow>[], start: GridSort | null | undefined): ColDef<HttpFlow>[] {
+  const shown = start && columns.some((column) => column.colId === start.colId && column.sortable !== false) ? start : DEFAULT_SORT;
+  return columns.map((column) => ({ ...column, initialSort: column.colId === shown.colId ? shown.sort : undefined }));
+}
 
 type HttpFlowsGridProps = {
   rows: HttpFlow[];
   selectedUid: string | null;
+  /**
+   * The sort the grid starts in (the tab keeps it across visits). Read once
+   * on mount; later header clicks report through `onViewChange`.
+   */
+  initialSort?: GridSort | null;
   /** The shown row order and the column sort behind it, after every model update. */
   onViewChange?: (view: GridView<number>) => void;
   onRowOpen: (flow: HttpFlow, invoker: HTMLElement | null) => void;
@@ -82,19 +97,22 @@ function LastSeenCell({ data }: ICellRendererParams<HttpFlow>) {
   return <TimeStamp value={data.created_at} />;
 }
 
-export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChange, onApi }: HttpFlowsGridProps) {
+export default function HttpFlowsGrid({ rows, selectedUid, initialSort, onRowOpen, onViewChange, onApi }: HttpFlowsGridProps) {
+  // Read once: the columns carry the starting sort; the grid owns it after that.
+  const [startSort] = useState(initialSort);
   const gridRef = useRef<AgGridReact<HttpFlow>>(null);
   const onApiRef = useRef(onApi);
   onApiRef.current = onApi;
   useEffect(() => () => onApiRef.current?.(null), []);
 
-  const columnDefs = useMemo<ColDef<HttpFlow>[]>(() => [
+  const columnDefs = useMemo<ColDef<HttpFlow>[]>(() => withStartSort([
     {
       headerName: "Method",
       colId: "method",
       width: 100,
       cellRenderer: MethodCell,
       valueGetter: (p) => (p.data?.method || "").toUpperCase(),
+      sortingOrder: ["asc", "desc"],
     },
     {
       headerName: "Host",
@@ -104,6 +122,7 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       valueGetter: (p) => p.data?.host || "",
       cellClass: "ag-mono",
       cellStyle: { color: "var(--ink-2)" },
+      sortingOrder: ["asc", "desc"],
     },
     {
       headerName: "Path",
@@ -114,6 +133,7 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       tooltipValueGetter: (p) => p.data?.url || p.data?.path || "",
       cellClass: "ag-mono ag-clip-cell",
       cellStyle: { color: "var(--ink)" },
+      sortingOrder: ["asc", "desc"],
     },
     {
       headerName: "Status",
@@ -121,6 +141,7 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       width: 90,
       cellRenderer: StatusCell,
       valueGetter: (p) => p.data?.response_status ?? null,
+      sortingOrder: ["asc", "desc"],
     },
     {
       headerName: "Content-Type",
@@ -128,6 +149,7 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       width: 130,
       valueGetter: (p) => p.data?.content_type_family || "—",
       cellStyle: { color: "var(--ink-2)" },
+      sortingOrder: ["asc", "desc"],
     },
     {
       headerName: "Auth",
@@ -135,6 +157,7 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       width: 120,
       valueGetter: (p) => p.data?.auth_context || "—",
       cellStyle: { color: "var(--muted)" },
+      sortingOrder: ["asc", "desc"],
     },
     {
       headerName: "Req",
@@ -144,6 +167,8 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       valueFormatter: (p) => formatBytes(p.value as number | null),
       cellClass: "ag-mono",
       cellStyle: { color: "var(--muted)" },
+      // Sizes open largest first.
+      sortingOrder: ["desc", "asc"],
     },
     {
       headerName: "Resp",
@@ -153,6 +178,7 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       valueFormatter: (p) => formatBytes(p.value as number | null),
       cellClass: "ag-mono",
       cellStyle: { color: "var(--muted)" },
+      sortingOrder: ["desc", "asc"],
     },
     {
       headerName: "Flags",
@@ -169,14 +195,12 @@ export default function HttpFlowsGrid({ rows, selectedUid, onRowOpen, onViewChan
       pinned: "right",
       cellRenderer: LastSeenCell,
       valueGetter: (p) => p.data?.created_at || "",
-      // The default order, newest first; the header shows it.
-      initialSort: "desc",
       sortingOrder: ["desc", "asc"],
       // Missing capture times sort last in both directions.
       comparator: gridTimeComparator,
       valueFormatter: (p) => formatRelativeTime(p.value as string),
     },
-  ], []);
+  ], startSort), [startSort]);
 
   const { onRowClicked, onCellKeyDown } = rowOpenHandlers<HttpFlow>(onRowOpen);
 

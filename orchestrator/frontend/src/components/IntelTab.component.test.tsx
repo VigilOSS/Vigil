@@ -428,6 +428,62 @@ describe("IntelTab record view", () => {
     expect(within(record).getByRole("heading", { level: 2, name: "svc-reader@example.com" })).toBeTruthy();
   });
 
+  it("titles a credential by who it authenticates as, and keeps its secret verbatim", async () => {
+    vi.mocked(listIntelCredentials).mockResolvedValue([
+      { id: 42, credential_key: "acme-portal-api-key", principal: "svc-portal@example.com", kind: "api-key", identity: "", secret: "exact-token", status: "confirmed" },
+      { id: 43, credential_key: "acme-backup-token", principal: "", kind: "api-token", identity: "", secret: "other-token", status: "unverified" },
+    ]);
+    render(<ToastProvider><IntelTab engagementKey="acme" summary={{ counts: {} }} /></ToastProvider>);
+    // Each credential reads as itself in the list: its principal, else its key.
+    const row = await screen.findByRole("row", { name: /svc-portal@example\.com/ });
+    expect(within(row).getByText(/acme-portal-api-key/)).toBeTruthy();
+    expect(screen.getByRole("button", { name: /acme-backup-token/ })).toBeTruthy();
+    fireEvent.click(within(row).getByRole("button", { name: /svc-portal@example\.com/ }));
+    const record = await screen.findByRole("region", { name: "Intel record" });
+    expect(within(record).getByRole("heading", { level: 2, name: "svc-portal@example.com" })).toBeTruthy();
+    expect(within(record).getByText("exact-token")).toBeTruthy();
+  });
+
+  it("links a superseded record to the record that replaced it", async () => {
+    mockIntel({
+      note: [
+        { id: 11, title: "Acme SSO uses SAML", superseded_by_id: 12, superseded_at: "2026-09-21T10:00:00Z" },
+        { id: 12, title: "Acme SSO uses SAML and OIDC" },
+      ],
+    });
+    render(<ToastProvider><IntelTab engagementKey="acme" summary={{ counts: {} }} /></ToastProvider>);
+    const row = await screen.findByRole("row", { name: /Acme SSO uses SAML\b(?! and)/ });
+    const replacement = "#/engagements/acme?tab=intel&intel_type=note&intel_id=12";
+    expect(within(row).getByRole("link", { name: /#12/ }).getAttribute("href")).toBe(replacement);
+    fireEvent.click(within(row).getByRole("button", { name: /Acme SSO uses SAML/ }));
+    const record = await screen.findByRole("region", { name: "Intel record" });
+    const links = within(record).getAllByRole("link", { name: /#12/ });
+    expect(links.length).toBeGreaterThan(0);
+    for (const link of links) expect(link.getAttribute("href")).toBe(replacement);
+  });
+
+  it("keeps Previous / Next for a lead that a refresh takes out of Needs attention", async () => {
+    const leads = (second: string) => [
+      { id: 21, title: "Acme lead one", lead_status: "open", updated_at: "2026-09-28T03:00:00Z" },
+      { id: 22, title: "Acme lead two", lead_status: second, updated_at: "2026-09-28T02:00:00Z" },
+      { id: 23, title: "Acme lead three", lead_status: "open", updated_at: "2026-09-28T01:00:00Z" },
+    ];
+    mockIntel({ note: leads("open") });
+    const view = render(<ToastProvider><IntelTab engagementKey="acme" summary={{ counts: {} }} refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /^Needs attention\s*3/ }));
+    fireEvent.click(screen.getByRole("button", { name: "Acme lead two" }));
+    const record = await screen.findByRole("region", { name: "Intel record" });
+    expect(await within(record).findByText("2 of 3 results")).toBeTruthy();
+
+    // An agent resolves the lead while it is open.
+    mockIntel({ note: leads("resolved") });
+    view.rerender(<ToastProvider><IntelTab engagementKey="acme" summary={{ counts: {} }} refreshVersion={1} /></ToastProvider>);
+    expect(await within(record).findByText("Outside current results")).toBeTruthy();
+    fireEvent.click(within(record).getByRole("button", { name: "Next intel record" }));
+    expect(await within(record).findByRole("heading", { level: 2, name: "Acme lead three" })).toBeTruthy();
+    expect(within(record).getByText("2 of 2 results")).toBeTruthy();
+  });
+
   it("explains a deep link to a record the ledger does not hold", async () => {
     render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="cve" initialIntelId={404} /></ToastProvider>);
     expect((await screen.findByRole("alert")).textContent).toContain("Intel record cve #404 was not found");
@@ -549,6 +605,26 @@ describe("IntelTab by-URL continuations", () => {
       .toBe("#/engagements/demo?tab=surfaces&surface=5");
     expect(screen.getByRole("link", { name: /https:\/\/api.example.com\/v1/i }).getAttribute("href"))
       .toBe("#/engagements/demo?tab=http&request=6");
+  });
+});
+
+describe("IntelTab by-URL heading", () => {
+  it("names the URL that was looked up, whatever the box holds since", async () => {
+    vi.mocked(intelByUrl).mockResolvedValue({
+      domains: [],
+      services: [],
+      surfaces: [{ id: 5, target_descriptor: "https://app.example.com/a", surface_type: "web" }],
+      request_variants: [],
+    });
+    render(<ToastProvider><IntelTab engagementKey="acme" summary={{ counts: {} }} /></ToastProvider>);
+    const box = screen.getByRole("searchbox", { name: "Look up intel by URL" });
+    fireEvent.change(box, { target: { value: "https://app.example.com/a" } });
+    fireEvent.click(screen.getByRole("button", { name: "Go" }));
+    await screen.findByRole("link", { name: /https:\/\/app\.example\.com\/a/ });
+    const heading = () => document.querySelector(".intel-lookups .section-title code")?.textContent;
+    expect(heading()).toBe("https://app.example.com/a");
+    fireEvent.change(box, { target: { value: "https://app.example.com/b" } });
+    expect(heading()).toBe("https://app.example.com/a");
   });
 });
 
@@ -686,6 +762,154 @@ describe("IntelTab page and filters", () => {
     await within(record).findByRole("heading", { level: 2, name: "Note 02" });
     fireEvent.click(within(record).getByRole("button", { name: "Back to results" }));
     await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 02/ })));
+  });
+
+  it("moves the selection with j and k from the row that has focus", async () => {
+    mockIntel({ note: notes(3) });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("button", { name: /Note 01/ }));
+    const record = await screen.findByRole("region", { name: "Intel record" });
+    fireEvent.click(within(record).getByRole("button", { name: "Back to results" }));
+    // Back leaves focus on the row; the list keys continue from it.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 01/ })));
+    const table = screen.getByRole("table", { name: "Intel records" });
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "j" });
+    await waitFor(() => expect(within(table).getByRole("row", { name: /Note 02/ }).className).toContain("is-selected"));
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 02/ })));
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "]" });
+    await waitFor(() => expect(within(table).getByRole("row", { name: /Note 03/ }).className).toContain("is-selected"));
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "k" });
+    await waitFor(() => expect(within(table).getByRole("row", { name: /Note 02/ }).className).toContain("is-selected"));
+  });
+
+  it("steps from the focused row when another row, or none, is highlighted", async () => {
+    mockIntel({ note: notes(5) });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    const table = screen.getByRole("table", { name: "Intel records" });
+    const selected = () => within(table).getAllByRole("row").filter((row) => row.className.includes("is-selected")).map((row) => row.textContent);
+    // Tab reaches a row without highlighting it.
+    (await screen.findByRole("button", { name: /Note 03/ })).focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "j" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 04/ })));
+    expect(selected()).toEqual([expect.stringContaining("Note 04")]);
+    // Focus moved on by Tab while Note 04 stays highlighted.
+    screen.getByRole("button", { name: /Note 02/ }).focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "[" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 01/ })));
+    expect(selected()).toEqual([expect.stringContaining("Note 01")]);
+  });
+
+  it("moves focus onto the highlighted row when a list key steps to it from the row beside it", async () => {
+    mockIntel({ note: notes(45) });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    const table = screen.getByRole("table", { name: "Intel records" });
+    // Note 04 is highlighted and has focus; Shift+Tab then puts focus on Note 03.
+    (await screen.findByRole("button", { name: /Note 03/ })).focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "j" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 04/ })));
+    screen.getByRole("button", { name: /Note 03/ }).focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "j" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 04/ })));
+
+    // The highlighted row is on the next page: stepping onto it from the last row shown turns the page.
+    screen.getByRole("button", { name: /Note 40/ }).focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "j" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 41/ })));
+    fireEvent.click(screen.getByRole("button", { name: "Prev" }));
+    (await screen.findByRole("button", { name: /Note 40/ })).focus();
+    fireEvent.keyDown(document.activeElement as HTMLElement, { key: "]" });
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: /Note 41/ })));
+    expect(within(table).getByRole("row", { name: /Note 41/ }).className).toContain("is-selected");
+  });
+
+  it("states a tech component's structured WAF measurement: the verdict, the hosts measured and the run behind it", async () => {
+    mockIntel({
+      tech_component: [
+        { id: 41, component: "wafw00f sweep", provenance: { command_run_id: 8, waf: { verdict: "none_detected", hosts: ["api.acme.example", "shop.acme.example"] } } },
+        { id: 42, component: "Acme Edge WAF", provenance: { command_run_id: 7, waf: { verdict: "detected", hosts: ["www.acme.example"] } } },
+        { id: 43, component: "nginx", provenance: { agent_name: "recon-specialist" } },
+      ] as never[],
+    });
+    const view = render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="tech_component" initialIntelId={41} /></ToastProvider>);
+    const measured = await screen.findByRole("group", { name: "WAF measurement" });
+    // A measured negative reads as a result, not as a missing one.
+    expect(within(measured).getByText("No WAF detected")).toBeTruthy();
+    expect(within(measured).getAllByRole("listitem").map((item) => item.textContent)).toEqual(["api.acme.example", "shop.acme.example"]);
+    expect(within(measured).getByRole("link", { name: "Command run #8" }).getAttribute("href")).toBe("#/engagements/demo?tab=commands&command=8");
+
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="tech_component" initialIntelId={42} /></ToastProvider>);
+    await waitFor(() => expect(within(screen.getByRole("group", { name: "WAF measurement" })).getByText("WAF detected")).toBeTruthy());
+    // A component without a measurement has no such section.
+    view.rerender(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="tech_component" initialIntelId={43} /></ToastProvider>);
+    await screen.findByRole("heading", { level: 2, name: "nginx" });
+    expect(screen.queryByRole("group", { name: "WAF measurement" })).toBeNull();
+  });
+
+  it("says in the list which tech components are WAF measurements, with the verdict and how many hosts it covers", async () => {
+    mockIntel({
+      tech_component: [
+        { id: 41, component: "wafw00f sweep", evidence_ref: "recon/wafw00f.json", provenance: { command_run_id: 8, waf: { verdict: "none_detected", hosts: ["api.acme.example", "shop.acme.example"] } } },
+        { id: 42, component: "Acme Edge WAF", provenance: { command_run_id: 7, waf: { verdict: "detected", hosts: ["www.acme.example"] } } },
+        { id: 43, component: "nginx", evidence_ref: "recon/httpx.json", provenance: { agent_name: "recon-specialist" } },
+      ] as never[],
+    });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    const table = screen.getByRole("table", { name: "Intel records" });
+    const negative = await within(table).findByRole("row", { name: /wafw00f sweep/ });
+    expect(negative.textContent).toContain("WAF measurement: No WAF detected on 2 hosts · recon/wafw00f.json");
+    expect(within(table).getByRole("row", { name: /Acme Edge WAF/ }).textContent).toContain("WAF measurement: WAF detected on 1 host");
+    expect(within(table).getByRole("row", { name: /nginx/ }).textContent).not.toContain("WAF measurement");
+  });
+
+  it("shows a WAF measurement the readiness check cannot read as it was recorded", async () => {
+    mockIntel({
+      tech_component: [{ id: 44, component: "Edge", provenance: { waf: { verdict: "maybe", hosts: "www.acme.example" } } }] as never[],
+    });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="tech_component" initialIntelId={44} /></ToastProvider>);
+    const measured = await screen.findByRole("group", { name: "WAF measurement" });
+    expect(measured.textContent).toContain("maybe");
+    expect(measured.textContent).toContain("No command run is cited");
+    expect(measured.textContent).toContain("\"www.acme.example\"");
+  });
+
+  it("says a WAF measurement names no hosts, and where an unreadable measurement is reported", async () => {
+    mockIntel({
+      tech_component: [{ id: 45, component: "Edge", provenance: { command_run_id: 9, waf: { verdict: "detected", hosts: [] } } }] as never[],
+    });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} initialIntelType="tech_component" initialIntelId={45} /></ToastProvider>);
+    const measured = await screen.findByRole("group", { name: "WAF measurement" });
+    expect(within(measured).getByText("No hosts recorded")).toBeTruthy();
+    // A measurement that names no hosts closes no host's WAF tier; the view points at where the check says so.
+    expect(measured.textContent).toContain("A measurement it cannot read closes none");
+    expect(within(measured).getByRole("link", { name: "Report checks" }).getAttribute("href")).toBe("#/engagements/demo");
+  });
+
+  it("says how many tags a row leaves out and names them", async () => {
+    mockIntel({ note: [{ id: 1, title: "Acme auth map", tags: ["sso", "saml", "oidc", "mfa", "session-fixation", "password-reset"] } as never] });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    const row = await screen.findByRole("row", { name: /Acme auth map/ });
+    expect(within(row).getByText("sso")).toBeTruthy();
+    expect(within(row).queryByText("password-reset")).toBeNull();
+    const more = within(row).getByText(/\+\s*2/);
+    expect(more.getAttribute("title")).toContain("session-fixation");
+    expect(more.getAttribute("title")).toContain("password-reset");
+  });
+
+  it("says how many records match in the palette when it lists only the first of them", async () => {
+    mockIntel({ note: notes(35) });
+    render(<ToastProvider><IntelTab engagementKey="demo" summary={{ counts: {} }} /></ToastProvider>);
+    await screen.findByRole("button", { name: /Note 01/ });
+    fireEvent.click(screen.getByRole("button", { name: /Jump to…/ }));
+    const dialog = screen.getByRole("dialog", { name: "Jump to intel" });
+    const input = within(dialog).getByRole("textbox", { name: "Search intel to jump to" });
+    fireEvent.change(input, { target: { value: "note" } });
+    const listed = dialog.querySelectorAll(".cmd-item").length;
+    expect(listed).toBeLessThan(35);
+    expect(within(dialog).getByRole("status").textContent).toMatch(new RegExp(`${listed}\\D+35`));
+    // A search that lists every match has nothing to add.
+    fireEvent.change(input, { target: { value: "Note 07" } });
+    expect(dialog.querySelectorAll(".cmd-item")).toHaveLength(1);
+    expect(within(dialog).queryByRole("status")).toBeNull();
   });
 
   it("lays the list out as a table of records with sortable column headers", async () => {

@@ -22,7 +22,8 @@ test("malformed routes and noncanonical numeric identities cannot select a round
   for (const hash of ["#/engagements/%E0%A4%A", "#/unknown/workspace", "#/remediation/", "#/engagements/%20"]) {
     assert.deepEqual(parseWorkspaceRoute(hash), { kind: "invalid" });
   }
-  for (const value of ["", "-1", "1.5", "NaN", "9007199254740993"]) {
+  // Only the canonical decimal form names a record: no exponent, hex, sign, padding or spaces.
+  for (const value of ["", "-1", "1.5", "NaN", "9007199254740993", "1e3", "0x10", "+7", "007", " 7", "7 "]) {
     assert.equal(positiveRouteId(new URLSearchParams({ id: value }), "id"), undefined);
   }
 });

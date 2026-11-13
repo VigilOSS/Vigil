@@ -72,6 +72,8 @@ type SubmissionsTabProps = {
   initialDrawerTab?: string;
   /** Reports the engagement's "to do" count from each listing read, for the rail badge while open. */
   onToDoCount?: (count: number) => void;
+  /** Called with the engagement's ready-to-export count from every listing read. */
+  onReadyCount?: (count: number) => void;
 };
 
 const SEARCH_DEBOUNCE_MS = 250;
@@ -131,7 +133,7 @@ export function SubmissionsTab(props: SubmissionsTabProps) {
   return <SubmissionDesk key={props.engagementKey} {...props} />;
 }
 
-function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSlug, initialDrawerTab, onToDoCount }: SubmissionsTabProps) {
+function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSlug, initialDrawerTab, onToDoCount, onReadyCount }: SubmissionsTabProps) {
   const { toast } = useToast();
   const [saved] = useState(() => readDeskView(engagementKey));
   const initialWindow = useRef(saved.loadedCount ?? SUBMISSION_PAGE_SIZE);
@@ -626,6 +628,10 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
   useEffect(() => {
     if (actionable != null) onToDoCount?.(actionable);
   }, [actionable, onToDoCount]);
+  const ready = counts?.ready;
+  useEffect(() => {
+    if (ready != null) onReadyCount?.(ready);
+  }, [ready, onReadyCount]);
   const needWork = counts ? counts.blocked + counts.needs_draft : null;
   const shellRef = useRef<HTMLDivElement | null>(null);
   const { height: paneHeight, stickyTop } = useViewportPane(shellRef, MIN_PANE_HEIGHT, [
@@ -843,6 +849,12 @@ function SubmissionDesk({ engagementKey, refreshVersion = 0, initialSubmissionSl
           exporting={exporting}
           previewOutdated={previewOutdated}
           outsideList={selectedOutsideList ? listingFilterLabel(readinessFilter) : null}
+          outsideListMore={selectedOutsideList && listing?.findings_page.has_more
+            ? { loaded: listing.findings.length, total: listing.findings_page.total }
+            : null}
+          loadingMoreFindings={loadingMoreFindings}
+          onLoadMoreFindings={handleLoadMoreFindings}
+          requestedSlug={selectedSlug ?? ""}
           emptyList={listing && listing.findings.length === 0 ? (listing.counts.all === 0 ? "nothing-recorded" : "filtered") : null}
           loadingMoreVersions={loadingMoreVersions}
           loadingMorePending={loadingMorePending}

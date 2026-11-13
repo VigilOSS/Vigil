@@ -7,7 +7,7 @@
 // and coming back restores the loaded depth, the open entries and the scroll
 // position for the same filters.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 
 import {
   listActivityFeed,
@@ -49,6 +49,8 @@ const MAX_CATCH_UP_PAGES = 5;
 const AT_TOP_PX = 24;
 const FRESH_HIGHLIGHT_MS = 6_000;
 const SEARCH_DEBOUNCE_MS = 300;
+/** The longest search the feed accepts (backend `/activity` `q`). */
+const SEARCH_MAX_CHARS = 1024;
 
 const ACTORS: Array<[ActivityActorKind | "", string]> = [
   ["", "Everyone"], ["operator", "Operator"], ["agent", "Agents"], ["system", "System"],
@@ -149,6 +151,8 @@ export function ActivityTab({
   const [fresh, setFresh] = useState<ReadonlySet<string>>(new Set());
   const [now, setNow] = useState(() => Date.now());
   const [categoryNotice, setCategoryNotice] = useState<string | null>(null);
+  // Why the selection differs from the one a link named; shown while those filters stand.
+  const [linkNotice, setLinkNotice] = useState<{ filters: string; text: string } | null>(null);
 
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const searchRef = useRef<HTMLInputElement | null>(null);
@@ -167,6 +171,8 @@ export function ActivityTab({
   // The saved view for these filters is restored once, by the first load after mount.
   const restoreRef = useRef<SavedView | null>(readSavedView(engagementKey));
   const scrollTopRef = useRef(0);
+  // The scroll position a restored view returns to once its entries are on screen.
+  const restoreScrollRef = useRef<number | null>(null);
 
   // Refresh passes read the latest rows synchronously, before React renders.
   const commitRows = useCallback((next: ActivityItem[]) => {
@@ -219,10 +225,46 @@ export function ActivityTab({
     ...extra,
   }), [engagementKey, filters]);
 
+  // Whether any read has delivered the category list the chips show.
+  const categoriesKnownRef = useRef(false);
   const applyMeta = useCallback((page: ActivityFeedPage) => {
     setTotal(page.total);
     setCategories(page.categories);
+    categoriesKnownRef.current = true;
   }, []);
+
+  // A refused first page (a link naming a category the feed does not have, a
+  // search it does not accept) delivers no category list. This reads the list
+  // without any filter so the chips still show, and drops selected categories
+  // the feed does not have. True when the selection changed (a new first page follows).
+  const recoverCategories = useCallback(async (generation: number): Promise<boolean> => {
+    // Nothing to recover: the chips show and the default selection is in use.
+    if (categoriesKnownRef.current && filters.categories === null) return false;
+    let known: ActivityCategory[];
+    try {
+      known = (await listActivityFeed(engagementKey, { limit: 1 })).categories;
+    } catch {
+      return false;
+    }
+    if (generation !== generationRef.current) return true;
+    if (!categoriesKnownRef.current) {
+      setCategories(known);
+      categoriesKnownRef.current = true;
+    }
+    const chosen = filters.categories;
+    if (chosen === null) return false;
+    const keys = new Set(known.map((category) => category.key));
+    const kept = chosen.filter((key) => keys.has(key));
+    if (kept.length === chosen.length) return false;
+    const unknown = chosen.filter((key) => !keys.has(key));
+    const next: Filters = { ...filters, categories: kept.length ? kept : null };
+    setLinkNotice({
+      filters: filtersKey(next),
+      text: `The link named ${unknown.length === 1 ? "a category" : "categories"} this feed does not have (${unknown.join(", ")}); showing ${kept.length ? "the rest of its selection" : "the default categories"}.`,
+    });
+    setFilters(next);
+    return true;
+  }, [engagementKey, filters]);
 
   // First page for the current engagement and filters. Previous rows stay
   // visible (dimmed) until the replacement arrives. Returning to the same
@@ -253,20 +295,20 @@ export function ActivityTab({
         setFresh(new Set());
         setNow(Date.now());
         applyMeta(page);
+        // New results read from their first entry; a restored view returns
+        // to its saved position when these rows are on screen.
+        if (scrollRef.current) scrollRef.current.scrollTop = 0;
+        scrollTopRef.current = 0;
+        atTopRef.current = true;
+        restoreScrollRef.current = null;
         if (saved) {
           restoreRef.current = null;
           setExpanded(new Set(saved.expanded));
-          const top = saved.scrollTop;
-          if (top > 0) {
-            window.setTimeout(() => {
-              if (generation !== generationRef.current || !scrollRef.current) return;
-              scrollRef.current.scrollTop = top;
-              scrollTopRef.current = top;
-              atTopRef.current = top <= AT_TOP_PX;
-            }, 0);
-          }
+          if (saved.scrollTop > 0) restoreScrollRef.current = saved.scrollTop;
         }
       } catch (cause) {
+        if (generation !== generationRef.current) return;
+        if (await recoverCategories(generation)) return;
         if (generation === generationRef.current) setError(errorText(cause, "Activity could not be loaded"));
       } finally {
         if (generation === generationRef.current) {
@@ -279,7 +321,18 @@ export function ActivityTab({
         }
       }
     })();
-  }, [query, applyMeta, commitRows, commitPending, filters]);
+  }, [query, applyMeta, commitRows, commitPending, recoverCategories, filters]);
+
+  // The scroll box cannot reach a saved position before its entries render,
+  // so the position is applied with the commit that puts them on screen.
+  useLayoutEffect(() => {
+    const top = restoreScrollRef.current;
+    if (top === null || !scrollRef.current || rows.length === 0) return;
+    restoreScrollRef.current = null;
+    scrollRef.current.scrollTop = top;
+    scrollTopRef.current = top;
+    atTopRef.current = top <= AT_TOP_PX;
+  }, [rows]);
 
   // Remember the loaded depth, open entries and scroll for the return trip.
   const saveView = useCallback(() => {
@@ -516,6 +569,7 @@ export function ActivityTab({
             )}
           </FilterGroup>
           {categoryNotice && <p className="activity-notice" role="status">{categoryNotice}</p>}
+          {linkNotice?.filters === currentKey && <p className="activity-notice" role="status">{linkNotice.text}</p>}
           <div className="activity-controls">
             <div className="search-wrap activity-search">
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={2} strokeLinecap="round" strokeLinejoin="round" className="search-icon" aria-hidden="true">
@@ -528,6 +582,7 @@ export function ActivityTab({
                 className="search-input"
                 aria-label="Search activity"
                 placeholder="Search what the log shows: summaries, actors, linked records, commands, results…"
+                maxLength={SEARCH_MAX_CHARS}
                 value={queryInput}
                 onChange={(event) => setQueryInput(event.target.value)}
                 onKeyDown={(event) => {

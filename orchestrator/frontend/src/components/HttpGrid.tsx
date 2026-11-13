@@ -16,8 +16,10 @@ import type {
 } from "ag-grid-community";
 import { AG_GRID_THEME, GRID_ROW_HEIGHT, gridBaseProps, registerAgGrid, rowOpenHandlers } from "../lib/agGrid";
 import {
+  DEFAULT_REQUEST_VARIANT_ORDER,
   createRequestVariantDatasource,
   fetchRequestVariantPage,
+  requestVariantColumnInitialSort,
   requestVariantOrderFromModel,
   type RequestVariantFilters,
   type RequestVariantOrder,
@@ -50,6 +52,12 @@ type HttpGridProps = {
   /** Bump to re-read loaded blocks in place (live refresh). */
   refreshToken: number;
   selectedId: number | null;
+  /**
+   * The order the grid starts in (the tab keeps it across visits); newest
+   * first when not given. Read once on mount; later header clicks report
+   * through `onSortChange`.
+   */
+  sort?: RequestVariantOrder;
   onRowOpen: (row: RequestVariant, invoker: HTMLElement | null) => void;
   onWindow: (window: HttpGridWindow) => void;
   onError: (message: string | null) => void;
@@ -93,6 +101,7 @@ export default function HttpGrid({
   filtersKey,
   refreshToken,
   selectedId,
+  sort = DEFAULT_REQUEST_VARIANT_ORDER,
   onRowOpen,
   onWindow,
   onError,
@@ -106,6 +115,8 @@ export default function HttpGrid({
 
   const reportWindow = useCallback(() => {
     const api = apiRef.current;
+    // A grid being torn down has nothing to measure.
+    if (api?.isDestroyed()) return;
     const total = totalRef.current;
     if (!api || total == null) {
       callbacks.current.onWindow({ total, first: 0, last: 0 });
@@ -157,14 +168,21 @@ export default function HttpGrid({
     apiRef.current?.redrawRows();
   }, [selectedId]);
 
-  useEffect(() => () => callbacks.current.onApi?.(null), []);
+  // A page that answers after the grid is gone has no grid to report on.
+  useEffect(() => () => {
+    activeDatasourceRef.current = null;
+    apiRef.current = null;
+    callbacks.current.onApi?.(null);
+  }, []);
 
   const fitColumns = useCallback((api: GridApi<RequestVariant>, width: number) => {
     for (const { below, columns } of NARROW_HIDDEN) api.setColumnsVisible(columns, !(width > 0 && width < below));
   }, []);
 
+  // Mount-time order only: after mount the grid's own header state leads.
+  const initialOrder = useRef(sort).current;
   const columnDefs = useMemo<ColDef<RequestVariant>[]>(
-    () => [
+    () => ([
       { headerName: "Method", colId: "method", width: 92, cellRenderer: MethodCell, sortingOrder: ["asc", "desc"] },
       {
         headerName: "Path",
@@ -238,11 +256,10 @@ export default function HttpGrid({
         colId: "lastseen",
         width: 112,
         cellRenderer: LastSeenCell,
-        initialSort: "desc",
         sortingOrder: ["desc", "asc"],
       },
-    ],
-    [],
+    ] as ColDef<RequestVariant>[]).map((column) => ({ ...column, initialSort: requestVariantColumnInitialSort(column.colId ?? "", initialOrder) })),
+    [initialOrder],
   );
 
   const { onRowClicked, onCellKeyDown } = rowOpenHandlers<RequestVariant>(onRowOpen);

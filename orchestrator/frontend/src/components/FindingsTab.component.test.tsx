@@ -193,6 +193,16 @@ describe("SubmissionPane structure", () => {
     }
   });
 
+  it("shows the recorded response body, verbatim, from the key the backend records it under", () => {
+    const excerpt = '{"user":"root@acme.example","token":"acme-session-token"}';
+    const { container } = renderPane({
+      poc_response: { status: 200, headers: { server: "acme" }, body_excerpt: excerpt },
+    });
+
+    const blocks = [...container.querySelectorAll("pre")].map((block) => block.textContent ?? "");
+    expect(blocks.some((text) => text.includes("HTTP 200") && text.includes("server: acme") && text.includes(excerpt))).toBe(true);
+  });
+
   it("keeps payload and HTTP captures under one supporting-captures disclosure", () => {
     renderPane({
       poc_code: "curl https://target.example",
@@ -471,6 +481,23 @@ describe("finding change policy audit", () => {
     expect(container.textContent).not.toContain("[object Object]");
   });
 
+  it("names the fields a write left out and the service stored for it", async () => {
+    const { row, detail } = transitionPair({
+      id: 16, actor: "vulnerability-analyst", action: "details_patched",
+      from_verification_status: "unreviewed", to_verification_status: "unreviewed",
+      verification_event_version: 0, from_severity: "high", to_severity: "high",
+      reason_code: "",
+    }, {
+      detail: { metadata_json: JSON.stringify({ derived: ["details.cvss_score", "reason_text"] }) },
+    });
+    vi.mocked(getAssessmentFindingTransition).mockResolvedValue(detail);
+    render(<HistoryPane engagementKey="demo" findingSlug="VA-001" loading={false} error={null} transitions={[row]} />);
+
+    fireEvent.click(screen.getByText("View details"));
+    const record = (await screen.findByText("Stored by the service, not authored")).closest(".tl-audit-record")!;
+    expect([...record.querySelectorAll("code")].map((code) => code.textContent)).toEqual(["details.cvss_score", "reason_text"]);
+  });
+
   it("does not report an invalidation when the finding held no verdict", async () => {
     const { row, detail } = transitionPair({
       id: 15, actor: "operator", action: "details_patched",
@@ -573,6 +600,131 @@ describe("finding investigation workspace", () => {
     vi.mocked(getAssessmentFinding).mockResolvedValue(current as never);
     return render(<ToastProvider><FindingsTab engagementKey="demo" findings={[current] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} initialFindingSlug="VA-012" /><ToastViewport /></ToastProvider>);
   }
+
+  const variance = (id: number, over = {}) => ({
+    id, transition_id: id, normal_band: "medium", chosen_severity: "low", actor: `vulnerability-analyst:ver-${id}`,
+    reason: `Reason ${id}: program priority follows demonstrated impact.`, proof_receipt_id: 40 + id, created_at: "2026-10-02T12:00:00Z", ...over,
+  });
+
+  // The point read says whether the severity departs from its CVSS band and
+  // which variance, if any, is on the current verification.
+  const band = (over = {}) => ({ cvss_band: "medium", departs: true, current_variance_id: null, explained: false, ...over });
+
+  it("explains a severity outside its CVSS band with the variance on the current verification, in the verifier's words", async () => {
+    workspace({
+      severity: "low",
+      details: { ...finding.details, cvss_score: 4.3 },
+      // The current variance is the one the server names, not the newest record.
+      verification_audit: {
+        ...finding.verification_audit,
+        severity_variances: [variance(15), variance(1)],
+        severity_variance_total: 2,
+        severity_band: band({ current_variance_id: 1, explained: true }),
+      },
+    });
+    const notice = await screen.findByRole("status", { name: "Severity variance" });
+    expect(notice.textContent).toContain("Severity recorded outside its CVSS band: Medium band, reported as Low");
+    expect(notice.textContent).toContain("Current severity variance (#1)");
+    expect(notice.textContent).toContain("Reason 1: program priority follows demonstrated impact.");
+    expect(notice.textContent).toContain("by vulnerability-analyst:ver-1");
+    expect(notice.textContent).toContain("proof receipt #41");
+    expect(notice.textContent).toContain("1 other in History");
+    expect(notice.textContent).not.toContain("Reason 15:");
+  });
+
+  it("shows a departure no current variance explains as an advisory, with where the fix is listed", async () => {
+    workspace({
+      severity: "low",
+      details: { ...finding.details, cvss_score: 4.3 },
+      // A variance for this severity exists, but not on the current verification.
+      verification_audit: {
+        ...finding.verification_audit,
+        severity_variances: [variance(3)],
+        severity_variance_total: 1,
+        severity_band: band(),
+      },
+    });
+    const notice = await screen.findByRole("status", { name: "Severity variance" });
+    expect(notice.textContent).toContain("Severity recorded outside its CVSS band: Medium band, reported as Low");
+    expect(notice.textContent).toContain("No severity variance on the current verification explains it");
+    expect(notice.textContent).toContain("severity_cvss_mismatch");
+    expect(within(notice).getByRole("link", { name: "Report checks" }).getAttribute("href")).toBe("#/engagements/demo");
+    expect(notice.textContent).not.toContain("Reason 3:");
+  });
+
+  it("names an operator-authority verdict as what explains a departure with no variance", async () => {
+    workspace({
+      severity: "low",
+      details: { ...finding.details, cvss_score: 4.3 },
+      verification_audit: { ...finding.verification_audit, severity_band: band({ explained: true }) },
+    });
+    const notice = await screen.findByRole("status", { name: "Severity variance" });
+    expect(notice.textContent).toContain("Explained by the operator-authority verdict on this finding");
+  });
+
+  it("says where the current variance is when its record is not among those loaded", async () => {
+    workspace({
+      severity: "low",
+      details: { ...finding.details, cvss_score: 4.3 },
+      verification_audit: {
+        ...finding.verification_audit,
+        severity_variances: [variance(40)],
+        severity_variance_total: 140,
+        truncated: true,
+        severity_band: band({ current_variance_id: 7, explained: true }),
+      },
+    });
+    const notice = await screen.findByRole("status", { name: "Severity variance" });
+    expect(notice.textContent).toContain("Explained by severity variance #7 on the current verification");
+    expect(notice.textContent).toContain("1 of 140");
+    expect(notice.textContent).toContain("History");
+    expect(notice.textContent).not.toContain("Reason 40:");
+  });
+
+  it("leaves Enter to a disclosure inside the open record, so the keyboard can expand it", async () => {
+    workspace();
+    await screen.findByRole("heading", { name: "Shared claim" });
+    const summary = document.querySelector<HTMLElement>("[aria-label='Finding investigation'] summary")!;
+    expect(summary).toBeTruthy();
+    // fireEvent returns false when a handler cancelled the key's default action (toggling the disclosure).
+    expect(fireEvent.keyDown(summary, { key: "Enter" })).toBe(true);
+  });
+
+  it("leaves Enter to the results table, never opening the finding remembered from an earlier visit", async () => {
+    window.localStorage.setItem("findings.selected.demo", "VA-012");
+    try {
+      window.history.replaceState(null, "", "#/engagements/demo?tab=findings");
+      vi.mocked(getAssessmentFinding).mockResolvedValue(finding as never);
+      const { container } = render(<ToastProvider><FindingsTab engagementKey="demo" findings={[finding] as never[]} fallbackFindings={[]} chains={[]} chainLinks={[]} assessmentRefreshVersion={0} /><ToastViewport /></ToastProvider>);
+      // A cell of a results grid owns Enter: it opens the row that has focus.
+      const grid = document.createElement("div");
+      grid.setAttribute("role", "grid");
+      const cell = document.createElement("div");
+      cell.tabIndex = 0;
+      grid.appendChild(cell);
+      container.appendChild(grid);
+      expect(fireEvent.keyDown(cell, { key: "Enter" })).toBe(true);
+      expect(window.location.hash).toBe("#/engagements/demo?tab=findings");
+    } finally {
+      window.localStorage.removeItem("findings.selected.demo");
+    }
+  });
+
+  it("says nothing in the header for a severity inside its CVSS band, whatever variances are on record", async () => {
+    workspace({
+      severity: "low",
+      details: { ...finding.details, cvss_score: 2.6 },
+      // A variance that named this severity, recorded before the score moved into its band.
+      verification_audit: {
+        ...finding.verification_audit,
+        severity_variances: [variance(3)],
+        severity_variance_total: 1,
+        severity_band: band({ cvss_band: "low", departs: false }),
+      },
+    });
+    expect(await screen.findByRole("heading", { name: "Shared claim" })).toBeTruthy();
+    expect(screen.queryByRole("status", { name: "Severity variance" })).toBeNull();
+  });
 
   it("resolves a routed finding outside the loaded queue with one exact lookup", async () => {
     vi.mocked(getAssessmentFinding).mockResolvedValue({ ...finding, slug: "VA-888", title: "Outside queue" } as never);

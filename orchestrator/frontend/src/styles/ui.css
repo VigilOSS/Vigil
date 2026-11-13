@@ -18,6 +18,10 @@
 [data-tone="success"] { --ui-tone: var(--ok); }
 [data-tone="neutral"] { --ui-tone: var(--muted); }
 
+/* Text on a tone's own tint: the tone pulled toward --ink, so a pill label
+ * holds 4.5:1 on its tinted fill in both themes (the plain tone does not). */
+:where(.ui-status, .ui-chip) { --ui-tone-ink: color-mix(in srgb, var(--ui-tone) 70%, var(--ink)); }
+
 /* ── Page header ── */
 
 .ui-page-header {
@@ -95,7 +99,7 @@
   border: 1px solid color-mix(in srgb, var(--ui-tone) 38%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--ui-tone) 12%, transparent);
-  color: var(--ui-tone);
+  color: var(--ui-tone-ink);
   font-size: 0.76rem;
   font-weight: 600;
   line-height: 1.45;
@@ -104,7 +108,8 @@
 }
 .ui-status-sm { padding: 0 7px; font-size: 0.72rem; gap: 4px; }
 .ui-status-label { overflow: hidden; text-overflow: ellipsis; }
-.ui-status-glyph { flex: none; }
+/* The glyph keeps the pure tone; only the label mixes toward --ink. */
+.ui-status-glyph { flex: none; color: var(--ui-tone); }
 .ui-status-group {
   display: inline-flex;
   align-items: center;
@@ -132,7 +137,8 @@
   border: 1px solid color-mix(in srgb, var(--sev-tag-color) 38%, transparent);
   border-radius: 999px;
   background: color-mix(in srgb, var(--sev-tag-color) 12%, transparent);
-  color: var(--sev-tag-color);
+  /* Same rule as the status pill: the label mixes toward --ink for contrast. */
+  color: color-mix(in srgb, var(--sev-tag-color) 70%, var(--ink));
   font-size: 0.76rem;
   font-weight: 600;
   line-height: 1.45;
@@ -269,14 +275,15 @@
 .ui-chip[aria-pressed="true"] {
   border-color: var(--ui-chip-color);
   background: color-mix(in srgb, var(--ui-chip-color) 12%, transparent);
-  color: var(--ui-chip-color);
+  color: color-mix(in srgb, var(--ui-chip-color) 70%, var(--ink));
 }
 .ui-chip:disabled { opacity: 0.5; cursor: not-allowed; }
 .ui-chip:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .ui-chip-dot { flex: none; width: 8px; height: 8px; border-radius: 2px; background: var(--ui-chip-color); }
 .ui-chip[data-tone] .ui-status-glyph { color: var(--ui-tone); }
 .ui-chip-label { min-width: 0; overflow-wrap: anywhere; }
-.ui-chip-count { font-size: 0.68rem; opacity: 0.75; font-variant-numeric: tabular-nums; }
+/* The count is quieter by size, not by opacity: a faded count falls under 4.5:1. */
+.ui-chip-count { font-size: 0.68rem; font-variant-numeric: tabular-nums; }
 .ui-clear-filters {
   padding: 0;
   border: 0;

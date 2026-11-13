@@ -35,7 +35,6 @@ import {
   setCapturePolicy,
 } from "../lib/api";
 import {
-  DEFAULT_REQUEST_VARIANT_ORDER,
   EMPTY_REQUEST_VARIANT_FILTERS,
   FLOW_PAGE_SIZE,
   FLOW_REFRESH_PROBE,
@@ -46,6 +45,8 @@ import {
   fetchRequestVariantFacets,
   fetchRequestVariantObservations,
   fetchRequestVariantPosition,
+  fullBodyBytes,
+  parseRequestVariantOrder,
   readLedgerHead,
   requestVariantFiltersKey,
   type RequestVariantFacetName,
@@ -82,7 +83,7 @@ import {
   useResultsScrollMemory,
 } from "./record/RecordView";
 import { useLedgerWindow } from "./record/ledgerWindow";
-import { useGridView, useRecordPosition, useWindowedNavigation, windowedReviewOrder } from "./record/recordNavigation";
+import { useGridView, useRecordPosition, useWindowedNavigation, windowedReviewOrder, type GridSort } from "./record/recordNavigation";
 import type { HttpGridWindow } from "./HttpGrid";
 import "../styles/http.css";
 
@@ -323,7 +324,7 @@ function HttpPageHeader({ hidden, stats, status, actions, children }: {
   );
 }
 
-/** A view's saved search and filters (sessionStorage, per engagement), or an empty object. */
+/** A view's saved search, filters and sort (sessionStorage, per engagement), or an empty object. */
 function readSavedView(key: string): Record<string, unknown> {
   try {
     const value: unknown = JSON.parse(window.sessionStorage.getItem(key) || "{}");
@@ -374,17 +375,17 @@ function HttpInventoryView({
   viewSwitch: ReactNode;
   onTotal: (total: number) => void;
 }) {
-  // Search and filters survive leaving the tab.
+  // Search, filters and the grid's sort survive leaving the tab.
   const viewKey = `http.inventory.${engagementKey}`;
+  const [saved] = useState(() => readSavedView(viewKey));
   const [filters, setFilters] = useState<RequestVariantFilters>(() => {
-    const saved = readSavedView(viewKey);
     const restored = { ...EMPTY_REQUEST_VARIANT_FILTERS, q: savedString(saved.q) };
     for (const name of REQUEST_VARIANT_FACETS) restored[name] = savedStrings(saved[name]);
     return restored;
   });
   const [searchText, setSearchText] = useState(filters.q);
-  useEffect(() => writeSavedView(viewKey, { ...filters, q: searchText }), [viewKey, filters, searchText]);
-  const [order, setOrder] = useState<RequestVariantOrder>(DEFAULT_REQUEST_VARIANT_ORDER);
+  const [order, setOrder] = useState<RequestVariantOrder>(() => parseRequestVariantOrder(saved.order));
+  useEffect(() => writeSavedView(viewKey, { ...filters, q: searchText, order }), [viewKey, filters, searchText, order]);
   const refreshToken = useLiveRefreshToken(refreshVersion, LIVE_REFRESH_MIN_MS);
   const [gridWindow, setGridWindow] = useState<HttpGridWindow>({ total: null, first: 0, last: 0 });
   const [gridError, setGridError] = useState<string | null>(null);
@@ -626,24 +627,27 @@ function HttpInventoryView({
       {/* Inventory grid (the open record replaces it below) */}
       <div ref={resultsRef} className="http-results" hidden={investigating}>
         <section className="panel http-list-panel">
-          <div className="http-list-head">
-            {gridWindow.total != null ? (
-              <ResultsSummary
-                shown={gridWindow.total}
-                total={engagementTotal}
-                noun="request variants"
-                sort={describeSort(sortLabel.label, order.dir, sortLabel.kind)}
-              />
-            ) : (
-              <span className="meta-text" role="status">{facets.error || gridError ? "" : "Counting request variants…"}</span>
-            )}
-            {gridWindow.total != null && gridWindow.total > 0 && gridWindow.last > 0 && (
-              <span className="meta-text http-window">
-                Showing {gridWindow.first.toLocaleString()}–{gridWindow.last.toLocaleString()}
-              </span>
-            )}
-          </div>
-          <SlowLoadHint active={gridWindow.total == null && !gridError && !facets.error} what="the endpoint inventory" />
+          {/* An empty inventory has nothing to count or sort; the empty state below says so. */}
+          {!empty && (
+            <div className="http-list-head">
+              {gridWindow.total != null ? (
+                <ResultsSummary
+                  shown={gridWindow.total}
+                  total={engagementTotal}
+                  noun="request variants"
+                  sort={describeSort(sortLabel.label, order.dir, sortLabel.kind)}
+                />
+              ) : (
+                <span className="meta-text" role="status">{facets.error || gridError ? "" : "Counting request variants…"}</span>
+              )}
+              {gridWindow.total != null && gridWindow.total > 0 && gridWindow.last > 0 && (
+                <span className="meta-text http-window">
+                  Showing {gridWindow.first.toLocaleString()}–{gridWindow.last.toLocaleString()}
+                </span>
+              )}
+            </div>
+          )}
+          <SlowLoadHint active={!empty && gridWindow.total == null && !gridError && !facets.error} what="the endpoint inventory" />
           {empty ? (
             <EmptyState variant="empty" title="No endpoint inventory recorded yet.">
               Agents and the Vigil proxy add a request variant for each distinct request shape they see.
@@ -667,6 +671,7 @@ function HttpInventoryView({
                     filtersKey={filtersKey}
                     refreshToken={refreshToken}
                     selectedId={lastOpenedId}
+                    sort={order}
                     onRowOpen={openRecord}
                     onWindow={setGridWindow}
                     onError={setGridError}
@@ -1037,6 +1042,9 @@ function countBy(flows: HttpFlow[], valueOf: (flow: HttpFlow) => string | null |
   return [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([value, count]) => ({ value, count }));
 }
 
+/** Either body of the exchange was cut at the capture size cap. */
+const flowTruncated = (flow: HttpFlow) => flow.request_body_truncated || flow.response_body_truncated;
+
 const FLOW_SORT_LABELS: Record<string, { label: string; kind: "time" | "number" | "text" }> = {
   seen: { label: "Seen", kind: "time" },
   method: { label: "Method", kind: "text" },
@@ -1048,6 +1056,12 @@ const FLOW_SORT_LABELS: Record<string, { label: string; kind: "time" | "number" 
   reqbytes: { label: "Request size", kind: "number" },
   respbytes: { label: "Response size", kind: "number" },
 };
+
+/** A kept column sort the summary can name, else null. */
+function savedFlowSort(value: unknown): GridSort | null {
+  const { colId, sort } = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return typeof colId === "string" && Object.hasOwn(FLOW_SORT_LABELS, colId) && (sort === "asc" || sort === "desc") ? { colId, sort } : null;
+}
 
 function HttpFlowsView({
   engagementKey,
@@ -1078,9 +1092,18 @@ function HttpFlowsView({
   const [auth, setAuth] = useState(savedString(saved.auth));
   const [truncated, setTruncated] = useState<"" | "true" | "false">(saved.truncated === "true" || saved.truncated === "false" ? saved.truncated : "");
   const [query, setQuery] = useState(savedString(saved.query));
+  const [savedSort] = useState(() => savedFlowSort(saved.sort));
+  const [gridView, reportGridView] = useGridView<number>();
+  // The sort the grid shows, or before it has reported, the one kept from the last visit.
+  const sortEntry: GridSort | null = gridView?.sort[0] ?? savedSort;
+  const sortColumn = sortEntry?.colId;
+  const sortDirection = sortEntry?.sort;
   useEffect(
-    () => writeSavedView(viewKey, { host, method, status, ctype, auth, truncated, query }),
-    [viewKey, host, method, status, ctype, auth, truncated, query],
+    () => writeSavedView(viewKey, {
+      host, method, status, ctype, auth, truncated, query,
+      sort: sortColumn && sortDirection ? { colId: sortColumn, sort: sortDirection } : null,
+    }),
+    [viewKey, host, method, status, ctype, auth, truncated, query, sortColumn, sortDirection],
   );
   const searchRef = useRef<HTMLInputElement | null>(null);
 
@@ -1172,10 +1195,10 @@ function HttpFlowsView({
   );
   const ctypeValues = useMemo(() => countBy(allFlows, (f) => f.content_type_family), [allFlows]);
   const authValues = useMemo(() => countBy(allFlows, (f) => f.auth_context), [allFlows]);
-  const truncatedCount = useMemo(
-    () => allFlows.filter((f) => f.request_body_truncated || f.response_body_truncated).length,
-    [allFlows],
-  );
+  // The Body chip counts over the unfiltered ledger like every chip; the
+  // note beside the results line counts among the exchanges shown.
+  const truncatedCount = useMemo(() => allFlows.filter(flowTruncated).length, [allFlows]);
+  const shownTruncatedCount = useMemo(() => results.filter(flowTruncated).length, [results]);
 
   const activeFilterCount =
     (host ? 1 : 0) +
@@ -1262,7 +1285,6 @@ function HttpFlowsView({
     if (openFlow) setLastOpenedUid(openFlow.flow_uid);
   }, [openFlow]);
 
-  const [gridView, reportGridView] = useGridView<number>();
   const review = useMemo(() => windowedReviewOrder(results.map(rowId), gridView, "seen"), [results, gridView]);
   const navigation = useWindowedNavigation({
     order: review.order,
@@ -1320,7 +1342,6 @@ function HttpFlowsView({
   };
 
   const olderUnloaded = resultsLedger.rows !== null && !resultsLedger.complete;
-  const sortEntry = gridView?.sort[0];
   const sortLabel = FLOW_SORT_LABELS[sortEntry?.colId ?? "seen"] ?? FLOW_SORT_LABELS.seen;
   const noMatches = filtersActive && !resultsLoading && resultsLedger.rows !== null && results.length === 0;
 
@@ -1441,7 +1462,11 @@ function HttpFlowsView({
             ) : (
               <span className="meta-text" role="status">{!loading && resultsLoading ? "Filtering…" : ""}</span>
             )}
-            {truncatedCount > 0 && <span className="meta-text">{truncatedCount.toLocaleString()} truncated</span>}
+            {resultsLedger.rows !== null && shownTruncatedCount > 0 && (
+              <span className="meta-text http-truncated-count" title="Exchanges in these results whose request or response body was cut at the capture size cap">
+                {shownTruncatedCount.toLocaleString()} truncated
+              </span>
+            )}
           </div>
           <SlowLoadHint active={loading} what="the captured exchanges" />
 
@@ -1458,6 +1483,7 @@ function HttpFlowsView({
               <HttpFlowsGrid
                 rows={results}
                 selectedUid={lastOpenedUid}
+                initialSort={savedSort}
                 onRowOpen={openRecord}
                 onViewChange={reportGridView}
                 onApi={(api) => { flowGridApiRef.current = api; }}
@@ -1905,6 +1931,7 @@ function FlowRecord({
                 label="Request"
                 contentType={row.request_content_type}
                 bytes={row.request_body_bytes}
+                fullBytes={row.request_body_truncated ? fullBodyBytes(row.request_headers, row.request_body_bytes) : null}
                 sha={row.request_body_sha256}
                 truncated={row.request_body_truncated}
                 captureStatus={row.request_body_capture_status}
@@ -1916,6 +1943,7 @@ function FlowRecord({
                 label="Response"
                 contentType={row.response_content_type}
                 bytes={row.response_body_bytes}
+                fullBytes={row.response_body_truncated ? fullBodyBytes(row.response_headers, row.response_body_bytes) : null}
                 sha={row.response_body_sha256}
                 truncated={row.response_body_truncated}
                 captureStatus={row.response_body_capture_status}
@@ -1949,11 +1977,13 @@ function FlowRecord({
 }
 
 // Body-side metadata block (request or response). Renders a compact KV grid
-// covering content-type, size, truncation flag, sha256, and the artifact path.
+// covering content-type, size, what a truncated body kept and lost, sha256,
+// and the artifact path.
 function FlowBodyMeta({
   label,
   contentType,
   bytes,
+  fullBytes,
   sha,
   truncated,
   captureStatus,
@@ -1963,7 +1993,10 @@ function FlowBodyMeta({
 }: {
   label: string;
   contentType: string;
+  /** Bytes of the body that were kept. */
   bytes: number;
+  /** The body's full size when it was cut and the exchange states it; null when it is not recorded. */
+  fullBytes: number | null;
   sha: string;
   truncated: boolean;
   captureStatus: string;
@@ -1971,8 +2004,16 @@ function FlowBodyMeta({
   artifactPath: string | null;
   toast: ToastFn;
 }) {
+  // What a cut body kept and lost. The rest was never stored, so only a
+  // larger capture size cap keeps more of later exchanges.
+  const kept = bytes > 0 ? `the first ${formatBytes(bytes)}` : "none of it";
+  const cut = !truncated
+    ? "no"
+    : fullBytes != null
+      ? `yes: kept ${kept} of ${formatBytes(fullBytes)}; ${formatBytes(fullBytes - bytes)} cut`
+      : `yes: kept ${kept}; the full size was not recorded`;
   return (
-    <div>
+    <div role="group" aria-label={`${label} body`}>
       <div className="code-block-header">
         <span className="code-block-label">
           {label} body
@@ -1991,8 +2032,13 @@ function FlowBodyMeta({
         <div className="kv">
           <p className="k">Truncated</p>
           <p className="v" style={{ color: truncated ? "var(--warn)" : undefined }}>
-            {truncated ? "yes" : "no"}
+            {cut}
           </p>
+          {truncated && (
+            <p className="meta-text">
+              The rest was not stored. A larger body size cap in the capture policy keeps more of later exchanges.
+            </p>
+          )}
         </div>
         <KV k="SHA-256" v={sha} mono toast={sha ? toast : undefined} />
         <KV k="Artifact" v={artifactPath ?? undefined} mono toast={artifactPath ? toast : undefined} />

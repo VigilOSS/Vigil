@@ -29,7 +29,7 @@ import {
   type CommandLedgerRow,
   type CommandSort,
 } from "../lib/commandsApi";
-import { formatDuration } from "../lib/serverTime";
+import { formatDuration, gridTimeMode } from "../lib/serverTime";
 import { TimeStamp } from "./formatting";
 import { Skeleton } from "./Skeletons";
 import { StatusPill } from "./ui";
@@ -77,9 +77,11 @@ function Pending() {
   return <Skeleton width="70%" height={10} />;
 }
 
+// Relative while recent; the absolute minute once the age would show only a date.
 function TimeCell({ data }: ICellRendererParams<CommandLedgerRow>) {
   if (!data) return <Pending />;
-  return <TimeStamp value={data.created_at || data.started_at} />;
+  const value = data.created_at || data.started_at;
+  return <TimeStamp value={value} mode={gridTimeMode(value)} />;
 }
 
 function StatusCell({ data }: ICellRendererParams<CommandLedgerRow>) {
@@ -100,7 +102,12 @@ function ToolCell({ data }: ICellRendererParams<CommandLedgerRow>) {
   const tool = data.tool || "(unknown)";
   const color = toolColor(data.tool);
   return (
-    <span className="tag commands-tool" style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color }} title={tool}>
+    // The label mixes toward --ink so it holds contrast on its own tint (styles/ui.css).
+    <span
+      className="tag commands-tool"
+      style={{ background: `color-mix(in srgb, ${color} 12%, transparent)`, color: `color-mix(in srgb, ${color} 70%, var(--ink))` }}
+      title={tool}
+    >
       {tool}
     </span>
   );
@@ -169,8 +176,9 @@ export default function CommandsGrid({
     callbacks.current.onWindow({ total, first: Math.min(first, total), last: Math.min(last, total) });
   }, []);
 
-  // A new filter set is a new datasource: the grid drops its cache and starts
-  // at the top. Answers for a datasource that is no longer active are ignored.
+  // A new filter set is a new datasource: the grid drops its cache and goes
+  // back to the first row. Answers for a datasource that is no longer active
+  // are ignored.
   const activeDatasourceRef = useRef<IDatasource | null>(null);
   const datasource = useMemo<IDatasource>(() => {
     const created: IDatasource = createCommandDatasource(
@@ -193,9 +201,13 @@ export default function CommandsGrid({
   }, [engagementKey, filtersKey, reportWindow]);
 
   useEffect(() => {
+    const replaced = activeDatasourceRef.current !== null && activeDatasourceRef.current !== datasource;
     activeDatasourceRef.current = datasource;
     totalRef.current = null;
     callbacks.current.onWindow({ total: null, first: 0, last: 0 });
+    // The grid keeps its scroll offset across a cache reset, which would land
+    // partway into the new results.
+    if (replaced) apiRef.current?.ensureIndexVisible(0, "top");
   }, [datasource]);
 
   // Live refresh re-reads the loaded blocks while keeping rows on screen.
@@ -253,7 +265,7 @@ export default function CommandsGrid({
       {
         headerName: "Time",
         colId: "time",
-        width: 88,
+        width: 150,
         cellRenderer: TimeCell,
         headerTooltip: "When the run was recorded",
         sortingOrder: ["desc", "asc"],
@@ -310,6 +322,8 @@ export default function CommandsGrid({
   const onSortChanged = (event: SortChangedEvent<CommandLedgerRow>) => {
     const model = event.api.getColumnState().map((column) => ({ colId: column.colId, sort: column.sort }));
     onSortChange(commandSortFromModel(model));
+    // A new order is read from its first row.
+    event.api.ensureIndexVisible(0, "top");
   };
 
   return (

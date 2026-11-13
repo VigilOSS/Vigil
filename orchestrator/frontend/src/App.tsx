@@ -42,7 +42,8 @@ type EngagementRoute = {
 // Hash scheme: #/engagements/{key}?tab={tabKey}&finding={slug}&dtab={drawerTab},
 // #/engagements/{key}?tab=intel&intel_type={type}&intel_id={id},
 // #/engagements/{key}?tab=runs&run={id}&dtab={recordSection}&section={childKind}&object={id},
-// #/engagements/{key}?tab=coverage&item={id}&dtab={recordSection},
+// #/engagements/{key}?tab=coverage&item={id}&dtab={recordSection}, or
+// &view=items&status={a,b}&reason={text}|&no_reason=1&created_from={text} (read by CoverageTab),
 // #/engagements/{key}?tab=proof&work={id}, #/engagements/{key}?tab=commands&command={id}&dtab={recordSection},
 // #/engagements/{key}?tab=surfaces&surface={id}, #/engagements/{key}?tab=oast&probe={id},
 // #/engagements/{key}?tab=http&view=inventory|exchanges&request={id}|flow={id} (record views also carry dtab={recordSection}),

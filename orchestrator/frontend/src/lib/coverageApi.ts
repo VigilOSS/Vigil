@@ -255,6 +255,26 @@ export function fetchCoverageReasons(
   return request<CoverageReasonRollup>(`${base(engagementKey)}/reasons${qs ? `?${qs}` : ""}`, init);
 }
 
+/** A service's coverage status: the rollup of its service-bound items. */
+export type ServiceCoverageRow = {
+  endpoint: string;
+  service: string;
+  coverage_status: string;
+  updated_at: string;
+};
+
+/** The summary's note on one of its bounded lists: its row bound, whether rows were left out, and the route that serves them all. */
+export type SummaryListTruncation = {
+  limit: number;
+  truncated: boolean;
+  full_route: string;
+};
+
+/** Every service with its coverage status, most recently updated first, from the route the summary names for the whole set. */
+export function fetchServiceCoverage(engagementKey: string, route: string, init?: RequestInit) {
+  return request<ServiceCoverageRow[]>(`/engagements/${encodeURIComponent(engagementKey)}/assessment/${route}`, init);
+}
+
 export function fetchCoverageItem(engagementKey: string, coverageItemId: number, init?: RequestInit) {
   return request<CoverageItemDetail>(`${base(engagementKey)}/${coverageItemId}`, init);
 }

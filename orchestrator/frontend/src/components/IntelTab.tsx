@@ -8,7 +8,7 @@
 // the workspace says intel changed. Opening a record replaces the list with
 // the shared record view; Back, Escape and browser Back return to the list.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type {
   IntelByUrlResponse,
@@ -62,6 +62,7 @@ import {
   type SortDirection,
   type SortKind,
   type StatusDomain,
+  type StatusTone,
 } from "./ui";
 import {
   RecordBody,
@@ -73,7 +74,7 @@ import {
   type RecordDate,
   type RecordNavigation,
 } from "./record/RecordView";
-import { listNavigation } from "./record/recordNavigation";
+import { useListNavigation } from "./record/recordNavigation";
 import "../styles/intel.css";
 
 // ── Props ────────────────────────────────────────────────────────────
@@ -123,6 +124,11 @@ const ENTITY_LABEL = new Map<string, string>(
 );
 
 const PAGE_SIZE = 40;
+// A list row shows at most this many tags, fewer when its one-line tags cell
+// is narrower; the rest are counted and named on hover.
+const ROW_TAG_LIMIT = 4;
+// The jump palette lists this many matches and says how many more there are.
+const PALETTE_LIMIT = 30;
 // A burst of intel events re-reads the ledger at most this often (with a trailing read).
 const LIVE_REFRESH_MIN_MS = 5000;
 
@@ -341,7 +347,8 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       const component = (raw.component as string) || "";
       const version = (raw.version as string) || "";
       title = version ? `${component} ${version}` : component;
-      subtitle = (raw.evidence_ref as string) || "";
+      // A structured WAF measurement is named in the list, ahead of the evidence reference.
+      subtitle = [wafMeasurementSummary(raw.provenance), (raw.evidence_ref as string) || ""].filter(Boolean).join(" · ");
       location = (raw.evidence_ref as string) || "";
       const conf = (raw.confidence as string) || "";
       status = conf || null;
@@ -378,14 +385,17 @@ function derive(entity: EntityFilter, raw: Record<string, unknown>, index: numbe
       break;
     }
     case "credentials": {
-      const identity = (raw.identity as string) || (raw.username as string) || "";
+      // Who the credential authenticates as, else the named session identity
+      // it replays as, else the key it is stored under.
+      const principal = (raw.principal as string) || (raw.identity as string) || (raw.username as string) || "";
+      const credentialKey = (raw.credential_key as string) || "";
       const endpoint =
         (raw.endpoint as string) ||
         (raw.target_descriptor as string) ||
         (raw.host as string) ||
         "";
-      title = identity || endpoint || "credential";
-      subtitle = endpoint && identity ? endpoint : "";
+      title = principal || credentialKey || endpoint || "credential";
+      subtitle = [credentialKey, endpoint].filter((part) => part && part !== title).join(" · ");
       location = endpoint;
       host = endpoint ? extractHost(endpoint) || endpoint : "";
       const st =
@@ -721,6 +731,8 @@ function IntelWorkspace({
 
   const [urlQuery, setUrlQuery] = useState("");
   const [urlResults, setUrlResults] = useState<IntelByUrlResponse | null>(null);
+  // The URL the shown by-URL results were read for.
+  const [urlLookedUp, setUrlLookedUp] = useState("");
   const [urlError, setUrlError] = useState<string | null>(null);
   const [urlLoading, setUrlLoading] = useState(false);
 
@@ -1085,10 +1097,25 @@ function IntelWorkspace({
   useEffect(() => {
     if (selectedId) showRow(selectedId);
   }, [selectedId, showRow]);
+  // Set while a list key pressed on a focused row steps to another row: focus
+  // moves to that row, on whichever page it is. The step is counted so focus
+  // also moves onto a row that was already the highlighted one.
+  const focusFollowsRef = useRef(false);
+  const [focusStep, setFocusStep] = useState(0);
+  const stepFocusTo = useCallback((id: string) => {
+    focusFollowsRef.current = true;
+    showRow(id);
+    setFocusStep((count) => count + 1);
+  }, [showRow]);
   useEffect(() => {
     if (!selectedId || detailOpen) return;
-    rowRefs.current.get(selectedId)?.scrollIntoView?.({ block: "nearest" });
-  }, [selectedId, page, detailOpen]);
+    const row = rowRefs.current.get(selectedId);
+    row?.scrollIntoView?.({ block: "nearest" });
+    if (focusFollowsRef.current && row) {
+      focusFollowsRef.current = false;
+      row.focus({ preventScroll: true });
+    }
+  }, [selectedId, page, detailOpen, focusStep]);
 
   // Keep selection valid — if the record leaves the ledger, fall through to
   // the first row. Nothing opens on mount without a route.
@@ -1110,9 +1137,10 @@ function IntelWorkspace({
     const record = derivedById.get(id);
     if (record) openRecord(record);
   }, [derivedById, openRecord]);
+  const listedNavigation = useListNavigation(reviewIds, investigating ? selectedId : null, stepToRecord);
   const reviewNavigation: RecordNavigation = loading.size > 0
     ? { index: undefined, total: undefined, pending: true }
-    : listNavigation(reviewIds, selectedId, stepToRecord);
+    : listedNavigation;
   const resultsRef = useRef<HTMLDivElement | null>(null);
   // Back to results lands on the record last shown, on its page.
   useResultsScrollMemory(resultsRef, investigating, { recordKey: investigating ? selectedId : null, reveal: showRow });
@@ -1138,6 +1166,12 @@ function IntelWorkspace({
       const target = e.target instanceof HTMLElement ? e.target : null;
       const isTyping = Boolean(target?.closest("input, textarea, select, [contenteditable]:not([contenteditable='false'])"));
       const isInteractive = isTyping || Boolean(target?.closest("button, a, [role='button'], [role='combobox'], [role='listbox']"));
+      // A focused row is part of the list: the list keys step from it (not
+      // from a highlight left on another row), and focus follows the
+      // selection. Its own Enter opens it.
+      const focusedRowId = target?.closest(".intel-row-open")?.closest("[data-record-key]")?.getAttribute("data-record-key") ?? null;
+      const onRow = focusedRowId !== null;
+      const listKeysBlocked = isInteractive && !onRow;
       if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "k") {
         e.preventDefault();
         openCommandPalette();
@@ -1164,20 +1198,17 @@ function IntelWorkspace({
         return;
       }
       // The open record handles [ / ] itself.
-      if (!isInteractive && !detailOpenRef.current && (e.key === "[" || e.key === "]")) {
+      if (!listKeysBlocked && !detailOpenRef.current && (e.key === "[" || e.key === "]")) {
         e.preventDefault();
         const list = filteredRef.current;
         if (!list.length) return;
-        const cur = selectedRef.current;
+        const cur = focusedRowId ?? selectedRef.current;
         const idx = list.findIndex((f) => f.id === cur);
-        if (idx < 0) {
-          if (list[0]) setSelectedId(list[0].id);
-          return;
-        }
-        const next = e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+        const next = idx < 0 ? 0 : e.key === "[" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+        if (onRow && list[next].id !== cur) stepFocusTo(list[next].id);
         setSelectedId(list[next].id);
       }
-      if (!isInteractive && (e.key === "j" || e.key === "k")) {
+      if (!listKeysBlocked && (e.key === "j" || e.key === "k")) {
         e.preventDefault();
         if (detailOpenRef.current) {
           const { onPrevious, onNext, pending } = navigationRef.current;
@@ -1187,13 +1218,10 @@ function IntelWorkspace({
         }
         const list = filteredRef.current;
         if (!list.length) return;
-        const cur = selectedRef.current;
+        const cur = focusedRowId ?? selectedRef.current;
         const idx = list.findIndex((f) => f.id === cur);
-        if (idx < 0 && list[0]) {
-          setSelectedId(list[0].id);
-          return;
-        }
-        const next = e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+        const next = idx < 0 ? 0 : e.key === "k" ? Math.max(0, idx - 1) : Math.min(list.length - 1, idx + 1);
+        if (onRow && list[next].id !== cur) stepFocusTo(list[next].id);
         setSelectedId(list[next].id);
       }
       if (!isInteractive && !detailOpenRef.current && e.key === "Enter" && selectedRef.current != null) {
@@ -1205,7 +1233,7 @@ function IntelWorkspace({
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [openCommandPalette, closeRecord, openRecord]);
+  }, [openCommandPalette, closeRecord, openRecord, stepFocusTo]);
 
   // Counts, each within what the other filters leave.
   const entityCounts = useMemo(() => {
@@ -1313,7 +1341,9 @@ function IntelWorkspace({
     setUrlError(null);
     intelByUrl(engagementKey, u)
       .then((resp) => {
-        if (request === urlRequestRef.current) setUrlResults(resp);
+        if (request !== urlRequestRef.current) return;
+        setUrlResults(resp);
+        setUrlLookedUp(u);
       })
       .catch((err: unknown) => {
         if (request !== urlRequestRef.current) return;
@@ -1651,7 +1681,7 @@ function IntelWorkspace({
           {urlResults !== null && (
             <div>
               <p className="section-title">
-                Recorded for <code>{urlQuery}</code>
+                Recorded for <code>{urlLookedUp}</code>
               </p>
               {urlResults.domains.length + urlResults.services.length + urlResults.surfaces.length + urlResults.request_variants.length === 0 && (
                 <EmptyState variant="empty" compact title="Nothing recorded for this URL." />
@@ -1728,6 +1758,7 @@ function IntelWorkspace({
                   <IntelRow
                     key={d.id}
                     d={d}
+                    supersededHref={supersederHref(engagementKey, d)}
                     selected={selectedId === d.id}
                     onOpen={(invoker) => openRecord(d, invoker)}
                     freeTerms={parsedQuery.freeTerms}
@@ -1856,8 +1887,37 @@ function isCveWithSeverity(d: Derived): boolean {
 // One table row. The title is the row's button (keyboard and assistive
 // technology open the record through it); a click anywhere on the row opens
 // it too, unless the operator is selecting text.
+/**
+ * How many of a row's tags its one-line tags cell shows: at most
+ * ROW_TAG_LIMIT, one fewer per layout pass while the cell's content overflows
+ * it, and the most again when the tags or the cell's width change.
+ */
+function useTagFit(tags: readonly string[]) {
+  const ref = useRef<HTMLSpanElement | null>(null);
+  const most = Math.min(tags.length, ROW_TAG_LIMIT);
+  const key = tags.join("\u0000");
+  // The cell's width as last observed; a fit measured at another width (or
+  // while the list was hidden) no longer holds.
+  const [width, setWidth] = useState(0);
+  const [measured, setMeasured] = useState<{ key: string; width: number; fit: number } | null>(null);
+  const fit = measured?.key === key && measured.width === width ? Math.min(measured.fit, most) : most;
+  useLayoutEffect(() => {
+    const cell = ref.current;
+    if (cell && fit > 0 && cell.scrollWidth > cell.clientWidth) setMeasured({ key, width, fit: fit - 1 });
+  });
+  useEffect(() => {
+    const cell = ref.current;
+    if (!cell || typeof ResizeObserver === "undefined") return undefined;
+    const observer = new ResizeObserver(() => setWidth(cell.clientWidth));
+    observer.observe(cell);
+    return () => observer.disconnect();
+  }, []);
+  return { ref, fit };
+}
+
 function IntelRow({
   d,
+  supersededHref,
   selected,
   onOpen,
   freeTerms,
@@ -1865,6 +1925,8 @@ function IntelRow({
   registerRef,
 }: {
   d: Derived;
+  /** Link to the record that replaced this one. */
+  supersededHref?: string;
   selected: boolean;
   onOpen: (invoker: HTMLElement | null) => void;
   freeTerms: string[];
@@ -1877,8 +1939,10 @@ function IntelRow({
   const pillClass = isCveWithSev ? String(d.sev) : `itype-${d.entity}`;
   const superseded = d.supersededById != null;
   // Struck-through styling + dim opacity flags the row as historical.
-  // The superseder id is rendered as a tag so the operator can tell at a
-  // glance which canonical row replaced it.
+  // The superseder id is a tag that links to the record that replaced it.
+  // The row shows the tags that fit its cell and says how many more there are.
+  const { ref: tagsRef, fit } = useTagFit(d.tags);
+  const hiddenTags = d.tags.slice(fit);
   const supersededStyle: React.CSSProperties | undefined = superseded
     ? { textDecoration: "line-through", opacity: 0.55 }
     : undefined;
@@ -1927,16 +1991,27 @@ function IntelRow({
         </span>
       </span>
       <span role="cell" className="frow-loc" style={supersededStyle}>{d.location || ""}</span>
-      <span role="cell" className="frow-tags">
+      <span role="cell" className="frow-tags" ref={tagsRef}>
         {superseded && (
-          <span className="tag" title={`Replaced by intel id=${d.supersededById}`}>
+          <a
+            className="tag"
+            href={supersededHref}
+            title={`Open the record that replaced this one (#${d.supersededById})`}
+            onClick={(event) => event.stopPropagation()}
+          >
             superseded → #{d.supersededById}
-          </span>
+          </a>
         )}
         {d.sevLabel && <span className="tag cve">{d.sevLabel}</span>}
-        {d.tags.slice(0, 4).map((t, i) => (
+        {d.tags.slice(0, fit).map((t, i) => (
           <span key={`t-${i}-${t}`} className="tag">{t}</span>
         ))}
+        {hiddenTags.length > 0 && (
+          <span className="tag intel-more-tags" title={`${hiddenTags.join(", ")} (the record lists every tag)`}>
+            {fit > 0 ? `+${hiddenTags.length}` : `${hiddenTags.length} ${hiddenTags.length === 1 ? "tag" : "tags"}`}
+            <span className="sr-only">{fit > 0 ? " more tags" : ""}: {hiddenTags.join(", ")}</span>
+          </span>
+        )}
       </span>
       <span role="cell" className="frow-status">
         {d.status && d.statusDomain ? <StatusPill domain={d.statusDomain} value={d.status} size="sm" /> : null}
@@ -1956,6 +2031,12 @@ const INTEL_RECORD_TABS: readonly IntelRecordTab[] = ["overview", "references", 
 
 function isIntelRecordTab(value: string | undefined): value is IntelRecordTab {
   return (INTEL_RECORD_TABS as readonly string[]).includes(value ?? "");
+}
+
+/** The link to the record that replaced a superseded one (same type, its `superseded_by_id`). */
+function supersederHref(engagementKey: string, d: Derived): string | undefined {
+  if (d.supersededById == null) return undefined;
+  return engagementHref(engagementKey, { tab: "intel", intel_type: d.entity, intel_id: d.supersededById });
 }
 
 /** The route identity of a record: `intel_type` + `intel_id`. */
@@ -2020,6 +2101,9 @@ function IntelRecord({ d, engagementKey, tab, onTabChange, titleId }: IntelRecor
     { label: "Updated", value: d.updated_at || null },
   ];
   if (d.supersededAt) dates.push({ label: "Superseded", value: d.supersededAt });
+  const supersededBy = d.supersededById != null
+    ? <>Superseded by <a href={supersederHref(engagementKey, d)}>#{d.supersededById}</a></>
+    : undefined;
 
   return (
     <>
@@ -2042,11 +2126,11 @@ function IntelRecord({ d, engagementKey, tab, onTabChange, titleId }: IntelRecor
               <StatusPill
                 domain={d.statusDomain}
                 value={d.status}
-                reason={d.supersededById != null ? `Superseded by #${d.supersededById}` : undefined}
+                reason={supersededBy}
               />
             )}
-            {(!d.status || !d.statusDomain) && d.supersededById != null && (
-              <span className="record-pill-reason">Superseded by #{d.supersededById}</span>
+            {(!d.status || !d.statusDomain) && supersededBy && (
+              <span className="record-pill-reason">{supersededBy}</span>
             )}
             {d.source && <span className="tag">{d.source}</span>}
           </>
@@ -2068,7 +2152,7 @@ function IntelRecord({ d, engagementKey, tab, onTabChange, titleId }: IntelRecor
         trailing={tab === "overview" ? <ProseModeToggle mode={proseMode} onChange={setProseMode} /> : undefined}
       />
       <RecordBody>
-        {tab === "overview" && <OverviewPane d={d} proseMode={proseMode} toast={toast} />}
+        {tab === "overview" && <OverviewPane d={d} engagementKey={engagementKey} proseMode={proseMode} toast={toast} supersededHref={supersederHref(engagementKey, d)} />}
         {tab === "references" && <ReferencesPane d={d} engagementKey={engagementKey} toast={toast} />}
         {tab === "provenance" && <ProvenancePane d={d} />}
         {tab === "raw" && <RawPane d={d} />}
@@ -2106,12 +2190,17 @@ const BASE_KEYS_HANDLED = new Set<string>([
 
 function OverviewPane({
   d,
+  engagementKey,
   proseMode,
   toast,
+  supersededHref,
 }: {
   d: Derived;
+  engagementKey: string;
   proseMode: ProseMode;
   toast: ToastFn;
+  /** Link to the record that replaced this one. */
+  supersededHref?: string;
 }) {
   const raw = d.raw;
   const known = new Set<string>(BASE_KEYS_HANDLED);
@@ -2305,13 +2394,19 @@ function OverviewPane({
         <h3 className="section-title">{entityNoun(d.entity)}</h3>
         {specific}
       </section>
+      {d.entity === "tech_component" && <WafMeasurement provenance={raw.provenance} engagementKey={engagementKey} />}
       {/* Created / Updated / Superseded times are in the record header. */}
       <section className="section">
         <h3 className="section-title">Metadata</h3>
         <div className="kv-grid">
           <KV k="Source" v={d.source} toast={d.source ? toast : undefined} />
           <KV k="Record ID" v={raw.id} mono toast={raw.id != null ? toast : undefined} />
-          {d.supersededById != null && <KV k="Superseded by" v={`#${d.supersededById}`} mono />}
+          {d.supersededById != null && (
+            <div className="kv">
+              <p className="k">Superseded by</p>
+              <p className="v mono"><a href={supersededHref}>#{d.supersededById}</a></p>
+            </div>
+          )}
         </div>
       </section>
       {/* Note body + free-form notes render through the shared prose
@@ -2403,6 +2498,86 @@ function ReferencesPane({
         </section>
       )}
     </>
+  );
+}
+
+const WAF_VERDICT_LABELS: Record<string, { label: string; tone: StatusTone }> = {
+  detected: { label: "WAF detected", tone: "info" },
+  none_detected: { label: "No WAF detected", tone: "success" },
+};
+
+/**
+ * What a tech component's `provenance.waf` records, as far as it has the
+ * measurement's shape: the verdict (and its label when it is a known one),
+ * the hosts when they are a list of strings, and the cited command run. Null
+ * when the provenance carries no `waf` block.
+ */
+function readWafMeasurement(provenance: unknown) {
+  const recorded = provenance && typeof provenance === "object" ? (provenance as Record<string, unknown>) : {};
+  if (recorded.waf == null) return null;
+  const waf = typeof recorded.waf === "object" ? (recorded.waf as Record<string, unknown>) : null;
+  const verdict = typeof waf?.verdict === "string" ? waf.verdict : null;
+  const known = verdict !== null && Object.hasOwn(WAF_VERDICT_LABELS, verdict) ? WAF_VERDICT_LABELS[verdict] : null;
+  const hosts = Array.isArray(waf?.hosts) && waf.hosts.every((host) => typeof host === "string") ? (waf.hosts as string[]) : null;
+  const runId = typeof recorded.command_run_id === "number" ? recorded.command_run_id : null;
+  return { recorded, waf, verdict, known, hosts, runId };
+}
+
+/** The list row's words for a WAF measurement: its verdict and how many hosts it names; "" without one. */
+function wafMeasurementSummary(provenance: unknown): string {
+  const measurement = readWafMeasurement(provenance);
+  if (!measurement) return "";
+  const { known, hosts } = measurement;
+  if (!known || !hosts) return "WAF measurement";
+  return `WAF measurement: ${known.label} on ${hosts.length.toLocaleString()} ${hosts.length === 1 ? "host" : "hosts"}`;
+}
+
+/**
+ * A tech component's structured WAF measurement (`provenance.waf`): the
+ * verdict, the hosts measured and the command run behind it. Coverage reads
+ * it to close the WAF tier for exactly those hosts, a measured negative
+ * included. Anything recorded in another shape is shown as recorded. Whether
+ * coverage could read the measurement is the server's call, served with the
+ * report checks, so this view points there instead of judging it.
+ */
+function WafMeasurement({ provenance, engagementKey }: { provenance: unknown; engagementKey: string }) {
+  const measurement = readWafMeasurement(provenance);
+  if (!measurement) return null;
+  const { recorded, waf, verdict, known, hosts, runId } = measurement;
+  return (
+    <section className="section" role="group" aria-label="WAF measurement">
+      <h3 className="section-title">WAF measurement</h3>
+      <div className="kv-grid">
+        <div className="kv">
+          <p className="k">Verdict</p>
+          <p className="v">
+            {known
+              ? <StatusPill value={verdict} tone={known.tone} label={known.label} size="sm" />
+              : <span className="mono">{waf ? JSON.stringify(waf.verdict ?? null) : JSON.stringify(recorded.waf)}</span>}
+          </p>
+        </div>
+        <div className="kv">
+          <p className="k">Measured by</p>
+          <p className="v">
+            {runId !== null
+              ? <a href={engagementHref(engagementKey, { tab: "commands", command: runId })}>Command run #{runId}</a>
+              : "No command run is cited"}
+          </p>
+        </div>
+        <div className="kv intel-waf-measured">
+          <p className="k">Hosts measured</p>
+          {hosts && hosts.length > 0
+            ? <ul className="intel-waf-hosts">{hosts.map((host, index) => <li key={`${index}-${host}`} className="mono">{host}</li>)}</ul>
+            : hosts
+              ? <p className="v">No hosts recorded</p>
+              : <p className="v mono">{waf ? JSON.stringify(waf.hosts ?? null) : "—"}</p>}
+        </div>
+      </div>
+      <p className="meta-text">
+        Coverage closes the WAF tier for the hosts a measurement names, whether or not a WAF was found. A measurement it
+        cannot read closes none; <a href={engagementHref(engagementKey, {})}>Report checks</a> on the Overview name it.
+      </p>
+    </section>
   );
 }
 
@@ -2547,7 +2722,7 @@ function CommandPalette({
     inputRef.current?.focus();
   }, []);
 
-  const results = useMemo(() => {
+  const { results, matched } = useMemo(() => {
     const parsed = parseQuery(q);
     const list = derivedList.filter((d) => {
       for (const tok of parsed.tokens) {
@@ -2576,7 +2751,7 @@ function CommandPalette({
       for (const t of parsed.freeTerms) if (!d.searchCorpus.includes(t)) return false;
       return true;
     });
-    return list.slice(0, 30);
+    return { results: list.slice(0, PALETTE_LIMIT), matched: list.length };
   }, [q, derivedList]);
 
   useEffect(() => {
@@ -2644,6 +2819,11 @@ function CommandPalette({
             ))
           )}
         </div>
+        {matched > results.length && (
+          <p className="cmd-more meta-text" role="status">
+            Showing the first {results.length.toLocaleString()} of {matched.toLocaleString()} matching records. Type more to narrow them.
+          </p>
+        )}
       </div>
     </div>
   );

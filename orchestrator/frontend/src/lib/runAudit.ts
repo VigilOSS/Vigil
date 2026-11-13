@@ -774,7 +774,7 @@ export function parseRunsView(text: string | null | undefined): RunsSavedView {
         range: RUN_TIME_RANGES.some((range) => range.key === value.range) ? value.range as RunTimeRange : "all",
       },
       scope: value.scope === "attention" ? "attention" : "all",
-      sort: sort && typeof sort.colId === "string" && sort.colId in RUN_SORT_COLUMNS && (sort.sort === "asc" || sort.sort === "desc")
+      sort: sort && typeof sort.colId === "string" && Object.hasOwn(RUN_SORT_COLUMNS, sort.colId) && (sort.sort === "asc" || sort.sort === "desc")
         ? { colId: sort.colId, sort: sort.sort }
         : DEFAULT_RUN_SORT,
     };

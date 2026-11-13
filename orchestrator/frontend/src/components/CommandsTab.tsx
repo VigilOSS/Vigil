@@ -36,7 +36,7 @@ import type { AssessmentCommandRunDetail } from "../lib/api";
 import { formatDuration } from "../lib/serverTime";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import { useBodyScrollLock, useModalFocus } from "../lib/modalScrollLock";
-import { CopyInline } from "./formatting";
+import { CopyInline, formatBytes } from "./formatting";
 import { KVTime } from "./drawer/DrawerKit";
 import { JsonView } from "./JsonView";
 import { CardSkeleton, Skeleton, SlowLoadHint, TableSkeleton } from "./Skeletons";
@@ -225,6 +225,11 @@ function tint(color: string, pct = 10): string {
   return `color-mix(in srgb, ${color} ${pct}%, transparent)`;
 }
 
+/** Label ink on a `tint` of the same hue: mixed toward --ink so it holds 4.5:1 (styles/ui.css). */
+function tintInk(color: string): string {
+  return `color-mix(in srgb, ${color} 70%, var(--ink))`;
+}
+
 // Mid-truncate: keep the binary up front and the target at the end.
 function midTruncate(text: string, max: number): string {
   if (!text || text.length <= max) return text || "";
@@ -232,6 +237,10 @@ function midTruncate(text: string, max: number): string {
   const tail = Math.max(1, max - 1 - head);
   return `${text.slice(0, head)}…${text.slice(text.length - tail)}`;
 }
+
+// A record without an intent is titled by its command, cut to this length; the
+// whole command is the title's hover text and the Command section.
+const TITLE_COMMAND_CHARS = 160;
 
 const INCOMPLETE_OUTPUT_RETENTION = new Set(["measurement_conflict", "partially_measured", "preview_only", "unmeasured"]);
 
@@ -501,7 +510,7 @@ function CommandsWorkspace({ engagementKey, refreshVersion = 0, commandId, initi
       }
       // The palette handles its own keys.
       if (document.querySelector('[aria-modal="true"]')) return;
-      if (!isTyping && e.key === "/") {
+      if (!isTyping && e.key === "/" && !e.metaKey && !e.ctrlKey && !e.altKey) {
         e.preventDefault();
         if (investigatingRef.current) closeRecord();
         queueMicrotask(() => {
@@ -935,7 +944,7 @@ function CommandRecord({
         id={`Command run #${id}`}
         copyId={String(id)}
         copyIdLabel="Copy command run ID"
-        title={intent || <span className="mono">{midTruncate(command, 160) || "(no command recorded)"}</span>}
+        title={intent || <span className="mono" title={command || undefined}>{midTruncate(command, TITLE_COMMAND_CHARS) || "(no command recorded)"}</span>}
         titleId={titleId}
         tone={statusTone("command", header.status)}
         actions={
@@ -953,18 +962,18 @@ function CommandRecord({
         pills={
           <>
             <StatusPill domain="command" value={header.status} reason={commandStatusReason({ status: header.status, return_code: header.return_code, timeout_seconds_requested: header.timeout_seconds_requested ?? null, attention_reasons: header.attention_reasons }) || undefined} />
-            <span className="tag" style={{ color: toolHue, background: tint(toolHue) }} title="Tool">{tool || "(unknown tool)"}</span>
+            <span className="tag" style={{ color: tintInk(toolHue), background: tint(toolHue) }} title="Tool">{tool || "(unknown tool)"}</span>
             {header.agent_name && (
-              <span className="tag" style={{ color: agentColor(header.agent_name), background: tint(agentColor(header.agent_name)) }} title="Agent">
+              <span className="tag" style={{ color: tintInk(agentColor(header.agent_name)), background: tint(agentColor(header.agent_name)) }} title="Agent">
                 {header.agent_name}
               </span>
             )}
             {header.phase && <span className="tag" title="Phase">{header.phase}</span>}
             {technique && (
-              <span className="tag" style={{ color: techniqueColor(technique), background: tint(techniqueColor(technique)) }} title="Technique">{technique}</span>
+              <span className="tag" style={{ color: tintInk(techniqueColor(technique)), background: tint(techniqueColor(technique)) }} title="Technique">{technique}</span>
             )}
             {probeKind && (
-              <span className="tag" style={{ color: probeKindColor(probeKind), background: tint(probeKindColor(probeKind)) }} title="Probe kind">{probeKind}</span>
+              <span className="tag" style={{ color: tintInk(probeKindColor(probeKind)), background: tint(probeKindColor(probeKind)) }} title="Probe kind">{probeKind}</span>
             )}
             {header.destructive && <span className="tag warning">writes target state</span>}
           </>
@@ -985,7 +994,7 @@ function CommandRecord({
         active={section}
         onChange={onSectionChange}
         tabs={[
-          { id: "command", label: "Command", count: record?.argv?.length || undefined },
+          { id: "command", label: "Command" },
           { id: "stdout", label: "Stdout" },
           { id: "stderr", label: "Stderr" },
           { id: "context", label: "Context" },
@@ -1049,7 +1058,7 @@ function SearchTag({ scope, value, color, onSearch, label }: { scope: string; va
     <button
       type="button"
       className="tag commands-search-tag"
-      style={{ color, background: tint(color) }}
+      style={{ color: tintInk(color), background: tint(color) }}
       onClick={() => onSearch(searchToken(scope, value))}
       title={`Show runs with ${searchToken(scope, value)}`}
       aria-label={`Show runs with ${scope} ${value}`}
@@ -1096,8 +1105,8 @@ function CommandPane({ record, engagementKey }: { record: AssessmentCommandRunDe
           <h3 className="section-title">
             Argv <span className="count">{record.argv.length}</span>
           </h3>
-          <ol className="steps mono">
-            {record.argv.map((arg, index) => <li key={index}>{arg}</li>)}
+          <ol className="steps mono commands-argv">
+            {record.argv.map((arg, index) => <li key={index}><pre>{arg}</pre></li>)}
           </ol>
         </section>
       )}
@@ -1188,6 +1197,48 @@ function ContextPane({ record, engagementKey, onSearch }: { record: AssessmentCo
   );
 }
 
+const utf8 = new TextEncoder();
+
+/**
+ * Above a preview that holds only part of the captured stream: how much of it
+ * the preview shows and where the whole stream is. Nothing when the preview is
+ * the whole stream (or its size was not measured).
+ */
+function PartialPreviewNote({
+  preview,
+  bytes,
+  artifactRef,
+  storedPath,
+}: {
+  preview: string;
+  bytes: number;
+  /** The full-output artifact, named in its own callout under the preview. */
+  artifactRef: string;
+  storedPath: string;
+}) {
+  const shown = utf8.encode(preview).length;
+  if (!preview || !(bytes > shown)) return null;
+  return (
+    <div className="callout commands-partial-preview" role="note">
+      <p className="section-title">Partial preview</p>
+      <p>
+        This preview holds {formatBytes(shown)} of the {formatBytes(bytes)} captured, including any marker that says
+        where output was left out.{" "}
+        {artifactRef
+          ? "The full output is the artifact named under the preview."
+          : storedPath
+            ? <>The full output is stored at <span className="mono">{storedPath}</span></>
+            : "No stored path for the full output is recorded on this run."}
+      </p>
+      {!artifactRef && storedPath && (
+        <div className="commands-callout-actions">
+          <CopyInline text={storedPath} ariaLabel="Copy full output path">Copy path</CopyInline>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StreamPane({ record, kind }: { record: AssessmentCommandRunDetail; kind: "stdout" | "stderr" }) {
   const retention = (record.output_retention_status || "").toLowerCase();
   const integrity = (record.output_integrity_status || "").toLowerCase();
@@ -1196,6 +1247,14 @@ function StreamPane({ record, kind }: { record: AssessmentCommandRunDetail; kind
   const artifactRef = kind === "stdout" ? record.stdout_artifact_ref : record.stderr_artifact_ref;
   const sha = kind === "stdout" ? record.stdout_sha256 : record.stderr_sha256;
   const bytes = kind === "stdout" ? record.stdout_bytes : record.stderr_bytes;
+  const partial = (
+    <PartialPreviewNote
+      preview={preview || ""}
+      bytes={bytes}
+      artifactRef={artifactRef || ""}
+      storedPath={(kind === "stdout" ? record.stdout_path : record.stderr_path) || ""}
+    />
+  );
 
   if (integrity === "pending" || integrity === "warning") {
     return (
@@ -1208,6 +1267,7 @@ function StreamPane({ record, kind }: { record: AssessmentCommandRunDetail; kind
           </p>
         </div>
         <h3 className="section-title">Captured output preview</h3>
+        {partial}
         <pre className="pre commands-output">{preview || "(empty preview)"}</pre>
         <div className="kv-grid">
           <KV k="Bytes captured" v={bytes} />
@@ -1252,6 +1312,7 @@ function StreamPane({ record, kind }: { record: AssessmentCommandRunDetail; kind
           <KV k="Retention" v={retention} />
           <KV k="Integrity" v={record.output_integrity_status || "warning"} />
         </div>
+        {partial}
         {preview ? <pre className="pre commands-output">{preview}</pre> : null}
       </section>
     );
@@ -1272,6 +1333,7 @@ function StreamPane({ record, kind }: { record: AssessmentCommandRunDetail; kind
   return (
     <section className="section">
       <h3 className="section-title">Captured output preview</h3>
+      {partial}
       <pre className="pre commands-output">{preview || "(empty preview)"}</pre>
       {retention === "artifact" && artifactRef && (
         <div className="callout">
@@ -1364,6 +1426,11 @@ function CommandPalette({
   const [error, setError] = useState<string | null>(null);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  // Enter pressed before the search for the typed text answered: that answer's
+  // first run opens when it lands. Typing again withdraws it.
+  const enterPending = useRef(false);
+  const selectRef = useRef(onSelect);
+  selectRef.current = onSelect;
   useBodyScrollLock();
   useModalFocus(panelRef, onClose, true, returnFocusRef);
 
@@ -1380,9 +1447,15 @@ function CommandPalette({
           setAnswer({ q, total: page.total, items: page.items });
           setError(null);
           setIdx(0);
+          if (enterPending.current) {
+            enterPending.current = false;
+            if (page.items[0]) selectRef.current(page.items[0]);
+          }
         })
         .catch((cause: unknown) => {
-          if (active) setError(cause instanceof Error ? cause.message : "Search failed");
+          if (!active) return;
+          enterPending.current = false;
+          setError(cause instanceof Error ? cause.message : "Search failed");
         });
     }, q ? 200 : 0);
     return () => {
@@ -1392,6 +1465,9 @@ function CommandPalette({
   }, [engagementKey, q]);
 
   const results = answer?.items ?? [];
+  // The list answers the typed text; while a newer search is on its way it
+  // still holds the previous one.
+  const settled = answer !== null && answer.q === q;
   const listId = useId();
   const optionId = (id: number) => `${listId}-run-${id}`;
   const onKey = (e: ReactKeyboardEvent<HTMLInputElement>) => {
@@ -1403,7 +1479,8 @@ function CommandPalette({
       setIdx((i) => Math.max(0, i - 1));
     } else if (e.key === "Enter") {
       e.preventDefault();
-      if (results[idx]) onSelect(results[idx]);
+      if (!settled) enterPending.current = true;
+      else if (results[idx]) onSelect(results[idx]);
     }
   };
 
@@ -1423,7 +1500,10 @@ function CommandPalette({
             aria-label="Search commands to jump to"
             placeholder="Jump to a run · a run_uuid prefix, #id, tool:curl target:app.example.com"
             value={q}
-            onChange={(e) => setQ(e.target.value)}
+            onChange={(e) => {
+              enterPending.current = false;
+              setQ(e.target.value);
+            }}
             onKeyDown={onKey}
           />
           <span className="search-kbd" aria-hidden="true">esc</span>
@@ -1431,13 +1511,13 @@ function CommandPalette({
         <p className="meta-text commands-palette-count" role="status">
           {error
             ? `Search failed: ${error}`
-            : answer === null
+            : !settled
               ? "Searching…"
               : answer.total === 0
                 ? "No command runs match."
                 : `${answer.total.toLocaleString()} ${answer.total === 1 ? "match" : "matches"}${answer.total > results.length ? ` · showing the newest ${results.length}` : ""}${answer.q ? "" : " · newest runs"}`}
         </p>
-        <div className="cmd-list" id={listId} role="listbox" aria-label="Matching command runs">
+        <div className="cmd-list" id={listId} role="listbox" aria-label="Matching command runs" aria-busy={!settled}>
           {results.map((row, i) => (
             <button
               type="button"

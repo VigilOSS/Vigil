@@ -7,6 +7,19 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { listEngagementFiles, readEngagementFile, type EngagementFile, type EngagementFileContent } from "../lib/filesApi";
 import { FilesTab } from "./FilesTab";
 
+// The real Markdown renderer, counting how often a document is rendered.
+const markdown = vi.hoisted(() => ({ renders: 0 }));
+vi.mock("./Markdown", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("./Markdown")>();
+  return {
+    ...actual,
+    MarkdownBlock: (props: Parameters<typeof actual.MarkdownBlock>[0]) => {
+      markdown.renders += 1;
+      return <actual.MarkdownBlock {...props} />;
+    },
+  };
+});
+
 vi.mock("../lib/filesApi", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../lib/filesApi")>()),
   listEngagementFiles: vi.fn(),
@@ -195,6 +208,37 @@ describe("FilesTab", () => {
     expect(await screen.findByRole("heading", { name: "Acme brief" })).toBeTruthy();
     await waitFor(() => expect(readEngagementFile).toHaveBeenCalledTimes(3));
     await waitFor(() => expect(viewer.getAttribute("aria-busy")).toBe("false"));
+  });
+
+  it("leaves the open document as rendered when a refresh reads the same content, and shows new content when it changes", async () => {
+    const view = render(<FilesTab engagementKey="acme" refreshVersion={0} />);
+    await screen.findByRole("heading", { name: "Acme brief" });
+    const viewer = screen.getByRole("article", { name: "ENGAGEMENT.md contents" });
+    const rendered = markdown.renders;
+
+    for (const version of [1, 2]) {
+      view.rerender(<FilesTab engagementKey="acme" refreshVersion={version} />);
+      await waitFor(() => expect(readEngagementFile).toHaveBeenCalledTimes(version + 1));
+      await waitFor(() => expect(viewer.getAttribute("aria-busy")).toBe("false"));
+    }
+    expect(markdown.renders).toBe(rendered);
+
+    vi.mocked(readEngagementFile).mockResolvedValueOnce(content(brief, "# Acme brief, revised\n"));
+    view.rerender(<FilesTab engagementKey="acme" refreshVersion={3} />);
+    expect(await screen.findByRole("heading", { name: "Acme brief, revised" })).toBeTruthy();
+  });
+
+  it("shows a JSON file that does not parse as its exact text and offers no rendered view of it", async () => {
+    const cut = "{\"hostname\":\"acme.exa";
+    vi.mocked(readEngagementFile).mockImplementation(async (_key, name) => (name === "scope.json"
+      ? content(scope, cut, { truncated: true, size_bytes: 4096 })
+      : content(brief, bodies["ENGAGEMENT.md"])));
+    render(<FilesTab engagementKey="acme" refreshVersion={0} initialFileName="scope.json" />);
+    const viewer = await screen.findByRole("article", { name: "scope.json contents" });
+    await waitFor(() => expect(viewer.querySelector("pre")?.textContent).toBe(cut));
+    // Nothing claims a rendered view is on screen, and a note says why there is none.
+    expect(within(viewer).queryByRole("button", { name: "Rendered", pressed: true })).toBeNull();
+    expect(within(viewer).getAllByRole("note").some((note) => /JSON/.test(note.textContent ?? ""))).toBe(true);
   });
 
   it("keeps the last content with a stale notice when a refresh read fails", async () => {

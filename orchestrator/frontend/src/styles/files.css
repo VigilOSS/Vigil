@@ -124,6 +124,12 @@
   background: var(--count-bg-active);
 }
 
+/* On the selected row's tint --muted falls under 4.5:1. */
+.files-row[aria-pressed="true"] .files-row-path,
+.files-row[aria-pressed="true"] .files-row-meta {
+  color: var(--ink-2);
+}
+
 .files-row-name {
   font-family: "Source Code Pro", "SFMono-Regular", monospace;
   font-size: 12px;

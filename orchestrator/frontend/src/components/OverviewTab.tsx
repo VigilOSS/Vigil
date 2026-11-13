@@ -10,6 +10,7 @@ import type {
   PerHostCoverage,
   PerHostCoverageHost,
   PerHostOutcome,
+  ReportQc,
   ReportReadiness,
   ReportReadinessCoverage,
   ReportReadinessItem,
@@ -97,6 +98,8 @@ function readPerHostCollapsed(defaultCollapsed: boolean): boolean {
 type OverviewTabProps = {
   engagementKey: string;
   assessmentSummary: AssessmentSummary | null;
+  /** The summary read failed (as opposed to still loading); it is read again on the next refresh. */
+  summaryLoadError?: string | null;
   findings: (AssessmentFindingDetail | AssessmentFinding)[];
   findingsLoading?: boolean;
   findingsLoadError?: string | null;
@@ -183,7 +186,7 @@ export function OverviewTab(props: OverviewTabProps) {
   return <OverviewWorkspace key={props.engagementKey} {...props} />;
 }
 
-function OverviewWorkspace({ engagementKey, assessmentSummary, findings, findingsLoading = false, findingsLoadError = null, chains, chainLinks, currentPhase, trackState, aggregateComplete, assessmentRefreshVersion, readinessRefreshVersion }: OverviewTabProps) {
+function OverviewWorkspace({ engagementKey, assessmentSummary, summaryLoadError = null, findings, findingsLoading = false, findingsLoadError = null, chains, chainLinks, currentPhase, trackState, aggregateComplete, assessmentRefreshVersion, readinessRefreshVersion }: OverviewTabProps) {
   const s = assessmentSummary;
   const [readiness, setReadiness] = useState<ReportReadiness | null>(null);
   const [readinessError, setReadinessError] = useState<string | null>(null);
@@ -196,7 +199,20 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
     () => (readiness ? partitionReadinessItems(readiness) : { blocking: [], advisory: [] }),
     [readiness],
   );
-  const awaitingHref = engagementHref(engagementKey, { tab: "findings", verification: AWAITING_VERIFICATION.join(",") });
+  // Merged and false-positive findings keep whatever verification they had,
+  // and the summary counts every row; what needs the operator is the current
+  // findings, so the unsettled retired ones are counted apart.
+  // Only the loaded ledger can say how many: until then the page holds the
+  // summary's top findings, and the figure is labelled as including them.
+  const ledgerKnown = !findingsLoading && !findingsLoadError;
+  const retiredAwaiting = ledgerKnown ? queue.filter((finding) => RETIRED_WORKFLOWS.has(finding.workflow_status)).length : 0;
+  const currentWorkflows = Object.keys(assessmentSummary?.finding_workflow_statuses ?? {}).filter((status) => !RETIRED_WORKFLOWS.has(status));
+  const awaitingHref = engagementHref(engagementKey, {
+    tab: "findings",
+    // With retired findings among the unsettled, the link keeps to the current ones it counts.
+    workflow: retiredAwaiting > 0 && currentWorkflows.length > 0 ? currentWorkflows.join(",") : undefined,
+    verification: AWAITING_VERIFICATION.join(","),
+  });
 
   // Each chain's linked findings, in chainLinks order: slug/id indexes are
   // built once, then finding-kind links are bucketed by chain_key in one pass.
@@ -295,7 +311,8 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
     void loadActivity(mode);
   }, [loadActivity, assessmentRefreshVersion]);
 
-  const awaitingCount = s ? AWAITING_VERIFICATION.reduce((total, status) => total + (s.finding_verification_statuses?.[status] ?? 0), 0) : null;
+  const awaitingAll = s ? AWAITING_VERIFICATION.reduce((total, status) => total + (s.finding_verification_statuses?.[status] ?? 0), 0) : null;
+  const awaitingCount = awaitingAll == null ? null : Math.max(0, awaitingAll - retiredAwaiting);
   return (
     <>
       <PageHeader
@@ -306,7 +323,11 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
       />
       <section className="panel overview-attention" aria-labelledby="attention-title">
         <div className="panel-header"><h2 id="attention-title">Needs attention</h2></div>
-        {s === null ? (
+        {s === null && summaryLoadError ? (
+          <p className="error-text" role="alert">
+            Engagement summary unavailable: {summaryLoadError}. The counts appear once a later refresh reads it.
+          </p>
+        ) : s === null ? (
           <div className="attention-row" role="status" aria-busy="true" aria-label="Loading engagement summary">
             <Skeleton width={200} height={14} />
             <Skeleton width={130} height={14} />
@@ -325,6 +346,16 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
           <a href={awaitingHref} title="Unreviewed, disputed, pending runtime proof or blocked verification">
             <strong>{formatCount(awaitingCount)}</strong> findings awaiting verification
           </a>
+          {retiredAwaiting > 0 && (
+            <span className="meta-text" title="Merged and false-positive findings keep the verification they had; they are not counted as needing attention">
+              {formatCount(retiredAwaiting)} more are merged or false positive
+            </span>
+          )}
+          {!ledgerKnown && (
+            <span className="meta-text">
+              merged and false-positive findings included{findingsLoadError ? "; the finding ledger could not be read" : " until the finding ledger loads"}
+            </span>
+          )}
         </div>}
       </section>
 
@@ -354,7 +385,8 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
           )}
           {queue.length > 0 && (
             <p className="meta-text overview-queue-footer">
-              Showing {Math.min(QUEUE_LIMIT, queue.length)} of {queue.length.toLocaleString("en-US")} {queue.length === 1 ? "finding" : "findings"} awaiting verification.{" "}
+              Showing {Math.min(QUEUE_LIMIT, queue.length)} of {queue.length.toLocaleString("en-US")} {queue.length === 1 ? "finding" : "findings"} awaiting verification
+              {retiredAwaiting > 0 ? ` (${retiredAwaiting.toLocaleString("en-US")} merged or false positive, listed last)` : ""}.{" "}
               <a href={awaitingHref}>Review them in Findings</a>
             </p>
           )}
@@ -459,7 +491,7 @@ function OverviewWorkspace({ engagementKey, assessmentSummary, findings, finding
       </section>
 
       {readiness && (
-        <ReadinessPanel readiness={readiness} advisoryCount={readinessItems.advisory.length} />
+        <ReadinessPanel engagementKey={engagementKey} readiness={readiness} advisoryCount={readinessItems.advisory.length} />
       )}
 
       {readiness && readinessItems.blocking.length > 0 && (
@@ -705,6 +737,7 @@ function LatestActivity({ engagementKey, page, error }: { engagementKey: string;
 }
 
 type ReadinessPanelProps = {
+  engagementKey: string;
   readiness: ReportReadiness;
   /**
    * Readiness items stamped `advisory`, counted by the caller's partition.
@@ -780,7 +813,7 @@ function deriveScopeLiterals(scopeHosts: string[] | undefined): Set<string> {
   return out;
 }
 
-function ReadinessPanel({ readiness, advisoryCount }: ReadinessPanelProps) {
+function ReadinessPanel({ engagementKey, readiness, advisoryCount }: ReadinessPanelProps) {
   const perHost = readiness.per_host_coverage;
   const totalUnmet = perHost
     ? perHost.hosts.reduce((sum, row) => sum + row.unmet_objectives.length, 0)
@@ -837,6 +870,8 @@ function ReadinessPanel({ readiness, advisoryCount }: ReadinessPanelProps) {
         </article>
       </div>
 
+      {readiness.report_qc && <ReportQcStanding qc={readiness.report_qc} />}
+
       <PerHostCoverageMatrix
         perHost={perHost}
         scopeLiterals={scopeLiterals}
@@ -845,10 +880,50 @@ function ReadinessPanel({ readiness, advisoryCount }: ReadinessPanelProps) {
         onToggleFilter={() => setScopeLiteralsOnly((v) => !v)}
       />
 
-      <EngagementSignalsCard perHost={perHost} />
+      <EngagementSignalsCard engagementKey={engagementKey} perHost={perHost} />
 
       <ActiveDeferralsList perHost={perHost} />
     </section>
+  );
+}
+
+/**
+ * The registered report's independent QC review: the newest verdict, who
+ * recorded it, the bytes it reviewed and whether it still covers the
+ * registered ones. The server owns that rule (`report_qc`); this states it.
+ */
+function ReportQcStanding({ qc }: { qc: ReportQc }) {
+  return (
+    <div className="readiness-report-qc" role="group" aria-label="Report QC">
+      <h3>Report QC</h3>
+      {!qc.required ? (
+        <p className="meta-text">No report.md is registered, so no report QC is owed yet.</p>
+      ) : (
+        <>
+          <p>
+            <StatusPill domain="qc-review" value={qc.status} size="sm" />
+            {qc.verdict && <> · verdict <code>{qc.verdict}</code></>}
+            {qc.reviewer_dispatch_agent_id && <> · reviewer {qc.reviewer_dispatch_agent_id}</>}
+            {qc.writer_dispatch_agent_id && <> · writer {qc.writer_dispatch_agent_id}</>}
+            {qc.decision_id != null && <> · decision #{qc.decision_id}</>}
+            {qc.decided_at && <> · <TimeStamp value={qc.decided_at} mode="both" /></>}
+          </p>
+          {qc.issue && <p className="readiness-report-qc-issue">The registered report.md {qc.issue}.</p>}
+          <p className="meta-text">
+            report.md{qc.artifact_id != null ? ` artifact #${qc.artifact_id}` : ""}
+            {qc.sha256 ? <> · sha256 <code>{qc.sha256}</code></> : null}
+            {qc.reviewed_sha256
+              ? qc.reviewed_sha256 === qc.sha256
+                ? <> (the reviewed bytes)</>
+                : <> · reviewed sha256 <code>{qc.reviewed_sha256}</code></>
+              : null}
+          </p>
+          <p className="meta-text">
+            A separate report-writer reviews the registered report; completing the engagement needs a pass that still covers these bytes.
+          </p>
+        </>
+      )}
+    </div>
   );
 }
 
@@ -859,16 +934,18 @@ function ReadinessPanel({ readiness, advisoryCount }: ReadinessPanelProps) {
 // is the OSINT objective. Surfacing them makes the matrix Y/D/N marks
 // self-explanatory — operators can see why a row went green at engagement
 // level even when no host-specific intel was recorded.
-const ENGAGEMENT_SIGNAL_LABELS: Record<string, string> = {
+const ENGAGEMENT_SIGNAL_LABELS = {
   waf_intel_count: "WAF intel rows (engagement-wide)",
+  waf_measurement_count: "WAF measurements (per host)",
   tech_scan_intel_count: "Tech-scan intel rows",
   osint_intel_total: "OSINT intel rows",
-};
+} as const;
 
-function EngagementSignalsCard({ perHost }: { perHost: PerHostCoverage | undefined }) {
+function EngagementSignalsCard({ engagementKey, perHost }: { engagementKey: string; perHost: PerHostCoverage | undefined }) {
   if (!perHost) return null;
   const signals = perHost.engagement_signals ?? {};
-  const entries = Object.entries(ENGAGEMENT_SIGNAL_LABELS);
+  const entries = Object.entries(ENGAGEMENT_SIGNAL_LABELS) as Array<[keyof typeof ENGAGEMENT_SIGNAL_LABELS, string]>;
+  const ignored = signals.waf_measurements_ignored ?? [];
   // Render even when every value is 0/undefined — a row of zeros is itself
   // useful operator signal ("OSINT hasn't run yet").
   return (
@@ -876,7 +953,7 @@ function EngagementSignalsCard({ perHost }: { perHost: PerHostCoverage | undefin
       <h3>Engagement-level signals</h3>
       <div className="stats-grid">
         {entries.map(([key, label]) => {
-          const value = typeof signals[key] === "number" ? (signals[key] as number) : 0;
+          const value = signals[key] ?? 0;
           return (
             <article className="stat-card" key={key} data-testid={`readiness-signal-${key}`}>
               <span className="stat-value">{value}</span>
@@ -888,8 +965,31 @@ function EngagementSignalsCard({ perHost }: { perHost: PerHostCoverage | undefin
       <p className="meta-text">
         Engagement-wide intel feeds matrix objectives without per-host
         evidence: WAF-class intel satisfies <code>waf_tier</code> for every
-        host, OSINT intel satisfies <code>osint</code> engagement-wide.
+        host, OSINT intel satisfies <code>osint</code> engagement-wide. A WAF
+        measurement answers <code>waf_tier</code> only for the hosts it names.
       </p>
+      {ignored.length > 0 && (
+        // A measurement the projection could not read closes no host's WAF
+        // tier; the server names each one so it is not silently dropped.
+        <div className="readiness-waf-ignored" role="group" aria-label="Ignored WAF measurements">
+          <p>
+            <strong>
+              {ignored.length.toLocaleString("en-US")} WAF {ignored.length === 1 ? "measurement is" : "measurements are"} ignored
+            </strong>
+            : {ignored.length === 1 ? "it closes" : "they close"} no host's WAF tier until the record is corrected.
+          </p>
+          <ul>
+            {ignored.map((entry) => (
+              <li key={entry.intel_id}>
+                <a href={engagementHref(engagementKey, { tab: "intel", intel_type: "tech_component", intel_id: entry.intel_id })}>
+                  Tech stack record #{entry.intel_id}
+                </a>
+                {entry.problem ? <>: {entry.problem}</> : null}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
     </div>
   );
 }
@@ -967,17 +1067,21 @@ function PerHostCoverageMatrixBody({
   // Section-collapse: default collapsed only when the matrix is large
   // (host count over the row cap). The localStorage preference, when set,
   // overrides the size-based default and survives WS refreshes / reloads.
+  // Only the operator's own toggle is stored: a default derived from one
+  // engagement's size is not a choice and must not carry into another.
   const sectionDefaultCollapsed = visibleRows.length > PER_HOST_ROW_CAP;
   const [collapsed, setCollapsed] = useState(() =>
     readPerHostCollapsed(sectionDefaultCollapsed),
   );
-  useEffect(() => {
+  const toggleCollapsed = () => {
+    const next = !collapsed;
+    setCollapsed(next);
     try {
-      window.localStorage.setItem(PER_HOST_COLLAPSE_KEY, collapsed ? "1" : "0");
+      window.localStorage.setItem(PER_HOST_COLLAPSE_KEY, next ? "1" : "0");
     } catch {
       // ignore
     }
-  }, [collapsed]);
+  };
 
   // Row cap with uncovered-first ordering in the capped view, so the most
   // actionable hosts (those with unmet objectives) are the ones shown before
@@ -997,7 +1101,7 @@ function PerHostCoverageMatrixBody({
       <button
         type="button"
         className="sessions-toggle readiness-matrix-collapse"
-        onClick={() => setCollapsed((v) => !v)}
+        onClick={toggleCollapsed}
         aria-expanded={!collapsed}
         data-testid="readiness-matrix-collapse"
       >
@@ -1071,7 +1175,8 @@ function PerHostCoverageMatrixBody({
           <p className="meta-text">
             Cells: <strong>Y</strong> objective met, <strong>D</strong> intentionally
             deferred via <code>coverage_deferral</code>, <strong>N</strong> unmet
-            (WARN-only — does not block phase advance).
+            (WARN-only — does not block phase advance). A met WAF tier also says
+            whether a WAF fronts the host: a measurement that found none still meets it.
           </p>
         </>
       )}
@@ -1103,11 +1208,17 @@ const ReadinessMatrixRow = memo(function ReadinessMatrixRow({
         const evidence = outcome?.evidence?.length
           ? outcome.evidence.join(", ")
           : "";
+        // Whether a WAF fronts the host is a different fact from whether its
+        // tier was measured; an unmeasured host has no verdict to show.
+        const waf = outcome?.met && typeof outcome.waf_detected === "boolean"
+          ? outcome.waf_detected ? "WAF detected" : "No WAF detected"
+          : null;
         return (
           <td key={obj} className="readiness-cell">
             <span data-testid={`readiness-cell-${row.host}-${obj}`}>
               <StatusPill value={outcomeMarker(outcome)} tone={outcomeTone(outcome)} label={outcomeMarker(outcome)} title={evidence || undefined} size="sm" />
             </span>
+            {waf && <span className="readiness-cell-note">{waf}</span>}
           </td>
         );
       })}

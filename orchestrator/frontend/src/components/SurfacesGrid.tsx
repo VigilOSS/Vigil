@@ -4,9 +4,11 @@
 // (scope, chips + search) stays in SurfacesTab React state feeding rowData;
 // this component renders, opens a row's record, and reports what it shows
 // (row order and the column sort behind it) so the record's Previous / Next
-// walk it and the summary line names the order.
+// walk it and the summary line names the order. The grid always shows some
+// order: it starts in the sort the tab hands it (newest update first when
+// there is none) and a header click flips a column's direction.
 
-import { useEffect, useMemo, useRef } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { AgGridReact } from "ag-grid-react";
 import type { ColDef, GridApi, ICellRendererParams, ModelUpdatedEvent } from "ag-grid-community";
 import type { AssessmentSurface } from "../lib/api";
@@ -14,16 +16,28 @@ import { AG_GRID_THEME, gridBaseProps, registerAgGrid, rowOpenHandlers } from ".
 import { gridTimeComparator } from "../lib/serverTime";
 import { TimeStamp } from "./formatting";
 import { StatusPill, compareStatus, humanizeStatus } from "./ui";
-import { readGridView, type GridView } from "./record/recordNavigation";
+import { readGridView, type GridSort, type GridView } from "./record/recordNavigation";
 
 registerAgGrid();
 
+const DEFAULT_SORT: GridSort = { colId: "updated", sort: "desc" };
+
+/** The column definitions with the starting sort on its column (and no other); a sort no column shows starts on `DEFAULT_SORT`. */
+function withStartSort(columns: ColDef<AssessmentSurface>[], start: GridSort | null | undefined): ColDef<AssessmentSurface>[] {
+  const shown = start && columns.some((column) => column.colId === start.colId && column.sortable !== false) ? start : DEFAULT_SORT;
+  return columns.map((column) => ({ ...column, initialSort: column.colId === shown.colId ? shown.sort : undefined }));
+}
 
 type SurfacesGridProps = {
   rows: AssessmentSurface[];
   // surface id → number of linked findings (for the Findings count badge).
   linkCounts: Map<number, number>;
   selectedId: number | null;
+  /**
+   * The sort the grid starts in (the tab keeps it across visits). Read once
+   * on mount; later header clicks report through `onViewChange`.
+   */
+  initialSort?: GridSort | null;
   onRowOpen: (surface: AssessmentSurface, invoker: HTMLElement | null) => void;
   /** The shown row order and the column sort behind it, after every model update. */
   onViewChange?: (view: GridView<number>) => void;
@@ -45,10 +59,13 @@ export default function SurfacesGrid({
   rows,
   linkCounts,
   selectedId,
+  initialSort,
   onRowOpen,
   onViewChange,
   onApi,
 }: SurfacesGridProps) {
+  // Read once: the columns carry the starting sort; the grid owns it after that.
+  const [startSort] = useState(initialSort);
   const gridRef = useRef<AgGridReact<AssessmentSurface>>(null);
   const onApiRef = useRef(onApi);
   onApiRef.current = onApi;
@@ -69,7 +86,7 @@ export default function SurfacesGrid({
   );
 
   const columnDefs = useMemo<ColDef<AssessmentSurface>[]>(
-    () => [
+    () => withStartSort([
       {
         headerName: "Target",
         colId: "target",
@@ -78,6 +95,7 @@ export default function SurfacesGrid({
         valueGetter: (p) => p.data?.target_descriptor || "",
         tooltipValueGetter: (p) => p.data?.target_descriptor || "",
         cellClass: "ag-mono ag-clip-cell",
+        sortingOrder: ["asc", "desc"],
       },
       {
         headerName: "Type",
@@ -86,6 +104,7 @@ export default function SurfacesGrid({
         valueGetter: (p) => humanizeStatus(p.data?.surface_type || "unknown"),
         cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--ink-2)" },
+        sortingOrder: ["asc", "desc"],
       },
       {
         headerName: "Status",
@@ -106,6 +125,7 @@ export default function SurfacesGrid({
         tooltipValueGetter: (p) => p.data?.source_name || "",
         cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--muted)" },
+        sortingOrder: ["asc", "desc"],
       },
       {
         headerName: "Rationale",
@@ -116,6 +136,7 @@ export default function SurfacesGrid({
         tooltipValueGetter: (p) => p.data?.rationale || "",
         cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--ink-2)" },
+        sortingOrder: ["asc", "desc"],
       },
       {
         headerName: "Follow-up",
@@ -126,6 +147,7 @@ export default function SurfacesGrid({
         tooltipValueGetter: (p) => p.data?.followup_condition || "",
         cellClass: "ag-clip-cell",
         cellStyle: { color: "var(--ink-2)" },
+        sortingOrder: ["asc", "desc"],
       },
       {
         headerName: "Findings",
@@ -142,12 +164,10 @@ export default function SurfacesGrid({
         valueGetter: (p) => p.data?.updated_at || "",
         // Missing update times sort last in both directions.
         comparator: gridTimeComparator,
-        // The default order, newest first; the header shows it.
-        initialSort: "desc",
         sortingOrder: ["desc", "asc"],
       },
-    ],
-    [FindingsCell],
+    ], startSort),
+    [FindingsCell, startSort],
   );
 
   const { onRowClicked, onCellKeyDown } = rowOpenHandlers<AssessmentSurface>(onRowOpen);

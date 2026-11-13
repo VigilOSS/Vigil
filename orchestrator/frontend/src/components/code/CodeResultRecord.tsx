@@ -32,7 +32,10 @@ export function isCodeResultSection(value: string | null | undefined): value is 
 }
 
 export const AWAITING_VERDICT_REASON =
-  "Awaiting a verdict: the file's latest review is suspicious, and no finding or later clean review has settled it.";
+  "Awaiting a verdict: the file's latest review concluded suspicious, and no later successful review has settled it.";
+/** The review closed the file as a finding and left this suspicious result open beside it. */
+export const OPEN_LEAD_BESIDE_FINDING_REASON =
+  "Open lead beside a finding: the review closed this file as a finding and left this suspicious result awaiting a verdict. A targeted re-review of the file settles it, as does a correction that replaces this result.";
 
 type Props = {
   engagementKey: string;
@@ -90,7 +93,9 @@ export function CodeResultRecord({ engagementKey, resultId, row, section, onSect
   const path = shown.file_path ?? `file #${shown.file_id}`;
   const callableCount = "callable_ref_count" in shown ? shown.callable_ref_count : shown.callable_refs.length;
   const anchors = shown.reviewed_spans.length + callableCount;
-  const notCurrent = detail ? !detail.current : Boolean(shown.superseded_at);
+  // A suspicious result left open beside a finding is not among the current
+  // receipts, yet nothing replaced it: it is the one still awaiting a verdict.
+  const notCurrent = !shown.awaiting_verdict && (detail ? !detail.current : Boolean(shown.superseded_at));
   return (
     <>
       <RecordHeader
@@ -111,7 +116,11 @@ export function CodeResultRecord({ engagementKey, resultId, row, section, onSect
             <StatusPill
               domain="code-disposition"
               value={shown.disposition}
-              reason={shown.awaiting_verdict ? AWAITING_VERDICT_REASON : undefined}
+              reason={
+                !shown.awaiting_verdict ? undefined
+                : detail?.queue_disposition === "finding" ? OPEN_LEAD_BESIDE_FINDING_REASON
+                : AWAITING_VERDICT_REASON
+              }
             />
             {shown.confidence ? <span className="tag">{humanizeStatus(shown.confidence)} confidence</span> : null}
             {shown.cwe_id ? <span className="tag mono">{shown.cwe_id}</span> : null}

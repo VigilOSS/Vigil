@@ -19,6 +19,7 @@ import {
   fetchRequestVariantPage,
   fetchRequestVariantPosition,
   type RequestVariantFilters,
+  type RequestVariantOrder,
 } from "../lib/httpApi";
 import { ToastProvider } from "../contexts/ToastContext";
 import { HttpTab } from "./HttpTab";
@@ -52,23 +53,28 @@ vi.mock("../lib/httpApi", async (importOriginal) => {
 
 // The inventory grid is ag-grid's infinite row model in production; this
 // stand-in reads its first block through the same server page the real
-// datasource uses and renders rows marked with their record key.
+// datasource uses and renders rows marked with their record key. Like the
+// real grid it starts in the order the tab hands it and owns the order after
+// that; "sort by path" stands in for a header click.
 vi.mock("./HttpGrid", async () => {
   const { useEffect, useState } = await import("react");
   const httpApi = await import("../lib/httpApi");
   return {
-    default: function HttpGridMock({ engagementKey, filters, filtersKey, refreshToken, onRowOpen, onWindow, onError }: {
+    default: function HttpGridMock({ engagementKey, filters, filtersKey, refreshToken, sort, onRowOpen, onWindow, onError, onSortChange }: {
       engagementKey: string;
       filters: RequestVariantFilters;
       filtersKey: string;
       refreshToken: number;
+      sort?: RequestVariantOrder;
       onRowOpen: (row: RequestVariant, invoker: HTMLElement) => void;
       onWindow: (window: { total: number | null; first: number; last: number }) => void;
       onError: (message: string | null) => void;
+      onSortChange?: (order: RequestVariantOrder) => void;
     }) {
       const [rows, setRows] = useState<RequestVariant[]>([]);
+      const [order, setOrder] = useState<RequestVariantOrder>(sort ?? { sort: "last_seen_at", dir: "desc" });
       useEffect(() => {
-        httpApi.fetchRequestVariantPage(engagementKey, filters, { sort: "last_seen_at", dir: "desc", limit: 100, offset: 0 })
+        httpApi.fetchRequestVariantPage(engagementKey, filters, { ...order, limit: 100, offset: 0 })
           .then((page) => {
             setRows(page.items);
             onWindow({ total: page.total, first: page.items.length ? 1 : 0, last: page.items.length });
@@ -76,9 +82,19 @@ vi.mock("./HttpGrid", async () => {
           })
           .catch((error: Error) => onError(error.message));
         // eslint-disable-next-line react-hooks/exhaustive-deps
-      }, [engagementKey, filtersKey, refreshToken]);
+      }, [engagementKey, filtersKey, refreshToken, order]);
       return (
         <div>
+          <button
+            type="button"
+            onClick={() => {
+              const next: RequestVariantOrder = { sort: "path", dir: "asc" };
+              setOrder(next);
+              onSortChange?.(next);
+            }}
+          >
+            sort by path
+          </button>
           {rows.map((row) => (
             <button key={row.id} data-record-key={row.id} onClick={(event) => onRowOpen(row, event.currentTarget)}>
               {row.normalized_path}
@@ -90,14 +106,36 @@ vi.mock("./HttpGrid", async () => {
   };
 });
 
-vi.mock("./HttpFlowsGrid", () => ({
-  default: ({ rows, onRowOpen }: { rows: Array<{ flow_uid: string }>; onRowOpen: (row: never) => void }) => (
-    // The real grid virtualizes; the first rows are enough here.
-    <div>{rows.slice(0, 50).map((row) => (
-      <button key={row.flow_uid} onClick={() => onRowOpen(row as never)}>{row.flow_uid}</button>
-    ))}</div>
-  ),
-}));
+// The exchanges grid sorts on the client in production; this stand-in shows
+// the rows it is given and reports them with its column sort, starting in
+// the sort the tab hands it. "sort by status" stands in for a header click.
+vi.mock("./HttpFlowsGrid", async () => {
+  const { useEffect, useState } = await import("react");
+  type Sort = { colId: string; sort: "asc" | "desc" };
+  return {
+    default: function HttpFlowsGridMock({ rows, initialSort, onRowOpen, onViewChange }: {
+      rows: Array<{ id: number; flow_uid: string }>;
+      initialSort?: Sort | null;
+      onRowOpen: (row: never) => void;
+      onViewChange?: (view: { ids: number[]; sort: Sort[] }) => void;
+    }) {
+      const [sort, setSort] = useState<Sort>(initialSort ?? { colId: "seen", sort: "desc" });
+      const order = rows.map((row) => row.id).join(",");
+      useEffect(() => {
+        onViewChange?.({ ids: order ? order.split(",").map(Number) : [], sort: [sort] });
+      }, [order, sort, onViewChange]);
+      return (
+        // The real grid virtualizes; the first rows are enough here.
+        <div>
+          <button type="button" onClick={() => setSort({ colId: "status", sort: "asc" })}>sort by status</button>
+          {rows.slice(0, 50).map((row) => (
+            <button key={row.flow_uid} onClick={() => onRowOpen(row as never)}>{row.flow_uid}</button>
+          ))}
+        </div>
+      );
+    },
+  };
+});
 
 const variant: RequestVariant = {
   id: 1,
@@ -236,6 +274,9 @@ async function withDebounce(step: () => void, ms: number) {
   await act(async () => {});
 }
 
+/** The line above the list: "3 of 3 request variants · Sorted by …". */
+const resultsText = () => document.querySelector(".ui-results-summary")?.textContent ?? "";
+
 /** The inventory rows the grid shows, in order. */
 const shownPaths = () => [...document.querySelectorAll("[data-record-key]")].map((row) => row.textContent);
 
@@ -329,9 +370,17 @@ describe("HttpTab endpoint inventory", () => {
   it("explains an empty inventory without offering to clear filters", async () => {
     vi.mocked(fetchRequestVariantFacets).mockResolvedValue(facetsFor([], 0));
     vi.mocked(fetchRequestVariantPage).mockResolvedValue({ total: 0, offset: 0, count: 0, has_more: false, items: [] });
-    renderTab();
-    expect(await screen.findByText("No endpoint inventory recorded yet.")).toBeTruthy();
+    // Long enough for a load that never settles to say it is still loading.
+    await withDebounce(() => { renderTab(); }, 2_500);
+    const emptyState = await screen.findByText("No endpoint inventory recorded yet.");
     expect(screen.queryByRole("button", { name: /Clear filters/ })).toBeNull();
+    // The inventory is known to be empty: beside that statement, nothing
+    // announces a count or a load still under way.
+    const pending = [...emptyState.closest("section")!.querySelectorAll("[role='status']")]
+      .filter((status) => !status.contains(emptyState))
+      .map((status) => status.textContent)
+      .filter(Boolean);
+    expect(pending).toEqual([]);
   });
 
   it("does not render a false empty state when the inventory read fails", async () => {
@@ -382,6 +431,43 @@ describe("HttpTab saved view", () => {
     expect(await screen.findByRole("button", { name: "/two" })).toBeTruthy();
     expect(screen.getByRole("button", { name: /^POST\s*1/ }).getAttribute("aria-pressed")).toBe("true");
     expect(vi.mocked(fetchRequestVariantPage).mock.calls.at(-1)?.[1]).toMatchObject({ method: ["POST"], q: "two" });
+  });
+
+  it("keeps the inventory sort when the tab is left and reopened", async () => {
+    const first = renderTab();
+    fireEvent.click(await screen.findByRole("button", { name: "sort by path" }));
+    await waitFor(() => expect(resultsText()).toContain("Sorted by Path"));
+    first.unmount();
+
+    renderTab();
+    await screen.findByRole("button", { name: "/three" });
+    // The grid starts in the kept order, and the summary and record navigation name it.
+    expect(vi.mocked(fetchRequestVariantPage).mock.calls.at(-1)?.[2]).toMatchObject({ sort: "path", dir: "asc" });
+    expect(resultsText()).toContain("Sorted by Path");
+    fireEvent.click(screen.getByRole("button", { name: "/three" }));
+    await screen.findByRole("region", { name: "Request record" });
+    await waitFor(() => expect(vi.mocked(fetchRequestVariantPosition).mock.calls.at(-1)?.[3]).toEqual({ sort: "path", dir: "asc" }));
+  });
+
+  it("keeps the exchanges sort when the tab is left and reopened", async () => {
+    vi.mocked(listHttpFlows).mockResolvedValue([flow] as never);
+    const first = renderTab({ initialView: "exchanges" });
+    fireEvent.click(await screen.findByRole("button", { name: "sort by status" }));
+    await waitFor(() => expect(resultsText()).toContain("Sorted by Status"));
+    first.unmount();
+
+    renderTab({ initialView: "exchanges" });
+    await screen.findByRole("button", { name: "flow-1" });
+    await waitFor(() => expect(resultsText()).toContain("Sorted by Status"));
+  });
+
+  it("starts the exchanges from the default order when the kept sort names no column", async () => {
+    vi.mocked(listHttpFlows).mockResolvedValue([flow] as never);
+    // A kept view is browser storage: any string can be in it, a name every object answers to included.
+    window.sessionStorage.setItem("http.exchanges.demo", JSON.stringify({ sort: { colId: "constructor", sort: "asc" } }));
+    renderTab({ initialView: "exchanges" });
+    await screen.findByRole("button", { name: "flow-1" });
+    await waitFor(() => expect(resultsText()).toContain("Sorted by Seen, newest first"));
   });
 
   it("keeps the exchange filters when the tab is left and reopened", async () => {
@@ -559,6 +645,53 @@ describe("HttpTab captured exchanges", () => {
     vi.mocked(listHttpFlows).mockResolvedValue([flow] as never);
     fireEvent.click(screen.getByRole("button", { name: "Clear filters" }));
     expect(await screen.findByRole("button", { name: "flow-1" })).toBeTruthy();
+  });
+
+  it("counts truncated exchanges among the results shown, not the whole ledger", async () => {
+    const ledger = [
+      { ...flow, id: 43, flow_uid: "flow-3", method: "GET", response_body_truncated: true },
+      { ...flow, id: 42, flow_uid: "flow-2", method: "GET", request_body_truncated: true },
+      { ...flow, id: 41, flow_uid: "flow-1", method: "POST" },
+    ];
+    vi.mocked(listHttpFlows).mockImplementation(async (_key, params = {}) => {
+      const method = (params as { method?: string }).method;
+      return ledger.filter((row) => !method || row.method === method).slice(params.offset ?? 0, (params.offset ?? 0) + (params.limit ?? 3)) as never;
+    });
+    renderTab({ initialView: "exchanges" });
+    await screen.findByRole("button", { name: "flow-3" });
+    const truncatedNote = () => document.querySelector(".http-list-head .http-truncated-count")?.textContent ?? "";
+    expect(truncatedNote()).toMatch(/^2\b/);
+
+    await withDebounce(() => {
+      fireEvent.click(within(screen.getByRole("group", { name: "Method" })).getByRole("button", { name: /^POST/ }));
+    }, 250);
+    await waitFor(() => expect(resultsText()).toMatch(/^1 of 3/));
+    // The one exchange shown is complete.
+    expect(truncatedNote()).toBe("");
+  });
+
+  it("says how much of a truncated body was kept, and how much was cut when the exchange states its full size", async () => {
+    const cut = {
+      ...flow,
+      response_body_bytes: 524_288,
+      response_body_truncated: true,
+      response_headers: { "Content-Type": "application/json", "Content-Length": "1048576" },
+      request_body_bytes: 1_024,
+      request_body_truncated: true,
+      // A coded body's length is not the size of the stored, decoded bytes.
+      request_headers: { "Content-Length": "300", "Content-Encoding": "gzip" },
+    };
+    vi.mocked(listHttpFlows).mockResolvedValue([cut] as never);
+    vi.mocked(getHttpFlow).mockResolvedValue(cut as never);
+    renderTab({ initialFlowId: 41, initialDrawerTab: "bodies" });
+    const record = await screen.findByRole("region", { name: "Exchange record" });
+    const response = within(record).getByRole("group", { name: "Response body" });
+    expect(response.textContent).toContain("512.0 KB of 1.0 MB");
+    expect(response.textContent).toContain("512.0 KB cut");
+    const request = within(record).getByRole("group", { name: "Request body" });
+    expect(request.textContent).toContain("1.0 KB");
+    expect(request.textContent).toMatch(/full size (was|is) not recorded/i);
+    expect(request.textContent).not.toContain("300");
   });
 
   it("separates endpoint inventory from non-retroactive captured exchanges", async () => {

@@ -32,9 +32,12 @@ export function remediationHref(key: string, caseId?: number): string {
   return `#/remediation/${encodeURIComponent(key)}${caseId ? `?case=${caseId}` : ""}`;
 }
 
+/** A record id from the URL: its canonical decimal form only, so no other spelling names the same record. */
 export function positiveRouteId(params: URLSearchParams, name: string): number | undefined {
-  const value = Number(params.get(name));
-  return Number.isSafeInteger(value) && value > 0 ? value : undefined;
+  const raw = params.get(name);
+  if (raw === null || !/^[1-9]\d*$/.test(raw)) return undefined;
+  const value = Number(raw);
+  return Number.isSafeInteger(value) ? value : undefined;
 }
 
 export function writeWorkspaceHash(href: string, mode: "push" | "replace" = "push"): void {

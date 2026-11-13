@@ -101,7 +101,7 @@ export type SubmissionAttachmentRow = {
 export type SubmissionBlockerItem = { message: string; fix: string; command: string };
 
 export type SubmissionReadiness = {
-  pass1_qa: SubmissionPass1QA;
+  submission_qc: SubmissionQC;
   attachment_ids: number[];
   final_ready: boolean;
   blockers: string[];
@@ -155,12 +155,20 @@ export type SubmissionDeskWorkspace = {
   external_body_valid_utf8: boolean;
 };
 
-export type SubmissionPass1QA = {
+// The latest independent report-writer QC review of a triage packet, judged
+// against the current package. Final export of an offensive engagement needs
+// status "current".
+export type SubmissionQCFailedRow = { row: string; quote: string };
+
+export type SubmissionQC = {
+  required: boolean;
   status: "missing" | "current" | "stale" | "blocked";
-  verdict: "pass" | "blocked" | null;
+  // The reviewer's verdict as recorded: only "pass" accepts the submission.
+  verdict: string | null;
   packet_id: string | null;
-  auditor_dispatch_agent_id: string | null;
-  reason: string;
+  reviewer_dispatch_agent_id: string | null;
+  writer_dispatch_agent_id: string | null;
+  failed_rows: SubmissionQCFailedRow[];
   decided_at: string | null;
   issue: string;
 };
@@ -170,7 +178,7 @@ export type SubmissionDeskDetail = {
   workspace: SubmissionDeskWorkspace;
   platform: SubmissionPlatform | null;
   blind_triage: SubmissionBlindTriage;
-  pass1_qa: SubmissionPass1QA;
+  submission_qc: SubmissionQC;
   latest_version: SubmissionVersion | null;
   default_attachment_ids: number[];
   default_attachment_source: "blind_triage" | "latest_version" | "none";

@@ -135,6 +135,9 @@ const BLOCKER_TARGETS: Record<string, Partial<CodeRouteTarget>> = {
   structural_coverage_unresolved: { focus: "risk" },
   files_unclassified: { focus: "risk" },
   structural_analysis_debt_unreviewed: { focus: "direct" },
+  // The review queue's lead list narrowed to the kind each blocker counts.
+  pending_triggers: { kind: "cross_file" },
+  depth_floor_triggers: { kind: "depth_floor" },
 };
 
 // Findings blockers open the Findings list filtered (its `q`, `workflow` and

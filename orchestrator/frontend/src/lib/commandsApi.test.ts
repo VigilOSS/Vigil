@@ -12,6 +12,7 @@ import {
   fetchCommandFacets,
   fetchCommandPage,
   fetchCommandPosition,
+  parseCommandView,
   searchToken,
   type CommandLedgerPage,
 } from "./commandsApi.ts";
@@ -136,4 +137,11 @@ test("filter identity ignores chip order and surrounding spaces; the scope is no
 test("search tokens quote values with spaces", () => {
   assert.equal(searchToken("technique", "SSRF"), "technique:SSRF");
   assert.equal(searchToken("intent", "verify token leak"), 'intent:"verify token leak"');
+});
+
+test("a kept view names a sort only by a key the ledger sorts on", () => {
+  assert.deepEqual(parseCommandView(JSON.stringify({ sort: { sort: "tool", dir: "asc" } })).sort, { sort: "tool", dir: "asc" });
+  assert.deepEqual(parseCommandView(JSON.stringify({ sort: { sort: "rank", dir: "asc" } })).sort, DEFAULT_COMMAND_SORT);
+  // A name every object answers to is not a sort key.
+  assert.deepEqual(parseCommandView(JSON.stringify({ sort: { sort: "constructor", dir: "asc" } })).sort, DEFAULT_COMMAND_SORT);
 });

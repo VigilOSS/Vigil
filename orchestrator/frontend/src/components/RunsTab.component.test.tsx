@@ -473,6 +473,46 @@ describe("RunsTab record", () => {
     expect((within(record).getByRole("button", { name: "Next run" }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("returns keyboard focus to the search box when a run outside the current results is closed", async () => {
+    const view = renderTab(<RunsTab engagementKey="acme" />);
+    fireEvent.change(await screen.findByLabelText("Search runs"), { target: { value: "source roots" } });
+    view.rerender(<RunsTab engagementKey="acme" initialRunId={42} />);
+    const record = await screen.findByRole("region", { name: "Run record" });
+    expect(within(record).getByText("Outside current results")).toBeTruthy();
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("region", { name: "Run record" })).toBeNull());
+    // The run has no row to return to.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("Search runs")));
+  });
+
+  it("links a receipt's artifact to Files only when Files can open it, and otherwise gives its path to copy", async () => {
+    vi.mocked(listAssessmentRunChildren).mockImplementation(async (_key, _runId, section) => (section === "proof-receipts"
+      ? page([receipt, { ...receipt, id: 344, artifact_relative_path: "RESUME.md" }])
+      : page([])));
+    renderTab(<RunsTab engagementKey="acme" initialRunId={42} initialDrawerTab="evidence" />);
+    const record = await screen.findByRole("region", { name: "Run record" });
+    expect(await within(record).findByText("evidence/export.txt")).toBeTruthy();
+    // Files opens engagement root documents only: the root document links to itself there.
+    const fileLinks = within(record).getAllByRole("link").map((link) => link.getAttribute("href")).filter((href) => href?.includes("tab=artifacts"));
+    expect(fileLinks).toEqual(["#/engagements/acme?tab=artifacts&file=RESUME.md"]);
+    expect(within(record).getAllByRole("button", { name: "Copy artifact path" })).toHaveLength(1);
+  });
+
+  it("counts and names the evidence kind on screen", async () => {
+    renderTab(<RunsTab engagementKey="acme" initialRunId={42} initialDrawerTab="evidence" />);
+    const record = await screen.findByRole("region", { name: "Run record" });
+    await within(record).findByText("HTTP 200 with the other tenant's rows");
+    const heading = within(record).getByRole("heading", { level: 3, name: /^Evidence receipts/ });
+    expect(heading.textContent).toMatch(/1$/);
+
+    fireEvent.click(within(record).getByRole("button", { name: "HTTP, browser & OOB" }));
+    await waitFor(() => expect(listAssessmentRunChildren).toHaveBeenCalledWith("acme", 42, "observed-events", { limit: 50, offset: 0 }));
+    // The run still has one receipt; none is of this kind, and the section says so.
+    await waitFor(() => expect(heading.textContent).toMatch(/0$/));
+    expect(within(record).getAllByText(/HTTP, browser & OOB/).length).toBeGreaterThan(1);
+    expect(within(record).getByRole("button", { name: /^Evidence/ }).textContent).toMatch(/1$/);
+  });
+
   it("shows blockers with record links and full audit data verbatim for a scan run", async () => {
     renderTab(<RunsTab engagementKey="acme" initialRunId={40} />);
     const record = await screen.findByRole("region", { name: "Run record" });

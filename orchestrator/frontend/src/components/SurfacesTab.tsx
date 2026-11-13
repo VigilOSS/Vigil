@@ -7,7 +7,7 @@
 // replaces the list with the shared record view; Back, Escape and browser
 // Back return to the list.
 
-import { lazy, Suspense, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import type { GridApi } from "ag-grid-community";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import type {
@@ -54,7 +54,7 @@ import {
   RecordView,
   useResultsScrollMemory,
 } from "./record/RecordView";
-import { listNavigation, useGridView } from "./record/recordNavigation";
+import { useGridView, useListNavigation, type GridSort } from "./record/recordNavigation";
 import "../styles/surfaces.css";
 
 // The workspace reads at most this many surfaces (EngagementPage's surface
@@ -241,6 +241,8 @@ type SurfacesView = {
   type: string[];
   status: string[];
   source: string[];
+  /** The grid's column sort; null follows the grid's default (newest update first). */
+  sort: GridSort | null;
 };
 
 const viewKey = (engagementKey: string) => `surfaces.view.${engagementKey}`;
@@ -259,7 +261,14 @@ function readView(engagementKey: string): SurfacesView {
     type: strings(value.type),
     status: strings(value.status),
     source: strings(value.source),
+    sort: savedSort(value.sort),
   };
+}
+
+/** A kept column sort the summary can name, else null. */
+function savedSort(value: unknown): GridSort | null {
+  const { colId, sort } = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  return typeof colId === "string" && Object.hasOwn(SORT_LABELS, colId) && (sort === "asc" || sort === "desc") ? { colId, sort } : null;
 }
 
 // ── Component ─────────────────────────────────────────────────────────
@@ -409,14 +418,25 @@ function SurfacesWorkspace({
   const [typeFilters, setTypeFilters] = useState<Set<string>>(() => new Set(savedView.type));
   const [statusFilters, setStatusFilters] = useState<Set<string>>(() => new Set(savedView.status));
   const [sourceFilters, setSourceFilters] = useState<Set<string>>(() => new Set(savedView.source));
+  // The sort the grid shows, or before it has reported, the one kept from the last visit.
+  const sortEntry: GridSort | null = gridView?.sort[0] ?? savedView.sort;
+  const sortColumn = sortEntry?.colId;
+  const sortDirection = sortEntry?.sort;
   useEffect(() => {
-    const view: SurfacesView = { scope: chosenScope, query, type: [...typeFilters], status: [...statusFilters], source: [...sourceFilters] };
+    const view: SurfacesView = {
+      scope: chosenScope,
+      query,
+      type: [...typeFilters],
+      status: [...statusFilters],
+      source: [...sourceFilters],
+      sort: sortColumn && sortDirection ? { colId: sortColumn, sort: sortDirection } : null,
+    };
     try {
       window.sessionStorage.setItem(viewKey(engagementKey), JSON.stringify(view));
     } catch {
       // Browser storage may be unavailable; the view just resets next visit.
     }
-  }, [engagementKey, chosenScope, query, typeFilters, statusFilters, sourceFilters]);
+  }, [engagementKey, chosenScope, query, typeFilters, statusFilters, sourceFilters, sortColumn, sortDirection]);
   const openSurfaceCount = useMemo(
     () => localSurfaces.reduce((count, surface) => count + (isOpen(surface) ? 1 : 0), 0),
     [localSurfaces],
@@ -619,7 +639,7 @@ function SurfacesWorkspace({
     if (shown && shown.length === visible.size) return shown;
     return filteredSurfaces.map((surface) => surface.id);
   }, [filteredSurfaces, gridView]);
-  const reviewNavigation = listNavigation(reviewOrder, selectedId, stepToSurface);
+  const reviewNavigation = useListNavigation(reviewOrder, selectedId, stepToSurface);
   const resultsRef = useRef<HTMLDivElement | null>(null);
   const reveal = useCallback((key: string) => {
     const api = gridApiRef.current;
@@ -627,6 +647,12 @@ function SurfacesWorkspace({
     if (api && node) api.ensureNodeVisible(node, "middle");
   }, []);
   useResultsScrollMemory(resultsRef, investigating, { recordKey: selectedId, reveal });
+  // Closing a record returns focus to the row that opened it. A row that has
+  // left the results (its surface stopped matching) cannot take it; the
+  // search box does.
+  useLayoutEffect(() => {
+    if (!investigating && invokerRef.current && !invokerRef.current.isConnected) invokerRef.current = searchRef.current;
+  }, [investigating]);
 
   // Keyboard shortcuts: `/` focuses search (leaving an open record), `Esc`
   // leaves the search box. The open record handles its own Escape.
@@ -653,7 +679,6 @@ function SurfacesWorkspace({
   }, [closeSurface]);
 
   const empty = !awaitingLedger && localSurfaces.length === 0;
-  const sortEntry = gridView?.sort[0];
   const sortLabel = SORT_LABELS[sortEntry?.colId ?? "updated"] ?? SORT_LABELS.updated;
   const unavailable = Boolean(loadError) && empty;
 
@@ -800,6 +825,7 @@ function SurfacesWorkspace({
                   rows={filteredSurfaces}
                   linkCounts={linkCounts}
                   selectedId={selectedId}
+                  initialSort={savedView.sort}
                   onRowOpen={openSurface}
                   onViewChange={reportGridView}
                   onApi={(api) => { gridApiRef.current = api; }}

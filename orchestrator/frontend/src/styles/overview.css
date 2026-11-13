@@ -69,6 +69,19 @@
 
 /* Per-host matrix marks share the status pill; keep the cell compact. */
 .readiness-matrix .readiness-cell .ui-status { justify-content: center; min-width: 2.2rem; }
+/* The WAF tier's verdict beside its mark: whether a WAF fronts the host. */
+.readiness-matrix .readiness-cell-note { display: block; margin-top: 2px; font-size: 0.72rem; color: var(--ink-2); }
+/* The registered report's QC standing, under the report check counts. */
+.readiness-report-qc { margin-top: 14px; }
+.readiness-report-qc h3 { margin: 0 0 6px; font-size: 0.92rem; }
+.readiness-report-qc p { margin: 4px 0; font-size: 0.84rem; overflow-wrap: anywhere; }
+.readiness-report-qc-issue { color: var(--warn); }
+/* WAF measurements the per-host projection could not read. */
+.readiness-waf-ignored { margin-top: 8px; font-size: 0.84rem; }
+.readiness-waf-ignored p { margin: 0 0 4px; }
+.readiness-waf-ignored strong { color: var(--warn); }
+.readiness-waf-ignored ul { margin: 0; padding-left: 18px; }
+.readiness-waf-ignored li { overflow-wrap: anywhere; }
 
 @media (max-width: 900px) {
   /* Severity and statuses share a line under the title. */

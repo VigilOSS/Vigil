@@ -110,6 +110,42 @@ export function pendingLeads(coverage: CodeCoverage | null): number | null {
   return coverage.trigger_summary?.pending ?? coverage.confidence.unprocessed_triggers;
 }
 
+// `trigger_summary` keys that split another count instead of naming a status.
+const LEAD_BREAKDOWN_KEYS = new Set(["depth_floor_pending"]);
+
+export type LeadCounts = {
+  /** Every lead not yet followed. */
+  pending: number;
+  /** Of `pending`, the leads a critical/high closeout raised for a family left below its floor. */
+  depthFloorPending: number;
+  /** Of `pending`, the leads that point at another file. */
+  crossFilePending: number;
+  queued: number;
+  /** Leads followed, or closed with a recorded reason. */
+  settled: number;
+  /** One entry per lead status, in the summary's order. */
+  statuses: Array<{ status: string; count: number }>;
+};
+
+/**
+ * The lead counts of `coverage.trigger_summary`. `depth_floor_pending` is part
+ * of `pending`, not a status of its own, so it is read as that split and never
+ * listed beside the statuses. Null while the summary is unknown.
+ */
+export function leadCounts(summary: Record<string, number> | null | undefined): LeadCounts | null {
+  if (!summary) return null;
+  const pending = summary.pending ?? 0;
+  const depthFloorPending = Math.min(summary.depth_floor_pending ?? 0, pending);
+  const statuses = Object.entries(summary)
+    .filter(([status]) => !LEAD_BREAKDOWN_KEYS.has(status))
+    .map(([status, count]) => ({ status, count }));
+  const queued = summary.queued ?? 0;
+  const settled = statuses
+    .filter((entry) => entry.status !== "pending" && entry.status !== "queued")
+    .reduce((sum, entry) => sum + entry.count, 0);
+  return { pending, depthFloorPending, crossFilePending: pending - depthFloorPending, queued, settled, statuses };
+}
+
 export function percent(part: number, whole: number): number {
   return whole > 0 ? Math.round((part / whole) * 100) : 0;
 }

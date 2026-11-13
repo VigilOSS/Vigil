@@ -6,9 +6,12 @@ import {
   DEFAULT_COVERAGE_SORT,
   columnInitialSort,
   coverageFiltersKey,
+  coverageListFromParams,
+  coverageListParams,
   createCoverageDatasource,
   parseCoverageView,
   serverSortFromModel,
+  withCoverageDrill,
 } from "./coverageGridModel";
 
 function page(total: number, ids: number[]): CoverageLedgerPage {
@@ -109,5 +112,46 @@ describe("parseCoverageView", () => {
     });
     expect(parseCoverageView("{not json")).toEqual({ view: "reasons", filters: EMPTY_COVERAGE_FILTERS, includeClosed: false, sort: DEFAULT_COVERAGE_SORT });
     expect(parseCoverageView(JSON.stringify({ sort: { sort: "rank", dir: "up" } })).sort).toEqual(DEFAULT_COVERAGE_SORT);
+    // A name every object answers to is not a sort key.
+    expect(parseCoverageView(JSON.stringify({ sort: { sort: "constructor", dir: "asc" } })).sort).toEqual(DEFAULT_COVERAGE_SORT);
+  });
+});
+
+describe("coverage list address", () => {
+  const read = (params: Record<string, string | number | undefined>) => {
+    const query = new URLSearchParams();
+    for (const [name, value] of Object.entries(params)) if (value !== undefined && value !== "") query.set(name, String(value));
+    return coverageListFromParams(query);
+  };
+
+  it("carries the view and each kind of drill-down there and back", () => {
+    const picks = [
+      { status: ["blocked"], reason: "Needs a second tenant; only one Acme tenant is provisioned.", reason_missing: false, created_from: null },
+      { status: ["pending"], reason: null, reason_missing: true, created_from: "gf bucket 'idor' matched at ingest" },
+      // Items with no reason and an empty creation note.
+      { status: ["pending"], reason: null, reason_missing: true, created_from: "" },
+      { status: ["blocked", "deferred"], reason: null, reason_missing: false, created_from: null },
+      { status: [], reason: null, reason_missing: false, created_from: null },
+    ];
+    for (const drill of picks) {
+      expect(read(coverageListParams("items", { ...EMPTY_COVERAGE_FILTERS, ...drill }))).toEqual({ view: "items", drill });
+    }
+  });
+
+  it("names no view for the reason rollup, whose link is the bare tab", () => {
+    expect(coverageListParams("reasons", { ...EMPTY_COVERAGE_FILTERS, status: ["blocked"] })).toEqual({});
+    expect(read({}).view).toBeNull();
+    expect(read({ view: "elsewhere" }).view).toBeNull();
+  });
+
+  it("replaces only the drill-down, and keeps the filters' identity when nothing changes", () => {
+    const filters = { ...EMPTY_COVERAGE_FILTERS, status: ["blocked"], host: ["api.acme.example"], q: "orders" };
+    const same = { status: ["blocked"], reason: null, reason_missing: false, created_from: null };
+    expect(withCoverageDrill(filters, same)).toBe(filters);
+    expect(withCoverageDrill(filters, { ...same, status: ["deferred"], reason: "Gateway refuses both tenants." })).toEqual({
+      ...filters,
+      status: ["deferred"],
+      reason: "Gateway refuses both tenants.",
+    });
   });
 });

@@ -543,6 +543,8 @@ test("the saved Runs view round-trips and rejects anything it does not know", ()
   assert.equal(junk.filters.range, "all");
   assert.equal(junk.scope, "all");
   assert.deepEqual(junk.sort, { colId: "started", sort: "desc" });
+  // A name every object answers to is not a column.
+  assert.deepEqual(parseRunsView('{"sort":{"colId":"constructor","sort":"asc"}}').sort, { colId: "started", sort: "desc" });
   assert.equal(parseRunsView("{not json").scope, "all");
 });
 

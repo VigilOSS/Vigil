@@ -202,6 +202,10 @@ export function SubmissionDocument({
   exporting,
   previewOutdated,
   outsideList,
+  outsideListMore = null,
+  loadingMoreFindings = false,
+  onLoadMoreFindings,
+  requestedSlug = "",
   emptyList,
   loadingMoreVersions,
   loadingMorePending,
@@ -229,6 +233,12 @@ export function SubmissionDocument({
   previewOutdated: boolean;
   /** The open finding is not in the queue as filtered: the filter's label. */
   outsideList?: string | null;
+  /** The list holds more findings than are loaded, so "not in the list" may only mean "further down". */
+  outsideListMore?: { loaded: number; total: number } | null;
+  loadingMoreFindings?: boolean;
+  onLoadMoreFindings?: () => void;
+  /** The finding the selection (or the URL) names, known before any of its data is. */
+  requestedSlug?: string;
   /** Why the queue holds no findings: none recorded yet, or none under these filters. */
   emptyList?: "nothing-recorded" | "filtered" | null;
   loadingMoreVersions: boolean;
@@ -256,6 +266,26 @@ export function SubmissionDocument({
   const latest = detail?.latest_version ?? null;
   const showingStale = detailLoading && detail != null;
   const blockerCount = readiness?.blockers.length ?? 0;
+  // A merged or false-positive finding is in no submission list, whatever the filters.
+  const retired = detail?.finding.workflow_status === "merged" ? "merged"
+    : detail?.finding.workflow_status === "false_positive" ? "a false positive"
+    : null;
+
+  if (!slug && requestedSlug && (detailError || detailLoading)) {
+    // The named finding has no row and no detail yet: say whether it is loading or could not be read.
+    return (
+      <section className="subm-card panel subm-card-empty" aria-label={`Submission ${requestedSlug}`}>
+        {detailError ? (
+          <p className="error-text" role="alert">
+            Submission for {requestedSlug} unavailable: {detailError}{" "}
+            <button type="button" className="qa-btn" onClick={onRefresh} disabled={detailLoading}>Retry</button>
+          </p>
+        ) : (
+          <p className="meta-text" role="status">Loading {requestedSlug}…</p>
+        )}
+      </section>
+    );
+  }
 
   if (!slug) {
     return (
@@ -353,7 +383,7 @@ export function SubmissionDocument({
               <code>submission-body.md</code> — exactly what the program receives
             </span>
             <span className="subm-hash">
-              sha256 <code>{shortHash(workspace.external_body_sha256)}</code>
+              sha256 <code title={workspace.external_body_sha256 ?? undefined}>{shortHash(workspace.external_body_sha256)}</code>
               <CopyChip text={workspace.external_body_sha256 ?? ""} toast={toast} label="Copy body sha256" />
             </span>
           </div>
@@ -498,7 +528,15 @@ export function SubmissionDocument({
     );
   } else {
     const triage = detail.blind_triage;
-    const qa = readiness?.pass1_qa ?? detail.pass1_qa;
+    const qc = readiness?.submission_qc ?? detail.submission_qc;
+    // Rows as the reviewer recorded them. A value that is not text is shown as its JSON, and an
+    // entry that is not a row object is shown whole; only an empty entry has nothing to show.
+    const recorded = (value: unknown): string => (typeof value === "string" ? value : value == null ? "" : JSON.stringify(value));
+    const failedRows = ((qc.failed_rows ?? []) as unknown[])
+      .filter((failed) => failed != null)
+      .map((failed) => (typeof failed === "object"
+        ? { row: recorded((failed as { row?: unknown }).row), quote: recorded((failed as { quote?: unknown }).quote) }
+        : { row: recorded(failed), quote: "" }));
     body = (
       <div className="subm-readiness">
         {!readiness || checkingReadiness ? (
@@ -527,23 +565,36 @@ export function SubmissionDocument({
         )}
         <dl className="subm-facts">
           <div>
-            <dt>Pass 1 QA</dt>
+            <dt>Submission QC</dt>
             <dd>
-              {qa.status === "missing" ? "No checklist verdict recorded" : <>
-                {qa.status} · {qa.auditor_dispatch_agent_id}
-                {qa.packet_id && <> · packet <code>{shortHash(qa.packet_id)}</code></>}
-                {qa.decided_at && <> · <TimeStamp value={qa.decided_at} mode="both" /></>}
-                {qa.issue && <p>{qa.issue}</p>}
-                {qa.reason && <p>{qa.reason}</p>}
+              <StatusPill domain="qc-review" value={qc.status} size="sm" />
+              {qc.status === "missing" ? null : <>
+                {qc.verdict && <> · verdict <code>{qc.verdict}</code></>}
+                {qc.reviewer_dispatch_agent_id && <> · reviewer {qc.reviewer_dispatch_agent_id}</>}
+                {qc.writer_dispatch_agent_id && <> · writer {qc.writer_dispatch_agent_id}</>}
+                {qc.packet_id && <> · packet <code title={qc.packet_id ?? undefined}>{shortHash(qc.packet_id)}</code></>}
+                {qc.decided_at && <> · <TimeStamp value={qc.decided_at} mode="both" /></>}
+                {qc.issue && <p>{qc.issue}</p>}
+                {failedRows.length > 0 && (
+                  <ul aria-label="Failed QC rows">
+                    {failedRows.map((failed, index) => (
+                      <li key={index}>
+                        <strong>{failed.row}</strong>{failed.quote ? <>: <q>{failed.quote}</q></> : null}
+                      </li>
+                    ))}
+                  </ul>
+                )}
               </>}
-              <span className="subm-muted"> Editing QA; independent blind triage remains separate.</span>
+              <span className="subm-muted">
+                {" "}({qc.required ? "a separate report-writer reviews every submission" : "not required for this engagement"})
+              </span>
             </dd>
           </div>
           <div>
             <dt>Blind triage</dt>
             <dd>
               {triage.verdict
-                ? <>{triage.verdict} · packet <code>{shortHash(triage.packet_id)}</code></>
+                ? <>{triage.verdict} · packet <code title={triage.packet_id ?? undefined}>{shortHash(triage.packet_id)}</code></>
                 : "No verdict recorded"}
               {triage.decided_at && <> · <TimeStamp value={triage.decided_at} mode="both" /></>}
               <span className="subm-muted">
@@ -554,7 +605,7 @@ export function SubmissionDocument({
           <div>
             <dt>Reviewed body</dt>
             <dd>
-              {triage.reviewed_body_sha256 ? <code>{shortHash(triage.reviewed_body_sha256)}</code> : "—"}
+              {triage.reviewed_body_sha256 ? <code title={triage.reviewed_body_sha256 ?? undefined}>{shortHash(triage.reviewed_body_sha256)}</code> : "—"}
               {triage.reviewed_body_sha256 && workspace?.external_body_sha256 && (
                 triage.reviewed_body_sha256 === workspace.external_body_sha256
                   ? <span className="subm-chip is-ok">matches current body</span>
@@ -628,10 +679,28 @@ export function SubmissionDocument({
         </div>
         {outsideList && (
           <div className="subm-header-notice is-info" role="status">
-            <span>
-              {slug} is not in this list ({outsideList}): the filters exclude it now. It stays open here; pick another
-              finding or change the filters.
-            </span>
+            {retired ? (
+              <span>
+                {slug} is {retired}, so no submission list includes it. It stays open here; pick another finding.
+              </span>
+            ) : outsideListMore ? (
+              <>
+                <span>
+                  {slug} is not among the {outsideListMore.loaded.toLocaleString()} of {outsideListMore.total.toLocaleString()} findings
+                  loaded in this list ({outsideList}); it may be further down. It stays open here.
+                </span>
+                {onLoadMoreFindings && (
+                  <button type="button" className="qa-btn" onClick={onLoadMoreFindings} disabled={loadingMoreFindings}>
+                    {loadingMoreFindings ? "Loading…" : "Load more findings"}
+                  </button>
+                )}
+              </>
+            ) : (
+              <span>
+                {slug} is not in this list ({outsideList}): the filters exclude it now. It stays open here; pick another
+                finding or change the filters.
+              </span>
+            )}
           </div>
         )}
         {previewOutdated && (

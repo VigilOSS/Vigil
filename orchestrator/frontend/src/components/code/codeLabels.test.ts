@@ -6,9 +6,12 @@ import {
   blockerLabel,
   directReadReason,
   familyLabel,
+  leadKindLabel,
+  leadStatusLabel,
   parseQualityWarning,
   requirementLabel,
 } from "./codeLabels";
+import { leadCounts } from "./codeModel";
 import { CODE_VIEWS } from "./useCodeRoute";
 
 describe("code label map", () => {
@@ -61,5 +64,28 @@ describe("code label map", () => {
     expect(parseQualityWarning("High file src/b.js: missing slot_types").kind).toBe("missing_slots");
     expect(parseQualityWarning("Repository 4 structural coverage debt: 3 unreviewed admitted file(s)").kind).toBe("direct_read");
     expect(parseQualityWarning("src/c.js: something new")).toEqual({ kind: "other", text: "src/c.js: something new" });
+    expect(
+      parseQualityWarning("Effort below tier threshold — High x ssrf (threshold 50): 2 file(s), e.g. High file src/a.js: family 'ssrf' effort 10 < 50").kind,
+    ).toBe("effort_group");
+  });
+});
+
+describe("lead counts", () => {
+  it("reads the depth-floor split as part of the leads not yet followed, never as a status", () => {
+    const counts = leadCounts({ pending: 841, depth_floor_pending: 821, queued: 2, resolved: 103, not_applicable: 1, reviewed_at_sufficient_depth: 4 });
+    expect(counts).toMatchObject({ pending: 841, depthFloorPending: 821, crossFilePending: 20, queued: 2, settled: 108 });
+    expect(counts!.statuses.map((entry) => entry.status)).toEqual(["pending", "queued", "resolved", "not_applicable", "reviewed_at_sufficient_depth"]);
+  });
+
+  it("is unknown without a summary, and counts every pending lead as cross-file when no split is given", () => {
+    expect(leadCounts(null)).toBeNull();
+    expect(leadCounts({ pending: 20, queued: 30, resolved: 5 })).toMatchObject({ depthFloorPending: 0, crossFilePending: 20, settled: 5 });
+  });
+
+  it("labels lead statuses and kinds, falling back to readable text", () => {
+    expect(leadStatusLabel("reviewed_at_sufficient_depth")).toBe("Read at sufficient depth");
+    expect(leadStatusLabel("future_status")).toBe("Future status");
+    expect(leadKindLabel("depth_floor")).toBe("Depth floor");
+    expect(leadKindLabel("future_kind")).toBe("Future kind");
   });
 });

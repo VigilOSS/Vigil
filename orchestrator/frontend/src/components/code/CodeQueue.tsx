@@ -6,11 +6,12 @@ import { useCoalescedRequest } from "../../lib/useCoalescedRequest";
 import { TimeStamp } from "../formatting";
 import { CardSkeleton } from "../Skeletons";
 import { humanizeStatus, statusLabel } from "../ui";
-import { QUEUE_MODE_LABELS } from "./codeLabels";
+import { CodeLeads } from "./CodeLeads";
+import { QUEUE_MODE_LABELS, familyLabel } from "./codeLabels";
 import { finishedNotReviewed, isReference, repoLabel } from "./codeModel";
 import { RiskTag } from "./RiskTag";
 import { QUEUE_LANES, QUEUE_LANE_PAGE, type CodeData, type CodeSource } from "./useCodeData";
-import { codeViewHref } from "./useCodeRoute";
+import { codeViewHref, type CodeRoute } from "./useCodeRoute";
 
 type Props = {
   engagementKey: string;
@@ -19,6 +20,7 @@ type Props = {
   errors: Partial<Record<CodeSource, string>>;
   pending: ReadonlySet<CodeSource>;
   refreshVersion: number;
+  route: CodeRoute;
 };
 
 const LANE_TITLES: Record<CodeQueueLane, string> = {
@@ -39,23 +41,16 @@ const BAR_SEGMENTS: Array<{ key: "done" | "processing" | "needs_context" | "erro
   ["done", "processing", "needs_context", "error", "pending"] as const
 ).map((key) => ({ key, label: statusLabel("code-queue", key) }));
 
-const LEAD_LABELS: Record<string, string> = {
-  pending: "not yet followed",
-  queued: "queued for review",
-  resolved: "followed",
-  external_context_unavailable: "need source outside the snapshot",
-  source_equivalent_analyzed: "covered by an equivalent review",
-  not_applicable: "not applicable",
-};
-
-export function CodeQueue({ engagementKey, data, errors, pending, refreshVersion }: Props) {
+export function CodeQueue({ engagementKey, data, errors, pending, refreshVersion, route }: Props) {
   const stats = data.queueStats;
   const repos = data.repos ?? [];
-  const leads = data.coverage?.trigger_summary;
   const gap = finishedNotReviewed(data.progress);
   // Lanes with jobs get a list; empty lanes collapse into one sentence.
   const busyLanes = QUEUE_LANES.filter((lane) => (data.lanes?.[lane]?.total ?? 0) > 0);
   const quietLanes = QUEUE_LANES.filter((lane) => data.lanes?.[lane] && data.lanes[lane].total === 0);
+  // A failed read is over; a missing value without one is still loading.
+  const statsFailed = Boolean(errors.queueStats) && !pending.has("queueStats");
+  const lanesFailed = Boolean(errors.lanes) && !pending.has("lanes");
 
   return (
     <>
@@ -67,7 +62,7 @@ export function CodeQueue({ engagementKey, data, errors, pending, refreshVersion
           </p>
         </header>
         {!stats ? (
-          errors.queueStats && !pending.has("queueStats") ? (
+          statsFailed ? (
             <p className="meta-text">Review job counts are unavailable.</p>
           ) : (
             <div aria-label="Loading review job counts">
@@ -125,7 +120,7 @@ export function CodeQueue({ engagementKey, data, errors, pending, refreshVersion
 
       {data.lanes === null ? (
         <section className="panel cv-section">
-          <CardSkeleton lines={4} />
+          {lanesFailed ? <p className="meta-text">Review jobs are unavailable.</p> : <CardSkeleton lines={4} />}
         </section>
       ) : (
         <>
@@ -147,31 +142,15 @@ export function CodeQueue({ engagementKey, data, errors, pending, refreshVersion
         </>
       )}
 
-      <section className="panel cv-section" aria-labelledby="cv-leads-title">
-        <header className="cv-section-head">
-          <h3 id="cv-leads-title">Cross-file leads</h3>
-          <p className="meta-text">
-            When a review finds that data flows into another file, it leaves a lead so that file gets reviewed with that context.
-          </p>
-        </header>
-        {!leads ? (
-          errors.coverage && !pending.has("coverage") ? (
-            <p className="meta-text">Lead counts are unavailable.</p>
-          ) : (
-            <div aria-label="Loading lead counts">
-              <CardSkeleton lines={1} title={false} />
-            </div>
-          )
-        ) : (
-          <ul className="cv-legend">
-            {Object.entries(leads).map(([status, count]) => (
-              <li key={status}>
-                <strong>{count.toLocaleString()}</strong> {LEAD_LABELS[status] ?? humanizeStatus(status)}
-              </li>
-            ))}
-          </ul>
-        )}
-      </section>
+      <CodeLeads
+        engagementKey={engagementKey}
+        summary={data.coverage?.trigger_summary ?? null}
+        summaryUnavailable={Boolean(errors.coverage) && !pending.has("coverage")}
+        repos={repos}
+        route={route}
+        refreshVersion={refreshVersion}
+        ready={!pending.has("queueStats") && !pending.has("lanes")}
+      />
 
       {stats && <QueueDiagnostics stats={stats} />}
     </>
@@ -280,6 +259,12 @@ function QueueJob({ engagementKey, item, repos }: { engagementKey: string; item:
         <TimeStamp value={item.lease_activity_at ?? item.updated_at} />
       </span>
       {item.skip_reason && <span className="meta-text">{item.skip_reason}</span>}
+      {/* The server-only families the file's client-bundle tag leaves optional: not owed, though a reviewer may score them. */}
+      {item.optional_vuln_classes && item.optional_vuln_classes.length > 0 ? (
+        <span className="meta-text cv-job-optional">
+          <span>Optional on this client bundle:</span> {item.optional_vuln_classes.map(familyLabel).join(", ")}
+        </span>
+      ) : null}
     </li>
   );
 }

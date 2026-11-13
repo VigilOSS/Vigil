@@ -220,8 +220,12 @@ function ProofWorkWorkspace({ engagementKey, refreshVersion = 0, workId: highlig
   stateCounts.set("reverify", searchedReverify.length);
   const scopeCounts = {
     attention: searchedParked.filter((card) => proofNeedsAttention(card.owed?.queue_state)).length + searchedReverify.length,
-    all: searchedParked.length + searchedReverify.length,
+    // "All" also lists the findings no longer parked, so it counts them.
+    all: searchedParked.length + searchedReverify.length + history.filter(cardMatchesQuery).length,
   };
+  // The states there are to filter by; with none, the group is not shown as a bare label.
+  const stateChips = STATE_ORDER.filter((state) => (stateCounts.get(state) ?? 0) > 0 || stateFilter === state);
+  const showReverifyChip = reverification.length > 0 || stateFilter === "reverify";
   const attentionTotal = data ? proofNeedsAttentionCount(data) : 0;
 
   const visibleParked = stateFilter === "reverify" ? [] : scopedParked.filter((card) => !stateFilter || card.owed?.queue_state === stateFilter);
@@ -401,8 +405,8 @@ function ProofWorkWorkspace({ engagementKey, refreshVersion = 0, workId: highlig
                   </button>
                 )}
               </div>
-              <FilterGroup label="State">
-                {STATE_ORDER.filter((state) => (stateCounts.get(state) ?? 0) > 0 || stateFilter === state).map((state) => (
+              {(stateChips.length > 0 || showReverifyChip) && <FilterGroup label="State">
+                {stateChips.map((state) => (
                   <FilterChip
                     key={state}
                     label={statusLabel("proof-work", state)}
@@ -412,7 +416,7 @@ function ProofWorkWorkspace({ engagementKey, refreshVersion = 0, workId: highlig
                     onToggle={() => toggleState(state)}
                   />
                 ))}
-                {(reverification.length > 0 || stateFilter === "reverify") && (
+                {showReverifyChip && (
                   <FilterChip
                     label="Needs re-verification"
                     status={{ domain: "proof-work", value: "stale" }}
@@ -422,7 +426,7 @@ function ProofWorkWorkspace({ engagementKey, refreshVersion = 0, workId: highlig
                     onToggle={() => toggleState("reverify")}
                   />
                 )}
-              </FilterGroup>
+              </FilterGroup>}
               <ClearFiltersButton count={activeFilters} onClear={clearFilters} />
             </div>
           </div>

@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { cleanup, render } from "@testing-library/react";
-import type { ColDef, RowClickedEvent } from "ag-grid-community";
+import type { ColDef, ICellRendererParams, RowClickedEvent } from "ag-grid-community";
+import type { ComponentType } from "react";
 import { afterEach, expect, it, vi } from "vitest";
 
 import { deriveRunRow, type RunRow } from "../lib/runAudit";
@@ -66,4 +67,14 @@ it("opens a run from its row but not from a link inside the row", () => {
   const cell = document.createElement("div");
   grid.onRowClicked?.({ data: row, event: { target: cell } } as unknown as RowClickedEvent<RunRow>);
   expect(open).toHaveBeenCalledWith(9, null);
+});
+
+it("keeps the time of day on runs started too long ago for a relative age", () => {
+  render(<RunsGrid engagementKey="acme" rows={[deriveRunRow(run)]} selectedId={null} onRowOpen={() => {}} />);
+  const Cell = grid.columnDefs[0].cellRenderer as ComponentType<Partial<ICellRendererParams<RunRow>>>;
+  const old = deriveRunRow({ ...run, created_at: "2026-01-05 14:07:09" });
+  const recent = deriveRunRow({ ...run, id: 10, created_at: new Date(Date.now() - 2 * 3_600_000).toISOString() });
+  const cells = render(<><span data-testid="old"><Cell data={old} /></span><span data-testid="recent"><Cell data={recent} /></span></>);
+  expect(cells.getByTestId("old").textContent).toBe("2026-01-05 14:07 UTC");
+  expect(cells.getByTestId("recent").textContent).toBe("2h ago");
 });

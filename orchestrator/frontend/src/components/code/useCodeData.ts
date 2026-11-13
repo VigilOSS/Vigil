@@ -1,18 +1,19 @@
 // The Code view loads its own data. Summary sources (repositories, queue
-// counts, coverage, review progress, readiness) load on mount and on every refresh; heavier
+// counts, review progress, readiness) load on mount and on every refresh; heavier
 // per-section sources load only while their section is open (a lane's later
 // pages and the results list load in their own components). Each source is
 // single-flight (lib/coalesce): a refresh that arrives mid-request folds into
 // one follow-up load, and the previous value stays on screen until the new one
 // lands. Live updates reach the view through the tab's throttled refresh token
-// (lib/useLiveRefreshToken).
+// (lib/useLiveRefreshToken). Coverage is not a request of its own: completion
+// readiness carries it (`include_coverage`), because the backend computes
+// readiness from that same summary.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
 import { createCoalescedRunner } from "../../lib/coalesce";
 
 import {
-  getCodeCoverage,
   getCodeQueueStats,
   getCodeReadiness,
   listCodeModules,
@@ -49,6 +50,8 @@ export type CodeData = {
 };
 
 export type CodeSource = keyof CodeData;
+/** The sources fetched; `coverage` arrives inside completion readiness. */
+type FetchedSource = Exclude<CodeSource, "coverage">;
 
 const EMPTY: CodeData = {
   repos: null,
@@ -61,10 +64,9 @@ const EMPTY: CodeData = {
   lanes: null,
 };
 
-const SOURCE_LABELS: Record<CodeSource, string> = {
+const SOURCE_LABELS: Record<FetchedSource, string> = {
   repos: "repositories",
   queueStats: "review queue counts",
-  coverage: "coverage",
   readiness: "next-transition readiness",
   completion: "completion readiness",
   progress: "repository progress",
@@ -72,7 +74,7 @@ const SOURCE_LABELS: Record<CodeSource, string> = {
   lanes: "review jobs",
 };
 
-const VIEW_SOURCES: Partial<Record<CodeView, CodeSource[]>> = {
+const VIEW_SOURCES: Partial<Record<CodeView, FetchedSource[]>> = {
   queue: ["lanes"],
   modules: ["modules"],
 };
@@ -91,12 +93,12 @@ export function useCodeData({
   refreshVersion: number;
 }) {
   const [data, setData] = useState<CodeData>(EMPTY);
-  const [errors, setErrors] = useState<Partial<Record<CodeSource, string>>>({});
-  const [pending, setPending] = useState<ReadonlySet<CodeSource>>(new Set());
+  const [errors, setErrors] = useState<Partial<Record<FetchedSource, string>>>({});
+  const [pending, setPending] = useState<ReadonlySet<FetchedSource>>(new Set());
   const [manualVersion, setManualVersion] = useState(0);
   // One single-flight runner per source; each pass runs the latest task.
-  const runners = useRef(new Map<CodeSource, Runner>());
-  const tasks = useRef(new Map<CodeSource, () => Promise<void>>());
+  const runners = useRef(new Map<FetchedSource, Runner>());
+  const tasks = useRef(new Map<FetchedSource, () => Promise<void>>());
   const mounted = useRef(true);
 
   useEffect(() => {
@@ -107,18 +109,18 @@ export function useCodeData({
   }, []);
 
   const fetchers = useCallback(
-    (source: CodeSource): (() => Promise<CodeData[CodeSource]>) => {
+    (source: FetchedSource): (() => Promise<CodeData[FetchedSource]>) => {
       switch (source) {
         case "repos":
           return () => listCodeRepos(engagementKey);
         case "queueStats":
           return () => getCodeQueueStats(engagementKey);
-        case "coverage":
-          return () => getCodeCoverage(engagementKey);
         case "readiness":
-          return () => getCodeReadiness(engagementKey, target);
+          // When the next transition is completion, this read is also the
+          // completion one, so it carries the coverage summary.
+          return () => getCodeReadiness(engagementKey, target, { includeCoverage: target === "complete" });
         case "completion":
-          return () => getCodeReadiness(engagementKey, "complete");
+          return () => getCodeReadiness(engagementKey, "complete", { includeCoverage: true });
         case "progress":
           return () => listCodeRepoReviewProgress(engagementKey);
         case "modules":
@@ -139,7 +141,7 @@ export function useCodeData({
   );
 
   const load = useCallback(
-    (source: CodeSource) => {
+    (source: FetchedSource) => {
       const fetcher = fetchers(source);
       const task = async () => {
         // A pass queued before unmount has nothing left to update.
@@ -192,7 +194,6 @@ export function useCodeData({
     summaryTrigger.current = trigger;
     load("repos");
     load("queueStats");
-    load("coverage");
     // Progress explains why finished review jobs do not count as reviewed
     // files, next to the reviewed count every section shows.
     load("progress");
@@ -209,12 +210,33 @@ export function useCodeData({
   }, [load, engagementKey, target, view, refreshVersion, manualVersion]);
 
   const reload = useCallback(() => setManualVersion((value) => value + 1), []);
+  // A trigger this render announces is owed its reads before the effects
+  // above have started them. Those sources count as pending already, so a
+  // section's own effect (which runs first) never takes the values held from
+  // an earlier visit for settled ones.
+  const starting: FetchedSource[] = [
+    ...(summaryTrigger.current !== `${engagementKey}|${target}|${refreshVersion}|${manualVersion}`
+      ? (["repos", "queueStats", "progress", "readiness", ...(sameTarget ? [] : ["completion"])] as FetchedSource[])
+      : []),
+    ...(sectionTrigger.current !== `${engagementKey}|${target}|${view}|${refreshVersion}|${manualVersion}`
+      ? VIEW_SOURCES[view] ?? []
+      : []),
+  ];
+  const owed: ReadonlySet<FetchedSource> = starting.length > 0 ? new Set([...pending, ...starting]) : pending;
+  const completionSource: FetchedSource = sameTarget ? "readiness" : "completion";
   const completion = sameTarget ? data.readiness : data.completion;
+  // Coverage shares its read with completion readiness, and so its loading
+  // and error state; the error is listed once, under that read.
+  const errorBySource: Partial<Record<CodeSource, string>> = { ...errors };
+  if (errors[completionSource]) errorBySource.coverage = errors[completionSource];
+  const pendingSources: ReadonlySet<CodeSource> = owed.has(completionSource)
+    ? new Set<CodeSource>([...owed, "coverage"])
+    : owed;
   return {
-    data: { ...data, completion },
+    data: { ...data, completion, coverage: completion?.coverage ?? null },
     errors: Object.values(errors),
-    errorBySource: errors,
-    pending,
+    errorBySource,
+    pending: pendingSources,
     reload,
   };
 }

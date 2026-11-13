@@ -33,6 +33,15 @@ type EngagementsPageProps = {
 // (updated_at desc → newest activity first), matching the brief.
 type EngagementSort = "activity" | "created" | "findings" | "target" | "status";
 const ENGAGEMENT_SORT_KEY = "engagements.sort";
+const ENGAGEMENT_SEARCH_KEY = "engagements.search";
+
+function readEngagementSearch(): string {
+  try {
+    return window.sessionStorage.getItem(ENGAGEMENT_SEARCH_KEY) ?? "";
+  } catch {
+    return "";
+  }
+}
 const ENGAGEMENT_SORT_OPTIONS: { value: EngagementSort; label: string }[] = [
   { value: "activity", label: "Latest activity" },
   { value: "created", label: "Recently created" },
@@ -80,9 +89,19 @@ export function EngagementsPage({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [sort, setSort] = useState<EngagementSort>(() => readEngagementSort());
-  const [query, setQuery] = useState("");
+  const [query, setQuery] = useState(() => readEngagementSearch());
   const deleteDialogRef = useRef<HTMLDivElement | null>(null);
   const deleteOpenerRef = useRef<HTMLElement | null>(null);
+
+  // The search lasts for the browser session, so a reload or returning from an engagement keeps the narrowed list.
+  useEffect(() => {
+    try {
+      if (query) window.sessionStorage.setItem(ENGAGEMENT_SEARCH_KEY, query);
+      else window.sessionStorage.removeItem(ENGAGEMENT_SEARCH_KEY);
+    } catch {
+      // ignore
+    }
+  }, [query]);
 
   // Persist the chosen sort so it survives reload (FindingsTab persistence idiom).
   useEffect(() => {

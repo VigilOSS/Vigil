@@ -8,7 +8,7 @@
 // and JSON through JsonView's text tokenizer (ADR 0018). "Raw" always shows
 // the exact text the backend returned.
 
-import { useEffect, useMemo, useState, type ReactNode } from "react";
+import { memo, useEffect, useMemo, useState, type ReactNode } from "react";
 import type { EngagementFile, EngagementFileMeta } from "../lib/filesApi";
 import { TimeStamp, formatBytes } from "./formatting";
 import { JsonView } from "./JsonView";
@@ -206,20 +206,29 @@ function MarkdownContent({ content }: { content: string }) {
   );
 }
 
-function RenderedBody({ artifact }: { artifact: ViewerContent }) {
+/** A JSON document's parsed value; null when its text does not parse. */
+type ParsedJson = { value: unknown } | null;
+
+function parseJsonArtifact(artifact: ViewerContent): ParsedJson {
+  try {
+    return { value: JSON.parse(artifact.content) };
+  } catch {
+    // A read cut at the view limit, or a damaged file.
+    return null;
+  }
+}
+
+// Rendering a large document is the costly part of this view, so it happens
+// once per content: the viewer's other updates (loading states, the file
+// list) leave it alone.
+const RenderedBody = memo(function RenderedBody({ artifact, json }: { artifact: ViewerContent; json: ParsedJson }) {
   if (isJsonlArtifact(artifact)) {
     return <JsonlContent content={artifact.content} truncated={Boolean(artifact.truncated)} />;
   }
-  if (isJsonArtifact(artifact)) {
-    try {
-      return <JsonView value={JSON.parse(artifact.content)} />;
-    } catch {
-      return <RawText content={artifact.content} />;
-    }
-  }
+  if (json) return <JsonView value={json.value} />;
   if (isMarkdownArtifact(artifact)) return <MarkdownContent content={artifact.content} />;
   return <RawText content={artifact.content} />;
-}
+});
 
 function StubNotice({ waiver }: { waiver: string }) {
   if (waiver.trim()) {
@@ -298,7 +307,13 @@ export function ArtifactViewer({
   const hasScope = present.some((file) => file.name === "scope.json");
   const waiting = Boolean(selectedName) && !displayedArtifact && !loadError;
   const meta: Partial<EngagementFileMeta> & { relative_path?: string } = { ...selectedFile, ...displayedArtifact };
-  const renderable = displayedArtifact ? hasRenderedView(displayedArtifact) : false;
+  const json = useMemo<ParsedJson>(
+    () => (displayedArtifact && isJsonArtifact(displayedArtifact) && !isJsonlArtifact(displayedArtifact) ? parseJsonArtifact(displayedArtifact) : null),
+    [displayedArtifact],
+  );
+  // A JSON file whose text does not parse has no rendered view: it shows as its exact text.
+  const unparsedJson = Boolean(displayedArtifact) && isJsonArtifact(displayedArtifact!) && !isJsonlArtifact(displayedArtifact!) && json === null;
+  const renderable = displayedArtifact ? hasRenderedView(displayedArtifact) && !unparsedJson : false;
   const effectiveView = renderable ? view : "raw";
 
   return (
@@ -420,8 +435,14 @@ export function ArtifactViewer({
                   Open {displayedArtifact.relative_path} in the engagement directory for the rest.
                 </div>
               )}
+              {unparsedJson && (
+                <div className="files-notice" role="note">
+                  <strong>No rendered view.</strong>{" "}
+                  This file's text does not parse as JSON{displayedArtifact.truncated ? " (the read stops partway through it)" : ""}, so it is shown exactly as stored.
+                </div>
+              )}
               <div className="files-body">
-                {effectiveView === "raw" ? <RawText content={displayedArtifact.content} /> : <RenderedBody artifact={displayedArtifact} />}
+                {effectiveView === "raw" ? <RawText content={displayedArtifact.content} /> : <RenderedBody artifact={displayedArtifact} json={json} />}
               </div>
             </>
           ) : waiting ? (

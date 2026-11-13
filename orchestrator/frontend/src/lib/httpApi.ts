@@ -166,6 +166,22 @@ export function requestVariantOrderFromModel(
   return DEFAULT_REQUEST_VARIANT_ORDER;
 }
 
+/**
+ * A column's starting sort for a grid that mounts on `order` (the tab keeps
+ * the order across visits, so a new grid shows the order the summary names
+ * and the record's Previous / Next walk).
+ */
+export function requestVariantColumnInitialSort(colId: string, order: RequestVariantOrder): RequestVariantSortDir | undefined {
+  return REQUEST_VARIANT_COLUMN_SORT[colId] === order.sort ? order.dir : undefined;
+}
+
+/** A kept order a grid column can show, or the default for anything else. */
+export function parseRequestVariantOrder(value: unknown): RequestVariantOrder {
+  const { sort, dir } = (value && typeof value === "object" ? value : {}) as Record<string, unknown>;
+  const shown = Object.values(REQUEST_VARIANT_COLUMN_SORT).find((key) => key === sort);
+  return shown && (dir === "asc" || dir === "desc") ? { sort: shown, dir } : DEFAULT_REQUEST_VARIANT_ORDER;
+}
+
 /** Column header names, for "Sorted by …". */
 export const REQUEST_VARIANT_SORT_LABELS: Record<RequestVariantSortKey, { label: string; kind: "time" | "number" | "text" }> = {
   last_seen_at: { label: "Last seen", kind: "time" },
@@ -252,4 +268,24 @@ export async function readLedgerHead<T>(
     return linedUp ? [...head.slice(0, at), ...held].slice(0, limit) : fetchPage(0, limit);
   }
   return fetchPage(0, limit);
+}
+
+/**
+ * The full size of a body the capture cut short, when the exchange's own
+ * headers state it. The capture stores (and counts) the decoded body, so a
+ * Content-Length says how large that was only when the body carries no
+ * content coding; a coded (gzip, br) body's length is its size on the wire,
+ * and a chunked one has none. Null when the full size is not recorded.
+ */
+export function fullBodyBytes(headers: Record<string, string> | null | undefined, storedBytes: number): number | null {
+  let length: string | undefined;
+  let coding = "";
+  for (const [name, value] of Object.entries(headers ?? {})) {
+    const header = name.toLowerCase();
+    if (header === "content-length") length = String(value).trim();
+    if (header === "content-encoding") coding = String(value).trim().toLowerCase();
+  }
+  if (length === undefined || !/^\d+$/.test(length) || (coding && coding !== "identity")) return null;
+  const full = Number(length);
+  return Number.isSafeInteger(full) && full > storedBytes ? full : null;
 }

@@ -111,6 +111,13 @@
   gap: 8px;
 }
 .record-pill-reason { color: var(--ink-2); font-size: 0.8rem; }
+/* A long tag in the header (a source or path recorded as one value) wraps
+ * inside the header instead of widening the page. */
+.record-pills > .tag {
+  max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
 .record-dates {
   display: flex;
   flex-wrap: wrap;

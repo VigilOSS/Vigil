@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 
-import { StrictMode } from "react";
+import { StrictMode, useEffect, useState } from "react";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -129,6 +129,24 @@ beforeEach(() => {
   window.sessionStorage.clear();
   vi.mocked(listOobProbes).mockResolvedValue([probe]);
 });
+
+// The tab as the workspace mounts it: the open probe and section come from
+// the address, so the tab's own writes come back to it as props.
+function RoutedOastTab() {
+  const read = () => new URLSearchParams(window.location.hash.split("?")[1] ?? "");
+  const [params, setParams] = useState(read);
+  useEffect(() => {
+    const onHash = () => setParams(read());
+    window.addEventListener("hashchange", onHash);
+    return () => window.removeEventListener("hashchange", onHash);
+  }, []);
+  const probeId = Number(params.get("probe"));
+  return (
+    <ToastProvider>
+      <OastTab engagementKey="demo" refreshVersion={0} initialProbeId={probeId > 0 ? probeId : undefined} initialDrawerTab={params.get("dtab") ?? undefined} />
+    </ToastProvider>
+  );
+}
 
 async function openCallbacks() {
   const record = await screen.findByRole("region", RECORD);
@@ -596,6 +614,73 @@ describe("OastTab operator verdicts", () => {
     await waitFor(() => expect(screen.queryByRole("region", RECORD)).toBeNull());
     expect(screen.getByRole("button", { name: /^Needs attention/ }).textContent).toContain("1");
     expect(screen.getAllByRole("gridcell").map((cell) => cell.textContent)).toEqual(["fired-w"]);
+  });
+
+  it("keeps the review list while stepping away from and back to a probe just given a verdict", async () => {
+    const confirmed = { ...fired, status: "confirmed", interactions: [], verdict: { verdict: "confirmed", note: "", actor: "operator", recorded_at: "2026-09-13T10:00:00Z" } };
+    vi.mocked(request).mockResolvedValue(confirmed as never);
+    render(<RoutedOastTab />);
+    fireEvent.click(await screen.findByRole("gridcell", { name: "fired-v" }));
+    const record = await screen.findByRole("region", RECORD);
+    fireEvent.click(within(record).getByRole("button", { name: "Confirm callback…" }));
+    vi.mocked(listOobProbes).mockResolvedValue([{ ...fired, status: "confirmed" }, other]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Record verdict: Operator confirmed" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    await waitFor(() => expect(listOobProbes).toHaveBeenCalledTimes(2));
+
+    fireEvent.click(within(record).getByRole("button", { name: "Next probe" }));
+    expect(await within(record).findByRole("heading", { level: 2, name: /acme\.example\/w/ })).toBeTruthy();
+    fireEvent.click(within(record).getByRole("button", { name: "Previous probe" }));
+    expect(await within(record).findByRole("heading", { level: 2, name: /acme\.example\/v/ })).toBeTruthy();
+    // The reviewed probe is still the first of the two under review.
+    expect(within(record).getByText("1 of 2 results")).toBeTruthy();
+
+    fireEvent.click(within(record).getByRole("button", { name: "Back to results" }));
+    await waitFor(() => expect(screen.queryByRole("region", RECORD)).toBeNull());
+    expect(screen.getByRole("button", { name: /^Needs attention/ }).getAttribute("aria-pressed")).toBe("true");
+    expect(screen.getAllByRole("gridcell").map((cell) => cell.textContent)).toEqual(["fired-w"]);
+  });
+
+  it("keeps keyboard focus in the record after a verdict is recorded", async () => {
+    const confirmed = { ...fired, status: "confirmed", interactions: [], verdict: { verdict: "confirmed", note: "", actor: "operator", recorded_at: "2026-09-13T10:00:00Z" } };
+    vi.mocked(request).mockResolvedValue(confirmed as never);
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} initialProbeId={21} /></ToastProvider>);
+    const record = await screen.findByRole("region", RECORD);
+    const confirm = within(record).getByRole("button", { name: "Confirm callback…" });
+    confirm.focus();
+    fireEvent.click(confirm);
+    vi.mocked(listOobProbes).mockResolvedValue([{ ...fired, status: "confirmed" }, other]);
+    fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: "Record verdict: Operator confirmed" }));
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    // The button that opened the dialog is gone: the probe now offers the other verdict.
+    expect(confirm.isConnected).toBe(false);
+    await waitFor(() => expect(record.contains(document.activeElement)).toBe(true));
+  });
+
+  it("reads a probe's callback history again each time its record opens", async () => {
+    vi.mocked(getOobProbe).mockResolvedValueOnce({ ...fired, interactions: [interaction(1)], verdict: null } as never);
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} /></ToastProvider>);
+    fireEvent.click(await screen.findByRole("gridcell", { name: "fired-v" }));
+    let record = await screen.findByRole("region", RECORD);
+    await waitFor(() => expect(within(record).getByRole("button", { name: /^Callbacks/ }).textContent).toMatch(/1$/));
+    fireEvent.click(within(record).getByRole("button", { name: "Back to results" }));
+    await waitFor(() => expect(screen.queryByRole("region", RECORD)).toBeNull());
+
+    // Two more callbacks arrived while the record was closed.
+    vi.mocked(getOobProbe).mockResolvedValueOnce({ ...fired, interactions: [interaction(1), interaction(2), interaction(3)], verdict: null } as never);
+    fireEvent.click(screen.getByRole("gridcell", { name: "fired-v" }));
+    record = await screen.findByRole("region", RECORD);
+    await waitFor(() => expect(within(record).getByRole("button", { name: /^Callbacks/ }).textContent).toMatch(/3$/));
+  });
+
+  it("leaves an open record alone when / is pressed with a modifier key", async () => {
+    render(<ToastProvider><OastTab engagementKey="demo" refreshVersion={0} initialProbeId={21} /></ToastProvider>);
+    await screen.findByRole("region", RECORD);
+    fireEvent.keyDown(document.body, { key: "/", ctrlKey: true });
+    fireEvent.keyDown(document.body, { key: "/", metaKey: true });
+    expect(screen.getByRole("region", RECORD)).toBeTruthy();
+    fireEvent.keyDown(document.body, { key: "/" });
+    await waitFor(() => expect(screen.queryByRole("region", RECORD)).toBeNull());
   });
 
   it("reports the probes awaiting a verdict to the rail as soon as a verdict is recorded", async () => {

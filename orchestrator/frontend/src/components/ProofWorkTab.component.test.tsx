@@ -277,6 +277,17 @@ describe('ProofWorkTab', () => {
     expect(screen.queryByRole('group', { name: 'State' })).toBeNull();
   });
 
+  it('counts the findings no longer parked in the All scope that lists them, with no empty State group', async () => {
+    // Earlier proof work whose finding is no longer parked: nothing owed, one item kept as history.
+    vi.mocked(listProofWork).mockResolvedValue(queue({ owed: [], queue_state_counts: {} }));
+    render(<ProofWorkTab engagementKey="acme" />);
+    expect(await screen.findByText(/Findings no longer parked/)).toBeTruthy();
+    // The scope that lists that finding counts it.
+    expect(screen.getByRole('button', { name: /^All/ }).textContent).toContain('1');
+    // No state to filter by: the group is not shown as a bare label.
+    expect(screen.queryByRole('group', { name: 'State' })).toBeNull();
+  });
+
   it('shows a work item a link names even when the scope would hide it', async () => {
     const ready = { ...owed, finding_slug: 'VA-003', finding_id: 3, title: 'Acme ready hypothesis', work_ids: [10], queue_state: 'ready' };
     vi.mocked(listProofWork).mockResolvedValue(queue({ owed: [owed, ready], items: [work, { ...work, id: 10, finding_slug: 'VA-003', queue_state: 'ready', approval_required: false }], queue_state_counts: { needs_approval: 1, ready: 1 } }));
