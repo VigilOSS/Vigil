@@ -272,6 +272,36 @@ def get_config_value(key: str, default: str | None = None) -> str | None:
     return load_config().get(key, default)
 
 
+# Model a Claude Code operator session runs per offensive track. Specialists the
+# operator dispatches inherit it unless their generated wrapper pins a model.
+CLAUDE_TRACK_MODELS = {
+    "code": "claude-opus-5-5[1m]",
+    "web": "claude-opus-5[1m]",
+}
+# Override value that passes no --model, leaving Claude Code's own default in effect.
+CLAUDE_CLIENT_DEFAULT_MODEL = "default"
+
+
+def claude_session_model(track: str) -> tuple[str | None, str | None]:
+    """Return ``(model, source)`` for a Claude operator session on ``track``.
+
+    ``VIGIL_CLAUDE_MODEL_<TRACK>`` wins over the ``claude.model.<track>`` config key,
+    which wins over the track default. ``model`` is None when Vigil passes no
+    ``--model``: the override is ``default``, or the track has no Vigil default.
+    """
+    if track not in CLAUDE_TRACK_MODELS:
+        return None, None
+    env_name = f"VIGIL_CLAUDE_MODEL_{track.upper()}"
+    config_key = f"claude.model.{track}"
+    if (value := _str_env(env_name)) is not None:
+        source = env_name
+    elif (value := (get_config_value(config_key) or "").strip()):
+        source = f"config {config_key}"
+    else:
+        return CLAUDE_TRACK_MODELS[track], f"Vigil {track} default"
+    return (None if value == CLAUDE_CLIENT_DEFAULT_MODEL else value), source
+
+
 @contextmanager
 def _config_mutation_lock(target: Path) -> Iterator[None]:
     target.parent.mkdir(parents=True, exist_ok=True)

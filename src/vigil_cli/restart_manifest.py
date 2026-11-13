@@ -77,9 +77,9 @@ _CONSUMER_LABELS = {
 def backend_restart_remedy(workspace: Path, base_url: str) -> str:
     """Name the reload action without losing explicit workspace/remote ownership."""
     from .paths import resolve_install_root
-    from .preflight import managed_backend_host
+    from .preflight import managed_backend_endpoint
 
-    if managed_backend_host(base_url) is None:
+    if managed_backend_endpoint(base_url) is None:
         return f"restart or upgrade the configured backend at {base_url} on its owning host"
     explicit = workspace.resolve() != resolve_install_root().resolve()
     argv = ["vigil", *(["--root", str(workspace)] if explicit else []), "orchestrator", "restart"]
@@ -418,7 +418,7 @@ def backend_state(install_root: Path, *, engagement_dir: Path | None = None) -> 
     if engagement_dir is None:
         return _backend_state_from_probe(install_root, _readyz_backend_runtime(install_root))
     from .paths import resolve_orchestrator_base_url
-    from .preflight import managed_backend_host
+    from .preflight import managed_backend_endpoint
     from .status import _orchestrator_readyz_snapshot
 
     base_url = resolve_orchestrator_base_url(install_root, engagement_dir)
@@ -426,7 +426,7 @@ def backend_state(install_root: Path, *, engagement_dir: Path | None = None) -> 
     probe = _backend_probe_from_readiness(readiness)
     if not probe.reachable:
         return _backend_unknown(f"cannot check backend freshness at {base_url}")
-    if managed_backend_host(base_url) is None:
+    if managed_backend_endpoint(base_url) is None:
         if probe.runtime and probe.runtime.get("restart_required") is True:
             return _state("backend", "stale",
                           detail="configured remote backend reports changed application inputs")

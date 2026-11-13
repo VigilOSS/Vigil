@@ -1816,6 +1816,7 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
         for hook in entry["hooks"]
     ]
     assert commands == [
+        shlex.join(["bash", str(hooks_dir / "application-read-only.sh")]),
         shlex.join(["bash", str(hooks_dir / "post-tool-log.sh")]),
         shlex.join(["bash", str(hooks_dir / "post-compact-resume.sh")]),
         shlex.join(["bash", str(hooks_dir / "session-end.sh")]),

@@ -230,9 +230,9 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         "--kill-reason",
         default=None,
         help=(
-            "REQUIRED with --disposition false_positive: which check failed and why the "
-            "alert is not a real incident. Stored as details.kill_reason, which the "
-            "backend demands before it will record a false-positive verdict."
+            "With --disposition false_positive: which check failed and why the alert "
+            "is not a real incident, stored as details.kill_reason. Without it the "
+            "backend stores --reason (or a summary of the counter-check) there."
         ),
     )
     verify_p.add_argument(
@@ -241,8 +241,9 @@ def register_blue_parser(sub: argparse._SubParsersAction) -> None:
         default=None,
         choices=(1, 2, 3, 4, 5),
         help=(
-            "REQUIRED with --disposition false_positive: the numbered verification check "
-            "(1-5) that produced the false-positive verdict. Stored as details.kill_check."
+            "With --disposition false_positive: the numbered verification check (1-5) "
+            "that produced the false-positive verdict, stored as details.kill_check "
+            "(optional)."
         ),
     )
     verify_p.add_argument("--new-severity", default=None)
@@ -921,6 +922,7 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             f"finding {args.finding_slug!r}. Dispatch the verifier first via: "
             f"vigil assess agent start --role incident-verifier --tier L3 "
             f"--skills alert-fp-verification --task 'verify {args.finding_slug}' "
+            f"--finding-slugs {args.finding_slug} "
             f"--rate-budget '<authored tenant query budget>' "
             f"--prompt-context-json dispatch-context.json\nAlternatively run "
             f"vigil blue verify {args.finding_slug} --force to record an operator-approved bypass."
@@ -953,12 +955,11 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
             "disposition": blue_disp,  # preserve blue vocab verbatim for report-writer
             "evidence_refs": evidence_refs,
         }
-        # The counter-check is the structured decision; details.kill_reason +
-        # details.kill_check are a SEPARATE backend requirement for the same
-        # verdict, and the wrapper had no way to carry them at all — so a blue
-        # kill could not be recorded however it was invoked. The backend owns
-        # the refusal when they are missing (it names both keys and the 1-5
-        # range); what belongs here is the ability to supply them.
+        # The counter-check is the structured decision; details.kill_reason and
+        # details.kill_check describe the same verdict. The backend derives the
+        # kill reason from --reason or the counter-check when it is omitted;
+        # kill_check is optional. The wrapper only carries what the analyst
+        # supplied.
         kill_reason = (getattr(args, "kill_reason", None) or "").strip()
         kill_check = getattr(args, "kill_check", None)
         if kill_reason:
@@ -1029,10 +1030,28 @@ def _cmd_verify(args: argparse.Namespace, install_root: Path) -> None:
         raise SystemExit(rc)
 
 
+def _names_finding(row: object, finding_slug: str) -> bool:
+    """Whether one dispatch row names *finding_slug* exactly.
+
+    The row's structured ``finding_slugs`` list, or the slug as a whole token of
+    its task: a longer slug that begins with this one (``VA-10`` for ``VA-1``)
+    names a different finding.
+    """
+    if not isinstance(row, dict):
+        return False
+    slugs = row.get("finding_slugs")
+    if isinstance(slugs, list) and finding_slug in slugs:
+        return True
+    task = row.get("task")
+    return isinstance(task, str) and re.search(
+        rf"(?<![A-Za-z0-9_-]){re.escape(finding_slug)}(?![A-Za-z0-9_-])", task
+    ) is not None
+
+
 def _has_verifier_dispatch_for(install_root: Path, eng_dir: Path, finding_slug: str) -> bool:
-    # Cheap heuristic: list incident-verifier dispatches and grep for the
-    # finding slug in their task / finding_slugs field. Best-effort — if the
-    # backend is unreachable we return True so the verify call still attempts
+    # List incident-verifier dispatches and look for one that names the finding
+    # (`_names_finding`). Best-effort: if the backend is unreachable or the
+    # listing does not parse we return True so the verify call still attempts
     # (the user's warning is only suppressed in that case).
     try:
         result = subprocess.run(
@@ -1045,8 +1064,15 @@ def _has_verifier_dispatch_for(install_root: Path, eng_dir: Path, finding_slug: 
         return True  # fail-open; the warning is advisory anyway
     if result.returncode != 0:
         return True
-    haystack = result.stdout or ""
-    return finding_slug in haystack
+    rows = []
+    for line in (result.stdout or "").splitlines():
+        if not line.strip():
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            return True
+    return any(_names_finding(row, finding_slug) for row in rows)
 
 
 def _fetch_containment_decision(

@@ -48,11 +48,15 @@ def _emit(record: str, *, state: str | None = None) -> None:
     print(term.row(state, "Orchestrator", detail, stream=sys.stdout))
 
 
+DEFAULT_HOST = "127.0.0.1"
+DEFAULT_PORT = 18000
+
+
 @dataclass(frozen=True, slots=True)
 class OrchestratorOptions:
     install_root: Path
-    host: str = "127.0.0.1"
-    port: int = 18000
+    host: str = DEFAULT_HOST
+    port: int = DEFAULT_PORT
     build: bool = False
     foreground: bool = False
     allow_existing: bool = False
@@ -99,6 +103,100 @@ def _startup_timeout_seconds() -> float:
 def start_orchestrator(options: OrchestratorOptions) -> None:
     with service_start_lock(f"orchestrator:{options.host}:{options.port}"):
         _start_orchestrator_locked(options)
+
+
+def _endpoint_url(host: str, port: int) -> str:
+    return f"http://{'[' + host + ']' if ':' in host else host}:{port}"
+
+
+def _receipt_endpoint(receipt: dict[str, object], *, host: str, port: int) -> tuple[str, int] | None:
+    """A receipt's recorded endpoint, defaulting omitted fields; ``None`` when malformed."""
+    receipt_host, receipt_port = receipt.get("host", host), receipt.get("port", port)
+    if (not isinstance(receipt_port, int) or isinstance(receipt_port, bool)
+            or not 0 < receipt_port <= 65535 or not isinstance(receipt_host, str) or not receipt_host):
+        return None
+    return receipt_host, receipt_port
+
+
+def owned_backend_endpoint(install_root: Path) -> tuple[str, int] | None:
+    """The endpoint this workspace's live, receipted backend was started on."""
+    install_root = install_root.expanduser().resolve()
+    pid_file = resolve_runtime_state_dir(install_root) / "pids" / "orchestrator.pid"
+    try:
+        receipt = json.loads(pid_file.with_suffix(".json").read_text())
+    except (OSError, ValueError):
+        return None
+    pid = _read_pid(pid_file)
+    if not isinstance(receipt, dict) or pid is None or pid <= 0 or receipt.get("pid") != pid:
+        return None
+    if receipt.get("workspace") != str(install_root):
+        return None
+    try:
+        identity = _process_identity(pid)
+    except SystemExit:
+        return None
+    if not identity or receipt.get("process_identity") != identity:
+        return None
+    return _receipt_endpoint(receipt, host=DEFAULT_HOST, port=DEFAULT_PORT)
+
+
+def lifecycle_endpoint(install_root: Path) -> tuple[str, int]:
+    """The local endpoint start, stop and restart manage for this workspace.
+
+    The owned backend's receipt wins; otherwise the workspace's resolved base URL
+    when it names a managed loopback endpoint; otherwise the default endpoint.
+    """
+    owned = owned_backend_endpoint(install_root)
+    if owned is not None:
+        return owned
+    from .paths import resolve_orchestrator_base_url
+    from .preflight import managed_backend_endpoint
+    configured = managed_backend_endpoint(resolve_orchestrator_base_url(install_root.expanduser().resolve()))
+    return configured or (DEFAULT_HOST, DEFAULT_PORT)
+
+
+def backend_ui_url(install_root: Path) -> str:
+    """The web UI of the workspace's running backend, else its resolved base URL."""
+    owned = owned_backend_endpoint(install_root)
+    if owned is not None:
+        return _endpoint_url(*owned)
+    from .paths import resolve_orchestrator_base_url
+    return resolve_orchestrator_base_url(install_root.expanduser().resolve())
+
+
+def warn_if_clients_resolve_elsewhere(install_root: Path, host: str, port: int) -> None:
+    """Name the setting that points this workspace's clients at an explicitly chosen port."""
+    from .paths import global_default_install_root, resolve_orchestrator_base_url
+    from .preflight import managed_backend_endpoint
+    install_root = install_root.expanduser().resolve()
+    resolved = resolve_orchestrator_base_url(install_root)
+    if managed_backend_endpoint(resolved) == (host, port):
+        return
+    url = _endpoint_url(host, port)
+    if install_root == global_default_install_root():
+        remedy = f"`vigil config set orchestrator_base_url {url}`"
+    else:
+        remedy = f"ORCHESTRATOR_BASE_URL={url} in {install_root / '.orchestrator.env'}"
+    print(
+        f"[vigil] WARN: clients of {install_root} resolve {resolved}, not this backend at {url}; "
+        f"set {remedy} so they reach it. Engagements whose own .orchestrator.env names a URL keep it.",
+        file=sys.stderr,
+    )
+
+
+def restart_orchestrator(install_root: Path, *, port: int | None = None) -> None:
+    """Stop the workspace's backend and start it again on the endpoint it used.
+
+    An explicit ``port`` moves it; that port must be free before anything stops.
+    """
+    host, current_port = lifecycle_endpoint(install_root)
+    target_port = current_port if port is None else port
+    if target_port != current_port:
+        _check_port_available(host, target_port)
+    stop_orchestrator(install_root, host=host, port=current_port)
+    if port is not None:
+        warn_if_clients_resolve_elsewhere(install_root, host, target_port)
+    start_orchestrator(OrchestratorOptions(install_root=install_root, host=host, port=target_port))
 
 
 def _start_orchestrator_locked(options: OrchestratorOptions) -> None:
@@ -387,15 +485,13 @@ def orchestrator_status_payload(install_root: Path, *, host: str = "127.0.0.1", 
     endpoint = f"http://{'[' + host + ']' if ':' in host else host}:{port}"
     local_endpoint = True
     if owned:
-        receipt_port = receipt.get("port", port)
-        receipt_host = receipt.get("host", host)
-        if (not isinstance(receipt_port, int) or isinstance(receipt_port, bool)
-                or not 0 < receipt_port <= 65535 or not isinstance(receipt_host, str) or not receipt_host):
+        recorded = _receipt_endpoint(receipt, host=host, port=port)
+        if recorded is None:
             owned = False
             detail = "backend process receipt has an invalid endpoint; ownership requires inspection"
         else:
-            host, port = receipt_host, receipt_port
-        endpoint = f"http://{'[' + host + ']' if ':' in host else host}:{port}"
+            host, port = recorded
+        endpoint = _endpoint_url(host, port)
     elif host == "127.0.0.1" and port == 18000:
         from urllib.parse import urlsplit
         import ipaddress

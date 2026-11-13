@@ -69,7 +69,9 @@ def register_remediation_parser(
     parser.add_argument("--engagement-key", "-k", help="Project key; start asks when omitted on a terminal")
     parser.set_defaults(remediation_help=parser.print_help, remediation_create_parser=create_parser,
                         remediation_create=create_engagement)
-    commands = parser.add_subparsers(dest="remediation_command", title="Commands", metavar="COMMAND")
+    # An explicit prog: older argparse derives it from the custom `usage=` above.
+    commands = parser.add_subparsers(dest="remediation_command", title="Commands", metavar="COMMAND",
+                                     prog=parser.prog)
     register_session_parsers(commands)
 
     intake = commands.add_parser(
@@ -1782,9 +1784,10 @@ def _pr_body(case: dict, config: dict[str, object], root_cause: str, fix_summary
 
 
 def _explanation(value: str, label: str) -> str:
+    """The authored PR explanation; its quality is reviewed with the final body."""
     text = value.strip()
-    if len(text) < 20 or text.lower() in {"todo", "tbd", "placeholder"} or "summarize" in text.lower():
-        raise SystemExit(f"PR {label} needs a concrete explanation of at least 20 characters")
+    if not text:
+        raise SystemExit(f"PR {label} is required")
     return text
 
 

@@ -202,6 +202,35 @@ def test_pr_body_requires_production_decision_and_monitoring() -> None:
     assert "Watch errors" in body
 
 
+def _releasable_case() -> dict:
+    evidence = [{"id": index, "kind": kind, "method": "Laravel", "environment": "local",
+                 "observed": "observed", "proved": "proved"}
+                for index, kind in enumerate(("red-test", "green-test"), 1)]
+    return {"title": "Fix", "approval_current": True,
+            "approvals": [{"review_digest": "a" * 64, "evidence_cutoff_id": 2}],
+            "evidence": evidence, "verification_requirements": {"requirements": [{"kind": row["kind"]} for row in evidence]},
+            "verification_matches": [{"requirement_index": index, "evidence_ids": [row["id"]], "missing": None} for index, row in enumerate(evidence)],
+            "worktree_revision": "sha", "verification_plan": "Run the tenant regression",
+            "release_plan": {"production_canary_decision": "not_required", "production_canary_rationale": "Route coverage",
+                             "safe_procedure": "", "monitoring": "Watch errors"}}
+
+
+def test_pr_body_carries_the_explanation_as_written() -> None:
+    """The approved case and the reviewed final body own PR quality, not word lists."""
+    body = _pr_body(_releasable_case(), {}, "IDOR on /orders", "Summarize: scope by tenant")
+
+    assert "## Root cause\n\nIDOR on /orders\n" in body
+    assert "## Fix\n\nSummarize: scope by tenant\n" in body
+
+
+@pytest.mark.parametrize("blank", ["", "   \n"])
+def test_pr_body_requires_a_root_cause_and_fix(blank) -> None:
+    with pytest.raises(SystemExit, match="root cause"):
+        _pr_body(_releasable_case(), {}, blank, "Load records through the tenant relation")
+    with pytest.raises(SystemExit, match="fix summary"):
+        _pr_body(_releasable_case(), {}, "Controller selects an unscoped record", blank)
+
+
 def test_pr_body_includes_reviewed_evidence_environments() -> None:
     evidence = [{"id": index, "kind": kind, "method": method, "environment": environment,
                  "revision": "sha", "observed": "observed", "proved": "proved"}
@@ -885,3 +914,17 @@ def test_evidence_command_option_does_not_replace_the_cli_command(monkeypatch, t
     cli.main(["remediation", "-k", "acme", "evidence", "1", "--kind", "api-test", "--method", "pytest",
               "--environment", "local", "--command", "pytest tests", "--observed", "o", "--proved", "p"])
     assert [(args.command, args.evidence_command) for args in received] == [("remediation", "pytest tests")]
+
+
+def test_every_remediation_verb_names_itself_in_usage_and_errors() -> None:
+    # Python 3.11-3.13 derive a subparser's prog from the parent's explicit
+    # `usage=`, which turned every verb's usage and error prefix into
+    # `vigil remediation [-k KEY] COMMAND ... <verb>`.
+    parser = argparse.ArgumentParser(prog="vigil")
+    register_remediation_parser(parser.add_subparsers(dest="command"))
+    root = next(action for action in parser._actions if isinstance(action, argparse._SubParsersAction))
+    commands = next(action for action in root.choices["remediation"]._actions
+                    if isinstance(action, argparse._SubParsersAction))
+    assert commands.choices
+    assert {name: verb.prog for name, verb in commands.choices.items()} == {
+        name: f"vigil remediation {name}" for name in commands.choices}

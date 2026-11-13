@@ -13,7 +13,7 @@ npm to build them. ``UV_OFFLINE=1`` is enforced so nothing is downloaded.
 ``vigil assess`` resolves its script dependencies through the workspace's own
 ``cache/uv``, which a fresh workspace lacks: point ``VIGIL_E2E_UV_CACHE_SEED`` at
 a populated one (for example ``<workspace>/cache/uv`` of an existing install) to
-seed it; without a seed the first ``vigil assess`` call fails offline.
+seed it; the test skips without one.
 
 Everything the test writes is isolated: a private workspace, config and
 application cache under one work directory (``VIGIL_E2E_WORKDIR`` keeps it for
@@ -219,6 +219,13 @@ def vigil(tmp_path_factory: pytest.TempPathFactory):
     for tool in ("docker", "uv"):
         if shutil.which(tool) is None:
             pytest.skip(f"requires {tool} on PATH")
+    seed = os.environ.get("VIGIL_E2E_UV_CACHE_SEED")
+    if not seed or not Path(seed).is_dir():
+        pytest.skip(
+            "requires VIGIL_E2E_UV_CACHE_SEED naming a populated uv cache (for example "
+            "<workspace>/cache/uv of an existing install); `vigil assess` resolves its "
+            "script dependencies offline through the workspace cache"
+        )
     try:
         subprocess.run(["docker", "info"], capture_output=True, timeout=30, check=True)
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
@@ -302,9 +309,8 @@ def test_code_finding_runtime_proof_end_to_end(vigil: Vigil) -> None:
     source = vigil.workdir / "source" / "acme-reports"
     shutil.copytree(FIXTURE, source, ignore=shutil.ignore_patterns("__pycache__"))
     vigil.run("--root", str(vigil.root), "install")
-    seed = os.environ.get("VIGIL_E2E_UV_CACHE_SEED")
-    if seed:
-        shutil.copytree(seed, vigil.root / "cache" / "uv", symlinks=True, dirs_exist_ok=True)
+    shutil.copytree(os.environ["VIGIL_E2E_UV_CACHE_SEED"], vigil.root / "cache" / "uv",
+                    symlinks=True, dirs_exist_ok=True)
     workspace = json.loads((vigil.root / "workspace.json").read_text(encoding="utf-8"))
     assert Path(workspace["application"]["root"]).resolve() == REPO_ROOT
     vigil.backend("start")

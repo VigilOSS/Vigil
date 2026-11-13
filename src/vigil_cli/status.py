@@ -494,7 +494,6 @@ def _print_install_staleness_warning(staleness: object) -> None:
         return
     state = staleness.get("state")
     if state == "stale":
-        installed = _short_sha(staleness.get("installed_sha"))
         current = _short_sha(staleness.get("current_source_sha"))
         behind = staleness.get("behind_count")
         positively_behind = isinstance(behind, int) and behind > 0
@@ -513,8 +512,8 @@ def _print_install_staleness_warning(staleness: object) -> None:
             f"is behind source{behind_str}" if positively_behind else "differs from application"
         )
         print(
-            f"warn\tworkspace provenance {relationship}: recorded {installed} "
-            f"vs application {current}; run `vigil install` to adopt the matched application "
+            f"warn\tworkspace provenance {relationship}: {_staleness_comparison(staleness)}; "
+            "run `vigil install` to adopt the matched application "
             "without copying source; check restart requirements above"
         )
     elif state == "no-stamp":
@@ -528,6 +527,28 @@ def _short_sha(value: object) -> str:
     return value[:12] if isinstance(value, str) and value else "?"
 
 
+def _staleness_comparison(staleness: dict[str, object]) -> str:
+    """The two values the staleness verdict compared, named by what they are."""
+    if staleness.get("comparison_basis") == "content":
+        installed_revision = staleness.get("installed_sha")
+        current_revision = staleness.get("current_source_sha")
+        revisions = (
+            f" (revision {_short_sha(installed_revision)} vs {_short_sha(current_revision)})"
+            if isinstance(installed_revision, str) and installed_revision
+            and isinstance(current_revision, str) and current_revision
+            else ""
+        )
+        return (
+            f"recorded content {_short_sha(staleness.get('installed_content_sha256'))} "
+            f"vs application content {_short_sha(staleness.get('current_source_content_sha256'))}"
+            f"{revisions}"
+        )
+    return (
+        f"recorded revision {_short_sha(staleness.get('installed_sha'))} "
+        f"vs application revision {_short_sha(staleness.get('current_source_sha'))}"
+    )
+
+
 def _install_staleness_check(install_root: Path) -> Check:
     """Workspace adoption provenance, as a doctor check."""
     staleness = install_staleness(install_root)
@@ -536,18 +557,18 @@ def _install_staleness_check(install_root: Path) -> Check:
         return Check("install-staleness", "OK")
     if state == "unknown":
         return Check("install-staleness", "SKIPPED", "no matched application available")
-    installed = _short_sha(staleness.get("installed_sha"))
     current = _short_sha(staleness.get("current_source_sha"))
     if staleness.get("reason") == "source_content_changed_without_revision":
         return Check(
             "install-staleness",
             "STALE",
-            f"source files changed without a new revision at {current}; run `vigil install`",
+            f"source files changed without a new revision at {current} "
+            f"({_staleness_comparison(staleness)}); run `vigil install`",
         )
     return Check(
         "install-staleness",
         "STALE",
-        f"{state}: workspace provenance at {installed}, application at {current}; run `vigil install`",
+        f"{state}: workspace provenance {_staleness_comparison(staleness)}; run `vigil install`",
     )
 
 

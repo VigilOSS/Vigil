@@ -196,3 +196,19 @@ def test_application_cache_location_tolerates_common_home_layouts(tmp_path, monk
         monkeypatch.setenv("XDG_CACHE_HOME", "" if xdg == "empty" else "relative-cache")
     root = application.resolve_application_root()
     assert root == expected.resolve() / "vigil/applications" / f"1.1.0-{metadata['content_sha256']}"
+
+
+@pytest.mark.parametrize("name", [
+    # CPython writes bytecode to `<name>.pyc.<id>` and renames it into place, so a
+    # concurrent import leaves that temporary name visible to validation.
+    "agent/scripts/assess/__pycache__/client.cpython-314.pyc.4389274",
+    "agent/scripts/assess/__pycache__/client.cpython-314.opt-1.pyc",
+    "agent/scripts/assess/lib/__pycache__/.nfs000000001",
+])
+def test_materialized_cache_ignores_any_bytecode_cache_entry(tmp_path, monkeypatch, name):
+    _bundle(tmp_path, monkeypatch)
+    root = application.resolve_application_root()
+    entry = root / name
+    entry.parent.mkdir(parents=True, exist_ok=True)
+    entry.write_bytes(b"bytecode in flight")
+    assert application.resolve_application_root() == root

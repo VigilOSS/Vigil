@@ -691,6 +691,30 @@ def test_status_stale_warning_is_neutral_without_positive_commit_distance(
     assert "behind" not in output
 
 
+def test_stale_content_provenance_names_the_compared_digests(capsys, tmp_path, monkeypatch) -> None:
+    """A content-digest comparison reports the two digests it compared, not revision SHAs."""
+    from vigil_cli import status as status_module
+
+    stale = {
+        "state": "stale",
+        "comparison_basis": "content",
+        "reason": "source_content_changed",
+        "installed_sha": None,
+        "current_source_sha": "d" * 40,
+        "installed_content_sha256": "1" * 64,
+        "current_source_content_sha256": "2" * 64,
+    }
+    _print_install_staleness_warning(stale)
+    output = capsys.readouterr().out
+    assert "1" * 12 in output and "2" * 12 in output
+    assert "recorded ?" not in output
+
+    monkeypatch.setattr(status_module, "install_staleness", lambda *_a, **_k: stale)
+    check = status_module._install_staleness_check(tmp_path)
+    assert check.status == "STALE"
+    assert "1" * 12 in check.detail and "2" * 12 in check.detail
+
+
 def test_doctor_fails_on_a_corrupt_orchestrator_database(tmp_path):
     """`PRAGMA quick_check` reports corruption in its ROW, not by raising.
 

@@ -265,6 +265,37 @@ def test_pre_compact_does_not_choose_a_mode_for_a_dual_capability_engagement(
     assert "vigil assess code-coverage" not in result.stdout
 
 
+@pytest.mark.parametrize(
+    ("operator_mode", "include_additions"),
+    [
+        ("web", True),
+        ("code", True),
+        ("blue", True),
+        ("android", True),
+        (None, True),
+        ("web", False),
+    ],
+    ids=("web", "code", "blue", "android", "no-mode", "codex-stable-prompt"),
+)
+def test_pre_compact_names_the_trigger_loaded_resume_rule(
+    tmp_path: Path, operator_mode: str | None, include_additions: bool
+) -> None:
+    """The resume rule loads only on resume/compaction, so every compaction
+    contract outside remediation must name the file the next turn reads."""
+    engagement_dir = _engagement(tmp_path)
+    payload: dict[str, object] = {"trigger": "auto", "cwd": str(engagement_dir)}
+    if not include_additions:
+        payload["include_engagement_additions"] = False
+    result = _run_hook(
+        PRE_COMPACT,
+        payload,
+        cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": operator_mode} if operator_mode else None,
+    )
+    assert result.returncode == 0
+    assert "agent/rules/resume.md" in result.stdout
+
+
 def test_pre_compact_uses_remediation_case_state_in_remediation_mode(
     tmp_path: Path,
 ) -> None:
@@ -357,6 +388,21 @@ def test_post_compact_resume_restores_only_the_session_mode(
     assert f"session-selected `{operator_mode}` mode" in result.stdout
     assert "vigil engagement mode" in result.stdout
     assert "load only that prompt" in result.stdout
+
+
+@pytest.mark.parametrize("operator_mode", ["web", "code", "blue", "android"])
+def test_post_compact_resume_names_the_resume_rule_for_every_operator_mode(
+    tmp_path: Path, operator_mode: str
+) -> None:
+    engagement_dir = _engagement(tmp_path)
+    result = _run_hook(
+        POST_COMPACT_RESUME,
+        {"source": "compact", "cwd": str(engagement_dir), "hook_event_name": "SessionStart"},
+        cwd=engagement_dir,
+        env={"VIGIL_OPERATOR_MODE": operator_mode},
+    )
+    assert result.returncode == 0
+    assert "agent/rules/resume.md" in result.stdout
 
 
 def test_post_compact_resume_stops_without_a_session_mode(tmp_path: Path) -> None:

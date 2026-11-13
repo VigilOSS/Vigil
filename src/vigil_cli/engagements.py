@@ -1848,7 +1848,20 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
             repair = repair_engagement_client_entrypoints(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
             if engagement_dir.name in repair.reconciled:
                 repair_engagement_client_rosters(install_root, engagement_dir=engagement_dir, preserve_operator_config=True)
-                repair_engagement_operator_pointers(install_root, engagement_dir=engagement_dir)
+            # The pointer names the install and application roots, so it is refreshed on
+            # every start whose rendering differs, not only when wrappers were reconciled.
+            repaired_pointers = repair_engagement_operator_pointers(install_root, engagement_dir=engagement_dir)
+            if repaired_pointers:
+                refreshed = [engagement_dir / "AGENTS.md"] + (
+                    [engagement_dir / "CLAUDE.md"] if (engagement_dir / "CLAUDE.md").is_file() else []
+                )
+                print(
+                    f"[vigil] operator pointer refreshed: {', '.join(str(path) for path in refreshed)} "
+                    f"(install root {install_root}, application root "
+                    f"{application_agent_root(install_root.resolve()).parent})",
+                    file=sys.stderr,
+                )
+            if engagement_dir.name in repair.reconciled or repaired_pointers:
                 # Goose eagerly reads its copied router, not AGENTS.md itself.
                 _write_goose_config(
                     application_agent_root(install_root), engagement_dir,
@@ -1889,9 +1902,16 @@ def start_engagement(install_root: Path, engagement_dir: Path, client: str, extr
     os.environ["VIGIL_REQUESTED_CLIENT"] = client
     os.environ["VIGIL_OPERATOR_MODE"] = selected_mode
     phase = _engagement_modes(_read_json(engagement_dir / "scope.json"))[selected_mode]["phase"]
+    model_line = ""
+    if client == "claude":
+        model, model_source = _claude_launch_model(selected_mode, extra_args)
+        if model_source is not None:
+            model_line = f"\nmodel: {model or 'Claude Code default'} ({model_source})"
+        if model is not None and model_source != _FORWARDED_MODEL_SOURCE:
+            extra_args = [f"--model={model}", *extra_args]
     print(
         f"workspace: {install_root}\nengagement: {engagement_dir.name}\n"
-        f"client: {client}\nmode: {selected_mode}\nphase: {phase}",
+        f"client: {client}\nmode: {selected_mode}\nphase: {phase}{model_line}",
         file=sys.stderr,
         flush=True,
     )
@@ -2728,6 +2748,28 @@ def _write_prompt_wrappers(
     agent_root: Path, eng_dir: Path, client_kind: str, *, engagement_type: str,
     workspace_root: Path | None = None,
 ) -> None:
+    # The engagement-local AGENTS.md points at the applicable canonical installed
+    # prompt for both Codex and Claude. When the client kind requires a CLAUDE.md
+    # entrypoint, we write it as a thin local pointer to the engagement
+    # AGENTS.md rather than a second pointer to agent/CLAUDE.md — that prevents
+    # Cursor / Claude Code from loading the whole canonical operator prompt twice
+    # per turn (once via CLAUDE.md, once via AGENTS.md). That prompt is the
+    # largest text in the system and keeps growing, so the cost avoided here is
+    # whatever `vigil assess prompt-census` currently measures for the operator
+    # cores rather than a figure pinned in this comment.
+    if client_kind in {"codex", "claude", "both"}:
+        (eng_dir / "AGENTS.md").write_text(
+            _operator_pointer_body(agent_root, eng_dir, engagement_type=engagement_type, workspace_root=workspace_root),
+            encoding="utf-8",
+        )
+    if client_kind in {"claude", "both"}:
+        _write_claude_pointer(eng_dir)
+
+
+def _operator_pointer_body(
+    agent_root: Path, eng_dir: Path, *, engagement_type: str, workspace_root: Path | None = None,
+) -> str:
+    """The engagement-local AGENTS.md text for the current install and application roots."""
     install_root = workspace_root or agent_root.parent
     scope = _read_json(eng_dir / "scope.json")
     tracks = _offensive_tracks(scope) if engagement_type == "offensive" else {}
@@ -2739,6 +2781,14 @@ def _write_prompt_wrappers(
     dual_track = len(tracks) == 2
     selected_kind = next(iter(tracks)) if tracks and not dual_track else engagement_type
     operator_prompt = None if dual_track else _canonical_operator_prompt(agent_root, selected_kind)
+    # Only some operator prompts open with a section map (the web and blue cores
+    # do, the code core does not), so the pointer names one only when it exists.
+    map_clause = (
+        ", following its Map of This File,"
+        if operator_prompt is not None
+        and "\n## Map of This File\n" in operator_prompt.read_text(encoding="utf-8")
+        else ""
+    )
     prompt_instruction = (
         "Inside a generated client Project folder, follow that project's AGENTS.md and session helper; "
         "they supply the selected client and workflow. "
@@ -2750,7 +2800,7 @@ def _write_prompt_wrappers(
         "Explain the setup action and wait for the user to confirm their project is ready.\n"
         if dual_track else
         f"Load workspace operator instructions from:\n- {operator_prompt}\n\n"
-        "Read that file in bounded parts, following its Map of This File, and continue "
+        f"Read that file in bounded parts{map_clause} and continue "
         "until you have reached the end of the file. Do not treat a tool's partial-read "
         "notice as completion.\n"
     )
@@ -2795,24 +2845,11 @@ Artifacts:
 - Start clients through this engagement directory's launcher so ENGAGEMENT_DIR is exported for artifact paths and VIGIL_SESSION_ENGAGEMENT_DIR binds engagement state
 - The local .orchestrator.env provides this engagement's orchestrator base URL; install-root env files are only fallbacks
 """
-    # The engagement-local AGENTS.md points at the applicable canonical installed
-    # prompt for both Codex and Claude. When the client kind requires a CLAUDE.md
-    # entrypoint, we write it as a thin local pointer to the engagement
-    # AGENTS.md rather than a second pointer to agent/CLAUDE.md — that prevents
-    # Cursor / Claude Code from loading the whole canonical operator prompt twice
-    # per turn (once via CLAUDE.md, once via AGENTS.md). That prompt is the
-    # largest text in the system and keeps growing, so the cost avoided here is
-    # whatever `vigil assess prompt-census` currently measures for the operator
-    # cores rather than a figure pinned in this comment.
-    if client_kind in {"codex", "claude", "both"}:
-        (eng_dir / "AGENTS.md").write_text(
-            f"{_SPECIALIST_STOP_SIGN}\n"
-            f"# Engagement Workspace\n\n{prompt_instruction}\n"
-            f"{_ENGAGEMENT_ROE_POINTER}\n{common}",
-            encoding="utf-8",
-        )
-    if client_kind in {"claude", "both"}:
-        _write_claude_pointer(eng_dir)
+    return (
+        f"{_SPECIALIST_STOP_SIGN}\n"
+        f"# Engagement Workspace\n\n{prompt_instruction}\n"
+        f"{_ENGAGEMENT_ROE_POINTER}\n{common}"
+    )
 
 
 def _write_claude_pointer(eng_dir: Path) -> None:
@@ -2849,17 +2886,20 @@ def repair_engagement_operator_pointers(
         if kind not in {"offensive", "web", "code", "both"}:
             continue
         try:
-            tracks = _offensive_tracks(scope)
+            _offensive_tracks(scope)
         except SystemExit:
             continue
-        if len(tracks) == 2 and "vigil engagement mode" in body:
-            continue
-        if len(tracks) == 1 and str(_canonical_operator_prompt(rendered_agent_root, next(iter(tracks)))) in body:
+        workspace_root = rendered_install_root or install_root
+        # Compare the whole rendered pointer: a moved, copied or reinstalled engagement
+        # can name the right prompt path under a stale install or application root.
+        if body == _operator_pointer_body(
+            rendered_agent_root, eng_dir, engagement_type="offensive", workspace_root=workspace_root,
+        ):
             continue
         if (eng_dir / "CLAUDE.md").is_symlink():
             continue
         client_kind = "both" if (eng_dir / "CLAUDE.md").is_file() else "codex"
-        _write_prompt_wrappers(rendered_agent_root, eng_dir, client_kind, engagement_type="offensive", workspace_root=rendered_install_root or install_root)
+        _write_prompt_wrappers(rendered_agent_root, eng_dir, client_kind, engagement_type="offensive", workspace_root=workspace_root)
         repaired.append(eng_dir.name)
     return tuple(repaired)
 
@@ -3226,6 +3266,22 @@ def split_operator_message(client_args: Sequence[str]) -> tuple[list[str], str |
     if previous.startswith("-") and "=" not in previous:
         return list(client_args), None
     return list(client_args[:-1]), last
+
+
+_FORWARDED_MODEL_SOURCE = "forwarded --model"
+
+
+def _claude_launch_model(track: str, client_args: Sequence[str]) -> tuple[str | None, str | None]:
+    """Model for a Claude operator start: a forwarded ``--model``, else the track's resolved model."""
+    flags, _ = split_operator_message(client_args)
+    for index, flag in enumerate(flags):
+        if flag.startswith("--model="):
+            return flag.partition("=")[2], _FORWARDED_MODEL_SOURCE
+        if flag == "--model":
+            return (flags[index + 1] if index + 1 < len(flags) else None), _FORWARDED_MODEL_SOURCE
+    from .config import claude_session_model
+
+    return claude_session_model(track)
 
 
 def client_launch_argv(client: str, client_args: Sequence[str]) -> list[str]:

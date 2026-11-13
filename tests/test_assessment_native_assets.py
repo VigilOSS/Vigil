@@ -35,3 +35,19 @@ def test_assessment_roles_inherit_native_model_and_keep_specialist_boundary(rend
         if client == "zcode":
             assert fields.get("name", "").strip() == role.stem
             assert fields.get("injectAgentsMd", "").strip() == "false"
+
+
+def _frontmatter_fields(path: Path) -> dict[str, str]:
+    frontmatter = path.read_text().split("---", 2)[1]
+    return {key.strip(): value.strip() for key, value in
+            (line.split(":", 1) for line in frontmatter.splitlines() if ":" in line)}
+
+
+def test_claude_report_writer_wrapper_pins_its_model_and_effort(rendered):
+    roles = rendered / ".claude/agents"
+    fields = _frontmatter_fields(roles / "report-writer.md")
+    assert fields["model"] == "claude-sonnet-5-5"
+    assert fields["effort"] == "medium"
+    for role in roles.glob("*.md"):
+        if role.stem != "report-writer":
+            assert {"model", "effort"}.isdisjoint(_frontmatter_fields(role)), role.name

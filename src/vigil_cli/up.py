@@ -27,7 +27,7 @@ from .oob import (
     requires_relay_slot_reservation,
     start_oob,
 )
-from .orchestrator import OrchestratorOptions, start_orchestrator
+from .orchestrator import OrchestratorOptions, lifecycle_endpoint, start_orchestrator
 from .paths import default_runtime_container, engagements_root
 from .runtime import RuntimeOptions, runtime_image_inputs, start_runtime
 from .runtime_images import ensure_runtime_image
@@ -155,7 +155,8 @@ def _start_stack(
     else:
         _progress("Proxy image", "current")
 
-    start_orchestrator(OrchestratorOptions(install_root=install_root, allow_existing=True))
+    host, port = lifecycle_endpoint(install_root)
+    start_orchestrator(OrchestratorOptions(install_root=install_root, host=host, port=port, allow_existing=True))
     services["orchestrator"] = "running"
     _progress("Orchestrator", "running")
     services["mitmproxy"] = _start_mitmproxy_if_needed(install_root, options, runner=runner, build_runner=build_runner)

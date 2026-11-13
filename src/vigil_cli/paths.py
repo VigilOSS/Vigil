@@ -59,6 +59,16 @@ def resolve_install_root(
     return _resolved_or_preserved(DEFAULT_INSTALL_ROOT, preserve_path=preserve_path)
 
 
+def global_default_install_root() -> Path:
+    """The workspace bare commands select when no root or environment override is given.
+
+    Global settings such as ``orchestrator_base_url`` belong to this workspace; a
+    workspace selected with ``--root`` or the environment keeps its own.
+    """
+    config_value = get_config_value("install.root")
+    return Path(config_value or DEFAULT_INSTALL_ROOT).expanduser().resolve()
+
+
 def resolve_source_root(
     value: str | Path | None = None,
     *,
@@ -164,8 +174,12 @@ def resolve_orchestrator_base_url(install_root: Path, engagement_dir: Path | Non
     3. ``vigil config get orchestrator_base_url`` — user-set persistent
        default, so changing the port doesn't require touching code or
        fiddling with environment variables.
-    4. Install-root ``.orchestrator.env`` / ``.env`` — legacy fallbacks.
+    4. Install-root ``.orchestrator.env`` / ``.env``.
     5. Hardcoded fallback ``DEFAULT_ORCHESTRATOR_BASE_URL``.
+
+    The global setting (3) belongs to ``global_default_install_root``. Any other
+    workspace's own install-root files (4) rank above it, so two workspaces can
+    run side by side on different ports.
     """
     if os.environ.get("ORCHESTRATOR_BASE_URL"):
         return os.environ["ORCHESTRATOR_BASE_URL"].rstrip("/")
@@ -173,13 +187,15 @@ def resolve_orchestrator_base_url(install_root: Path, engagement_dir: Path | Non
         value = read_env_file(engagement_dir / ".orchestrator.env").get("ORCHESTRATOR_BASE_URL")
         if value:
             return value.rstrip("/")
+    own_value = next((value for path in (install_root / ".orchestrator.env", install_root / ".env")
+                      if (value := read_env_file(path).get("ORCHESTRATOR_BASE_URL"))), None)
+    if own_value and install_root.expanduser().resolve() != global_default_install_root():
+        return own_value.rstrip("/")
     config_value = get_config_value("orchestrator_base_url")
     if config_value:
         return config_value.rstrip("/")
-    for path in (install_root / ".orchestrator.env", install_root / ".env"):
-        value = read_env_file(path).get("ORCHESTRATOR_BASE_URL")
-        if value:
-            return value.rstrip("/")
+    if own_value:
+        return own_value.rstrip("/")
     return DEFAULT_ORCHESTRATOR_BASE_URL
 
 

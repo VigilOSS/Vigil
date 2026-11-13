@@ -107,10 +107,14 @@ from .oob import (
 from .oob_relay import legacy_relay_route, render_edge_routing
 from .orchestrator import (
     OrchestratorOptions,
+    backend_ui_url,
     build_frontend,
+    lifecycle_endpoint,
     orchestrator_status_payload,
+    restart_orchestrator,
     start_orchestrator,
     stop_orchestrator,
+    warn_if_clients_resolve_elsewhere,
 )
 from .paths import agent_root, default_runtime_container, engagements_root, resolve_install_root, resolve_source_root, resolve_logs_dir, resolve_runtime_state_dir, resolve_orchestrator_data_dir
 from .preflight import _preflight_engagement_start
@@ -276,6 +280,41 @@ def _oob_poll_record_limit(raw: str) -> int:
     return value
 
 
+def _record_default_workspace(root: Path, *, make_default: bool) -> None:
+    """Record the default workspace without silently repointing an existing one.
+
+    A first install becomes the default. Another workspace replaces an existing
+    default only with ``--make-default``; a bare command would otherwise act on
+    the wrong workspace's data.
+    """
+    from . import paths
+    from .install import has_prior_install_state
+
+    configured = config_module.get_config_value("install.root")
+    current = (Path(configured).expanduser() if configured
+               else paths.DEFAULT_INSTALL_ROOT if has_prior_install_state(paths.DEFAULT_INSTALL_ROOT)
+               else None)
+    if make_default or current is None or current.resolve() == root.resolve():
+        config_module.set_config_value("install.root", str(root))
+        return
+    print(
+        f"[vigil] Default workspace unchanged: {current}. Select {root} with "
+        f"`vigil --root {shlex.quote(str(root))} <command>`, or make it the default with "
+        f"`vigil install {shlex.quote(str(root))} --make-default`.",
+        file=sys.stderr,
+    )
+
+
+def _tcp_port(raw: str) -> int:
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("port must be an integer") from exc
+    if not 1 <= value <= 65535:
+        raise argparse.ArgumentTypeError("port must be between 1 and 65535")
+    return value
+
+
 class _SiblingHintParser(argparse.ArgumentParser):
     """Subcommand parser that can name a sibling namespace on an unknown verb.
 
@@ -374,6 +413,11 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
     install_p = sub.add_parser("install", help="Initialize or adopt a private workspace in place")
     install_p.add_argument("install_dir", nargs="?")
     install_p.add_argument("--dry-run", action="store_true")
+    install_p.add_argument(
+        "--make-default",
+        action="store_true",
+        help="Make this workspace the one commands select without --root, replacing the current default",
+    )
     install_p.add_argument("--force-image", action="store_true")
     install_p.add_argument("--skip-image-check", action="store_true")
     install_p.add_argument(
@@ -725,11 +769,15 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
 
     orch_p = sub.add_parser("orchestrator")
     orch_sub = orch_p.add_subparsers(dest="orchestrator_command", required=True)
+    port_help = ("Loopback port to bind (default: the running backend's port, else the port in this "
+                 "workspace's resolved ORCHESTRATOR_BASE_URL, else 18000).")
     orch_start = orch_sub.add_parser("start")
     orch_start.add_argument("--build", action="store_true")
     orch_start.add_argument("--foreground", action="store_true")
+    orch_start.add_argument("--port", type=_tcp_port, help=port_help)
     orch_sub.add_parser("stop")
-    orch_sub.add_parser("restart")
+    orch_restart = orch_sub.add_parser("restart")
+    orch_restart.add_argument("--port", type=_tcp_port, help=port_help)
     orch_status_p = orch_sub.add_parser("status")
     orch_status_p.add_argument("--json", action="store_true")
     orch_sub.add_parser("open")
@@ -1318,7 +1366,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
             )
         )
         if not args.dry_run:
-            config_module.set_config_value("install.root", str(result.install_root))
+            _record_default_workspace(result.install_root, make_default=args.make_default)
         print(result.install_root)
         if args.dry_run:
             _print_install_dry_run(result)
@@ -2490,12 +2538,16 @@ def _looks_like_android_artifact(value: str) -> bool:
 
 def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
     if args.orchestrator_command == "start":
-        start_orchestrator(OrchestratorOptions(install_root=install_root, build=args.build, foreground=args.foreground))
+        host, port = lifecycle_endpoint(install_root)
+        if args.port is not None:
+            port = args.port
+            warn_if_clients_resolve_elsewhere(install_root, host, port)
+        start_orchestrator(OrchestratorOptions(install_root=install_root, host=host, port=port,
+                                               build=args.build, foreground=args.foreground))
     elif args.orchestrator_command == "stop":
         stop_orchestrator(install_root)
     elif args.orchestrator_command == "restart":
-        stop_orchestrator(install_root)
-        start_orchestrator(OrchestratorOptions(install_root=install_root))
+        restart_orchestrator(install_root, port=args.port)
     elif args.orchestrator_command == "status":
         if args.json:
             print(json.dumps(orchestrator_status_payload(install_root), indent=2))
@@ -2505,7 +2557,7 @@ def _orchestrator(args: argparse.Namespace, install_root: Path) -> None:
             if payload.get("detail"):
                 print(payload["detail"])
     elif args.orchestrator_command == "open":
-        webbrowser.open("http://127.0.0.1:18000")
+        webbrowser.open(backend_ui_url(install_root))
     elif args.orchestrator_command == "build":
         build_frontend(install_root, force=args.force)
 

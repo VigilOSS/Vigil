@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from vigil_cli import engagements
+from vigil_cli.config import claude_session_model
 from vigil_cli.main import main
 
 
@@ -174,8 +175,10 @@ def test_resume_starts_preserve_client_arguments_without_automatic_message(works
         "--root", str(workspace), "engagement", "start", path.name,
         "--client", client, "--skip-preflight", *forwarded,
     ])
+    model, _ = claude_session_model("code")
+    track_model = [f"--model={model}"] if client == "claude" and model else []
     assert len(launched) == 1
-    assert launched[0][1:] == forwarded
+    assert launched[0][1:] == [*track_model, *forwarded]
 
 
 _SOURCE_TRUST_CONFIRMATION = (

@@ -137,19 +137,22 @@ def _preflight_engagement_start(
     _warn_if_install_stale(install_root)
 
 
-def managed_backend_host(base_url: str) -> str | None:
-    """Only literal HTTP loopback endpoints at the managed port convey start authority."""
+def managed_backend_endpoint(base_url: str) -> tuple[str, int] | None:
+    """Only literal HTTP loopback endpoints with an explicit port convey start authority.
+
+    Returns the ``(host, port)`` a local backend binds for that URL.
+    """
     import ipaddress
     from urllib.parse import urlsplit
     try:
         parsed = urlsplit(base_url)
-        if (parsed.scheme != "http" or parsed.port != 18000 or parsed.path not in {"", "/"}
+        if (parsed.scheme != "http" or parsed.port is None or parsed.path not in {"", "/"}
                 or parsed.query or parsed.fragment or parsed.username or parsed.password):
             return None
         host = parsed.hostname or ""
         if host == "localhost":
-            return "127.0.0.1"
-        return host if ipaddress.ip_address(host).is_loopback else None
+            return "127.0.0.1", parsed.port
+        return (host, parsed.port) if ipaddress.ip_address(host).is_loopback else None
     except ValueError:
         return None
 
@@ -183,17 +186,19 @@ def _ensure_engagement_backend(install_root: Path, engagement_dir: Path) -> None
     from . import engagements, orchestrator
 
     base_url = resolve_orchestrator_base_url(install_root, engagement_dir)
-    managed_host = managed_backend_host(base_url)
+    managed_endpoint = managed_backend_endpoint(base_url)
     ownership = engagements.inspect_backend_ownership(install_root, engagement_dir)
     verified_ownership: engagements.BackendOwnership | None = ownership
     engagements.require_backend_ownership(ownership, install_root)
     if ownership.state == engagements.BackendInstallRootStatus.PROTOCOL_ERROR:
         raise SystemExit(f"engagement backend is not ready at {base_url}: protocol error: {ownership.detail}. Pass --skip-preflight to launch anyway.")
-    if (managed_host is not None and ownership.state == engagements.BackendInstallRootStatus.UNREACHABLE
+    if (managed_endpoint is not None and ownership.state == engagements.BackendInstallRootStatus.UNREACHABLE
             and orchestrator_status(install_root) != "running"):
         print("[vigil] Starting the engagement backend...", file=sys.stderr)
+        host, port = managed_endpoint
         with redirect_stdout(sys.stderr):
-            orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(install_root=install_root, host=managed_host, allow_existing=True))
+            orchestrator.start_orchestrator(orchestrator.OrchestratorOptions(
+                install_root=install_root, host=host, port=port, allow_existing=True))
         verified_ownership = None
     backend_state = engagements._verify_backend_install_root(install_root, engagement_dir, verified_ownership)
     if backend_state in {engagements.BackendInstallRootStatus.SYNC_PENDING,
@@ -203,7 +208,7 @@ def _ensure_engagement_backend(install_root: Path, engagement_dir: Path) -> None
         print(f"[vigil] WARN: {verified} and engagement sync is pending at {base_url}; the next backend request will retry synchronization.", file=sys.stderr)
         _ensure_backend_freshness(install_root, base_url)
         return
-    if backend_state == engagements.BackendInstallRootStatus.UNREACHABLE and managed_host is None:
+    if backend_state == engagements.BackendInstallRootStatus.UNREACHABLE and managed_endpoint is None:
         print(f"[vigil] WARN: configured remote engagement backend is unreachable at {base_url}; launching with local engagement state only.", file=sys.stderr)
         return
     if backend_state != engagements.BackendInstallRootStatus.VERIFIED:

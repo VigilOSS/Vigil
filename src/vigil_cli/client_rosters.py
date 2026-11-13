@@ -217,6 +217,23 @@ def ensure_codex_skills_link(agent_root: Path, codex_dir: Path) -> None:
     _ensure_entry_links(agent_root / ".codex" / "skills", codex_dir / "skills")
 
 
+# The hook scripts each client template binds. Their commands are rewritten to the
+# rendered agent root on every refresh, so a generated binding never depends on cwd.
+_CLAUDE_HOOK_SCRIPTS = (
+    "application-read-only.sh",
+    "post-tool-log.sh",
+    "pre-compact.sh",
+    "post-compact-resume.sh",
+    "session-end.sh",
+)
+_CODEX_HOOK_SCRIPTS = (
+    "application-read-only.sh",
+    "post-tool-log.sh",
+    "post-compact-resume.sh",
+    "session-end.sh",
+)
+
+
 def _render_codex_compact_prompt(
     agent_root: Path,
     engagement_dir: Path,
@@ -306,11 +323,7 @@ def ensure_codex_config(
     if not config_src.is_file():
         return
     target_root = rendered_agent_root or agent_root
-    script_names = (
-        "post-tool-log.sh",
-        "post-compact-resume.sh",
-        "session-end.sh",
-    )
+    script_names = _CODEX_HOOK_SCRIPTS
     source_config = tomllib.loads(config_src.read_text(encoding="utf-8"))
     source_commands = _hook_commands(source_config.get("hooks", {}))
     rendered_lines: list[str] = []
@@ -361,9 +374,21 @@ def ensure_codex_config(
                     indent = line[:len(line) - len(line.lstrip())]
                     line = f"{indent}command = {json.dumps(command)}" + ("\n" if line.endswith("\n") else "")
             rendered_lines.append(line)
-        config_text = "".join(rendered_lines)
-        if config_text != original:
-            config_dest.write_text(config_text, encoding="utf-8")
+        refreshed_text = "".join(rendered_lines)
+        missing = _missing_codex_hook_tables(
+            tomllib.loads(config_text), tomllib.loads(refreshed_text), script_names, source_commands,
+        )
+        if missing:
+            refreshed_text = refreshed_text.rstrip("\n") + "\n" + missing
+            try:
+                tomllib.loads(refreshed_text)
+            except tomllib.TOMLDecodeError as exc:
+                raise ValueError(
+                    f"cannot add Vigil's hook tables to {config_dest}: its hooks do not accept "
+                    f"[[hooks.<event>]] array entries ({exc})"
+                ) from exc
+        if refreshed_text != original:
+            config_dest.write_text(refreshed_text, encoding="utf-8")
         existing_prompt = existing_config.get("compact_prompt")
         recognizable_prompt = (
             existing_prompt is None or existing_prompt == compact_prompt_sentinel
@@ -375,6 +400,76 @@ def ensure_codex_config(
     if config_dest.exists() and config_dest.read_text(encoding="utf-8") == config_text:
         return
     config_dest.write_text(config_text, encoding="utf-8")
+
+
+def _toml_scalar(value: object) -> str:
+    """A TOML literal for the scalar values the client templates use."""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int | float):
+        return repr(value)
+    if isinstance(value, str):
+        return json.dumps(value)
+    raise TypeError(f"unsupported Codex hook template value: {value!r}")
+
+
+def _toml_key(key: str) -> str:
+    return key if key and all(c.isalnum() or c in "_-" for c in key) else json.dumps(key)
+
+
+def _missing_codex_hook_tables(
+    template: dict[str, object],
+    existing: dict[str, object],
+    scripts: tuple[str, ...],
+    source_commands: set[str],
+) -> str:
+    """TOML for each rendered template hook the engagement config does not bind yet.
+
+    A hook counts as bound when the same event already runs that Vigil script, under
+    any matcher or wrapper the operator chose, so a refresh never runs it twice.
+    """
+    template_hooks = template.get("hooks")
+    existing_hooks = existing.get("hooks")
+    if not isinstance(template_hooks, dict):
+        return ""
+    if not isinstance(existing_hooks, dict):
+        existing_hooks = {}
+    blocks: list[str] = []
+    for event, entries in template_hooks.items():
+        if not isinstance(entries, list):
+            continue
+        bound = existing_hooks.get(event)
+        bound_commands = [
+            hook["command"]
+            for entry in (bound if isinstance(bound, list) else [])
+            if isinstance(entry, dict) and isinstance(entry.get("hooks"), list)
+            for hook in entry["hooks"]
+            if isinstance(hook, dict) and isinstance(hook.get("command"), str)
+        ]
+        for entry in entries:
+            if not isinstance(entry, dict) or not isinstance(entry.get("hooks"), list):
+                continue
+            for hook in entry["hooks"]:
+                if not isinstance(hook, dict):
+                    continue
+                command = hook.get("command")
+                script = _generated_hook_script(command, scripts, source_commands) or next(
+                    (name for name in scripts if isinstance(command, str) and f"scripts/hooks/{name}" in command),
+                    None,
+                )
+                if any(
+                    existing_command == command
+                    or script is not None and f"scripts/hooks/{script}" in existing_command
+                    for existing_command in bound_commands
+                ):
+                    continue
+                header = f"hooks.{_toml_key(event)}"
+                lines = ["", f"[[{header}]]"]
+                lines += [f"{_toml_key(k)} = {_toml_scalar(v)}" for k, v in entry.items() if k != "hooks"]
+                lines += ["", f"[[{header}.hooks]]"]
+                lines += [f"{_toml_key(k)} = {_toml_scalar(v)}" for k, v in hook.items()]
+                blocks.append("\n".join(lines) + "\n")
+    return "".join(blocks)
 
 
 def _hook_commands(hooks: object) -> set[str]:
@@ -463,11 +558,7 @@ def ensure_claude_settings(
                 command_text = command.get("command")
                 if not isinstance(command_text, str):
                     continue
-                for script_name in (
-                    "post-tool-log.sh",
-                    "pre-compact.sh",
-                    "session-end.sh",
-                ):
+                for script_name in _CLAUDE_HOOK_SCRIPTS:
                     if script_name in command_text:
                         target = (
                             rendered_agent_root or agent_root
@@ -496,7 +587,7 @@ def ensure_claude_settings(
                     if not isinstance(command, dict) or not isinstance(command.get("command"), str):
                         continue
                     recognized_script = _generated_hook_script(
-                        command["command"], ("post-tool-log.sh", "pre-compact.sh", "session-end.sh"), source_commands,
+                        command["command"], _CLAUDE_HOOK_SCRIPTS, source_commands,
                     )
                     if recognized_script is not None:
                         command["command"] = shlex.join(["bash", str((rendered_agent_root or agent_root) / "scripts/hooks" / recognized_script)])
@@ -508,7 +599,7 @@ def ensure_claude_settings(
                     if not isinstance(canonical_command, dict):
                         continue
                     canonical_script = _generated_hook_script(
-                        canonical_command.get("command"), ("post-tool-log.sh", "pre-compact.sh", "session-end.sh"), source_commands,
+                        canonical_command.get("command"), _CLAUDE_HOOK_SCRIPTS, source_commands,
                     )
                     exists = any(
                         isinstance(entry, dict)
@@ -596,14 +687,14 @@ def ensure_goose_standard_hooks(
     *,
     rendered_agent_root: Path | None = None,
 ) -> None:
-    """Write the standard Goose hooks plugin (activity log) into an engagement.
+    """Write the standard Goose hooks plugin into an engagement.
 
     Mirrors ``ensure_opencode_plugin``: Goose hooks invoke shell scripts directly, so
-    this reuses the SHARED post-tool-log.sh (activity log) on
-    PostToolUse, via goose-hook-adapter.sh (payload reshape). Deterministic content →
-    idempotent overwrite, refreshed on repair so a hook-path fix reaches existing
-    engagements. There is no standard PreToolUse hook: Vigil does not filter its own
-    operator's commands (ADR 0019).
+    this reuses the SHARED scripts via goose-hook-adapter.sh (payload reshape):
+    application-read-only.sh on PreToolUse (the application tree is read-only,
+    ADR 0048) and post-tool-log.sh (activity log) on PostToolUse. Deterministic
+    content → idempotent overwrite, refreshed on repair so a hook-path fix reaches
+    existing engagements.
     """
     hooks_src = agent_root / "scripts" / "hooks"
     command_agent_root = rendered_agent_root or agent_root
@@ -619,6 +710,19 @@ def ensure_goose_standard_hooks(
     matcher = "shell|write|edit|tree|read_image|text_editor"
     config = {
         "hooks": {
+            # Only the shell and the writing file tools can modify the application.
+            "PreToolUse": [
+                {
+                    "matcher": "shell|write|edit|text_editor",
+                    "hooks": [{
+                        "type": "command",
+                        "command": _goose_hook_command(
+                            command_agent_root, command_hooks_src / "application-read-only.sh"
+                        ),
+                        "timeout": 10,
+                    }],
+                }
+            ],
             "PostToolUse": [
                 {
                     "matcher": matcher,
