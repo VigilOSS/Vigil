@@ -74,7 +74,8 @@ class _Backend:
         ]
 
     def get(self, endpoint: str):
-        if endpoint == "findings":
+        # The record clobber guard reads the list projection.
+        if endpoint in {"findings", "findings?view=list"}:
             return []
         if endpoint == "code/repos":
             return list(self.repos)
@@ -530,4 +531,5 @@ def test_a_stale_binding_is_never_derived_for_the_verifier(
     stderr = capsys.readouterr().err
     assert "superseded source snapshot" in stderr
     assert "--provenance-inline" in stderr
+    assert "fresh proof receipts" in stderr
     assert posted == []

@@ -3,8 +3,8 @@
 `tools/analysis-state/cve-bug-shapes.jsonl` seeds the Phase 2 variant swarm one
 physical line per shape. A shape is admissible when it describes the bug and
 its guard in words and cites the `code-history diff` receipt and patch for the
-exact vulnerable (first parent) and fixed revisions it names. An identifier or
-a commit subject alone is not a shape. A cited diff the budget truncated is
+exact vulnerable (first parent) and fixed revisions it names; the cited patch,
+not the length of the prose, carries the code shape. A cited diff the budget truncated is
 reported, never hidden. The check reads files only; it neither runs Git nor
 calls the backend.
 """
@@ -19,10 +19,8 @@ from typing import Any
 
 from assess.lib.code_history import (
     HISTORY_ARTIFACT_DIR,
-    MIN_DESCRIPTIVE_WORDS,
     RECEIPT_SCHEMA,
     SHAPE_CHECK_SCHEMA,
-    descriptive_word_count,
     full_object_id,
     repo_relative_path,
 )
@@ -90,11 +88,6 @@ def _text_errors(shape: dict[str, Any]) -> list[str]:
         value = shape.get(field)
         if not isinstance(value, str) or not value.strip():
             errors.append(f"{field} is required")
-        elif descriptive_word_count(value) < MIN_DESCRIPTIVE_WORDS:
-            errors.append(
-                f"{field} is identifier-only: describe the code shape in at least "
-                f"{MIN_DESCRIPTIVE_WORDS} words beyond advisory ids and hashes"
-            )
     return errors
 
 
@@ -248,7 +241,11 @@ def _lines(report: dict[str, Any]) -> list[str]:
         for error in entry["errors"]:
             append_contained_value(lines, "  error:", error)
         if entry["evidence_truncated"]:
-            lines.append("  TRUNCATED: a cited diff hit its budget; rerun code-history diff with a larger budget")
+            lines.append(
+                "  TRUNCATED: a cited diff hit its budget, so its files or patch bytes past it "
+                "were not checked; rerun `vigil assess code-history diff --commit <fixed_revision>` "
+                "with a larger --max-files / --max-bytes and cite the new receipt and patch"
+            )
     invalid = sum(bool(entry["errors"]) for entry in report["lines"])
     if report["valid"]:
         lines.append(f"{report['shape_count']} shape(s) valid")

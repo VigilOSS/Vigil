@@ -3,7 +3,7 @@
 The macOS / Windows Docker Desktop runtime proxies every container packet through
 a host-side userspace proxy (``com.docker.backend``) that tracks NAT/socket state
 PER DISTINCT DESTINATION IP. A DNS brute against a large resolver list (e.g. the
-trickest ~15k-IP list, engagement I-001) saturates that per-destination NAT table
+trickest ~15k-IP list) saturates that per-destination NAT table
 and wedges the whole VM — regardless of qps. The danger knob is the COUNT of
 distinct resolver destination IPs, not the query rate.
 
@@ -256,8 +256,8 @@ def resolve_runtime(
         enforce: when True, a DNS-heavy/bulk tool that WOULD route host on this
             platform but cannot (host binary missing) raises
             :class:`HostRoutingRequired` instead of silently degrading to the
-            I-001-prone container path. An explicit ``'container'`` request is
-            always honoured (caller forced isolation) and never enforced. On
+            container path that wedges the userspace proxy. An explicit
+            ``'container'`` request is always honoured (caller forced isolation) and never enforced. On
             native Linux / remote Docker the container path is safe, so enforce
             is a no-op there. The recon job sets ``enforce=True`` for its
             DNS-heavy stages.
@@ -276,7 +276,7 @@ def resolve_runtime(
                 raise HostRoutingRequired(
                     f"host routing is REQUIRED for {tool} (DNS-heavy/bulk stage) but "
                     f"'{tool}' is not on the host PATH. On macOS Docker Desktop the "
-                    "container path wedges the userspace proxy (I-001), so the recon "
+                    "container path wedges the userspace proxy, so the recon "
                     "job refuses to silently degrade. Install the host binary (see "
                     "agent setup / CR-11) or run on native Linux / remote Docker."
                 )
@@ -298,7 +298,7 @@ def resolve_runtime(
             raise HostRoutingRequired(
                 f"host routing is REQUIRED for {tool} (DNS-heavy/bulk stage) on macOS "
                 f"Docker Desktop but '{tool}' is not on the host PATH — the container "
-                "path would wedge the userspace proxy (I-001). Install the host binary "
+                "path would wedge the userspace proxy. Install the host binary "
                 "(see agent setup / CR-11) or run on native Linux / remote Docker."
             )
         # No nag on auto: host binary absent simply means we can't take the fast
@@ -354,7 +354,7 @@ def warn_excessive_resolver_ips(
         f"{n_distinct} distinct resolver IPs exceeds the in-container cap "
         f"(~{cap}) on macOS Docker Desktop: every distinct destination IP is "
         "NAT-tracked by the host userspace proxy (com.docker.backend), so a large "
-        "resolver set can wedge the VM regardless of qps (engagement I-001). "
+        "resolver set can wedge the VM regardless of qps. "
         f"Route this DNS op to the host (--runtime host) or trim to a small "
         f"validated resolver tier (premium-anycast ~40 IPs). See {_DOCKER_HAZARD_GUIDE}."
     )
@@ -510,7 +510,7 @@ def warn_excessive_target_ips(
     and is wired only into the DNS/web-discovery path; it does NOT cover cero, whose
     danger knob is the count of distinct SCAN-TARGET IPs (a whole-CIDR cero in the
     container NAT-saturates the Docker Desktop userspace proxy exactly like a large
-    resolver list — engagement I-001).
+    resolver list).
 
     Fires exactly when ALL hold: the runtime is Docker Desktop, the op is routed
     ``'container'``, and ``n_distinct`` exceeds :func:`resolver_ip_cap` (the SAME
@@ -531,8 +531,8 @@ def warn_excessive_target_ips(
         f"{tool}: ~{n_distinct} distinct target IPs exceeds the in-container cap "
         f"(~{cap}) on macOS Docker Desktop: every distinct destination IP is "
         "NAT-tracked by the host userspace proxy (com.docker.backend), so a "
-        f"whole-CIDR {tool} run can wedge the VM regardless of concurrency "
-        "(engagement I-001). Trim to a small validated target set, or split the "
+        f"whole-CIDR {tool} run can wedge the VM regardless of concurrency. "
+        "Trim to a small validated target set, or split the "
         "scan into smaller batches. Note: hostnames may each resolve to several "
         f"A-records, so the live fan-out can exceed this estimate. See "
         f"{_DOCKER_HAZARD_GUIDE} and {_CERO_GUIDE}."

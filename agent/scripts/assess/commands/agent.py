@@ -22,6 +22,7 @@ from assess.commands.code_dispatch import _dispatch_scratch_relative
 from assess.commands.dispatch._shared import (
     LEASE_BEARING_ROLES,
     _load_json_arg,
+    _split_csv,
     lane_coverage_basis,
 )
 from assess.commands.dispatch.handoff_renderer import (
@@ -32,19 +33,25 @@ from assess.commands.dispatch.handoff_renderer import (
 from assess.lib.client import AssessError
 from assess.lib.code_record_input import fail
 from assess.lib.code_structural_identity import parse_code_file_page
+from assess.lib.config import _read_vigil_config_value
+from assess.lib.vocabulary import word_folder
 from assess.lib.contracts import (
     BINDABLE_CLIENTS,
     MIXED_ASSESSMENT_ROLES,
-    _detect_technique_cage,
     role_declares_no_skills,
 )
+from assess.lib.code_snapshot import engagement_sealed_source
+from assess.lib.code_snapshot_binding import is_analysis_repository
+from assess.lib.contract_registry import DISPATCH_MODES_BY_ROLE, GATED_DECISION_KINDS
 from assess.lib.phases import (
     AUDIT_PHASE_TAGS,
     BLUE_PHASES,
     CODE_PHASES,
+    HALF_PHASE_AUDIT_TAGS,
     TERMINAL_PHASE,
     WEB_PHASES,
     canonical_phase,
+    resolve_track_phase,
 )
 from assess.lib.render_containment import contain_separators
 from assess.lib.tracks import track_phases
@@ -68,6 +75,13 @@ _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES = frozenset({"code-variant-hunter"})
 # The backend ``DispatchCreate.requested_reasoning`` vocabulary, shared by every
 # command that records a dispatch.
 REASONING_CHOICES = ("low", "medium", "high", "xhigh", "max")
+
+
+# Dispatch status words each verb accepts; each folds case and separator the way
+# the backend's `_DISPATCH_STATUS` does (`Completed`, `in_progress`).
+_DONE_STATUSES = ("completed", "failed", "aborted", "blocked")
+_LIST_STATUSES = ("in-progress", *_DONE_STATUSES)
+_CLOSE_STATUSES = ("failed", "blocked")
 
 
 def register(subparsers) -> None:
@@ -191,7 +205,18 @@ def register(subparsers) -> None:
     swarm.add_argument("--identity", dest="dispatch_identity", default=None)
     swarm.add_argument("--application-unit-id", type=int, default=None)
     swarm.add_argument("--tier", choices=("L1", "L2", "L3", "L4"), default=None)
-    swarm.add_argument("--workers", dest="swarm_workers", type=int, required=True)
+    swarm.add_argument(
+        "--workers",
+        dest="swarm_workers",
+        type=int,
+        required=True,
+        help=(
+            "Rows to record. A swarm whose workers plus in-progress dispatches exceed "
+            f"the client concurrency budget (default {DEFAULT_CLIENT_CONCURRENCY_BUDGET}, "
+            f"Claude Code's subagent ceiling; {CLIENT_CONCURRENCY_BUDGET_ENV} or Vigil "
+            f"config {CLIENT_CONCURRENCY_BUDGET_CONFIG_KEY}) is warned about and still recorded."
+        ),
+    )
     swarm.add_argument("--batch-size", dest="swarm_batch_size", type=int, required=True)
     swarm.add_argument("--items-file", dest="swarm_items_file", required=True)
     swarm_traffic = swarm.add_mutually_exclusive_group()
@@ -199,14 +224,21 @@ def register(subparsers) -> None:
     swarm_traffic.add_argument("--no-target-traffic", action="store_true")
 
     done = actions.add_parser(
-        "done", help="Patch dispatch lifecycle rows directly.", allow_abbrev=False
+        "done",
+        help=(
+            "Close dispatches. Without --status, a ready or blocked handoff is closed the way "
+            "`agent close` does (recording the dispatch_closed_from_handoff decision); --status "
+            "is the raw lifecycle write for recovery."
+        ),
+        allow_abbrev=False,
     )
     done.add_argument("extra", nargs="+", metavar="agent-id")
     done.add_argument(
         "--status",
         dest="dispatch_status",
         default=None,
-        choices=("completed", "failed", "aborted", "blocked"),
+        type=word_folder(_DONE_STATUSES),
+        choices=_DONE_STATUSES,
     )
     done.add_argument("--completed-at", default=None)
     done.add_argument("--finding-slugs", default=None)
@@ -219,7 +251,8 @@ def register(subparsers) -> None:
         "--status",
         dest="dispatch_status",
         default=None,
-        choices=("in-progress", "completed", "failed", "aborted", "blocked"),
+        type=word_folder(_LIST_STATUSES),
+        choices=_LIST_STATUSES,
     )
     list_parser.add_argument("--since", dest="filter_since", default=None)
     list_parser.add_argument("--task-q", default=None)
@@ -238,9 +271,15 @@ def register(subparsers) -> None:
             "extra", nargs="*" if action_name == "close" else "+", metavar="agent-id"
         )
         if action_name == "close":
-            action_parser.add_argument("--completed-at", default=None)
+            action_parser.add_argument(
+                "--completed-at",
+                default=None,
+                help="Completion time stamped on each listed dispatch (default: the close "
+                     "time). Refused with --all-ready.",
+            )
             action_parser.add_argument("--reason", default=None)
-            action_parser.add_argument("--status", dest="close_status", choices=("failed", "blocked"), default=None,
+            action_parser.add_argument("--status", dest="close_status", type=word_folder(_CLOSE_STATUSES),
+                                       choices=_CLOSE_STATUSES, default=None,
                                        help="Record an observed return with no final handoff; requires --reason. "
                                             "failed = no usable output; blocked = work done, scope incomplete.")
             action_parser.add_argument(
@@ -305,7 +344,20 @@ def register(subparsers) -> None:
     decision = actions.add_parser(
         "decision", help="Record a dispatch decision.", allow_abbrev=False
     )
-    decision.add_argument("--kind", dest="decision_kind", required=True)
+    decision.add_argument(
+        "--kind",
+        dest="decision_kind",
+        required=True,
+        help=(
+            "Decision kind. Open vocabulary: any kind is recorded as written, except "
+            "gated kinds: another case or separator spelling of one is stored under "
+            "the gated kind (named on the response's `derived`), and a misspelling of "
+            "one is refused with the kind it meant. Gated kinds (a backend gate "
+            "or approve+execute flow reads them): "
+            + ", ".join(GATED_DECISION_KINDS)
+            + ". See `vigil assess contract agent decision`."
+        ),
+    )
     decision.add_argument("--payload-json", default=None)
     decision.add_argument("--surfaced-to-user", action="store_true")
     decision.add_argument("--host", dest="decision_host", default=None)
@@ -314,6 +366,19 @@ def register(subparsers) -> None:
     decision.add_argument("--note", dest="decision_note", default=None)
     decision.add_argument("--phase", dest="decision_phase", default=None)
     decision.add_argument("--reason", default="")
+    decision.add_argument(
+        "--supersedes",
+        dest="decision_supersedes",
+        type=int,
+        default=None,
+        metavar="DECISION_ID",
+        help=(
+            "Id of an earlier decision of the same --kind that this row corrects. The earlier "
+            "row is marked superseded and no gate reads it; it stays readable by id. Refused for "
+            "another kind, another engagement's row, a row already superseded, and "
+            "severity_variance."
+        ),
+    )
 
     bind = actions.add_parser(
         "bind-client-handle",
@@ -330,8 +395,9 @@ def register(subparsers) -> None:
             "— nothing here is launcher- or provider-observed, and the row says "
             "so (asserted_* fields; provider_observed_handle stays 'unknown'). "
             "History is append-only: a correction is a new version that "
-            "supersedes the last one, and re-binding the same values is refused. "
-            "Full contract: `vigil assess contract agent bind-client-handle`."
+            "supersedes the last one, and re-binding the same values is an answered "
+            "no-op. The contract: `vigil assess contract agent bind-client-handle`; "
+            "`--field <name>` prints one field in full."
         ),
         allow_abbrev=False,
     )
@@ -481,11 +547,15 @@ def _continue(args) -> None:
             context, engagement_dir=_cfg.engagement_dir,
             payload={"agent_role": role, "assessment_mode": assessment_mode},
             verb="agent continue",
+            normalise=False,
         )
         source_identity = prior_context.get("source_identity") or []
         if source_identity:
             old_source = dict(line.split(": ", 1) for line in source_identity if ": " in line)
-            current = _code_source_identity_lines(client, agent_role=role, requested_repo_id=int(old_source["repo_id"]))
+            current = _code_source_identity_lines(
+                client, agent_role=role, requested_repo_id=int(old_source["repo_id"]),
+                engagement_dir=_cfg.engagement_dir,
+            )
             current_source = dict(line.split(": ", 1) for line in current if ": " in line)
             if any(current_source.get(key) != old_source.get(key) for key in ("repo_id", "repo_generation", "source_manifest_digest")):
                 raise AssessError("agent continue: source identity changed; start a fresh dispatch against the current source")
@@ -527,8 +597,7 @@ def _continue(args) -> None:
             source_identity=source_identity, args=render_args, client=client, validated_context=context,
             quote_finding_ledger=True)
         payload["prompt_packet"]["rendered_prompt"] = continued_prompt
-        _packet_advisories(payload, context, continued_prompt,
-                           finding_total=_rendered_finding_total(continued_prompt))
+        _packet_advisories(payload, context, continued_prompt)
         row = client.record_dispatch({key: value for key, value in payload.items() if value is not None})
     finally:
         client.close()
@@ -547,14 +616,58 @@ def _done(args) -> None:
     explicit_status = bool(getattr(args, "dispatch_status", None))
     if not explicit_status:
         args.dispatch_status = "completed"
+    raw_ids: list[str] = []
+    routed: list[tuple[str, str]] = []
     for agent_id in ids:
         args.agent_id = agent_id
-        _check_handoff_before_raw_done(args, explicit_status=explicit_status)
-    dispatch._update_dispatch_status(args, ids)  # noqa: SLF001
+        closable = _check_handoff_before_raw_done(args, explicit_status=explicit_status)
+        if closable:
+            routed.append((agent_id, closable))
+        else:
+            raw_ids.append(agent_id)
+    failed = _done_via_close(args, routed) if routed else 0
+    if raw_ids:
+        dispatch._update_dispatch_status(args, raw_ids)  # noqa: SLF001
+    if failed:
+        sys.exit(1)
 
 
-def _check_handoff_before_raw_done(args, *, explicit_status: bool) -> None:
-    """Keep an implicit raw close from losing a ready handoff's decision row.
+def _done_via_close(args, routed: list[tuple[str, str]]) -> int:
+    """Close each ready/blocked handoff the way `agent close` does; return failures.
+
+    The raw status PATCH would drop the dispatch_closed_from_handoff decision row
+    the audit ledger reads, and refusing it only made the caller re-run the same
+    ids under `close`. Each routed id says so on stderr.
+    """
+    added_slugs = _split_csv(getattr(args, "finding_slugs", None))
+    client, _ = dispatch._client_for(args)  # noqa: SLF001
+    failed = 0
+    try:
+        for agent_id, handoff_status in routed:
+            print(
+                f"agent done: {agent_id} has a {handoff_status} handoff; closing it as "
+                f"`vigil assess agent close {agent_id}` would, which records the "
+                "dispatch_closed_from_handoff decision. Pass --status for a raw write.",
+                file=sys.stderr,
+            )
+            try:
+                result = _close_via_client(
+                    client, agent_id, reason="agent done",
+                    completed_at=getattr(args, "completed_at", None),
+                    added_finding_slugs=added_slugs,
+                )
+            except Exception as exc:  # noqa: BLE001 - one bad id must not drop the rest
+                failed += 1
+                print(f"agent done: {agent_id} failed: {exc}", file=sys.stderr)
+                continue
+            print(json.dumps(result, ensure_ascii=False))
+    finally:
+        client.close()
+    return failed
+
+
+def _check_handoff_before_raw_done(args, *, explicit_status: bool) -> str:
+    """The handoff status an implicit `done` should close through, else "".
 
     `agent close` consumes a ready/blocked handoff and writes an audit decision
     row; `agent done` is a raw status PATCH. An explicit status remains available
@@ -563,11 +676,11 @@ def _check_handoff_before_raw_done(args, *, explicit_status: bool) -> None:
     try:
         client, _ = dispatch._client_for(args)  # noqa: SLF001
     except Exception:  # noqa: BLE001 - non-fatal precheck
-        return
+        return ""
     try:
         handoff = client.get_handoff(args.agent_id)
     except Exception:  # noqa: BLE001 - non-fatal precheck
-        return
+        return ""
     finally:
         try:
             client.close()
@@ -590,16 +703,11 @@ def _check_handoff_before_raw_done(args, *, explicit_status: bool) -> None:
                 "record a kind=dispatch_reconciliation decision naming this agent_id.",
                 file=sys.stderr,
             )
-        return
+        return ""
     status_value = str(handoff.get("handoff_status") or "")
     if status_value in {"ready", "blocked"}:
         if not explicit_status:
-            fail(
-                "agent done",
-                f"handoff for {args.agent_id} is {status_value}; "
-                f"use `vigil assess agent close {args.agent_id}` to record the closure "
-                "decision, or pass --status explicitly for a raw recovery write.",
-            )
+            return status_value
         print(
             f"WARN agent done: handoff for {args.agent_id} is handoff_status={status_value!r}; "
             f"`vigil assess agent close {args.agent_id}` would write a dispatch_closed_from_handoff "
@@ -607,6 +715,7 @@ def _check_handoff_before_raw_done(args, *, explicit_status: bool) -> None:
             "and ignore this warning if that is intended.",
             file=sys.stderr,
         )
+    return ""
 
 
 def _utcnow_iso() -> str:
@@ -639,6 +748,15 @@ def _close(args) -> None:
             f"handoff; --status {returned_status} records an observed return for a "
             "dispatch that has none. Close those by id.",
         )
+    completed_at = getattr(args, "completed_at", None)
+    if all_ready and completed_at:
+        fail(
+            "agent close",
+            "--all-ready selects its dispatches from backend state, so one "
+            "--completed-at cannot be the observed completion time of each; list the "
+            "ids that completed at that time instead, or drop --completed-at to stamp "
+            "each with the close time",
+        )
     if not ids and not all_ready:
         fail("agent close", "agent id required as positional arg, --agent-id, or --all-ready")
     client, _ = dispatch._client_for(args)  # noqa: SLF001
@@ -667,7 +785,8 @@ def _close(args) -> None:
         for agent_id in ids:
             try:
                 result = _close_via_client(client, agent_id, reason=reason,
-                                           returned_status=returned_status)
+                                           returned_status=returned_status,
+                                           completed_at=completed_at)
             except _ReconcileSkipped as exc:
                 failed += 1
                 print(f"agent close: {agent_id} skipped: {exc}", file=sys.stderr)
@@ -945,11 +1064,21 @@ class _ReconcileSkipped(Exception):
     """Raised when a reconcile candidate cannot be closed cleanly."""
 
 
-def _close_via_client(client, agent_id: str, *, reason: str, returned_status: str | None = None, completed_at: str | None = None) -> dict:
+def _close_via_client(
+    client,
+    agent_id: str,
+    *,
+    reason: str,
+    returned_status: str | None = None,
+    completed_at: str | None = None,
+    added_finding_slugs: list[str] | tuple[str, ...] = (),
+) -> dict:
     """Close one dispatch using an already-open client. Returns {'dispatch', 'decision'}.
 
     ``returned_status`` ('failed' or 'blocked') records an observed return with
     no final handoff; ``None`` consumes the specialist's own ready/blocked one.
+    ``added_finding_slugs`` joins the recorded scope (``agent done
+    --finding-slugs`` routed here).
     """
     if not agent_id:
         raise _ReconcileSkipped("missing agent_id")
@@ -996,10 +1125,17 @@ def _close_via_client(client, agent_id: str, *, reason: str, returned_status: st
     if dispatch_row.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES:
         dispatch_slugs = _normalise_finding_slugs(dispatch_row.get("finding_slugs"))
         union = list(dict.fromkeys(
-            dispatch_slugs + _normalise_finding_slugs(handoff.get("finding_slugs"))
+            dispatch_slugs
+            + _normalise_finding_slugs(handoff.get("finding_slugs"))
+            + _normalise_finding_slugs(list(added_finding_slugs))
         ))
         if union != dispatch_slugs:
             patch["finding_slugs"] = union
+    elif added_finding_slugs:
+        raise _ReconcileSkipped(
+            f"{dispatch_row.get('agent_role')} dispatch finding scope is immutable; "
+            "drop --finding-slugs (produced slugs stay on the handoff)"
+        )
     updated = client.update_dispatch(agent_id, patch)
     decision = client.record_decision(
         {
@@ -1043,6 +1179,14 @@ def _bind_client_handle(args) -> None:
     finally:
         client.close()
     print(json.dumps(record, ensure_ascii=False))
+    if isinstance(record, dict) and record.get("already_bound"):
+        binding = record.get("binding") or {}
+        print(
+            f"[agent bind-client-handle] {agent_id}: already bound to this handle at binding "
+            f"v{binding.get('binding_version')}; nothing written.",
+            file=sys.stderr,
+        )
+        return
     superseded = record.get("superseded") if isinstance(record, dict) else None
     if superseded:
         # A correction is the one case where the JSON alone under-reports what
@@ -1062,6 +1206,7 @@ def _start(args) -> None:
     payload = dispatch._build_register_payload(args)  # noqa: SLF001
     client, cfg = dispatch._client_for(args)  # noqa: SLF001
     _require_registered_role(payload, cfg)
+    _warn_undeclared_dispatch_mode(payload, cfg)
     for warning in _attach_dispatch_provenance(payload, cfg):
         print(f"WARN agent start: {warning}", file=sys.stderr)
     try:
@@ -1070,6 +1215,7 @@ def _start(args) -> None:
             client,
             agent_role=str(payload.get("agent_role") or ""),
             requested_repo_id=getattr(args, "code_repo_id", None),
+            engagement_dir=cfg.engagement_dir,
         )
         context = _load_prompt_context(args)
         _establish_authorized_phase(
@@ -1086,9 +1232,8 @@ def _start(args) -> None:
         if supplement:
             from assess.commands.export_triage_packet import _read_regular_at
             root = Path(cfg.engagement_dir).resolve()
-            source = Path(supplement)
+            relative = _engagement_relative_input(root, supplement, flag="--packet-file")
             try:
-                relative = source.relative_to(root) if source.is_absolute() else source
                 raw = _read_regular_at(root, relative, label="dispatch assignment", max_bytes=64 * 1024)
             except (ValueError, SystemExit) as exc:
                 raise AssessError(f"agent start: unsafe assignment supplement: {exc}") from exc
@@ -1102,8 +1247,7 @@ def _start(args) -> None:
             quote_finding_ledger=True,
         )
         payload["prompt_packet"] = {"schema": "dispatch-prompt/v1", "context": context, "rendered_prompt": emitted_prompt}
-        _packet_advisories(payload, context, emitted_prompt,
-                           finding_total=_rendered_finding_total(emitted_prompt))
+        _packet_advisories(payload, context, emitted_prompt)
         if not getattr(args, "allow_duplicate", False):
             dispatch._warn_on_overlapping_dispatch(client, payload)  # noqa: SLF001
         dry_run = bool(getattr(args, "dry_run", False))
@@ -1137,13 +1281,12 @@ def _require_registered_role(payload: dict, cfg) -> None:
     """Refuse a dispatch whose role has no prompt in the resolvable roster.
 
     The packet renders "read agent/agents/<role>.md and its mandatory references
-    before work" into the launch envelope, so a mistyped or invented role used to
+    before work" into the launch envelope, so a mistyped or invented role would
     produce a valid-looking row, an immutable packet, and an envelope pointing at
     a file that does not exist — with no mandatory references and nothing in the
     receipt saying so. The backend's own role cross-check (the handoff's
     agent_role vs the dispatch row's) only fires once the specialist has already
-    run. Skill names are roster-checked before dispatch already; roles were the
-    asymmetry.
+    run; skill names are roster-checked before dispatch the same way.
 
     When the roster directory itself does not resolve, nothing is provable, so a
     deployment without the agent tree advises rather than refuses — the same way
@@ -1175,6 +1318,31 @@ def _require_registered_role(payload: dict, cfg) -> None:
         + " Registered roles: "
         + ", ".join(available)
         + ".",
+    )
+
+
+def _warn_undeclared_dispatch_mode(payload: dict, cfg) -> None:
+    """Name a dispatch_mode the role's prompt does not describe.
+
+    The role prompt only tells the specialist how to work in the modes it
+    declares (`DISPATCH_MODES_BY_ROLE`), so another mode launches it with no
+    guidance for that traversal. `swarm` is the operator's corpus fan-out and
+    applies to any role. Advisory: dispatch_mode gates nothing but the web
+    variant pass.
+    """
+    role = str(payload.get("agent_role") or "")
+    mode = str(payload.get("dispatch_mode") or "")
+    declared = DISPATCH_MODES_BY_ROLE.get(role, ())
+    if not mode or mode == "swarm" or not declared or mode in declared:
+        return
+    roster = _role_roster_dir(cfg)
+    prompt = roster / f"{role}.md" if roster is not None else Path("agent/agents") / f"{role}.md"
+    print(
+        f"WARN agent start: dispatch_mode {mode!r} is not one {role} declares "
+        f"({', '.join(declared)}; see the Iteration mode line in {prompt}), so its "
+        "prompt gives no guidance for that traversal. Pass one of those with "
+        "--dispatch-mode unless this lane deliberately needs another.",
+        file=sys.stderr,
     )
 
 
@@ -1210,91 +1378,17 @@ def _require_proof_variant_parent_set(payload: dict, engagement_dir: Path) -> No
         )
 
 
-# A per-slug obligation needs all three on one line: the slug scope, an
-# assignment quantifier, and an obligation verb. "Record any finding slug you
-# produce" carries the scope word alone and is ordinary produced-finding
-# guidance, so it must not trip this.
-_SLUG_SCOPE_WORDS = ("slug", "assigned finding")
-_SLUG_QUANTIFIER_WORDS = ("every", "each", "all ", "assigned")
-_SLUG_OBLIGATION_WORDS = ("must", "required", "mandatory", "terminal verdict")
-
-
-def _per_slug_obligation_lines(text: str) -> list[str]:
-    """Authored lines that impose an obligation per ASSIGNED slug."""
-    hits: list[str] = []
-    for raw in str(text or "").splitlines():
-        line = raw.strip()
-        lowered = line.lower()
-        if not any(word in lowered for word in _SLUG_SCOPE_WORDS):
-            continue
-        if not any(word in lowered for word in _SLUG_QUANTIFIER_WORDS):
-            continue
-        if not any(word in lowered for word in _SLUG_OBLIGATION_WORDS):
-            continue
-        hits.append(line)
-    return hits
-
-
-#: Authored finding-count claims the specialist would dedupe against. The count
-#: an operator types goes stale between waves, so the live total is compared
-#: against every spelling the dispatch prompts actually use.
-_AUTHORED_FINDING_COUNT_RE = re.compile(
-    r"\b(\d{1,6})\s+(?:existing|recorded|prior|current|known)\s+findings?\b",
-    re.IGNORECASE,
-)
-
-
-def _packet_advisories(
-    payload: dict, context: dict, rendered: str, *, finding_total: int | None = None
-) -> None:
-    if finding_total is not None:
-        # The operator types "dedupe against the N existing findings" into prior
-        # state; three consecutive waves shipped an N that was already wrong when
-        # the packet rendered, which understates what the lane must check.
-        authored_counts = (
-            str(context.get("prior_state") or "")
-            + "\n" + str(context.get("coverage") or "")
-            + "\n" + str(context.get("role_specific_additions") or "")
-            + "\n" + str(payload.get("task") or "")
-            + "\n" + str((context.get("assignment_source") or {}).get("text") or "")
-        )
-        for claimed in dict.fromkeys(_AUTHORED_FINDING_COUNT_RE.findall(authored_counts)):
-            if int(claimed) != finding_total:
-                print(
-                    f"ADVISORY dispatch packet: authored text says {claimed} existing "
-                    f"findings but the live ledger holds {finding_total}. The packet "
-                    "quotes the live total; correct the authored count so the lane "
-                    "dedupes against the whole ledger.",
-                    file=sys.stderr,
-                )
+def _packet_advisories(payload: dict, context: dict, rendered: str) -> None:
     if len(rendered.encode("utf-8")) > 12_000:
         print(f"ADVISORY dispatch packet: {len(rendered.encode('utf-8'))} bytes / {len(rendered.splitlines())} lines; inspect repeated assignment context, preserve scope and proof requirements", file=sys.stderr)
-    # A verifier-shaped obligation block rendered into a lane that was never
-    # given a slug is unsatisfiable by construction. The whole authored text
-    # cannot be checked against a role, but this one mismatch is mechanical, so
-    # it is an advisory signal rather than a gate: the operator owns the text.
-    if not payload.get("finding_slugs"):
-        authored_guidance = (
-            str(context.get("role_specific_additions") or "")
-            + "\n"
-            + str((context.get("assignment_source") or {}).get("text") or "")
-        )
-        for line in _per_slug_obligation_lines(authored_guidance)[:3]:
-            print(
-                "ADVISORY dispatch packet: authored guidance imposes a per-slug "
-                f"obligation ({line[:160]!r}) but this dispatch carries no "
-                "finding_slugs. Pass --finding-slugs with the assigned set, or scope "
-                "the obligation to what this lane was given.",
-                file=sys.stderr,
-            )
     role = str(payload.get("agent_role") or "")
-    task = str(payload.get("task") or "")
     # `code-record analysis` and `code-dispatch done` both require the fetched
     # queue lease, so a hunter dispatched with no queue items and no lane file
     # cannot write a single receipt for anything it reads. That lane is
-    # legitimate (pre-queue discovery) but it is NON-COVERING: `code-coverage`
-    # keeps reporting every file it read as unreviewed, and a later wave re-reads
-    # them. See agent/agents/code-vuln-hunter.md "Non-covering discovery mode".
+    # legitimate (pre-queue discovery) but it is NON-COVERING: it adds no
+    # coverage for any file it reads, so a file no other lane covers is read
+    # again by a later wave. See agent/agents/code-vuln-hunter.md "Non-covering
+    # discovery mode".
     if role in LEASE_BEARING_ROLES and not lane_coverage_basis(context):
         print(
             f"ADVISORY dispatch packet: this {role} lane carries no "
@@ -1306,10 +1400,6 @@ def _packet_advisories(
             "operator can queue them.",
             file=sys.stderr,
         )
-    if role in {"code-vuln-hunter", "vulnerability-analyst", "recon-specialist"} and not task.lower().startswith(("verify", "reproduce", "rehearse", "confirm")):
-        authored = task + "\n" + str(context.get("role_specific_additions") or "") + "\n" + str((context.get("assignment_source") or {}).get("text") or "")
-        for warning in _detect_technique_cage(authored):
-            print(f"ADVISORY dispatch packet: {warning}", file=sys.stderr)
 
 
 def _materialize_packet(engagement_dir: str, dispatch_id: int, packet: dict) -> Path:
@@ -1365,13 +1455,35 @@ def _materialize_capture(engagement_dir: str, parts: tuple[str, ...], raw: bytes
     return root.joinpath(*parts, name)
 
 
+def _engagement_relative_input(root: Path, source: str, *, flag: str) -> Path:
+    """The engagement-relative path of an authored dispatch input file.
+
+    The packet records the input by this path and its SHA-256, and the read
+    walks the engagement directory without following symlinks, so the file has
+    to live inside it; a relative path is read from the engagement directory.
+    """
+    path = Path(source)
+    if not path.is_absolute():
+        return path
+    try:
+        return path.relative_to(root)
+    except ValueError:
+        raise AssessError(
+            f"agent start: {flag} {source} is outside the engagement; it must be a "
+            f"regular file inside the engagement directory {root} (for example "
+            f"{root / 'notes'}/<lane>-assignment.md). The packet records it by "
+            "engagement-relative path and SHA-256 so the dispatch can be re-read "
+            "and verified later, and it is read without following symlinks. Move "
+            f"or copy the file there and pass that path."
+        ) from None
+
+
 def _capture_standing_brief(engagement_dir: str, source: str) -> tuple[dict[str, str], bytes]:
     from assess.commands.export_triage_packet import _read_regular_at
 
     root = Path(engagement_dir).resolve()
-    path = Path(source)
+    relative = _engagement_relative_input(root, source, flag="--standing-brief-file")
     try:
-        relative = path.relative_to(root) if path.is_absolute() else path
         raw = _read_regular_at(root, relative, label="standing brief", max_bytes=64 * 1024)
         raw.decode("utf-8")
     except (ValueError, SystemExit, UnicodeError) as exc:
@@ -1511,10 +1623,9 @@ def _dispatch_prompt(
 
     prompt_context = (_load_prompt_context(args) if validated_context is None else _validate_prompt_context(validated_context, allow_saved_metadata=True))
     backend_prior_state: list[str] = []
-    # The live ledger total first: specialists are told to dedupe against "the N
-    # existing findings", and an operator-typed N goes stale between waves. The
-    # count is read here so the packet and the stale-count advisory quote one
-    # number.
+    # The live ledger total first: specialists dedupe against the whole ledger,
+    # and an operator-typed count goes stale between waves, so the packet quotes
+    # the backend's count and says it supersedes any authored one.
     # Only the `agent start` family quotes it: those lanes record findings and are
     # told to dedupe against the whole ledger. A proof-work claim is bound to one
     # finding its packet already names, so it keeps its single-read budget.
@@ -1522,7 +1633,9 @@ def _dispatch_prompt(
     if finding_total is not None:
         backend_prior_state.append(
             f"{_FINDING_LEDGER_LINE_PREFIX}{finding_total} recorded finding(s) in this "
-            "engagement. Dedupe against the whole ledger (`vigil assess finding list`); "
+            "engagement. Dedupe against the whole ledger (`vigil assess finding list "
+            "--search <endpoint or path>` lists every match; `vigil assess fetch findings "
+            "--paginate` reads every finding); "
             "any finding count in the authored prior state above is superseded by this one."
         )
     queue_ids = prompt_context.get("queue_item_ids") or []
@@ -1557,15 +1670,19 @@ def _dispatch_prompt(
             rendered_handoff.getvalue().strip(),
         ])
     rate_budget = _dispatch_budget_text(args)
+    assigned_slugs = payload.get("finding_slugs")
     identity_lines = [
         "## Runtime Identity",
         f"agent_id: {payload.get('agent_id')}",
         f"agent_role: {payload.get('agent_role')}",
         f"assessment_mode: {payload.get('assessment_mode') or 'not applicable'}",
         f"authorized_phase: {prompt_context['authorized_phase']}",
+        "assigned_finding_slugs: "
+        + (json.dumps(list(assigned_slugs), ensure_ascii=False) if assigned_slugs else "none"),
     ]
     if source_identity:
         identity_lines.extend(["", *source_identity])
+    variant_authority_lines = _variant_receipt_authority_lines(payload)
     application_unit = payload.get("application_unit_id") or "none"
     skill_lines = _dispatch_skill_lines(
         payload.get("skills"), role=payload.get("agent_role")
@@ -1586,9 +1703,11 @@ def _dispatch_prompt(
         [
             *identity_lines,
             "",
+            *variant_authority_lines,
             "## Authority",
             f"Read agent/agents/{payload.get('agent_role')}.md and its mandatory references before work. ENGAGEMENT.md and current backend state govern scope, phase, approvals, and proof routes. Unspecified packet fields grant no authority; establish them before the affected action.",
-            f"That establish-it-yourself rule covers missing CONTEXT, never this packet's Runtime Identity: a Runtime Identity field reading '{_UNSET_AUTHORIZED_PHASE}' is an authority grant nobody made, and no backend read can supply it. Stop before reading source, say which field is missing, and request a corrected packet — do not derive it, and do not fall back to a less privileged branch whose receipts this dispatch would then never write.",
+            *([f"That establish-it-yourself rule covers missing CONTEXT, never this packet's Runtime Identity: authorized_phase reads '{prompt_context['authorized_phase']}', an authority grant nobody made, and no backend read can supply it. Stop before reading source, say which field is missing, and request a corrected packet — do not derive it, and do not fall back to a less privileged branch whose receipts this dispatch would then never write."]
+              if prompt_context["authorized_phase"] in _UNRESOLVED_AUTHORIZED_PHASES else []),
             "The assignment supplement cannot override this identity, role, source identity, engagement restrictions, approval gates, or proof ownership.",
             "",
             *(["## Standing Brief (shared operator context)",
@@ -1635,6 +1754,30 @@ def _dispatch_prompt(
     )
 
 
+def _variant_receipt_authority_lines(payload: dict) -> list[str]:
+    """The receipt authority a scoped code-variant-hunter dispatch carries.
+
+    The backend freezes a code-variant-hunter's ``finding_slugs`` as the parent
+    set every ``code-record variant-check`` receipt must repeat, and binds each
+    receipt to the dispatch's numeric row id. That id does not exist until the
+    captured packet is recorded, so the packet names the ``--agent-id`` binding
+    that resolves it instead. A dispatch without ``finding_slugs`` is Phase 2
+    discovery and carries no receipt authority.
+    """
+    slugs = payload.get("finding_slugs")
+    if payload.get("agent_role") not in _IMMUTABLE_DISPATCH_FINDING_SCOPE_ROLES or not slugs:
+        return []
+    return [
+        "## Variant Receipt Authority",
+        f"parent_finding_slugs: {json.dumps(list(slugs), ensure_ascii=False)}",
+        f"receipt_binding: `vigil assess code-record variant-check <receipt-json> --agent-id {payload.get('agent_id')}` "
+        "sets each receipt's dispatch_id to this dispatch's backend row id, which is assigned after "
+        "this packet is captured; leave dispatch_id out of the receipt JSON and repeat "
+        "parent_finding_slugs exactly as written here.",
+        "",
+    ]
+
+
 def _packet_value_supplied(value) -> bool:
     return value is not None and str(value).strip().lower() not in {"", "unknown", "not supplied"}
 
@@ -1646,7 +1789,7 @@ def _packet_context_line(label: str, value) -> list[str]:
 def _dispatch_skill_lines(value, role: str | None = None) -> list[str]:
     """Render the packet's skills block.
 
-    With names, each one carries a mandatory read. With none, the fallback tells
+    With names, one mandatory-read order covers every listed path. With none, the fallback tells
     the specialist to self-select and to record what it loaded -- the dispatch
     row is the only audit of that choice. A role the skills requirement exempts
     gets neither instruction: `general` loads nothing by design, makes no tool
@@ -1666,17 +1809,11 @@ def _dispatch_skill_lines(value, role: str | None = None) -> list[str]:
             "skills: self-selected; record the loaded skill names in the handoff under "
             f"extras.{HANDOFF_SKILLS_KEY} (the key `render-handoff` reads)"
         ]
-    lines = ["skills:"]
-    for name in names:
-        path = f"agent/skills/{name}/SKILL.md"
-        lines.extend(
-            [
-                f"  - {name} — full path: {path}",
-                f'    "You MUST read and follow {path} before beginning work.',
-                "     If a skill contradicts this prompt, the skill wins for procedural steps.\"",
-            ]
-        )
-    return lines
+    return [
+        "skills (read and follow each before beginning work; for procedural steps a "
+        "skill outranks this packet):",
+        *(f"  - {name}: agent/skills/{name}/SKILL.md" for name in names),
+    ]
 
 
 #: What Runtime Identity carries when no phase could be established at all.
@@ -1712,6 +1849,21 @@ _UNRESOLVED_AUTHORIZED_PHASES = frozenset(
 _CANONICAL_PHASE_VOCABULARY = frozenset(
     {*WEB_PHASES, *CODE_PHASES, *BLUE_PHASES, *AUDIT_PHASE_TAGS, TERMINAL_PHASE}
 )
+
+#: The track rosters an off-roster advisory points the operator at.
+_TRACK_ROSTER_TEXT = (
+    f"web: {', '.join(WEB_PHASES)}; code: {', '.join(CODE_PHASES)}; "
+    f"blue: {', '.join(BLUE_PHASES)}"
+)
+
+#: Phases only the code track's roster holds, and phases only the web/blue
+#: rosters (with the web half-phase tags) hold. A grant from the other side is
+#: ADVISORY: a proof route or an operator decision may cross tracks on purpose,
+#: but a web lane granted `hunt` is far more often a code example copied over.
+_CODE_ONLY_PHASES = frozenset(CODE_PHASES) - frozenset(WEB_PHASES) - frozenset(BLUE_PHASES)
+_NON_CODE_ONLY_PHASES = (
+    frozenset(WEB_PHASES) | frozenset(BLUE_PHASES) | frozenset(HALF_PHASE_AUDIT_TAGS)
+) - frozenset(CODE_PHASES)
 
 _PROMPT_CONTEXT_FIELDS = (
     "authorized_phase",
@@ -1772,7 +1924,70 @@ def _scope_track_phase(engagement_dir, *, assessment_mode: str, agent_role: str)
     return ("", "") if phase in _UNSTAMPABLE_PHASES else (phase, track)
 
 
-def _establish_authorized_phase(context: dict, *, engagement_dir, payload: dict, verb: str) -> None:
+def _is_code_track_dispatch(payload: dict, engagement_dir) -> bool:
+    """Whether this dispatch works the code track.
+
+    By mode first; then, on an engagement with one track, by that track (a
+    role both tracks share works the only one there is); then by role.
+    """
+    mode = str(payload.get("assessment_mode") or "")
+    if mode in {"code", "web"}:
+        return mode == "code"
+    try:
+        scope = json.loads((Path(engagement_dir) / "scope.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, UnicodeError, json.JSONDecodeError):
+        scope = None
+    phases = track_phases(scope) if isinstance(scope, dict) else {}
+    if len(phases) == 1:
+        return "code" in phases
+    return str(payload.get("agent_role") or "").startswith("code-")
+
+
+def _review_supplied_phase(
+    context: dict, supplied: str, *, payload: dict, verb: str, normalise: bool, engagement_dir,
+) -> None:
+    """Normalise an operator-supplied grant and advise on what it cannot settle.
+
+    A code audit tag (``code-hunt``) names the same phase as its track phase
+    (``hunt``); the packet carries the track spelling the code role prompts read,
+    and the normalisation is echoed so the operator sees what was stored.
+    ``agent continue`` passes ``normalise=False``: it inherits a captured grant
+    verbatim. Every check here is ADVISORY — an operator may authorize a
+    sub-phase spelling or a deliberate cross-track grant.
+    """
+    phase = resolve_track_phase(supplied)
+    if normalise and phase != canonical_phase(supplied):
+        context["authorized_phase"] = phase
+        print(
+            f"{verb}: authorized_phase {supplied!r} is the audit tag for the code track "
+            f"phase {phase!r}; the packet records {phase!r}. Keep {supplied!r} for "
+            "audited command runs (`kali --phase`).",
+            file=sys.stderr,
+        )
+    if phase not in _CANONICAL_PHASE_VOCABULARY:
+        print(
+            f"ADVISORY {verb}: authorized_phase {supplied!r} is not a phase on any track "
+            f"roster ({_TRACK_ROSTER_TEXT}); the dispatch is recorded as authored.",
+            file=sys.stderr,
+        )
+        return
+    code_track = _is_code_track_dispatch(payload, engagement_dir)
+    foreign = _NON_CODE_ONLY_PHASES if code_track else _CODE_ONLY_PHASES
+    if phase in foreign:
+        role = str(payload.get("agent_role") or "this role")
+        own, other = ("code", "web/blue") if code_track else ("web/blue", "code")
+        print(
+            f"ADVISORY {verb}: authorized_phase {phase!r} is a {other} track phase, but "
+            f"this {role} dispatch works the {own} track ({_TRACK_ROSTER_TEXT}); the "
+            "dispatch is recorded as authored. Grant a phase from its own track unless "
+            "the cross-track grant is deliberate.",
+            file=sys.stderr,
+        )
+
+
+def _establish_authorized_phase(
+    context: dict, *, engagement_dir, payload: dict, verb: str, normalise: bool = True
+) -> None:
     """Resolve Runtime Identity's ``authorized_phase`` before the packet renders.
 
     The operator's explicit value always wins — a dispatch is routinely
@@ -1785,13 +2000,10 @@ def _establish_authorized_phase(context: dict, *, engagement_dir, payload: dict,
     """
     supplied = str(context.get("authorized_phase") or "").strip()
     if supplied and supplied not in _UNRESOLVED_AUTHORIZED_PHASES:
-        if canonical_phase(supplied) not in _CANONICAL_PHASE_VOCABULARY:
-            print(
-                f"ADVISORY {verb}: authorized_phase {supplied!r} is not in the canonical "
-                "phase vocabulary (`vigil assess list-commands --phase`); the dispatch "
-                "is recorded as authored.",
-                file=sys.stderr,
-            )
+        _review_supplied_phase(
+            context, supplied, payload=payload, verb=verb, normalise=normalise,
+            engagement_dir=engagement_dir,
+        )
         return
     phase, track = _scope_track_phase(
         engagement_dir,
@@ -1907,19 +2119,7 @@ def _vuln_class_names(value) -> tuple[str, ...]:
     return tuple(dict.fromkeys(names))
 
 
-#: The one rendered spelling of the live ledger total. The stale-count advisory
-#: reads the number back out of the packet it is warning about, so the packet and
-#: the warning cannot quote two different totals or need two backend reads.
 _FINDING_LEDGER_LINE_PREFIX = "Backend finding ledger at dispatch time: "
-_FINDING_LEDGER_LINE_RE = re.compile(
-    re.escape(_FINDING_LEDGER_LINE_PREFIX) + r"(\d+) recorded finding"
-)
-
-
-def _rendered_finding_total(rendered: str) -> int | None:
-    """The live ledger total this packet actually quotes, if it quotes one."""
-    match = _FINDING_LEDGER_LINE_RE.search(rendered or "")
-    return int(match.group(1)) if match else None
 
 
 def _backend_finding_total(client) -> int | None:
@@ -2001,7 +2201,14 @@ def _selected_queue_facts(client, item_ids: list[int], *, repo_id: int, repo_gen
 
 
 def _backend_file_locs(client, repo_id: int, paths: list[str], *, repo_generation: int | None = None) -> dict[str, int]:
-    """Read only selected file facts, validating the complete filtered page."""
+    """Read only selected file facts, validating the complete filtered page.
+
+    A `code/files` row carries no generation of its own: the listing holds the
+    non-retired inventory of the repository's active generation, the one the
+    packet's Code Source Identity read from `code/repos` in this command. A
+    file's current queue attempt does carry one, so a refresh that lands
+    between the two reads is caught on every file that has an attempt.
+    """
     selected = set(paths)
     index = {}
     requests = []
@@ -2026,7 +2233,10 @@ def _backend_file_locs(client, repo_id: int, paths: list[str], *, repo_generatio
         if has_more:
             fail("agent start", "selected code file facts returned an incomplete page")
         for row in items:
-            if repo_generation is not None and row.get("repo_generation") != repo_generation:
+            queue = row.get("queue")
+            attempt = queue.get("current_attempt") if isinstance(queue, dict) else None
+            if (repo_generation is not None and isinstance(attempt, dict)
+                    and attempt.get("repo_generation") != repo_generation):
                 fail("agent start", "selected code file facts are stale for the packet generation")
             if (row.get("file_path") not in selected or type(row.get("loc")) is not int
                     or row["loc"] < 0):
@@ -2044,7 +2254,7 @@ def _common_family_floor(families: list[tuple[str, ...]]) -> tuple[str, ...]:
 
 def _lane_file_line(row: tuple, *, common: tuple[str, ...] = ()) -> str:
     """One manifest bullet: backend file facts plus the families `done` requires."""
-    file_path, loc, item_id, scratch, applicable, suggested = row
+    file_path, loc, item_id, scratch, applicable, suggested, unread_suggested = row
     detail = f"{json.dumps(file_path, ensure_ascii=False)} ({loc} LOC"
     if item_id is not None:
         detail += f"; queue item {item_id}"
@@ -2055,6 +2265,8 @@ def _lane_file_line(row: tuple, *, common: tuple[str, ...] = ()) -> str:
         detail += "; additional_applicable_vuln_classes: " + (",".join(additions) or "none")
     if suggested:
         detail += "; path_suggested_vuln_classes: " + ",".join(suggested)
+    if unread_suggested:
+        detail += "; unread_code_suggested_vuln_classes: " + ",".join(unread_suggested)
     return f"  - {detail})"
 
 
@@ -2071,7 +2283,9 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
     stripped = raw.strip()
     if not stripped:
         fail("agent start", "lane_file is empty")
-    rows: list[tuple[str, int, int | None, str | None, tuple[str, ...], tuple[str, ...]]]
+    rows: list[tuple[
+        str, int, int | None, str | None, tuple[str, ...], tuple[str, ...], tuple[str, ...]
+    ]]
     if resolved.suffix.lower() == ".json" or stripped.startswith(("[", "{")):
         try:
             data = json.loads(stripped)
@@ -2121,6 +2335,7 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
                 file_path.strip(), loc, item["id"], scratch,
                 _vuln_class_names(backend_row.get("applicable_vuln_classes")),
                 _vuln_class_names(backend_row.get("path_suggested_vuln_classes")),
+                _vuln_class_names(backend_row.get("unread_code_suggested_vuln_classes")),
             ))
     else:
         paths = [line.strip() for line in raw.splitlines() if line.strip()]
@@ -2137,7 +2352,7 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
                 "agent start",
                 "lane_file paths missing from selected repository: " + ", ".join(missing[:20]),
             )
-        rows = [(item, indexed[item], None, None, (), ()) for item in paths]
+        rows = [(item, indexed[item], None, None, (), (), ()) for item in paths]
     if len(rows) > 5000 or len({item[0] for item in rows}) != len(rows):
         fail("agent start", "lane_file must contain at most 5000 distinct file paths")
     directories: dict[str, list[int]] = {}
@@ -2150,9 +2365,10 @@ def _lane_file_manifest(path: Path, *, client, source_identity: list[str]) -> li
     family_note = (
         ["- applicable_vuln_classes is the family floor `code-dispatch done` requires "
          "per file: common_applicable_vuln_classes plus each file's additional_applicable_vuln_classes; "
-         "path_suggested_vuln_classes are path-derived hints, not obligations",
+         "path_suggested_vuln_classes and unread_code_suggested_vuln_classes are hints, "
+         "not obligations",
          "- common_applicable_vuln_classes: " + (",".join(common) or "none")]
-        if any(row[4] or row[5] for row in rows[:25])
+        if any(row[4] or row[5] or row[6] for row in rows[:25])
         else []
     )
     return [
@@ -2177,18 +2393,24 @@ def _backend_queue_manifest(client, item_ids: list[int], *, repo_id: int, repo_g
         if not isinstance(row.get("applicable_vuln_classes"), list):
             fail("agent start", f"queue item {item_id} did not report applicable_vuln_classes")
         families[item_id] = (_vuln_class_names(row["applicable_vuln_classes"]),
-                             _vuln_class_names(row.get("path_suggested_vuln_classes")))
+                             _vuln_class_names(row.get("path_suggested_vuln_classes")),
+                             _vuln_class_names(row.get("unread_code_suggested_vuln_classes")))
     common = _common_family_floor([families[item_id][0] for item_id in item_ids])
     return [
         "Backend queue manifest (selected current-generation items; each item's family floor is "
         "common_applicable_vuln_classes plus additional_applicable_vuln_classes; "
-        "path_suggested_vuln_classes are hints):",
+        "path_suggested_vuln_classes and unread_code_suggested_vuln_classes are hints):",
         "- common_applicable_vuln_classes=" + (",".join(common) or "none"),
         *(
             f"- queue_item_id={item_id} file_path={json.dumps(str(found[item_id].get('file_path') or ''), ensure_ascii=False)} "
             f"status={found[item_id].get('status')} classification={found[item_id].get('classification')} "
             f"additional_applicable_vuln_classes={','.join(name for name in families[item_id][0] if name not in common) or 'none'} "
             f"path_suggested_vuln_classes={','.join(families[item_id][1]) or 'none'}"
+            + (
+                f" unread_code_suggested_vuln_classes={','.join(families[item_id][2])}"
+                if families[item_id][2]
+                else ""
+            )
             for item_id in item_ids
         ),
     ]
@@ -2239,11 +2461,25 @@ def _attach_dispatch_provenance(payload: dict, cfg) -> list[str]:
     return warnings
 
 
+def _engagement_snapshot_path(engagement_dir: str | Path, repo: dict) -> str:
+    """The sealed source a specialist reads: this engagement's copy, not the recorded path.
+
+    The backend's `repo_path` is where the source was sealed; a moved or cloned
+    engagement holds the same content-addressed snapshot under its own root
+    (`engagement_sealed_source`). A path that names no sealed source is shown
+    as recorded.
+    """
+    recorded = str(repo.get("repo_path") or "")
+    local = engagement_sealed_source(engagement_dir, recorded) if recorded else None
+    return str(local) if local is not None else recorded
+
+
 def _code_source_identity_lines(
     client,
     *,
     agent_role: str,
     requested_repo_id: int | None,
+    engagement_dir: str | Path,
 ) -> list[str]:
     if agent_role not in _CODE_SOURCE_IDENTITY_ROLES and requested_repo_id is None:
         return []
@@ -2251,17 +2487,14 @@ def _code_source_identity_lines(
     repos = client.get("code/repos")
     if not isinstance(repos, list):
         fail("agent start", "code repository listing returned an invalid payload")
-    active_repos = [
+    reference_repos = [
         repo
         for repo in repos
-        if isinstance(repo, dict) and int(repo.get("active_generation") or 0) > 0
+        if isinstance(repo, dict)
+        and int(repo.get("active_generation") or 0) > 0
+        and repo.get("repo_role") == "reference"
     ]
-    reference_repos = [
-        repo for repo in active_repos if repo.get("repo_role") == "reference"
-    ]
-    active_repos = [
-        repo for repo in active_repos if repo.get("repo_role") != "reference"
-    ]
+    active_repos = [repo for repo in repos if is_analysis_repository(repo)]
     if requested_repo_id is not None:
         active_repos = [
             repo for repo in active_repos if int(repo.get("id") or 0) == requested_repo_id
@@ -2292,7 +2525,7 @@ def _code_source_identity_lines(
         "repo_key": str(repo.get("repo_key") or ""),
         "repo_generation": generation,
         "source_manifest_digest": digest,
-        "snapshot_path": str(repo.get("repo_path") or ""),
+        "snapshot_path": _engagement_snapshot_path(engagement_dir, repo),
         "structural_index_schema": str(repo.get("structural_index_schema") or ""),
         "structural_index_manifest_path": str(
             repo.get("structural_index_manifest_path") or ""
@@ -2342,12 +2575,83 @@ def _code_source_identity_lines(
             lines.append(
                 f"- repo_id={reference.get('id')} repo_key={reference.get('repo_key')} "
                 f"generation={reference.get('active_generation')} "
-                f"snapshot_path={reference.get('repo_path')} (navigation only; no analysis obligation)"
+                f"snapshot_path={_engagement_snapshot_path(engagement_dir, reference)} "
+                "(navigation only; no analysis obligation)"
             )
         if len(reference_repos) > 10:
             lines.append(f"- … showing 10 of {len(reference_repos)} reference repositories; "
                          "resolve further active reference identities with `vigil assess fetch code/repos`")
     return lines
+
+
+#: How many subagents the operator's native client runs at once. The default is
+#: Claude Code's concurrent-subagent ceiling; set ``VIGIL_CLIENT_CONCURRENCY_BUDGET``
+#: or ``client.concurrency_budget`` in the Vigil config for another client.
+DEFAULT_CLIENT_CONCURRENCY_BUDGET = 20
+CLIENT_CONCURRENCY_BUDGET_ENV = "VIGIL_CLIENT_CONCURRENCY_BUDGET"
+CLIENT_CONCURRENCY_BUDGET_CONFIG_KEY = "client.concurrency_budget"
+
+
+def _client_concurrency_budget() -> int:
+    """The configured budget: environment first, then Vigil config, then default.
+
+    An empty or whitespace-only environment value counts as unset.
+    """
+    source = CLIENT_CONCURRENCY_BUDGET_ENV
+    raw = (os.environ.get(CLIENT_CONCURRENCY_BUDGET_ENV) or "").strip() or None
+    if raw is None:
+        source = CLIENT_CONCURRENCY_BUDGET_CONFIG_KEY
+        try:
+            raw = _read_vigil_config_value(CLIENT_CONCURRENCY_BUDGET_CONFIG_KEY)
+        except SystemExit as exc:
+            # The reader exits on a malformed config file; this advisory never
+            # blocks the swarm, so it says why and uses the default instead.
+            print(
+                f"WARN agent start-swarm: cannot read {source} ({exc}); using the "
+                f"default of {DEFAULT_CLIENT_CONCURRENCY_BUDGET}.",
+                file=sys.stderr,
+            )
+            return DEFAULT_CLIENT_CONCURRENCY_BUDGET
+    if raw is None:
+        return DEFAULT_CLIENT_CONCURRENCY_BUDGET
+    try:
+        budget = int(str(raw).strip())
+    except ValueError:
+        budget = 0
+    if budget < 1:
+        print(
+            f"WARN agent start-swarm: ignoring {source}={raw!r} (not a positive "
+            f"integer); using the default of {DEFAULT_CLIENT_CONCURRENCY_BUDGET}.",
+            file=sys.stderr,
+        )
+        return DEFAULT_CLIENT_CONCURRENCY_BUDGET
+    return budget
+
+
+def _warn_past_concurrency_budget(client, workers: int) -> None:
+    """Advise when this swarm plus live dispatches exceeds the client's budget.
+
+    ADVISORY only: every row is still recorded. Specialists past the budget
+    queue inside the native client instead of running, which the operator
+    should plan for rather than discover. A listing that cannot be read, for
+    any reason, skips the advisory: it never blocks the swarm.
+    """
+    budget = _client_concurrency_budget()
+    try:
+        in_progress = len(_list_every_page(client.list_dispatches, status="in-progress"))
+    except Exception:  # noqa: BLE001 - an advisory read never fails the swarm
+        return
+    if workers + in_progress <= budget:
+        return
+    print(
+        f"WARN agent start-swarm: {workers} worker(s) plus {in_progress} in-progress "
+        f"dispatch(es) exceed the client concurrency budget of {budget}; specialists "
+        "past the budget queue in the client rather than run in parallel. Launch the "
+        "rows in waves, lower --workers, or set "
+        f"{CLIENT_CONCURRENCY_BUDGET_ENV} / {CLIENT_CONCURRENCY_BUDGET_CONFIG_KEY} "
+        "to the native client's actual limit.",
+        file=sys.stderr,
+    )
 
 
 def _start_swarm(args) -> None:
@@ -2421,7 +2725,9 @@ def _start_swarm(args) -> None:
             client,
             agent_role=str(role),
             requested_repo_id=getattr(args, "code_repo_id", None),
+            engagement_dir=cfg.engagement_dir,
         )
+        _warn_past_concurrency_budget(client, len(batches))
         base_uuid_short = uuid.uuid4().hex[:6]
         role_slug = role.replace("_", "-").replace(" ", "-")
         for worker_idx, batch in enumerate(batches, start=1):

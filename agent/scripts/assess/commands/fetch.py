@@ -85,6 +85,7 @@ _PAGED_ASSESSMENT_ENDPOINTS = {
 _PAGED_ASSESSMENT_ENVELOPE_ENDPOINTS = {
     "attempts": ("attempts", 5000),
     "code/files": ("items", 10000),
+    "code/triggers": ("items", 1000),
 }
 
 _PAGED_ENGAGEMENT_LIST_ENDPOINTS = {
@@ -153,7 +154,7 @@ _FETCH_ROUTES: tuple[tuple[str, str], ...] = (
     ("code/modules", "Recorded architectural modules."),
     ("code/threat-model/<repo-id>", "Persisted repository threat model."),
     ("code/analysis-queue/stats", "Queue status counts and accounting debt."),
-    ("code/triggers", "Cross-file triggers and their resolution state."),
+    ("code/triggers", "Cross-file and depth-floor triggers and their resolution state (paged)."),
     ("code/analysis-results", "Source-review receipts."),
     ("code/variant-checks", "Variant-check receipts."),
     ("code/readiness", "Code phase readiness detail."),
@@ -403,25 +404,70 @@ def _fetch_assessment_endpoint(
         return rows
 
     # A route whose own ceiling is below the default page would 422 on the very
-    # request meant to be the safe one.
+    # request meant to be the safe one. One lookahead row, where the ceiling
+    # leaves room for it, tells a complete page from a truncated one.
     bounded_page_size = min(_DEFAULT_PAGE_SIZE, page_limit)
-    bounded_query = [*query_items, ("limit", str(bounded_page_size))]
+    request_size = bounded_page_size + 1 if bounded_page_size < page_limit else bounded_page_size
+    bounded_query = [*query_items, ("limit", str(request_size))]
     if not has_offset:
         bounded_query.append(("offset", "0"))
     bounded_endpoint = f"{normalized_path}?{urlencode(bounded_query)}"
     rows = _require_assessment_list(client.get(bounded_endpoint), normalized_path)
+    more: bool | None = len(rows) > bounded_page_size
+    if request_size == bounded_page_size and len(rows) == bounded_page_size:
+        more = None
+    rows = rows[:bounded_page_size]
     if normalized_path == "findings":
         rows = [
             compact_finding_list_row(row) if isinstance(row, dict) else row
             for row in rows
         ]
     print(
-        f"fetch: returned one bounded page of up to {bounded_page_size} "
-        f"{normalized_path} row(s); use --paginate to fetch every page or set "
-        "?limit=N&offset=M explicitly.",
+        _bounded_page_notice(
+            normalized_path,
+            shown=len(rows),
+            start=_single_offset(query_items),
+            size=bounded_page_size,
+            more=more,
+        ),
         file=sys.stderr,
     )
     return rows
+
+
+def _single_offset(query_items: list[tuple[str, str]]) -> int:
+    values = [value for key, value in query_items if key == "offset"]
+    try:
+        return int(values[0]) if len(values) == 1 else 0
+    except ValueError:
+        return 0
+
+
+def _bounded_page_notice(
+    normalized_path: str,
+    *,
+    shown: int,
+    start: int,
+    size: int,
+    more: bool | None,
+    total: int | None = None,
+) -> str:
+    """The stderr line for a default one-page read: complete or TRUNCATED.
+
+    ``more`` is True when the backend proved further rows match, False when
+    this page holds every remaining row, and None when a full page at the
+    route ceiling cannot tell.
+    """
+    head = f"fetch: returned one bounded page of up to {size} {normalized_path} row(s)"
+    if more is False:
+        return f"{head}; it holds every remaining match ({shown} row(s) from offset {start})."
+    state = "TRUNCATED: more rows match" if more else "possibly TRUNCATED: the page is full"
+    of_total = f" of {total}" if total is not None else ""
+    return (
+        f"{head} and it is {state} (rows {start + 1}-{start + shown}{of_total} shown). "
+        f"Continue with ?limit={size}&offset={start + shown} and the same filters, "
+        "or use --paginate to fetch every page."
+    )
 
 
 def _warn_if_array_window_truncated(
@@ -600,10 +646,26 @@ def _fetch_assessment_envelope(
             expected_offset=start_offset,
         )
         if not limit_values:
+            truncation = _envelope_truncation_reason(
+                rows,
+                total,
+                has_more,
+                start_offset=start_offset,
+                requested_page_size=requested_page_size,
+            )
             print(
-                f"fetch: returned one bounded page of up to {requested_page_size} "
-                f"{normalized_path} row(s); use --paginate to fetch every page or "
-                "set ?limit=N&offset=M explicitly.",
+                _bounded_page_notice(
+                    normalized_path,
+                    shown=len(rows),
+                    start=start_offset,
+                    size=requested_page_size,
+                    more=(
+                        False
+                        if truncation is None
+                        else None if total is None and has_more is None else True
+                    ),
+                    total=total,
+                ),
                 file=sys.stderr,
             )
         else:
@@ -726,6 +788,39 @@ def _incomplete_envelope_notice(endpoint: str, result: Any) -> str | None:
     )
 
 
+def _zero_row_notice(endpoint: str, result: Any) -> str | None:
+    """Say plainly that a list read succeeded and came back empty.
+
+    An empty array on stdout looks the same as a read that silently failed or a
+    filter that was never applied, and under ``--jq`` it can print nothing at
+    all. A failed read exits non-zero, so an empty answer that reaches this
+    point is the backend's real answer; the notice names the filters it was
+    answered for so the reader can tell "nothing matched" from "nothing exists".
+    """
+    path, _sep, raw_query = endpoint.partition("?")
+    normalized_path = path.strip("/")
+    rows: Any = result
+    if isinstance(result, dict):
+        envelope = _PAGED_ASSESSMENT_ENVELOPE_ENDPOINTS.get(normalized_path)
+        rows_key = envelope[0] if envelope else (
+            "items" if normalized_path == _ACTIVITY_LIST_ENDPOINT else None
+        )
+        rows = result.get(rows_key) if rows_key else None
+    if not isinstance(rows, list) or rows:
+        return None
+    query_items = parse_qsl(raw_query, keep_blank_values=True)
+    filters = [f"{key}={value}" for key, value in query_items if key not in {"limit", "offset"}]
+    offset = _single_offset(query_items)
+    head = f"fetch: {normalized_path} returned 0 rows"
+    if filters:
+        head += f" for {', '.join(filters)}"
+    if offset > 0:
+        return f"{head} at offset {offset}; the read succeeded and no rows remain past that offset."
+    if filters:
+        return f"{head}; the read succeeded and nothing matched those filters."
+    return f"{head}; the read succeeded and the engagement holds none on this route."
+
+
 def _fetch_engagement_endpoint(
     client: AssessmentClient,
     endpoint: str,
@@ -748,13 +843,20 @@ def _fetch_engagement_endpoint(
 
     if not paginate:
         bounded_query = urlencode(
-            [*query_items, ("limit", _DEFAULT_PAGE_SIZE), ("offset", 0)]
+            [*query_items, ("limit", _DEFAULT_PAGE_SIZE + 1), ("offset", 0)]
         )
         result = client.get_engagement(normalized_path, query=bounded_query)
+        more = isinstance(result, list) and len(result) > _DEFAULT_PAGE_SIZE
+        if isinstance(result, list):
+            result = result[:_DEFAULT_PAGE_SIZE]
         print(
-            f"fetch: returned one bounded page of up to {_DEFAULT_PAGE_SIZE} "
-            f"{normalized_path} row(s); use --paginate to fetch every page or "
-            "set ?limit=N&offset=M explicitly.",
+            _bounded_page_notice(
+                normalized_path,
+                shown=len(result) if isinstance(result, list) else 0,
+                start=0,
+                size=_DEFAULT_PAGE_SIZE,
+                more=more,
+            ),
             file=sys.stderr,
         )
         return result
@@ -935,6 +1037,9 @@ def run(args) -> None:
     incomplete = _incomplete_envelope_notice(endpoint, result)
     if incomplete:
         print(incomplete, file=sys.stderr)
+    empty = _zero_row_notice(endpoint, result)
+    if empty:
+        print(empty, file=sys.stderr)
 
     if isinstance(result, str):
         if args.jq:

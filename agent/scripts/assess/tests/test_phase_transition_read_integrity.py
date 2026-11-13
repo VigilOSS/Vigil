@@ -54,29 +54,61 @@ class _WebPrerequisiteClient:
         return response
 
 
-@pytest.mark.parametrize(
-    ("target_phase", "check_name"),
-    [("verify", "verify findings"), ("exploit", "exploit findings")],
-)
-def test_web_finding_precondition_fails_closed_on_malformed_response(
-    target_phase: str,
-    check_name: str,
-) -> None:
-    client = _WebPrerequisiteClient(
-        {
-            "findings": {"unexpected": "object"},
-            "work-items?status=pending": [],
-        }
-    )
+def test_exploit_finding_precondition_fails_closed_on_malformed_response() -> None:
+    client = _WebPrerequisiteClient({"findings?view=list": {"unexpected": "object"}})
 
-    blockers = transition_phase._check_web_preconditions(target_phase, client)
+    blockers = transition_phase._check_web_preconditions("exploit", client)
 
     assert blockers == [
         {
             "kind": "precondition_check_failed",
-            "detail": f"{check_name} check failed: backend returned a non-list response",
+            "detail": "exploit findings check failed: backend returned a non-list response",
         }
     ]
+
+
+_CLEAN_STAGE_AUDIT = {"stage_audit": {"applicable": True, "expected_stages": [], "gaps": []}}
+
+
+@pytest.mark.parametrize(
+    ("target_phase", "responses", "check_name"),
+    [
+        ("collect", {"services": RuntimeError("services backend unavailable"),
+                     "phase-readiness?phase=recon": _CLEAN_STAGE_AUDIT},
+         "collect services"),
+        ("consume-test",
+         {"work-items?status=pending": RuntimeError("work buffer unavailable"),
+          "phase-readiness?phase=collect": _CLEAN_STAGE_AUDIT},
+         "consume-test work buffer"),
+        ("collect", {"services": [{"id": 1}],
+                     "phase-readiness?phase=recon": RuntimeError("readiness unavailable")},
+         "recon stage-completion audit"),
+        ("verify",
+         {"findings?view=list": {"unexpected": "object"}, "work-items?status=pending": []},
+         "verify findings"),
+        ("verify",
+         {"findings?view=list": [{"slug": "VA-1", "workflow_status": "active"}],
+          "work-items?status=pending": RuntimeError("work buffer unavailable")},
+         "verify consumption"),
+    ],
+    ids=["collect", "consume-test", "collect-stage-audit", "verify-findings",
+         "verify-consumption"],
+)
+def test_an_advisory_check_whose_read_fails_is_an_advisory_naming_the_failure(
+    target_phase: str, responses: dict, check_name: str
+) -> None:
+    """These empty-state checks never block, so a failed read cannot block either;
+    the advisory says the check was not evaluated."""
+    blockers = transition_phase._check_web_preconditions(
+        target_phase, _WebPrerequisiteClient(responses)
+    )
+
+    assert len(blockers) == 1
+    [item] = blockers
+    assert item["kind"] == "precondition_check_failed"
+    assert item["severity"] == "advisory"
+    assert item["detail"].startswith(f"{check_name} check failed: ")
+    assert "not evaluated" in item["detail"]
 
 
 @pytest.mark.parametrize(
@@ -114,7 +146,7 @@ def test_blind_triage_precondition_fails_closed_on_bad_decision_response(
 ) -> None:
     client = _WebPrerequisiteClient(
         {
-            "findings": [
+            "findings?view=list": [
                 {
                     "slug": "VA-1",
                     "severity": "high",
@@ -133,25 +165,29 @@ def test_blind_triage_precondition_fails_closed_on_bad_decision_response(
     assert "blind-triage decisions check failed" in blockers[0]["detail"]
 
 
+_TWO_CONFIRMED_HIGHS = [
+    {
+        "slug": f"VA-{index}",
+        "severity": "high",
+        "verification_status": "confirmed",
+        "workflow_status": "active",
+    }
+    for index in (1, 2)
+]
+
+
 @pytest.mark.parametrize(
     "dispatch_response",
     [RuntimeError("dispatch backend unavailable"), {"unexpected": "object"}],
     ids=["unavailable", "malformed"],
 )
-def test_chain_construction_precondition_fails_closed_on_bad_dispatch_response(
+def test_chain_construction_advisory_survives_a_bad_dispatch_response(
     dispatch_response: object,
 ) -> None:
     client = _WebPrerequisiteClient(
         {
-            "findings": [
-                {
-                    "slug": f"VA-{index}",
-                    "severity": "high",
-                    "verification_status": "confirmed",
-                    "workflow_status": "active",
-                }
-                for index in (1, 2)
-            ],
+            "findings?view=list": _TWO_CONFIRMED_HIGHS,
+            "attack-chain-links": [],
             "dispatches?role=exploit-developer&status=completed&limit=1000": dispatch_response,
         }
     )
@@ -159,5 +195,81 @@ def test_chain_construction_precondition_fails_closed_on_bad_dispatch_response(
     blockers = transition_phase._chain_construction_blockers(client)
 
     assert len(blockers) == 1
+    assert blockers[0]["kind"] == "chain_construction_unchained"
+    assert blockers[0]["severity"] == "advisory"
+    assert "VA-1, VA-2" in blockers[0]["detail"]
+    assert "an unknown number of (read failed:" in blockers[0]["detail"]
+
+
+@pytest.mark.parametrize(
+    "links_response",
+    [RuntimeError("chain backend unavailable"), {"unexpected": "object"}],
+    ids=["unavailable", "malformed"],
+)
+def test_chain_construction_advisory_reports_a_bad_chain_link_read(
+    links_response: object,
+) -> None:
+    client = _WebPrerequisiteClient(
+        {"findings?view=list": _TWO_CONFIRMED_HIGHS, "attack-chain-links": links_response}
+    )
+
+    blockers = transition_phase._chain_construction_blockers(client)
+
+    assert len(blockers) == 1
     assert blockers[0]["kind"] == "precondition_check_failed"
-    assert "chain-construction dispatches check failed" in blockers[0]["detail"]
+    assert blockers[0]["severity"] == "advisory"
+    assert "chain-construction links check failed" in blockers[0]["detail"]
+
+
+def test_variant_pass_gate_reads_every_analyst_dispatch_page() -> None:
+    slug = "VA-7"
+    analyst_filler = [
+        {"agent_role": "vulnerability-analyst", "status": "completed",
+         "dispatch_mode": "standard", "finding_slugs": []}
+        for _ in range(1000)
+    ]
+    late_variant_pass = {
+        "agent_role": "vulnerability-analyst", "status": "completed",
+        "dispatch_mode": "variant-rotation", "finding_slugs": [slug],
+    }
+    client = _WebPrerequisiteClient(
+        {
+            "findings?view=list": [
+                {"slug": slug, "severity": "high", "verification_status": "confirmed",
+                 "workflow_status": "active"},
+            ],
+            "work-items?status=pending": [],
+            "dispatches?role=vulnerability-analyst&limit=1000&offset=0": analyst_filler,
+            "dispatches?role=vulnerability-analyst&limit=1000&offset=1000": [late_variant_pass],
+        }
+    )
+
+    blockers = transition_phase._check_web_preconditions("exploit", client)
+
+    assert blockers == []
+
+
+def test_variant_pass_gate_fails_closed_on_a_malformed_later_page() -> None:
+    client = _WebPrerequisiteClient(
+        {
+            "findings?view=list": [
+                {"slug": "VA-7", "severity": "high", "verification_status": "confirmed",
+                 "workflow_status": "active"},
+            ],
+            "work-items?status=pending": [],
+            "dispatches?role=vulnerability-analyst&limit=1000&offset=0": [
+                {"agent_role": "vulnerability-analyst", "status": "completed"}
+                for _ in range(1000)
+            ],
+            "dispatches?role=vulnerability-analyst&limit=1000&offset=1000": {"page": "object"},
+        }
+    )
+
+    blockers = transition_phase._check_web_preconditions("exploit", client)
+
+    assert blockers == [
+        {
+            "kind": "precondition_check_failed",
+            "detail": "exploit variant dispatches check failed: backend returned a non-list response",
+        }
+    ]

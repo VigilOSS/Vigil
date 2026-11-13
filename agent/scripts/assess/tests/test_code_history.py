@@ -20,6 +20,7 @@ import pytest
 from _fake_client import StubClient
 
 from assess.commands import code_history, code_ingest
+from assess.lib.code_history import MAX_CHANGED_PATHS
 from assess.lib.code_snapshot import SnapshotBuilder
 from assess.lib.trusted_exec import git_command, resolve_trusted_tool, trusted_environment
 
@@ -431,6 +432,54 @@ def test_budget_truncation_is_always_flagged(tmp_path, monkeypatch, capsys, git_
     assert commits["initial"] in {record["commit"] for record in _records(engagement, full)}
 
 
+def test_truncated_text_counts_what_it_left_out_and_names_the_widening_flag(
+    tmp_path, monkeypatch, capsys, git_bin
+):
+    repo, _commits = _history_repo(tmp_path)
+    for name in ("a", "b", "c"):
+        _write(repo, f"src/{name}.py", f"{name.upper()} = 1\n")
+    wide = _commit(repo, "Security fix across modules", "2026-05-05T09:00:00Z")
+    engagement = _engagement(tmp_path)
+    _bind(monkeypatch, engagement, repo, git_bin)
+
+    _code, walk, _err = _run(capsys, "commits", "--repo-id", str(_REPO_ID), "--match", "all",
+                             "--max-commits", "2")
+    _code, diff, _err = _run(capsys, "diff", "--repo-id", str(_REPO_ID), "--commit", wide,
+                             "--max-files", "2", "--max-bytes", "40")
+
+    walk_line = next(line for line in walk.splitlines() if line.startswith("walked "))
+    assert "--max-commits" in walk_line and "--path-prefix" in walk_line
+    files_line = next(line for line in diff.splitlines() if line.startswith("files: "))
+    assert "1 file(s) not listed" in files_line
+    assert "--max-files" in files_line and "--path" in files_line
+    patch_line = next(line for line in diff.splitlines() if line.startswith("patch: "))
+    patch = json.loads(_run(capsys, "diff", "--repo-id", str(_REPO_ID), "--commit", wide,
+                            "--max-files", "2", "--max-bytes", "40", "--json")[1])
+    left_out = patch["counts"]["patch_bytes_total"] - 40
+    assert f"{left_out} byte(s) not written" in patch_line
+    assert "--max-bytes" in patch_line
+
+
+def test_a_changed_path_list_over_its_bound_names_the_diff_that_lists_it(
+    tmp_path, monkeypatch, capsys, git_bin
+):
+    repo, _commits = _history_repo(tmp_path)
+    for n in range(MAX_CHANGED_PATHS + 3):
+        _write(repo, f"gen/f{n}.txt", f"{n}\n")
+    bulk = _commit(repo, "Fix cve-2026-0002 across generated files", "2026-05-06T09:00:00Z")
+    engagement = _engagement(tmp_path)
+    _bind(monkeypatch, engagement, repo, git_bin)
+
+    _code, text, _err = _run(capsys, "commits", "--repo-id", str(_REPO_ID), "--match", "all")
+
+    record_line = next(line for line in text.splitlines() if line.startswith(f"- {bulk}"))
+    assert f"paths={MAX_CHANGED_PATHS + 3} ({MAX_CHANGED_PATHS} recorded)" in record_line
+    truncated = next(line for line in text.splitlines() if line.startswith("TRUNCATED: "))
+    assert "1 path list(s)" in truncated
+    assert f"vigil assess code-history diff --repo-id {_REPO_ID} --commit <commit>" in truncated
+    assert "--max-files" in truncated
+
+
 def test_defaults_are_recorded_as_budgets(tmp_path, monkeypatch, capsys, git_bin):
     repo, commits = _history_repo(tmp_path)
     engagement = _engagement(tmp_path)
@@ -664,3 +713,54 @@ def test_a_non_utf8_message_is_stored_as_base64(tmp_path, monkeypatch, capsys, g
     assert record["encoding"] == "ISO-8859-1"
     assert record["author"] == "Acme Dev <dev@acme.example> 1780315200 +0000"
     assert record["security"]["keyword_hits"] == ["security"]
+
+
+def test_history_binds_the_sealed_snapshot_after_the_engagement_moves(
+    tmp_path, monkeypatch, capsys, git_bin,
+):
+    repo, _commits = _history_repo(tmp_path)
+    engagement = _engagement(tmp_path)
+    _bind(monkeypatch, engagement, repo, git_bin)  # the backend keeps the pre-move paths
+    moved = tmp_path / "moved" / "acme-engagement"
+    moved.parent.mkdir()
+    os.rename(engagement, moved)
+    monkeypatch.setattr(
+        code_history,
+        "load_config",
+        lambda *_a, **_k: SimpleNamespace(
+            base_url="http://example.test",
+            engagement_key="acme-engagement",
+            engagement_dir=str(moved),
+        ),
+    )
+
+    code, _out, err = _run(capsys, "commits", "--repo-id", str(_REPO_ID))
+
+    assert code == 0, err
+    assert _history_tree(moved).exists()
+
+
+@pytest.mark.parametrize(
+    "field, value",
+    [
+        ("repo_path", lambda record: Path(record["repo_path"]).parent.parent / ("e" * 64) / "source"),
+        ("repo_path", lambda record: Path(record["repo_path"]).parent.parent.parent / "acme-other"
+         / Path(record["repo_path"]).parent.name / "source"),
+        ("snapshot_manifest_path", lambda record: Path(record["repo_path"]).parent / "index.json"),
+    ],
+    ids=["other-digest", "other-repo-key", "not-a-manifest"],
+)
+def test_history_refuses_a_backend_path_naming_another_snapshot(
+    tmp_path, monkeypatch, capsys, git_bin, field, value,
+):
+    repo, _commits = _history_repo(tmp_path)
+    engagement = _engagement(tmp_path)
+    record = _bind(monkeypatch, engagement, repo, git_bin)
+    record[field] = str(value(record))
+    _Client.repo = record
+
+    code, _out, err = _run(capsys, "commits", "--repo-id", str(_REPO_ID))
+
+    assert code != 0
+    assert "no sealed snapshot binding" in err
+    assert not _history_tree(engagement).exists()

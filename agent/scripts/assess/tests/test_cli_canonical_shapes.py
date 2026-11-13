@@ -97,14 +97,14 @@ def test_artifact_search_rejects_positional_query_with_q_guidance(capsys) -> Non
 
 def test_canonical_contracts_have_one_cli_shape() -> None:
     artifact_contract = contracts.render_contract("artifact")
+    search_contract = contracts.render_contract("artifact search")
     link_contract = contracts.render_contract("finding link")
-    start_contract = contracts.render_contract("agent start")
 
     assert "artifact search --q" in artifact_contract
-    assert "search: --q" in artifact_contract
-    assert "Producer agent/command attribution is immutable" in artifact_contract
+    assert "--q <query>" in search_contract
+    assert "Producer agent/command attribution is immutable" in contracts.render_contract_notes("artifact")
     assert "--reason" in link_contract
-    assert "does not spawn" in start_contract.lower()
+    assert "does not spawn" in contracts.render_contract_notes("agent start").lower()
 
 
 def test_host_exec_contract_exposes_the_authoritative_cli_shapes() -> None:
@@ -115,7 +115,9 @@ def test_host_exec_contract_exposes_the_authoritative_cli_shapes() -> None:
         "vigil assess host-exec --tool <tool> --intent '<why>' --technique <technique> --phase <phase> -- <command> [args...]",
         "vigil assess host-exec --from-json <request.json>",
     )
-    rendered = contracts.render_contract("host-exec")
+    rendered = contracts.render_field_sections(
+        "host-exec", ["require-audit", "allow-destructive", "finding"]
+    )
     assert "--require-audit" in rendered
     assert "--allow-destructive" in rendered
     assert "--finding" in rendered
@@ -330,7 +332,7 @@ def test_agent_start_swarm_has_parser_and_introspectable_contract(tmp_path) -> N
     assert "--workers" in rendered
     assert "--batch-size" in rendered
     assert "--items-file" in rendered
-    assert "non-zero" in rendered
+    assert "non-zero" in contracts.render_contract_notes("agent start-swarm")
 
 
 class _CodeDispatchClient(_DispatchClient):
@@ -758,8 +760,7 @@ def test_agent_start_emit_prompt_injects_blue_tenant_context(
     assert "--- END PERSISTED PRIOR-STATE DATA ---" in output
     assert "## Dispatch Context" in output
     assert "outcome objective: Investigate suspicious sign-in" in output
-    assert "skills:\n  - okta-investigation — full path: " in output
-    assert "You MUST read and follow agent/skills/okta-investigation/SKILL.md" in output
+    assert "  - okta-investigation: agent/skills/okta-investigation/SKILL.md" in output
     assert "## Role-specific additions" in output
     for placeholder in (
         "<set-by-operator>",
@@ -1109,28 +1110,36 @@ def test_registered_kali_verbs_match_the_kali_verb_registry() -> None:
 
 
 @pytest.mark.parametrize(
-    "name",
+    ("name", "resolved"),
     [
-        "artifact register",
-        "artifact mark-scratch",
-        "auth status",
-        "exploit approve",
-        "fixture observe",
-        "gau js-endpoints",
-        "http import-har",
-        "http policy set",
-        "ingest endpoints",
-        "kali job start",
-        "resolve coverage-item",
+        ("artifact register", "artifact register"),
+        ("artifact mark-scratch", "artifact mark-scratch"),
+        ("exploit approve", "exploit approve"),
+        ("exploit approve selected", "exploit approve"),
+        ("fixture observe", "fixture observe"),
+        ("gau js-endpoints", "gau js-endpoints"),
+        ("http import-har", "http import-har"),
+        ("http policy set", "http policy"),
+        ("ingest endpoints", "ingest endpoints"),
+        ("kali job start", "kali job start"),
+        ("resolve coverage-item", "resolve coverage-item"),
     ],
 )
-def test_inline_documented_namespace_action_resolves_to_its_parent(name: str) -> None:
-    # These parents document every action inline and TELL the reader to run
-    # `contract <parent> <action>`; returning "Unknown contract" there made the
-    # parent's own pointer a dead end.
-    parent = name.rsplit(" ", 1)[0] if name.startswith("kali job") else name.split(" ")[0]
+def test_an_action_of_a_multi_action_command_resolves_to_that_action(name: str, resolved: str) -> None:
+    # A command that documents several actions TELLS the reader to run
+    # `contract <command> <action>`; that pointer resolves to the one action, and
+    # an action that names a family of sub-actions answers for them.
     contract = _contract(name)
-    assert contract.name == parent
+    assert contract.name == resolved
+    assert contract.variants == ()
+
+
+def test_an_unknown_action_names_the_commands_actions() -> None:
+    with pytest.raises(ValueError) as excinfo:
+        contracts.render_contract("auth status")
+    message = str(excinfo.value)
+    assert "Unknown action 'status' for `auth`" in message
+    assert "list" in message
 
 
 def test_details_writing_contracts_publish_the_allowed_details_keys() -> None:
@@ -1140,13 +1149,14 @@ def test_details_writing_contracts_publish_the_allowed_details_keys() -> None:
     # `finding update` — which validates against the same schema — points there
     # rather than carrying a second 15 KB copy that can drift.
     record = contracts.render_contract("finding record")
-    assert "Allowed details keys" in record
     for key in ("attacker_trace", "cvss_vector", "repro_runs"):
-        assert f"  - {key}" in record, f"{key} missing from finding record contract"
+        assert f"  - details.{key} (" in record, f"{key} missing from finding record contract"
 
     update = contracts.render_contract("finding update")
-    assert "Allowed details keys" not in update
-    assert "vigil assess contract finding record" in update
+    assert "  - details.attacker_trace (" not in update
+    assert "vigil assess contract finding record" in contracts.render_field_sections(
+        "finding update", ["details"]
+    )
 
 
 def _mixed_role_continuation(prior_mode, recorded):
@@ -1216,9 +1226,8 @@ def test_agent_continue_refuses_an_unknown_or_conflicting_mode_before_writing(
 
 
 def test_agent_contracts_show_assessment_mode_for_mixed_roles() -> None:
-    root = contracts.render_contract("agent")
-    assert "--assessment-mode" in root
-    assert "--assessment-mode" in contracts.render_contract("agent continue")
+    for name in ("agent", "agent continue"):
+        assert "--assessment-mode" in contracts.render_field_sections(name, ["assessment-mode"])
 
 
 @pytest.mark.parametrize('role', sorted(agent._CODE_SOURCE_IDENTITY_ROLES))
@@ -1293,7 +1302,6 @@ def test_agent_handoff_contract_publishes_every_handoff_create_field() -> None:
     )
 
     rendered = contracts.render_contract("agent handoff")
-    assert "Allowed top-level fields:" in rendered
     for name in writable:
         assert f"  - {name} (" in rendered, name
 
@@ -1307,6 +1315,11 @@ def test_agent_handoff_contract_marks_the_fields_the_model_requires() -> None:
             assert "required" in domains[name], (
                 f"HandoffCreate requires {name!r}, so its contract domain must "
                 "say so"
+            )
+        else:
+            assert "required" not in domains[name], (
+                f"HandoffCreate does not require {name!r}, so its contract domain "
+                "must not say it does"
             )
 
 
@@ -1387,7 +1400,7 @@ def test_agent_handoff_notes_the_keys_the_backend_owns() -> None:
     """`agent handoff` rejects unknown keys BY NAME, and the names a specialist
     most plausibly copies back out of a prior row are backend-managed. A
     contract that does not list them teaches the payload that gets refused."""
-    rendered = contracts.render_contract("agent handoff")
+    rendered = contracts.render_contract_notes("agent handoff")
 
     for owned in ("handoff_version", "last_checkpoint_at", "created_at", "engagement_id"):
         assert owned in rendered, owned
@@ -1637,15 +1650,11 @@ def test_agent_start_notes_the_unregistered_role_refusal() -> None:
     assert "roster" in notes.lower()
 
 
-def test_agent_start_notes_the_per_slug_obligation_advisory() -> None:
+def test_agent_start_notes_the_assigned_finding_set() -> None:
     notes = _contract_notes("agent start")
 
-    assert "role_specific_additions" in notes
-    assert "per-slug" in notes.lower()
-    assert "ADVISORY" in notes, (
-        "it is a signal about authored text the operator owns, so the contract "
-        "has to say it does not block"
-    )
+    assert "assigned_finding_slugs" in notes
+    assert "--finding-slugs" in notes
 
 
 # --------------------------------------------------------------------------- #
@@ -1669,7 +1678,7 @@ def _fetch_route_names() -> set[str]:
 
 
 def test_code_ingest_names_the_repository_listing_read() -> None:
-    rendered = contracts.render_contract("code-ingest")
+    rendered = contracts.render_contract_notes("code-ingest")
 
     assert "fetch code/repos" in rendered, (
         "code-ingest hands back a repo_id every later code verb is keyed by; "
@@ -2403,4 +2412,32 @@ def test_no_contract_names_an_impossible_verb_compound() -> None:
     assert impossible == set(), (
         "a contract names a `<verb>-<positional>` compound that is not a "
         f"command — the verb takes that word as a positional: {sorted(impossible)}"
+    )
+
+
+def test_classify_refuses_a_context_tag_the_current_schema_does_not_declare() -> None:
+    """The CLI validates context_tags against the generated schema, as it does
+    slot_types, so a tag the classify contract does not list is refused before
+    any write instead of reaching a backend whose vocabulary may differ."""
+    from assess.commands import code_classify
+    from assess.lib.schema_validation import load_schema
+
+    declared = load_schema("code-file-classification.schema.json")["properties"]["context_tags"]
+    item = {
+        "file_id": 1, "classification": "medium", "role": "bundle", "slot_types": [],
+        "analysis_priority": 30,
+    }
+
+    errors = code_classify._validate_classification_payload(
+        [{**item, "context_tags": ["client-bundel", "parser"]}]
+    )
+    assert any("client-bundel" in error and "Allowed values" in error for error in errors)
+    assert code_classify._validate_classification_payload(
+        [{**item, "context_tags": list(declared["items"]["enum"])}]
+    ) == []
+    assert any(
+        "context_tags must be a JSON array" in error
+        for error in code_classify._validate_classification_payload(
+            [{**item, "context_tags": "parser"}]
+        )
     )

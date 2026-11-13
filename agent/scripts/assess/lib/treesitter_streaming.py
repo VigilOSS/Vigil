@@ -13,6 +13,7 @@ from assess.lib.treesitter_catalogues import (
     _PHP_STREAM_MASS_ASSIGNMENT,
     _PHP_STREAM_VARIABLE_VARIABLE,
     _SINK_DEFINITIONS,
+    python_imports_flask_only,
 )
 from assess.lib.treesitter_common import _gate_literals, _literal_gate, _php_import_record
 from assess.lib.treesitter_lightweight import (
@@ -958,6 +959,10 @@ class StreamingSecurityScanner:
             self._finish_line()
         if self._php_use_pending is not None:
             self._publish_php_use()
+        if self.language == "python" and python_imports_flask_only(self.imports):
+            for record in self.entry_points:
+                if record["kind"] == "fastapi_route":
+                    record["kind"] = "flask_route"
         if self._block_comment:
             # The source ended inside a `/*` it never closed, so the lines
             # from the opener were read as comment text without that ever

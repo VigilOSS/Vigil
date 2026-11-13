@@ -7,6 +7,11 @@ audited command:
       -> kali arjun -i <list>.<M> -m <M>   (one blocking call per method)
       -> ingest-arjun                       (fold discovered params into the buffer)
 
+The required ``--timeout`` bounds the WHOLE sweep, because the caller blocks on
+it as one command: each method's arjun call gets the smaller of
+``--stage-timeout`` and the time left, and a method left with no usable time is
+reported deferred rather than run past the caller's budget.
+
 The three recurring foot-guns this removes:
   * running the union list under a SINGLE ``-m`` (so POST/JSON/XML body surfaces
     get scanned as GET and their hidden body params are missed) — arjun-sweep
@@ -29,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -52,6 +58,16 @@ from assess.lib.kali_output import kali_exit_code
 # cap keeps the best targets; the rest are deferred and reported, never silently
 # dropped. 0 = unlimited (opt out of sizing).
 _DEFAULT_MAX_TARGETS = 100
+
+# Per-method arjun call cap, matching the 600 s blocking-call ceiling so a
+# single-method sweep fits one blocking call.
+_DEFAULT_STAGE_TIMEOUT = 600
+
+# A method arm left with less than this much of the sweep-wide --timeout is
+# deferred instead of started: arjun cannot finish a list that fast, and a
+# near-zero run would only produce an incomplete artifact. Capped at --timeout
+# itself so a deliberately small sweep budget still runs its first method.
+_MIN_ARM_SECONDS = 30
 
 # Arjun only accepts these four -m modes (kali_arjun._ARJUN_METHODS). A work-item
 # method is a raw HTTP verb, so map body verbs (PUT/PATCH/DELETE) onto arjun's
@@ -110,8 +126,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
     p.add_argument("-w", dest="wordlist", default="",
                    help="arjun -w wordlist (default arjun's full db/large.txt; pass a smaller list to go faster).")
     p.add_argument("-t", dest="threads", default="", help="arjun -t threads.")
-    p.add_argument("--stage-timeout", dest="stage_timeout", type=int, default=1800,
-                   help="Per-method arjun call timeout in seconds (default 1800).")
+    p.add_argument("--stage-timeout", dest="stage_timeout", type=int,
+                   default=_DEFAULT_STAGE_TIMEOUT,
+                   help=f"Per-method arjun call cap in seconds (default {_DEFAULT_STAGE_TIMEOUT}; "
+                        "the sweep as a whole is bounded by --timeout).")
     p.set_defaults(func=run)
 
 
@@ -173,8 +191,42 @@ def run(args: argparse.Namespace) -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     max_targets = int(args.max_targets)
+    stage_timeout = int(args.stage_timeout)
+    # Resolved once: the audit attribution and the caller-ceiling check run per
+    # CLI invocation, and the ceiling-checked --timeout is the sweep budget.
+    audit_kw = kali_args_to_kwargs(args)
+    sweep_budget = int(audit_kw["timeout"])
+    min_arm = min(_MIN_ARM_SECONDS, sweep_budget)
+    started = time.monotonic()
     per_method: list[dict] = []
     for method, urls in sorted(by_method.items()):
+        remaining = int(sweep_budget - (time.monotonic() - started))
+        if remaining < min_arm:
+            print(
+                f"arjun-sweep: deferring {method} ({len(urls)} route(s)): only "
+                f"{max(remaining, 0)}s of the sweep-wide --timeout {sweep_budget}s is left. "
+                "Its hidden params are a HOLE, not a clean 0 — re-run arjun-sweep for it.",
+                file=sys.stderr,
+            )
+            per_method.append({
+                "method": method,
+                "routes": len(urls),
+                "deferred": len(urls),
+                "status": "deferred",
+                "incomplete": True,
+                "run_id": None,
+                "resolved_argv": [],
+                "json": None,
+            })
+            continue
+        arm_timeout = min(stage_timeout, remaining)
+        if arm_timeout < stage_timeout:
+            print(
+                f"arjun-sweep: {method} gets {arm_timeout}s, not its {stage_timeout}s "
+                f"--stage-timeout: that is what is left of the sweep-wide --timeout "
+                f"{sweep_budget}s.",
+                file=sys.stderr,
+            )
         deferred = 0
         if max_targets > 0 and len(urls) > max_targets:
             deferred = len(urls) - max_targets
@@ -204,9 +256,9 @@ def run(args: argparse.Namespace) -> None:
         if args.threads:
             cmd.extend(["-t", str(args.threads)])
 
-        kw = kali_args_to_kwargs(args)
+        kw = dict(audit_kw)
         kw["intent"] = f"arjun-sweep: hidden {method} param discovery on {len(urls)} gated routes"
-        kw["timeout"] = int(args.stage_timeout)
+        kw["timeout"] = arm_timeout
         print(f"arjun-sweep: scanning {len(urls)} {method} route(s)...", file=sys.stderr)
         result = kali_exec(cmd, tool_name="arjun", **kw)
 
@@ -250,12 +302,15 @@ def run(args: argparse.Namespace) -> None:
         })
 
     any_incomplete = any(r["incomplete"] for r in per_method)
+    deferred_methods = [r["method"] for r in per_method if r["status"] == "deferred"]
     # Same worst-arm rule the value sweep uses (one shared implementation): a
     # per-method arm whose terminal status means "no usable output" is a hole,
     # not a negative, and a sweep where EVERY method arm died must not exit 0 —
     # that is the false green this verb is most exposed to, because it is the
     # one an operator leaves running unattended.
-    exit_code = aggregate_exit_code(r["status"] for r in per_method)
+    exit_code = aggregate_exit_code(
+        r["status"] for r in per_method if r["status"] != "deferred"
+    )
     failed = [r for r in per_method if kali_exit_code(r["status"])]
     print(json.dumps({
         "verb": "arjun-sweep",
@@ -264,6 +319,7 @@ def run(args: argparse.Namespace) -> None:
         "runs": per_method,
         "incomplete": any_incomplete,
         "failed_methods": [r["method"] for r in failed],
+        "deferred_methods": deferred_methods,
         "drops": drop_stats,
     }, ensure_ascii=False, indent=2))
     if failed:

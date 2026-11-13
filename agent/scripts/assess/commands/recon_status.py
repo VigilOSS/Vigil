@@ -1,7 +1,8 @@
 """vigil assess recon-status — read the recon pipeline digest.
 
 A pure, read-only projection over ``scans/recon/recon-status.json`` (written by
-``vigil assess recon`` after every stage) plus an optional cross-check against
+``vigil assess recon`` after every stage; ``overall_state`` is ``running``,
+``done``, ``partial`` or ``failed``) plus an optional cross-check against
 the backend job row. This is what the operator polls and what the recon
 completeness-assessor specialist ingests — "% complete + per-stage state +
 counts + what's next" — so neither ever holds a blocking call to learn where the
@@ -30,7 +31,7 @@ def register(subparsers) -> None:
 
 def _digest(status: dict) -> dict:
     stages = status.get("stages", []) or []
-    settled = sum(1 for s in stages if s.get("state") in ("done", "skipped"))
+    settled = sum(1 for s in stages if s.get("state") in _recon._SETTLED_STAGE_STATES)
     total = len(stages)
     pct = int(round(100 * settled / total)) if total else 0
     nxt = next((s for s in stages if s.get("state") in ("pending", "running", "failed")), None)
@@ -47,6 +48,7 @@ def _digest(status: dict) -> dict:
                 "state": s.get("state"),
                 "exit_code": s.get("exit_code"),
                 "counts": s.get("counts", {}),
+                "errors": s.get("errors") or [],
             }
             for s in stages
         ],
@@ -85,7 +87,15 @@ def run(args) -> None:
         counts = " ".join(f"{k}={v}" for k, v in sorted((s.get("counts") or {}).items()))
         rc = "" if s.get("exit_code") in (None, 0) else f" rc={s['exit_code']}"
         print(f"  [{s['state']:<8}] {s['label']}{rc}  {counts}")
+        for error in s.get("errors") or []:
+            print(f"      error: {error}")
     if digest.get("job_status"):
-        print(f"  job[{digest['job_id']}] backend status: {digest['job_status']}")
+        note = (
+            " (its exit code reports the failed stage(s) above; the rest of the "
+            "pipeline ran)"
+            if digest["overall_state"] == "partial" and digest["job_status"] == "failed"
+            else ""
+        )
+        print(f"  job[{digest['job_id']}] backend status: {digest['job_status']}{note}")
     if digest["next"] and digest["overall_state"] != "done":
         print(f"  next: {digest['next']}")

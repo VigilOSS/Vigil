@@ -64,7 +64,13 @@ from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.exploit_targets import resolve_approved_target_slugs
-from assess.lib.phases import CODE_PHASES, PHASE_INPUT_ALIASES, WEB_PHASES, canonical_phase
+from assess.lib.phases import (
+    CODE_PHASES,
+    PHASE_INPUT_ALIASES,
+    TERMINAL_PHASE,
+    WEB_PHASES,
+    canonical_phase,
+)
 from assess.lib.scope import load_scope
 
 
@@ -94,8 +100,8 @@ _PHASE_REQUIRE_STAGE: dict[str, str | None] = {
 # and the would-block set (coverage-grain unbundle / ADR 0012) so the terminal
 # depth block is legible BEFORE `transition-phase report` runs it. The preview
 # NEVER changes this advisory command's exit code — the hard block lives on the
-# transition-phase precondition. (`complete` is not a phase of this command, so
-# it is not listed; its block is previewed under `report`.)
+# transition-phase precondition. (`--phase complete` reads the web track
+# through the `report` gate, so it is not listed separately.)
 _DEPTH_PHASES = frozenset({"consume-test", "verify", "report"})
 
 _COVERAGE_PHASES = frozenset(
@@ -230,44 +236,52 @@ def run(args: argparse.Namespace) -> None:
     from assess.lib.tracks import track_phases
 
     tracks = track_phases(scope)
-    if "code" not in tracks and phase not in PHASES:
+    if phase in CODE_PHASES and "code" not in tracks:
         fail(
             "check-phase-readiness",
             f"{phase} is a code phase, but this engagement has no code track",
         )
-    if "web" not in tracks or phase in (*CODE_PHASES, "complete"):
-        if phase in (*CODE_PHASES, "complete"):
-            target = phase
-        else:
-            current = tracks.get("code", "ingest")
-            target = (
-                (*CODE_PHASES, "complete")[CODE_PHASES.index(current) + 1]
-                if current in CODE_PHASES else "classify-map"
-            )
+    if "web" not in tracks and "code" not in tracks:
+        fail(
+            "check-phase-readiness",
+            "this engagement has neither a web nor a code track to check",
+        )
+    if phase in CODE_PHASES or "web" not in tracks:
         print(
-            "check-phase-readiness checks web phases; code readiness is owned by "
-            f"`vigil assess code-coverage --require-transition-ready {target}`.",
+            "check-phase-readiness checks web phases; "
+            + _code_readiness_pointer(tracks.get("code"), phase)
+            + ".",
             file=sys.stderr,
         )
         sys.exit(1)
 
+    # `complete` is the terminal state of every track. The web track's terminal
+    # preconditions start from the report gate, so `--phase complete` previews
+    # that gate; the verdicts produced during reporting are checked by
+    # `transition-phase complete` itself.
+    backend_phase = "report" if phase == TERMINAL_PHASE else phase
     projection: dict[str, Any] = {"phase": phase, "engagement_key": cfg.engagement_key}
     text_lines: list[str] = (
-        ["Web track readiness only. For code, use `vigil assess code-coverage "
-         "--require-transition-ready <target-phase>`."]
+        [f"Web track readiness only. For code, {_code_readiness_pointer(tracks['code'], phase)}."]
         if "code" in tracks else []
     )
+    if phase == TERMINAL_PHASE:
+        text_lines.append(
+            "complete: previews the web report gate below; `transition-phase "
+            "complete` also requires the blind-triage, submission-QC and "
+            "report-QC verdicts produced during reporting."
+        )
     exit_nonzero = False
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         try:
-            backend = client.get(f"phase-readiness?phase={phase}")
+            backend = client.get(f"phase-readiness?phase={backend_phase}")
         except AssessError as exc:
             fail("check-phase-readiness", f"backend phase-readiness fetch failed: {exc}")
         if not isinstance(backend, dict):
             fail("check-phase-readiness", "unexpected response from backend")
 
-        if phase == "report":
+        if backend_phase == "report":
             exit_nonzero |= _run_report_phase(
                 client, args, backend, projection, text_lines
             )
@@ -336,7 +350,9 @@ def run(args: argparse.Namespace) -> None:
                 except AssessError:
                     ledger = {"skipped": True, "units": [], "summary": {}}
             projection["depth_ledger"] = ledger
-            text_lines.extend(_render_depth_ledger(ledger, by_app_unit=args.by_app_unit))
+            text_lines.extend(
+                _render_depth_ledger(ledger, by_app_unit=args.by_app_unit, phase=phase)
+            )
             if args.strict_deep and _depth_unsatisfied(ledger):
                 exit_nonzero = True
 
@@ -366,6 +382,46 @@ def run(args: argparse.Namespace) -> None:
     _emit(args, projection, text_lines)
     if exit_nonzero:
         sys.exit(1)
+
+
+def _code_readiness_pointer(code_phase: str | None, phase: str) -> str:
+    """Name the code readiness command that answers *phase* for the code track.
+
+    A code phase (or `complete`) names its own gate. `ingest` is where the code
+    track starts and has no gate to enter, so it names the gate that leaves it.
+    A web phase names the code track's next gate, and the terminal one too when
+    reporting: a report is final only once the code track can complete as well.
+    Wherever it names the terminal gate it also names the deliverable reviews
+    `transition-phase complete` checks, which that command does not read.
+    """
+    command = "`vigil assess code-coverage --require-transition-ready {}`"
+    deliverable_qc = (
+        "; `transition-phase complete` also requires a passing `submission_qc_verdict` "
+        "for each registered submission and `report_qc_verdict` for a registered report.md"
+    )
+    if phase == CODE_PHASES[0]:
+        return (
+            f"{phase} has no entry gate; the gate that leaves it is "
+            + command.format(CODE_PHASES[1])
+        )
+    if phase in (*CODE_PHASES, TERMINAL_PHASE):
+        targets = [phase]
+    elif code_phase == TERMINAL_PHASE:
+        return (
+            "the code track is complete; "
+            + command.format(TERMINAL_PHASE)
+            + " re-reads its terminal gate"
+            + deliverable_qc
+        )
+    elif code_phase in CODE_PHASES:
+        targets = [(*CODE_PHASES, TERMINAL_PHASE)[CODE_PHASES.index(code_phase) + 1]]
+    else:
+        targets = [CODE_PHASES[1]]
+    if phase == "report" and TERMINAL_PHASE not in targets:
+        targets.append(TERMINAL_PHASE)
+    return "code readiness is owned by " + " and ".join(
+        command.format(target) for target in targets
+    ) + (deliverable_qc if TERMINAL_PHASE in targets else "")
 
 
 def _run_report_phase(
@@ -398,7 +454,9 @@ def _run_report_phase(
                 ledger = {"skipped": True, "units": [], "summary": {}}
         projection["depth_ledger"] = ledger
         text_lines.extend(
-            _render_depth_ledger(ledger, by_app_unit=getattr(args, "by_app_unit", False))
+            _render_depth_ledger(
+                ledger, by_app_unit=getattr(args, "by_app_unit", False), phase="report"
+            )
         )
 
         would_block = None
@@ -601,8 +659,15 @@ def _depth_unsatisfied(ledger: Any) -> bool:
     return int(summary.get("depth_unsatisfied", 0) or 0) > 0
 
 
-def _render_depth_ledger(ledger: Any, *, by_app_unit: bool) -> list[str]:
-    """Render the EV-ranked depth ledger as human lines."""
+_DEPTH_LEDGER_SAMPLES = 5
+
+
+def _render_depth_ledger(ledger: Any, *, by_app_unit: bool, phase: str) -> list[str]:
+    """Render the EV-ranked depth ledger as human lines.
+
+    Without ``by_app_unit`` only the top unsatisfied units are listed, followed by
+    how many were left out and the ``--by-app-unit`` command that lists every unit.
+    """
     lines: list[str] = []
     lines.append("")
     if not isinstance(ledger, dict):
@@ -639,7 +704,8 @@ def _render_depth_ledger(ledger: Any, *, by_app_unit: bool) -> list[str]:
             if warn:
                 lines.append(f"      missing (warn):  {', '.join(str(m) for m in warn)}")
     else:
-        top = [u for u in units if not u.get("depth_satisfied")][:5]
+        unsatisfied_units = [u for u in units if not u.get("depth_satisfied")]
+        top = unsatisfied_units[:_DEPTH_LEDGER_SAMPLES]
         for u in top:
             unit = u.get("unit") or {}
             label = f"{unit.get('host', '?')}{unit.get('path_prefix', '/')}"
@@ -647,6 +713,12 @@ def _render_depth_ledger(ledger: Any, *, by_app_unit: bool) -> list[str]:
             lines.append(
                 f"  ! {label} [{unit.get('depth_tier', '?')}] ev={u.get('ev_rank', 0)} "
                 f"missing: {', '.join(str(m) for m in missing) or '(dispatch obligation)'}"
+            )
+        left_out = len(unsatisfied_units) - len(top)
+        if left_out > 0:
+            lines.append(
+                f"  +{left_out} more unsatisfied unit(s); every unit: "
+                f"`vigil assess check-phase-readiness --phase {phase} --by-app-unit`"
             )
         if not top:
             lines.append("  (all deep_required units depth-satisfied)")

@@ -146,17 +146,14 @@ def test_collapsed_kali_verbs_still_resolve_as_contracts(verb):
     assert rendered.startswith(f"Command: {verb}")
 
 
-@pytest.mark.parametrize("name", ["auth status", "auth list"])
-def test_auth_two_token_resolves_to_auth_contract(name):
-    # `auth` is one contract documenting the `list`/`status` subcommands, so the
-    # two-token form `contract auth status` / `contract auth list` must resolve to
-    # it (mirroring `contract resolve <target>`) instead of returning None ->
-    # "Unknown contract".
-    contract = contracts.get_contract(name)
-    assert contract is not None, f"contract lookup for {name!r} returned None"
-    assert contract.name == "auth"
-    rendered = contracts.render_contract(name)
-    assert rendered.startswith("Command: auth")
+def test_auth_two_token_resolves_to_its_action():
+    # `auth` documents its `list` action, so `contract auth list` resolves to
+    # that action (mirroring `contract resolve <target>`) instead of "Unknown
+    # contract".
+    contract = contracts.get_contract("auth list")
+    assert contract is not None
+    assert contract.name == "auth list"
+    assert contracts.render_contract("auth list").startswith("Command: auth list")
 
 
 def test_grep_filter_matches_name_or_summary(capsys):
@@ -321,7 +318,12 @@ def test_code_dispatch_action_pointer_resolves_to_parent_contract():
     contract = contracts.get_contract("code-dispatch done")
 
     assert contract is not None
-    assert contract.name == "code-dispatch"
+    assert contract.name == "code-dispatch done"
+    assert contract.preferred_invocations
+    assert all(
+        invocation.startswith("vigil assess code-dispatch done ")
+        for invocation in contract.preferred_invocations
+    )
     assert any("disposition" in invocation for invocation in contract.preferred_invocations)
 
 
@@ -390,3 +392,13 @@ def test_list_commands_phase_choices_cover_every_allowed_phase():
     for phase in ALLOWED_PHASES:
         assert phase in list_commands._PHASE_CHOICES
     assert "consume" in list_commands._PHASE_CHOICES
+
+
+@pytest.mark.parametrize("phase", ["ingest", "classify-map", "hunt", "verify-variant", "fuzz"])
+def test_a_code_track_phase_from_a_dispatch_packet_lists_its_audit_tag_slice(phase, capsys):
+    """`agent start` stores a code lane's track phase; the catalog accepts that spelling."""
+    from assess.lib.phases import code_audit_tag
+
+    rows = _run_json(capsys, ["list-commands", "--phase", phase, "--json"])
+    assert rows
+    assert all(code_audit_tag(phase) in row["phases"] for row in rows)

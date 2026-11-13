@@ -7,6 +7,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient, AssessError
+from assess.lib.code_record_input import unwrap_request_envelope
 from assess.lib.config import load_config
 
 
@@ -120,7 +121,12 @@ def run(args) -> None:
         print(f"Modules JSON file not found: {args.modules_json}", file=sys.stderr)
         sys.exit(1)
 
-    modules = json.loads(json_path.read_text(encoding="utf-8"))
+    modules = unwrap_request_envelope(
+        "code-record modules",
+        json.loads(json_path.read_text(encoding="utf-8")),
+        inner_key="modules",
+        identity={"repo_id": (int(args.repo_id), "repo_id")},
+    )
     if not isinstance(modules, list):
         print("Modules file must contain a JSON array", file=sys.stderr)
         sys.exit(1)

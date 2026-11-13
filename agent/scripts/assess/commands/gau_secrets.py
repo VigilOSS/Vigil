@@ -2,7 +2,7 @@
 
 Body-fetch pipeline for secret extraction. Reuses cached gau output and
 cached `bodies/` when present, then runs trufflehog filesystem mode against
-the captured bodies. Defaults to `--no-verification`; operators can pass
+the captured bodies, decoded by Content-Encoding into `bodies-decoded/`. Defaults to `--no-verification`; operators can pass
 `--verify` to enable trufflehog's verification step.
 """
 from __future__ import annotations
@@ -31,6 +31,7 @@ from assess.lib.gau_pipeline import (
     write_cache_meta,
 )
 from assess.lib.kali import kali_exec
+from assess.lib.stored_responses import mirror_decoded_bodies
 
 
 # Extensions worth body-fetching for secret extraction. JS bundles, JSON
@@ -242,9 +243,36 @@ def _run_httpx_store_response(paths, *, cfg, args, target_list_path: Path) -> di
     }
 
 
+_DECODED_BODIES_DIR = "bodies-decoded"
+
+
+def _decode_bodies(paths) -> dict:
+    """Mirror bodies/ decoded by Content-Encoding for the secret scan.
+
+    httpx stores each response body as captured, so a brotli/gzip body is
+    still compressed on disk; trufflehog reads the decoded mirror instead
+    (``lib/stored_responses.py``). Every body left undecoded is named on stderr.
+    """
+    report = mirror_decoded_bodies(paths.bodies_dir, paths.work_dir / _DECODED_BODIES_DIR)
+    summary = report.summary()
+    for kind, verb in (("undecodable", "could not be decoded and were scanned as captured"),
+                       ("partial", "decoded only in part (truncated or over the size cap)")):
+        rows = summary[kind]
+        if rows:
+            named = "; ".join(f"{row['file']} ({row['reason']})" for row in rows[:10])
+            more = f"; {len(rows) - 10} more in the summary's body_decoding" if len(rows) > 10 else ""
+            print(f"WARN gau-secrets: {len(rows)} stored body/bodies {verb}: {named}{more}",
+                  file=sys.stderr)
+    return {
+        "bodies_decoded_dir": str(paths.work_dir / _DECODED_BODIES_DIR),
+        "body_decoding": summary,
+        "undecodable_bodies": len(summary["undecodable"]),
+    }
+
+
 def _run_trufflehog(paths, *, cfg, args) -> dict:
-    """Scan bodies/ with trufflehog filesystem mode."""
-    container_bodies = paths.container_bodies_dir
+    """Scan the decoded mirror of bodies/ with trufflehog filesystem mode."""
+    container_bodies = f"{paths.container_work_dir}/{_DECODED_BODIES_DIR}"
     container_out = f"{paths.container_work_dir}/trufflehog.json"
     verify_flag = "" if args.verify else "--no-verification"
     cmd = [
@@ -431,6 +459,7 @@ def run(args: argparse.Namespace) -> None:
             sys.exit(1)
         httpx_summary["reused_bodies"] = False
 
+    decode_summary = _decode_bodies(paths)
     try:
         truffle_summary = _run_trufflehog(paths, cfg=cfg, args=args)
     except AssessError as exc:
@@ -448,6 +477,7 @@ def run(args: argparse.Namespace) -> None:
             "deduped_count": deduped_count,
             "bodies_dir": str(paths.bodies_dir),
             **httpx_summary,
+            **decode_summary,
             **truffle_summary,
         }
     )

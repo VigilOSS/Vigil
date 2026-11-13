@@ -62,7 +62,8 @@ def _exit_marker_host_path(record: dict[str, Any]) -> Path | None:
     ``stdout_path`` (``<dir>/<uuid>.out`` → ``<dir>/<uuid>.exit``). The marker
     lives under the ``/engagements`` bind mount, so it is the same inode the
     in-container wrapper writes — read it with a plain filesystem read, never a
-    ``docker exec cat`` poll loop (I-012, docker-desktop-network-hazards.md)."""
+    ``docker exec cat`` poll loop, which hangs on Docker Desktop when the userspace
+    proxy stalls (docker-desktop-network-hazards.md)."""
     stdout_path = record.get("stdout_path")
     if not stdout_path:
         return None
@@ -86,6 +87,63 @@ def _read_exit_marker(record: dict[str, Any]) -> int | None:
         return int(text)
     except ValueError:
         return None
+
+
+def _stop_marker_host_path(record: dict[str, Any]) -> Path | None:
+    """Host-side record that a stop was requested (``<dir>/<uuid>.stop``).
+
+    ``job_stop`` writes it BEFORE signalling a job that has not published its
+    exit marker, so every later reader of the exit marker (job status/list,
+    sweep-orphans) knows the exit code it reads belongs to an interrupted run —
+    a tool that traps SIGTERM and exits 0 did not complete."""
+    stdout_path = record.get("stdout_path")
+    if not stdout_path:
+        return None
+    return Path(str(stdout_path)).with_suffix(".stop")
+
+
+def _record_stop_request(record: dict[str, Any]) -> None:
+    marker = _stop_marker_host_path(record)
+    if marker is None:
+        return
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        tmp = marker.with_suffix(".stop.tmp")
+        tmp.write_text(_utcnow_iso(), encoding="utf-8")
+        tmp.replace(marker)
+    except OSError as exc:
+        print(
+            f"warning: could not record the stop request at {marker}: {exc}; a later "
+            "marker read may report this job's own exit status instead of killed",
+            file=sys.stderr,
+        )
+
+
+def _stop_requested(record: dict[str, Any]) -> bool:
+    marker = _stop_marker_host_path(record)
+    return marker is not None and marker.is_file()
+
+
+def job_status_from_marker(record: dict[str, Any], rc: int) -> str:
+    """Terminal job status for a published exit code.
+
+    ``killed`` when a stop was requested before the job published its exit
+    marker (the exit code is still recorded as the tool's real one); otherwise
+    the job ended on its own: ``completed`` on 0, ``failed`` on anything else
+    (a deadline-watchdog kill included)."""
+    if _stop_requested(record):
+        return "killed"
+    return "completed" if rc == 0 else "failed"
+
+
+def _await_exit_marker(record: dict[str, Any], *, timeout_seconds: float = 1.0) -> int | None:
+    """The exit code the wrapper publishes just after the tool's PID is reaped."""
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        rc = _read_exit_marker(record)
+        if rc is not None or time.monotonic() >= deadline:
+            return rc
+        time.sleep(0.05)
 
 
 def _read_job_preview(path_value: Any, *, limit: int = 16_384) -> str:
@@ -196,7 +254,7 @@ def _finalize_if_marker_present(
     job_id = record.get("id")
     if job_id is None:
         return record
-    final_status = "completed" if rc == 0 else "failed"
+    final_status = job_status_from_marker(record, rc)
     try:
         finalized = client.patch(
             f"jobs/{int(job_id)}",
@@ -315,8 +373,10 @@ def _build_job_wrapper(
     publishes it atomically (``.tmp`` + ``mv``) to a host-readable marker on the
     ``/engagements`` bind mount, so a host-side reader (job_status / sweep) can
     finalize the backend row with a plain filesystem read, never a docker-exec
-    poll loop (I-012). A kill is observed as a 128+signal wait status (SIGTERM=143
-    / SIGKILL=137); job_stop treats rc>=128 as 'killed', rc<128 as a natural exit.
+    poll loop. A kill is observed as a 128+signal wait status (SIGTERM=143
+    / SIGKILL=137), but a tool that traps SIGTERM may exit 0, so job_stop
+    decides "interrupted" from the marker's ABSENCE before it signals and
+    records the stop request (``_record_stop_request``) for every marker reader.
 
     When ``timeout_seconds`` is a positive budget the wrapper also arms a hard-
     deadline watchdog (the in-container analogue of the sync path's ``--timeout``
@@ -324,7 +384,7 @@ def _build_job_wrapper(
     escalates to SIGKILL after the grace, so a hung run (e.g. nuclei stuck on
     template load, 0-byte output for hours) is killed AT the deadline and self-
     finalizes via the marker (the kill wait-status, which the lazy finalizer maps
-    to ``failed``) instead of surviving until a manual sweep-orphans (I-19). The
+    to ``failed``) instead of surviving until a manual sweep-orphans. The
     marker is published BEFORE the watchdog is reaped so the disposition lands
     promptly; the trailing ``wait`` then reaps the watchdog so it never lingers.
 
@@ -473,7 +533,7 @@ def start_job(
             # Hard deadline for the async run, sized from the operator's
             # --timeout (carried in audit_metadata by `kali job start`). Without
             # this the dtach worker had no deadline and a hung tool survived
-            # until a manual sweep-orphans (I-19).
+            # until a manual sweep-orphans.
             timeout_seconds=audit_meta.get("timeout_seconds_requested"),
         )
         # ENGAGEMENT_KEY env mirrors the sync exec path in
@@ -722,7 +782,16 @@ def job_stop(
     final_status = "lost"
     final_exit_code: int | None = None
     failure_message: str | None = None
-    if _container_running(container_name):
+    finished_before_stop = _read_exit_marker(record)
+    if finished_before_stop is not None:
+        # The job published its exit code after job_status read the row and
+        # before any signal: it ended on its own, so record that outcome.
+        final_status = job_status_from_marker(record, finished_before_stop)
+        final_exit_code = finished_before_stop
+    elif _container_running(container_name):
+        # Not finished before stop was requested: whatever exit code the tool
+        # publishes from here on belongs to an interrupted run.
+        _record_stop_request(record)
         pid = _read_job_pid(container_name, pid_file)
         if pid is None:
             # No pid file → fall back to the dtach Ctrl-C path so trapped
@@ -745,16 +814,11 @@ def job_stop(
                 _signal_job_pid(container_name, pid, "KILL")
                 wait_result = _wait_for_pid_exit(container_name, pid, timeout_seconds=5.0)
             if wait_result is True:
-                # PID gone. rc < 128 means the tool exited naturally in the kill
-                # window — record its real code. rc >= 128 (our signal, see
-                # _build_job_wrapper) or no marker yet (we won the race) means WE
-                # terminated it → 'killed'.
-                rc = _read_exit_marker(record)
-                if rc is not None and rc < 128:
-                    final_status = "completed" if rc == 0 else "failed"
-                    final_exit_code = rc
-                else:
-                    final_status = "killed"
+                # PID gone after our signal: the run was interrupted, whatever it
+                # exited with (a SIGTERM-trapping tool may exit 0). Keep the
+                # tool's real exit code when the wrapper publishes it.
+                final_status = "killed"
+                final_exit_code = _await_exit_marker(record)
             elif wait_result is None:
                 # Docker became unreachable mid-stop: we cannot confirm the PID
                 # exited, so do NOT finalize a definitive 'killed' on a transient

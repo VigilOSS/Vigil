@@ -42,6 +42,7 @@ from assess.lib.kali_audit import _stream_output_truth
 from assess.lib.kali_jobs import _job_pid_file as _job_pid_file_in_container
 from assess.lib.kali_jobs import _read_exit_marker as _read_job_exit_marker
 from assess.lib.kali_jobs import finalize_parent_command_run
+from assess.lib.kali_jobs import job_status_from_marker
 from assess.lib.kali_output import _read_safely
 from assess.lib.kali_runtime_exec import _cat_container_pid_file, _container_pid_file
 from assess.lib.host_processes import reap_registered_processes
@@ -778,7 +779,7 @@ def _sweep_jobs(
         # poll loop (I-012). A present marker is authoritative over PID probing.
         rc = _read_job_exit_marker(row)
         if rc is not None:
-            final_status = "completed" if rc == 0 else "failed"
+            final_status = job_status_from_marker(row, rc)
             if args.dry_run:
                 summary["finalized"] += 1
                 print(

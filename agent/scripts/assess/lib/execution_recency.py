@@ -1,10 +1,13 @@
 """Non-blocking cross-lane activity context for target-facing executions."""
 from __future__ import annotations
 
-import sys
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlencode
+
+from .run_notices import emit_once, in_scope
+
+_REPEAT_NOTE = "; not repeated for the rest of this run unless the reading changes"
 
 
 def _parse_time(value: Any) -> datetime | None:
@@ -30,7 +33,13 @@ def emit_foreign_lane_recency(
     instruction; this readout is only coordination context. The backend owns
     the all-history aggregate so this pre-command advisory never replays
     command-run list pages.
+
+    Inside a run scope (``run_notices.notice_scope``: a recon job and its
+    stages) the line prints once per distinct reading — the foreign count and
+    latest start time — so it repeats only when another lane's activity
+    actually changed, and the first line says so.
     """
+    note = _REPEAT_NOTE if in_scope() else ""
     try:
         payload = client.get(
             "command-runs/foreign-lane-recency?"
@@ -50,18 +59,19 @@ def emit_foreign_lane_recency(
             raise ValueError("foreign-lane recency timestamp is invalid")
         latest = _parse_time(latest_raw)
     except Exception as exc:  # noqa: BLE001 - coordination context never gates work
-        print(
+        emit_once(
+            f"foreign-lane-recency-unavailable:{exc}",
             f"target concurrency advisory unavailable: {exc}; proceeding without "
-            "a reservation or rate-enforcement claim",
-            file=sys.stderr,
+            f"a reservation or rate-enforcement claim{note}",
         )
         return
 
+    reading_key = f"foreign-lane-recency:{foreign_count}:{latest_raw}"
     if not foreign_count:
-        print(
+        emit_once(
+            reading_key,
             "target concurrency advisory: no foreign-lane target-facing commands "
-            "recorded (all history); advisory only; no reservation or rate enforcement",
-            file=sys.stderr,
+            f"recorded (all history); advisory only; no reservation or rate enforcement{note}",
         )
         return
     if latest is None:
@@ -69,9 +79,9 @@ def emit_foreign_lane_recency(
     else:
         current = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
         latest_text = f"latest {max(0, int((current - latest).total_seconds()))}s ago"
-    print(
+    emit_once(
+        reading_key,
         "target concurrency advisory: "
         f"{foreign_count} foreign-lane target-facing command(s) recorded (all history); "
-        f"{latest_text}; advisory only; no reservation or rate enforcement",
-        file=sys.stderr,
+        f"{latest_text}; advisory only; no reservation or rate enforcement{note}",
     )

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import agent
+from assess.lib.client import AssessError
 
 
 class Client:
@@ -57,6 +58,30 @@ def test_start_always_captures_packet_and_emits_short_digest_bound_launch(monkey
     assert hashlib.sha256(files[0].read_bytes()).hexdigest() in output
     assert '## Runtime Identity' not in output
     assert str(files[0]) in output
+
+
+@pytest.mark.parametrize(('attr', 'flag'), [('packet_file', '--packet-file'),
+                                             ('standing_brief_file', '--standing-brief-file')])
+def test_dispatch_input_outside_the_engagement_says_where_it_must_live(
+    monkeypatch, tmp_path, attr, flag
+):
+    engagement = tmp_path / 'engagement'
+    engagement.mkdir()
+    args, client = setup_start(monkeypatch, engagement)
+    outside = tmp_path / 'assignment.md'
+    outside.write_text('Question: which caller controls the record owner?\n')
+    setattr(args, attr, str(outside))
+
+    with pytest.raises(AssessError) as raised:
+        agent._start(args)
+
+    err = str(raised.value)
+    assert client.writes == []
+    assert flag in err
+    assert str(outside) in err
+    assert f'inside the engagement directory {engagement.resolve()}' in err
+    assert 'notes/' in err
+    assert 'SHA-256' in err
 
 
 def test_authored_assignment_supplement_is_contained_in_canonical_packet(monkeypatch, tmp_path, capsys):
@@ -193,47 +218,33 @@ def test_code_continuation_uses_current_paths_for_the_same_pinned_content(monkey
     assert 'snapshot_path: source/acme/current' in captured['rendered_prompt']
 
 
-@pytest.mark.parametrize('channel', ['role_specific_additions', 'packet_file'])
-def test_per_slug_obligation_without_assigned_slugs_is_advised(monkeypatch, tmp_path, capsys, channel):
-    """A verifier-shaped obligation block rendered into a lane with no slugs.
+def _runtime_identity(rendered):
+    return rendered.split('## Runtime Identity', 1)[1].split('\n## ', 1)[0]
 
-    `role_specific_additions` and the captured assignment text are passed through
-    verbatim with no cross-check, so a block reading "every assigned slug must
-    leave this dispatch with a terminal verdict" reached a variant lane that was
-    never given a slug. Mechanically detectable, so it is an advisory signal —
-    the operator still owns the authored text.
+
+def test_runtime_identity_states_the_assigned_finding_set(monkeypatch, tmp_path):
+    """The assigned set is packet data, so an obligation scoped to it is checkable.
+
+    An authored "every assigned slug" block is the operator's text; the packet
+    states what was actually assigned, so the specialist reads the set rather
+    than inferring it from prose.
     """
-    args, client = setup_start(monkeypatch, tmp_path, role='code-variant-hunter', mode='code')
-    obligation = 'Every assigned slug must leave this dispatch with a terminal verdict.'
-    if channel == 'packet_file':
-        supplement = tmp_path / 'assignment.txt'
-        supplement.write_text(obligation + '\n')
-        args.packet_file = str(supplement)
-    else:
-        args.prompt_context = {'role_specific_additions': obligation}
-    agent._start(args)
-    err = capsys.readouterr().err
-    assert 'ADVISORY dispatch packet' in err
-    assert 'finding_slugs' in err
-    assert obligation[:40] in err
-
-
-def test_a_lane_that_was_given_its_slugs_draws_no_obligation_advisory(monkeypatch, tmp_path, capsys):
-    args, client = setup_start(monkeypatch, tmp_path, role='code-variant-hunter', mode='code')
+    args, client = setup_start(monkeypatch, tmp_path, role='code-vuln-verifier', mode='code')
     monkeypatch.setattr(agent.dispatch, '_build_register_payload', lambda _: {
-        'agent_id': 'acme-lane', 'agent_role': 'code-variant-hunter', 'task': args.task,
-        'assessment_mode': 'code', 'finding_slugs': ['VF-001'],
+        'agent_id': 'acme-lane', 'agent_role': 'code-vuln-verifier', 'task': args.task,
+        'assessment_mode': 'code', 'finding_slugs': ['VF-001', 'VF-002'],
     })
+    agent._start(args)
+    identity = _runtime_identity(client.writes[0]['prompt_packet']['rendered_prompt'])
+    assert 'assigned_finding_slugs: ["VF-001", "VF-002"]' in identity
+
+
+def test_runtime_identity_states_when_no_finding_was_assigned(monkeypatch, tmp_path):
+    args, client = setup_start(monkeypatch, tmp_path, role='code-vuln-hunter', mode='code')
     args.prompt_context = {'role_specific_additions': 'Every assigned slug must leave this dispatch with a terminal verdict.'}
     agent._start(args)
-    assert 'per-slug' not in capsys.readouterr().err
-
-
-def test_ordinary_produced_slug_guidance_is_not_mistaken_for_an_obligation(monkeypatch, tmp_path, capsys):
-    args, client = setup_start(monkeypatch, tmp_path, role='code-vuln-hunter', mode='code')
-    args.prompt_context = {'role_specific_additions': 'Record any finding slug you produce with `finding record`.'}
-    agent._start(args)
-    assert 'per-slug' not in capsys.readouterr().err
+    identity = _runtime_identity(client.writes[0]['prompt_packet']['rendered_prompt'])
+    assert 'assigned_finding_slugs: none' in identity
 
 
 def test_start_refuses_a_role_that_has_no_prompt_in_the_resolvable_roster(monkeypatch, tmp_path, capsys):

@@ -14,6 +14,7 @@ import pytest
 
 from assess.lib.client import AssessError
 from assess.lib.kali_audit import _validate_inputs
+from assess.lib.phases import CODE_PHASES, code_audit_tag
 
 
 def _expect_validate_error(**overrides) -> str:
@@ -87,6 +88,28 @@ def test_phase_reject_suggestion():
     assert "Did you mean:" in msg
     assert "recon-pivot" in msg
     assert "(allowed:" in msg
+
+
+@pytest.mark.parametrize("phase", CODE_PHASES)
+def test_a_code_track_phase_is_refused_and_pointed_at_its_audit_tag(phase):
+    # `agent start` stores the track spelling (`verify-variant`) in a code lane's
+    # packet; `kali --phase` still takes only the audit tag. The refusal must
+    # lead with that tag, never a near-spelled web phase (`verify`).
+    msg = _expect_validate_error(phase=phase)
+    lead = msg.split(" (allowed")[0]
+    assert f"Did you mean: {code_audit_tag(phase)}?" in lead, lead
+    assert "(allowed:" in msg
+
+
+def test_scoped_parser_points_a_code_track_phase_at_its_audit_tag():
+    code, err = _run_cli([
+        "kali", "nmap-scan",
+        "--technique", "RECON", "--intent", "x",
+        "--probe-kind", "fingerprint", "--phase", "verify-variant",
+        "--timeout", "60", "--", "nmap", "t",
+    ])
+    assert code == 2
+    assert "Did you mean: code-verify?" in err.split(" (allowed")[0]
 
 
 # --------------------------------------------------------------------------- #

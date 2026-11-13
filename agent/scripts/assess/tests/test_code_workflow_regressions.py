@@ -291,10 +291,10 @@ def test_code_coverage_prints_review_quality_once_with_readiness(monkeypatch, ca
 
     class FakeClient(StubClient):
         def get(self, endpoint: str):
-            if endpoint == "code/coverage":
-                return coverage
-            assert endpoint == "code/readiness?target_phase=hunt&include_debt_paths=true"
-            return readiness
+            assert endpoint == (
+                "code/readiness?target_phase=hunt&include_debt_paths=true&include_coverage=true"
+            )
+            return {**readiness, "coverage": coverage}
 
     monkeypatch.setattr(code_coverage, "AssessmentClient", FakeClient)
     _offline_config(monkeypatch, code_coverage)

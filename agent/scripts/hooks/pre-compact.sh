@@ -239,6 +239,14 @@ CONTRACT
 else
   cat <<'CONTRACT'
 
+Read `agent/rules/resume.md` first: it owns the hydration below, and compaction
+drops any copy loaded earlier in the session. End the summary with this line,
+verbatim, so the next turn sees it:
+
+    After compaction: read agent/rules/resume.md and run its hydration before any other action.
+
+Then run:
+
     vigil assess resume-brief                         # core hydration; run this first
     vigil assess operator-checkpoint show             # your own last recorded intent
     vigil assess agent list --status in-progress      # who is running, and what they own

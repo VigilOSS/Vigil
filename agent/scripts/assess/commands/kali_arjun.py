@@ -3,7 +3,8 @@
 Arjun discovers *hidden* HTTP parameters an endpoint silently accepts but never
 advertises. This verb exposes the FULL Arjun v2.2.7 CLI surface as first-class
 typed flags (no capability narrowed): single-URL (`-u`) and list (`-i`) input,
-all four methods (GET/POST/JSON/XML), the passive OSINT mode (`--passive`),
+all four methods (GET/POST/JSON/XML), `--passive` (seed the wordlist with
+parameter names harvested from wayback / commoncrawl / otx, then scan actively),
 auth-aware discovery (`--identity <name>` folds a store identity's session/bearer
 into `--headers`, or paste `--headers` manually), every rate/politeness knob, the
 casing styles, and all three output formats. A `--extra-args` passthrough is
@@ -16,8 +17,8 @@ even when the operator also requests `-oT`/`-oB`. The JSON file is what
 `vigil assess ingest arjun` consumes to enrich the work buffer.
 
 Like every other kali_* verb, Arjun runs INSIDE the isolated Kali runtime
-(it sends HTTP to the target and, in passive mode, hits external OSINT
-sources) under the same egress isolation. The host never makes the request.
+(it sends HTTP to the target and, with `--passive`, also queries those
+archive sources) under the same egress isolation. The host never makes the request.
 """
 from __future__ import annotations
 
@@ -159,7 +160,7 @@ def register(subparsers) -> None:
         ),
     )
 
-    # --- Passive OSINT mode ---
+    # --- Passive-source wordlist seeding ---
     p.add_argument(
         "--passive",
         dest="passive",

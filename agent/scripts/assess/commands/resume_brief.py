@@ -320,7 +320,8 @@ def _render_markdown(brief: dict) -> str:
         lines.extend(["", "## Target Finding", _finding_line(target)])
     lines.extend(["", "## Findings"])
     findings = brief.get("findings") or {}
-    for bucket in ("active", "unreviewed", "verified", "killed", "merged", "chain_required"):
+    bucket_totals = brief.get("finding_bucket_counts") or {}
+    for bucket in _FINDING_BUCKET_LISTINGS:
         rows = findings.get(bucket) or []
         lines.append(f"- {bucket}:")
         if not rows:
@@ -329,8 +330,14 @@ def _render_markdown(brief: dict) -> str:
         shown = _select_findings(rows)
         for row in shown:
             lines.append("  - " + _finding_line(row))
-        if len(shown) < len(rows):
-            lines.append(f"  - … showing {len(shown)} of {len(rows)} (medium+ always shown)")
+        total = bucket_totals.get(bucket)
+        total = total if type(total) is int and total >= len(rows) else len(rows)
+        if len(shown) < total:
+            listing = " and ".join(f"`{command}`" for command in _FINDING_BUCKET_LISTINGS[bucket])
+            lines.append(
+                f"  - … INCOMPLETE: showing {len(shown)} of {total} (most severe first; "
+                f"medium+ in this window always shown); complete list: {listing}"
+            )
     _render_surfaces(lines, brief.get("surfaces") or {})
     _render_work_buffer(lines, brief.get("work_buffer") or {})
     _render_attempts(lines, brief.get("attempts") or {})
@@ -813,7 +820,11 @@ def _render_credential_needs(lines: list[str], section: dict) -> None:
             f"requested_from={item.get('requested_from') or '-'}"
         ))
     if count > len(items):
-        lines.append(f"- … showing {len(items)} of {count}")
+        lines.append(
+            f"- … showing {len(items)} of {count}; complete list: "
+            "`vigil assess fetch 'dispatch-decisions?kind=dispatch_blocked&resolved=false' --paginate` "
+            "and `vigil assess finding list --verification-status blocked`"
+        )
 
 
 def _render_contradiction_reviews(lines: list[str], section: dict) -> None:
@@ -829,7 +840,10 @@ def _render_contradiction_reviews(lines: list[str], section: dict) -> None:
             f"review with `vigil assess finding get {item.get('target_slug')}`"
         ))
     if count > len(items):
-        lines.append(f"- … showing {len(items)} of {count}")
+        lines.append(
+            f"- … showing {len(items)} of {count}; complete list: `vigil assess fetch finding-links "
+            "--paginate --jq '.[] | select(.link_kind == \"contradicts\" and .retired_at == null)'`"
+        )
 
 
 def _render_proof_work(lines: list[str], section: dict) -> None:
@@ -1010,10 +1024,10 @@ def _render_code_analysis(lines: list, code_analysis: dict) -> None:
     if coverage_gate:
         state = "PASS" if coverage_gate.get("passed") is True else "NEEDS ATTENTION"
         reasons = "; ".join(str(item) for item in coverage_gate.get("reasons", [])[:3])
-        # A medium-tier gap reaches `advisories` and never `reasons`, so the gate
-        # reads PASS while review effort is still owed. Rendering both keeps the
-        # brief honest about the difference instead of silently dropping the half
-        # that does not block.
+        # Effort below a tier's threshold reaches `advisories` and never
+        # `reasons` on every tier, so the gate can read PASS while effort is
+        # still short. Rendering both keeps the brief honest about the
+        # difference instead of silently dropping the half that does not block.
         advisories = "; ".join(
             str(item) for item in coverage_gate.get("advisories", [])[:3]
         )
@@ -1061,6 +1075,24 @@ _FINDING_ROW_FLOOR = 6
 
 def _severity_rank(value) -> int:
     return _SEVERITY_RANK.get(str(value or "").strip().lower(), 0)
+
+
+# Each resume bucket, in render order, with the `finding list` filters that
+# list the whole bucket (the brief carries a severity-first window of it).
+_FINDING_BUCKET_LISTINGS: dict[str, tuple[str, ...]] = {
+    "active": tuple(
+        f"vigil assess finding list --status {status}"
+        for status in ("active", "exploited", "reported")
+    ),
+    "unreviewed": ("vigil assess finding list --verification-status unreviewed",),
+    "verified": (
+        "vigil assess finding list --verification-status confirmed",
+        "vigil assess finding list --verification-status downgraded",
+    ),
+    "killed": ("vigil assess finding list --status false_positive",),
+    "merged": ("vigil assess finding list --status merged",),
+    "chain_required": ("vigil assess fetch findings --paginate",),
+}
 
 
 def _select_findings(rows: list) -> list:

@@ -19,7 +19,9 @@ safety net for unmodeled katana flags.
 from __future__ import annotations
 
 import argparse
+import shlex
 import sys
+from urllib.parse import urlsplit
 
 from assess.lib import scope as scope_lib
 from assess.lib.client import AssessError
@@ -81,7 +83,9 @@ def register(subparsers) -> None:
     p.add_argument("--allow-fast-crawl", dest="allow_fast_crawl", action="store_true",
                    help="Permit -rl above the 20 req/s safety cap (operator opt-in).")
     p.add_argument("-fs", dest="field_scope", default="",
-                   help="Explicit Katana -fs field-scope.")
+                   help="Katana -fs field-scope (dn, rdn, fqdn or a host regex). Default: fqdn, or a "
+                        "host regex when scope.json has a wildcard; the scope.json -cs crawl regex "
+                        "applies either way.")
     p.add_argument("-kf", dest="known_files", default="",
                    help="-kf known-files expansion (e.g. 'all' for robots/sitemap/well-known).")
     p.add_argument("-cos", dest="crawl_out_scope", default="",
@@ -118,6 +122,47 @@ def _resolve_rate_cap(args):
     return rate_cap
 
 
+def _crawl_fence(args) -> list[str]:
+    """The scope.json crawl fence (`scope.crawl_fence`), or the caller's own.
+
+    An explicit ``-fs`` replaces the fence's field scope and keeps its
+    crawl-scope regex; scope flags in ``--extra-args`` replace the whole fence,
+    with a WARN, because the caller has stated its own boundary.
+    """
+    overrides = scope_lib.crawl_fence_overrides(shlex.split(getattr(args, "extra_args", "") or ""))
+    if overrides:
+        print(
+            f"WARN katana: --extra-args sets {', '.join(overrides)}, so the scope.json crawl "
+            "fence is not applied; you own the crawl boundary for this run (the audit row "
+            "records the argv).",
+            file=sys.stderr,
+        )
+        return []
+    try:
+        cfg = load_config(getattr(args, "engagement_dir", None))
+    except SystemExit:
+        # No engagement resolves: the run itself refuses on that, so only the
+        # field-scope half of the fence is placed here.
+        return ["-fs", str(args.field_scope or "fqdn")]
+    try:
+        scope_doc = scope_lib.load_scope(cfg.engagement_dir)
+        seed = urlsplit(args.target_url).hostname if args.target_url else None
+        fence = scope_lib.crawl_fence(
+            scope_doc, seed_hosts=[seed] if seed else (), field_scope=str(args.field_scope or "")
+        )
+    except SystemExit as exc:
+        print(
+            f"WARN katana: {exc or 'no readable scope.json'}, so the crawl carries no scope "
+            "fence beyond -fs (each seed stays on its own host under the default fqdn).",
+            file=sys.stderr,
+        )
+        return ["-fs", str(args.field_scope or "fqdn")]
+    for warning in fence.warnings:
+        print(f"WARN katana: {warning}", file=sys.stderr)
+    print(f"katana: {fence.summary}", file=sys.stderr)
+    return fence.argv
+
+
 def run(args) -> None:
     if not args.target_url and not args.target_list:
         print("katana: pass -u <url> or -list <file>", file=sys.stderr)
@@ -149,8 +194,7 @@ def run(args) -> None:
     )
     cmd.extend(["-rl", str(rl)])
 
-    if args.field_scope:
-        cmd.extend(["-fs", str(args.field_scope)])
+    cmd.extend(_crawl_fence(args))
     if args.known_files:
         cmd.extend(["-kf", str(args.known_files)])
     authored_exclusion = str(args.crawl_out_scope or "").strip()

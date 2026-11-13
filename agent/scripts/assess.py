@@ -2,6 +2,7 @@
 # /// script
 # requires-python = ">=3.11"
 # dependencies = [
+#     "brotli==1.2.0",
 #     "psutil==7.2.2",
 #     "tree-sitter==0.26.0",
 #     "tree-sitter-java==0.23.5",

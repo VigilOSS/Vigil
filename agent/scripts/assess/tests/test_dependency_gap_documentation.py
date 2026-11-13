@@ -131,7 +131,7 @@ def test_every_emitted_gap_code_is_documented():
 
 
 def test_documented_gap_codes_reach_the_rendered_contract():
-    text = contracts.render_contract("code-dependencies")
+    text = contracts.render_contract_notes("code-dependencies")
     for code, meaning in contracts.DEPENDENCY_ANALYSIS_GAPS:
         assert code in text, f"{code} is in the roster but never rendered"
         assert meaning.strip(), f"{code} carries no meaning"

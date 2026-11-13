@@ -89,10 +89,10 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         action="store_true",
         help=(
             "Emit a paste-ready COVERAGE: block for a dispatch prompt, scoped to "
-            "--host (required) and optional --path-prefix. Reuses the by-family "
-            "grid (no extra backend call) and lists covered vs OPEN-gap families "
-            "so the dispatch hands the specialist a map + open objective, not a "
-            "technique cage."
+            "--host (required) and optional --path-prefix. Reads the by-family "
+            "grid scoped to that host/prefix and lists covered vs OPEN-gap "
+            "families so the dispatch hands the specialist a map + open "
+            "objective, not a technique cage. A failed grid read exits non-zero."
         ),
     )
     p.add_argument(
@@ -112,8 +112,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         dest="host",
         default="",
         help=(
-            "Application-unit host to scope --for-dispatch to (REQUIRED for that "
-            "mode), or the target-host filter under --attempts. NOTE: for the "
+            "Application-unit host to scope --for-dispatch (REQUIRED there) or "
+            "--by-family to, or the target-host filter under --attempts. NOTE: for the "
             "grid this is a host, NOT the --surface surface-id."
         ),
     )
@@ -121,7 +121,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         "--path-prefix",
         dest="path_prefix",
         default="",
-        help="Optional application-unit path-prefix to further scope --for-dispatch.",
+        help="Optional application-unit path-prefix to further scope --for-dispatch or --by-family.",
     )
     # --attempts filters (a surface-ID here, NOT a host; use --host for host).
     p.add_argument("--finding", dest="finding", default="",
@@ -159,19 +159,38 @@ def _empty_per_host_payload() -> dict:
     }
 
 
-def _fetch_by_family(cfg) -> dict:
-    """Fetch the by-family coverage grid; empty grid on backend failure."""
+_BY_FAMILY_ROUTE = "coverage-readiness/by-family"
+
+
+def _fetch_by_family(cfg, *, host: str = "", path_prefix: str = "") -> dict:
+    """Read the by-family grid, scoped to ``host``/``path_prefix`` when given.
+
+    A failed or malformed read raises: an empty grid would read as "nothing
+    recorded yet" for an engagement whose coverage is simply unknown.
+    """
+    params = [("host", host)] if host else []
+    if path_prefix:
+        params.append(("path_prefix", path_prefix))
+    endpoint = (
+        f"{_BY_FAMILY_ROUTE}?{urlencode(params, quote_via=quote)}" if params else _BY_FAMILY_ROUTE
+    )
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         try:
-            payload = client.get("coverage-readiness/by-family")
+            payload = client.get(endpoint)
         except AssessError as exc:
-            print(
-                f"coverage: backend by-family fetch failed ({exc}); "
-                "rendering an empty grid",
-                file=sys.stderr,
-            )
-            return {"units": [], "totals": {}}
-    return payload if isinstance(payload, dict) else {"units": [], "totals": {}}
+            raise AssessError(
+                f"coverage: backend {endpoint} read failed ({exc}); no grid rendered"
+            ) from exc
+    units = payload.get("units") if isinstance(payload, dict) else None
+    if (
+        not isinstance(units, list)
+        or any(not isinstance(unit, dict) for unit in units)
+        or not isinstance(payload.get("totals"), dict)
+    ):
+        raise AssessError(
+            f"coverage: malformed backend {endpoint} response; no grid rendered"
+        )
+    return payload
 
 
 def _run_for_dispatch(args: argparse.Namespace, cfg) -> None:
@@ -184,20 +203,16 @@ def _run_for_dispatch(args: argparse.Namespace, cfg) -> None:
         )
         sys.exit(2)
     path_prefix = (getattr(args, "path_prefix", "") or "").strip()
-    payload = _fetch_by_family(cfg)
+    payload = _fetch_by_family(cfg, host=host, path_prefix=path_prefix)
     if getattr(args, "as_json", False):
-        # Scope the JSON to --host [--path-prefix] too — the same filter the text
-        # COVERAGE block applies — so `--for-dispatch --json` doesn't silently
-        # dump the whole grid.
-        host_l = host.lower()
-        units = [
-            u
-            for u in (payload.get("units") or [])
-            if isinstance(u, dict)
-            and str(u.get("host") or "").strip().lower() == host_l
-            and (not path_prefix or str(u.get("path_prefix") or "") == path_prefix)
-        ]
-        scoped = {"scope": {"host": host_l, "path_prefix": path_prefix or None}, "units": units}
+        # The backend scoped the grid, and its totals, to --host
+        # [--path-prefix]; the JSON keeps that scope and those units (the ones
+        # the text COVERAGE block renders) with the scoped totals beside them.
+        scoped = {
+            "scope": {"host": host.lower(), "path_prefix": path_prefix or None},
+            "units": payload["units"],
+            "totals": payload["totals"],
+        }
         print(json.dumps(scoped, indent=2, ensure_ascii=False))
         return
     for line in cc.render_dispatch_coverage_block(
@@ -207,7 +222,11 @@ def _run_for_dispatch(args: argparse.Namespace, cfg) -> None:
 
 
 def _run_by_family(args: argparse.Namespace, cfg) -> None:
-    payload = _fetch_by_family(cfg)
+    payload = _fetch_by_family(
+        cfg,
+        host=(getattr(args, "host", "") or "").strip(),
+        path_prefix=(getattr(args, "path_prefix", "") or "").strip(),
+    )
     if getattr(args, "as_json", False):
         print(json.dumps(payload, indent=2, ensure_ascii=False))
         return
@@ -406,14 +425,41 @@ def _run_attempts(args: argparse.Namespace, cfg) -> None:
     print(_render_attempts_table(rows))
 
 
+def _refuse_unscoped_view(args: argparse.Namespace) -> None:
+    """Refuse a scope flag the chosen view cannot apply, rather than ignore it.
+
+    --host and --path-prefix scope --by-family and --for-dispatch; --attempts
+    takes --host as its target-host filter; the per-host ledger lists every host.
+    """
+    attempts = getattr(args, "attempts", False)
+    scoped_views = getattr(args, "for_dispatch", False) or getattr(args, "by_family", False)
+    flags = [
+        flag
+        for flag, value, applies in (
+            ("--host", getattr(args, "host", ""), scoped_views or attempts),
+            ("--path-prefix", getattr(args, "path_prefix", ""), scoped_views),
+        )
+        if (value or "").strip() and not applies
+    ]
+    if flags:
+        print(
+            f"coverage: {' and '.join(flags)} cannot scope this view. --host and --path-prefix "
+            "scope --by-family and --for-dispatch; --attempts takes --host as its target-host "
+            "filter; the default per-host ledger lists every host.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
+
 def run(args: argparse.Namespace) -> None:
+    _refuse_unscoped_view(args)
     cfg = load_config(args.engagement_dir)
 
     # A1 / C4a: the by-family grid and the --for-dispatch COVERAGE block both
-    # project the SAME `coverage-readiness/by-family` route; --for-dispatch
-    # additionally filters it client-side to --host [--path-prefix]. Both are
-    # guarded by getattr so the existing per-host path (and its tests, which
-    # build args without these flags) is untouched.
+    # project the SAME `coverage-readiness/by-family` route; --for-dispatch asks
+    # the backend for --host [--path-prefix] only. Both are guarded by getattr
+    # so the per-host path (and its tests, which build args without these
+    # flags) is untouched.
     if getattr(args, "attempts", False):
         _run_attempts(args, cfg)
         return
@@ -450,13 +496,18 @@ def run(args: argparse.Namespace) -> None:
                 file=sys.stderr,
             )
         try:
-            dispatches = client.list_dispatches(limit=1000)
+            dispatches = cc.list_every_dispatch(client)
             application_units = client.get("application-units")
             dispatched_hosts = cc.dispatched_hosts_from_rows(
                 dispatches,
                 application_units if isinstance(application_units, list) else [],
             )
-        except AssessError:
+        except AssessError as exc:
+            print(
+                f"coverage: backend dispatch/application-unit read failed ({exc}); "
+                "dedicated_lane is unknown and renders as no lane",
+                file=sys.stderr,
+            )
             dispatched_hosts = {}
 
     ledger = cc.build_coverage_ledger(

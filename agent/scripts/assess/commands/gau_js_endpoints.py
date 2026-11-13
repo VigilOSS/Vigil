@@ -44,6 +44,7 @@ from assess.lib.gau_pipeline import (
     run_uro_dedup,
 )
 from assess.lib.kali import kali_exec
+from assess.lib.stored_responses import decode_stored_response
 
 
 def register(subparsers) -> None:
@@ -219,19 +220,18 @@ def _host_matches_target(host: str, target: str) -> bool:
     return bool(host and target_host and (host == target_host or host.endswith("." + target_host)))
 
 
-def _read_js_payload(body_path: Path) -> str:
-    """Return the JS body content (httpx prepends headers — strip to just the body).
+def _read_js_payload(body_path: Path) -> tuple[str, str, str]:
+    """Return (JS body text, decode status, reason) for one httpx-stored response.
 
-    httpx writes the response in HTTP wire format: status line, headers,
-    blank line, body. We split on the first blank line. If the file
-    contains no blank-line marker (very unusual), fall back to returning
-    the whole file so the regex still has something to chew on.
+    httpx stores the request, the response headers and the body as captured,
+    so a compressed or chunked response is decoded by its Content-Encoding first
+    (``lib/stored_responses.py``). A body that cannot be decoded is returned as
+    captured with status ``undecodable``; a file with no response block is
+    returned whole so the regex still has something to chew on.
     """
-    raw = body_path.read_text(encoding="utf-8", errors="replace")
-    marker = "\r\n\r\n" if "\r\n\r\n" in raw else "\n\n"
-    if marker in raw:
-        return raw.split(marker, 1)[1]
-    return raw
+    decoded = decode_stored_response(body_path.read_bytes())
+    payload = decoded.rebuilt() if decoded.status == "unparsed" else decoded.body
+    return payload.decode("utf-8", errors="replace"), decoded.status, decoded.reason
 
 
 def _fetch_js_bodies(paths, *, cfg, args) -> int:
@@ -415,8 +415,13 @@ def run(args: argparse.Namespace) -> None:
         else args.target.rstrip("/") + "/"
     )
 
+    undecodable: list[dict[str, str]] = []
     for body in js_bodies:
-        payload = _read_js_payload(body)
+        payload, decode_status, decode_reason = _read_js_payload(body)
+        if decode_status in {"undecodable", "partial"}:
+            undecodable.append(
+                {"file": str(body), "status": decode_status, "reason": decode_reason}
+            )
         endpoints = extract_js_endpoints(payload)
         extracted_total += len(endpoints)
         source_url = _extract_source_url_from_body(body) or fallback_base
@@ -444,6 +449,17 @@ def run(args: argparse.Namespace) -> None:
             "resolved_in_scope": body_resolved,
         })
 
+    if undecodable:
+        named = "; ".join(
+            f"{row['file']} ({row['status']}: {row['reason']})" for row in undecodable[:10]
+        )
+        more = f"; {len(undecodable) - 10} more in the summary's bodies_not_fully_decoded" if len(undecodable) > 10 else ""
+        print(
+            f"WARN gau-js-endpoints: {len(undecodable)} stored body/bodies not fully "
+            f"decoded (mined as far as they decoded): {named}{more}",
+            file=sys.stderr,
+        )
+
     try:
         ingested = _ingest_extracted_urls(
             source=args.source,
@@ -461,6 +477,8 @@ def run(args: argparse.Namespace) -> None:
             "bodies_dir": str(bodies_dir),
             "bodies_fetched": fetched_count,
             "js_bodies_scanned": len(js_bodies),
+            "undecodable_bodies": sum(1 for row in undecodable if row["status"] == "undecodable"),
+            "bodies_not_fully_decoded": undecodable,
             "raw_endpoints_extracted": extracted_total,
             "unique_in_scope_urls": len(resolved_unique),
             "ingested_count": ingested,

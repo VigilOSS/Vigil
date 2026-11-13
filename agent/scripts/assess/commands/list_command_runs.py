@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import sys
 from urllib.parse import quote, urlencode
 
 from assess.lib.audit_enums import PROBE_KIND_ENUM, TECHNIQUE_ENUM
@@ -71,9 +72,11 @@ def register(subparsers) -> None:
         dest="target_host",
         default="",
         help=(
-            "C30: filter to the parsed target host for httpx / nuclei / ffuf / sqlmap runs. "
-            "Exact match (case-insensitive) against the target_host column. Unhandled verbs "
-            "store an empty value; use --q for substring search on those rows."
+            "C30: filter to the parsed target host for httpx / nuclei / ffuf / sqlmap / katana / "
+            "wafw00f runs (a `katana -list` crawl or `wafw00f -i` sweep stores its distinct "
+            "hosts, comma-joined when there are several). Matches the whole target_host value "
+            "or one host of a comma-joined list (case-insensitive). Unhandled verbs store an empty value; use --q for substring search on "
+            "those rows."
         ),
     )
     p.add_argument(
@@ -396,19 +399,23 @@ def run(args) -> None:
             used_lookahead=used_lookahead,
         )
     rows = page.rows
-    report_page(
-        page,
-        noun="command runs",
-        continuation_command=_continuation_command(
-            args, page.offset + len(page.rows)
-        ),
-        point_read_hint="`vigil assess command-run get <id>`",
-    )
-    if rows and args.include_output:
-        warn_untrusted_data()
-
+    notice = {
+        "noun": "command runs",
+        "continuation_command": _continuation_command(args, page.offset + len(page.rows)),
+        "point_read_hint": "`vigil assess command-run get <id>`",
+    }
     if args.as_json:
+        report_page(page, **notice)
+        if rows and args.include_output:
+            warn_untrusted_data()
         print(json.dumps(rows, indent=2, ensure_ascii=False))
         return
 
+    # The table carries its notice on stdout, above it and, when the page leaves
+    # matches out, below it too.
+    report_page(page, file=sys.stdout, **notice)
+    if rows and args.include_output:
+        warn_untrusted_data()
     print(_render_table(rows))
+    if page.has_more:
+        report_page(page, file=sys.stdout, **notice)

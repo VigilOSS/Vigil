@@ -1,12 +1,34 @@
 """Shared helpers for high-volume assessment ingestion writes."""
 from __future__ import annotations
 
+import hashlib
 import sys
 from typing import Any
 
 from assess.lib.client import DEFAULT_READ_TIMEOUT_SECONDS, AssessError
 
 DEFAULT_BULK_WRITE_SIZE = 500
+
+# The backend bound on a work item's ``queue_key`` (``WorkItemBulkInput`` and
+# ``WorkItemInput`` in ``orchestrator/backend/app/api/assessment.py``).
+MAX_QUEUE_KEY_LENGTH = 512
+_DIGEST_MARKER = ":sha256:"
+
+
+def bounded_queue_key(key: str) -> str:
+    """Return ``key`` unchanged when it fits the backend bound, else a bounded twin.
+
+    A key built from raw input (a historical URL can run to thousands of
+    characters) keeps its readable head, then ``:sha256:`` and the digest of
+    the WHOLE key, so two long keys that share a prefix stay distinct and the
+    same input always maps to the same row. The full URL is never shortened:
+    it travels in the row's own ``url`` field.
+    """
+    if len(key) <= MAX_QUEUE_KEY_LENGTH:
+        return key
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    head = key[: MAX_QUEUE_KEY_LENGTH - len(_DIGEST_MARKER) - len(digest)]
+    return f"{head}{_DIGEST_MARKER}{digest}"
 
 # A full request-observation chunk carries every row's request and response
 # body, so one chunk is routinely multi-megabyte and the backend writes a
@@ -207,6 +229,46 @@ def post_request_observations_bulk(
         )
         for observation, record in zip(observations, records, strict=True)
     ]
+
+
+def post_work_items_bulk(
+    client,
+    items: list[dict[str, Any]],
+    *,
+    warn_prefix: str,
+) -> list[Exception | None]:
+    """POST direct work-buffer rows in bounded chunks; one entry per item.
+
+    A chunk the backend refused before writing anything (400/413/422) is
+    retried one row at a time, so a single unacceptable row costs only itself.
+    ``None`` marks a stored row and an exception marks a refused one; the caller
+    reports refused rows. Any other failure leaves the chunk's fate unknown and
+    propagates.
+    """
+    outcomes: list[Exception | None] = []
+    for chunk in _chunks(items, DEFAULT_BULK_WRITE_SIZE):
+        try:
+            client.post("work-items/bulk", {"items": chunk})
+        except AssessError as exc:
+            if not request_rejected_before_any_write(exc):
+                raise
+            print(
+                f"WARN {warn_prefix}: work-items bulk POST refused ({exc}); "
+                f"retrying {len(chunk)} row(s) individually.",
+                file=sys.stderr,
+            )
+            for item in chunk:
+                try:
+                    client.post("work-items/bulk", {"items": [item]})
+                except AssessError as row_exc:
+                    if not request_rejected_before_any_write(row_exc):
+                        raise
+                    outcomes.append(row_exc)
+                else:
+                    outcomes.append(None)
+            continue
+        outcomes.extend([None] * len(chunk))
+    return outcomes
 
 
 def post_coverage_items_bulk(client, items: list[dict[str, Any]], *, warn_prefix: str) -> None:

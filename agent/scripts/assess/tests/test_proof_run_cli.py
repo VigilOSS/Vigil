@@ -359,11 +359,11 @@ def test_proof_run_start_rejects_success_with_wrong_lifecycle_or_producer(
 def test_proof_run_contract_documents_the_whole_lifecycle() -> None:
     contract = contracts.get_contract("proof-run finish")
     assert contract is not None
-    assert contract.name == "proof-run"
-    assert "start | begin | finish | list | get" in " ".join(
-        contract.author_supplied_fields
-    )
-    contract_text = " ".join((*contract.author_supplied_fields, *contract.notes))
+    assert contract.name == "proof-run finish"
+    root = contracts.get_contract("proof-run")
+    assert [variant.name for variant in root.variants] == ["start", "begin", "finish", "list", "get"]
+    start = contracts.get_contract("proof-run start")
+    contract_text = " ".join((*start.author_supplied_fields, *start.notes))
     for field in (
         "inventory_commitment_version",
         "inventory_count",

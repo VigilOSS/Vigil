@@ -11,7 +11,7 @@ import sys
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import parse_qsl, urlencode, urlparse
+from urllib.parse import parse_qsl, quote, urlencode, urlparse
 
 
 def default_runtime_container() -> str:
@@ -46,6 +46,38 @@ class AssessTransportError(AssessError):
 # able to say "the default, or more" without restating the number.
 DEFAULT_READ_TIMEOUT_SECONDS = 10.0
 
+#: Response budget for the aggregate reads whose server-side cost scales with
+#: the engagement (readiness, coverage and resume roll-ups over every file,
+#: finding and surface). A read timeout is never re-sent, so this budget is the
+#: whole wait.
+AGGREGATE_READ_TIMEOUT_SECONDS = 120.0
+
+#: Assessment endpoints that get ``AGGREGATE_READ_TIMEOUT_SECONDS``, matched on
+#: the path before any query string. ``resume-brief`` composes the code coverage
+#: roll-up with every other resume section; the application-unit depth ledger
+#: and terminal block roll every unit's coverage up the same way.
+_AGGREGATE_READ_ENDPOINTS = frozenset(
+    {
+        "report-readiness",
+        "phase-readiness",
+        "coverage-readiness",
+        "code/readiness",
+        "code/coverage",
+        "resume-brief",
+        "application-units/terminal-block",
+        "application-units/depth-ledger",
+    }
+)
+_AGGREGATE_READ_PREFIXES = ("coverage-readiness/",)
+
+
+def _read_budget(endpoint: str) -> float:
+    """The response budget for a GET of assessment ``endpoint``."""
+    path = endpoint.strip("/").split("?", 1)[0]
+    if path in _AGGREGATE_READ_ENDPOINTS or path.startswith(_AGGREGATE_READ_PREFIXES):
+        return AGGREGATE_READ_TIMEOUT_SECONDS
+    return DEFAULT_READ_TIMEOUT_SECONDS
+
 
 def require_finding_write_response(
     response: dict[str, Any], *, finding_slug: str, operation: str
@@ -68,11 +100,58 @@ def require_finding_write_response(
     return response
 
 
+def claim_equivalence_command(
+    slug: str,
+    *,
+    claim_transition_id: Any = None,
+    current_claim_sha256: Any = None,
+) -> str:
+    """The decision invocation that clears ``slug``'s pending claim review.
+
+    The payload is the shape the backend's claim_equivalence validator accepts.
+    Values the caller already knows are filled in; the rest name where they are
+    read (``finding get``'s verification_audit) or what the reviewer supplies.
+    """
+    payload = {
+        "finding_slug": slug,
+        "verdict": "equivalent|changed",
+        "claim_transition_id": (
+            claim_transition_id
+            if claim_transition_id is not None
+            else "<verification_audit.claim_transition_id>"
+        ),
+        "new_claim_sha256": current_claim_sha256 or "<verification_audit.current_claim_sha256>",
+        "verifier_dispatch_agent_id": "<separate verifier dispatch agent_id>",
+        "reason": "<why the edited claim does or does not match the verified one>",
+    }
+    return (
+        "vigil assess agent decision --kind claim_equivalence --payload-json "
+        f"'{json.dumps(payload, separators=(',', ':'))}'"
+    )
+
+
+def _claim_review_guidance(slug: str, response: dict[str, Any]) -> str:
+    finding = response.get("finding")
+    audit = finding.get("verification_audit") if isinstance(finding, dict) else None
+    audit = audit if isinstance(audit, dict) else {}
+    command = claim_equivalence_command(
+        slug,
+        claim_transition_id=audit.get("claim_transition_id"),
+        current_claim_sha256=audit.get("current_claim_sha256"),
+    )
+    lookup = (
+        ""
+        if audit.get("claim_transition_id") is not None and audit.get("current_claim_sha256")
+        else f" (read the ids from `vigil assess finding get {slug}` verification_audit)"
+    )
+    return (
+        "; the verdict stands, and report readiness blocks until a verifier dispatch "
+        "that neither authored the finding nor made this edit records "
+        f"`{command}`{lookup}. Alternatively, re-verify with fresh proof receipts"
+    )
+
+
 _VERDICT_EFFECT_GUIDANCE = {
-    "claim_review": (
-        "; the verdict stands, and an independent claim_equivalence review or "
-        "re-verification is required before the report"
-    ),
     "invalidate": "; verification is unreviewed and needs a fresh proof run",
 }
 
@@ -83,10 +162,12 @@ def verdict_effect_line(operation: str, slug: str, response: Any) -> str | None:
         return None
     effect = str(response["verification_effect"])
     axes = ", ".join(str(axis) for axis in response.get("changed_axes") or []) or "no change"
-    return (
-        f"{operation}: {slug} verdict effect {effect} ({axes})"
-        f"{_VERDICT_EFFECT_GUIDANCE.get(effect, '')}"
+    guidance = (
+        _claim_review_guidance(slug, response)
+        if effect == "claim_review"
+        else _VERDICT_EFFECT_GUIDANCE.get(effect, "")
     )
+    return f"{operation}: {slug} verdict effect {effect} ({axes}){guidance}"
 
 
 def canonical_artifact_path(engagement_dir: str, path_value: str, *, operation: str) -> str:
@@ -123,6 +204,37 @@ def canonical_artifact_path(engagement_dir: str, path_value: str, *, operation: 
             f"{operation}: artifact path must be inside the engagement directory ({root})"
         ) from exc
     return relative.as_posix()
+
+
+_RECORDED_DISPATCH_HINT = (
+    "pass your own dispatch ID (`vigil assess agent list`), or omit --agent-id for an "
+    "operator registration"
+)
+
+
+def require_recorded_dispatch(
+    client: Any, agent_id: str, *, operation: str, hint: str = _RECORDED_DISPATCH_HINT
+) -> dict[str, Any]:
+    """The dispatch row ``--agent-id`` names, or an error naming the unknown id.
+
+    Attribution flags store the id as a producer that review gates compare
+    against, so an id that names no recorded dispatch is refused before the
+    write instead of being stored as a producer nobody can be. *hint* says
+    where the caller finds the right id; a verb that has no operator form
+    passes its own.
+    """
+    try:
+        row = client.get(f"dispatches/{quote(agent_id, safe='')}")
+    except AssessError as exc:
+        if "HTTP 404" not in str(exc):
+            raise
+        row = None
+    if not isinstance(row, dict):
+        raise AssessError(
+            f"{operation}: --agent-id {agent_id!r} names no recorded dispatch in this "
+            f"engagement; {hint}"
+        )
+    return row
 
 
 def require_artifact_write_response(
@@ -344,9 +456,14 @@ def require_command_run_finalize_response(
 def _is_handoff_duplicate_conflict(exc: AssessError) -> bool:
     """Return True only for the backend's duplicate handoff 409.
 
-    Handoff POST can also return 409 for validation failures such as
-    agent_role mismatch. Those must not fall through to PATCH because PATCH
-    intentionally omits immutable fields such as agent_role.
+    Only that conflict means the row exists and may be updated in place. Any
+    other 409 must surface as the error it is rather than fall through to PATCH,
+    which intentionally omits immutable fields such as agent_role. A handoff
+    role that differs from the dispatch's is one of those other 409s: the
+    backend refuses it rather than storing it, so it surfaces as that refusal
+    instead of becoming a PATCH that would drop the role and report success.
+    (An absent role is not a conflict: the backend stores the registered role
+    and names it on the response's ``derived`` list.)
     """
     message = str(exc)
     if not message.startswith("HTTP 409"):
@@ -386,7 +503,8 @@ class AssessmentClient:
     """HTTP client for the orchestrator assessment API.
 
     Uses http.client.HTTPConnection for keep-alive connection reuse.
-    Retry: 3 attempts with 1s/2s/4s backoff on 429, 500, 502, 503, 504, connection errors.
+    Retry: 3 attempts with 1s/2s/4s backoff on 429, 500, 502, 503, 504 and connection
+    errors for reads. A read timeout after the request was sent is never retried.
     """
 
     RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
@@ -471,10 +589,12 @@ class AssessmentClient:
         last_error: Exception | None = None
         stale_conn_retry_used = False
         request_sent = False
+        response_budget_exceeded = False
         attempt = 0
         attempts_made = 0
         while attempt < retries:
             attempts_made += 1
+            attempt_sent = False
             reused_conn = self._conn is not None
             try:
                 if (not retry_safe and self._conn is not None
@@ -494,7 +614,7 @@ class AssessmentClient:
                     conn.timeout = connect_timeout
                     conn.connect()
                 conn.sock.settimeout(read_timeout)
-                request_sent = True
+                request_sent = attempt_sent = True
                 conn.request(method, path, body=body, headers=headers)
                 resp = conn.getresponse()
                 resp_body = resp.read()
@@ -537,6 +657,12 @@ class AssessmentClient:
                     ),
                 )
                 self._reset_conn()
+                if attempt_sent and isinstance(exc, TimeoutError):
+                    # The request arrived and the server is still computing the
+                    # answer. Re-sending a read would start the same work again
+                    # beside it; re-sending a write could apply it twice.
+                    response_budget_exceeded = True
+                    break
                 if retry_safe and stale_keepalive_drop and not stale_conn_retry_used:
                     stale_conn_retry_used = True
                     continue
@@ -548,6 +674,18 @@ class AssessmentClient:
                     continue
                 break
 
+        if response_budget_exceeded:
+            # The backend accepted the connection and the request, so it is up;
+            # pointing at `orchestrator start` would misdiagnose a slow answer.
+            raise AssessTransportError(
+                f"{method.upper()} {path}: no response within the {read_timeout:g} s "
+                "response budget; the server received the request and may still be "
+                "working on it, so it was not re-sent.\n"
+                + ("Write outcome uncertain; read current state before retrying."
+                   if not retry_safe else
+                   "Retry once the backend is less busy, or read a narrower slice."),
+                request_sent=True,
+            )
         raise AssessTransportError(
             f"Failed after {attempts_made} attempts: {last_error}\n"
             + ("Write outcome uncertain; read current state before retrying.\n"
@@ -586,8 +724,10 @@ class AssessmentClient:
             f"`vigil orchestrator start`, and verify ORCHESTRATOR_BASE_URL={self.base_url!r}."
         )
 
-    def _get_json(self, path: str) -> Any:
-        status, body = self._request("GET", path)
+    def _get_json(
+        self, path: str, *, read_timeout: float = DEFAULT_READ_TIMEOUT_SECONDS
+    ) -> Any:
+        status, body = self._request("GET", path, read_timeout=read_timeout)
         try:
             return json.loads(body)
         except json.JSONDecodeError as exc:
@@ -644,8 +784,15 @@ class AssessmentClient:
         return parsed
 
     def get(self, endpoint: str) -> Any:
-        """GET /assessment/{endpoint}."""
-        return self._get_json(f"{self._assessment_prefix}/{endpoint}")
+        """GET /assessment/{endpoint}.
+
+        An aggregate readiness or coverage read gets
+        ``AGGREGATE_READ_TIMEOUT_SECONDS``; every other read the default.
+        """
+        return self._get_json(
+            f"{self._assessment_prefix}/{endpoint}",
+            read_timeout=_read_budget(endpoint),
+        )
 
     def get_bytes(self, endpoint: str) -> bytes:
         """GET exact transport bytes from an assessment download route.
@@ -950,7 +1097,14 @@ class AssessmentClient:
             expected={"kind": payload.get("kind")},
             positive_ids=("id",),
         )
-        if "payload" in result and result["payload"] != payload.get("payload", {}):
+        # The backend may add derived fields (repro_rehearsal stores
+        # reproduction_sha256); every requested field must come back unchanged.
+        requested = payload.get("payload", {})
+        stored = result.get("payload")
+        if "payload" in result and (
+            not isinstance(stored, dict)
+            or any(key not in stored or stored[key] != value for key, value in requested.items())
+        ):
             raise AssessError(
                 "record dispatch decision: backend response did not identify the "
                 "requested decision payload; the write may have committed, so inspect "

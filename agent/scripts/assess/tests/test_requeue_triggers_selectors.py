@@ -255,3 +255,22 @@ def test_fully_applied_batch_exits_zero(monkeypatch, tmp_path, capsys):
     code_dispatch._requeue_triggers(_config(tmp_path), triggers_file)
 
     assert "already-queued=1" in capsys.readouterr().out
+
+
+def test_summary_names_triggers_the_current_review_already_addressed(
+    monkeypatch, tmp_path, capsys
+):
+    _install_snapshot_stub(monkeypatch, tmp_path)
+    _install_client(
+        monkeypatch,
+        _response(
+            input_trigger_count=2, target_count=1, already_completed=1,
+            resolved_trigger_ids=[12, 14],
+        ),
+    )
+    triggers_file = _write(tmp_path, [{"trigger_id": 12}, {"trigger_id": 14}])
+
+    code_dispatch._requeue_triggers(_config(tmp_path), triggers_file)
+
+    summary = capsys.readouterr().out.split("Audit snapshots:")[0]
+    assert "12" in summary and "14" in summary and "resolved" in summary, summary

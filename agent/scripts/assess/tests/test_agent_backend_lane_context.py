@@ -11,11 +11,15 @@ from assess.commands import agent
 
 
 def _files_page(rows, *, offset=0, total=None):
-    """The bounded `code/files` envelope the shared validator requires."""
+    """The bounded `code/files` envelope the shared validator requires.
+
+    Rows carry only fields the backend serializes for a file; they have no
+    generation. orchestrator/backend/tests/test_agent_lane_file_backend_rows.py
+    drives the same reads with real backend responses.
+    """
     total = len(rows) if total is None else total
     return {"total": total, "offset": offset, "count": len(rows),
-            "has_more": offset + len(rows) < total,
-            "items": [{"repo_generation": 3, **row} for row in rows]}
+            "has_more": offset + len(rows) < total, "items": list(rows)}
 
 
 class _Client:
@@ -351,6 +355,39 @@ def test_lane_file_manifest_renders_each_items_required_families(tmp_path: Path)
 
     assert "common_applicable_vuln_classes: deserialization,error-handling" in rendered
     assert "path_suggested_vuln_classes: file-upload" in rendered
+
+
+def test_queue_manifests_carry_unread_code_suggestions(tmp_path: Path):
+    """A streaming-fallback markup file's code families reach the packet as hints."""
+    class Suggesting(_Client):
+        progress = {44: {**_Client.progress[44],
+                         "unread_code_suggested_vuln_classes": ["ssrf", "file-upload"]}}
+
+    rendered = "\n".join(
+        agent._backend_queue_manifest(Suggesting(), [44], repo_id=7, repo_generation=3)
+    )
+    assert "unread_code_suggested_vuln_classes=ssrf,file-upload" in rendered
+
+    lane_file = tmp_path / "lane.json"
+    lane_file.write_text(json.dumps([
+        {"id": 44, "repo_generation": 3, "repo": {"id": 7},
+         "file": {"file_path": "templates/landing.html", "loc": 12}},
+    ]), encoding="utf-8")
+
+    class BackendClient:
+        def get(self, endpoint):
+            assert endpoint.startswith("code/analysis-queue?"), endpoint
+            return {"items": [{"id": 44, "file_path": "templates/landing.html",
+                               "repo_generation": 3, "repo_id": 7, "status": "processing",
+                               "loc": 12, "applicable_vuln_classes": ["web-app-injection"],
+                               "path_suggested_vuln_classes": [],
+                               "unread_code_suggested_vuln_classes": ["ssrf"]}],
+                    "has_more": False}
+
+    rendered = "\n".join(agent._lane_file_manifest(
+        lane_file, client=BackendClient(), source_identity=["repo_id: 7", "repo_generation: 3"],
+    ))
+    assert "unread_code_suggested_vuln_classes: ssrf" in rendered
 
 
 def test_lane_file_manifest_refuses_a_code_files_total_that_shifts_while_paging(

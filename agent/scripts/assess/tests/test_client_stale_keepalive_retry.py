@@ -109,7 +109,7 @@ def test_read_timeout_on_a_write_is_never_resent(monkeypatch):
         [("raise", TimeoutError())],
         warm=True,
     )
-    with pytest.raises(AssessError, match="Failed after 1 attempts"):
+    with pytest.raises(AssessError, match="Write outcome uncertain"):
         client._request_raw("POST", "/x", body=b"{}", max_retries=1)
     assert len(made) == 1  # no fresh re-send
 
@@ -130,7 +130,7 @@ def test_fresh_connect_failure_is_not_treated_as_stale(monkeypatch):
 def test_a_sent_request_stays_sent_when_a_retry_cannot_connect(monkeypatch):
     client = AssessmentClient("http://localhost:8000", "eng")
     sent = _Conn(("respond", 200))
-    monkeypatch.setattr(sent, "getresponse", Mock(side_effect=TimeoutError()))
+    monkeypatch.setattr(sent, "getresponse", Mock(side_effect=ConnectionResetError()))
     monkeypatch.setattr(client, "_get_conn", Mock(side_effect=[sent, ConnectionRefusedError()]))
     monkeypatch.setattr("assess.lib.client.time.sleep", lambda _s: None)
 

@@ -194,13 +194,13 @@
         },
         "kill_reason": {
           "type": "string",
-          "description": "Verifier rationale for false_positive verdict: which check failed and why the issue is not exploitable."
+          "description": "Verifier rationale for false_positive verdict: which check failed and why the issue is not exploitable. A kill that names none stores the verify's reason_text here, or a summary of its counter_check."
         },
         "kill_check": {
           "type": "integer",
           "minimum": 1,
           "maximum": 5,
-          "description": "Verification check number (1-5) that produced the false-positive verdict."
+          "description": "Verification check number (1-5) that produced the false-positive verdict. Optional."
         },
         "entry_point": {
           "type": "string",
@@ -474,7 +474,7 @@
         },
         "severity_band_rationale": {
           "type": "string",
-          "description": "Why the assigned severity band DIVERGES from the band the CVSS base score implies (e.g. business context the vector cannot express). Present and non-empty demotes report-readiness' severity_cvss_mismatch blocker to an advisory; it never excuses the two CVSS-arithmetic blockers."
+          "description": "Why the assigned severity band diverges from the band the CVSS base score implies (e.g. business context the vector cannot express), as prose for the reader. Report readiness does not read it: only a severity_variance attached to the current verification (`finding verify --severity-variance-file`) attributes the divergence, and an unattributed one stays the severity_cvss_mismatch advisory. It never excuses the two CVSS-arithmetic blockers."
         },
         "honest_bounds": {
           "type": "string",
@@ -643,7 +643,7 @@
         },
         "withdrawal_reason": {
           "type": "string",
-          "description": "Why the researcher withdrew this submission. REQUIRED when submission_status is set to 'withdrawn' — a retraction is researcher-initiated, so the record must say why rather than assert a program decision."
+          "description": "Why the researcher withdrew this submission. A move to submission_status 'withdrawn' needs it — a retraction is researcher-initiated, so the record says why rather than asserting a program decision; a write that states reason_text and names no withdrawal_reason stores that reason here."
         },
         "poc_request": {
           "type": "object",

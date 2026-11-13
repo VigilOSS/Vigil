@@ -111,7 +111,7 @@ _PROGRESS = {
         }
     ],
     "receipt_count": 1,
-    "coverage_integrity": {"current_receipt_rows": 1, "plausible": True},
+    "coverage_integrity": {"current_receipt_rows": 1, "receipts_consistent": True},
 }
 
 
@@ -254,7 +254,7 @@ def test_progress_lists_path_hints_apart_from_what_closeout_owes(
     code_dispatch._progress(_config(tmp_path), "41", as_json=False)
 
     lines = capsys.readouterr().out.splitlines()
-    (owed,) = [line for line in lines if "still owed at closeout" in line]
+    (owed,) = [line for line in lines if "not yet recorded" in line]
     assert "path-traversal" in owed and "race-condition" not in owed
     (hints,) = [line for line in lines if "race-condition" in line]
     assert "business-logic" in hints and "advisory" in hints
@@ -275,4 +275,6 @@ def test_the_contract_documents_the_recovery_verbs() -> None:
     assert "adopt-lease" in rendered
     assert "progress" in rendered
     assert "--stale-minutes" in rendered
-    assert contracts.get_contract("code-dispatch adopt-lease") is contract
+    action = contracts.get_contract("code-dispatch adopt-lease")
+    assert action.name == "code-dispatch adopt-lease"
+    assert "--stale-minutes" in " ".join(action.preferred_invocations)

@@ -1,6 +1,7 @@
 """Shared tree-sitter query, sink, and entry-point catalogues."""
 from __future__ import annotations
 
+import re
 from typing import Any
 
 _FUNCTION_QUERIES: dict[str, str] = {
@@ -410,6 +411,24 @@ _SINK_DEFINITIONS: list[SinkPattern] = [
 # ---------------------------------------------------------------------------
 
 # Annotation / decorator strings that mark entry points, keyed by language.
+_PY_FLASK_IMPORT_RE = re.compile(r"^\s*(?:from\s+flask\b|import\s+flask\b)")
+_PY_ASGI_IMPORT_RE = re.compile(r"^\s*(?:from|import)\s+(?:fastapi|starlette)\b")
+
+
+def python_imports_flask_only(import_lines) -> bool:
+    """Whether a module's lines import Flask and neither FastAPI nor Starlette.
+
+    `@app.get` / `@app.post` are route decorators in both Flask 2 and FastAPI,
+    so the catalogue's `fastapi_route` entries are `flask_route` in a module
+    whose own framework import is Flask; that import is the only local evidence.
+    """
+    flask = asgi = False
+    for line in import_lines:
+        flask = flask or bool(_PY_FLASK_IMPORT_RE.match(line))
+        asgi = asgi or bool(_PY_ASGI_IMPORT_RE.match(line))
+    return flask and not asgi
+
+
 _ENTRY_ANNOTATIONS: dict[str, list[dict[str, str]]] = {
     "java": [
         {"pattern": r"@WebServlet\b", "kind": "servlet_annotation"},

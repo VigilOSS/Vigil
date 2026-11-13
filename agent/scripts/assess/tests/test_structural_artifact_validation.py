@@ -176,7 +176,7 @@ def index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     raw = b"def f(): pass\n"
     origin = tmp_path / "origin"
     origin.mkdir()
-    builder = SnapshotBuilder(tmp_path / "snapshots", "demo")
+    builder = SnapshotBuilder(tmp_path / "tools" / "analysis-state" / "code-snapshots", "demo")
     rows = []
     for file_id, rel_path in enumerate(("a.py", "b.py"), 1):
         path = origin / rel_path
@@ -203,7 +203,7 @@ def index_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
     for module in (code_index, code_index_sync):
         monkeypatch.setattr(module, "AssessmentClient", Client)
-        monkeypatch.setattr(module, "load_config", lambda *_: SimpleNamespace(base_url="http://example.test", engagement_key="eng"))
+        monkeypatch.setattr(module, "load_config", lambda flag=None: SimpleNamespace(base_url="http://example.test", engagement_key="eng", engagement_dir=flag))
     monkeypatch.setattr(code_index, "index_file", lambda _path, _language, source, **_kwargs: _artifact(source))
     args = SimpleNamespace(repo_path=str(snapshot.source_path), repo_id=7, repo_key="demo",
                            output_dir=str(tmp_path / "analysis-state"), file_list=None, engagement_dir=str(tmp_path))
@@ -312,7 +312,7 @@ def test_sync_reports_failures_across_selected_repositories(index_project, monke
     monkeypatch.setattr(code_index_sync, "_resolve_per_repo_manifests", lambda *_args, **_kwargs: manifests)
     monkeypatch.setattr(code_index_sync, "_find_backend_repo", lambda *_args, **_kwargs: copy.deepcopy(repo))
 
-    def invalid_payload(_client, _repo, manifest, _root):
+    def invalid_payload(_client, _repo, manifest, _root, **_binding):
         raise ValueError(f"bad artifact in repo {manifest['repo_id']}")
 
     monkeypatch.setattr(code_index_sync, "_prepare_repo_payload", invalid_payload)
@@ -368,7 +368,7 @@ def test_selected_v7_sync_coexists_with_unselected_v6_aggregate_pointer(
     origin.mkdir()
     path = origin / "other.py"
     path.write_bytes(raw)
-    builder = SnapshotBuilder(tmp_path / "snapshots", "other")
+    builder = SnapshotBuilder(tmp_path / "tools" / "analysis-state" / "code-snapshots", "other")
     builder.add("other.py", capture_regular_file(path), language="python")
     snapshot = builder.finish(repo_key="other", repo_name="other", source_origin_path=str(origin),
                               git={"head": "", "branch": "", "dirty": None})

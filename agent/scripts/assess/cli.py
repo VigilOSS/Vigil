@@ -400,8 +400,8 @@ def main(argv: list[str] | None = None) -> None:
             "Discovery:\n"
             "  vigil assess list-commands            # every verb, grouped by phase\n"
             "  vigil assess list-commands --phase consume-test\n"
-            "  vigil assess contract <verb>          # the full contract for one verb "
-            "(examples, required fields, common mistakes)\n\n"
+            "  vigil assess contract <verb>          # the contract for one verb; "
+            "`--field <name>` prints one field in full\n\n"
             f"Engagement binding:\n  {ENGAGEMENT_BINDING_CONTRACT}\n"
         ),
     )
@@ -440,6 +440,7 @@ def main(argv: list[str] | None = None) -> None:
         check_phase_readiness,
         classify_payload,
         contract,
+        corroborate_finding,
         coverage,
         dns_discovery,
         egress_check,
@@ -452,6 +453,7 @@ def main(argv: list[str] | None = None) -> None:
         code_lead,
         code_record,
         code_size_summary,
+        code_snapshot_repair,
         code_sourcemap_extract,
         emit_event,
         exploit,
@@ -500,6 +502,7 @@ def main(argv: list[str] | None = None) -> None:
         kali_wafw00f,
         kali_whatweb,
         list_command_runs,
+        list_chains,
         list_commands,
         list_findings,
         list_intel,
@@ -597,6 +600,7 @@ def main(argv: list[str] | None = None) -> None:
         code_dependencies,
         code_history,
         code_size_summary,
+        code_snapshot_repair,
         code_sourcemap_extract,
         contract,
         transition_phase,
@@ -610,7 +614,7 @@ def main(argv: list[str] | None = None) -> None:
     _register_subcommand_group(
         sub,
         name="finding",
-        help_text="Finding lifecycle: record, update, verify, relocate, retract-claim, merge, link, list, get, history, report.",
+        help_text="Finding lifecycle: record, update, verify, relocate, retract-claim, merge, link, corroborate, list, get, history, report.",
         dest="finding_action",
         leaf_modules=(
             record_finding,
@@ -621,6 +625,7 @@ def main(argv: list[str] | None = None) -> None:
             retract_finding_claim,
             merge_finding,
             link_finding,
+            corroborate_finding,
             list_findings,
             get_finding,
             finding_history,
@@ -652,6 +657,13 @@ def main(argv: list[str] | None = None) -> None:
             export_triage_packet,
             export_surfaces,
         ),
+    )
+    _register_subcommand_group(
+        sub,
+        name="chain",
+        help_text="Recorded attack chains: list (record one with `record-chain`).",
+        dest="chain_action",
+        leaf_modules=(list_chains,),
     )
     _register_subcommand_group(
         sub,
@@ -763,7 +775,12 @@ def main(argv: list[str] | None = None) -> None:
                     file=sys.stderr,
                 )
 
-            args.func(args)
+            # One invocation is one run: an advisory that every tool in a fan-out
+            # verb (or a recon job's stage subprocesses) would repeat prints once.
+            from assess.lib.run_notices import notice_scope
+
+            with notice_scope():
+                args.func(args)
             try:
                 _flush_buffered_output()
             except (OSError, ValueError) as flush_failure:

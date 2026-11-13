@@ -205,7 +205,7 @@ def test_agent_start_never_asks_for_a_client_handle() -> None:
 
 
 def test_contract_states_the_binding_is_asserted_not_observed() -> None:
-    rendered = contracts.render_contract("agent bind-client-handle")
+    rendered = contracts.render_contract_notes("agent bind-client-handle")
 
     assert "asserted" in rendered.lower()
     assert "provider_observed_handle" in rendered

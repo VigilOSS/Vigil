@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from urllib.parse import quote
 
 from assess.lib.client import AssessmentClient, AssessError
@@ -39,4 +40,20 @@ def run(args) -> None:
             f"{requested_slug}"
         )
     warn_untrusted_data()
+    corroboration = _corroboration_line(requested_slug, row.get("corroboration"))
+    if corroboration:
+        print(corroboration, file=sys.stderr)
     print(json.dumps(row, indent=2, ensure_ascii=False))
+
+
+def _corroboration_line(slug: str, corroboration: object) -> str | None:
+    """Name the lanes the backend counts as independent re-derivations, if any."""
+    if not isinstance(corroboration, dict) or not corroboration.get("lane_count"):
+        return None
+    lanes = [
+        str(lane.get("agent_id"))
+        for lane in corroboration.get("dispatches") or []
+        if isinstance(lane, dict) and lane.get("agent_id")
+    ]
+    named = f" ({', '.join(lanes)})" if lanes else ""
+    return f"finding get: {slug} {corroboration.get('summary')}{named}"

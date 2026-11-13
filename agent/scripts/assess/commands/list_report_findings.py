@@ -44,9 +44,15 @@ def run(args) -> None:
 
     groups = report.get("groups", []) if isinstance(report, dict) else []
     standalone = report.get("standalone", []) if isinstance(report, dict) else []
+    finding_count = report.get("finding_count") if isinstance(report, dict) else None
+    if type(finding_count) is not int:
+        finding_count = len(standalone) + sum(
+            1 + len(group.get("siblings", [])) for group in groups
+        )
     print(
         f"Report findings ({args.mode}): "
-        f"{len(groups)} root-cause groups, {len(standalone)} standalone findings"
+        f"{len(groups)} root-cause groups, {len(standalone)} standalone findings, "
+        f"{finding_count} report findings in all"
     )
     for group in groups:
         root = group.get("root", {})

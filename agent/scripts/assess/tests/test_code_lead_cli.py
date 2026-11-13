@@ -14,7 +14,7 @@ from types import SimpleNamespace
 import pytest
 
 from assess.commands import code_lead
-from assess.lib.contracts import render_contract
+from assess.lib.contracts import render_contract, render_contract_notes
 
 
 def _parser() -> argparse.ArgumentParser:
@@ -349,8 +349,9 @@ def test_contract_documents_every_action_and_the_completion_gate():
 
     for action in ("bind", "list", "queue", "unbind"):
         assert f"code-lead {action}" in rendered
-    assert "code_leads_unresolved" in rendered
-    assert "lead_status" in rendered
+    notes = render_contract_notes("code-lead")
+    assert "code_leads_unresolved" in notes
+    assert "lead_status" in notes
 
 
 def test_readiness_repair_names_the_lead_worklist_and_the_closing_verb(capsys):

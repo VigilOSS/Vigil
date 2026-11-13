@@ -296,9 +296,10 @@ def test_proof_receipt_create_rejects_success_with_changed_authored_evidence(
 def test_proof_receipt_contract_documents_creation_and_reads() -> None:
     contract = contracts.get_contract("proof-receipt create")
     assert contract is not None
-    assert contract.name == "proof-receipt"
-    assert "create | list | get" in " ".join(contract.author_supplied_fields)
-    assert "reusing author-produced evidence" in " ".join(contract.notes)
+    assert contract.name == "proof-receipt create"
+    root = contracts.get_contract("proof-receipt")
+    assert [variant.name for variant in root.variants] == ["create", "list", "get"]
+    assert "reusing author-produced evidence" in " ".join(root.notes)
 
 
 def test_a_derived_health_downgrade_is_reported_not_treated_as_a_lost_write(

@@ -6,15 +6,22 @@ from fnmatch import fnmatch
 import hashlib
 import json
 import re
+import signal
 import stat
 import sys
+import time
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, NamedTuple
 from urllib.parse import urlencode
 
 from assess.lib.code_audit import write_json_snapshot
-from assess.lib.client import DEFAULT_READ_TIMEOUT_SECONDS, AssessError, AssessmentClient
+from assess.lib.client import (
+    DEFAULT_READ_TIMEOUT_SECONDS,
+    AssessError,
+    AssessmentClient,
+    AssessTransportError,
+)
 from assess.lib.config import load_config
 from assess.lib.contracts import CODE_SKIP_REASONS
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
@@ -58,6 +65,12 @@ _PATH_SCOPE_HELP = (
     "values of one flag are alternatives, and every other filter must also "
     "match.\n"
 )
+
+
+# Rows `list-triggers` prints by default. A larger selection prints this page
+# and says on stderr how many rows it left out and the command for the rest, so
+# a lane never floods its context with hundreds of rows by accident.
+TRIGGER_PRINT_PAGE = 200
 
 _ACTION_HELP: dict[str, str] = {
     "stats": (
@@ -126,25 +139,35 @@ _ACTION_HELP: dict[str, str] = {
     ),
     "heartbeat": (
         "Usage: vigil assess code-dispatch heartbeat "
-        "<item-id> <agent-id> <lease-token>\n\n"
+        "<item-id> <agent-id> <lease-token> [--keepalive [--every SECONDS]]\n\n"
         "Renew the exact active lease for one claimed queue item.\n"
+        "--keepalive renews it every --every seconds (default 240, 30-599) until the "
+        "backend refuses the lease: exit 0 when the item closed under this lease, 1 when "
+        "the lease was reset, adopted or reclaimed, on any other refusal, or after 3 "
+        "consecutive transport/5xx failures. The lease is the only stop condition; run "
+        "one keepalive per lease in the background and never share a stop file. SIGINT "
+        "or SIGTERM stops it (exit 130/143) and leaves the lease held.\n"
     ),
     "done": (
         "Usage: vigil assess code-dispatch done <item-id> <agent-id> "
-        "<lease-token> <disposition> <cwe-coverage-json-file> [notes] "
+        "<lease-token> <disposition> <cwe-coverage> [notes] "
         "[--dry-run] [--skip-reason <reason>]\n\n"
         f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}.\n"
-        "CWE coverage must be a JSON array such as "
-        "[{\"family\":\"ssrf\",\"effort\":80}]. It must carry an entry for every "
-        "family the file requires; read that set with `code-dispatch progress "
-        "<item-id>` (or the claim's `applicable_vuln_classes`) before closing, "
-        "never from the queue item's own `slot_types`.\n"
+        "<cwe-coverage> is a JSON file path, inline JSON, or - to read stdin, holding "
+        "an array such as [{\"family\":\"ssrf\",\"effort\":80}] (a "
+        "{\"cwe_coverage\": [...]} wrapper is unwrapped). Give one entry per family you "
+        "reviewed; on a critical or high file each applicable family it leaves out is "
+        "recorded at effort 0 (a coverage gap the coverage harness reports). Read the "
+        "applicable set with `code-dispatch progress <item-id>` (or the claim's "
+        "`applicable_vuln_classes`) before closing, never from the queue item's own "
+        "`slot_types`.\n"
         "<notes> is a trailing positional and is REQUIRED when "
         "disposition=clean; it is optional for every other disposition.\n"
         f"--skip-reason is required when disposition=skipped, one of: "
         f"{', '.join(CODE_SKIP_REASONS)}.\n"
-        "--dry-run renders the exact payload and names anything that would be "
-        "refused, without contacting the backend.\n"
+        "--dry-run renders the exact payload and has the backend run every check "
+        "the close runs (lease, receipts, evidence, coverage) without writing "
+        "anything.\n"
     ),
     "error": (
         "Usage: vigil assess code-dispatch error "
@@ -200,17 +223,52 @@ _ACTION_HELP: dict[str, str] = {
     ),
     "requeue-triggers": (
         "Usage: vigil assess code-dispatch requeue-triggers <triggers-json-file>\n\n"
-        "Turn cross-file triggers into linked current analysis attempts.\n"
+        "Turn cross-file and depth_floor triggers into linked current analysis attempts.\n"
+        "A depth_floor trigger whose family cannot occur in its file settles without a "
+        "re-review: resolve-triggers <file> not_applicable \"<why>\" while it is pending. "
+        "Requeued, it is queued; stderr names the `withdraw` of the inserted attempts "
+        "that returns it to pending.\n"
+    ),
+    "withdraw": (
+        "Usage: vigil assess code-dispatch withdraw <id1,id2,...> --reason TEXT\n"
+        "       vigil assess code-dispatch withdraw --ids-file PATH --reason TEXT\n\n"
+        "Take back pending directed attempts `requeue-triggers` inserted that no "
+        "lease has ever claimed, when the attempt before is a current successful "
+        "review. Each withdrawn row is removed, the file's earlier review is its "
+        "current verdict again, and the triggers the row carried are pending again "
+        "with the reason, so `resolve-triggers` can settle them. A claimed (even if "
+        "released), completed, initial, reanalysis or metadata-refresh row, or an "
+        "owed attempt trigger context was merged into, is refused with the reason; "
+        "the rest still withdraw, and any refusal exits 1.\n"
     ),
     "list-triggers": (
-        "Usage: vigil assess code-dispatch list-triggers [status]\n\n"
-        "List cross-file triggers, defaulting to pending.\n"
+        "Usage: vigil assess code-dispatch list-triggers [status] "
+        "[--origin depth_floor|cross_file] [--vuln-class FAMILY]... "
+        "[--path-prefix PATH]... [--repo-id N] [--summary] [--limit N] [--offset N] "
+        "[--all] [--include-superseded]\n\n"
+        "List triggers, defaulting to pending. stdout is the JSON row array that "
+        "requeue-triggers and resolve-triggers take unchanged, at most "
+        f"{TRIGGER_PRINT_PAGE} rows unless --limit or --all says otherwise (--offset "
+        "starts later in the selection); --summary prints only counts by origin x "
+        "vuln_class x status and the distinct target files. stderr always counts the "
+        "selected rows by origin, and names the rows not printed with the command for "
+        "the next page. --include-superseded also lists the history a reopened review "
+        "or a context-tag change superseded.\n"
+        "--vuln-class and --path-prefix repeat (values of one flag are alternatives); "
+        "--path-prefix matches the target file path by whole segments, case-sensitively, "
+        "as `list --path-prefix` does. --repo-id filters on the backend.\n"
     ),
     "resolve-triggers": (
         "Usage: vigil assess code-dispatch resolve-triggers <triggers-json-file> "
-        "<external_context_unavailable|source_equivalent_analyzed|not_applicable> "
-        "<note>\n\n"
+        "<external_context_unavailable|source_equivalent_analyzed|not_applicable|reviewed_at_sufficient_depth> "
+        "<note>\n"
+        "       vigil assess code-dispatch resolve-triggers --amend "
+        "<triggers-json-file> <note>\n\n"
         "Resolve triggers that cannot or should not produce another queue attempt.\n"
+        "reviewed_at_sufficient_depth settles only a depth_floor trigger: the file was "
+        "read at depth and its recorded effort understates it (the note says how).\n"
+        "--amend appends a dated correction to closed triggers' resolution notes, "
+        "addressed by trigger_id; the status and the original note are kept.\n"
     ),
 }
 
@@ -229,7 +287,7 @@ def register(subparsers) -> None:
     p.add_argument(
         "action",
         choices=tuple(_ACTION_HELP),
-        help="stats|list|progress|fetch|heartbeat|done|error|needs-context|release|adopt-lease|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|list-triggers|resolve-triggers",
+        help="stats|list|progress|fetch|heartbeat|done|error|needs-context|release|adopt-lease|reset-stale|retry-error|retry-needs-context|queue|reanalyze|requeue-triggers|withdraw|list-triggers|resolve-triggers",
     )
     p.add_argument("extra", nargs=argparse.REMAINDER, help="Action-specific arguments")
     p.set_defaults(func=run)
@@ -287,10 +345,10 @@ def run(args) -> None:
     elif action == "done":
         if len(extra) < 5:
             print(
-                "Usage: code-dispatch done <item-id> <agent-id> <lease-token> <disposition> <cwe-coverage-json-file> [notes] [--dry-run] [--skip-reason <reason>]\n"
+                "Usage: code-dispatch done <item-id> <agent-id> <lease-token> <disposition> <cwe-coverage> [notes] [--dry-run] [--skip-reason <reason>]\n"
                 f"Valid dispositions: {', '.join(_DONE_DISPOSITIONS)}\n"
-                "CWE coverage must be a JSON array like "
-                "[{\"family\":\"ssrf\",\"effort\":80}]\n"
+                "<cwe-coverage> is a JSON file path, inline JSON, or - (stdin) holding an "
+                "array like [{\"family\":\"ssrf\",\"effort\":80}]\n"
                 "<notes> is required when disposition=clean\n"
                 f"--skip-reason is required when disposition=skipped, one of: "
                 f"{', '.join(CODE_SKIP_REASONS)}",
@@ -339,10 +397,18 @@ def run(args) -> None:
             dry_run=dry_run, skip_reason=skip_reason,
         )
     elif action == "heartbeat":
-        if len(extra) != 3:
-            print("Usage: code-dispatch heartbeat <item-id> <agent-id> <lease-token>", file=sys.stderr)
+        if len(extra) < 3:
+            print(
+                "Usage: code-dispatch heartbeat <item-id> <agent-id> <lease-token> "
+                "[--keepalive [--every SECONDS]]",
+                file=sys.stderr,
+            )
             sys.exit(1)
-        _heartbeat(cfg, extra[0], extra[1], extra[2])
+        every = _parse_keepalive_options(extra[3:])
+        if every is None:
+            _heartbeat(cfg, extra[0], extra[1], extra[2])
+        else:
+            _keepalive(cfg, extra[0], extra[1], extra[2], every=every)
     elif action == "error":
         if len(extra) < 3:
             print("Usage: code-dispatch error <item-id> <agent-id> <lease-token> [notes]", file=sys.stderr)
@@ -412,14 +478,26 @@ def run(args) -> None:
             print("Usage: code-dispatch requeue-triggers <triggers-json-file>", file=sys.stderr)
             sys.exit(1)
         _requeue_triggers(cfg, extra[0])
+    elif action == "withdraw":
+        _withdraw(cfg, *_parse_withdraw_options(extra))
     elif action == "list-triggers":
-        status_filter = extra[0] if extra else "pending"
-        _list_triggers(cfg, status_filter)
+        status_filter, selection = _parse_list_triggers_options(extra)
+        _list_triggers(cfg, status_filter, selection)
     elif action == "resolve-triggers":
+        if extra and extra[0] == "--amend":
+            if len(extra) < 3:
+                print(
+                    "Usage: code-dispatch resolve-triggers --amend <triggers-json-file> <note>",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+            _resolve_triggers(cfg, extra[1], None, " ".join(extra[2:]), amend=True)
+            return
         if len(extra) < 3:
             print(
                 "Usage: code-dispatch resolve-triggers <triggers-json-file> "
-                "<external_context_unavailable|source_equivalent_analyzed|not_applicable> <note>",
+                "<external_context_unavailable|source_equivalent_analyzed|not_applicable|reviewed_at_sufficient_depth> <note>\n"
+                "       code-dispatch resolve-triggers --amend <triggers-json-file> <note>",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -678,6 +756,34 @@ def _parse_release_options(tokens: list[str]) -> dict[str, object]:
         )
         raise SystemExit(1)
     return options
+
+
+def _parse_withdraw_options(tokens: list[str]) -> tuple[list[int], str]:
+    """`<id1,id2,...> --reason TEXT` or `--ids-file PATH --reason TEXT`."""
+    usage = (
+        "Usage: code-dispatch withdraw <id1,id2,...> --reason TEXT\n"
+        "       code-dispatch withdraw --ids-file PATH --reason TEXT"
+    )
+    positional = tokens[0] if tokens and not tokens[0].startswith("--") else None
+    options = _parse_verb_options(
+        tokens[1:] if positional is not None else tokens,
+        verb="withdraw",
+        fields={"--reason": "reason", "--ids-file": "ids_file"},
+    )
+    if (positional is None) == ("ids_file" not in options) or "reason" not in options:
+        print(usage, file=sys.stderr)
+        print(
+            "ERROR: name the queue items once (an id list or --ids-file) and give "
+            "--reason; the reason is kept on every trigger the withdrawal returns",
+            file=sys.stderr,
+        )
+        raise SystemExit(1)
+    ids = (
+        _validate_id_list(positional)
+        if positional is not None
+        else _ids_from_file(str(options["ids_file"]))
+    )
+    return sorted(set(ids)), str(options["reason"])
 
 
 def _parse_fetch_filters(tokens: list[str]) -> dict[str, object]:
@@ -1100,13 +1206,19 @@ def _progress(cfg, item_id: str, *, as_json: bool) -> None:
             f"families={', '.join(receipt.get('cwe_families') or []) or '-'} "
             f"by {receipt.get('agent_name', '?')}"
         )
-    # The full required set, not only the remainder: this is the one list
-    # `done` enforces, and it is derived from the file's classification slot
-    # types, role and language — never from the queue item's own `slot_types`.
-    # Printing only the remainder left the authoritative list reachable solely
-    # through `--json`.
+    # The full applicable set, not only the remainder, derived from the file's
+    # classification slot types, context tags and language — never from the queue
+    # item's own `slot_types`. On critical and high files `done` records every
+    # family the closeout omits at effort 0 (a measured coverage gap); on every
+    # other tier it is the list to cover, and `not yet recorded` stays empty.
+    tier = str(result.get("classification") or "")
+    applicable_label = (
+        "cwe families owed an entry at closeout"
+        if tier in {"critical", "high"}
+        else f"cwe families to cover (guidance; a {tier or 'unclassified'} closeout owes no entry per family)"
+    )
     print(
-        "  cwe families required at closeout: "
+        f"  {applicable_label}: "
         f"{', '.join(result.get('applicable_vuln_classes') or []) or 'none'}"
     )
     print(
@@ -1114,7 +1226,7 @@ def _progress(cfg, item_id: str, *, as_json: bool) -> None:
         f"{', '.join(result.get('recorded_cwe_families') or []) or '-'}"
     )
     print(
-        "  cwe families still owed at closeout: "
+        "  cwe families not yet recorded (done records each at effort 0, a coverage gap): "
         f"{', '.join(result.get('missing_cwe_families') or []) or 'none'}"
     )
     path_hints = result.get("path_suggested_vuln_classes") or []
@@ -1123,14 +1235,29 @@ def _progress(cfg, item_id: str, *, as_json: bool) -> None:
             "  path hints to consider (advisory, never owed): "
             + ", ".join(path_hints)
         )
+    unread_hints = result.get("unread_code_suggested_vuln_classes") or []
+    if unread_hints:
+        print(
+            "  code families a streaming-fallback index could not rule out "
+            "(advisory, never owed): " + ", ".join(unread_hints)
+        )
+    optional = result.get("optional_vuln_classes") or []
+    if optional:
+        print(
+            "  server-only families the client-bundle tag makes optional (score one "
+            "only if the file does more than run in the browser): " + ", ".join(optional)
+        )
     integrity = result.get("coverage_integrity")
     if isinstance(integrity, dict):
         blockers = integrity.get("authoritative_blockers") or []
         advisories = integrity.get("advisories") or []
+        # Bookkeeping only: the receipts agree with what the closeout claims.
+        # Review depth is not something this check can see.
         print(
-            f"  coverage integrity: "
-            f"{'plausible' if integrity.get('plausible') else 'BLOCKED'} "
-            f"({len(blockers)} blocker(s), {len(advisories)} advisory(ies))"
+            f"  receipt consistency: "
+            f"{'ok' if integrity.get('receipts_consistent') else 'BLOCKED'} "
+            "(bookkeeping, not depth; "
+            f"{len(blockers)} blocker(s), {len(advisories)} advisory(ies))"
         )
         for warning in [*blockers, *advisories]:
             print(f"    - {warning}")
@@ -1597,6 +1724,53 @@ def _done_invocation_problems(
     return problems
 
 
+def _load_cwe_coverage(source: str) -> list:
+    """The CWE coverage array from a file path, inline JSON, or ``-`` (stdin).
+
+    A lane has the array in hand after counting its families, so inline JSON and
+    a pipe are the same input as a file. The ``{"cwe_coverage": [...]}`` wrapper
+    the request payload uses is unwrapped, and the unwrap is named on stderr.
+    """
+    text = source.strip()
+    if text == "-":
+        raw, origin = sys.stdin.read(), "stdin"
+    elif text.startswith(("[", "{")):
+        raw, origin = text, "inline JSON"
+    else:
+        path = Path(source)
+        if not path.is_file():
+            print(
+                f"CWE coverage JSON file not found: {source} (pass a file path, inline "
+                "JSON, or - to read stdin)",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        raw, origin = path.read_text(encoding="utf-8"), source
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        print(
+            f"CWE coverage in {origin} is not valid JSON: {exc.msg} at line "
+            f"{exc.lineno} column {exc.colno}",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    if isinstance(data, dict) and set(data) == {"cwe_coverage"}:
+        data = data["cwe_coverage"]
+        print(
+            f"code-dispatch done: read the cwe_coverage array out of its wrapper object in {origin}.",
+            file=sys.stderr,
+        )
+    if not isinstance(data, list):
+        print(
+            "CWE coverage payload must be a JSON array (or {\"cwe_coverage\": [...]}) "
+            "like [{\"family\":\"ssrf\",\"effort\":80}]",
+            file=sys.stderr,
+        )
+        sys.exit(1)
+    return data
+
+
 def _done(
     cfg,
     id_list: str,
@@ -1619,9 +1793,8 @@ def _done(
         sys.exit(1)
 
     # Before the coverage file is opened: an invocation the backend will refuse
-    # on its shape costs nothing to catch here. A dry run reports them instead
-    # of refusing — its whole purpose is to render the payload beside its
-    # defects.
+    # on its shape costs nothing to catch here. A dry run still renders the
+    # payload, then names them beside it and exits 1 without a request.
     invocation_problems = _done_invocation_problems(
         normalized_disposition, notes, skip_reason
     )
@@ -1630,14 +1803,7 @@ def _done(
             print(f"ERROR: {problem}", file=sys.stderr)
         sys.exit(1)
 
-    cwe_path = Path(cwe_file)
-    if not cwe_path.is_file():
-        print(f"CWE coverage JSON file not found: {cwe_file}", file=sys.stderr)
-        sys.exit(1)
-    cwe_data = json.loads(cwe_path.read_text(encoding="utf-8"))
-    if not isinstance(cwe_data, list):
-        print("CWE coverage payload must be a JSON array", file=sys.stderr)
-        sys.exit(1)
+    cwe_data = _load_cwe_coverage(cwe_file)
     if not cwe_data and normalized_disposition != 'skipped':
         print('CWE coverage must contain at least one entry for analyzed work', file=sys.stderr)
         sys.exit(1)
@@ -1672,14 +1838,21 @@ def _done(
         payload['skip_reason'] = skip_reason
     if dry_run:
         print("Dry run only; no queue state was changed.")
-        for problem in invocation_problems:
-            print(f"WOULD BE REFUSED: {problem}")
-        print(
-            "Coverage completeness is checked by the backend against this "
-            f"file's required family set; read it with `code-dispatch progress "
-            f"{ids[0]}` before closing."
-        )
         print(json.dumps({"endpoint": "code/analysis-queue/done", "payload": payload}, indent=2, ensure_ascii=False))
+        if invocation_problems:
+            # The backend refuses the same shape, so there is nothing to send.
+            for problem in invocation_problems:
+                print(f"WOULD BE REFUSED: {problem}")
+            sys.exit(1)
+        # The backend runs every check the close runs and writes nothing; its
+        # refusal raises here exactly as the real close's would.
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            preview = client.post('code/analysis-queue/done', {**payload, 'dry_run': True})
+        print(
+            "Every check `done` runs passed against the attempt as it stands "
+            "(lease, receipts, evidence, coverage); nothing was written."
+        )
+        print(json.dumps(preview, indent=2, ensure_ascii=False))
         return
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post('code/analysis-queue/done', payload)
@@ -1708,6 +1881,184 @@ def _heartbeat(cfg, item_id: str, agent_name: str, lease_token: str) -> None:
             'item_id': item_id_value, 'agent_name': agent_name, 'lease_token': lease_token,
         })
     print(json.dumps(result, indent=2, ensure_ascii=False))
+
+
+_DEFAULT_KEEPALIVE_SECONDS = 240
+_MIN_KEEPALIVE_SECONDS = 30
+# Below the backend's 10-minute stale-lease window, so one missed beat never
+# lets the lease be reset.
+_MAX_KEEPALIVE_SECONDS = 599
+_MAX_TRANSIENT_HEARTBEAT_FAILURES = 3
+
+
+def _parse_keepalive_options(tokens: list[str]) -> int | None:
+    """``--keepalive [--every SECONDS]`` -> the interval, or None for one heartbeat."""
+    keepalive = False
+    every: int | None = None
+    index = 0
+    while index < len(tokens):
+        token = tokens[index]
+        if token == "--keepalive" and not keepalive:
+            keepalive = True
+            index += 1
+        elif token == "--every" and every is None and index + 1 < len(tokens):
+            value = tokens[index + 1]
+            if re.fullmatch(r"[0-9]+", value) is None or not (
+                _MIN_KEEPALIVE_SECONDS <= int(value) <= _MAX_KEEPALIVE_SECONDS
+            ):
+                print(
+                    f"ERROR: --every requires an integer between {_MIN_KEEPALIVE_SECONDS} "
+                    f"and {_MAX_KEEPALIVE_SECONDS} seconds (the lease goes stale after 10 "
+                    "minutes without a heartbeat)",
+                    file=sys.stderr,
+                )
+                raise SystemExit(1)
+            every = int(value)
+            index += 2
+        else:
+            print(f"Unknown, repeated or incomplete code-dispatch heartbeat option: {token}", file=sys.stderr)
+            raise SystemExit(1)
+    if every is not None and not keepalive:
+        print("ERROR: --every only applies with --keepalive", file=sys.stderr)
+        raise SystemExit(1)
+    if not keepalive:
+        return None
+    return every if every is not None else _DEFAULT_KEEPALIVE_SECONDS
+
+
+class _KeepaliveSignal(Exception):
+    def __init__(self, signum: int) -> None:
+        super().__init__(signum)
+        self.signum = signum
+
+
+def _raise_keepalive_signal(signum, _frame) -> None:
+    raise _KeepaliveSignal(signum)
+
+
+def _heartbeat_refusal_detail(exc: AssessError) -> str:
+    _, _, body = str(exc).partition("\n")
+    try:
+        detail = json.loads(body).get("detail")
+    except (json.JSONDecodeError, AttributeError):
+        detail = None
+    return detail if isinstance(detail, str) and detail else str(exc)
+
+
+def _keepalive_outcome(
+    cfg, item_id: int, agent_name: str, lease_token: str, refusal: AssessError
+) -> int:
+    """Classify a refused heartbeat from the item's own progress read: 0 or 1."""
+    detail = _heartbeat_refusal_detail(refusal)
+    try:
+        with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+            progress = client.get(f"code/analysis-queue/{item_id}/progress")
+    except AssessError as exc:
+        print(
+            f"code-dispatch heartbeat --keepalive: queue item {item_id} refused the "
+            f"heartbeat ({detail}) and its progress could not be read ({exc}); stopping.",
+            file=sys.stderr,
+        )
+        return 1
+    if not isinstance(progress, dict):
+        progress = {}
+    row_status = str(progress.get("status") or "unknown")
+    ours = (
+        progress.get("agent_name") == agent_name and progress.get("lease_token") == lease_token
+    )
+    if ours and row_status != "processing":
+        print(
+            f"code-dispatch heartbeat --keepalive: queue item {item_id} closed under this "
+            f"lease (status {row_status}); heartbeats stopped.",
+            file=sys.stderr,
+        )
+        return 0
+    if ours:
+        print(
+            f"code-dispatch heartbeat --keepalive: queue item {item_id} refused the "
+            f"heartbeat under this lease: {detail}; stopping.",
+            file=sys.stderr,
+        )
+        return 1
+    holder = progress.get("agent_name") or "no agent"
+    print(
+        f"code-dispatch heartbeat --keepalive: this lease no longer holds queue item "
+        f"{item_id}: it is {row_status}, held by {holder} ({detail}). Its results and "
+        "closeout will be refused; stopping.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _keepalive(cfg, item_id: str, agent_name: str, lease_token: str, *, every: int) -> None:
+    """Heartbeat one lease every *every* seconds until the backend ends it.
+
+    The lease is the only stop condition: a closed item exits 0, a lease that was
+    reset, adopted or reclaimed exits 1, and so does a refusal the item's progress
+    cannot explain or three transport/5xx failures in a row. SIGINT and SIGTERM
+    stop the loop without touching the lease.
+    """
+    item_id_value = _validate_single_id(item_id)
+    payload = {'item_id': item_id_value, 'agent_name': agent_name, 'lease_token': lease_token}
+    previous_term = signal.signal(signal.SIGTERM, _raise_keepalive_signal)
+    failures = 0
+    print(
+        f"code-dispatch heartbeat --keepalive: renewing queue item {item_id_value} for "
+        f"{agent_name} every {every}s until the item closes or the lease moves.",
+        file=sys.stderr,
+    )
+    try:
+        while True:
+            try:
+                with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+                    result = client.post('code/analysis-queue/heartbeat', payload)
+                failures = 0
+                beat_at = result.get("last_heartbeat_at") if isinstance(result, dict) else None
+                print(
+                    f"code-dispatch heartbeat --keepalive: queue item {item_id_value} alive "
+                    f"at {beat_at or 'an unreported time'}",
+                    file=sys.stderr,
+                )
+            except AssessError as exc:
+                transient = isinstance(exc, AssessTransportError) or str(exc).startswith("HTTP 5")
+                if not transient:
+                    if str(exc).startswith("HTTP 409"):
+                        raise SystemExit(
+                            _keepalive_outcome(cfg, item_id_value, agent_name, lease_token, exc)
+                        ) from None
+                    print(
+                        f"code-dispatch heartbeat --keepalive: queue item {item_id_value} "
+                        f"refused the heartbeat: {_heartbeat_refusal_detail(exc)}; stopping.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1) from None
+                failures += 1
+                if failures >= _MAX_TRANSIENT_HEARTBEAT_FAILURES:
+                    print(
+                        f"code-dispatch heartbeat --keepalive: {failures} consecutive "
+                        f"heartbeat failures for queue item {item_id_value} (last: {exc}); "
+                        "stopping. Check the backend, then `code-dispatch progress "
+                        f"{item_id_value}` for the lease's state.",
+                        file=sys.stderr,
+                    )
+                    raise SystemExit(1) from None
+                print(
+                    f"WARN code-dispatch heartbeat --keepalive: heartbeat for queue item "
+                    f"{item_id_value} failed ({exc}); retrying in {every}s",
+                    file=sys.stderr,
+                )
+            time.sleep(every)
+    except (KeyboardInterrupt, _KeepaliveSignal) as exc:
+        signum = exc.signum if isinstance(exc, _KeepaliveSignal) else signal.SIGINT
+        print(
+            f"code-dispatch heartbeat --keepalive: stopped by {signal.Signals(signum).name}; "
+            f"the lease stays held by {agent_name} until the item closes or the lease goes "
+            "stale.",
+            file=sys.stderr,
+        )
+        raise SystemExit(128 + int(signum)) from None
+    finally:
+        signal.signal(signal.SIGTERM, previous_term)
 
 
 def _report_queue_write(result: object, snapshot: Path, count_line: str) -> None:
@@ -1879,6 +2230,42 @@ def _retry_error(cfg, id_list: str, reason: str = "") -> None:
     )
     retried = result.get('retried', 0) if isinstance(result, dict) else 0
     _report_queue_write(result, snapshot, f"Retried (error -> pending): {retried} item(s)")
+
+
+def _withdraw(cfg, ids: list[int], reason: str) -> None:
+    """Take back unclaimed directed attempts; any refused id fails the command."""
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        result = client.post("code/analysis-queue/withdraw", {"item_ids": ids, "reason": reason})
+    snapshot = write_json_snapshot(
+        cfg.engagement_dir,
+        category="code-queue-withdraw",
+        label="items",
+        payload=result,
+        metadata={"command": "code-dispatch withdraw", "item_ids": ids, "reason": reason},
+    )
+    withdrawn = result.get("withdrawn", []) if isinstance(result, dict) else []
+    refused = result.get("refused", []) if isinstance(result, dict) else []
+    print(f"Withdrew {len(withdrawn)} of {len(ids)} queue item(s)")
+    for row in withdrawn:
+        returned = ", ".join(str(tid) for tid in row.get("returned_trigger_ids") or []) or "none"
+        print(
+            f"  {row.get('queue_item_id')}: {row.get('file_path')} is "
+            f"{row.get('file_analysis_status')} again under queue item "
+            f"{row.get('predecessor_queue_item_id')} ({row.get('predecessor_status')}"
+            + (f" {row['predecessor_disposition']}" if row.get("predecessor_disposition") else "")
+            + f"); trigger(s) returned to pending: {returned}"
+        )
+    print(f"Saved audit snapshot: {snapshot.name}")
+    for row in refused:
+        print(f"  refused: {row.get('reason')}", file=sys.stderr)
+    if refused or not isinstance(result, dict):
+        print(
+            f"code-dispatch withdraw: {len(refused)} queue item(s) refused; the others "
+            "were withdrawn. `code-dispatch list --queue-mode trigger --status pending` "
+            "lists the directed attempts still withdrawable.",
+            file=sys.stderr,
+        )
+        sys.exit(1)
 
 
 def _retry_needs_context(cfg, id_list: str, reason: str) -> None:
@@ -2828,6 +3215,13 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
     reopened = counts["reopened_terminal_files"]
     if reopened:
         print(f"  reopened {reopened} terminal file(s) with a new trigger attempt")
+    resolved_ids = result.get("resolved_trigger_ids") or []
+    if resolved_ids:
+        print(
+            f"  resolved trigger(s) {', '.join(str(tid) for tid in resolved_ids)}: "
+            "the target's current review was claimed after each was raised and "
+            "carried it or scored its vuln_class; no new attempt was queued for them"
+        )
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     print(json.dumps(result, indent=2, ensure_ascii=False))
 
@@ -2845,6 +3239,7 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
         print(f"  not found: {label}", file=sys.stderr)
     for label in ambiguous:
         print(f"  ambiguous without repo_id: {label}", file=sys.stderr)
+    _name_depth_floor_alternative(triggers, triggers_file, result.get("outcomes"))
     if blocked or not_found or ambiguous:
         print(
             f"code-dispatch requeue-triggers: {blocked} blocked target(s), "
@@ -2857,16 +3252,282 @@ def _requeue_triggers(cfg, triggers_file: str) -> None:
         sys.exit(1)
 
 
-def _list_triggers(cfg, status_filter: str) -> None:
-    endpoint = "code/triggers"
-    if status_filter:
-        endpoint = f"{endpoint}?status={status_filter}"
+TRIGGER_ORIGINS = ("depth_floor", "cross_file")
+# `GET code/triggers` page size: the backend's maximum (`TRIGGER_PAGE_MAX`).
+_TRIGGER_PAGE_SIZE = 1000
+
+
+class _TriggerSelection(NamedTuple):
+    """The CLI-side narrowing of one `list-triggers` read.
+
+    Values of one repeatable flag are alternatives; every given flag must match.
+    ``repo_id`` is the only one the backend filters on.
+    """
+
+    origin: str | None = None
+    vuln_classes: tuple[str, ...] = ()
+    path_prefixes: tuple[str, ...] = ()
+    repo_id: int | None = None
+    summary: bool = False
+    # The printed slice of the selected rows: ``limit`` None prints the default
+    # page (`TRIGGER_PRINT_PAGE`), ``print_all`` every row.
+    limit: int | None = None
+    offset: int = 0
+    print_all: bool = False
+    include_superseded: bool = False
+
+
+
+def _parse_list_triggers_options(tokens: list[str]) -> tuple[str, _TriggerSelection]:
+    """`[status] [--origin O] [--vuln-class F]... [--path-prefix P]... [--repo-id N] [--summary]`."""
+    status_filter = "pending"
+    index = 0
+    if tokens and not tokens[0].startswith("--"):
+        status_filter = tokens[0]
+        index = 1
+    origin: str | None = None
+    vuln_classes: list[str] = []
+    path_scopes: dict[str, list[str]] = {}
+    repo_id: int | None = None
+    summary = False
+    flags: set[str] = set()
+    numbers: dict[str, int] = {}
+    while index < len(tokens):
+        token = tokens[index]
+        if token in {"--summary", "--all", "--include-superseded"}:
+            if token in flags:
+                print(f"ERROR: {token} was specified more than once", file=sys.stderr)
+                raise SystemExit(1)
+            flags.add(token)
+            summary = summary or token == "--summary"
+            index += 1
+            continue
+        if token in {"--limit", "--offset"} and index + 1 < len(tokens):
+            value = tokens[index + 1]
+            index += 2
+            minimum = 1 if token == "--limit" else 0
+            if token in numbers:
+                print(f"ERROR: {token} was specified more than once", file=sys.stderr)
+                raise SystemExit(1)
+            if re.fullmatch(r"[0-9]+", value) is None or int(value) < minimum:
+                print(f"ERROR: {token} requires an integer >= {minimum}", file=sys.stderr)
+                raise SystemExit(1)
+            numbers[token] = int(value)
+            continue
+        if token not in {"--origin", "--vuln-class", "--path-prefix", "--repo-id"} or index + 1 >= len(tokens):
+            print(f"Unknown or incomplete code-dispatch list-triggers option: {token}", file=sys.stderr)
+            raise SystemExit(1)
+        value = tokens[index + 1]
+        index += 2
+        if token == "--path-prefix":
+            _add_path_scope_value(path_scopes, token, value)
+        elif not value.strip():
+            print(f"ERROR: {token} requires a value", file=sys.stderr)
+            raise SystemExit(1)
+        elif token == "--vuln-class":
+            if value not in vuln_classes:
+                vuln_classes.append(value)
+        elif token == "--origin":
+            if origin is not None:
+                print("ERROR: --origin was specified more than once", file=sys.stderr)
+                raise SystemExit(1)
+            if value not in TRIGGER_ORIGINS:
+                print(f"ERROR: --origin must be one of: {', '.join(TRIGGER_ORIGINS)}", file=sys.stderr)
+                raise SystemExit(1)
+            origin = value
+        else:
+            if repo_id is not None:
+                print("ERROR: --repo-id was specified more than once", file=sys.stderr)
+                raise SystemExit(1)
+            if re.fullmatch(r"[0-9]+", value) is None or int(value) < 1:
+                print("ERROR: --repo-id requires an integer >= 1", file=sys.stderr)
+                raise SystemExit(1)
+            repo_id = int(value)
+    if "--all" in flags and "--limit" in numbers:
+        print("ERROR: --all and --limit are alternatives; pass one", file=sys.stderr)
+        raise SystemExit(1)
+    return status_filter, _TriggerSelection(
+        origin=origin,
+        vuln_classes=tuple(vuln_classes),
+        path_prefixes=tuple(path_scopes.get("path_prefix", ())),
+        repo_id=repo_id,
+        summary=summary,
+        limit=numbers.get("--limit"),
+        offset=numbers.get("--offset", 0),
+        print_all="--all" in flags,
+        include_superseded="--include-superseded" in flags,
+    )
+
+
+def _trigger_target_path(row: dict) -> str:
+    return str(row.get("resolved_target_file_path") or row.get("target_file_path") or "")
+
+
+def _under_path_prefix(path: str, prefixes: tuple[str, ...]) -> bool:
+    """Whole-segment, case-sensitive: the backend's `--path-prefix` predicate."""
+    for prefix in prefixes:
+        value = prefix.rstrip("/")
+        if path == value or path.startswith(f"{value}/"):
+            return True
+    return False
+
+
+def _trigger_selected(row: object, selection: _TriggerSelection) -> bool:
+    if not isinstance(row, dict):
+        return False
+    if selection.origin is not None and row.get("origin") != selection.origin:
+        return False
+    if selection.vuln_classes and row.get("vuln_class") not in selection.vuln_classes:
+        return False
+    return not selection.path_prefixes or _under_path_prefix(
+        _trigger_target_path(row), selection.path_prefixes
+    )
+
+
+def _trigger_summary(status_filter: str, rows: list[dict]) -> dict:
+    by_origin: dict[str, int] = {}
+    cells: dict[tuple[str, str, str], int] = {}
+    for row in rows:
+        origin = str(row.get("origin") or "")
+        by_origin[origin] = by_origin.get(origin, 0) + 1
+        key = (origin, str(row.get("vuln_class") or ""), str(row.get("status") or ""))
+        cells[key] = cells.get(key, 0) + 1
+    return {
+        "status": status_filter,
+        "rows": len(rows),
+        "distinct_target_files": len({
+            (row.get("repo_id"), _trigger_target_path(row)) for row in rows
+        }),
+        "by_origin": dict(sorted(by_origin.items())),
+        "counts": [
+            {"origin": origin, "vuln_class": vuln_class, "status": row_status, "count": count}
+            for (origin, vuln_class, row_status), count in sorted(
+                cells.items(), key=lambda item: (-item[1], item[0])
+            )
+        ],
+    }
+
+
+def _name_depth_floor_alternative(triggers: list, triggers_file: str, outcomes: object) -> None:
+    """Name the way back to a one-command settle for requeued depth_floor targets.
+
+    A depth_floor trigger asks for more effort on a family the file was closed
+    below; when that family cannot occur in the file, a reasoned resolution
+    settles it without a re-review. The requeue has just bound those triggers
+    as `queued`, where `resolve-triggers` cannot reach them, so the settle goes
+    through `withdraw` of the directed attempts this batch inserted.
+    """
+    depth_floor = [
+        trigger for trigger in triggers
+        if isinstance(trigger, dict) and trigger.get("origin") == "depth_floor"
+    ]
+    if not depth_floor:
+        return
+    files = {_trigger_target_path(trigger) or str(trigger.get("file_path") or "") for trigger in depth_floor}
+    inserted = sorted(
+        int(outcome["queue_item_id"])
+        for outcome in (outcomes if isinstance(outcomes, list) else [])
+        if isinstance(outcome, dict)
+        and outcome.get("outcome") == "inserted"
+        and outcome.get("file_path") in files
+        and type(outcome.get("queue_item_id")) is int
+    )
+    message = (
+        f"code-dispatch requeue-triggers: {len(depth_floor)} depth_floor trigger(s) on "
+        f"{len(files)} file(s) went to re-review and are now queued, which "
+        "`resolve-triggers` does not touch. "
+    )
+    if inserted:
+        message += (
+            "Where a family cannot occur in its file, take the directed attempt back first: "
+            f"`vigil assess code-dispatch withdraw {','.join(str(i) for i in inserted)} "
+            "--reason \"<why>\"` returns its triggers to pending (a claimed attempt is "
+            "refused), then `vigil assess code-dispatch resolve-triggers "
+            f"{triggers_file} not_applicable \"<why the family cannot occur in this file>\"`, "
+            "or `reviewed_at_sufficient_depth \"<how the recorded effort understates the "
+            "read>\"`. Before the next requeue, select only the rows that need a pass with "
+            "`code-dispatch list-triggers --origin depth_floor --vuln-class <family> "
+            "--path-prefix <path>`."
+        )
+    else:
+        message += (
+            "They joined an attempt already under way and settle when it closes. Before the "
+            "next requeue, settle the rows that need no pass with `code-dispatch "
+            "resolve-triggers <file> not_applicable \"<why>\"` while they are pending; "
+            "`code-dispatch list-triggers --origin depth_floor --vuln-class <family> "
+            "--path-prefix <path>` selects them."
+        )
+    print(message, file=sys.stderr)
+
+
+def _list_triggers(cfg, status_filter: str, selection: _TriggerSelection | None = None) -> None:
+    """Print the selected trigger rows (or their counts) and a count line on stderr.
+
+    Without ``--summary`` stdout is the JSON row array, which `requeue-triggers`
+    and `resolve-triggers` take unchanged.
+    """
+    selection = selection or _TriggerSelection()
+    query = [f"status={status_filter}"] if status_filter else []
+    if selection.repo_id is not None:
+        query.append(f"repo_id={selection.repo_id}")
+    if selection.origin is not None:
+        query.append(f"origin={selection.origin}")
+    if selection.include_superseded:
+        query.append("include_superseded=true")
+    result: list = []
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.get(endpoint)
-    print(json.dumps(result, indent=2, ensure_ascii=False))
+        # The backend pages the list; every page is read so no selected row is missed.
+        while True:
+            page = client.get(
+                "code/triggers?"
+                + "&".join([*query, f"limit={_TRIGGER_PAGE_SIZE}", f"offset={len(result)}"])
+            )
+            items = page.get("items") if isinstance(page, dict) else None
+            if not isinstance(items, list):
+                print("Backend returned a trigger page without an items array", file=sys.stderr)
+                raise SystemExit(1)
+            result.extend(items)
+            if not page.get("has_more") or not items:
+                break
+    rows = [row for row in result if _trigger_selected(row, selection)]
+    summary = _trigger_summary(status_filter, rows)
+    limit = (
+        len(rows) if selection.print_all
+        else selection.limit if selection.limit is not None
+        else TRIGGER_PRINT_PAGE
+    )
+    printed = rows[selection.offset:selection.offset + limit]
+    if selection.summary:
+        print(json.dumps(summary, indent=2, ensure_ascii=False))
+    else:
+        print(json.dumps(printed, indent=2, ensure_ascii=False))
+    counted = f"{len(rows)} of {len(result)}" if len(rows) != len(result) else str(len(rows))
+    origins = "".join(f", {origin}={count}" for origin, count in summary["by_origin"].items())
+    page_note = ""
+    if not selection.summary and len(printed) != len(rows):
+        end = selection.offset + len(printed)
+        page_note = (
+            f"; printed rows {selection.offset + 1 if printed else 0}-{end} of {len(rows)}"
+            f" ({len(rows) - len(printed)} not printed)"
+            + (
+                f": the next page is --offset {end} --limit {limit}, every row --all"
+                if end < len(rows)
+                else ""
+            )
+        )
+    print(
+        f"code-dispatch list-triggers: {counted} rows (status {status_filter or 'any'}{origins})"
+        + (", counted only" if selection.summary else "")
+        + page_note
+        + "; narrow with --origin/--vuln-class/--path-prefix, --summary for counts only",
+        file=sys.stderr,
+    )
 
 
-def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str) -> None:
+def _resolve_triggers(
+    cfg, triggers_file: str, resolution_status: str | None, note: str, *, amend: bool = False
+) -> None:
+    """Resolve pending triggers, or with *amend* append to closed triggers' notes."""
     fp = Path(triggers_file)
     if not fp.is_file():
         print(f"Triggers JSON file not found: {triggers_file}", file=sys.stderr)
@@ -2901,6 +3562,13 @@ def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str
         ):
             if source_key in trigger and trigger[source_key] not in (None, ""):
                 item[target_key] = trigger[source_key]
+        if amend and not any(key in item for key in ("trigger_id", "id")):
+            print(
+                f"Trigger item {idx} needs trigger_id/id: --amend corrects one named "
+                "trigger's note, so it never matches by file_path",
+                file=sys.stderr,
+            )
+            sys.exit(1)
         if not any(key in item for key in ("trigger_id", "id", "file_path", "target_file_path")):
             print(
                 f"Trigger item {idx} needs trigger_id/id or file_path/target_file_path",
@@ -2909,18 +3577,25 @@ def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str
             sys.exit(1)
         items.append(item)
 
-    payload = {
-        "items": items,
-        "resolution_status": resolution_status,
-        "resolution_note": note,
-    }
+    if amend:
+        items = [
+            {key: item[key] for key in ("trigger_id", "id") if key in item} for item in items
+        ]
+        payload: dict = {"items": items, "resolution_note": note, "amend": True}
+    else:
+        payload = {
+            "items": items,
+            "resolution_status": resolution_status,
+            "resolution_note": note,
+        }
+    command = "code-dispatch resolve-triggers" + (" --amend" if amend else "")
     submit_snapshot = write_json_snapshot(
         cfg.engagement_dir,
         category="code-trigger-resolve",
         label=fp.stem,
         payload=payload,
         source_path=str(fp),
-        metadata={"command": "code-dispatch resolve-triggers", "count": len(items)},
+        metadata={"command": command, "count": len(items)},
     )
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         result = client.post("code/triggers/resolve", payload)
@@ -2931,12 +3606,32 @@ def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str
         label=fp.stem,
         payload=result,
         source_path=str(submit_snapshot),
-        metadata={"command": "code-dispatch resolve-triggers", "count": len(items)},
+        metadata={"command": command, "count": len(items)},
     )
-    resolved_count = result.get("resolved", 0) if isinstance(result, dict) else 0
     not_resolved = result.get("not_resolved", []) if isinstance(result, dict) else []
     if not isinstance(not_resolved, list):
         not_resolved = [not_resolved]
+    if amend:
+        amended = result.get("amended", []) if isinstance(result, dict) else []
+        amended_count = len(amended) if isinstance(amended, list) else 0
+        print(f"Amended {amended_count} of {len(items)} trigger note(s)")
+        print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
+        if isinstance(result, dict) and result:
+            print(json.dumps(result, indent=2, ensure_ascii=False))
+        for label in not_resolved:
+            print(f"  not amended: {label}", file=sys.stderr)
+        if amended_count == 0 or not_resolved:
+            print(
+                f"code-dispatch resolve-triggers --amend: amended {amended_count} of "
+                f"{len(items)} item(s); {len(not_resolved)} not amended. --amend takes "
+                "the trigger_id of a closed trigger (resolved or an accepted-gap "
+                "status) in the current generation; a pending trigger is resolved "
+                "without --amend.",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+        return
+    resolved_count = result.get("resolved", 0) if isinstance(result, dict) else 0
     print(f"Resolved {resolved_count} of {len(items)} trigger(s)")
     print(f"Audit snapshots: {submit_snapshot.name}, {response_snapshot.name}")
     if isinstance(result, dict) and result:
@@ -2952,7 +3647,11 @@ def _resolve_triggers(cfg, triggers_file: str, resolution_status: str, note: str
             f"code-dispatch resolve-triggers: resolved {resolved_count} of "
             f"{len(items)} item(s); {len(not_resolved)} unresolved. Re-check each "
             "item's trigger_id/file_path against `code-dispatch list-triggers` — a "
-            "trigger that already left `pending` can no longer be resolved.",
+            "trigger that already left `pending` can no longer be resolved; correct a "
+            "closed trigger's note with `code-dispatch resolve-triggers --amend "
+            "<triggers-json-file> <note>`.",
             file=sys.stderr,
         )
+        if isinstance(result, dict) and result.get("detail"):
+            print(f"code-dispatch resolve-triggers: {result['detail']}", file=sys.stderr)
         sys.exit(1)

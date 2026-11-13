@@ -116,7 +116,7 @@ def _host_row(host: str, *, waf: bool = False) -> dict:
     return {
         "host": host,
         "outcomes": {
-            "waf_tier": cell(waf),
+            "waf_tier": {**cell(waf), "waf_detected": waf},
             "service_inventory": cell(True),
             "directory_fuzz": cell(False),
             "tech_fingerprint": cell(False),
@@ -489,3 +489,81 @@ def test_command_text_output_surfaces_uncovered_block(tmp_path, monkeypatch):
     text = out.getvalue()
     assert "app.target.example" in text
     assert "uncovered" in text.lower()
+
+
+# --------------------------------------------------------------------------- #
+# dispatch reads are complete past one backend page
+# --------------------------------------------------------------------------- #
+
+
+class _PagedDispatchClient(FakeClient):
+    """Answers ``list_dispatches`` the way the backend does: one window per call."""
+
+    def __init__(self, *, dispatches, per_host_payload=None, units=None):
+        super().__init__(per_host_payload=per_host_payload or _per_host_payload())
+        self._all_dispatches = dispatches
+        self._units = units or []
+        self.dispatch_windows: list[tuple[int, int, dict]] = []
+
+    def get(self, endpoint: str):
+        if endpoint == "application-units":
+            return self._units
+        return super().get(endpoint)
+
+    def list_dispatches(self, **filters):
+        limit = int(filters.pop("limit", 100))
+        offset = int(filters.pop("offset", 0))
+        self.dispatch_windows.append((limit, offset, dict(filters)))
+        rows = [
+            row for row in self._all_dispatches
+            if not filters.get("status") or row.get("status") == filters["status"]
+        ]
+        return rows[offset:offset + limit]
+
+
+def _filler_dispatches(count: int, *, status: str = "completed") -> list[dict]:
+    return [
+        {"agent_id": f"filler-{index}", "agent_role": "recon-specialist",
+         "status": status, "application_unit_id": None, "task": f"filler {index}"}
+        for index in range(count)
+    ]
+
+
+def test_dedicated_lane_found_past_the_first_thousand_dispatches(tmp_path, monkeypatch):
+    eng_dir = tmp_path / "eng"
+    eng_dir.mkdir()
+    _write_scope(eng_dir, ["app.target.example"])
+    lane = {"agent_id": "va-late", "agent_role": "vulnerability-analyst",
+            "status": "completed", "application_unit_id": 9}
+    fake = _PagedDispatchClient(
+        dispatches=[*_filler_dispatches(1000), lane],
+        per_host_payload=_per_host_payload(hosts=[_host_row("app.target.example")]),
+        units=[{"id": 9, "host": "app.target.example", "path_prefix": "/"}],
+    )
+    monkeypatch.setattr(coverage_cmd, "load_config", lambda _flag: _cfg(eng_dir))
+    monkeypatch.setattr(coverage_cmd, "AssessmentClient", lambda *a, **k: fake)
+
+    out = io.StringIO()
+    with contextlib.redirect_stdout(out):
+        coverage_cmd.run(SimpleNamespace(
+            engagement_dir=str(eng_dir), route_threshold=6, as_json=True,
+        ))
+
+    rows = {r["host"]: r for r in json.loads(out.getvalue())["hosts"]}
+    assert rows["app.target.example"]["dedicated_lane"] is True
+    assert [window[1] for window in fake.dispatch_windows] == [0, 1000]
+
+
+def test_prior_dispatch_dedup_reads_every_in_progress_dispatch():
+    late = {"agent_id": "va-late", "agent_role": "vulnerability-analyst",
+            "status": "in-progress", "task": "Hunt IDOR on /api/orders"}
+    fake = _PagedDispatchClient(
+        dispatches=[*_filler_dispatches(1000, status="in-progress"), late],
+    )
+
+    rows, degraded = cc.fetch_prior_dispatches(fake)
+
+    assert degraded is False
+    assert len(rows) == 1001
+    assert rows[-1]["agent_id"] == "va-late"
+    assert all(window[2] == {"status": "in-progress"} for window in fake.dispatch_windows)

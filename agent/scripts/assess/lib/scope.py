@@ -13,7 +13,7 @@ import sys
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterable, Iterator, NamedTuple
 from urllib.parse import urlsplit
 
 from assess.lib.tracks import track_phases
@@ -684,6 +684,180 @@ def entry_matches_host(entry: dict[str, str], host: str) -> bool:
 
 def host_in_scope(host: str, entries: list[dict[str, str]]) -> bool:
     return any(entry_matches_host(entry, host) for entry in entries)
+
+
+# Passthrough flags with which a caller states its own crawl boundary, by name.
+_CRAWL_FENCE_FLAGS = ("fs", "field-scope", "cs", "crawl-scope", "ns", "no-scope")
+
+
+def crawl_fence_overrides(tokens: Iterable[str]) -> list[str]:
+    """The katana scope flags in ``tokens``, each spelling as given.
+
+    katana's flag parser reads ``-flag``, ``--flag``, ``-flag=value`` and
+    ``--flag=value`` alike and stops at a bare ``--``, so every one of those
+    spellings before the terminator states a boundary.
+    """
+    found: list[str] = []
+    for token in tokens:
+        if token == "--":
+            break
+        if not token.startswith("-"):
+            continue
+        spelled = token.split("=", 1)[0]
+        name = spelled[2:] if spelled.startswith("--") else spelled[1:]
+        if name in _CRAWL_FENCE_FLAGS and spelled not in found:
+            found.append(spelled)
+    return found
+
+
+def _host_pattern(entry_kind: str, host: str) -> str:
+    """An RE2-compatible pattern for one declared host, matching like ``entry_matches_host``."""
+    escaped = host.replace(".", r"\.")
+    if ":" in host:  # an IPv6 literal sits in brackets in a URL authority
+        return rf"\[{escaped}\]"
+    if entry_kind == "wildcard":
+        return rf"(?:[a-z0-9_-]+\.)*{escaped}"
+    return escaped
+
+
+_OCTET = r"(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])"
+
+
+def _ipv4_network_pattern(network: ipaddress.IPv4Network) -> str:
+    """An RE2-compatible pattern for exactly the dotted-quad addresses in *network*."""
+    octets = str(network.network_address).split(".")
+    whole, partial_bits = divmod(network.prefixlen, 8)
+    parts = list(octets[:whole])
+    if whole < 4:
+        if partial_bits:
+            start = int(octets[whole])
+            values = range(start + (1 << (8 - partial_bits)) - 1, start - 1, -1)
+            parts.append("(?:" + "|".join(str(value) for value in values) + ")")
+            parts.extend([_OCTET] * (3 - whole))
+        else:
+            parts.extend([_OCTET] * (4 - whole))
+    return r"\.".join(parts)
+
+
+def _authority_regex(patterns: list[str]) -> str:
+    # Anchored on the whole authority: a declared host as a prefix
+    # (app.example.com.evil.example), a suffix (evil-app.example.com), userinfo
+    # or a query value never matches.
+    return rf"(?i)^https?://(?:{'|'.join(patterns)})(?::\d+)?(?:[/?#]|$)"
+
+
+class CrawlFence(NamedTuple):
+    """The katana argv that keeps a crawl on the hosts scope.json declares."""
+
+    argv: list[str]
+    warnings: list[str]
+    summary: str
+
+
+def crawl_fence(
+    scope: dict[str, Any],
+    *,
+    seed_hosts: Iterable[str] = (),
+    field_scope: str = "",
+) -> CrawlFence:
+    """Fence a crawl to the scope.json allowlist (recon shaping, ADR 0019).
+
+    Every link a crawler follows is a live request, and katana's default field
+    scope (``rdn``) follows any subdomain of the seed's registrable domain. The
+    fence matches exactly what ``host_admitted`` admits: a bare host or URL
+    entry is that host, a wildcard its apex and every subdomain, and each
+    ``out_of_scope`` host entry is excluded with ``-cos``, an IPv4
+    ``out_of_scope`` network as the exact set of its addresses (an IPv6 one is
+    named in a warning, since no host pattern expresses it). An in-scope CIDR
+    entry admits no hostname pattern, so a seed it admits is fenced to that
+    exact address. Without a wildcard the field scope is ``fqdn``; with one it is a
+    custom host regex, since ``fqdn`` would refuse the subdomains the wildcard
+    grants. An explicit ``field_scope`` (the caller's ``-fs``) replaces only
+    the field-scope half. ``off_limits_paths`` stays out of the fence.
+    """
+    allow = scope_entries(scope)
+    deny = out_of_scope_entries(scope)
+    patterns = [
+        _host_pattern(entry["entry_kind"], entry["host"])
+        for entry in allow
+        if entry["entry_kind"] != "cidr"
+    ]
+    warnings: list[str] = []
+    for host in dict.fromkeys(str(h).strip().lower() for h in seed_hosts if str(h).strip()):
+        if not host_admitted(host, allow, deny):
+            warnings.append(
+                f"crawl seed {host} is not declared by scope.json, so the fence follows no "
+                "link from it; `vigil assess scope explain " + host + "` shows why"
+            )
+        elif not host_in_scope(host, [e for e in allow if e["entry_kind"] != "cidr"]):
+            patterns.append(_host_pattern("bare_host", host))
+    patterns = list(dict.fromkeys(patterns))
+    wildcard = any(entry["entry_kind"] == "wildcard" for entry in allow)
+    if field_scope:
+        chosen_field_scope = field_scope
+    elif wildcard:
+        chosen_field_scope = (
+            rf"(?i)^(?:https?://)?(?:{'|'.join(patterns)})(?::\d+)?(?:[/?#].*)?$"
+        )
+    else:
+        chosen_field_scope = "fqdn"
+    argv = ["-fs", chosen_field_scope]
+    if patterns:
+        argv.extend(["-cs", _authority_regex(patterns)])
+    else:
+        warnings.append(
+            "scope.json declares no crawlable host, so the crawl is fenced by -fs "
+            f"{chosen_field_scope} alone"
+            + (
+                f" (the caller's -fs {field_scope} decides which links each seed follows)"
+                if field_scope
+                else " (each seed stays on its own host)"
+            )
+        )
+    denied = [
+        _host_pattern(entry["entry_kind"], entry["host"])
+        for entry in deny
+        if entry["entry_kind"] != "cidr"
+    ]
+    for entry in deny:
+        if entry["entry_kind"] != "cidr":
+            continue
+        network = ipaddress.ip_network(entry["host"], strict=False)
+        if isinstance(network, ipaddress.IPv4Network):
+            denied.append(_ipv4_network_pattern(network))
+        else:
+            warnings.append(
+                f"out_of_scope network {entry['host']} is IPv6, which the crawl fence "
+                "cannot express as a host pattern: a link to an address in it is not "
+                "excluded by -cos. Declare its hosts in out_of_scope, or keep the crawl "
+                "off it with -cos in the passthrough args"
+            )
+    if denied:
+        argv.extend(["-cos", _authority_regex(list(dict.fromkeys(denied)))])
+    if field_scope:
+        reach = f"the caller's -fs {field_scope} bounds which links each seed follows"
+    elif wildcard:
+        reach = (
+            "the crawl follows links between declared hosts, wildcard subdomains included"
+        )
+    else:
+        # `-fs fqdn` holds each seed to its own host even when -cs admits several.
+        reach = "each seed stays on its own host" + (
+            "; a link to another declared host is not followed, so seed each host to crawl it"
+            if len(patterns) > 1
+            else ""
+        )
+    summary = (
+        f"crawl fenced to scope.json: {len(allow)} declared entr"
+        f"{'y' if len(allow) == 1 else 'ies'}"
+        + (f", {len(denied)} out_of_scope carve-out(s) excluded" if denied else "")
+        + f"; {reach}"
+        + f" (-fs {'custom host regex' if chosen_field_scope.startswith('(?i)') else chosen_field_scope}"
+        + (" + anchored -cs" if patterns else "")
+        + (" + -cos" if denied else "")
+        + ")"
+    )
+    return CrawlFence(argv=argv, warnings=warnings, summary=summary)
 
 
 def host_admitted(

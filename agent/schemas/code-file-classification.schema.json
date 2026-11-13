@@ -51,6 +51,31 @@
       "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
       "default": []
     },
+    "context_tags": {
+      "items": {
+        "enum": [
+          "crypto",
+          "authentication",
+          "authorization",
+          "error-handling",
+          "allocator",
+          "parser",
+          "response-data",
+          "ai-model",
+          "value-transfer",
+          "provider-callback",
+          "one-time-secret",
+          "client-bundle"
+        ],
+        "type": "string"
+      },
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
+      "title": "Context Tags"
+    },
     "language": {
       "maxLength": 64,
       "type": "string",

@@ -414,7 +414,8 @@ def test_every_handoff_schema_example_is_accepted_by_the_live_model():
         # Blocks carrying `...` are abbreviated CLI samples, not payloads.
         if "..." not in block
     ]
-    assert len(blocks) >= 12
+    # Blue L1-L4 + blue osint, one red final handoff, one in-progress checkpoint.
+    assert len(blocks) >= 6
     for block in blocks:
         payload = json.loads(block)
         HandoffCreate.model_validate(payload)

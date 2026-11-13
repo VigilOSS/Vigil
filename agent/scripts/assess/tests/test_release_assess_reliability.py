@@ -40,7 +40,7 @@ def test_selected_approval_checks_every_candidate_before_scope_write(tmp_path, m
 def test_blind_triage_only_requires_verdicts_for_reportable_findings(verification):
     class Client:
         def get(self, endpoint):
-            if endpoint == 'findings':
+            if endpoint == 'findings?view=list':
                 return [{'slug': 'VA-001', 'severity': 'high', 'workflow_status': 'active',
                          'verification_status': verification}]
             return []

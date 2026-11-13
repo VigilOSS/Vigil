@@ -227,7 +227,7 @@
         "properties": {
           "family": {
             "type": "string",
-            "description": "Vulnerability class name (for example, sql-injection, path-traversal)"
+            "description": "Canonical vulnerability class name (for example, sqli, path-traversal); `vigil assess code-coverage --cwe-matrix` renders one column per family"
           },
           "effort": {
             "type": "integer",

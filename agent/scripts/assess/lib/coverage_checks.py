@@ -28,7 +28,7 @@ from pathlib import Path
 from typing import Any
 
 from assess.lib.classify_buckets import BUCKET_SKILLS, classify_from_fields
-from assess.lib.client import AssessError, AssessmentClient
+from assess.lib.client import MAX_PAGE_WALK, AssessError, AssessmentClient
 from assess.lib.scope import (
     classify_scope_entry,
     entry_matches_host,
@@ -66,6 +66,17 @@ def render_surface_coverage(readiness: Any) -> tuple[bool, list[str], list[str]]
         return False, [], ["surface-coverage: unexpected response from backend"]
 
     if readiness.get("ready", False):
+        count = readiness.get("surface_count")
+        if count == 0:
+            # Ready only because there is nothing to judge, which is not the
+            # same verdict as every recorded surface being covered.
+            return True, [
+                "surface coverage: nothing to check — 0 surfaces recorded; record "
+                "them with `vigil assess record-surface` or `vigil assess ingest "
+                "endpoints <source>`"
+            ], []
+        if type(count) is int:
+            return True, [f"surface coverage: ok ({count} surfaces checked)"], []
         return True, ["surface coverage: ok"], []
 
     blockers: list[str] = []
@@ -225,8 +236,28 @@ def render_stage_audit(audit: Any) -> tuple[bool, list[str]]:
 
     lines = [
         f"stage-completion audit ({phase} pipeline): {len(gaps)} open stage gap(s) "
-        f"of {len(expected)} expected — re-run or accept-with-reason:"
+        f"of {len(expected)} expected:"
     ]
+    lines.extend(f"  - {line}" for line in stage_gap_lines(gaps))
+    lines.append(f"  {STAGE_GAP_RESOLUTION}")
+    return True, lines
+
+
+#: How an open pipeline-stage gap is resolved. A coverage deferral records an
+#: intentionally skipped host objective; it does not mark the stage complete,
+#: so the gap also goes in the handoff (agent/skills/phase-qc/SKILL.md).
+STAGE_GAP_RESOLUTION = (
+    "Re-run each stage that is still worth running; for a host objective skipped "
+    "on purpose, record `vigil assess agent decision --kind coverage_deferral "
+    "--surfaced-to-user --payload-json '{\"host\":\"<host>\",\"deferred_objectives\":"
+    "[\"<objective>\"],\"reason\":\"<why>\"}'` and name the remaining stage gap in "
+    "the handoff."
+)
+
+
+def stage_gap_lines(gaps: list[dict]) -> list[str]:
+    """One line per open stage gap: stage, label, disposition and offending runs."""
+    lines = []
     for gap in gaps:
         ids = [i for i in (gap.get("command_run_ids") or [])]
         ids_str = (
@@ -234,10 +265,8 @@ def render_stage_audit(audit: Any) -> tuple[bool, list[str]]:
         )
         disposition = str(gap.get("disposition") or "gap")
         verb = "never ran" if disposition == "never_ran" else disposition
-        lines.append(
-            f"  - {gap.get('stage')} ({gap.get('label')}): {verb}{ids_str}"
-        )
-    return True, lines
+        lines.append(f"{gap.get('stage')} ({gap.get('label')}): {verb}{ids_str}")
+    return lines
 
 
 # ===========================================================================
@@ -269,37 +298,75 @@ _HINT_RECON_SPECIALIST = "recon-specialist"
 _HINT_OSINT_ANALYST = "osint-analyst"
 
 
-# Per-objective remediation hint. Operators read this when the gate WARNs so
-# they know exactly what to dispatch (or what coverage_deferral to record).
+# Mirror of the backend's ``coverage_readiness._TECH_SCAN_SOURCE_TOKENS``: a
+# tech-component row counts as fingerprinting when its ``source_name`` is empty
+# or contains one of these. The hint below lists them; the test asserts the two
+# sets agree.
+_TECH_FINGERPRINT_SOURCES: tuple[str, ...] = (
+    "whatweb",
+    "httpx",
+    "wappalyzer",
+    "nuclei",
+    "nikto",
+    "nmap",
+    "recon-specialist",
+    "wafw00f",
+    "wafw0of",
+    "source-analyzer",
+    "operator",
+)
+# WAF families the backend classifies by ``component`` name; the test asserts
+# each is one it recognises. Any other vendor is recorded as a structured
+# measurement with verdict ``detected``.
+_HINT_WAF_VENDOR_EXAMPLES: tuple[str, ...] = ("Cloudflare", "Akamai", "Imperva")
+
+
+# Per-objective remediation hint: the durable row that closes the objective
+# (what `per_host_coverage` reads), who records it, and the deferral that
+# closes it on purpose. Operators read this when the gate WARNs. "Current"
+# means not superseded; a tech-component row carrying provenance.waf answers
+# waf_tier only.
+_DEFERRAL_HINT = (
+    "OR record `vigil assess agent decision --kind coverage_deferral "
+    "--payload-json '{{\"host\": \"{host}\", \"deferred_objectives\": "
+    "[\"{objective}\"], \"reason\": \"...\"}}' --surfaced-to-user`"
+)
 _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
     "waf_tier": (
-        f"dispatch {_HINT_RECON_SPECIALIST} with skill web-recon (records "
-        "intel_tech_components via wafw00f / httpx --tech-detect / whatweb), "
-        "OR record `vigil assess agent decision --kind coverage_deferral "
-        "--payload-json '{{\"host\": \"{host}\", \"deferred_objectives\": "
-        "[\"waf_tier\"], \"reason\": \"...\"}}' --surfaced-to-user`"
-    ),
+        "closed by a current tech-component intel row whose component names a known "
+        f"WAF/CDN family (e.g. {', '.join(_HINT_WAF_VENDOR_EXAMPLES)}), for every host, or "
+        "by a structured WAF measurement in provenance.waf, for the hosts it names: provenance "
+        "{{\"command_run_id\": <run>, \"waf\": {{\"verdict\": \"detected\"|\"none_detected\", "
+        "\"hosts\": [\"{host}\"]}}}} (a measured negative counts; `vigil assess contract "
+        "intel record tech-component`). The cited run must have completed successfully "
+        "and record each named host as its target (its target_host, or the target its "
+        "argv names); a measurement citing a host-list run with no target_host is "
+        "refused, so measure each host with a single-target run. Dispatch "
+        f"{_HINT_RECON_SPECIALIST} with skill web-recon (wafw00f) to measure it, "
+    ) + _DEFERRAL_HINT,
     "service_inventory": (
-        f"dispatch {_HINT_RECON_SPECIALIST} (records assessment_services / "
-        "assessment_surfaces) or ingest endpoints via `vigil assess "
-        "ingest endpoints <source>`, OR record a coverage_deferral for the host"
-    ),
+        "closed by an assessment_services row for the host whose state is not down, "
+        "filtered or unreachable, or by any assessment_surfaces row for the host. "
+        f"Dispatch {_HINT_RECON_SPECIALIST} or ingest endpoints via "
+        "`vigil assess ingest endpoints <source>`, "
+    ) + _DEFERRAL_HINT,
     "directory_fuzz": (
-        f"dispatch {_HINT_RECON_SPECIALIST} with skill directory-fuzzing "
-        "(records assessment_surfaces via record-surface), OR record a "
-        "coverage_deferral with reason='brute-force forbidden by scope brief' "
-        "if the program disallows directory brute-force"
-    ),
+        "closed by any assessment_surfaces row for the host (`vigil assess "
+        f"record-surface`). Dispatch {_HINT_RECON_SPECIALIST} with skill "
+        "directory-fuzzing (when the program disallows directory brute-force, defer it), "
+    ) + _DEFERRAL_HINT,
     "tech_fingerprint": (
-        f"dispatch {_HINT_RECON_SPECIALIST} with web-recon (any of whatweb / "
-        "httpx -tech-detect / nuclei tech templates / nikto recording a "
-        "tech-component intel row satisfies this), OR record a coverage_deferral"
-    ),
+        "closed by any current tech-component intel row without provenance.waf whose "
+        "source_name is empty or contains one of: "
+        f"{', '.join(_TECH_FINGERPRINT_SOURCES)}, for every host. Dispatch {_HINT_RECON_SPECIALIST} "
+        "with web-recon, "
+    ) + _DEFERRAL_HINT,
     "osint": (
-        f"dispatch {_HINT_OSINT_ANALYST} (records intel_tech_components, "
-        "intel_people, intel_breach_records), OR record an engagement-level "
-        "coverage_deferral if OSINT is explicitly out of scope"
-    ),
+        "closed by any current person or breach-record intel row, or tech-component "
+        "intel row without provenance.waf, for every host. Dispatch "
+        f"{_HINT_OSINT_ANALYST} (when OSINT is out of scope, defer it with "
+        "`\"engagement_wide\": true` in place of the host), "
+    ) + _DEFERRAL_HINT,
 }
 
 
@@ -829,12 +896,35 @@ def _index_prior_dispatches(rows: list[dict[str, Any]]) -> dict[tuple[str, str],
     return index
 
 
+_DISPATCH_PAGE_SIZE = 1000
+
+
+def list_every_dispatch(client: AssessmentClient, **filters: Any) -> list[dict[str, Any]]:
+    """Every dispatch row matching ``filters``, paged until a short page.
+
+    Raises ``AssessError`` when the backend never returns a short page, so a
+    caller never mistakes the rows read so far for the whole ledger.
+    """
+    rows: list[dict[str, Any]] = []
+    offset = 0
+    for _page in range(MAX_PAGE_WALK):
+        page = client.list_dispatches(limit=_DISPATCH_PAGE_SIZE, offset=offset, **filters)
+        rows.extend(page)
+        if len(page) < _DISPATCH_PAGE_SIZE:
+            return rows
+        offset += len(page)
+    raise AssessError(
+        f"dispatches: stopped after {MAX_PAGE_WALK} pages ({len(rows)} rows) "
+        "without reaching a short page; the dispatch ledger read is incomplete"
+    )
+
+
 def fetch_prior_dispatches(
     client: AssessmentClient,
 ) -> tuple[list[dict[str, Any]], bool]:
     """Fetch ACTIVE prior dispatches for dedup. Returns ``(rows, degraded)``."""
     try:
-        rows = client.list_dispatches(limit=1000, status="in-progress")
+        rows = list_every_dispatch(client, status="in-progress")
     except AssessError:
         return [], True
     rows = rows if isinstance(rows, list) else []
@@ -1440,6 +1530,8 @@ def annotate_by_host_payload(payload: dict[str, Any]) -> dict[str, Any]:
                     "evidence": list(cell.get("evidence") or []),
                     "deferred": bool(cell.get("deferred")),
                 }
+                if "waf_detected" in cell:
+                    outcomes[name]["waf_detected"] = bool(cell["waf_detected"])
             unmet = [
                 name
                 for name in objectives
@@ -1535,7 +1627,7 @@ def per_host_warning_lines(section: dict[str, Any]) -> list[str]:
                 "dispatch the appropriate specialist or record a coverage_deferral",
             )
             try:
-                rendered_hint = hint.format(host=host)
+                rendered_hint = hint.format(host=host, objective=objective)
             except (KeyError, IndexError):
                 rendered_hint = hint
             warnings.append(
@@ -1733,8 +1825,10 @@ def dispatched_hosts_from_rows(
 def _host_waf_flag(per_host_row: dict[str, Any] | None) -> bool:
     if not per_host_row:
         return False
+    # ``met`` says the tier was measured (a measured negative is met);
+    # ``waf_detected`` says whether a WAF fronts the host.
     cell = (per_host_row.get("outcomes") or {}).get("waf_tier") or {}
-    return bool(cell.get("met")) or bool(cell.get("evidence"))
+    return bool(cell.get("waf_detected"))
 
 
 def build_coverage_ledger(
@@ -2078,12 +2172,12 @@ def render_dispatch_coverage_block(
 ) -> list[str]:
     """Render a paste-ready ``COVERAGE:`` block for a specialist dispatch prompt.
 
-    Filters the by-family grid CLIENT-SIDE to ``host`` (and ``path_prefix`` when
-    given) and lists, per application-unit, which attack-families are already
-    covered and which remain OPEN gaps — so a dispatch can hand the specialist
-    the measured coverage picture plus an OPEN objective instead of a
-    prescriptive technique cage. Reuses the by-family payload; adds no backend
-    call. NOTE: ``host``/``path_prefix`` scope by application-unit here — this is
+    Keeps the by-family units on ``host`` (and ``path_prefix`` when given; the
+    ``--for-dispatch`` read is already scoped to them by the backend) and lists,
+    per application-unit, which attack-families are already covered and which
+    remain OPEN gaps — so a dispatch can hand the specialist the measured
+    coverage picture plus an OPEN objective instead of a prescriptive technique
+    cage. Makes no backend call. NOTE: ``host``/``path_prefix`` scope by application-unit here — this is
     deliberately NOT the surface-id sense of ``--surface`` on ``coverage --attempts``.
     """
     host_l = (host or "").strip().lower()
@@ -2147,6 +2241,7 @@ __all__ = [
     "build_scope_coverage_report",
     "build_redispatch_block",
     "fetch_prior_dispatches",
+    "list_every_dispatch",
     "annotate_by_host_payload",
     "filter_to_scope_literals",
     "per_host_warning_lines",

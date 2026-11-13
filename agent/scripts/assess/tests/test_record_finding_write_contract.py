@@ -144,7 +144,7 @@ class _FakeClient(StubClient):
         self.posts: list[tuple[str, dict]] = []
 
     def get(self, path: str):
-        if path == "findings":
+        if path == "findings?view=list":
             return [self.stored] if self.stored else []
         if path.startswith("findings/"):
             if self.stored is None:
@@ -234,45 +234,90 @@ def _source_payload(**over) -> dict:
     return payload
 
 
-# -- Defect: the refusal was buried under its own contract ---------------------
+# -- The refusal carries the contract sections it needs, not the whole verb ----
 
 
-def test_a_rejected_key_is_named_again_after_the_contract(tmp_path, monkeypatch, capsys):
-    """The last thing written is the failure, not the end of the contract.
-
-    ``_report_validation_errors`` prints the error, then the whole ~340-line
-    ``finding record`` contract. Everything was already on stderr, so the error
-    was present and unreadable: it sat on lines 1-3 of a 349-line block, and the
-    tail an operator (or a dispatched agent reading truncated output) actually
-    sees showed only the allowed-detail-key table.
-    """
+def _refused_record(tmp_path, monkeypatch, capsys, payload) -> str:
     monkeypatch.setattr(record_finding, "load_config", lambda *a, **k: _Cfg(tmp_path))
     monkeypatch.setattr(record_finding, "AssessmentClient", lambda *a, **k: _FakeClient())
     monkeypatch.setattr(record_finding, "next_finding_id", lambda *a, **k: "VA-001")
-    payload = _network_payload()
-    payload["details"]["risk"] = "High: any member can read another member's order."
 
     with pytest.raises(SystemExit) as exit_info:
         record_finding.run(_record_args(tmp_path, payload))
 
     assert exit_info.value.code == 1
-    lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
-    assert len(lines) > 100, "the contract is still expected to be printed in full"
-    assert "risk" in lines[-1] and "severity_rationale" in lines[-1], lines[-1]
+    return capsys.readouterr().err
 
 
-def test_an_unrouteable_key_still_names_itself_last(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(record_finding, "load_config", lambda *a, **k: _Cfg(tmp_path))
-    monkeypatch.setattr(record_finding, "AssessmentClient", lambda *a, **k: _FakeClient())
-    monkeypatch.setattr(record_finding, "next_finding_id", lambda *a, **k: "VA-001")
+def test_a_rejected_key_prints_the_sections_of_the_fields_it_points_at(
+    tmp_path, monkeypatch, capsys
+):
+    """The refusal names the error, the did-you-mean, and the contract lines for
+    the fields that fix it, plus the pointer that prints any other field.
+
+    The sections stay scoped to the offending fields so the lines that matter
+    are not buried under the whole ~48 KB ``finding record`` contract.
+    """
+    payload = _network_payload()
+    payload["details"]["risk"] = "High: any member can read another member's order."
+
+    err = _refused_record(tmp_path, monkeypatch, capsys, payload)
+
+    assert "payload.details.risk is not allowed" in err
+    assert "details.severity_rationale" in err
+    lines = err.splitlines()
+    assert any(line.startswith("  - details.impact (") for line in lines), err
+    assert any(line.startswith("  - details.severity_rationale (") for line in lines), err
+    assert "`vigil assess contract finding record --field <name>`" in err
+    # Bounded: the sections for the named fields, never the whole verb.
+    assert len(err.encode("utf-8")) < 4096, len(err.encode("utf-8"))
+    # The errors come last, so a truncated tail still shows them.
+    assert "risk" in lines[-1], err
+
+
+def test_a_bad_enum_value_prints_that_field_s_domain(tmp_path, monkeypatch, capsys):
+    err = _refused_record(
+        tmp_path, monkeypatch, capsys, _network_payload(severity="urgent")
+    )
+
+    assert "payload.severity must be one of" in err
+    section = [line for line in err.splitlines() if line.startswith("  - severity (")]
+    assert section and "one of: info, low, medium, high, critical" in section[0], err
+    assert len(err.encode("utf-8")) < 4096
+
+
+def test_an_unrouteable_key_still_names_itself_and_the_pointer(
+    tmp_path, monkeypatch, capsys
+):
     payload = _network_payload()
     payload["details"]["fizzbuzz"] = "x"
 
-    with pytest.raises(SystemExit):
-        record_finding.run(_record_args(tmp_path, payload))
+    err = _refused_record(tmp_path, monkeypatch, capsys, payload)
 
-    lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
-    assert "fizzbuzz" in lines[-1], lines[-1]
+    assert "payload.details.fizzbuzz is not allowed" in err
+    assert "`vigil assess contract finding record --field <name>`" in err
+    assert len(err.encode("utf-8")) < 4096
+    assert "fizzbuzz" in err.splitlines()[-1], err
+
+
+def test_the_errors_still_print_when_the_contract_sections_cannot_render(
+    tmp_path, monkeypatch, capsys
+):
+    """The sections are help; the errors are the refusal. A renderer fault must
+    not replace them with a traceback."""
+
+    def _broken(*_args, **_kwargs):
+        raise KeyError("details.risk")
+
+    monkeypatch.setattr(record_finding, "refusal_sections", _broken)
+    payload = _network_payload()
+    payload["details"]["risk"] = "High."
+
+    err = _refused_record(tmp_path, monkeypatch, capsys, payload)
+
+    assert "payload.details.risk is not allowed" in err
+    assert "risk" in err.splitlines()[-1], err
+    assert "`vigil assess contract finding record --field <name>`" in err
 
 
 # -- Defect: a title-only re-record moved the dedup axes ----------------------
@@ -471,3 +516,52 @@ def test_the_record_door_still_refuses_an_unknown_provenance_key(
 
     lines = [line for line in capsys.readouterr().err.splitlines() if line.strip()]
     assert "reportedby" in lines[-1] and "reported_by" in lines[-1], lines[-1]
+
+
+# -- What the backend fills in is named, never silent ---------------------------
+
+
+class _EnvelopeClient(_FakeClient):
+    def post(self, path: str, payload: dict):
+        response = super().post(path, payload)
+        response["derived"] = [{
+            "field": "severity",
+            "value": "medium",
+            "derived_from": "cvss_vector",
+            "detail": "severity was not supplied; stored the value of cvss_vector",
+        }]
+        response["advisories"] = [{"kind": "acme_advisory", "detail": "Acme advisory text."}]
+        return response
+
+
+def _run_envelope_record(tmp_path, monkeypatch, **over):
+    fake = _EnvelopeClient()
+    monkeypatch.setattr(record_finding, "load_config", lambda *a, **k: _Cfg(tmp_path))
+    monkeypatch.setattr(record_finding, "AssessmentClient", lambda *a, **k: fake)
+    monkeypatch.setattr(record_finding, "next_finding_id", lambda *a, **k: "VA-001")
+    record_finding.run(_record_args(tmp_path, _network_payload(), **over))
+
+
+def test_record_names_each_derived_value_and_advisory_on_stderr(
+    tmp_path, monkeypatch, capsys
+):
+    _run_envelope_record(tmp_path, monkeypatch)
+
+    err = capsys.readouterr().err
+    assert "finding record: derived severity" in err
+    assert "stored the value of cvss_vector" in err
+    assert "finding record: advisory [acme_advisory] Acme advisory text." in err
+
+
+def test_record_quiet_silences_advisories_but_still_names_derived_values(
+    tmp_path, monkeypatch, capsys
+):
+    _run_envelope_record(tmp_path, monkeypatch, quiet=True)
+
+    err = capsys.readouterr().err
+    assert "finding record: derived severity" in err
+    assert "advisory [acme_advisory]" not in err
+    count_line = next(line for line in err.splitlines() if "not printed" in line)
+    assert "1 advisory" in count_line
+    assert "acme_advisory" in count_line
+    assert "--quiet" in count_line

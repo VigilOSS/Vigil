@@ -28,7 +28,8 @@ class _Backend:
         self.posts: list[tuple[str, dict]] = []
 
     def get(self, endpoint: str):
-        if endpoint == "findings":
+        # The record clobber guard reads the list projection.
+        if endpoint in {"findings", "findings?view=list"}:
             return []
         if endpoint.startswith("findings/"):
             return {"slug": endpoint.split("/", 1)[1],
@@ -167,13 +168,14 @@ def test_record_refuses_an_unpaired_park_or_plan_before_recording(engagement, ba
 
 
 def test_verify_contract_documents_the_plan_flag_and_every_field():
-    text = contracts.render_contract("finding verify")
+    text = contracts.render_contract("finding verify") + contracts.render_contract_notes("finding verify")
     assert "--next-test-file" in text
     for name, _domain, _meaning in contracts.NEXT_TEST_FIELDS:
         assert name in text
     for hint in contracts.NEXT_TEST_ROUTE_HINTS:
         assert hint in text
     assert "--next-test-file" in contracts.render_contract("finding record")
+    assert "--next-test-file" in contracts.render_field_sections("finding record", ["next-test-file"])
 
 
 def test_record_rejects_overlong_park_before_first_write(engagement, backend):

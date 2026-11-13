@@ -1,11 +1,11 @@
 #!/bin/bash
-# post-compact-resume.sh — Codex SessionStart(compact) hook
+# post-compact-resume.sh — SessionStart(compact) hook for Claude Code and Codex
 #
-# Codex runs this after manual or automatic compaction and adds stdout as
-# developer context before the immediate continuation. The compaction prompt
-# preserves working context; this hook makes the resumed operator reconcile that
-# lossy summary with Vigil's canonical backend without waiting for a human to
-# invoke `$vigil-resume`.
+# Both clients run this after manual or automatic compaction (SessionStart with
+# source "compact") and add stdout as context before the immediate continuation.
+# The compaction prompt preserves working context; this hook makes the resumed
+# operator reconcile that lossy summary with Vigil's canonical backend without
+# waiting for a human to invoke the vigil-resume command.
 #
 # Fail open and stay silent outside a live engagement. A lifecycle hook must not
 # wedge the session because scope state or a local helper is unavailable.
@@ -69,7 +69,8 @@ index, while the backend is canonical. Before any other action or conclusion:
 
 1. Run `vigil engagement mode` and verify it matches the session-selected mode.
    Re-read this engagement's `AGENTS.md` and only the canonical prompt it routes to.
-2. Read `agent/rules/resume.md` in full and apply its hydration procedure.
+2. Read `agent/rules/resume.md` in full (compaction drops any copy loaded
+   earlier in the session) and apply its hydration procedure.
 3. Read `ENGAGEMENT.md`; also read `RESUME.md` and `COMPACT.md` when present, and
    report either optional file as absent when it is missing.
 4. Run `vigil assess resume-brief` first, perform the rule's required orphan
@@ -77,8 +78,8 @@ index, while the backend is canonical. Before any other action or conclusion:
 5. Reconcile the summary against live phase, checkpoint, finding, dispatch, and
    coverage state before resuming the operator loop.
 
-Do not ask the operator to invoke `$vigil-resume`; this hook is that automatic
-continuation boundary. Preserve the active ROE and do not perform target-facing
+Do not ask the operator to invoke the vigil-resume command; this hook is that
+automatic continuation boundary. Preserve the active ROE and do not perform target-facing
 work until hydration is complete.
 CONTEXT
 fi

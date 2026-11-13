@@ -466,20 +466,10 @@ def test_inline_tombstones_are_hidden_from_help(tmp_path, capsys):
         assert "--inline" not in capsys.readouterr().out
 
 
-def test_update_payload_file_is_single_slug_and_requires_row_version(
-    tmp_path, monkeypatch, capsys
-):
+def test_update_payload_file_is_single_slug(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
     payload_path = tmp_path / "patch.json"
-    payload_path.write_text(json.dumps({"summary": "working copy"}), encoding="utf-8")
-
-    args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
-    with pytest.raises(SystemExit) as exc:
-        update_finding.run(args)
-    assert exc.value.code == 1
-    assert "expected_row_version" in capsys.readouterr().err
-
     payload_path.write_text(
         json.dumps({"summary": "working copy", "expected_row_version": 4}),
         encoding="utf-8",
@@ -646,15 +636,10 @@ def test_update_exposes_notes_rotation_with_cas(tmp_path, monkeypatch):
     ]
 
 
-@pytest.mark.parametrize("notes_mode", [None, "invalid"])
-def test_update_payload_file_notes_require_explicit_valid_mode(
-    notes_mode, tmp_path, monkeypatch, capsys
-):
+def test_update_payload_file_notes_refuse_an_unknown_mode(tmp_path, monkeypatch, capsys):
     fake = _FakeClient()
     _install(monkeypatch, update_finding, tmp_path, fake)
-    payload = {"notes": "cumulative notes", "expected_row_version": 4}
-    if notes_mode is not None:
-        payload["notes_mode"] = notes_mode
+    payload = {"notes": "cumulative notes", "notes_mode": "invalid", "expected_row_version": 4}
     payload_path = tmp_path / "patch.json"
     payload_path.write_text(json.dumps(payload), encoding="utf-8")
     args = _parse(update_finding, ["update", "VA-1", "--payload-file", str(payload_path)], tmp_path)
@@ -845,7 +830,7 @@ def test_empty_payload_file_never_falls_through_to_explicit_flags(
     assert fake.posts == [] and fake.patches == []
 
 
-def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
+def test_verify_payload_file_refuses_a_contradicting_flag_but_allows_narrative(
     tmp_path, monkeypatch, capsys
 ):
     fake = _FakeClient()
@@ -882,7 +867,7 @@ def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
     with pytest.raises(SystemExit) as exc:
         verify_finding.run(args)
     assert exc.value.code == 1
-    assert "cannot be combined" in capsys.readouterr().err
+    assert "contradicts the payload file's reason_text" in capsys.readouterr().err
     assert fake.posts == []
 
     args = _parse(
@@ -892,6 +877,47 @@ def test_verify_payload_file_rejects_content_flags_but_allows_narrative(
     )
     verify_finding.run(args)
     assert [endpoint for endpoint, _ in fake.posts] == ["findings/VA-1/verify", "artifacts"]
+
+
+@pytest.mark.parametrize("blank", ["", "   "])
+@pytest.mark.parametrize("module", [update_finding, verify_finding])
+def test_payload_file_blank_reason_text_takes_the_reason_flag(
+    module, blank, tmp_path, monkeypatch, capsys
+):
+    """A blank payload value is an unset control, so --reason fills it."""
+    fake = _FakeClient()
+    _install(monkeypatch, module, tmp_path, fake)
+    payload_path = tmp_path / "payload.json"
+    payload_path.write_text(
+        json.dumps(
+            {"summary": "file", "expected_row_version": 4, "reason_text": blank}
+            if module is update_finding
+            else {
+                "verification_status": "confirmed",
+                "reason_text": blank,
+                "proof_receipt_ids": [17],
+                "confirm_check": {
+                    "method": "Replay the claim",
+                    "attempted_falsification": "Check whether the expected guard blocks it",
+                    "expected_result": "The guard blocks the claim",
+                    "observed_result": "The claim still reproduces",
+                    "proof_receipt_ids": [17],
+                    "completed": True,
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    action = "update" if module is update_finding else "verify"
+    args = _parse(
+        module, [action, "VA-1", "--payload-file", str(payload_path), "--reason", "flag"], tmp_path
+    )
+
+    module.run(args)
+
+    writes = fake.patches if module is update_finding else fake.posts
+    assert [payload.get("reason_text") for _endpoint, payload in writes[:1]] == ["flag"]
+    assert "took reason_text from flags" in capsys.readouterr().err
 
 
 def test_verify_rejects_narrative_artifact_receipt_without_canonical_identity(

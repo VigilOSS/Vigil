@@ -198,3 +198,33 @@ def test_record_chain_rejects_wrong_nonempty_generated_chain_key(
     assert exc.value.code == 1
     assert "canonical chain key" in capsys.readouterr().err
     assert fake_client.events == []
+
+
+def test_record_chain_refuses_every_unknown_key_naming_its_home(tmp_path, monkeypatch, capsys):
+    """A chain written from the adjudication template's words (`steps`, `impact`,
+    a link's `slug`) is refused before the POST, each key named with where it
+    belongs, instead of stored without its steps."""
+    chain_file = tmp_path / "chain.json"
+    chain_file.write_text(json.dumps({
+        "title": "Acme IDOR to account takeover",
+        "steps": ["VA-047", "VA-048"],
+        "impact": "Any Acme account can be taken over.",
+        "links": [{"entity_kind": "finding", "slug": "VA-047"}],
+    }), encoding="utf-8")
+    fake_client = _FakeClient()
+    monkeypatch.setattr(record_chain, "load_config", lambda *a, **k: _Cfg())
+    monkeypatch.setattr(record_chain, "AssessmentClient", lambda *a, **k: fake_client)
+
+    with pytest.raises(SystemExit) as exc:
+        record_chain.run(_record_chain_ns(str(chain_file), str(tmp_path)))
+
+    assert exc.value.code == 1
+    lines = capsys.readouterr().err.splitlines()
+    by_key = {
+        key: next(line for line in lines if f"payload.{key} is not allowed" in line)
+        for key in ("steps", "impact", "links[0].slug")
+    }
+    assert "links" in by_key["steps"]
+    assert "narrative" in by_key["impact"]
+    assert "entity_ref" in by_key["links[0].slug"]
+    assert fake_client.posts == []

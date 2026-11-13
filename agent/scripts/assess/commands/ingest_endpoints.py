@@ -19,7 +19,10 @@ from assess.lib import vuln_taxonomy
 from assess.lib.auth import auth_active_context
 from assess.lib.bulk_ingest import (
     DEFAULT_BULK_WRITE_SIZE,
+    bounded_queue_key,
     post_request_observations_bulk,
+    post_work_items_bulk,
+    request_rejected_before_any_write,
 )
 from assess.lib.candidate_records import int_value, json_text
 from assess.lib.classify import classify_type
@@ -30,7 +33,7 @@ from assess.lib.classify_buckets import (
     tagged_terminal_reason,
     weak_tokens_for_key,
 )
-from assess.lib.client import AssessmentClient
+from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 from assess.lib.params import (
     extract_url_path,
@@ -184,6 +187,36 @@ _FQDN_RE = re.compile(r"^[a-zA-Z0-9][-a-zA-Z0-9.]*\.[a-zA-Z]{2,}(?:[:/?#]|$)")
 _IPV4_RE = re.compile(r"^(?:\d{1,3}\.){3}\d{1,3}(?:[:/?#]|$)")
 _LOCALHOST_RE = re.compile(r"^localhost(?:[:/?#]|$)", re.IGNORECASE)
 _BRACKETED_IPV6_RE = re.compile(r"^\[[0-9A-Fa-f:]+\](?:[:/?#]|$)")
+_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
+
+# Web-asset file extensions that are NOT delegated top-level domains, so a
+# scheme-less token whose last dotted label is one of them names a file
+# (``app.css``, ``bundle.min.js``), never a host. Extensions that ARE TLDs
+# (``.zip``, ``.mov``, ``.map``, ``.py``, ``.sh``, ``.md``, ``.pl``) are left out
+# on purpose: ``downloads.zip`` can be a real host. Checked against the IANA
+# root zone list.
+_FILE_EXTENSION_LABELS = frozenset({
+    "js", "mjs", "cjs", "jsx", "ts", "tsx", "css", "scss", "sass", "less",
+    "json", "jsonld", "html", "htm", "xhtml", "shtml", "php", "asp", "aspx",
+    "jsp", "jspx", "cgi", "png", "jpg", "jpeg", "gif", "svg", "webp", "avif",
+    "ico", "bmp", "woff", "woff2", "ttf", "eot", "otf", "txt", "xml", "yaml",
+    "yml", "csv", "pdf", "mp3", "mp4", "webm", "wasm", "vue", "swf", "ogg",
+    "wav", "gz", "tgz",
+})
+# ``.map`` is a TLD, but ``<name>.js.map`` / ``<name>.css.map`` is the source-map
+# naming convention, so a ``map`` label after a script/style extension is a file.
+_SOURCE_MAP_PREFIX_LABELS = frozenset({"js", "mjs", "cjs", "css"})
+
+
+def _names_a_file(token: str) -> bool:
+    """True when a scheme-less token's leading name is a filename, not a host."""
+    name = re.split(r"[:/?#]", token, maxsplit=1)[0].lower().rstrip(".")
+    labels = name.split(".")
+    if len(labels) < 2:
+        return False
+    if labels[-1] in _FILE_EXTENSION_LABELS:
+        return True
+    return labels[-1] == "map" and len(labels) >= 3 and labels[-2] in _SOURCE_MAP_PREFIX_LABELS
 
 
 def _ensure_url_scheme(url: str) -> str | None:
@@ -192,6 +225,8 @@ def _ensure_url_scheme(url: str) -> str | None:
         return None
     if url.startswith(("http://", "https://")):
         return url
+    if _names_a_file(url):
+        return None
     if (
         _FQDN_RE.match(url)
         or _IPV4_RE.match(url)
@@ -200,6 +235,15 @@ def _ensure_url_scheme(url: str) -> str | None:
     ):
         return f"https://{url}"
     return None
+
+
+def _is_relative_reference(url: str) -> bool:
+    """True for a scheme-less, host-less reference (``/a``, ``./a``, ``app.js``).
+
+    Such a line names a path on whatever page or script referenced it, so it can
+    only be ingested after resolution against that source; it is not a host.
+    """
+    return not url.startswith("//") and not _SCHEME_RE.match(url)
 
 
 def _payload_text(value) -> str:
@@ -217,7 +261,7 @@ def _params_text(value) -> str:
     return json.dumps(value) if isinstance(value, dict) else str(value)
 
 
-def run(args) -> None:
+def run(args) -> dict:
     source = args.source
 
     cfg = load_config(args.engagement_dir)
@@ -242,11 +286,35 @@ def run(args) -> None:
     skipped_malformed = 0
     skipped_badjson = 0
     skipped_overlong = 0
+    skipped_relative = 0
+    # Rows the backend refused (400/413/422: nothing in that request was
+    # written) and rows whose write failed with an unknown outcome (a 5xx, a
+    # transport error, an unverifiable receipt: it may have committed). Neither
+    # is a malformed input line, so neither is counted as one.
+    backend_refused = 0
+    write_uncertain = 0
     pending_observations: list[dict] = []
     pending_direct: list[dict] = []
 
+    def _record_write_failure(url: str, exc: Exception) -> None:
+        nonlocal backend_refused, write_uncertain
+        if isinstance(exc, AssessError) and request_rejected_before_any_write(exc):
+            backend_refused += 1
+            print(
+                f"WARN ingest-endpoints: backend rejected {url}: {exc}; skipping this line",
+                file=sys.stderr,
+            )
+            return
+        write_uncertain += 1
+        print(
+            f"WARN ingest-endpoints: write of {url} failed with an unknown outcome "
+            f"({exc}); it may have committed, so inspect the work buffer before "
+            "re-ingesting it",
+            file=sys.stderr,
+        )
+
     def _flush_observations() -> None:
-        nonlocal count, skipped_malformed
+        nonlocal count
         if not pending_observations:
             return
         observations = list(pending_observations)
@@ -259,12 +327,7 @@ def run(args) -> None:
         )
         for observation, response in zip(observations, responses, strict=True):
             if isinstance(response, Exception):
-                skipped_malformed += 1
-                print(
-                    f"WARN ingest-endpoints: backend rejected {observation['url']}: "
-                    f"{response}; skipping this line",
-                    file=sys.stderr,
-                )
+                _record_write_failure(observation["url"], response)
                 continue
             count += 1
 
@@ -273,10 +336,10 @@ def run(args) -> None:
             return
         items = list(pending_direct)
         pending_direct.clear()
-        for start in range(0, len(items), DEFAULT_BULK_WRITE_SIZE):
-            chunk = items[start:start + DEFAULT_BULK_WRITE_SIZE]
-            if chunk:
-                client.post("work-items/bulk", {"items": chunk})
+        outcomes = post_work_items_bulk(client, items, warn_prefix="ingest-endpoints")
+        for item, outcome in zip(items, outcomes, strict=True):
+            if outcome is not None:
+                _record_write_failure(item["url"], outcome)
 
     try:
         for line in input_stream:
@@ -366,6 +429,15 @@ def run(args) -> None:
                 continue
 
             resolved = _ensure_url_scheme(url)
+            if resolved is None and _is_relative_reference(url):
+                skipped_relative += 1
+                print(
+                    f"WARN ingest-endpoints: skipping malformed endpoint line "
+                    f"(relative path with no host; resolve it against the page or "
+                    f"script that referenced it): {url[:120]}",
+                    file=sys.stderr,
+                )
+                continue
             if resolved is None:
                 skipped_malformed += 1
                 print(
@@ -427,7 +499,7 @@ def run(args) -> None:
                         file=sys.stderr,
                     )
                 pending_direct.append({
-                    "queue_key": f"skipped:out-of-scope:{apex_host}:{url}",
+                    "queue_key": bounded_queue_key(f"skipped:out-of-scope:{apex_host}:{url}"),
                     "method": method,
                     "url": url,
                     "url_path": url_path,
@@ -460,7 +532,7 @@ def run(args) -> None:
                         file=sys.stderr,
                     )
                 pending_direct.append({
-                    "queue_key": f"deferred:egress-blocked:{apex_host}:{url}",
+                    "queue_key": bounded_queue_key(f"deferred:egress-blocked:{apex_host}:{url}"),
                     "method": method,
                     "url": url,
                     "url_path": url_path,
@@ -578,12 +650,17 @@ def run(args) -> None:
         client.close()
 
     print(f"[ingest] Ingested {count} work items from source '{source}'")
-    total_skipped = skipped_template + skipped_malformed + skipped_badjson + skipped_overlong
+    total_skipped = (
+        skipped_template + skipped_malformed + skipped_badjson + skipped_overlong
+        + skipped_relative
+    )
     if total_skipped:
         print(
             f"[ingest] Skipped {total_skipped} line(s): "
             f"{skipped_template} template/fuzz/empty, "
             f"{skipped_malformed} malformed/unkeyable, "
+            f"{skipped_relative} relative-path (no host to resolve against; not "
+            f"out-of-scope hosts), "
             f"{skipped_badjson} bad-JSON, "
             f"{skipped_overlong} over-long-URL (see WARN lines above).",
             file=sys.stderr,
@@ -605,3 +682,31 @@ def run(args) -> None:
             f"`vigil assess work-buffer stats --by reason`.",
             file=sys.stderr,
         )
+    if backend_refused:
+        print(
+            f"[ingest] {backend_refused} row(s) the backend refused are not in the work "
+            f"buffer; each is named with the backend's reason in a 'backend rejected' "
+            f"WARN line above.",
+            file=sys.stderr,
+        )
+    if write_uncertain:
+        print(
+            f"[ingest] {write_uncertain} row(s) whose write failed with an unknown outcome "
+            f"may or may not be in the work buffer; each is named in a 'failed with an "
+            f"unknown outcome' WARN line above.",
+            file=sys.stderr,
+        )
+    return {
+        "ingested": count,
+        "backend_refused": backend_refused,
+        "write_uncertain": write_uncertain,
+        "skipped": {
+            "template": skipped_template,
+            "malformed": skipped_malformed,
+            "relative_path": skipped_relative,
+            "bad_json": skipped_badjson,
+            "over_long_url": skipped_overlong,
+        },
+        "deferred_egress_blocked": egress_blocked_count,
+        "excluded_out_of_scope": out_of_scope_count,
+    }

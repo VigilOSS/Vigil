@@ -138,9 +138,11 @@ def add_required_kali_flags(parser) -> None:
         required=True,
         type=int,
         help=(
-            "Wall-clock budget in seconds. Suggested baseline: 1800. Must not "
-            f"exceed the caller's own ceiling when {_CALLER_TIMEOUT_ENV} is "
-            "exported — a run that outlives its caller is orphaned, not audited."
+            "Wall-clock budget in seconds; keep it at 600 or less so the run ends "
+            "before the agent-harness ceiling (work that cannot fit is an operator "
+            "`kali job`). Must not exceed the caller's own ceiling when "
+            f"{_CALLER_TIMEOUT_ENV} is exported — a run that outlives its caller "
+            "is orphaned, not audited."
         ),
     )
     parser.add_argument(
@@ -157,9 +159,9 @@ def add_required_kali_flags(parser) -> None:
         dest="kali_agent_name",
         default=None,
         help=(
-            "Dispatching agent name. Defaults to --agent-id / $AGENT_NAME / "
-            "$VIGIL_AGENT_NAME / 'operator'; specialists should pass this explicitly "
-            "if wrapper env is missing."
+            "Audit attribution override. Defaults to --agent-id / $AGENT_NAME / "
+            "$VIGIL_AGENT_NAME / 'operator'; a dispatched specialist passes --agent-id "
+            "instead, because a run backing verifier evidence must carry the dispatch id."
         ),
     )
     parser.add_argument(

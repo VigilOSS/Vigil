@@ -32,6 +32,14 @@ READINESS_TARGETS = (
 )
 
 _STRUCTURAL_DEBT_PREVIEW_LIMIT = 10
+# Advisory rows the default view lists before pointing at `--cwe-matrix`, and
+# the example files it names per tier x family group.
+_ADVISORY_PREVIEW_LIMIT = 10
+_ADVISORY_FILES_PER_GROUP = 3
+_TIER_ORDER = ("critical", "high", "medium", "low")
+# The share of claimed `functions_analyzed` that structurally bound callables
+# must reach before the matrix stops flagging the claim as thinly receipted.
+_CALLABLE_RATIO_FLOOR = 0.3
 
 
 def _coerce_effort(value) -> float:
@@ -339,11 +347,12 @@ def _print_coverage_by_path(result: dict) -> None:
     print(
         f"{'UNCOV':>5}  {'CRIT':>7}  {'HIGH':>7}  {'FILES':>6}  {'LOC':>8}  "
         f"{'DONE':>5}  {'QUEUED':>6}  {'ACTIVE':>6}  {'NCTX':>5}  {'CLSF':>5}  {'PEND':>5}  "
-        f"{'DEBT':>5}  {'SKIPS':>5}  {'REPO':<16}  PATH"
+        f"{'DEBT':>5}  {'SKIPS':>5}  {'DEEP':>5}  {'CHWIDE':>6}  {'REPO':<16}  PATH"
     )
     for row in rows:
         statuses = row.get("by_status") or {}
         debt = row.get("structural_debt") or {}
+        review_depth = row.get("by_review_depth") or {}
         print(
             f"{row.get('uncovered_critical_high', 0)!s:>5}  "
             f"{_tier_cell(row, 'critical'):>7}  {_tier_cell(row, 'high'):>7}  "
@@ -352,13 +361,17 @@ def _print_coverage_by_path(result: dict) -> None:
             f"{statuses.get('in_progress', 0)!s:>6}  {statuses.get('needs_context', 0)!s:>5}  "
             f"{statuses.get('classified', 0)!s:>5}  {statuses.get('pending', 0)!s:>5}  "
             f"{debt.get('count', 0)!s:>5}  {row.get('accounted_skips', 0)!s:>5}  "
+            f"{review_depth.get('deep', 0)!s:>5}  {row.get('critical_high_wide_only', 0)!s:>6}  "
             f"{str(row.get('repo_key', '')):<16}  {row.get('path', '')}"
         )
     print(
         "\nUNCOV = critical+high files without a successful review; CRIT/HIGH = analyzed/total. "
         "DONE..PEND are the summary's analysis-status buckets (analyzed, queued, in progress, "
         "needs context, classified, pending). DEBT = degraded/unsupported/truncated "
-        "structural analysis with no successful review; SKIPS = accounted skips."
+        "structural analysis with no successful review; SKIPS = accounted skips. "
+        "DEEP = files with a deep pass (a reanalysis, a deep-manual dispatch, or a "
+        "`hunt_scope: deep` packet); CHWIDE = critical+high files reviewed by wide "
+        "passes only. Depth points at where to go deeper; it is not coverage."
     )
     _print_dispositions_by_path(rows)
     if result.get("has_more"):
@@ -471,8 +484,36 @@ def _print_next_gate(target: str, readiness: dict, *, debt_paths: bool) -> None:
     print(f"  full gate: vigil assess code-coverage --require-transition-ready {target}")
 
 
-def _readiness_endpoint(target: str) -> str:
-    return f"code/readiness?target_phase={target}&include_debt_paths=true"
+def _readiness_endpoint(target: str, *, include_coverage: bool = False) -> str:
+    endpoint = f"code/readiness?target_phase={target}&include_debt_paths=true"
+    return endpoint + "&include_coverage=true" if include_coverage else endpoint
+
+
+def _repo_scoped_debt(readiness: dict, repo_id: object) -> dict:
+    """The readiness payload with `structural_debt` narrowed to one repository.
+
+    Debt rows carry their `repo_id`; the count in the coverage table must
+    describe the same repository as the rest of that table.
+    """
+    debt = readiness.get("structural_debt")
+    if not isinstance(debt, list):
+        return readiness
+    return {
+        **readiness,
+        "structural_debt": [
+            item for item in debt
+            if isinstance(item, dict) and str(item.get("repo_id")) == str(repo_id)
+        ],
+    }
+
+
+def _print_engagement_wide_readiness_note(repo_id: object) -> None:
+    print(
+        f"\nNOTE: --repo-id {repo_id} scopes the coverage table above. Phase "
+        "readiness is engagement-wide by design — a phase advances for the whole "
+        "engagement — so the gate, blockers and structural debt below cover every "
+        "analysis repository."
+    )
 
 
 def run(args) -> None:
@@ -490,7 +531,7 @@ def run(args) -> None:
     )
 
     if getattr(args, 'cwe_matrix', False):
-        quality_passed = _run_cwe_matrix(cfg, args)
+        quality_passed, reported_quality = _run_cwe_matrix(cfg, args)
         failed = bool(getattr(args, 'require_gate_pass', False) and not quality_passed)
         if readiness_target:
             with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
@@ -502,9 +543,12 @@ def run(args) -> None:
                 )
                 failed = True
             else:
+                if args.repo_id:
+                    _print_engagement_wide_readiness_note(args.repo_id)
                 _print_transition_readiness(
                     readiness_target, readiness,
                     debt_paths=bool(getattr(args, "debt_paths", False)),
+                    reported_quality=reported_quality,
                 )
                 if (
                     readiness.get('target_phase') != readiness_target
@@ -515,17 +559,31 @@ def run(args) -> None:
             sys.exit(1)
         return
 
-    endpoint = 'code/coverage'
-    if args.repo_id:
-        endpoint = f'code/coverage?repo_id={args.repo_id}'
-
+    repo_id = args.repo_id
+    readiness_phase = readiness_target or next_target
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
-        result = client.get(endpoint)
-        readiness = (
-            client.get(_readiness_endpoint(readiness_target or next_target))
-            if readiness_target or next_target
-            else None
-        )
+        if readiness_phase and not repo_id:
+            # Readiness gates on the engagement-wide summary, so one read
+            # returns both instead of computing the summary twice.
+            readiness = client.get(
+                _readiness_endpoint(readiness_phase, include_coverage=True)
+            )
+            result = readiness.get("coverage") if isinstance(readiness, dict) else None
+            if not isinstance(result, dict):
+                print(
+                    "Backend returned a readiness payload without its coverage summary",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+        else:
+            result = client.get(
+                f'code/coverage?repo_id={repo_id}' if repo_id else 'code/coverage'
+            )
+            readiness = (
+                client.get(_readiness_endpoint(readiness_phase))
+                if readiness_phase
+                else None
+            )
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))
@@ -533,14 +591,19 @@ def run(args) -> None:
             sys.exit(1)
         return
 
+    table_debt = readiness if not repo_id or not isinstance(readiness, dict) else (
+        _repo_scoped_debt(readiness, repo_id)
+    )
     _print_coverage(
         result,
         structural_debt_by_classification=(
-            _debt_counts(readiness)[0] if isinstance(readiness, dict) else Counter()
+            _debt_counts(table_debt)[0] if isinstance(table_debt, dict) else Counter()
         ),
         include_review_quality=False,
     )
     _print_vuln_class_summary(result)
+    if repo_id and readiness is not None:
+        _print_engagement_wide_readiness_note(repo_id)
     if next_target:
         if isinstance(readiness, dict):
             _print_next_gate(
@@ -566,6 +629,7 @@ def run(args) -> None:
             _print_transition_readiness(
                 readiness_target, readiness,
                 debt_paths=bool(getattr(args, "debt_paths", False)),
+                reported_quality=_review_quality(result)[1],
             )
             if (
                 readiness.get('target_phase') != readiness_target
@@ -573,7 +637,11 @@ def run(args) -> None:
             ):
                 failed = True
 
-    _print_review_quality(result)
+    _print_review_quality(result, full=False)
+    _print_depth_advisories(result, full=False)
+    _print_context_tags_unrecorded(result)
+    _print_client_bundle_advisories(result)
+    _print_untriggered_depth_shortfalls(result)
     print()
 
     if failed:
@@ -629,8 +697,18 @@ _BLOCKER_REPAIRS = {
 
 
 def _print_transition_readiness(
-    target_phase: str, readiness: dict, *, debt_paths: bool = False
+    target_phase: str,
+    readiness: dict,
+    *,
+    debt_paths: bool = False,
+    reported_quality: list[str] | None = None,
 ) -> None:
+    """Render one readiness payload.
+
+    *reported_quality* holds the review-quality warnings this invocation
+    renders under "Review Quality"; readiness repeats them in
+    `quality_gate.warnings`, so only the remainder is listed here.
+    """
     bound_target = readiness.get('target_phase')
     ready = bound_target == target_phase and readiness.get('transition_ready') is True
     print(f"Transition Readiness ({target_phase}): {'READY' if ready else 'BLOCKED'}")
@@ -648,6 +726,15 @@ def _print_transition_readiness(
             repo_id = blocker.get('repo_id')
             scope = f" (repo {repo_id})" if repo_id not in (None, '') else ""
             print(f"  - [{code}]{scope} {message}{integrity}")
+            sample = blocker.get('sample_paths')
+            if isinstance(sample, list) and sample:
+                omitted = blocker.get('omitted') or 0
+                print(
+                    "      files: " + ", ".join(str(path) for path in sample)
+                    + (f" (+{omitted} more)" if omitted else "")
+                )
+                if blocker.get('full_list'):
+                    print(f"      every file: {blocker['full_list']}")
             repair = _BLOCKER_REPAIRS.get(str(code))
             if repair:
                 print(f"      repair: {repair(repo_id)}")
@@ -656,20 +743,41 @@ def _print_transition_readiness(
     if isinstance(quality, dict):
         warnings = quality.get('warnings', [])
         quality_passed = quality.get('passed') is True
-        if not quality_passed or warnings:
+        already = set(reported_quality or [])
+        # Review Quality has already shown the effort shortfalls (as groups, or
+        # per file under --cwe-matrix), so readiness's copy of them, which
+        # `quality_gate.effort_gap_warnings` names, is skipped in either wording.
+        gap_lines = (
+            {str(line) for line in quality.get('effort_gap_warnings') or []}
+            if reported_quality is not None else set()
+        )
+        remaining = [
+            str(warning) for warning in warnings
+            if str(warning) not in already and str(warning) not in gap_lines
+        ] if isinstance(warnings, list) else []
+        if not quality_passed or remaining:
             print(
                 "Readiness Advisories: "
                 f"{'PASS' if quality_passed else 'NEEDS ATTENTION'}"
+                + (
+                    f" ({len(already)} review-quality advisory(ies) listed under Review Quality)"
+                    if already and not quality_passed
+                    else ""
+                )
             )
-            if isinstance(warnings, list):
-                for warning in warnings:
-                    print(f"  - {warning}")
+            for warning in remaining[:_ADVISORY_PREVIEW_LIMIT]:
+                print(f"  - {warning}")
+            if len(remaining) > _ADVISORY_PREVIEW_LIMIT:
+                print(
+                    f"  ... +{len(remaining) - _ADVISORY_PREVIEW_LIMIT} more; "
+                    "full list: vigil assess code-coverage --cwe-matrix"
+                )
     _print_debt_summary(readiness, show_all=debt_paths)
     print()
 
 
-def _run_cwe_matrix(cfg, args) -> bool:
-    """Fetch and display the per-file CWE effort matrix; return its quality verdict."""
+def _run_cwe_matrix(cfg, args) -> tuple[bool, list[str]]:
+    """Display the per-file CWE effort matrix; return its quality verdict and warnings."""
     endpoint = 'code/coverage?detail=cwe'
     if args.repo_id:
         endpoint = f'code/coverage?detail=cwe&repo_id={args.repo_id}'
@@ -679,21 +787,22 @@ def _run_cwe_matrix(cfg, args) -> bool:
 
     if not isinstance(result, dict):
         print(json.dumps(result, indent=2, ensure_ascii=False))
-        return False
+        return False, []
 
     files = result.get('files', [])
     if not files:
         print("NOTE: No CWE coverage data available from backend.\n")
         _print_coverage(result)
-        quality_passed, _ = _review_quality(result)
-        return quality_passed
+        return _review_quality(result)
 
     _print_cwe_matrix(files)
     _print_open_leases(result)
-    _print_review_quality(result)
-
-    quality_passed, _ = _review_quality(result)
-    return quality_passed
+    _print_review_quality(result, full=True)
+    _print_depth_advisories(result, full=True)
+    _print_context_tags_unrecorded(result)
+    _print_client_bundle_advisories(result)
+    _print_untriggered_depth_shortfalls(result)
+    return _review_quality(result)
 
 
 def _print_cwe_matrix(files: list[dict]) -> None:
@@ -775,18 +884,67 @@ def _print_cwe_matrix(files: list[dict]) -> None:
 
     _print_path_hints(files)
     _print_structural_verification(files)
+    _print_review_depth(files)
     print()
 
 
-def _print_path_hints(files: list[dict]) -> None:
-    """List the families each file's path suggests, apart from the owed columns.
+def _print_review_depth(files: list[dict]) -> None:
+    """Name each matrix file's review depth; deep files are only counted.
 
-    A path word points at a family worth considering; only the role label
-    makes it required, so these never carry a threshold flag.
+    Effort numbers say how hard a pass looked, not whether any pass went
+    deep. The backend derives depth from the queue alone, so this is where a
+    wide-only file with a full effort row shows as still wide.
     """
+    depths = [
+        (f, f.get('review_depth')) for f in files if isinstance(f.get('review_depth'), dict)
+    ]
+    if not depths:
+        return
+    census = Counter(str(depth.get('depth', 'none')) for _f, depth in depths)
+    print(
+        "\nReview Depth (pointer, not coverage): "
+        + " ".join(f"{name}={census.get(name, 0)}" for name in ('deep', 'wide_only', 'none'))
+    )
+    for f, depth in depths:
+        label = str(depth.get('depth', 'none'))
+        if label == 'deep':
+            continue
+        print(
+            f"  {f.get('file_path', '?')} ({f.get('classification', '?')}): {label} — "
+            f"{depth.get('passes', 0)} pass(es), {depth.get('deep_passes', 0)} deep, "
+            f"{depth.get('dispatches', 0)} dispatch(es), "
+            f"{depth.get('signal_passes', 0)} with signal"
+        )
+
+
+def _print_path_hints(files: list[dict]) -> None:
+    """List the families each file's path or unread markup suggests, and the
+    ones its client-bundle tag makes optional, apart from the owed columns.
+
+    A path word points at a family worth considering; only the architect's
+    context tag makes it required. A markup file whose index fell back to a streaming read
+    could not rule out code, so the code families point at it too. A
+    `client-bundle` file owes no server-only family, and any effort recorded on
+    one is shown. None carries a threshold flag.
+    """
+    _print_family_hints(
+        files, "path_suggested_families",
+        "Path Hints (advisory; a context tag makes them required)",
+    )
+    _print_family_hints(
+        files, "unread_code_suggested_families",
+        "Unread Code Hints (advisory; a streaming-fallback index could not rule them out)",
+    )
+    _print_family_hints(
+        files, "optional_families",
+        "Optional Families (server-only families a client-bundle tag makes optional)",
+    )
+
+
+def _print_family_hints(files: list[dict], key: str, title: str) -> None:
     rows: list[str] = []
     for f in files:
-        hints = f.get('path_suggested_families') or []
+        hints = f.get(key) or []
         if not hints:
             continue
         efforts = {
@@ -808,7 +966,7 @@ def _print_path_hints(files: list[dict]) -> None:
         )
     if not rows:
         return
-    print("\n--- Path Hints (advisory; a role label makes them required) ---")
+    print(f"\n--- {title} ---")
     for row in rows:
         print(row)
 
@@ -865,6 +1023,11 @@ def _print_structural_verification(files: list[dict]) -> None:
         print(f"Files with unanalyzed functions: {len(gaps)}")
         for g in gaps:
             print(g)
+    thin = _thinly_receipted_claims(files)
+    if thin:
+        print(f"Function claims with few structurally bound callables: {len(thin)}")
+        for line in thin:
+            print(line)
     if unscanned:
         # Zero functions means zero scanned spans, so the function-count check
         # above has nothing to compare and silently passed these files over.
@@ -877,11 +1040,37 @@ def _print_structural_verification(files: list[dict]) -> None:
                 f"{', '.join(f.get('structural_unavailable_dimensions') or [])} "
                 "not measured — only whole-file source review can cover it"
             )
-    if not gaps and not unscanned:
+    if not gaps and not unscanned and not thin:
         # max(functions_analyzed) across CWE families matches total_functions,
         # but overlapping functions between families are not deduplicated —
         # this is count-based coverage, not identity-based.
         print("All indexed files report function-count coverage matching structural index.")
+
+
+def _thinly_receipted_claims(files: list[dict]) -> list[str]:
+    """Files whose claimed `functions_analyzed` far exceeds their bound callables.
+
+    A ratio of distinct structurally bound callables to the largest claimed
+    `functions_analyzed` below `_CALLABLE_RATIO_FLOOR` is worth a look, not a
+    defect: a receipt can cover several functions through one call chain.
+    """
+    rows: list[str] = []
+    for f in files:
+        effort = f.get('analysis_effort') or {}
+        bound = int(effort.get('distinct_structural_callables_reviewed', 0) or 0)
+        claimed = 0
+        for cwe in f.get('cwe_coverage', []):
+            try:
+                claimed = max(claimed, int(cwe.get('functions_analyzed', 0) or 0))
+            except (TypeError, ValueError):
+                continue
+        if bound > 0 and claimed > 0 and bound / claimed < _CALLABLE_RATIO_FLOOR:
+            rows.append(
+                f"  {f.get('file_path', '?')} ({f.get('classification', '')}): "
+                f"functions_analyzed={claimed} claimed, {bound} structurally bound "
+                f"callable(s) recorded (ratio={bound / claimed:.2f})"
+            )
+    return rows
 
 
 def _review_quality(data: dict) -> tuple[bool, list[str]]:
@@ -908,11 +1097,212 @@ def _review_quality(data: dict) -> tuple[bool, list[str]]:
     return not warnings, warnings
 
 
-def _print_review_quality(data: dict) -> None:
+def _print_review_quality(data: dict, *, full: bool) -> None:
+    """Render the advisory review-quality verdict.
+
+    These are self-attested numbers and receipt bookkeeping, so they never
+    gate. ``full`` lists every warning (the `--cwe-matrix` view); otherwise
+    effort shortfalls are grouped by tier x family and receipt warnings by
+    tier, each with a few example files, and the full list is one flag away.
+    """
     passed, warnings = _review_quality(data)
-    print(f"\nReview Quality: {'PASS' if passed else 'NEEDS ATTENTION'}")
-    for warning in warnings:
+    print(f"\nReview Quality: {'PASS' if passed else 'NEEDS ATTENTION'} (advisory)")
+    gate = data.get('gate')
+    if full or passed or not isinstance(gate, dict):
+        for warning in warnings:
+            print(f"  - {warning}")
+        return
+    # The backend groups family shortfalls tier x family (`gate.effort_gaps`)
+    # and names their lines in `effort_warnings` as `effort_gaps.warnings`;
+    # those lines are shown through the groups, so only the other effort
+    # warnings are listed below.
+    gap_summary = gate.get('effort_gaps')
+    groups = [
+        group for group in (gap_summary.get('groups') or [] if isinstance(gap_summary, dict) else [])
+        if isinstance(group, dict)
+    ]
+    grouped_messages: set[str] = set()
+    if groups:
+        print(
+            f"  Effort below tier threshold: {gap_summary.get('total', 0)} family gap(s) across "
+            f"{gap_summary.get('file_count', 0)} file(s)"
+        )
+        for group in groups:
+            count = int(group.get('file_count', 0) or 0)
+            shown = [str(path) for path in group.get('sample_file_paths') or []]
+            more = f" +{count - len(shown)} more" if count > len(shown) else ""
+            print(
+                f"    {group.get('classification', '')} x {group.get('family', '')}: "
+                f"{count} file(s) — {', '.join(shown)}{more}"
+            )
+        grouped_messages = {str(line) for line in gap_summary.get('warnings') or []}
+    integrity = [
+        item for item in gate.get('coverage_integrity') or []
+        if isinstance(item, dict) and item.get('warnings')
+    ]
+    integrity_messages = {
+        f"{item.get('file_path', 'unknown file')}: {warning}"
+        for item in integrity
+        for warning in item.get('warnings', [])
+    }
+    if integrity:
+        by_tier: dict[str, list[str]] = {}
+        for item in integrity:
+            by_tier.setdefault(str(item.get('classification', '')), []).append(
+                str(item.get('file_path', '?'))
+            )
+        print(f"  Receipt consistency warnings: {len(integrity)} file(s)")
+        for tier in sorted(
+            by_tier,
+            key=lambda name: _TIER_ORDER.index(name) if name in _TIER_ORDER else len(_TIER_ORDER),
+        ):
+            paths = by_tier[tier]
+            shown = paths[:_ADVISORY_FILES_PER_GROUP]
+            more = f" +{len(paths) - len(shown)} more" if len(paths) > len(shown) else ""
+            print(f"    {tier or 'unclassified'}: {len(paths)} file(s) — {', '.join(shown)}{more}")
+    other = [
+        warning for warning in warnings
+        if warning not in grouped_messages and warning not in integrity_messages
+    ]
+    for warning in other[:_ADVISORY_PREVIEW_LIMIT]:
         print(f"  - {warning}")
+    if len(other) > _ADVISORY_PREVIEW_LIMIT:
+        print(f"  ... +{len(other) - _ADVISORY_PREVIEW_LIMIT} more")
+    print("  Full per-file list: vigil assess code-coverage --cwe-matrix")
+
+
+def _print_depth_advisories(data: dict, *, full: bool) -> None:
+    """Name critical/high files whose signal came only from wide passes.
+
+    A pointer for the next lane, never a gate: it is not part of
+    `_review_quality`, readiness blockers, or `--require-gate-pass`.
+    """
+    gate = data.get('gate')
+    advisories = [
+        row for row in ((gate or {}).get('depth_advisories') or [] if isinstance(gate, dict) else [])
+        if isinstance(row, dict)
+    ]
+    if not advisories:
+        return
+    print(
+        f"\nDepth Advisories: {len(advisories)} critical/high file(s) produced signal "
+        "on wide passes only (pointer; never gates)"
+    )
+    shown = advisories if full else advisories[:_ADVISORY_PREVIEW_LIMIT]
+    for row in shown:
+        print(
+            f"  - {row.get('file_path', '?')} ({row.get('classification', '?')}): "
+            f"{row.get('passes', 0)} wide pass(es), {row.get('signal_passes', 0)} with signal, "
+            f"{row.get('findings', 0)} finding(s)"
+        )
+    if len(advisories) > len(shown):
+        print(
+            f"  ... +{len(advisories) - len(shown)} more; "
+            "full list: vigil assess code-coverage --cwe-matrix"
+        )
+    print(
+        "  Deeper read: a `hunt_scope: deep` lane over the file, or "
+        "`vigil assess code-dispatch reanalyze <queue-items-json-file> <reason>`."
+    )
+
+
+def _print_context_tags_unrecorded(data: dict) -> None:
+    """Name classified files whose classification recorded no context tags.
+
+    A pointer for the architect, never a gate: those files owe only their slot
+    and language families until their tags are recorded.
+    """
+    gate = data.get('gate')
+    unrecorded = gate.get('context_tags_unrecorded') if isinstance(gate, dict) else None
+    if not isinstance(unrecorded, dict) or not unrecorded.get('count'):
+        return
+    tiers = ", ".join(
+        f"{tier} {count}" for tier, count in (unrecorded.get('by_classification') or {}).items()
+    )
+    print(
+        f"\nContext Tags Unrecorded: {unrecorded['count']} classified file(s) ({tiers}) "
+        "owe only their slot-type and language families (pointer; never gates)"
+    )
+    for path in unrecorded.get('sample_paths') or []:
+        print(f"  - {path}")
+    if unrecorded.get('omitted'):
+        print(f"  ... +{unrecorded['omitted']} more")
+    print(f"  Every file: {unrecorded.get('full_list')}")
+    if unrecorded.get('paging'):
+        print(f"  Paging: {unrecorded['paging']}")
+    print(f"  Fix: {unrecorded.get('fix')}")
+
+
+def _print_client_bundle_advisories(data: dict) -> None:
+    """Name the families client-bundle tags make optional, and tags that look wrong.
+
+    Pointers, never gates: an optional family is never measured, so it is named
+    here rather than left silently absent from the gaps above.
+    """
+    gate = data.get('gate')
+    if not isinstance(gate, dict):
+        return
+    optional = gate.get('optional_families')
+    if isinstance(optional, dict) and optional.get('files'):
+        families = ", ".join(
+            f"{family} {count}" for family, count in (optional.get('by_family') or {}).items()
+        )
+        print(
+            f"\nOptional Families: {optional['files']} client-bundle file(s) carry "
+            f"server-only families nobody measures ({families}) (pointer; never gates)"
+        )
+        for path in optional.get('sample_paths') or []:
+            print(f"  - {path}")
+        if optional.get('omitted'):
+            print(f"  ... +{optional['omitted']} more")
+        print(f"  Every file: {optional.get('full_list')}")
+    conflicts = gate.get('client_bundle_conflicts')
+    if isinstance(conflicts, dict) and conflicts.get('count'):
+        print(
+            f"\nClient-Bundle Conflicts: {conflicts['count']} client-bundle file(s) whose "
+            "language or other tags say server code (pointer; never gates)"
+        )
+        for entry in conflicts.get('sample') or []:
+            print(f"  - {entry.get('file_path')}: {', '.join(entry.get('signals') or [])}")
+        if conflicts.get('omitted'):
+            print(f"  ... +{conflicts['omitted']} more")
+        print(f"  Every file: {conflicts.get('full_list')}")
+        print(f"  Fix: {conflicts.get('fix')}")
+
+
+def _print_untriggered_depth_shortfalls(data: dict) -> None:
+    """Name below-floor families no depth_floor trigger covers (a pointer, never a gate)."""
+    gate = data.get('gate')
+    shortfalls = gate.get('untriggered_depth_shortfalls') if isinstance(gate, dict) else None
+    if not isinstance(shortfalls, dict) or not shortfalls.get('total'):
+        return
+    print(
+        f"\nUntriggered Depth Shortfalls: {shortfalls['total']} critical/high famil(ies) on "
+        f"{shortfalls.get('file_count', '?')} file(s) (pointer; never gates)"
+    )
+    for group in shortfalls.get('groups') or []:
+        paths = ", ".join(group.get('sample_file_paths') or [])
+        more = int(group.get('file_count') or 0) - len(group.get('sample_file_paths') or [])
+        print(
+            f"  - {group.get('classification')} {group.get('family')} (< {group.get('threshold')}): "
+            f"{group.get('file_count')} file(s): {paths}" + (f" +{more} more" if more > 0 else "")
+        )
+    rows = shortfalls.get('rows')
+    if isinstance(rows, list):
+        print("  Every row:")
+        for row in rows:
+            if isinstance(row, dict):
+                print(
+                    f"    {row.get('file_path')}: {row.get('family')} "
+                    f"{_format_effort(_coerce_effort(row.get('effort', 0)))} < {row.get('threshold')} "
+                    f"({row.get('classification')})"
+                )
+    elif shortfalls.get('rows_omitted'):
+        print(
+            f"  {shortfalls['rows_omitted']} row(s) not listed; every row: "
+            f"{shortfalls.get('full_list')}"
+        )
+    print(f"  {shortfalls.get('detail')}")
 
 
 def _print_vuln_class_summary(data: dict) -> None:
@@ -1002,11 +1392,27 @@ def _print_analysis_status(data: dict) -> None:
         if status not in _ANALYSIS_STATUS_ORDER:
             print(f"  {str(status):14s}: {count:>5}")
 
+    # `classified` holds every classified file without a successful review,
+    # which includes files closed `skipped` with a reason: those are accounted
+    # and owe no queue row, so they are named apart from the ones still owed.
+    # The backend counts that share over the bucket's own files.
     classified = int(by_status.get('classified', 0) or 0)
     queued = int(by_status.get('queued', 0) or 0)
-    if classified > 0 and queued == 0:
+    confidence = data.get('confidence')
+    skipped = int(
+        (confidence.get('classified_accounted_skips') if isinstance(confidence, dict) else 0)
+        or 0
+    )
+    unreviewed = classified - skipped
+    if skipped:
         print(
-            f"  NOTE: {classified} file(s) classified but never queued — run "
+            f"  NOTE: {skipped} classified file(s) are closed `skipped` with a "
+            "reason — accounted, not reviewed."
+        )
+    if unreviewed > 0 and queued == 0:
+        print(
+            f"  NOTE: {unreviewed} classified file(s) have neither a successful "
+            "review nor an accounted skip — queue them with "
             "`vigil assess code-dispatch queue <queue-items-json-file>`; "
             "`analyzed` counts require queue receipts."
         )
@@ -1099,6 +1505,10 @@ def _print_coverage(
     total_files = data.get('total_files', 0)
 
     print("=== Code Analysis Coverage ===")
+    print(
+        "Coverage counts files with a receipt-backed review pass; it does not "
+        "attest how deep that review went."
+    )
     print(f"Total files: {total_files}")
 
     # A reference repository's files are deliberately absent from every count
@@ -1171,6 +1581,7 @@ def _print_coverage(
             triggers.get('external_context_unavailable', 0)
             + triggers.get('source_equivalent_analyzed', 0)
             + triggers.get('not_applicable', 0)
+            + triggers.get('reviewed_at_sufficient_depth', 0)
         )
         print(
             "\nCross-File Triggers: "
@@ -1181,5 +1592,5 @@ def _print_coverage(
         )
 
     if include_review_quality:
-        _print_review_quality(data)
+        _print_review_quality(data, full=True)
     print()

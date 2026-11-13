@@ -37,7 +37,7 @@ from assess.lib.arjun_enrich import (
     slot_for_method,
 )
 from assess.lib.auth import auth_active_context
-from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE
+from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, bounded_queue_key
 from assess.lib.classify_buckets import CLASSIFIER_VERSION, classify_from_fields
 from assess.lib.client import AssessmentClient
 from assess.lib.config import anchor_engagement_relative, load_config
@@ -296,7 +296,7 @@ def _create_candidate(record: dict, *, source: str, auth_context: str) -> tuple[
 
     # Include the full host-bearing URL (not the host-stripped url_path) so the
     # same method/path/params on two in-scope hosts don't collapse to one row.
-    queue_key = f"arjun:{method}:{endpoint}:{params_sig}"
+    queue_key = bounded_queue_key(f"arjun:{method}:{endpoint}:{params_sig}")
     item = {
         "queue_key": queue_key,
         "method": method,

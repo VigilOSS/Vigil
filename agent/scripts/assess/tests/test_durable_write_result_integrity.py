@@ -126,6 +126,32 @@ def test_record_decision_requires_requested_kind_and_payload(
     assert "do not retry automatically" in str(exc.value)
 
 
+def test_record_decision_accepts_fields_the_backend_derives(monkeypatch) -> None:
+    client = AssessmentClient("http://backend", "eng")
+    requested = {"finding_slug": "VA-001", "verdict": "followed"}
+    response = {
+        "id": 9,
+        "kind": "repro_rehearsal",
+        "payload": {**requested, "reproduction_sha256": "a" * 64},
+    }
+    monkeypatch.setattr(client, "post", lambda *_args, **_kwargs: response)
+
+    result = client.record_decision({"kind": "repro_rehearsal", "payload": requested})
+
+    assert result["id"] == 9
+
+
+def test_record_decision_rejects_a_response_missing_a_requested_field(
+    monkeypatch,
+) -> None:
+    client = AssessmentClient("http://backend", "eng")
+    response = {"id": 9, "kind": "scope", "payload": {}}
+    monkeypatch.setattr(client, "post", lambda *_args, **_kwargs: response)
+
+    with pytest.raises(AssessError, match="do not retry automatically"):
+        client.record_decision({"kind": "scope", "payload": {"host": "a.example"}})
+
+
 def test_record_finding_rejects_response_bound_to_a_different_slug(
     monkeypatch, tmp_path, capsys
 ):
@@ -498,7 +524,7 @@ def test_code_index_sync_rejects_response_without_bound_repo_identity(
     monkeypatch.setattr(
         code_index_sync,
         "_prepare_repo_payload",
-        lambda _client, _backend, _manifest, _root: payload,
+        lambda _client, _backend, _manifest, _root, **_binding: payload,
     )
 
     with pytest.raises(AssessError, match="sync structural metadata") as exc:

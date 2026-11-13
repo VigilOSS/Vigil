@@ -330,6 +330,115 @@ def test_a_passive_tool_is_skipped_not_refused(tmp_path):
     assert report["required_header_status"] == "skipped"
 
 
+@pytest.mark.parametrize(
+    ("command", "tool_name"),
+    [
+        (["which", "jsluice"], "which"),
+        (["timeout", "30", "which", "uro"], "which"),
+        (
+            [
+                "bash", "-lc",
+                "find /engagements/acme/js -type f -print0 | xargs -0 -r jsluice urls "
+                "> /engagements/acme/jsluice.jsonl 2>/dev/null || true",
+            ],
+            "jsluice",
+        ),
+        (
+            [
+                "bash", "-lc",
+                "trufflehog filesystem /engagements/acme/js --json --no-update "
+                "> /engagements/acme/trufflehog.json",
+            ],
+            "trufflehog",
+        ),
+    ],
+    ids=["which", "launcher-which", "jsluice-pipeline", "trufflehog"],
+)
+def test_a_run_that_makes_no_target_traffic_needs_no_attribution(
+    tmp_path, capsys, command, tool_name
+):
+    """Every executable in these argvs is declared offline in the tool roster, so
+    the run sends nothing to a target: no warning, and the row says why."""
+    eng = _engagement(tmp_path, required=_HANDLE)
+    before = list(command)
+
+    report = _attribution_report(command, tool_name=tool_name, eng=eng)
+
+    assert report["required_header_status"] == "not_applicable_offline"
+    assert command == before
+    assert "could not be injected" not in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["bash", "-c", "jsluice urls app.js; python3 scripts/fetch.py"],
+        ["bash", "-c", "find . -name '*.js' -exec wafw00f https://app.example.com {} ;"],
+        ["bash", "-c", "which jsluice && $TOOL https://app.example.com"],
+    ],
+    ids=["offline-then-interpreter", "find-exec", "dynamic-head"],
+)
+def test_an_offline_tool_beside_a_traffic_capable_command_is_not_exempt(tmp_path, command):
+    eng = _engagement(tmp_path, required=_HANDLE)
+    report = _attribution_report(command, tool_name="jsluice", eng=eng)
+
+    assert report["required_header_status"] == "warned"
+
+
+# --------------------------------------------------------------------------- #
+# I-12 — a script's destinations are invisible to the audit, so its row says so.
+# --------------------------------------------------------------------------- #
+
+
+def _recorded_notes(cmd: list[str], *, recognized: bool, eng) -> dict:
+    from assess.lib.kali_audit import _post_pre_exec_row
+
+    posted: list[dict] = []
+
+    class _Client:
+        def post(self, endpoint, payload):
+            posted.append(payload)
+            return {"id": 1}
+
+    _post_pre_exec_row(
+        _Client(), cmd=cmd, technique="RECON", intent="probe", probe_kind="fingerprint",
+        phase="recon", destructive=False, agent_name="sa-acme-1", engagement_dir=eng,
+        container_name="vigil", timeout=60, force=False,
+        started_at_iso="2026-11-14T00:00:00Z", stdout_path="", stderr_path="",
+        working_dir="", scope_version="", auth_context="anonymous",
+        tool_name=cmd[0], run_uuid="0" * 32,
+        execution_policy={"target_facing": recognized, "required_header_status": "none_required"},
+    )
+    return json.loads(posted[0]["notes"])
+
+
+@pytest.mark.parametrize(
+    ("cmd", "recognized", "expected"),
+    [
+        (["python3", "scripts/login.py", "t1_guest"], False, "unknown"),
+        (["python3", "-c", "import urllib.request"], False, "unknown"),
+        (["bash", "scripts/probe.sh"], False, "unknown"),
+        (["bash", "-c", "cd scripts && python3 login.py"], False, "unknown"),
+        (["env", "MODE=fast", "node", "scripts/probe.js"], False, "unknown"),
+        (["curl", "-s", "https://app.example.com/"], True, True),
+        (["which", "jsluice"], False, False),
+        (["bash", "-c", "grep -c token scans/a.txt | sort"], False, False),
+        (["gau", "app.example.com"], False, False),
+    ],
+    ids=[
+        "python-script", "python-inline", "bash-script", "bash-c-python", "env-node",
+        "curl", "which", "text-pipeline", "unrecognized-tool",
+    ],
+)
+def test_the_audit_row_records_unknown_target_traffic_for_scripts(
+    tmp_path, cmd, recognized, expected
+):
+    notes = _recorded_notes(cmd, recognized=recognized, eng=tmp_path)
+
+    assert notes["target_facing"] == expected
+    assert notes["required_header_status"] == "none_required"
+
+
 def test_required_headers_are_exported_for_the_script_to_read(tmp_path):
     pairs = kali.required_header_env_pairs(_HANDLE)
     assert ("VIGIL_REQUIRED_HEADERS", "X-HackerOne: acme-researcher") in pairs

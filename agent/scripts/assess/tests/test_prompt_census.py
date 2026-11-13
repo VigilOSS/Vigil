@@ -276,3 +276,240 @@ def test_census_credits_a_continuation_line_to_its_own_option(tmp_path: Path) ->
         role["role_bytes"] + 20,
         role["role_bytes"] + 40,
     ]
+
+
+def _write_operator_core_with_rule_lists(prompt_root: Path) -> Path:
+    rules = prompt_root / "rules"
+    rules.mkdir(parents=True, exist_ok=True)
+    (rules / "resume.md").write_text("R" * 30, encoding="utf-8")
+    (rules / "hunting.md").write_text("H" * 70, encoding="utf-8")
+    (rules / "hunting-operator.md").write_text("O" * 20, encoding="utf-8")
+    (rules / "digest-only.md").write_text("X" * 500, encoding="utf-8")
+    (prompt_root / "references").mkdir(exist_ok=True)
+    (prompt_root / "references" / "taxonomy.md").write_text("T" * 40, encoding="utf-8")
+    core = prompt_root / "operator-core.md"
+    core.write_text(
+        "## Rules\n\n"
+        "Always-active rules:\n"
+        "- `agent/rules/resume.md`\n\n"
+        "These rule files load on their trigger, not at session start:\n\n"
+        "- `agent/rules/hunting.md` — before you judge a negative\n"
+        "  or close a surface; see also `agent/rules/digest-only.md`.\n"
+        "- `agent/rules/hunting-operator.md` — before you exit a phase\n\n"
+        "**Digest.**\n\n"
+        "- `agent/rules/digest-only.md` is prose in a list that loads nothing.\n\n"
+        "## Loaded on trigger\n\n"
+        "Load each file below when its trigger fires:\n\n"
+        "| Trigger | Load |\n"
+        "|---|---|\n"
+        "| Naming a vuln class by hand | `agent/references/taxonomy.md`; helpers refuse a bad token |\n"
+        "| Entering a phase | that phase's doc |\n"
+        "| When nothing else applies | `agent/rules/missing.md` |\n\n"
+        "## Next\n\n"
+        "- `agent/rules/digest-only.md` — under a heading that names no trigger\n",
+        encoding="utf-8",
+    )
+    return core
+
+
+def test_census_reports_operator_session_standing_load_and_trigger_loaded_rules(
+    tmp_path: Path,
+) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    core_path = _write_operator_core_with_rule_lists(prompt_root)
+    core_bytes = core_path.stat().st_size
+
+    result = collect_prompt_census(prompt_root)
+    core = {row["path"]: row for row in result["operator_cores"]}["agent/operator-core.md"]
+
+    assert core["bytes"] == core_bytes
+    assert [(row["path"], row["bytes"]) for row in core["standing_references"]] == [
+        ("agent/rules/resume.md", 30)
+    ]
+    # Bullet lists after a trigger lead-in and Trigger/Load tables under a trigger
+    # heading both count; prose that merely mentions a path does not.
+    assert [
+        (row["path"], row["bytes"], row["trigger"])
+        for row in core["trigger_loaded_references"]
+    ] == [
+        (
+            "agent/rules/hunting.md",
+            70,
+            "before you judge a negative or close a surface; see also `agent/rules/digest-only.md`.",
+        ),
+        ("agent/rules/hunting-operator.md", 20, "before you exit a phase"),
+        ("agent/references/taxonomy.md", 40, "Naming a vuln class by hand"),
+        ("agent/rules/missing.md", None, "When nothing else applies"),
+    ]
+    # Session standing load = the core plus what it always loads; trigger-loaded files
+    # stay out of it and are summed separately as the every-trigger-fires ceiling.
+    assert core["approximate_session_standing_bytes"] == core_bytes + 30
+    assert core["approximate_session_ceiling_bytes"] == core_bytes + 30 + 70 + 20 + 40
+    assert core["advisories"] == [
+        "trigger-loaded reference is not a regular file: agent/rules/missing.md"
+    ]
+    assert result["advisory_count"] == 1
+
+
+def test_census_core_without_rule_lists_is_its_own_session_load(tmp_path: Path) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+
+    result = collect_prompt_census(prompt_root)
+    code_core = {row["path"]: row for row in result["operator_cores"]}[
+        "agent/operator-core-code.md"
+    ]
+
+    assert code_core["standing_references"] == []
+    assert code_core["trigger_loaded_references"] == []
+    assert code_core["approximate_session_standing_bytes"] == code_core["bytes"]
+    assert code_core["approximate_session_ceiling_bytes"] == code_core["bytes"]
+
+
+def test_census_lists_a_role_s_trigger_loaded_references_apart_from_standing(
+    tmp_path: Path,
+) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    (prompt_root / "rules" / "reporting.md").write_text("P" * 60, encoding="utf-8")
+
+    result = collect_prompt_census(prompt_root)
+    plain = {row["role"]: row for row in result["roles"]}["plain-role"]
+    plain_bytes = (prompt_root / "agents" / "plain-role.md").stat().st_size
+
+    assert [(row["path"], row["bytes"]) for row in plain["trigger_loaded_references"]] == [
+        ("agent/rules/reporting.md", 60)
+    ]
+    assert plain["approximate_trigger_loaded_bytes"] == 60
+    assert plain["approximate_standing_bytes"] == plain_bytes + 100 + 50
+
+
+def test_census_human_output_shows_session_standing_and_trigger_ceiling(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    core_bytes = _write_operator_core_with_rule_lists(prompt_root).stat().st_size
+
+    _run_cli(["prompt-census", "--prompt-root", str(prompt_root)])
+
+    out = capsys.readouterr().out
+    core_line = next(line for line in out.splitlines() if line.startswith("operator-core "))
+    assert str(core_bytes + 30) in core_line.split()
+    assert str(core_bytes + 160) in core_line.split()
+    assert "  trigger agent/rules/hunting-operator.md  20  before you exit a phase" in out
+
+
+def test_census_resolves_every_rule_this_checkout_s_operator_cores_list() -> None:
+    result = collect_prompt_census(_REPO_PROMPT_ROOT)
+
+    for core in result["operator_cores"]:
+        listed = [*core["standing_references"], *core["trigger_loaded_references"]]
+        assert [row["path"] for row in listed if not row["present"]] == [], core["path"]
+        assert core["approximate_session_standing_bytes"] >= core["bytes"]
+
+
+def _write_role_with_unmeasurable_lazy_pointers(prompt_root: Path) -> None:
+    (prompt_root / "references" / "web").mkdir(parents=True)
+    (prompt_root / "agents" / "glob-role.md").write_text(
+        "# Glob role\n\n"
+        "## Load First\n\n"
+        "**MANDATORY (before any work):**\n\n"
+        "- `agent/shared-specialist-core.md` — isolation\n\n"
+        "**LOAD-ON-FIRST-USE (lazy):**\n\n"
+        "- `agent/rules/reporting.md` when writing a report\n"
+        "- `agent/skills/*/SKILL.md` — the skill the signal names\n"
+        "- `agent/references/web/` — payload references on demand\n\n"
+        "## Work\nBody\n",
+        encoding="utf-8",
+    )
+
+
+def test_census_lists_lazy_pointers_it_could_not_measure(tmp_path: Path) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    (prompt_root / "rules" / "reporting.md").write_text("P" * 60, encoding="utf-8")
+    _write_role_with_unmeasurable_lazy_pointers(prompt_root)
+
+    result = collect_prompt_census(prompt_root)
+    role = {row["role"]: row for row in result["roles"]}["glob-role"]
+
+    assert [row["path"] for row in role["trigger_loaded_references"]] == [
+        "agent/rules/reporting.md"
+    ]
+    assert role["unmeasured_trigger_pointers"] == [
+        "agent/skills/*/SKILL.md",
+        "agent/references/web/",
+    ]
+
+
+def test_census_human_output_points_at_json_for_what_the_table_omits(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    (prompt_root / "rules" / "reporting.md").write_text("P" * 60, encoding="utf-8")
+    _write_role_with_unmeasurable_lazy_pointers(prompt_root)
+
+    _run_cli(["prompt-census", "--prompt-root", str(prompt_root)])
+
+    out = capsys.readouterr().out
+    role_lines = [line for line in out.splitlines() if "glob-role" in line]
+    assert any(
+        "agent/skills/*/SKILL.md" in line and "agent/references/web/" in line
+        for line in role_lines
+    )
+    assert "--json" in out
+    assert "trigger_loaded_references" in out
+
+
+def _specialist_advisories(result: dict) -> list[str]:
+    return [
+        advisory
+        for row in result["roles"]
+        for advisory in row["advisories"]
+        if advisory.startswith("specialist_cites_operator_core")
+    ]
+
+
+def test_census_flags_a_specialist_loaded_file_that_cites_an_operator_core(
+    tmp_path: Path,
+) -> None:
+    # Specialists never load an operator core, so a pointer into one from a file
+    # a role loads cannot be followed.
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    (prompt_root / "rules" / "hunting.md").write_text(
+        "Hunt.\nSee `agent/operator-core.md` \"Foo\" for the rule.\n"
+        "Never read `agent/AGENTS.md` or `agent/CLAUDE.md`.\n",
+        encoding="utf-8",
+    )
+
+    advisories = _specialist_advisories(collect_prompt_census(prompt_root))
+
+    # hunting.md is loaded by both roles; each role names it once.
+    assert len(advisories) == 2
+    assert all("agent/rules/hunting.md:2" in advisory for advisory in advisories)
+    assert all("operator-core.md" in advisory for advisory in advisories)
+
+
+def test_census_flags_a_role_file_citing_a_code_operator_core(tmp_path: Path) -> None:
+    prompt_root = tmp_path / "agent"
+    _write_prompt_tree(prompt_root)
+    role = prompt_root / "agents" / "plain-role.md"
+    role.write_text(
+        role.read_text(encoding="utf-8") + "Follow operator-core-code.md step 3.\n",
+        encoding="utf-8",
+    )
+
+    (advisory,) = _specialist_advisories(collect_prompt_census(prompt_root))
+
+    assert "agent/agents/plain-role.md:" in advisory
+    assert "operator-core-code.md" in advisory
+
+
+def test_this_checkout_s_specialist_files_cite_no_operator_core() -> None:
+    result = collect_prompt_census(_REPO_PROMPT_ROOT)
+
+    assert _specialist_advisories(result) == []

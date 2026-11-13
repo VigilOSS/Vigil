@@ -21,11 +21,13 @@ from assess.lib.client import (
     canonical_artifact_path,
     require_artifact_bulk_write_response,
     require_artifact_write_response,
+    require_recorded_dispatch,
     require_write_result,
 )
 from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
 from assess.lib.finding_render import warn_untrusted_data
+from assess.lib.producer_identity import resolve_report_writer
 from assess.lib.list_output import ListPage, lookahead_limit, page_from_backend, report_page
 
 
@@ -123,7 +125,11 @@ def register(subparsers) -> None:
     sp_register.add_argument("--kind", default="")
     sp_register.add_argument("--media-type", default="")
     sp_register.add_argument("--finding", default="", help="Link to finding slug")
-    sp_register.add_argument("--agent-id", default="")
+    sp_register.add_argument(
+        "--agent-id",
+        default="",
+        help="Your recorded dispatch ID, stored as the producer of these bytes; omit for an operator registration.",
+    )
     sp_register.add_argument("--agent-role", default="")
     sp_register.add_argument("--command-run-id", type=int, default=None)
     sp_register.add_argument("--json", dest="as_json", action="store_true")
@@ -428,6 +434,19 @@ def _run_register(args) -> None:
     paths = _register_paths(args)
     client, cfg = _client_and_config(args)
     try:
+        if args.kind == "report":
+            # report.md's registration is what report QC binds to its writer, so
+            # without --agent-id the in-progress report-writer dispatch is named.
+            args = argparse.Namespace(**{**vars(args), "agent_id": resolve_report_writer(
+                client, args.agent_id, operation="register artifact",
+                unattributed_note=(
+                    "report QC needs report.md's current bytes registered by their writer; "
+                    "the writer registers them with --agent-id <writer dispatch> "
+                    "(implied while it is the one in-progress report-writer dispatch)"
+                ),
+            ) or ""})
+        elif args.agent_id:
+            require_recorded_dispatch(client, args.agent_id, operation="register artifact")
         if len(paths) == 1:
             _register_one(client, cfg, args, paths[0])
         else:

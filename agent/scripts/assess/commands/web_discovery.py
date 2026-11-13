@@ -275,6 +275,37 @@ def _clamp_httpx_rate_limit(requested: str, rate_cap: float | None) -> int:
     return max(1, min(base, int(rate_cap)))
 
 
+def _crawl_fence(scope_doc: dict | None, live_urls: list[str], extra_argv: list[str]) -> list[str]:
+    """Keep the crawl on the hosts scope.json declares (`scope.crawl_fence`).
+
+    Scope flags in ``--katana-extra-args`` replace the fence, with a WARN: the
+    caller has stated its own boundary, and the audit row records the argv.
+    """
+    overrides = scope.crawl_fence_overrides(extra_argv)
+    if overrides:
+        _warn(
+            f"web-discovery: --katana-extra-args sets {', '.join(overrides)}, so the "
+            "scope.json crawl fence is not applied; you own the crawl boundary for this run."
+        )
+        return []
+    try:
+        if scope_doc is None:
+            raise SystemExit("no readable scope.json")
+        fence = scope.crawl_fence(
+            scope_doc, seed_hosts=[urlsplit(url).hostname or "" for url in live_urls]
+        )
+    except SystemExit as exc:
+        _warn(
+            f"web-discovery: {exc}, so the crawl carries no scope fence beyond -fs fqdn "
+            "(each seed stays on its own host)."
+        )
+        return ["-fs", "fqdn"]
+    for warning in fence.warnings:
+        _warn(f"web-discovery: {warning}")
+    print(f"web-discovery: {fence.summary}", file=sys.stderr)
+    return fence.argv
+
+
 def _extract_live_urls(httpx_jsonl: Path) -> list[str]:
     """Live URLs (answered, not failed) from an httpx -json file, for the crawl seed."""
     urls: list[str] = []
@@ -670,6 +701,7 @@ def run(args) -> None:
 
     # --- Stage 0: de-noise -------------------------------------------------
     raw_lines = hosts_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    scope_doc: dict | None = None
     try:
         scope_doc = scope.load_scope(args.engagement_dir)
         raw_lines, scope_metadata = scope.filter_recon_targets(scope_doc, raw_lines)
@@ -887,8 +919,9 @@ def run(args) -> None:
                 args.katana_rate, rate_cap=rate_cap, warn=_warn,
             )
             katana_cmd.extend(["-rl", str(katana_rl), "-rlm", str(katana_rl * 60)])
-            if args.katana_extra_args:
-                katana_cmd.extend(shlex.split(args.katana_extra_args))
+            extra_argv = shlex.split(args.katana_extra_args) if args.katana_extra_args else []
+            katana_cmd.extend(_crawl_fence(scope_doc, live_urls, extra_argv))
+            katana_cmd.extend(extra_argv)
             crawl_started = time.monotonic()
             kres = kali_exec(
                 katana_cmd, technique="DISCOVERY", intent="web-discovery: katana crawl of live subset",

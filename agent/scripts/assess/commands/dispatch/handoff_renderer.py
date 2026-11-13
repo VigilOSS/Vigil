@@ -27,6 +27,7 @@ from assess.commands.dispatch._shared import (
 from assess.lib.client import AssessmentClient, AssessError
 from assess.lib.config import load_config
 from assess.lib.finding_render import UNTRUSTED_DATA_NOTICE
+from assess.lib.phases import resolve_track_phase
 from assess.lib.render_containment import contain_separators
 
 
@@ -158,8 +159,8 @@ def _render_handoff(args, extra: list[str]) -> None:
         # GET findings/{slug} responded with anything other than a dict, which
         # confused operators because the same wording fired for both "slug
         # missing" and "backend returned a list / unexpected payload". The
-        # 404 path now emits "slug missing in backend (deleted or never
-        # recorded)" explicitly, distinct from "fetch error: <reason>".
+        # 404 path now emits "slug missing (deleted or never recorded)"
+        # explicitly, distinct from "fetch error: <reason>".
         finding_rows: list[dict] = []
         for slug in finding_slugs:
             try:
@@ -495,6 +496,10 @@ def _handoff_phase_line(
     fell back to is the one that writes no receipts. The handoff's own ``phase``
     is the lane's account of itself; ``authorized_phase`` from the immutable
     packet is the operator's grant. A divergence is named, never reconciled.
+    Both values are compared through ``resolve_track_phase``, so a code lane
+    that records its audit tag (``code-hunt``) under a track-phase grant
+    (``hunt``), or an input alias (``consume``), ran the phase it was granted;
+    ``code-classify`` under ``hunt`` is still a divergence.
     """
     ran = handoff_phase or "(not recorded in the handoff)"
     if not packet_available:
@@ -502,7 +507,11 @@ def _handoff_phase_line(
     else:
         granted = authorized_phase or "(not recorded in the packet)"
     line = f"- **Phase:** ran at {ran}; authorized_phase {granted}"
-    if handoff_phase and authorized_phase and handoff_phase != authorized_phase:
+    if (
+        handoff_phase
+        and authorized_phase
+        and resolve_track_phase(handoff_phase) != resolve_track_phase(authorized_phase)
+    ):
         line += (
             " — the phase this lane ran at differs from the phase it was "
             "authorized for; treat its coverage claims as scoped to the phase it "
@@ -516,9 +525,11 @@ def _lane_basis_lines(role: str, coverage_basis: str, *, packet_available: bool)
 
     A hunter dispatched with no queue items and no lane file holds no lease, so
     ``code-record analysis`` was unreachable for every file it read: the handoff
-    reads normally while ``code-coverage`` still reports those files unreviewed
-    and the next wave re-reads them. The handoff has to carry that fact, because
-    it is the only thing the next dispatch reads.
+    reads normally while the lane added no coverage at all, and a file nobody
+    else covered is read again by the next wave. The handoff has to carry that
+    fact, because it is the only thing the next dispatch reads. It cannot say
+    what status a file has — another lane may have covered it — so it points at
+    ``code-coverage`` for that.
     """
     if role not in LEASE_BEARING_ROLES:
         return []
@@ -531,8 +542,9 @@ def _lane_basis_lines(role: str, coverage_basis: str, *, packet_available: bool)
         return [f"- **Lane basis:** {coverage_basis}"]
     return [
         "- **Lane basis:** no queue lease (no queue_item_ids, no lane_file) — this "
-        "dispatch was non-covering: it could record no `code-record analysis` "
-        "receipt, so every file it read is still unreviewed in `code-coverage`"
+        "dispatch was non-covering: it recorded no `code-record analysis` receipt "
+        "and added no coverage, so each file it read keeps whatever status "
+        "`code-coverage` shows for it"
     ]
 
 

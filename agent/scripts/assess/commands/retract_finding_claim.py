@@ -5,7 +5,11 @@ import json
 import sys
 from urllib.parse import quote
 
-from assess.lib.client import AssessmentClient, require_finding_write_response
+from assess.lib.client import (
+    AssessmentClient,
+    require_finding_write_response,
+    verdict_effect_line,
+)
 from assess.lib.config import load_config
 
 
@@ -164,4 +168,7 @@ def run(args) -> None:
                 f"phrase at {location}; review this field before publication",
                 file=sys.stderr,
             )
+    effect = verdict_effect_line("finding retract-claim", canonical_slug, response)
+    if effect:
+        print(effect, file=sys.stderr)
     print(json.dumps(response, indent=2, ensure_ascii=False))

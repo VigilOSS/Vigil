@@ -4,6 +4,7 @@ from __future__ import annotations
 import argparse
 import json
 import shlex
+import sys
 from urllib.parse import quote, urlencode
 
 from assess.lib.client import AssessmentClient, AssessError
@@ -19,6 +20,7 @@ from assess.lib.list_output import (
     lookahead_limit,
     page_from_backend,
     page_from_complete,
+    page_with_total,
     report_page,
 )
 
@@ -27,6 +29,22 @@ from assess.lib.list_output import (
 # orchestrator/backend/app/services/state_manager/coverage.py). Naming a lower
 # ceiling here silently truncates a listing the backend would have served whole.
 _MAX_BACKEND_LIMIT = 5000
+# The unfiltered page size. A filtered listing defaults to every match up to
+# _MAX_BACKEND_LIMIT, so "the highs" or "the confirmed set" is never a page.
+_DEFAULT_UNFILTERED_LIMIT = 100
+# (args attribute, backend query key) for the filters GET /findings and
+# GET /findings/count both apply server-side over the whole ledger.
+_BACKEND_FILTERS = (
+    ("severity", "severity"),
+    ("workflow_status", "workflow_status"),
+    ("verification_status", "verification_status"),
+    ("source_name", "source_name"),
+    ("slug", "slug"),
+    ("search", "search"),
+)
+# The finding ledger's list projection (``GET /findings?view=list``): every list
+# field this verb prints, without each finding's details, notes or evidence.
+FINDING_LIST_VIEW = ("view", "list")
 _JSON_LIST_FIELDS = (
     "id",
     "slug",
@@ -99,7 +117,17 @@ def register(subparsers) -> None:
             "or blocked."
         ),
     )
-    p.add_argument("--limit", type=int, default=100, help="Maximum rows to fetch from the backend (default: 100)")
+    p.add_argument(
+        "--limit",
+        type=int,
+        default=None,
+        help=(
+            f"Rows per page (maximum {_MAX_BACKEND_LIMIT}). Default: every match up to "
+            f"{_MAX_BACKEND_LIMIT} when any filter is set, else {_DEFAULT_UNFILTERED_LIMIT}. "
+            "A page that leaves matches unshown says INCOMPLETE with exact totals and "
+            "the continuation command"
+        ),
+    )
     p.add_argument("--offset", type=int, default=0, help="Backend result offset for pagination")
     p.add_argument(
         "--all",
@@ -115,14 +143,15 @@ def register(subparsers) -> None:
     p.set_defaults(func=run)
 
 
-def _finding_row(item: dict) -> str:
+def _finding_row(item: dict, chain_keys: list[str] | None = None) -> str:
     """Render one finding as a pipe-delimited finding-list row.
 
     A blocked-for-provisioning finding (verification_status='blocked') gets
     a trailing ``BLOCKED[(kind)]: <reason>`` cell so the operator reads WHY it is
     held out of the report without opening the finding. The disposition cell
     already shows ``.../blocked``; this adds the reason that used to live only in
-    the finding's ``details_json``.
+    the finding's ``details_json``. A finding that is a step of a recorded
+    attack chain ends with ``CHAIN[<chain_key>,...]``.
     """
     row = (
         f"{item.get('slug', '')} | "
@@ -135,7 +164,39 @@ def _finding_row(item: dict) -> str:
     blocked = blocked_reason_summary(item)
     if blocked:
         row += f" | {blocked}"
+    if chain_keys:
+        row += f" | CHAIN[{','.join(chain_keys)}]"
     return row
+
+
+def _chain_keys_by_finding(links: object) -> tuple[dict[str, list[str]], dict[int, list[str]]]:
+    """Chain keys each finding is a step of, keyed by slug and by id.
+
+    ``attack-chain-links`` is the complete chain-link ledger in one response, so
+    a row on any page resolves against every chain. A link names its finding by
+    slug, or by id when it carries no slug.
+    """
+    if not isinstance(links, list):
+        raise AssessError("finding list: attack-chain-links did not return a JSON array")
+    by_slug: dict[str, list[str]] = {}
+    by_id: dict[int, list[str]] = {}
+    for link in sorted(
+        (link for link in links if isinstance(link, dict)),
+        key=lambda link: str(link.get("chain_key") or ""),
+    ):
+        if link.get("entity_kind") != "finding" or not link.get("chain_key"):
+            continue
+        key = str(link["chain_key"])
+        ref = str(link.get("entity_ref") or "")
+        if ref:
+            bucket = by_slug.setdefault(ref, [])
+        elif type(link.get("entity_id")) is int:
+            bucket = by_id.setdefault(int(link["entity_id"]), [])
+        else:
+            continue
+        if key not in bucket:
+            bucket.append(key)
+    return by_slug, by_id
 
 
 def _matches_search(finding: dict, search: str) -> bool:
@@ -201,12 +262,85 @@ def _filter_group_rows(rows: list[dict], args) -> list[dict]:
     return filtered
 
 
+# `root_cause_role` is stamped by the --root-cause group view only; the ledger
+# listing's rows never carry it.
+_GROUP_ONLY_LIST_FIELDS = frozenset({"root_cause_role"})
+
+
+def _json_omitted_notice(*, root_cause_group: bool) -> str:
+    """What every --json row of this listing mode carries and leaves out."""
+    fields = [
+        field
+        for field in _JSON_LIST_FIELDS
+        if root_cause_group or field not in _GROUP_ONLY_LIST_FIELDS
+    ]
+    return (
+        "finding list --json: each row carries only "
+        + ", ".join(fields)
+        + " and _point_read; every other finding field is omitted, including summary, "
+        "details (block_reason, chain_required, poc_request, poc_response, ...), notes, "
+        "provenance, evidence_ref, proof_receipts, reproduction_basis, next_test and "
+        "verification_audit. Read the complete record with "
+        "`vigil assess finding get <slug>` (each row's _point_read)."
+    )
+
+
 def compact_finding_list_row(item: dict) -> dict:
     row = {key: item[key] for key in _JSON_LIST_FIELDS if key in item}
     slug = str(item.get("slug") or "")
     if slug:
         row["_point_read"] = f"vigil assess finding get {shlex.quote(slug)}"
     return row
+
+
+def _has_filter(args) -> bool:
+    """Whether the listing selects a subset (a root-cause group counts as one)."""
+    return bool(
+        getattr(args, "holding", False)
+        or getattr(args, "root_cause_slug", None)
+        or any(getattr(args, attr, None) for attr, _key in _BACKEND_FILTERS)
+    )
+
+
+def _effective_limit(args) -> int:
+    """The page size: the explicit --limit, else the filter-aware default."""
+    limit = getattr(args, "limit", None)
+    if limit is not None:
+        return int(limit)
+    return _MAX_BACKEND_LIMIT if _has_filter(args) else _DEFAULT_UNFILTERED_LIMIT
+
+
+def _filter_params(args) -> list[tuple[str, str]]:
+    params = [
+        (key, str(value))
+        for attr, key in _BACKEND_FILTERS
+        if (value := getattr(args, attr, None))
+    ]
+    if getattr(args, "holding", False):
+        params.append(("holding", "true"))
+    return params
+
+
+def _endpoint(path: str, params: list[tuple[str, str]]) -> str:
+    return f"{path}?{urlencode(params, quote_via=quote)}" if params else path
+
+
+def _matching_counts(client, args) -> tuple[int, dict[str, int]]:
+    """Exact total and per-severity counts of every finding the filters match."""
+    counts = client.get(_endpoint("findings/count", _filter_params(args)))
+    total = counts.get("total") if isinstance(counts, dict) else None
+    by_severity = counts.get("by_severity") if isinstance(counts, dict) else None
+    if (
+        type(total) is not int
+        or total < 0
+        or not isinstance(by_severity, dict)
+        or any(type(value) is not int for value in by_severity.values())
+    ):
+        raise AssessError(
+            "finding list: findings/count did not return an integer total and "
+            "by_severity counts"
+        )
+    return total, by_severity
 
 
 def _continuation_command(args, offset: int) -> str:
@@ -225,7 +359,7 @@ def _continuation_command(args, offset: int) -> str:
             parts.extend((flag, shlex.quote(str(value))))
     if getattr(args, "holding", False):
         parts.append("--holding")
-    parts.extend(("--limit", str(int(args.limit)), "--offset", str(offset)))
+    parts.extend(("--limit", str(_effective_limit(args)), "--offset", str(offset)))
     return " ".join(parts)
 
 
@@ -264,6 +398,10 @@ def _print_root_cause_group(group: dict, root_slug: str) -> None:
 
 def run(args) -> None:
     cfg = load_config(args.engagement_dir)
+    by_severity: dict[str, int] | None = None
+    chains_by_slug: dict[str, list[str]] = {}
+    chains_by_id: dict[int, list[str]] = {}
+    chain_read_error: str | None = None
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         root_cause_slug = getattr(args, "root_cause_slug", None)
         if root_cause_slug:
@@ -277,8 +415,8 @@ def run(args) -> None:
                 siblings = _filter_group_rows(list(group.get("siblings", [])), args)
                 page = page_from_complete(
                     siblings,
-                    limit=int(args.limit),
-                    offset=int(args.offset),
+                    limit=_effective_limit(args),
+                    offset=int(getattr(args, "offset", 0)),
                 )
                 paged_group = {
                     **group,
@@ -295,6 +433,7 @@ def run(args) -> None:
                         args, page.offset + len(page.rows)
                     ),
                     point_read_hint="`vigil assess finding get <slug>`",
+                    file=sys.stdout,
                 )
                 return
             root = dict(group.get("root", {}))
@@ -304,78 +443,98 @@ def run(args) -> None:
                 item = dict(sibling)
                 item["root_cause_role"] = "sibling"
                 findings.append(item)
-        else:
-            params: list[tuple[str, str]] = []
-            for attr, key in (
-                ("severity", "severity"),
-                ("workflow_status", "workflow_status"),
-                ("verification_status", "verification_status"),
-                ("source_name", "source_name"),
-                ("slug", "slug"),
-                ("search", "search"),
-            ):
-                value = getattr(args, attr, None)
-                if value:
-                    params.append((key, str(value)))
-            if getattr(args, "holding", False):
-                params.append(("holding", "true"))
-            request_limit, used_lookahead = lookahead_limit(
-                int(getattr(args, "limit", 100)), maximum=_MAX_BACKEND_LIMIT
+            # The dedicated group endpoint returns the complete root + sibling
+            # set, so its flattened JSON view applies the common list filters
+            # here. The ordinary findings endpoint owns these predicates;
+            # applying them again in the CLI would be a second source of truth.
+            page = page_from_complete(
+                _filter_group_rows(findings, args),
+                limit=_effective_limit(args),
+                offset=int(getattr(args, "offset", 0)),
             )
-            params.append(("limit", str(request_limit)))
-            params.append(("offset", str(int(getattr(args, "offset", 0)))))
-            endpoint = "findings"
-            if params:
-                endpoint += "?" + urlencode(params, quote_via=quote)
-            findings = client.get(endpoint)
+        else:
+            limit = _effective_limit(args)
+            offset = int(getattr(args, "offset", 0))
+            request_limit, used_lookahead = lookahead_limit(
+                limit, maximum=_MAX_BACKEND_LIMIT
+            )
+            findings = client.get(
+                _endpoint(
+                    "findings",
+                    [
+                        FINDING_LIST_VIEW,
+                        *_filter_params(args),
+                        ("limit", str(request_limit)),
+                        ("offset", str(offset)),
+                    ],
+                )
+            )
+            if not isinstance(findings, list):
+                raise AssessError("finding list: expected a JSON array from the backend")
+            page = page_from_backend(
+                findings,
+                limit=limit,
+                offset=offset,
+                used_lookahead=used_lookahead,
+            )
+            if page.has_more or page.total is None:
+                # One page cannot say how much it leaves out; the count can.
+                total, by_severity = _matching_counts(client, args)
+                page = page_with_total(page, total)
+            if not args.json and page.rows:
+                # CHAIN cells annotate the table; a failed chain read drops the
+                # cells, says so, and still prints the findings.
+                try:
+                    chains_by_slug, chains_by_id = _chain_keys_by_finding(
+                        client.get("attack-chain-links")
+                    )
+                except AssessError as exc:
+                    chain_read_error = str(exc)
 
-    if not isinstance(findings, list):
-        raise AssessError("finding list: expected a JSON array from the backend")
-
-    filtered = findings
-    if root_cause_slug:
-        # The dedicated group endpoint returns the complete root + sibling set,
-        # so its flattened JSON view still applies the common list filters here.
-        # The ordinary findings endpoint already owns these predicates; applying
-        # them again in the CLI creates a second, drift-prone source of truth.
-        filtered = _filter_group_rows(filtered, args)
-    limit = int(getattr(args, "limit", 100))
-    offset = int(getattr(args, "offset", 0))
-    if root_cause_slug:
-        page = page_from_complete(filtered, limit=limit, offset=offset)
-    else:
-        page = page_from_backend(
-            filtered,
-            limit=limit,
-            offset=offset,
-            used_lookahead=used_lookahead,
-        )
-    filtered = page.rows
-    report_page(
-        page,
-        noun="findings",
-        continuation_command=_continuation_command(
-            args, page.offset + len(page.rows)
-        ),
-        point_read_hint="`vigil assess finding get <slug>`",
-    )
-
-    if filtered:
-        warn_untrusted_data()
-
+    rows = page.rows
+    notice = {
+        "noun": "findings",
+        "continuation_command": _continuation_command(args, page.offset + len(rows)),
+        "point_read_hint": "`vigil assess finding get <slug>`",
+        "breakdown": by_severity,
+    }
     if args.json:
+        report_page(page, **notice)
+        if rows:
+            print(
+                _json_omitted_notice(root_cause_group=bool(getattr(args, "root_cause_slug", None))),
+                file=sys.stderr,
+            )
+            warn_untrusted_data()
         print(
             json.dumps(
-                [compact_finding_list_row(item) for item in filtered],
+                [compact_finding_list_row(item) for item in rows],
                 indent=2,
                 ensure_ascii=False,
             )
         )
         return
 
-    if not filtered:
+    # The table carries its own notice on stdout, above the rows and, when the
+    # page leaves matches out, again below them, so a reader that keeps only
+    # one end of the output still learns the listing is partial.
+    report_page(page, file=sys.stdout, **notice)
+    if rows:
+        warn_untrusted_data()
+    if not rows:
         print("No findings matched.")
         return
-
-    for item in filtered:
-        print(_finding_row(item))
+    if chain_read_error is not None:
+        print(
+            f"CHAIN cells omitted: the chain-link read failed ({chain_read_error}); "
+            "run `vigil assess chain list` for chain membership."
+        )
+    for item in rows:
+        finding_id = item.get("id")
+        keys = [
+            *chains_by_slug.get(str(item.get("slug") or ""), []),
+            *(chains_by_id.get(finding_id, []) if type(finding_id) is int else []),
+        ]
+        print(_finding_row(item, list(dict.fromkeys(keys))))
+    if page.has_more:
+        report_page(page, file=sys.stdout, **notice)

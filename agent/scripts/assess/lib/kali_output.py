@@ -77,6 +77,8 @@ class KaliResult:
     #   ``self_attributed``    — the tool applies them itself (the browser verb);
     #   ``skipped``            — a passive/DNS/L3-L4 tool that sends no HTTP to
     #                            the in-scope target, so none can ride;
+    #   ``not_applicable_offline`` — every executable is declared to make no
+    #                            target traffic (``which``, ``jsluice``, …);
     #   ``referenced_in_script`` — a script FILE, whose non-comment text
     #                              references every required header (a text scan,
     #                              not proof that each request carries it);
@@ -944,6 +946,139 @@ _REQUIRED_HEADER_SKIP = frozenset(
     }
 )
 
+# Tools that make no traffic to any assessment target: they locate, read or
+# analyse LOCAL files. ``which`` resolves a binary on PATH; ``jsluice`` parses
+# stored JS bodies; ``uro`` dedups a URL list; ``find`` walks the filesystem;
+# ``trufflehog filesystem`` scans stored bodies (its ``--verify`` calls the
+# credential issuer's API, never the target) while its other sources (``git``,
+# ``github``, ``s3``…) fetch remote data, so only ``filesystem`` is declared.
+# The value is ``None`` when every invocation is offline, else the subcommands
+# that are. A run whose every executable is declared here, or is a text tool the
+# request classifier already knows cannot request (``scope._NON_REQUESTING_HEADS``),
+# needs no attribution header and records ``required_header_status``
+# ``not_applicable_offline``. Distinct from ``_REQUIRED_HEADER_SKIP``, whose tools
+# DO send traffic (to archives, resolvers, or the target below HTTP).
+_NO_TARGET_TRAFFIC_TOOLS: dict[str, frozenset[str] | None] = {
+    "find": None,
+    "jsluice": None,
+    "trufflehog": frozenset({"filesystem"}),
+    "uro": None,
+    "which": None,
+}
+# Options with which an otherwise offline tool runs ANOTHER command, whose own
+# traffic this classification cannot see.
+_CHILD_COMMAND_OPTIONS: dict[str, frozenset[str]] = {
+    "find": frozenset({"-exec", "-execdir", "-ok", "-okdir"}),
+}
+
+
+def _strip_env_assignments(words: list[str]) -> list[str]:
+    index = 0
+    while index < len(words) and "=" in words[index] and words[index].split("=", 1)[0].isidentifier():
+        index += 1
+    return words[index:]
+
+
+def _simple_commands(cmd: list[str], *, depth: int = 0) -> tuple[list[list[str]], bool]:
+    """Every simple command ``cmd`` runs, with launchers unwrapped and every
+    ``sh -c`` / ``bash -c`` body lexed into its sub-commands.
+
+    The second value is True when the shape cannot be read reliably (an
+    unbalanced quote, nesting too deep); callers then treat the run as unknown.
+    """
+    if depth > 8:
+        return [], True
+    words = _strip_env_assignments(
+        scope_lib._unwrap_launcher_argv(_strip_env_assignments([str(token) for token in cmd]))
+    )
+    if not words:
+        return [], False
+    script_index = _shell_script_index(words)
+    if script_index is None:
+        return [words], False
+    segments, ambiguous = scope_lib._shell_command_segments(words[script_index])
+    if ambiguous:
+        return [], True
+    commands: list[list[str]] = []
+    for segment in segments:
+        nested, nested_ambiguous = _simple_commands(segment, depth=depth + 1)
+        if nested_ambiguous:
+            return [], True
+        commands.extend(nested)
+    return commands, False
+
+
+def _command_makes_no_target_traffic(words: list[str]) -> bool:
+    head = Path(words[0]).name.lower()
+    if head in scope_lib._NON_REQUESTING_HEADS:
+        return True
+    if head not in _NO_TARGET_TRAFFIC_TOOLS:
+        return False
+    if any(word in _CHILD_COMMAND_OPTIONS.get(head, frozenset()) for word in words[1:]):
+        return False
+    modes = _NO_TARGET_TRAFFIC_TOOLS[head]
+    if modes is None:
+        return True
+    subcommand = next((word for word in words[1:] if not word.startswith("-")), "")
+    return subcommand in modes
+
+
+def argv_makes_no_target_traffic(cmd: list[str]) -> bool:
+    """True when every executable ``cmd`` runs is declared to make no target traffic.
+
+    Positive-only: an unreadable shape, a dynamic head (``$TOOL``), or any
+    executable not declared offline (an interpreter, curl, an unknown binary)
+    makes the whole run not provably offline.
+    """
+    commands, ambiguous = _simple_commands(cmd)
+    if ambiguous or not commands:
+        return False
+    return all(_command_makes_no_target_traffic(words) for words in commands)
+
+
+def recorded_target_facing(cmd: list[str], *, recognized: bool) -> bool | str:
+    """``target_facing`` as a command-run audit row records it.
+
+    ``True`` when the execution policy recognized target traffic. Otherwise
+    ``"unknown"`` when the run executes program code whose destinations the
+    argv does not show — a script file or inline program under an interpreter
+    or shell (``python3 login.py``, ``node -e …``, ``bash probe.sh``), a dynamic
+    head, or a shell body that cannot be lexed — unless every executable is
+    declared offline; else ``False`` ("not recognized as target-facing").
+
+    Only the audit record carries ``"unknown"``: the execution policy's own
+    boolean, which gates the scope ``hosts`` requirement and the cross-lane
+    advisory, stays a positive signal.
+    """
+    if recognized:
+        return True
+    commands, ambiguous = _simple_commands(cmd)
+    if ambiguous:
+        return "unknown"
+    for words in commands:
+        head = Path(words[0]).name.lower()
+        if head.startswith(("$", "`")) or head in scope_lib._SCRIPT_FILE_EXECUTORS:
+            return "unknown"
+    return False
+
+
+def audited_execution_policy(
+    cmd: list[str], policy: dict | None
+) -> dict | None:
+    """The execution policy as the audit row's ``notes`` record it.
+
+    A copy whose ``target_facing`` is :func:`recorded_target_facing`; a policy
+    without that key (a refusal record) is returned unchanged.
+    """
+    if policy is None or "target_facing" not in policy:
+        return policy
+    return {
+        **policy,
+        "target_facing": recorded_target_facing(
+            cmd, recognized=bool(policy["target_facing"])
+        ),
+    }
+
 
 def _existing_header_names(cmd: list[str]) -> set[str]:
     """Lower-cased header names already present as ``-H`` values in ``cmd``.
@@ -1225,6 +1360,9 @@ def _apply_required_headers(
                         to inject here and nothing to warn about.
       * ``"skipped"`` — passive/archive/DNS/L3-L4 tool that does not send HTTP
                         to the in-scope target; nothing applied, no warning.
+      * ``"not_applicable_offline"`` — every executable the argv runs is
+                        declared to make no target traffic
+                        (``_NO_TARGET_TRAFFIC_TOOLS``); nothing applied, no warning.
       * ``"injected"``— at least one header was appended, either as ``-H "Name:
                         Val"`` (curl-shaped tools) or via a non-``-H`` tool's own
                         flag (whatweb ``--header`` / nikto ``-Add-header`` / arjun
@@ -1249,6 +1387,8 @@ def _apply_required_headers(
     """
     if not headers:
         return "noop"
+    if classify_passive and argv_makes_no_target_traffic(cmd):
+        return "not_applicable_offline"
 
     script_idx = _wrapped_shell_script_index(cmd)
     if script_idx is not None:

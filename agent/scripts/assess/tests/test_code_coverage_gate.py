@@ -125,12 +125,14 @@ def _setup_env(
                 payload = dict(readiness or _readiness())
                 payload["target_phase"] = path.rsplit("=", 1)[-1]
                 return payload
-            if path == "findings":
+            if path == "findings?view=list":
                 return findings if findings is not None else [_ACTIVE_CODE_FINDING]
             if path == "code/coverage":
                 return coverage
             if path.startswith("dispatch-decisions"):
                 return list(decisions or [])
+            if path == "report-readiness":
+                return {"ready": True, "blockers": [], "report_qc": {"required": False, "status": "missing", "issue": ""}}
             return []
 
         def record_decision(self, payload):

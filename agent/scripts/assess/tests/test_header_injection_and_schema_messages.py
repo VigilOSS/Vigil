@@ -527,6 +527,22 @@ def test_surface_coverage_ready() -> None:
     )
 
 
+def test_surface_coverage_with_no_surfaces_says_there_was_nothing_to_check() -> None:
+    ready, ok_lines, blockers = coverage_checks.render_surface_coverage(
+        {"ready": True, "surface_count": 0}
+    )
+    assert ready is True and blockers == []
+    assert ok_lines[0].startswith("surface coverage: nothing to check")
+    assert "0 surfaces recorded" in ok_lines[0]
+    assert "vigil assess record-surface" in ok_lines[0]
+
+
+def test_surface_coverage_ready_counts_the_surfaces_it_checked() -> None:
+    assert coverage_checks.render_surface_coverage({"ready": True, "surface_count": 4}) == (
+        True, ["surface coverage: ok (4 surfaces checked)"], []
+    )
+
+
 def test_surface_coverage_blocker_lines() -> None:
     ready, ok_lines, blockers = coverage_checks.render_surface_coverage(
         {

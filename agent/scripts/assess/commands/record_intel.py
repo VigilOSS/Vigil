@@ -111,7 +111,8 @@ def _refuse_unknown_options(unknown: list[str], tokens: list[str]) -> None:
             file=sys.stderr,
         )
     print(
-        f"Run `vigil assess contract intel record {label}` for the full contract.",
+        f"Run `vigil assess contract intel record {label}` for the contract; "
+        f"`--field <name>` prints one field in full.",
         file=sys.stderr,
     )
     sys.exit(2)

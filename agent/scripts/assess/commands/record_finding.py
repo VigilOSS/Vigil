@@ -18,18 +18,23 @@ from assess.lib.client import (
 from assess.lib.code_record_input import fail
 from assess.lib.code_snapshot_binding import fill_binding
 from assess.lib.config import load_config
-from assess.lib.contracts import common_mistake_hints, render_contract
+from assess.lib.contract_sections import refusal_sections
+from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, common_mistake_hints
 from assess.lib.exploit_targets import is_source_bound
 from assess.lib.findings import finding_lock_path, next_finding_id
 from assess.lib.locking import file_lock
 from assess.lib.next_test import load_next_test_file
 from assess.lib.schema_validation import collect_validation_errors, load_schema
+from assess.lib.vocabulary import word_folder
 from assess.lib.evidence_ref import evidence_ref_exists, is_single_path_shaped
+from assess.lib.write_envelope import print_write_envelope_notes
 
 
 # The confirmation-mode vocabulary, mirroring the backend request models and
 # `finding update --evidence-type`. Nullable by design — see the flag help.
 _EVIDENCE_TYPES = ("network-confirmed", "code-inferred", "theoretical", "informational")
+# Folded the way the backend's `_EvidenceType` folds (`Network_Confirmed`).
+_fold_evidence_type = word_folder(_EVIDENCE_TYPES)
 
 
 def register(subparsers) -> None:
@@ -87,9 +92,22 @@ def register(subparsers) -> None:
              "historical rows with missing or invalid authors must first use finding bind-author.",
     )
     p.add_argument(
+        "--code-repo-id",
+        dest="code_repo_id",
+        type=int,
+        default=None,
+        help="Analysis repository (the repo_id in your Code Source Identity block) to derive "
+             "a file: finding's provenance.code_snapshot from. Needed only when the "
+             "engagement holds several active analysis repositories. Reference repositories "
+             "are never derived automatically; naming one here binds it with a warning that "
+             "it carries no coverage obligation. An "
+             "authored provenance.code_snapshot still wins and must name the same repository.",
+    )
+    p.add_argument(
         "--evidence-type",
         dest="evidence_type",
         default="",
+        type=_fold_evidence_type,
         choices=_EVIDENCE_TYPES,
         help=(
             "C44: classify this finding's confirmation mode, the same vocabulary "
@@ -127,7 +145,11 @@ def register(subparsers) -> None:
     p.add_argument(
         "--quiet",
         action="store_true",
-        help="Suppress non-error warnings and duplicate advisories; the canonical slug remains on stdout.",
+        help=(
+            "Suppress non-error warnings and advisories (duplicate and write advisories); "
+            "each value the backend derived is still named on stderr, and the canonical "
+            "slug remains on stdout."
+        ),
     )
     p.set_defaults(func=run)
 
@@ -141,6 +163,7 @@ _FINDING_SCHEMA = load_schema("finding-record.schema.json")
 # something — a payload that opened at `confirmed` used to clear client
 # validation and come back an opaque 422.
 _RECORD_TIME_VERIFICATION_STATUS = "unreviewed"
+_fold_record_status = word_folder((_RECORD_TIME_VERIFICATION_STATUS, *VERIFICATION_TRANSITION_STATUSES))
 
 
 def _require_atomic_candidate_response(
@@ -228,6 +251,10 @@ def _normalize_payload(
     existing: dict | None = None,
 ) -> dict:
     normalized = dict(payload)
+    if isinstance(normalized.get("evidence_type"), str):
+        normalized["evidence_type"] = _fold_evidence_type(normalized["evidence_type"])
+    if isinstance(normalized.get("verification_status"), str):
+        normalized["verification_status"] = _fold_record_status(normalized["verification_status"])
     normalized["slug"] = candidate_slug
     normalized.setdefault("source_name", agent_name)
     normalized.setdefault("severity", "medium")
@@ -564,8 +591,13 @@ def _require_authoring_dispatch(
                 raise
             dispatch = None
     if not isinstance(dispatch, dict) or dispatch.get("agent_id") != author:
+        # Registering a dispatch is the operator's act. A specialist that ran
+        # `agent start` itself would mint an author identity nobody dispatched.
         recovery = (
-            "Register the author with `vigil assess agent start --agent-id <id> --role <role> ...` before recording."
+            "A specialist passes the agent_id from its Runtime Identity block verbatim; "
+            "one without a Runtime Identity agent_id stops and returns to the operator "
+            "instead of registering itself. The operator registers each dispatch with "
+            "`vigil assess agent start` before its specialist records."
             if existing is None else
             "Run `vigil assess finding bind-author` once to repair this invalid historical binding."
         )
@@ -580,8 +612,10 @@ def _guard_finding_clobber(payload: dict, *, candidate_slug: str, base_url: str,
     """Refuse a net-new record that would silently overwrite a reported/active
     finding under a different slug (I-21). The backend match is the authoritative
     backstop; this fails fast before the POST with the same guidance."""
+    # The list projection carries the dedup tuple and workflow status this
+    # compares, without every finding's details and evidence.
     with AssessmentClient(base_url, engagement_key) as client:
-        findings = client.get("findings")
+        findings = client.get("findings?view=list")
     if not isinstance(findings, list):
         return
     clobbered = _find_clobbered_finding(
@@ -619,10 +653,18 @@ def _print_backend_clobber_refusal(exc: AssessError) -> bool:
 
 def _print_duplicate_advisories(response: object, *, quiet: bool) -> None:
     """Surface advisory-only duplicate matches returned by the backend."""
-    if quiet or not isinstance(response, dict):
+    if not isinstance(response, dict):
         return
     advisories = response.get("duplicate_advisories")
     if not isinstance(advisories, list):
+        return
+    if quiet:
+        if advisories:
+            print(
+                f"finding record: {len(advisories)} duplicate advisory(ies) not printed "
+                "under --quiet; a record without --quiet prints each sibling and its command",
+                file=sys.stderr,
+            )
         return
     for advisory in advisories:
         if not isinstance(advisory, dict):
@@ -630,27 +672,38 @@ def _print_duplicate_advisories(response: object, *, quiet: bool) -> None:
         detail = advisory.get("detail")
         if not isinstance(detail, str) or not detail.strip():
             slug = str(advisory.get("slug") or "unknown finding")
-            matched_on = str(advisory.get("matched_on") or "an existing submission")
+            matched_on = str(advisory.get("matched_on") or "an existing finding")
             detail = f"{slug} matches {matched_on}."
         print(f"finding record: duplicate advisory — {detail}", file=sys.stderr)
 
 
-def _fill_derivable_provenance(payload: dict, *, base_url: str, engagement_key: str) -> None:
+def _fill_derivable_provenance(
+    payload: dict, *, base_url: str, engagement_key: str, repo_id: int | None = None
+) -> None:
     """Derive ``provenance.code_snapshot`` for a file finding that authored none.
 
     The binding is the repository's own current identity, so the author was only
     ever transcribing it out of Code Source Identity — and a transcription error
     reads as a stale binding rather than as the mistake it is. An authored
     binding is left exactly as written, stale included, so the currency gate
-    still sees what the author claimed.
+    still sees what the author claimed; ``--code-repo-id`` naming a different
+    repository than that binding is a contradiction and is refused.
     """
     if not is_source_bound(str(payload.get("canonical_location", ""))):
         return
     provenance = payload["provenance"]
-    if provenance.get("code_snapshot"):
+    authored = provenance.get("code_snapshot")
+    if authored:
+        authored_repo = authored.get("repo_id") if isinstance(authored, dict) else None
+        if repo_id is not None and authored_repo != repo_id:
+            fail(
+                "finding record",
+                f"--code-repo-id {repo_id} contradicts the authored "
+                f"provenance.code_snapshot (repo_id {authored_repo!r}); drop one of them.",
+            )
         return
     with AssessmentClient(base_url, engagement_key) as client:
-        fill_binding(provenance, client, operation="finding record")
+        fill_binding(provenance, client, repo_id=repo_id, operation="finding record")
 
 
 def _park_pending_runtime_proof(
@@ -695,35 +748,34 @@ _VALIDATION_FAILURE_HEADER = "finding payload invalid after helper defaults:"
 
 
 def _report_validation_errors(payload: dict, errors: list[str]) -> None:
-    """Print the refusal, the contract, and then the refusal again.
+    """Print the contract lines for the offending fields, then the errors.
 
-    The contract is the reference an author needs, and at ~340 lines it is also
-    the reason nobody read the three lines that mattered: the failure landed on
-    lines 1-3 of a 349-line block, so ``tail -20`` showed the end of the allowed
-    detail-key table and nothing about what was wrong. Everything was already on
-    stderr, so this is purely ORDERING — the compact failure is re-emitted as the
-    LAST thing written, where a truncated view actually looks.
+    The refusal owes the author what is wrong and the part of the contract that
+    fixes it. The whole verb renders to ~48 KB, and printing it after every
+    refusal buried the lines that mattered; the pointer names the command that
+    prints any other field. The errors go last so a truncated tail still shows
+    them. The sections are help and the errors are the refusal, so a fault while
+    rendering the sections is named in one line and the errors still print.
     """
-
-    def _print_failure() -> None:
-        print(_VALIDATION_FAILURE_HEADER, file=sys.stderr)
-        for error in errors:
-            print(f"  - {error}", file=sys.stderr)
+    try:
+        sections = refusal_sections("finding record", errors)
+    except Exception as exc:  # noqa: BLE001 - the errors below must still print
+        sections = (
+            f"(the contract sections for these fields could not be rendered: {exc!r}; "
+            "read them with `vigil assess contract finding record --field <name>`)"
+        )
+    print(sections, file=sys.stderr)
+    print("", file=sys.stderr)
 
     hints = common_mistake_hints("finding record", payload)
-    _print_failure()
-
     if hints:
         print("Common legacy-field fixes:", file=sys.stderr)
         for hint in hints:
             print(f"  - {hint}", file=sys.stderr)
 
-    print("", file=sys.stderr)
-    print("Run `vigil assess contract finding record` for the canonical helper contract.", file=sys.stderr)
-    print("", file=sys.stderr)
-    print(render_contract("finding record"), file=sys.stderr)
-    print("", file=sys.stderr)
-    _print_failure()
+    print(_VALIDATION_FAILURE_HEADER, file=sys.stderr)
+    for error in errors:
+        print(f"  - {error}", file=sys.stderr)
     sys.exit(1)
 
 
@@ -791,7 +843,10 @@ def run(args) -> None:
             existing=existing_update,
         )
         _fill_derivable_provenance(
-            payload, base_url=cfg.base_url, engagement_key=cfg.engagement_key
+            payload,
+            base_url=cfg.base_url,
+            engagement_key=cfg.engagement_key,
+            repo_id=getattr(args, "code_repo_id", None),
         )
         validation_errors = collect_validation_errors(payload, _FINDING_SCHEMA)
         if validation_errors:
@@ -862,6 +917,9 @@ def run(args) -> None:
         _print_duplicate_advisories(
             response,
             quiet=getattr(args, "quiet", False),
+        )
+        print_write_envelope_notes(
+            "finding record", response, quiet=getattr(args, "quiet", False)
         )
 
     # Emit event (outside lock)

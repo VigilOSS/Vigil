@@ -67,14 +67,11 @@ def test_paginated_routes_are_marked_from_the_paging_tables(capsys) -> None:
 
 _ASSESSMENT_PREFIX = "/engagements/{engagement_key}/assessment/"
 
-# One sentinel route per router that serves assessment reads. `assessment.py`
-# carries `assessment_operator` and `assessment_proof_work` through its own
-# nested `include_router`, so mounting those two again here only duplicates
-# their operation ids; what the invariant needs is proof that they ARRIVE. A
-# router that stops being reachable — or an include FastAPI stops resolving —
-# now fails this file loudly instead of quietly shrinking the ground the
-# registration check below walks. The operator router is the one that mattered:
-# `dispatch-decisions` survived a sweep of thirteen unregistered routes.
+# One sentinel route per router that serves assessment reads; `main.py` mounts
+# each of them on the app. A router the probe below stops mounting fails this
+# file loudly instead of quietly shrinking the ground the registration check
+# walks. The operator router is the one that mattered: `dispatch-decisions`
+# survived a sweep of thirteen unregistered routes.
 _ROUTER_SENTINEL_ROUTES = (
     "findings",             # app.api.assessment
     "code/files",           # app.api.code_analysis
@@ -88,9 +85,9 @@ def _backend_assessment_get_routes() -> dict[str, dict[str, dict]]:
 
     The routers are the authority on which reads bound their page and how far a
     caller may widen it. Mounting them on a throwaway app and reading the
-    generated OpenAPI document resolves nested ``include_router`` calls — which
-    is how the operator and proof-work routers arrive — and reports each
-    ``Query()`` constraint without reaching into FastAPI internals.
+    generated OpenAPI document reports each ``Query()`` constraint without
+    reaching into FastAPI internals. The probe mounts the same assessment-read
+    routers ``main.py`` does.
     ``test_the_paging_invariant_can_see_every_router_that_serves_reads`` holds
     that reachability to account. The assess suite runs on the backend venv, so
     the routers are importable here.
@@ -98,11 +95,14 @@ def _backend_assessment_get_routes() -> dict[str, dict[str, dict]]:
     from fastapi import FastAPI
 
     from app.api.assessment import router as assessment_router
+    from app.api.assessment_operator import router as assessment_operator_router
+    from app.api.assessment_proof_work import router as assessment_proof_work_router
     from app.api.code_analysis import router as code_analysis_router
 
     probe = FastAPI()
-    probe.include_router(assessment_router)
-    probe.include_router(code_analysis_router)
+    for router in (assessment_router, assessment_operator_router,
+                   assessment_proof_work_router, code_analysis_router):
+        probe.include_router(router)
     routes: dict[str, dict[str, dict]] = {}
     for path, operations in probe.openapi()["paths"].items():
         operation = operations.get("get")

@@ -163,7 +163,51 @@ def test_katana_carries_omit_response_and_body_flags(monkeypatch, tmp_path):
     # I-4: -or (omit response) + -ob (omit body) keep the crawl off disk.
     assert "-or" in katana_runs[0]
     assert "-ob" in katana_runs[0]
-    assert "-fs" not in katana_runs[0]
+
+
+def _crawl(monkeypatch, tmp_path, *, hosts, extra_args=""):
+    _scope(tmp_path, hosts=hosts)
+    hosts_file = _hosts_file(tmp_path, ["app.example.com"])
+    captured: list[list[str]] = []
+    live_rows = {"80,443": ['{"url":"https://app.example.com","input":"app.example.com"}']}
+    _install_seams(monkeypatch, tmp_path, captured=captured, live_rows=live_rows)
+    web_discovery.run(_args(
+        tmp_path, hosts_file, runtime="container", no_crawl=False, katana_extra_args=extra_args
+    ))
+    return next(c for c in captured if c and c[0] == "katana")
+
+
+def _crawl_follows(katana: list[str], url: str) -> bool:
+    import re
+    field_scope = katana[katana.index("-fs") + 1]
+    host = url.split("://", 1)[1].split("/", 1)[0]
+    in_field = host == "app.example.com" if field_scope == "fqdn" else bool(re.search(field_scope, host))
+    return in_field and bool(re.search(katana[katana.index("-cs") + 1], url))
+
+
+def test_the_crawl_does_not_follow_a_sibling_subdomain_of_a_bare_host_scope(monkeypatch, tmp_path):
+    katana = _crawl(monkeypatch, tmp_path, hosts=["app.example.com"])
+
+    assert katana[katana.index("-fs") + 1] == "fqdn"
+    assert _crawl_follows(katana, "https://app.example.com/account")
+    assert not _crawl_follows(katana, "https://cdn.example.com/js/fp.js")
+
+
+def test_the_crawl_follows_the_subdomains_a_wildcard_scope_grants(monkeypatch, tmp_path):
+    katana = _crawl(monkeypatch, tmp_path, hosts=["*.example.com"])
+
+    assert _crawl_follows(katana, "https://cdn.example.com/js/app.js")
+    assert not _crawl_follows(katana, "https://cdn.example.org/js/app.js")
+
+
+def test_katana_extra_args_scope_flags_replace_the_fence_with_a_warning(
+    monkeypatch, tmp_path, capsys
+):
+    katana = _crawl(monkeypatch, tmp_path, hosts=["app.example.com"], extra_args="-fs rdn")
+
+    assert "-cs" not in katana
+    assert katana.count("-fs") == 1
+    assert "own the crawl boundary" in capsys.readouterr().err
 
 
 def test_katana_does_not_inject_scope_derived_crawl_exclusions(monkeypatch, tmp_path):
@@ -227,10 +271,8 @@ def test_rate_cap_unset_injects_safe_crawl_default(monkeypatch, tmp_path):
     assert "-rl" in katana_runs[0]
     assert katana_runs[0][katana_runs[0].index("-rl") + 1] == "10"
     assert katana_runs[0][katana_runs[0].index("-rlm") + 1] == "600"  # 10*60
-    # JS-aware + deep crawl defaults are baked in without a scope-derived
-    # outbound crawl restriction.
+    # JS-aware + deep crawl defaults are baked in.
     assert "-jsl" in katana_runs[0]
-    assert "-fs" not in katana_runs[0]
     assert katana_runs[0][katana_runs[0].index("-d") + 1] == "4"  # fleet-crawl depth default
 
 

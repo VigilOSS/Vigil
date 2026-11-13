@@ -452,7 +452,7 @@ _BUCKETS: tuple[tuple[str, int, frozenset[str], tuple[str, ...]], ...] = (
     ),
     (
         "trust_surface",
-        # NEW (review-and-merge): adversarial-mindset rule 2 — uploads,
+        # Trust delegation (`agent/rules/adversarial-mindset.md` §2) — uploads,
         # webhooks, password-reset, OAuth callbacks, exports, imports, file
         # download/preview/render are all places where the server trusts
         # client-supplied content type, filename, or token. Path-only

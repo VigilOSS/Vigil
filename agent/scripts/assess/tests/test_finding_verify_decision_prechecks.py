@@ -280,31 +280,6 @@ def test_a_kill_check_outside_its_range_fails_before_the_post(
     assert fake.posts == []
 
 
-def test_a_kill_with_no_authored_kill_fields_names_both_before_the_post(
-    tmp_path, monkeypatch, capsys
-) -> None:
-    """The fields may already be stored on the finding, so this warns rather than
-    refusing — but the roster has to arrive before the round trip, not as a 400."""
-    counter = _write(tmp_path, "counter-check.json", _COUNTER_CHECK)
-    args, fake = _args(
-        tmp_path,
-        monkeypatch,
-        ["verify", "VA-1", "VA-2", "--status", "false_positive", "--reason", "falsified",
-         "--counter-check-file", counter],
-    )
-
-    verify_finding.run(args)
-
-    err = capsys.readouterr().err
-    assert "details.kill_reason" in err
-    assert "details.kill_check" in err
-    assert "1 to 5" in err
-    # The settling-test rule, which an agent otherwise meets on its second attempt.
-    assert "required_followup" in err
-    assert "blocked" in err
-    assert len(fake.posts) == 2
-
-
 def test_a_complete_kill_payload_is_silent(tmp_path, monkeypatch, capsys) -> None:
     counter = _write(tmp_path, "counter-check.json", _COUNTER_CHECK)
     args, fake = _args(
@@ -322,3 +297,100 @@ def test_a_complete_kill_payload_is_silent(tmp_path, monkeypatch, capsys) -> Non
 
     assert "kill_reason" not in capsys.readouterr().err
     assert len(fake.posts) == 1
+
+
+# -- What the backend derives, the CLI neither demands nor hides ---------------
+
+
+class _EnvelopeClient(_FakeClient):
+    """Answers each verify with the envelope's derived values and advisories."""
+
+    def post(self, endpoint: str, payload: dict) -> dict:
+        super().post(endpoint, payload)
+        return {
+            "finding": {"slug": endpoint.split("/")[1]},
+            "derived": [{
+                "field": "details.kill_reason",
+                "value": "falsified",
+                "derived_from": "reason_text",
+                "detail": "details.kill_reason was not supplied; stored the value of reason_text",
+            }],
+            "advisories": [{
+                "kind": "killed_finding_settling_test_outstanding",
+                "detail": "details.required_followup names a settling test.",
+            }],
+        }
+
+
+def test_a_variance_file_carrying_only_its_reason_reaches_the_backend(
+    tmp_path, monkeypatch
+) -> None:
+    """The band, chosen severity, verifier and receipt come from the verification."""
+    confirm = _write(tmp_path, "confirm-check.json", _CONFIRM_CHECK)
+    variance = _write(tmp_path, "variance.json", {"reason": _SEVERITY_VARIANCE["reason"]})
+    args, fake = _args(
+        tmp_path,
+        monkeypatch,
+        ["verify", "VA-1", "--status", "confirmed", "--reason", "r",
+         "--proof-receipt-id", "17", "--confirm-check-file", confirm,
+         "--severity-variance-file", variance],
+    )
+
+    verify_finding.run(args)
+
+    assert fake.posts[0][1]["severity_variance"] == {"reason": _SEVERITY_VARIANCE["reason"]}
+
+
+def test_a_status_with_its_structured_check_needs_no_reason(tmp_path, monkeypatch) -> None:
+    """The backend records the confirm check's statement as the reason, so the
+    CLI sends no empty reason_text of its own."""
+    confirm = _write(tmp_path, "confirm-check.json", _CONFIRM_CHECK)
+    args, fake = _args(
+        tmp_path,
+        monkeypatch,
+        ["verify", "VA-1", "--status", "confirmed", "--proof-receipt-id", "17",
+         "--confirm-check-file", confirm],
+    )
+
+    verify_finding.run(args)
+
+    assert "reason_text" not in fake.posts[0][1]
+
+
+@pytest.mark.parametrize(
+    ("spelling", "canonical"),
+    [("Blocked", "blocked"), ("pending-runtime-proof", "pending_runtime_proof"),
+     ("FALSE POSITIVE", "false_positive")],
+)
+def test_a_status_in_any_case_or_separator_resolves_like_the_backend(
+    tmp_path, monkeypatch, spelling, canonical
+) -> None:
+    args, _fake = _args(tmp_path, monkeypatch, ["verify", "VA-1", "--status", spelling])
+
+    assert args.verification_status == canonical
+
+
+def test_a_status_outside_the_vocabulary_is_still_refused(tmp_path, monkeypatch) -> None:
+    with pytest.raises(SystemExit):
+        _args(tmp_path, monkeypatch, ["verify", "VA-1", "--status", "settled"])
+
+
+def test_what_the_backend_derived_and_advised_is_named_on_stderr(
+    tmp_path, monkeypatch, capsys
+) -> None:
+    counter = _write(tmp_path, "counter-check.json", _COUNTER_CHECK)
+    fake = _EnvelopeClient()
+    args, _ = _args(
+        tmp_path,
+        monkeypatch,
+        ["verify", "VA-1", "--status", "false_positive", "--reason", "falsified",
+         "--counter-check-file", counter],
+    )
+    monkeypatch.setattr(verify_finding, "AssessmentClient", lambda *a, **k: fake)
+
+    verify_finding.run(args)
+
+    err = capsys.readouterr().err
+    assert "derived details.kill_reason" in err
+    assert "stored the value of reason_text" in err
+    assert "advisory [killed_finding_settling_test_outstanding]" in err

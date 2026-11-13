@@ -1,7 +1,8 @@
 """Stable CLI contract metadata for helper-owned assessment commands."""
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+import difflib
 import argparse
 import functools
 import json
@@ -42,12 +43,21 @@ from .contract_registry import (
     CODE_REPO_ROLES as CODE_REPO_ROLES,
     CODE_SKIP_REASONS as CODE_SKIP_REASONS,
     CommandContract,
+    ContractVariant,
+    GATED_DECISION_KINDS as GATED_DECISION_KINDS,
     DEPENDENCY_ANALYSIS_GAPS as DEPENDENCY_ANALYSIS_GAPS,
     DISPATCH_FINDING_SLUGS_WRITE as DISPATCH_FINDING_SLUGS_WRITE,
+    DISPATCH_MODES_BY_ROLE as DISPATCH_MODES_BY_ROLE,
     FINDING_PATCH_FIELDS as FINDING_PATCH_FIELDS,
     FINDING_SEVERITIES as FINDING_SEVERITIES,
     FINDING_WORKFLOW_STATUSES as FINDING_WORKFLOW_STATUSES,
     FRAMEWORK_REGISTRATION_KINDS as FRAMEWORK_REGISTRATION_KINDS,
+    KALI_AUDIT_FIELDS as KALI_AUDIT_FIELDS,
+    KALI_BLOCKING_TIMEOUT_FIELD,
+    KALI_AGENT_ID_FIELD,
+    KALI_JOB_AGENT_FIELD,
+    KALI_JOB_NOTES,
+    KALI_JOB_TIMEOUT_FIELD,
     KALI_MAINT_VERBS as KALI_MAINT_VERBS,
     KALI_TARGET_VERBS as KALI_TARGET_VERBS,
     KALI_VERBS as KALI_VERBS,
@@ -60,10 +70,8 @@ from .contract_registry import (
     VERIFICATION_TRANSITION_STATUSES as VERIFICATION_TRANSITION_STATUSES,
     _CONTRACTS,
     _DEFAULT_DISPATCH_MODE,
-    _DISPATCH_MODE_BY_ROLE,
     _KALI_COMMON_MISTAKES,
     _KALI_COMMON_NOTES,
-    _INLINE_DOCUMENTED_NAMESPACES,
     _NAMESPACE_PARENTS,
     _NAMESPACE_ROOT_META,
     _RAW_ENDPOINT_RULES,
@@ -77,7 +85,7 @@ def default_dispatch_mode_for_role(role: str | None) -> str:
     insensitive so ``Vulnerability-Analyst`` resolves like the canonical name.
     """
     role_key = str(role or "").strip().lower()
-    return _DISPATCH_MODE_BY_ROLE.get(role_key, _DEFAULT_DISPATCH_MODE)
+    return DISPATCH_MODES_BY_ROLE.get(role_key, (_DEFAULT_DISPATCH_MODE,))[0]
 
 
 _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = ()
@@ -137,7 +145,7 @@ def _agent_skills_root() -> Path:
 class SpecialistDispatchContract:
     """Documentation mirror of specialist dispatch payloads for ``vigil assess agent start``.
 
-    Aligns with the Specialist Dispatch Contract table in ``agent/operator-core.md``.
+    Aligns with the Specialist Dispatch Contract section in ``agent/operator-core.md``.
     Use ``validate_specialist_dispatch_contract`` to lint a parsed JSON payload.
 
     The public operator contract accepts ``requested_model`` /
@@ -152,242 +160,6 @@ class SpecialistDispatchContract:
     requested_model: str | None = None
     requested_reasoning: str | None = None
     extras: dict[str, Any] = field(default_factory=dict)
-
-
-# C4a — technique-cage dispatch lint. A "technique cage" is a --task that caps a
-# specialist's depth before it has read anything — the doctrine's opposite of an
-# open-objective dispatch (see operator-core.md "Standing dispatch constraint": a
-# less-constrained specialist consistently out-finds a caged one). It takes two
-# shapes: a prescriptive step-by-step recipe, and a short themed objective whose
-# whole content is a list of bug families. The lint stays deliberately
-# CONSERVATIVE — it WARNs, never errors, and each shape needs co-occurring
-# signals, so it does not warning-fatigue on legitimately structured tasks. The
-# operative check is the Pre-Dispatch box in agent/operator-core-code.md; this is
-# the advisory that points at it.
-_CAGE_IMPERATIVE_VERBS: tuple[str, ...] = (
-    "test", "check", "verify", "try", "confirm", "validate", "attempt",
-    "send", "run", "fuzz", "enumerate", "probe", "inject", "exploit",
-    "brute", "bruteforce", "scan", "hit", "replay", "hunt",
-)
-
-# Roles whose dispatch legitimately NAMES a bug family, because the family is
-# already known: a verifier reproduces one finding, a variant hunter rotates one
-# parent class, a fuzzer drives one memory family, an exploit developer
-# weaponizes a confirmed bug, a report writer writes it up. The short-form signal
-# below must stay silent for them. Everything else — including an unknown or
-# absent role — is treated as a DISCOVERY dispatch, because that is the direction
-# that fails safe: `agent start`'s own packet advisory already restricts the lint
-# to discovery roles before calling, and it passes no role.
-_CAGE_NON_DISCOVERY_ROLES: frozenset[str] = frozenset(
-    {
-        "code-vuln-verifier",
-        "code-variant-hunter",
-        "code-fuzz-engineer",
-        "fuzzer",
-        "exploit-developer",
-        "report-writer",
-        "incident-verifier",
-    }
-)
-
-# A verification-shaped objective, by its opening word. Mirrors the gate
-# `agent start`'s packet advisory applies before it calls this lint
-# (`commands/agent.py` `_packet_advisories`), so the two cannot disagree about
-# what counts as verification work.
-_CAGE_VERIFICATION_OPENINGS: tuple[str, ...] = (
-    "verify", "reproduce", "rehearse", "confirm",
-)
-
-# A SHORT objective: at or below this many words there is no room for a surface,
-# an entry chain or a hypothesis — so two or more named bug families ARE the
-# whole objective. That is the cage in its most compact form, and it was the one
-# shape the structured-recipe signals could not see.
-_CAGE_SHORT_TASK_WORDS = 40
-
-# A step-list line: leading `1.` / `2)` numbering, or a `-` / `*` / `•` bullet.
-_CAGE_STEP_RE = re.compile(r"^\s*(?:\d+[.)]|[-*•])\s+")
-
-# An imperative-verb line: an optional leading number/bullet, then one of the
-# test-verbs at a word boundary.
-_CAGE_VERB_RE = re.compile(
-    r"^\s*(?:\d+[.)]\s*|[-*•]\s*)?(?:"
-    + "|".join(_CAGE_IMPERATIVE_VERBS)
-    + r")\b",
-    re.IGNORECASE,
-)
-
-
-def _detect_technique_cage(task: str, *, role: str = "") -> list[str]:
-    """Warn (never error) when a ``--task`` reads as a prescriptive technique cage.
-
-    Conservative by design — it must not warning-fatigue on legitimately
-    structured tasks. It detects three signals:
-
-      (i)   a numbered/bulleted STEP LIST — >=3 lines matching ``^\\s*\\d+[.)]``
-            or ``^\\s*[-*•]``;
-      (ii)  a run of IMPERATIVE test-verbs — >=3 lines starting (after any
-            leading number/bullet) with test/check/verify/try/confirm/validate/
-            attempt/send/run/fuzz/enumerate/...;
-      (iii) pre-named VULN-CLASS tokens from the canonical taxonomy
-            (``vuln_taxonomy.all_classes()`` — imported the way ``probe_args.py``
-            does, never a hardcoded parallel list).
-
-    It warns on either of two shapes.
-
-    LONG form: a STRUCTURED recipe (>=3 step-list lines (i) or >=3
-    imperative-verb lines (ii)) that also PRE-COMMITS to >=2 named bug classes
-    (iii) ON its recipe lines — the cage is "hunt these specific bugs, this way".
-    A structured imperative list that names NO bug to hunt (an orientation
-    checklist, or a confirmed-finding PoC / reproduction) is NOT a cage; neither
-    is a scope list with a single incidental class noun. Both stay quiet.
-
-    SHORT form: an UNSTRUCTURED objective of at most
-    ``_CAGE_SHORT_TASK_WORDS`` words that names >=2 bug classes on a DISCOVERY
-    dispatch. There is no recipe to detect because there is no room for one —
-    "Hunt SQL injection and XSS in the billing module files" is the whole task,
-    and it caps the specialist at two families while the backend's own
-    ``applicable_vuln_classes`` for those files asks for more. The brevity is
-    exactly what made it invisible to the long form. Verification, variant, fuzz,
-    exploit and report roles are excluded (``_CAGE_NON_DISCOVERY_ROLES``), as is
-    any objective that OPENS with a verification verb, because naming the class
-    is correct there.
-
-    Class tokens are matched with ``-`` relaxed to any run of hyphen, underscore
-    or whitespace, so natural prose ("path traversal") matches the canonical
-    ``path-traversal``. A class whose canonical spelling is an ABBREVIATION
-    (``sqli``, ``cmdi``, ``xxe``) is matched only as that abbreviation and as
-    whatever canonical token the prose happens to contain — no alias vocabulary
-    is maintained here, because a second parallel list would drift from
-    ``vuln_taxonomy``.
-
-    Returns zero or more short WARN strings, each pointing at the alternative:
-    ``vigil assess coverage --host <h> --for-dispatch``. WARN-ONLY — the caller
-    must NEVER fold these into ``errors``.
-    """
-    text = str(task or "")
-    if not text.strip():
-        return []
-    lines = text.splitlines()
-
-    step_lines = sum(1 for ln in lines if _CAGE_STEP_RE.match(ln))
-    verb_lines = sum(1 for ln in lines if _CAGE_VERB_RE.match(ln))
-
-    from assess.lib.vuln_taxonomy import all_classes
-
-    classes = tuple(all_classes())
-    # Canonical token, with `-` relaxed to any run of hyphen/underscore/space so
-    # prose spelling ("path traversal") reaches the canonical `path-traversal`.
-    # Derived from the taxonomy, never a second list.
-    class_patterns = {
-        cls: re.compile(
-            r"(?<![a-z0-9])"
-            + r"[-_\s]+".join(re.escape(part) for part in cls.split("-"))
-            + r"(?![a-z0-9])"
-        )
-        for cls in classes
-    }
-
-    def _classes_in(fragment: str) -> list[str]:
-        low = fragment.lower()
-        # Several canonical names contain a shorter one (`injection` inside
-        # `web-app-injection`, `sqli` inside `nosqli`), and the token boundary
-        # lets the shorter one match the longer spelling. Counting both would
-        # read ONE named family as two, which is the difference between a cage
-        # and a surface on the short-form threshold below. Resolved by POSITION,
-        # not by name: a class survives when at least one of its matches is not
-        # nested inside another class's match, so "prompt injection and SQL
-        # injection" still counts as two families while "web-app-injection"
-        # alone counts as one.
-        spans = {
-            cls: [match.span() for match in pattern.finditer(low)]
-            for cls, pattern in class_patterns.items()
-        }
-        spans = {cls: found for cls, found in spans.items() if found}
-
-        def nested(cls: str, span: tuple[int, int]) -> bool:
-            return any(
-                other != cls
-                and any(start <= span[0] and span[1] <= end for start, end in found)
-                for other, found in spans.items()
-            )
-
-        return sorted(
-            cls
-            for cls, found in spans.items()
-            if any(not nested(cls, span) for span in found)
-        )
-
-    def _names_a_class(fragment: str) -> bool:
-        return bool(_classes_in(fragment))
-
-    named_classes = _classes_in(text)
-    # Recipe lines (a step OR imperative-verb line) that THEMSELVES pre-name a
-    # specific bug class. A cage pre-commits the specialist to >=2 named bug
-    # classes inside a structured list. A structured imperative list that names
-    # no bug to hunt (an orientation checklist, a confirmed-finding PoC), or a
-    # scope list with one incidental class noun, is NOT a cage.
-    cage_lines = sum(
-        1 for ln in lines
-        if (_CAGE_STEP_RE.match(ln) or _CAGE_VERB_RE.match(ln)) and _names_a_class(ln)
-    )
-
-    signals: list[str] = []
-    if step_lines >= 3:
-        signals.append(f"a {step_lines}-item numbered/bulleted step list")
-    if verb_lines >= 3:
-        signals.append(f"{verb_lines} imperative test-verb lines")
-    if named_classes:
-        shown = ", ".join(named_classes[:4])
-        more = "" if len(named_classes) <= 4 else ", ..."
-        signals.append(f"pre-named vuln class(es): {shown}{more}")
-
-    # Warn on a STRUCTURED recipe (>=3 step lines or >=3 imperative-verb lines)
-    # that also pre-commits to >=2 named bug classes ON its recipe lines. The
-    # named-bug requirement is what separates a cage ("hunt these specific bugs")
-    # from a legitimate imperative checklist / confirmed-finding PoC that
-    # prescribes actions but names no bug to hunt.
-    has_structure = step_lines >= 3 or verb_lines >= 3
-    if has_structure and cage_lines >= 2:
-        return [
-            "task reads as a prescriptive technique cage ("
-            + "; ".join(signals)
-            + "). A step-by-step recipe caps a specialist's depth and costs real "
-            "severity — dispatch the surface + hard ROE + an OPEN objective and let "
-            "the specialist form its own hypotheses. To hand it the MEASURED "
-            "coverage picture (covered classes + OPEN gaps) instead of a script, "
-            "run `vigil assess coverage --host <h> --for-dispatch` and paste the "
-            "COVERAGE block into the dispatch."
-        ]
-
-    # SHORT form: no recipe to find because the whole objective IS the bug menu.
-    # A discovery dispatch of a few words naming two or more families caps the
-    # hunt at those families, below the backend's own applicable_vuln_classes
-    # floor for the same files — the shape that left a whole batch of items
-    # owing classes nobody had asked for.
-    if has_structure or len(named_classes) < 2:
-        return []
-    if str(role or "").strip().lower() in _CAGE_NON_DISCOVERY_ROLES:
-        return []
-    if text.strip().lower().startswith(_CAGE_VERIFICATION_OPENINGS):
-        return []
-    words = len(text.split())
-    if words > _CAGE_SHORT_TASK_WORDS:
-        return []
-
-    shown = ", ".join(named_classes[:4])
-    more = "" if len(named_classes) <= 4 else ", ..."
-    return [
-        "task reads as a prescriptive technique cage: a "
-        f"{words}-word objective whose entire content is {len(named_classes)} "
-        f"pre-named vuln class(es) ({shown}{more}) and no surface. A discovery "
-        "specialist hunts the families you named and stops, while the backend's "
-        "own applicable_vuln_classes for the same files asks for more — so the "
-        "classes you did not think of are the ones that go unreviewed. Name the "
-        "SURFACE and its ENTRY CHAINS and let the specialist choose the "
-        "families: `vigil assess coverage --host <h> --for-dispatch` renders the "
-        "measured web gap to paste in, and `vigil assess code-coverage "
-        "--cwe-matrix` shows which families the code lane has already covered."
-    ]
 
 
 def validate_specialist_dispatch_contract(
@@ -505,17 +277,6 @@ def validate_specialist_dispatch_contract(
                         "and pass the catalogue directory name"
                     )
 
-    # C4a: WARN-only technique-cage lint over the free-text task. NEVER appended
-    # to `errors` — a prescriptive task is a depth smell, not an invalid dispatch.
-    # The role is passed so the short-form signal stays silent on a verification,
-    # variant, fuzz, exploit or report dispatch, where naming the bug family is
-    # the point rather than a cap.
-    warnings.extend(
-        _detect_technique_cage(
-            str(payload.get("task") or ""), role=str(role_value or "")
-        )
-    )
-
     return errors, warnings
 
 
@@ -570,8 +331,8 @@ def _namespace_root_contract(parent: str) -> CommandContract:
         ),
         notes=(
             f"Cosmetic subcommand group: each action keeps its own argument parser. "
-            f"Read `vigil assess contract {parent} <action>` for the full per-action "
-            f"schema, examples, and common mistakes.",
+            f"`vigil assess contract {parent} <action>` prints one action's usage, "
+            f"fields and example.",
         ),
     )
 
@@ -656,19 +417,14 @@ def commands_by_phase(phase: str) -> list[CommandContract]:
     return sorted(matched, key=lambda c: c.name)
 
 
-def get_contract(name: str) -> CommandContract | None:
+def _base_contract(name: str) -> CommandContract | None:
+    """The contract registered or built under exactly ``name`` (no variant)."""
     if name.startswith("intel record "):
         # `intel record <type>` is the three-token per-type intel contract.
         # Strip the fixed `intel record ` prefix (partition on the first space
         # would wrongly split "intel" from "record <type>").
         intel_type = name[len("intel record "):]
         return _record_intel_contract(intel_type)
-    for parent in sorted(_INLINE_DOCUMENTED_NAMESPACES, key=len, reverse=True):
-        # Longest prefix first so `kali job start` resolves to `kali job`, not
-        # to the `kali` dispatcher. Recurses once to reach dynamically-built
-        # parents (`kali job` is composed by _kali_verb_contract, not stored).
-        if name.startswith(parent + " "):
-            return get_contract(parent)
     if name in _NAMESPACE_PARENTS:
         return _namespace_root_contract(name)
     if name == "kali":
@@ -689,85 +445,676 @@ def get_contract(name: str) -> CommandContract | None:
     return _CONTRACTS.get(name)
 
 
+def _variant_parent(name: str) -> tuple[CommandContract, str] | None:
+    """The variant-bearing contract ``name`` extends, and the rest of ``name``.
+
+    Longest prefix first, so `kali job start` reaches the `kali job` verb
+    contract rather than the `kali` dispatcher.
+    """
+    tokens = name.split()
+    for cut in range(len(tokens) - 1, 0, -1):
+        parent = _base_contract(" ".join(tokens[:cut]))
+        if parent is not None and parent.variants:
+            return parent, " ".join(tokens[cut:])
+    return None
+
+
+def _match_variant(parent: CommandContract, rest: str) -> ContractVariant | None:
+    """The longest variant of ``parent`` that ``rest`` names.
+
+    A variant that documents a family of sub-actions (`run-audit obligation`)
+    also answers for them (`run-audit obligation release`).
+    """
+    for variant in sorted(parent.variants, key=lambda v: len(v.name), reverse=True):
+        if rest == variant.name or rest.startswith(variant.name + " "):
+            return variant
+    return None
+
+
+def _mentioned_variants(text: str, parent: CommandContract) -> set[str]:
+    """The variants of ``parent`` a note, mistake or default names.
+
+    An action is named in backticks (`` `release` ``, `` `release <id>` ``) or
+    after its command (`code-dispatch release`); a bare English word such as
+    "list" or "done" does not count.
+    """
+    named: set[str] = set()
+    for variant in parent.variants:
+        word = re.escape(variant.name)
+        if re.search(rf"`{word}[`\s]|{re.escape(parent.name)} {word}(?![\w-])", text):
+            named.add(variant.name)
+    return named
+
+
+def _applies_to(
+    text: str, parent: CommandContract, variant: ContractVariant, *, entry: str | None = None
+) -> bool:
+    """Whether an entry shows under ``variant``: the actions a `Scoped` entry
+    states, else the actions it names, else every action."""
+    actions = getattr(entry if entry is not None else text, "actions", None)
+    if actions is not None:
+        return variant.name in actions
+    named = _mentioned_variants(text, parent)
+    return not named or variant.name in named
+
+
+def _variant_view(parent: CommandContract, variant: ContractVariant) -> CommandContract:
+    """``parent`` narrowed to one action: what `contract <parent> <action>` renders."""
+    runs = re.compile(rf"vigil assess {re.escape(parent.name)} {re.escape(variant.name)}(?:\s|$)")
+    return replace(
+        parent,
+        name=f"{parent.name} {variant.name}",
+        preferred_invocations=tuple(
+            line for line in parent.preferred_invocations if runs.search(line)
+        ),
+        author_supplied_fields=parent.author_supplied_fields + variant.fields,
+        examples=variant.examples,
+        helper_defaults=tuple(
+            (key, value)
+            for key, value in parent.helper_defaults
+            if _applies_to(f"{key} {value}", parent, variant, entry=key)
+        ),
+        notes=tuple(note for note in parent.notes if _applies_to(note, parent, variant)),
+        common_mistakes=tuple(
+            (wrong, fix)
+            for wrong, fix in parent.common_mistakes
+            if _applies_to(f"{wrong} {fix}", parent, variant, entry=wrong)
+        ),
+        variants=(),
+    )
+
+
+def get_contract(name: str) -> CommandContract | None:
+    contract = _base_contract(name)
+    if contract is not None:
+        return contract
+    found = _variant_parent(name)
+    if found is None:
+        return None
+    parent, rest = found
+    variant = _match_variant(parent, rest)
+    return _variant_view(parent, variant) if variant is not None else None
+
+
 def _require_contract(name: str) -> CommandContract:
     """The contract `name` resolves to, or the refusal that names every one.
 
-    Both rendering entry points ask the same question and owe the reader the
-    same answer, so the lookup and its message live here once.
+    Every rendering entry point asks the same question and owes the reader the
+    same answer, so the lookup and its message live here once. An unknown
+    action of a known command names that command's actions instead of the whole
+    catalogue.
     """
     contract = get_contract(name)
-    if contract is None:
-        available = ", ".join(contract_names())
-        raise ValueError(f"Unknown contract '{name}'. Available contracts: {available}")
-    return contract
+    if contract is not None:
+        return contract
+    found = _variant_parent(name)
+    if found is not None:
+        parent, rest = found
+        actions = ", ".join(_action_names(parent))
+        raise ValueError(
+            f"Unknown action '{rest}' for `{parent.name}`. Actions: {actions}. "
+            f"`vigil assess contract {parent.name}` lists their invocations."
+        )
+    children = _family_members(name)
+    if children:
+        raise ValueError(
+            f"`{name}` is a group of contracts: {', '.join(children)}. "
+            f"Run `vigil assess contract <one of them>`."
+        )
+    # A miss inside a family (`kali nmapscan`) owes the family, not the catalogue.
+    tokens = name.split()
+    for cut in range(len(tokens) - 1, 0, -1):
+        family = " ".join(tokens[:cut])
+        members = _family_members(family)
+        if members:
+            close = difflib.get_close_matches(name, members, n=3, cutoff=0.6)
+            hint = f" Did you mean: {', '.join(close)}?" if close else ""
+            raise ValueError(
+                f"Unknown contract '{name}'.{hint} The `{family}` contracts: {', '.join(members)}."
+            )
+    names = contract_names()
+    raise ValueError(f"Unknown contract '{name}'. Available contracts: {', '.join(names)}")
 
 
-def _append_section(
-    lines: list[str],
-    header: str,
-    entries: Iterable[str],
-    *,
-    always: bool = False,
-) -> None:
-    """Append one blank-line / header / entries block of a rendered contract.
+def _family_members(prefix: str) -> list[str]:
+    """Every contract name under ``prefix`` (`kali` → `kali alterx`, ...)."""
+    names = set(contract_names()) | {f"kali {verb}" for verb in KALI_VERBS}
+    return sorted(entry for entry in names if entry.startswith(prefix + " "))
 
-    A section with no entries is omitted, which is what the per-field guards
-    each of these sections used to carry did. `always` is for the two sections
-    every contract renders whether or not the tuple behind them is empty.
+
+def _action_names(contract: CommandContract) -> list[str]:
+    """A multi-action command's actions: its variants, then the actions that are
+    contracts of their own (`work-buffer reclassify`)."""
+    actions = [variant.name for variant in contract.variants]
+    for member in _family_members(contract.name):
+        action = member.removeprefix(contract.name + " ")
+        if " " not in action and action not in actions:
+            actions.append(action)
+    return actions
+
+
+# --------------------------------------------------------------------------- #
+# Rendering. `vigil assess contract <command>` prints the compact view: usage,
+# the fields one line each, one example, and a header that counts everything it
+# leaves out and names the flag that prints it. `--field`, `--notes` and
+# `--examples` print those parts; a refused write prints the sections of the
+# fields it got wrong (`render_field_sections`).
+# --------------------------------------------------------------------------- #
+
+# The tracks `assess.lib.tracks.track_phases` reads out of scope.json, which
+# `contract --track` accepts.
+CONTRACT_TRACKS: tuple[str, ...] = ("web", "code", "blue", "android", "remediation")
+
+# The schema extensions (`x-vigil-extension: blue/v1`) whose fields the compact
+# view shows only on their own track. The backend accepts every extension on
+# every track, so a `web/v1` or `code/v1` field stays visible everywhere (a code
+# finding's proof still writes poc_request/poc_response); the blue IR keys mean
+# nothing outside a blue engagement, and they are a fifth of `details`.
+_TRACK_BOUND_EXTENSIONS: frozenset[str] = frozenset({"blue"})
+
+# A helper default this short is printed whole on the field's compact line. A
+# longer one prints its head (the text before " — ") when that is short, and the
+# header counts it, because the rest is the field's full text behind `--field`.
+_INLINE_DEFAULT_CHARS = 100
+_INLINE_DEFAULT_HEAD_CHARS = 40
+
+
+@dataclass(frozen=True)
+class _Field:
+    """One writable field of a contract, as the compact view and `--field` see it."""
+
+    path: str
+    compact: str
+    full: tuple[str, ...]
+    track: str = ""
+
+
+def _contract_schema(contract: CommandContract) -> dict[str, Any]:
+    if not contract.schema_name.endswith(".schema.json"):
+        return {}
+    return load_schema(contract.schema_name)
+
+
+def _field_track(prop: dict[str, Any]) -> str:
+    extension = str(prop.get("x-vigil-extension") or "")
+    track = extension.partition("/")[0]
+    return track if track in _TRACK_BOUND_EXTENSIONS else ""
+
+
+def _inline_default(value: str) -> str:
+    """What of a helper default its field's compact line prints ("" for none)."""
+    if len(value) <= _INLINE_DEFAULT_CHARS:
+        return value
+    head = value.split(" — ", 1)[0].strip()
+    return head if len(head) <= _INLINE_DEFAULT_HEAD_CHARS else ""
+
+
+def _compact_annotation(
+    prop: dict[str, Any], *, required: bool, default: str | None
+) -> str:
+    """The parenthesised domain on a field's compact line.
+
+    Type, then whether the author must supply it or the helper fills it, then
+    what a value may legally be: the enum, and the keys of an object (``*``
+    marks a key the object requires). Descriptions are the field's full text.
     """
-    rows = list(entries)
-    if not rows and not always:
-        return
-    lines.append("")
-    lines.append(header)
-    lines.extend(rows)
+    parts = [_schema_type_label(prop)]
+    if required:
+        parts[0] += ", required"
+    elif default is not None:
+        inline = _inline_default(default)
+        parts.append(f"default {inline}" if inline else "helper-filled")
+    node = _schema_content_node(prop)
+    enum = prop.get("enum")
+    if enum is None:
+        enum = node.get("enum")
+    if isinstance(enum, list) and enum:
+        parts.append("one of: " + ", ".join(_enum_value_label(value) for value in enum))
+    properties = node.get("properties")
+    if isinstance(properties, dict) and properties:
+        nested_required = node.get("required")
+        marked = set(nested_required) if isinstance(nested_required, list) else set()
+        parts.append(
+            "keys: " + ", ".join(
+                key + ("*" if key in marked else "") for key in sorted(properties)
+            )
+        )
+    if node.get("additionalProperties") is True:
+        parts.append("other keys allowed")
+    return "; ".join(parts)
 
 
-def render_contract(name: str) -> str:
-    contract = _require_contract(name)
+def _schema_fields(contract: CommandContract) -> list[_Field]:
+    """The fields of a schema-backed contract: top level, then ``details.*``.
 
-    lines = [
-        f"Command: {contract.name}",
-        f"Summary: {contract.summary}",
-        f"Schema: {contract.schema_name}",
+    A name the schema requires but a helper default fills is not author-required,
+    which is a derivation from the defaults rather than a second list. The
+    ``details`` object of the verb that owns its vocabulary renders key by key.
+    """
+    schema = _contract_schema(contract)
+    properties = schema.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    defaults = dict(contract.helper_defaults)
+    required = schema.get("required")
+    author_required = {
+        name for name in (required if isinstance(required, list) else ())
+        if name not in defaults
+    }
+    expand = "details" if contract.details_schema_name else ""
+    fields: list[_Field] = []
+
+    def _add(node: dict[str, Any], prefix: str, required_here: set[str]) -> None:
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            return
+        for name in sorted(str(key) for key in props):
+            prop = props[name] if isinstance(props[name], dict) else {}
+            path = prefix + name
+            if path == expand:
+                nested_required = prop.get("required")
+                _add(
+                    prop,
+                    path + ".",
+                    set(nested_required) if isinstance(nested_required, list) else set(),
+                )
+                continue
+            is_required = name in required_here
+            annotation = _compact_annotation(
+                prop, required=is_required, default=defaults.get(path)
+            )
+            fields.append(
+                _Field(
+                    path=path,
+                    compact=f"  - {path} ({annotation})",
+                    full=tuple(_schema_path_lines(schema, path, helper_filled=defaults)),
+                    track=_field_track(prop),
+                )
+            )
+
+    _add(schema, "", author_required)
+    # Top-level fields first, then the expanded `details.*` keys.
+    return sorted(fields, key=lambda item: (bool(expand) and item.path.startswith(expand + "."), item.path))
+
+
+def compact_field_line(name: str, path: str) -> str:
+    """The compact line for one schema field at any depth, keys and all.
+
+    A field the compact view prints gets that exact line; a deeper one (an
+    object inside ``details``) gets the same annotation, built from its schema.
+    """
+    contract, _ = _resolve_view(name)
+    for item in _contract_fields(contract):
+        if item.path == path:
+            return item.compact
+    node: dict[str, Any] = _contract_schema(contract)
+    prop: dict[str, Any] = {}
+    required = False
+    for part in path.split("."):
+        props = node.get("properties")
+        child = props.get(part) if isinstance(props, dict) else None
+        if not isinstance(child, dict):
+            raise ValueError(f"`{contract.name}` declares no field '{path}'")
+        declared = node.get("required")
+        required = isinstance(declared, list) and part in declared
+        prop, node = child, _schema_content_node(child)
+    return f"  - {path} ({_compact_annotation(prop, required=required, default=None)})"
+
+
+def _top_level_fields(contract: CommandContract) -> list[_Field]:
+    """The fields of a verb whose request shape is a backend model."""
+    if contract.schema_name.endswith(".schema.json"):
+        return []
+    return [
+        _Field(
+            path=name,
+            compact=f"  - {name} ({domain})",
+            full=(f"  - {name} ({domain}) — {meaning}",),
+        )
+        for name, domain, meaning in contract.top_level_fields
     ]
-    if contract.goals:
-        lines.append(f"Goals: {', '.join(contract.goals)}")
+
+
+def _contract_fields(contract: CommandContract) -> list[_Field]:
+    return _schema_fields(contract) or _top_level_fields(contract)
+
+
+def _visible(fields: list[_Field], tracks: Iterable[str] | None) -> tuple[list[_Field], dict[str, int]]:
+    """Split ``fields`` into those the active tracks write and per-track hidden counts."""
+    if tracks is None:
+        return fields, {}
+    active = set(tracks)
+    shown: list[_Field] = []
+    hidden: dict[str, int] = {}
+    for item in fields:
+        if item.track and item.track not in active:
+            hidden[item.track] = hidden.get(item.track, 0) + 1
+        else:
+            shown.append(item)
+    return shown, hidden
+
+
+def _example_text(example: dict[str, Any]) -> str:
+    return json.dumps(example, indent=2, ensure_ascii=False)
+
+
+def _count(number: int, noun: str) -> str:
+    return f"{number} {noun}" + ("" if number == 1 else "s")
+
+
+def _not_shown_line(
+    contract: CommandContract,
+    fields: list[_Field],
+    hidden_tracks: dict[str, int],
+    *,
+    parent: CommandContract | None,
+) -> str:
+    """The header that counts what the compact view leaves out and how to print it."""
+    command = f"vigil assess contract {contract.name}"
+    # A default printed whole on its field's compact line is shown; any other
+    # (a nested key, a flag, a long default whose line carries only its head)
+    # is counted here.
+    lined = {item.path for item in fields} if _contract_schema(contract) else set()
+    hidden_defaults = [
+        key for key, value in contract.helper_defaults
+        if key not in lined or _inline_default(value) != value
+    ]
+    parts: list[str] = []
+    if fields:
+        parts.append(f"each field's description and rules (`{command} --field <name>`)")
+    else:
+        parts.append(f"everything said about one field or flag (`{command} --field <name>`)")
+    rest = [
+        _count(len(contract.notes), "note") if contract.notes else "",
+        _count(len(contract.common_mistakes), "common mistake") if contract.common_mistakes else "",
+        _count(len(hidden_defaults), "helper default") if hidden_defaults else "",
+    ]
+    rest = [entry for entry in rest if entry]
+    if rest:
+        parts.append(f"{', '.join(rest)} (`{command} --notes`)")
+    if len(contract.examples) > 1:
+        parts.append(f"{_count(len(contract.examples) - 1, 'more example')} (`{command} --examples`)")
+    for track, number in sorted(hidden_tracks.items()):
+        parts.append(f"{number} {track}-track field{'s' if number != 1 else ''} (`{command} --track {track}`)")
+    if contract.variants:
+        parts.append(
+            f"each action's fields and example (`vigil assess contract {contract.name} <action>`)"
+        )
+    if parent is not None:
+        others = _other_actions_counts(parent, contract)
+        if others:
+            parts.append(
+                f"{others} about other actions (`vigil assess contract {parent.name} --notes`)"
+            )
+    return "Not shown: " + "; ".join(parts) + "."
+
+
+def _other_actions_counts(parent: CommandContract, view: CommandContract) -> str:
+    """The notes, mistakes and defaults an action's view filtered out, counted."""
+    hidden = [
+        (len(parent.notes) - len(view.notes), "note"),
+        (len(parent.common_mistakes) - len(view.common_mistakes), "common mistake"),
+        (len(parent.helper_defaults) - len(view.helper_defaults), "helper default"),
+    ]
+    return ", ".join(_count(number, noun) for number, noun in hidden if number > 0)
+
+
+def _resolve_view(name: str) -> tuple[CommandContract, CommandContract | None]:
+    """The contract ``name`` names, and its variant-bearing parent when it is an action."""
+    contract = _require_contract(name)
+    if _base_contract(name) is not None:
+        return contract, None
+    found = _variant_parent(name)
+    return contract, (found[0] if found is not None else None)
+
+
+def render_contract(
+    name: str,
+    *,
+    tracks: Iterable[str] | None = None,
+    track_source: str = "",
+    track_fallback: str = "",
+) -> str:
+    """The compact view `vigil assess contract <command>` prints.
+
+    ``tracks`` hides the fields of a track-bound extension
+    (``_TRACK_BOUND_EXTENSIONS``) the caller's tracks do not include; ``None``
+    shows every track. ``track_source`` says where the tracks came from, and
+    ``track_fallback`` why every track is shown, for the header.
+    """
+    contract, parent = _resolve_view(name)
+    fields, hidden_tracks = _visible(_contract_fields(contract), tracks)
+    lines = [
+        f"Command: {contract.name} — {contract.summary}",
+        _not_shown_line(contract, fields, hidden_tracks, parent=parent),
+    ]
+    if contract.schema_name.endswith(".schema.json"):
+        lines.append(f"Schema: agent/schemas/{contract.schema_name}")
+    if any(item.track for item in _contract_fields(contract)):
+        scope = ", ".join(sorted(tracks)) if tracks is not None else "every track"
+        if tracks is not None and track_source:
+            scope += f" (from {track_source})"
+        elif tracks is None and track_fallback:
+            scope += f" ({track_fallback})"
+        lines.append(f"Track fields shown: {scope}")
+    if contract.preferred_invocations:
+        lines.extend(["", "Usage:"])
+        lines.extend(f"  {entry}" for entry in contract.preferred_invocations)
+    if contract.variants:
+        lines.extend(["", "Actions: " + ", ".join(_action_names(contract))])
+    if contract.author_supplied_fields:
+        lines.extend(["", "Author supplies:"])
+        lines.extend(f"  - {entry}" for entry in contract.author_supplied_fields)
+    if fields:
+        lines.extend(["", "Fields (one line each; `required` = you must supply it):"])
+        lines.extend(item.compact for item in fields)
+    if contract.examples:
+        lines.extend(["", "Example:", _example_text(contract.examples[0])])
+    return "\n".join(lines)
+
+
+def _term_pattern(term: str) -> re.Pattern[str]:
+    return re.compile(rf"(?<![\w.-]){re.escape(term)}(?![\w-])")
+
+
+def _search_terms(name: str) -> list[str]:
+    """What a `--field` name matches in prose: itself, and a flag spelling of it."""
+    clean = name.strip()
+    terms = [clean]
+    if clean and not clean.startswith(("-", "<")):
+        terms.append("--" + clean)
+    return terms
+
+
+def _mentions(text: str, terms: list[str]) -> bool:
+    return any(_term_pattern(term).search(text) for term in terms)
+
+
+def _schema_paths(schema: dict[str, Any]) -> list[str]:
+    """Every dotted property path a schema declares, nested content included."""
+    paths: list[str] = []
+
+    def _walk(node: dict[str, Any], prefix: str) -> None:
+        props = node.get("properties")
+        if not isinstance(props, dict):
+            return
+        for key in sorted(str(k) for k in props):
+            prop = props[key] if isinstance(props[key], dict) else {}
+            paths.append(prefix + key)
+            _walk(_schema_content_node(prop), prefix + key + ".")
+
+    _walk(schema, "")
+    return paths
+
+
+def _schema_path_lines(
+    schema: dict[str, Any], path: str, *, helper_filled: Iterable[str] = ()
+) -> list[str]:
+    """One declared property, at any depth, rendered with its description and content.
+
+    ``required`` is the declaring object's own array, less the names a helper
+    default fills (the top level of a helper-normalized verb), so it always
+    means "the author must supply it".
+    """
+    node: dict[str, Any] = schema
+    parts = path.split(".")
+    for part in parts[:-1]:
+        props = node.get("properties")
+        child = props.get(part) if isinstance(props, dict) else None
+        if not isinstance(child, dict):
+            return []
+        node = _schema_content_node(child)
+    props = node.get("properties")
+    if not isinstance(props, dict) or parts[-1] not in props:
+        return []
+    required = node.get("required")
+    single = {
+        "properties": {parts[-1]: props[parts[-1]]},
+        "required": [parts[-1]]
+        if isinstance(required, list) and parts[-1] in required and path not in set(helper_filled)
+        else [],
+    }
+    lines = _schema_object_lines(single, depth=0, mark_required=True, deferred_fields=())
+    if lines:
+        lines[0] = lines[0].replace(f"  - {parts[-1]} (", f"  - {path} (", 1)
+    return lines
+
+
+def _field_matches(contract: CommandContract, name: str) -> list[str]:
+    """The schema paths a `--field` name resolves to: exact, else by unique leaf."""
+    schema = _contract_schema(contract)
+    paths = _schema_paths(schema) if schema else [item.path for item in _top_level_fields(contract)]
+    clean = name.strip().removeprefix("payload.")
+    if clean in paths:
+        return [clean]
+    return [path for path in paths if path.endswith("." + clean)]
+
+
+def _contract_terms(contract: CommandContract) -> list[str]:
+    """Every field and flag name the contract's text uses, for did-you-mean."""
+    found: list[str] = []
+    texts = [
+        *contract.preferred_invocations,
+        *contract.author_supplied_fields,
+        *(key for key, _ in contract.helper_defaults),
+    ]
+    pattern = re.compile(r"--[a-z][a-z0-9-]*|<[^<>\s]+>|\b[a-z][a-z0-9]*(?:[_.][a-z0-9]+)+\b")
+    for text in texts:
+        for term in pattern.findall(text):
+            if term not in found:
+                found.append(term)
+    schema = _contract_schema(contract)
+    for path in _schema_paths(schema) if schema else [f.path for f in _top_level_fields(contract)]:
+        if path not in found:
+            found.append(path)
+    return found
+
+
+def _field_section(contract: CommandContract, name: str) -> list[str]:
+    """Everything a contract says about one field; empty when it says nothing."""
+    schema = _contract_schema(contract)
+    lines: list[str] = []
+    matches = _field_matches(contract, name)
+    terms = list(dict.fromkeys(term for match in matches or [name] for term in _search_terms(match)))
+    for match in matches:
+        if schema:
+            helper_filled = [key for key, _ in contract.helper_defaults]
+            lines.extend(_schema_path_lines(schema, match, helper_filled=helper_filled))
+        else:
+            lines.extend(
+                line for item in _top_level_fields(contract) if item.path == match for line in item.full
+            )
+    author = [entry for entry in contract.author_supplied_fields if _mentions(entry, terms)]
+    usage = [entry for entry in contract.preferred_invocations if _mentions(entry, terms)]
+    defaults = [
+        f"  - {key} = {value}" for key, value in contract.helper_defaults
+        if _mentions(key, terms) or (not schema and _mentions(value, terms))
+    ]
+    mistakes = [
+        f"  - {wrong} -> {fix}" for wrong, fix in contract.common_mistakes
+        if _mentions(f"{wrong} {fix}", terms)
+    ]
+    notes = [f"  - {note}" for note in contract.notes if _mentions(note, terms)]
+    if not matches and usage:
+        lines.extend(["  Usage:", *(f"    {entry}" for entry in usage)])
+    if author:
+        lines.extend(["  Author supplies:", *(f"    - {entry}" for entry in author)])
+    if defaults:
+        lines.extend(["  Helper default:", *(f"  {line}" for line in defaults)])
+    if mistakes:
+        lines.extend(["  Common mistakes:", *(f"  {line}" for line in mistakes)])
+    if notes:
+        lines.extend(["  Notes:", *(f"  {line}" for line in notes)])
+    return lines
+
+
+def render_field_sections(
+    name: str, fields: Iterable[str], *, strict: bool = True
+) -> str:
+    """The full text for each named field: `contract <command> --field <name>`.
+
+    Also what a refused write prints for the fields it got wrong (``strict=False``):
+    a name the contract says nothing about gets a did-you-mean line instead of
+    raising, and the block ends with the pointer to every other field.
+    """
+    contract, _ = _resolve_view(name)
+    command = f"vigil assess contract {contract.name}"
+    blocks: list[str] = []
+    for field_name in fields:
+        section = _field_section(contract, field_name)
+        if section:
+            blocks.append("\n".join([f"{contract.name} --field {field_name}", *section]))
+            continue
+        close = difflib.get_close_matches(field_name, _contract_terms(contract), n=4, cutoff=0.6)
+        hint = f" Did you mean: {', '.join(close)}?" if close else ""
+        message = f"`{contract.name}` says nothing about '{field_name}'.{hint}"
+        if strict:
+            raise ValueError(f"{message} `{command}` lists its fields.")
+        blocks.append(message)
+    blocks.append(
+        f"Any other field: `{command} --field <name>`; every field on one line each: `{command}`."
+    )
+    return "\n\n".join(blocks)
+
+
+def render_contract_notes(name: str) -> str:
+    """Everything the compact view leaves out that is not one field's text or an example."""
+    contract, parent = _resolve_view(name)
+    lines = [f"Command: {contract.name} — notes"]
+    lines.append(f"Schema: {contract.schema_name}")
     if contract.phase:
         lines.append(f"Phase: {', '.join(contract.phase)}")
-    invocations = (f"  - {entry}" for entry in contract.preferred_invocations)
-    _append_section(lines, "Preferred invocation:", invocations, always=True)
-    author_fields = (f"  - {entry}" for entry in contract.author_supplied_fields)
-    _append_section(lines, "Author-supplied fields:", author_fields, always=True)
-    defaults = (f"  - {key} = {value}" for key, value in contract.helper_defaults)
-    _append_section(lines, "Helper defaults:", defaults)
-    _append_section(lines, "Allowed top-level fields:", _schema_field_lines(
-        contract.schema_name,
-        # The top level prints its own "Required top-level fields" summary, and
-        # `details` gets a deeper section of its own on the verbs that write it.
-        mark_required=False,
-        deferred_fields=("details",) if contract.details_schema_name else (),
-    ) or [
-        f"  - {field_name} ({domain}) — {meaning}"
-        for field_name, domain, meaning in contract.top_level_fields
-    ])
-
-    lines.extend(_author_required_lines(contract))
-
-    _append_section(
-        lines,
-        f"Allowed details keys ({contract.details_schema_name} -> properties.details):",
-        _details_field_lines(contract.details_schema_name),
-    )
-    mistakes = (f"  - {wrong} -> {fix}" for wrong, fix in contract.common_mistakes)
-    _append_section(lines, "Common mistakes:", mistakes)
-    _append_section(lines, "Notes:", (f"  - {entry}" for entry in contract.notes))
-    examples = (json.dumps(e, indent=2, ensure_ascii=False) for e in contract.examples)
-    _append_section(lines, "Examples:", examples)
-
+    if contract.goals:
+        lines.append(f"Goals: {', '.join(contract.goals)}")
+    if contract.helper_defaults:
+        lines.extend(["", "Helper defaults:"])
+        lines.extend(f"  - {key} = {value}" for key, value in contract.helper_defaults)
+    if contract.common_mistakes:
+        lines.extend(["", "Common mistakes:"])
+        lines.extend(f"  - {wrong} -> {fix}" for wrong, fix in contract.common_mistakes)
+    if contract.notes:
+        lines.extend(["", "Notes:"])
+        lines.extend(f"  - {note}" for note in contract.notes)
+    others = _other_actions_counts(parent, contract) if parent is not None else ""
+    if parent is not None and others:
+        lines.extend([
+            "",
+            f"These are the entries that apply to `{contract.name.removeprefix(parent.name + ' ')}` "
+            f"or to every action; `vigil assess contract {parent.name} --notes` also prints "
+            f"{others} about other actions.",
+        ])
     lines.extend(["", "Assessment binding:", f"  {ENGAGEMENT_BINDING_CONTRACT}"])
-
     return "\n".join(lines)
+
+
+def render_contract_examples(name: str) -> str:
+    """Every example the contract carries (the compact view prints the first)."""
+    contract, _ = _resolve_view(name)
+    if not contract.examples:
+        return f"Command: {contract.name} — no examples; see its Usage lines."
+    return "\n".join(
+        [f"Command: {contract.name} — examples", *(_example_text(e) for e in contract.examples)]
+    )
 
 
 # argparse renders an enum miss as:
@@ -924,7 +1271,7 @@ def common_mistake_hints(name: str, payload: dict[str, Any]) -> list[str]:
     return hints
 
 
-_DEFERRED_FIELD_POINTER = 'see "Allowed details keys" below'
+_DEFERRED_FIELD_POINTER = "its keys print one at a time with `--field <field>.<key>`"
 
 
 def _schema_content_node(prop: dict[str, Any]) -> dict[str, Any]:
@@ -1049,40 +1396,6 @@ def _schema_object_lines(
     return lines
 
 
-def _schema_field_lines(
-    schema_name: str,
-    *,
-    mark_required: bool,
-    deferred_fields: tuple[str, ...],
-) -> list[str]:
-    """Authoring surface of a bundled schema's top-level object."""
-    if not schema_name.endswith(".schema.json"):
-        return []
-    return _schema_object_lines(
-        load_schema(schema_name),
-        depth=0,
-        mark_required=mark_required,
-        deferred_fields=deferred_fields,
-    )
-
-
-def _details_field_lines(schema_name: str) -> list[str]:
-    """Authoring surface of the ``details`` object inside a bundled schema.
-
-    Rendered through the same recursion as the top level, from the same schema,
-    so the section an author reads for a sub-key and the section they read for a
-    top-level field cannot describe the object differently.
-    """
-    if not schema_name.endswith(".schema.json"):
-        return []
-    details = load_schema(schema_name).get("properties", {}).get("details", {})
-    if not isinstance(details, dict):
-        return []
-    return _schema_object_lines(
-        details, depth=0, mark_required=True, deferred_fields=()
-    )
-
-
 def _schema_required_names(schema_name: str) -> list[str]:
     if not schema_name.endswith(".schema.json"):
         return []
@@ -1093,61 +1406,11 @@ def _schema_required_names(schema_name: str) -> list[str]:
     return sorted(str(name) for name in required)
 
 
-def _nested_required_names(schema_name: str, field: str) -> list[str]:
-    """The ``required`` array declared INSIDE one top-level object property."""
-    if not schema_name.endswith(".schema.json"):
-        return []
-    prop = load_schema(schema_name).get("properties", {}).get(field)
-    if not isinstance(prop, dict):
-        return []
-    required = _schema_content_node(prop).get("required", [])
-    if not isinstance(required, list):
-        return []
-    return sorted(str(name) for name in required)
-
-
-def _author_required_lines(contract: CommandContract) -> list[str]:
-    """The required-fields section, stated as what an AUTHOR must supply.
-
-    A schema's ``required`` array is the contract the validator enforces, which
-    on a helper-normalized verb is a POST-normalization contract: `finding
-    record` ``setdefault``s ten of its twelve names before validation runs, so
-    printing the array verbatim told authors to supply ten values the helper
-    owns — and named ``verification_status`` as required two sections below the
-    helper default calling ``unreviewed`` the only record-time value it accepts.
-
-    Subtracting the helper defaults is a derivation, not a second list, so a
-    default added or dropped moves this section with it. A name the helper only
-    partially fills stays required and carries its own nested ``required`` array:
-    `finding record` always CREATES ``details`` (to stamp ``discovered_by``) and
-    the object still fails validation without ``evidence`` and ``impact``.
-    """
-    required = _schema_required_names(contract.schema_name)
-    if not required:
-        return []
-    helper_filled = {key for key, _ in contract.helper_defaults}
-    author_required = [name for name in required if name not in helper_filled]
-    if not author_required:
-        return []
-    heading = "Required top-level fields:"
-    if len(author_required) < len(required):
-        heading = (
-            "Required top-level fields (author-supplied; every other name in the "
-            "schema's `required` array is filled by the Helper defaults above):"
-        )
-    lines = ["", heading]
-    for name in author_required:
-        nested = _nested_required_names(contract.schema_name, name)
-        suffix = f" — must carry {', '.join(nested)}" if nested else ""
-        lines.append(f"  - {name}{suffix}")
-    return lines
-
-
 _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "nmap-scan": (
         "Default is top-1000 ports; use --ports full for `-p-`, or pass an explicit list (e.g. 22,80,443).",
         "Defaults to `-sT` (TCP connect). Do NOT use `-sS` here — raw SYN probes are dropped by Docker's userland NAT (esp. Docker Desktop/macOS) and silently return 0-open on live hosts. Use `--scan-type sS` only on a bridged-network Linux runtime.",
-        "--scripts default,vuln triggers heavy NSE — run synchronously with --timeout 1800+; a long budget is killed cleanly on expiry.",
+        "--scripts default,vuln triggers heavy NSE: scope it to the open ports from a first pass so it fits one blocking call (--timeout 600 or less); a sweep that cannot fit is an operator-owned `kali job` a specialist names in next_steps.",
     ),
     "nuclei": (
         "Pass either -u or -l. LEAD with explicit `-t` template paths — `-as` (automatic) keys off "
@@ -1159,10 +1422,10 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "stderr); pass your own `-exclude-tags` to override it verbatim. The result's `resolved_argv` "
         "shows the exact command that ran after injection.",
         "Blind callbacks are disabled by default (`--oob-mode none` injects `-ni`). `public` is an explicit data-egress choice; `vigil` uses the OOB domain resolved and exported by the top-level `vigil assess` launcher.",
-        "Long sweeps run synchronously with a generous --timeout. `vigil assess kali job start` is operator-only — specialists never background (see kali-exec skill).",
+        "A sweep runs as blocking calls of --timeout 600 or less: split the host list or template set so each call fits. A sweep that cannot be split to fit is an operator-owned `kali job`; a specialist names it in next_steps and never starts a job itself.",
     ),
     "httpx": (
-        "Alt-port liveness (I-6): pass -ports/-p <comma-list> (e.g. 80,443,8080,8443) whenever "
+        "Alt-port liveness: pass -ports/-p <comma-list> (e.g. 80,443,8080,8443) whenever "
         "scope may include non-default ports — httpx probes only 80/443 by default, so an "
         "alt-port-only host reads as dead and is never seeded/crawled without this.",
         "Prefer typed flags over --extra-args: -web-server (Server header; there is NO -server "
@@ -1176,15 +1439,19 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     ),
     "katana": (
         "Deep + disk-bounded by DEFAULT: `-d 5`, `-or -ob` (omit body/raw so a deep crawl does not "
-        "fill the disk), `-ef <static set>`, and JS endpoint crawling + jsluice extraction. The wrapper "
-        "does not force Katana field scope; pass `-fs` or `-cos` only when the crawl itself calls for an "
-        "explicit operator-authored restriction. `--keep-bodies` / `--include-static` undo the disk/asset "
-        "defaults for a bounded source pass.",
+        "fill the disk), `-ef <static set>`, and JS endpoint crawling + jsluice extraction. "
+        "`--keep-bodies` / `--include-static` undo the disk/asset defaults for a bounded source pass.",
+        "The crawl follows only the hosts scope.json declares: with no wildcard entry each seed stays on "
+        "its own host (`-fs fqdn`), a `*.example.com` entry lets it follow that apex and every subdomain "
+        "(a custom `-fs` host regex), an anchored `-cs` regex admits exactly the declared hosts, and each "
+        "`out_of_scope` host is excluded with `-cos`. stderr names the fence and warns about a `-u` seed "
+        "scope.json does not declare (its links are not followed). `-cos` adds an exclusion of your own.",
         "Rate is SAFE by default and decoupled from depth: `-rl 10`, hard-capped at 20 req/s (warn + "
         "clamp above; `--allow-fast-crawl` to exceed) and always clamped DOWN to the program rate "
         "ceiling. Go as deep as you like — politeness comes from the rate cap, not a shallow crawl.",
-        "Use `-fs fqdn` for exact-host traversal or `-fs rdn` for registered-domain traversal only "
-        "when that restriction is intentional; scope.json does not choose either value.",
+        "An explicit `-fs` (`dn`, `rdn`, `fqdn` or a host regex) replaces the fence's field scope and "
+        "keeps its scope.json `-cs`; `-fs`, `-cs` or `-ns` inside --extra-args replace the whole fence "
+        "with a WARN, so the run crawls the boundary you stated and the audit row records the argv.",
         "A `--timeout` cut still yields usable output: katana streams routes to `-o` from line 1, so a "
         "timed-out deep crawl leaves partial-but-ingestible results on disk (`partial_results=true`).",
     ),
@@ -1201,14 +1468,14 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "Hidden-parameter discovery. Pass -u <url> for one endpoint or -i <file> for a gated list (build the list with `vigil assess arjun-select` — never aim Arjun at a raw URL dump or inert assets).",
         "JSON output (-oJ) is ALWAYS written under scans/arjun/<target>/<hash>.json (even alongside -oT/-oB) so the run is captured for `vigil assess ingest arjun` — the host-side step that folds discovered params into the work buffer and re-routes the parameterized endpoint (url=->gf:ssrf, file=->gf:lfi, id=->gf:idor/sqli).",
         "-m sets the method: GET (default) | POST | XML | JSON. GET-discovered params land in query_params on ingest; POST/XML/JSON in body_params — set it correctly for modern APIs.",
-        "--passive harvests param names from wayback/commoncrawl/otx with no/low target traffic. Use first on rate-sensitive or content-heavy targets, or when active discovery is out of budget.",
+        "--passive adds parameter names harvested from wayback/commoncrawl/otx to the wordlist and then scans the target actively, so it raises request volume rather than lowering it. Bare --passive harvests the -u target's own domain and needs -u; pass --passive <domain> with -i. Keep --stable --rate-limit set on a rate-sensitive target.",
         "--headers is auth-aware: pass an authenticated session (Authorization/Cookie) to surface params visible only behind auth. Header-only params are recorded as a signal on ingest (no classifier field maps to a header).",
         "Default wordlist is Arjun's db/large.txt (most thorough); override with -w for a faster list. Politeness knobs: --stable, -d (delay), -T (timeout), -t (threads), --rate-limit.",
         "SQLMAP doctrine: Arjun + the classifier ISOLATE the injectable param; sqlmap confirms and does high-volume blind/time-based extraction. When an enriched row routes to gf:sqli (or carries an id=/numeric param on a DB-ish route), ingest-arjun names `vigil assess kali sqlmap` in triage_rationale as the confirmation step. sqlmap is operator-invoked, never auto-fired. See references/tools/recon/arjun.md.",
     ),
     "cero": (
         "TLS-handshake SAN scraper — connects to TCP/TLS on the listed ports and harvests certificate Subject Alternative Names. Complements CT-log enumeration when targets issue private certs.",
-        "Feed CIDR ranges (after asnmap CIDR mapping) for non-DNS subdomain discovery; pass --only-cidrs when the input is exclusively CIDR.",
+        "Default feed is the de-duplicated A-record IPs of resolved origin/staging hosts; a whole asnmap CIDR is a gated escalation (target-owned non-cloud netblock, runtime not Docker Desktop) — see references/tools/recon/cero.md.",
         "Default ports are 443,8443; add 9443/8444/etc. via -p when the target advertises more TLS endpoints.",
         "Read-only TCP/TLS handshakes — leave --destructive off.",
     ),
@@ -1225,7 +1492,7 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
     "bbot": (
         "Multi-module recon scanner. Canonical passive subdomain invocation: `bbot -t <target> -p subdomain-enum -rf passive`. Add modules with -m or presets with -p; gate active modules behind --allow-deadly + --destructive.",
         "--allow-deadly requires --destructive — bbot's deadly modules run real attacks (fuzzing, brute-force, exploit). The CLI hard-fails on --allow-deadly without --destructive so the audit row stays truthful.",
-        "Passive sweeps (`-p subdomain-enum`) regularly run 15-30 minutes — set --timeout 1800 or wrap in `kali job start`.",
+        "The full passive preset (`-p subdomain-enum -rf passive`) regularly runs 15-30 minutes, past the 600 s blocking-call ceiling. A specialist runs a focused module set (`-m`) that fits one call and names the full sweep in next_steps; the operator runs that as a `kali job`.",
     ),
     "dnsx": (
         "The typed wrapper applies Docker-safe defaults: --dnsx-profile polite-cdn, --resolver-profile public-tcp, -rl 100, -t 20, -retry 3, -timeout 5.",
@@ -1273,21 +1540,21 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
         "A skill's tool list is not proof of installation: `vigil assess kali exec ... -- command -v <tool>` before planning a step around a tool you have not run in this engagement. If a target-facing tool is genuinely missing, rebuild the runtime image rather than falling back to a host or `docker exec` path — the image is the single source of truth for the tool surface.",
         "Reserve `echo` for FUNCTIONAL output only. Stdout is captured to the audit log and the FTS index, not shown to the user, so a commentary-echo bloats the preview and pollutes search without adding retrievable signal. Use --intent for the one-line purpose. `echo` is legitimate when its output IS the point: writing a file, piping into another tool, or generating a payload.",
         "PROCESS CLEANUP TAKES A PID SELECTOR, NEVER A BINARY NAME. `pkill -f nmap` / `killall nuclei` in a shared runtime kills sibling specialists' parallel scans and loses hours of recon. Manual cleanup is rarely needed at all — --timeout expiry already cascades SIGTERM then SIGKILL into the in-container PID, and an operator job stops with `vigil assess kali job stop <id>`. When you must clean up mid-run, every audit row carries a run_uuid and the wrapper records that run's in-container PID to /tmp/vigil-pid-<run_uuid>.pid, so `kill -TERM \"$(cat /tmp/vigil-pid-<run_uuid>.pid)\"` signals only your own run.",
-        "A single blocking call must fit in MINUTES, not tens of minutes — above the CLI's own --timeout sits an agent-harness ceiling you do not control, and a call that outruns it is auto-backgrounded with the agent killed (exit 144 / SIGUSR1), orphaning the probe and writing no handoff. A larger --timeout only widens that window. Genuinely long enumeration is an operator-owned job: see `vigil assess contract kali job`.",
+        "Keep a blocking call's --timeout at 600 seconds or less. Above the CLI's own --timeout sits an agent-harness ceiling you do not control; a call that outruns it is auto-backgrounded with the agent killed (exit 144 / SIGUSR1), orphaning the probe and writing no handoff, while a --timeout under it lets the CLI's SIGTERM/SIGKILL end the run cleanly. Size the sweep (host list, wordlist, rate) to fit; work that cannot fit is an operator-owned job (`vigil assess contract kali job`) a specialist names in next_steps.",
     ),
     "job": (
-        "Long-running probes go through `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
+        "The operator runs a probe that cannot fit one blocking call (--timeout 600 or less) as `vigil assess kali job start ...`. The dtach session is parented by tini so it survives the calling shell.",
         "Job start uses the same pre-execution preparation as synchronous Kali execution: `--identity` material (plus `--identity-scope` for a scoped alias and `--identity-target` for an argv shape Vigil cannot classify), required attribution headers, nuclei OOB safety, target scope, denied tools, and rate policy are applied before audit/spawn.",
-        "Subcommands: start | status | tail | stop | list.",
-        "OPERATOR-ONLY, AND A DISPATCHED SPECIALIST NEVER USES IT. Target-facing work runs SYNCHRONOUSLY: each `vigil assess kali <verb> ... --timeout N` call is blocking and awaited in-band — no run_in_background, no `job start`, no dtach, no watcher/poll loop. A specialist that backgrounds target traffic and halts for a completion notification gets auto-resumed by the harness, launches the next detached job, and halts again: unbounded relaunch thrash, duplicate probes, near-zero net coverage. A specialist that needs a probe to outlive its dispatch says so in its handoff and lets the operator own the job.",
-        "\"Synchronous\" means AWAITED-IN-BAND, not one-call-at-a-time. Several blocking calls in parallel, each awaited in-band, are fine; what is banned is detaching a job and reaping it later. A generous --timeout is the right tool for one long probe — on expiry the audit pipeline cascades SIGTERM then SIGKILL (after 5s) into the in-container PID, the row records timed_out=true, and nothing is orphaned.",
-        "The ceiling that makes this a real choice: above the CLI's --timeout sits a separate agent-harness limit you do not control, and a blocking call that runs too long is auto-backgrounded with the agent killed (exit 144 / SIGUSR1) — the probe is orphaned and no handoff is written. So a single synchronous probe must fit in minutes; a sweep that genuinely cannot is what `job start` is for, launched and monitored by the operator, never as a per-step or fan-out pattern.",
+        "OPERATOR-ONLY, AND A DISPATCHED SPECIALIST NEVER USES IT. Target-facing work runs SYNCHRONOUSLY: each `vigil assess kali <verb> ... --timeout N` call is blocking and awaited in-band — no run_in_background, no `job start`, no dtach, no watcher/poll loop. A specialist that backgrounds target traffic and halts for a completion notification gets auto-resumed by the harness, launches the next detached job, and halts again: unbounded relaunch thrash, duplicate probes, near-zero net coverage. A specialist that needs a probe to outlive its dispatch names it in next_steps and lets the operator own the job.",
+        "\"Synchronous\" means AWAITED-IN-BAND, not one-call-at-a-time. Several blocking calls in parallel, each awaited in-band, are fine; what is banned is detaching a job and reaping it later. Each blocking call keeps --timeout at 600 seconds or less — on expiry the audit pipeline cascades SIGTERM then SIGKILL (after 5s) into the in-container PID, the row records timed_out=true, and nothing is orphaned.",
+        "The ceiling that makes this a real choice: above the CLI's --timeout sits a separate agent-harness limit you do not control, and a blocking call that runs too long is auto-backgrounded with the agent killed (exit 144 / SIGUSR1) — the probe is orphaned and no handoff is written. So a single synchronous probe keeps --timeout at 600 seconds or less; a sweep that genuinely cannot fit is what `job start` is for, launched and monitored by the operator, never as a per-step or fan-out pattern.",
     ),
     "sweep": (
         "A DUMB fan-out: it expands ONLY the values you literally typed and reports ONLY what was probed. No seed-id lists, no opaque-id decoding, no hostname/metadata-path invention — `--values` is REQUIRED and a template with no placeholder is an error, so it can never silently run N identical commands.",
         "Each value becomes its own `kali exec` inside the runtime, so every value gets its own command-runs audit row; the summary then clusters the results by distinct response signature.",
         "Clustering reuses the project's EXISTING reachability taxonomy (LIVE / BLACKHOLED / TLS-reset / UNKNOWN, plus the dns-fail vs connection-refused split). `filter-rejected` is derived PURELY from identical reachable responses repeated across distinct values — never from a rule that 'knows' a filter exists.",
         "Politeness: --max-values caps expansion (default 200) and --concurrency defaults to 1; >1 requires --allow-concurrent because of the per-host \"<=1 active target-facing probe\" rule.",
+        "--timeout bounds each value's run, and the values run --concurrency at a time, so the whole sweep blocks for up to (values / concurrency) × --timeout. Keep that within the 600 s blocking-call ceiling: split a longer value list across calls.",
     ),
     "sweep-orphans": (
         "Host-side reconciler for `assessment_command_runs` rows stuck in status=running and terminal host-exec rows committed with output cleanup/integrity pending past --max-age-seconds. Run after a backend restart, host crash, or any window where finalize PATCHes may have failed.",
@@ -1305,20 +1572,20 @@ _KALI_VERB_NOTES: dict[str, tuple[str, ...]] = {
 _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     "nmap-scan": (
         {
-            "command": "vigil assess kali nmap-scan --target example.com --ports top-1000 --service-detection --technique RECON --intent 'Phase 1 baseline port + service' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali nmap-scan --target example.com --ports top-1000 --service-detection --technique RECON --intent 'Phase 1 baseline port + service' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "nuclei": (
         {
-            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/,http/misconfiguration/,http/exposures/ -severity high,critical -mhe 50 -random-agent -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --oob-mode none --technique RECON --intent 'reactive sweep on Phase-1 URL delta (WAF-resilient)' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali nuclei -l hosts.txt -t http/cves/,http/misconfiguration/,http/exposures/ -severity high,critical -mhe 50 -random-agent -rate-limit 50 -c 25 -bs 25 -jsonl -o scans/nuclei.jsonl --oob-mode none --technique RECON --intent 'reactive sweep on Phase-1 URL delta (WAF-resilient)' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "katana": (
         {
-            "command": "vigil assess kali katana -u https://target.example -o scans/katana_target.jsonl -jsonl --technique DISCOVERY --intent 'deep JS-aware scoped crawl' --probe-kind fingerprint --phase collect --timeout 1800",
+            "command": "vigil assess kali katana -u https://target.example -o scans/katana_target.jsonl -jsonl --technique DISCOVERY --intent 'JS-aware scoped crawl' --probe-kind fingerprint --phase collect --timeout 600",
         },
         {
-            "command": "vigil assess kali katana -u https://app.target.example -headless --allow-fast-crawl -rl 40 -o scans/katana_spa.jsonl -jsonl --technique DISCOVERY --intent 'headless crawl for browser-generated routes' --probe-kind fingerprint --phase collect --timeout 1800",
+            "command": "vigil assess kali katana -u https://app.target.example -headless --allow-fast-crawl -rl 40 -o scans/katana_spa.jsonl -jsonl --technique DISCOVERY --intent 'headless crawl for browser-generated routes' --probe-kind fingerprint --phase collect --timeout 600",
         },
     ),
     "tool-help": (
@@ -1328,23 +1595,23 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "sqlmap": (
         {
-            "command": "vigil assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 1800",
+            "command": "vigil assess kali sqlmap -u 'https://target/?id=1' --batch --sql-technique BEUSTQ --level 3 --risk 2 --technique SQLI --intent 'verify SQLi on id parameter' --probe-kind payload --phase consume-test --timeout 600",
         },
     ),
     "arjun": (
         {
-            "command": "vigil assess kali arjun -u https://target/api/item --technique DISCOVERY --intent 'hidden GET param discovery on item endpoint' --probe-kind fingerprint --phase consume-test --timeout 1800",
+            "command": "vigil assess kali arjun -u https://target/api/item --technique DISCOVERY --intent 'hidden GET param discovery on item endpoint' --probe-kind fingerprint --phase consume-test --timeout 600",
         },
         {
-            "command": "vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.JSON -m JSON --identity user_a --stable --rate-limit 10 --technique DISCOVERY --intent 'authed JSON-API hidden-param discovery on gated route list' --probe-kind fingerprint --phase consume-test --timeout 3600",
+            "command": "vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.JSON -m JSON --identity user_a --stable --rate-limit 10 --technique DISCOVERY --intent 'authed JSON-API hidden-param discovery on gated route list' --probe-kind fingerprint --phase consume-test --timeout 600",
         },
         {
-            "command": "vigil assess kali arjun -u https://target/search --passive --technique OSINT --intent 'passive param-name harvest (wayback/otx/commoncrawl)' --probe-kind fingerprint --phase recon --timeout 600",
+            "command": "vigil assess kali arjun -u https://target/search --passive --stable --rate-limit 10 --technique PARAM-DISCOVERY --intent 'hidden-param discovery with archive-mined names (wayback/otx/commoncrawl)' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "cero": (
         {
-            "command": "vigil assess kali cero -d 198.51.100.0/24 -p 443,8443,9443 -c 100 -t 4 -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt --technique OSINT --intent 'TLS SAN scraping for non-CT subs' --probe-kind fingerprint --phase recon --timeout 600",
+            "command": "vigil assess kali cero -l /engagements/$ENGAGEMENT_KEY/scans/origin_ips.txt -p 443,8443,9443 -c 100 -t 4 -o /engagements/$ENGAGEMENT_KEY/scans/cero_sans.txt --technique OSINT --intent 'TLS SAN scrape across resolved origin/staging IPs' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "alterx": (
@@ -1359,12 +1626,12 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "bbot": (
         {
-            "command": "vigil assess kali bbot -t example.com -p subdomain-enum -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'deep passive subdomain enum' --probe-kind fingerprint --phase recon --timeout 1800",
+            "command": "vigil assess kali bbot -t example.com -m crt -m certspotter -m hackertarget -rf passive -o /engagements/$ENGAGEMENT_KEY/scans/bbot_subs --technique OSINT --intent 'focused passive subdomain pass' --probe-kind fingerprint --phase recon --timeout 600",
         },
     ),
     "dnsx": (
         {
-            "command": "vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 1200",
+            "command": "vigil assess kali dnsx -l /engagements/$ENGAGEMENT_KEY/scans/candidates.txt --dnsx-profile polite-cdn --resolver-profile public-tcp -silent -o /engagements/$ENGAGEMENT_KEY/scans/candidates_resolved.txt --technique RECON --intent 'lean dnsx resolution without bulk JSON' --probe-kind baseline --phase recon --timeout 600",
         },
     ),
     "browser": (
@@ -1385,10 +1652,10 @@ _KALI_VERB_EXAMPLES: dict[str, tuple[dict[str, Any], ...]] = {
     ),
     "dalfox": (
         {
-            "command": "vigil assess kali dalfox -u 'https://target.example/search?q=test' -p q --skip-bav --silence -o scans/dalfox_q.txt --technique XSS --intent 'confirm reflected XSS on arjun-surfaced q param' --probe-kind payload --phase consume-test --timeout 1800",
+            "command": "vigil assess kali dalfox -u 'https://target.example/search?q=test' -p q --skip-bav --silence -o scans/dalfox_q.txt --technique XSS --intent 'confirm reflected XSS on arjun-surfaced q param' --probe-kind payload --phase consume-test --timeout 600",
         },
         {
-            "command": "vigil assess kali dalfox -i /engagements/$ENGAGEMENT_KEY/scans/arjun_xss_candidates.txt --waf-evasion -w 30 --delay 100 --format json -o scans/dalfox_batch.json --technique XSS --intent 'reflective XSS sweep over arjun param-bearing URLs (WAF-aware)' --probe-kind payload --phase consume-test --timeout 3600",
+            "command": "vigil assess kali dalfox -i /engagements/$ENGAGEMENT_KEY/scans/arjun_xss_candidates.txt --waf-evasion -w 30 --delay 100 --format json -o scans/dalfox_batch.json --technique XSS --intent 'reflective XSS sweep over arjun param-bearing URLs (WAF-aware)' --probe-kind payload --phase consume-test --timeout 600",
         },
     ),
     "robots": (
@@ -1496,18 +1763,11 @@ def _kali_root_contract() -> CommandContract:
             "vigil assess contract kali <verb>",
         ),
         author_supplied_fields=(
-            "--technique <enum>",
-            "--intent \"<one-line purpose>\"",
-            "--probe-kind {fingerprint|baseline|payload|exploit|replay|cleanup}",
-            "--phase <enum>",
-            "--timeout <seconds>",
+            f"<verb>, target-facing (takes every flag below): {', '.join(KALI_TARGET_VERBS)}",
+            f"<verb>, host-side maintenance (no audit flags; touches no target): {', '.join(KALI_MAINT_VERBS)}",
+            *KALI_AUDIT_FIELDS,
         ),
-        notes=_KALI_COMMON_NOTES + (
-            f"Target-facing verbs (require the audit-flag set above): "
-            f"{', '.join(KALI_TARGET_VERBS)}.",
-            f"Host-side maintenance verbs (no audit flags — they do not touch "
-            f"the target): {', '.join(KALI_MAINT_VERBS)}.",
-        ),
+        notes=_KALI_COMMON_NOTES,
         common_mistakes=_KALI_COMMON_MISTAKES,
         examples=(
             {"command": "vigil assess kali nmap-scan --target example.com --ports top-100 --technique RECON --intent 'fast top-100 sweep' --probe-kind fingerprint --phase recon --timeout 600"},
@@ -1569,16 +1829,12 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
             schema_name="argparse + one CommandRunRecordRequest per swept value",
             preferred_invocations=(
                 "vigil assess kali sweep --technique <enum> --intent \"<one-liner>\" "
-                "--probe-kind <kind> --phase <phase> --timeout 1800 --values \"1,2,7-9\" "
+                "--probe-kind <kind> --phase <phase> --timeout 30 --values \"1,2,7-9\" "
                 "-- curl -s -o /dev/null -w '%{http_code}' https://app.example.com/orders/{}",
                 "vigil assess kali sweep ... --values-file scans/ids.txt --json -- <command with {}>",
             ),
             author_supplied_fields=(
-                "--technique <enum>",
-                "--intent \"<one-line purpose>\"",
-                "--probe-kind <kind>",
-                "--phase <phase>",
-                "--timeout <seconds>",
+                *KALI_AUDIT_FIELDS,
                 "--values \"<literals and/or a-b integer ranges>\" OR --values-file <path> (exactly one, REQUIRED)",
                 "command template (positional after `--`; must contain the placeholder)",
                 "--placeholder <token> / --max-values <n> / --concurrency <n> / --allow-concurrent / --json",
@@ -1658,11 +1914,7 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     notes = _KALI_COMMON_NOTES + _KALI_VERB_NOTES.get(verb, ())
     invocation = _kali_invocation(verb)
     author_fields: tuple[str, ...] = (
-        "--technique <enum>",
-        "--intent \"<one-line purpose>\"",
-        "--probe-kind <kind>",
-        "--phase <phase>",
-        "--timeout <seconds>",
+        *KALI_AUDIT_FIELDS,
         "tool-specific flags (see `vigil assess kali "
         + verb
         + " --help`)",
@@ -1675,6 +1927,37 @@ def _kali_verb_contract(verb: str) -> CommandContract | None:
     if verb not in ("exec", "job", "browser"):
         author_fields = author_fields + (
             "--extra-args \"<raw flags>\" (optional, shlex-split passthrough for long-tail flags)",
+        )
+    if verb == "job":
+        # Only `job start` runs a tool, so the audit-flag set is that action's;
+        # the other actions address a recorded job by id.
+        return CommandContract(
+            name="kali job",
+            phase=_KALI_VERB_PHASES.get(verb, ()),
+            summary="Run a long-lived tool inside the runtime container as an audited dtach job, and inspect or stop it.",
+            schema_name="argparse + CommandRunRecordRequest backend model",
+            preferred_invocations=invocation,
+            author_supplied_fields=(),
+            notes=KALI_JOB_NOTES + _KALI_VERB_NOTES.get(verb, ()),
+            common_mistakes=_KALI_COMMON_MISTAKES,
+            variants=(
+                ContractVariant(
+                    "start",
+                    fields=tuple(
+                        {
+                            KALI_BLOCKING_TIMEOUT_FIELD: KALI_JOB_TIMEOUT_FIELD,
+                            KALI_AGENT_ID_FIELD: KALI_JOB_AGENT_FIELD,
+                        }.get(entry, entry)
+                        for entry in KALI_AUDIT_FIELDS
+                    )
+                    + ("the command after `--`",),
+                    examples=examples[:1],
+                ),
+                ContractVariant("status", fields=("<job-id>",), examples=examples[1:2]),
+                ContractVariant("tail", fields=("<job-id> [--follow]",)),
+                ContractVariant("stop", fields=("<job-id>, or --all to reap every in-flight job",)),
+                ContractVariant("list", fields=("--status <status> / --parent-run-id <id>",)),
+            ),
         )
     return CommandContract(
         name=f"kali {verb}",
@@ -1727,6 +2010,31 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
             "defaults are a REVALIDATION WARNING, never authorization or permission to act on "
             "the row."
         )
+    examples = [example] if example else []
+    provenance_schema = properties.get("provenance") if isinstance(properties, dict) else None
+    if isinstance(provenance_schema, dict) and "waf" in (provenance_schema.get("properties") or {}):
+        notes.append(
+            "A WAF measurement closes the per-host `waf_tier` readiness objective for each host "
+            "it names: set `provenance.waf` to {\"verdict\": \"detected\" | \"none_detected\", "
+            "\"hosts\": [<host>, ...]} with `provenance.command_run_id` naming the run that "
+            "measured them (wafw00f or an equivalent probe). The run must have completed "
+            "successfully and record each named host as its target: its target_host (a "
+            "list-mode run records the hosts its list file holds) or the target its argv "
+            "names. Record a measured negative as `none_detected`, and name a WAF in "
+            "`component` only when the run saw one. A row that says 'no WAF' only in its "
+            "text closes nothing; the backend refuses a measurement whose run is not in this "
+            "engagement, did not succeed, or did not target a named host, and names the host."
+        )
+        examples.append({
+            "component": "WAF: none detected",
+            "source_name": "recon-specialist",
+            "confidence": "high",
+            "evidence_ref": "scans/wafw00f_results.csv",
+            "provenance": {
+                "command_run_id": 77920,
+                "waf": {"verdict": "none_detected", "hosts": ["api.example.com", "www.example.com"]},
+            },
+        })
     return CommandContract(
         name=f"intel record {intel_type}",
         summary=f"Record one `{intel_type}` intel row via the intel record helper.",
@@ -1740,7 +2048,7 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
             ("source", "use source_name"),
             ("agent_name", "use source_name, or provenance.agent_name when provenance detail is useful"),
         ),
-        examples=(example,) if example else (),
+        examples=tuple(examples),
     )
 
 
@@ -1822,8 +2130,8 @@ def _looks_like_verification_payload(payload: Any | None) -> bool:
 # the next dispatch prompt.
 # ---------------------------------------------------------------------------
 
-# Agent lifecycle sub-verbs that have their own contract entry. The Contract-First
-# Rule directs operators to read these before first use, and the
+# Agent lifecycle sub-verbs that have their own contract entry. Prompts direct an
+# author to read `vigil assess contract <verb>` before hand-authoring a payload, and the
 # `vigil assess contract` resolver uses this tuple to advertise what is
 # discoverable. Read-only sub-verbs (`list`, `get`) are intentionally absent
 # because they do not mutate state and have nothing to validate.
@@ -1874,14 +2182,13 @@ def _dispatch_root_contract() -> CommandContract:
             "but does not spawn a specialist. Launch the specialist in the active client using "
             "the Runtime Identity block printed by `agent start`, then run "
             "`agent bind-client-handle` so the row names the session you launched and a "
-            "mid-flight message no longer depends on a mapping you keep by hand. `agent handoff` "
+            "mid-flight message does not depend on a mapping you keep by hand. `agent handoff` "
             "writes a repeatable checkpoint, `agent close` consumes a ready/blocked handoff "
             "into closure and records its decision, while `agent done --status ...` is an "
             "explicit raw lifecycle write for recovery. "
             "`agent render-handoff` assembles the blob the next dispatch prompt pastes verbatim.",
             "`agent start` defaults a missing --dispatch-mode from the role (warn, not block) and accepts a newly-coined mode (advisory warn). "
             "--skills is optional: set it when the applicable skill is already known, otherwise the specialist selects one from the surface and names it in its handoff. The advisory overlap scan is default-on across in-progress and completed rows; it streams paged history, ranks the five displayed rows by relevance/findings produced with deterministic tie-breaks, and prints the total count. Use --allow-duplicate only when the overlap is intentional.",
-            "`agent start` also lints authored discovery packet guidance for a prescriptive 'technique cage' — an objective that caps a specialist's depth before it reads anything. Two shapes trip it: a STRUCTURED recipe (a numbered/bulleted step list, or a run of imperative test-verbs, whose own lines pre-name two or more vuln classes), and a SHORT themed objective — a handful of words that names two or more bug families and no surface, which caps the hunt at the families you thought of while the backend's own applicable_vuln_classes for the same files asks for more. The short form is checked only on a discovery dispatch; naming the family is correct for a verifier, variant hunter, fuzzer, exploit developer or report writer, and for any objective that opens with a verification verb. This is WARN-only and NEVER blocks the dispatch; the fix is to hand the specialist the measured coverage picture instead of a script via `vigil assess coverage --host <h> --for-dispatch` (paste the COVERAGE block) plus an open objective naming the surface and its entry chains.",
             f"Verbs with their own contract entries: {', '.join(AGENT_VERBS)}.",
         ),
         common_mistakes=(
@@ -1925,9 +2232,19 @@ def _work_buffer_contract() -> CommandContract:
             "vigil assess work-buffer reclassify [--reclassify-all|--reclassify-stale|--reclaim-skipped|--retype|--retype-all]",
             "vigil assess work-buffer link-surface --surface-id <id> --cluster <key>",
         ),
-        author_supplied_fields=(
-            "<action>",
-            "action-specific item ids, type, limit, agent name, or reason",
+        author_supplied_fields=(),
+        # `reclassify` and `link-surface` have contracts of their own
+        # (`_work_buffer_verb_contract`), which resolve before these.
+        variants=(
+            ContractVariant("stats", fields=("--by status|source|cluster|host|reason|classifier_version / --status <status>",)),
+            ContractVariant("peek", fields=("<type> [limit]",)),
+            ContractVariant("fetch", fields=("<type> <limit> <agent-name>",)),
+            ContractVariant("fetch-by-priority", fields=("<limit> <agent-name|auto>",)),
+            ContractVariant("fetch-by-unit", fields=("--unit-id / --path / --class / --limit / --agent",)),
+            ContractVariant("done", fields=("<id1,id2,...>",)),
+            ContractVariant("defer-cluster", fields=("<cluster_key> --reason <text> [--reason-tag <tag>] [--dry-run]",)),
+            ContractVariant("defer-items", fields=("<id...> --reason <text> [--dry-run]",)),
+            ContractVariant("set-rationale", fields=("<id...> --rationale <text>",)),
         ),
         notes=(
             "Work-buffer rows are backend batching state (assessment_work_items), NOT backend agent "
@@ -1938,7 +2255,7 @@ def _work_buffer_contract() -> CommandContract:
             "stats --by host accepts --status so a pending-only queue census does not mix in terminal rows. set-rationale persists triage conclusions on selected work items.",
             "fetch-by-unit selects the highest-EV unsatisfied application unit when --unit-id is omitted. "
             "Omitting --limit derives a deterministic batch from depth tier and recent probe saturation; an explicit limit always wins and work-item priority scores are never rewritten.",
-            "reclassify (folded-in classify-work) re-applies gf-style priority/cluster classification (default: unscored rows only); --retype/--retype-all re-derive `type` from stored fields. link-surface (folded-in link-surface-work-items) links backend surfaces to the request variants behind selected work_items. See `vigil assess contract work-buffer reclassify` / `contract work-buffer link-surface`.",
+            "reclassify re-applies gf-style priority/cluster classification (default: unscored rows only); --retype/--retype-all re-derive `type` from stored fields. link-surface links backend surfaces to the request variants behind selected work_items. See `vigil assess contract work-buffer reclassify` / `contract work-buffer link-surface`.",
         ),
         common_mistakes=(
             ("using agent handoff syntax here", "`work-buffer` never records handoffs; use `vigil assess agent handoff`"),
@@ -1954,7 +2271,7 @@ def _work_buffer_verb_contract(verb: str) -> CommandContract | None:
     if verb == "reclassify":
         return CommandContract(
             name="work-buffer reclassify",
-            summary="Re-apply gf-style priority/cluster classification to the work buffer (folded-in classify-work).",
+            summary="Re-apply gf-style priority/cluster classification to the work buffer.",
             schema_name="reads GET work-items, writes POST work-items/update (ADR 0013)",
             preferred_invocations=(
                 "vigil assess work-buffer reclassify",
@@ -1979,7 +2296,7 @@ def _work_buffer_verb_contract(verb: str) -> CommandContract | None:
     if verb == "link-surface":
         return CommandContract(
             name="work-buffer link-surface",
-            summary="Link backend surfaces to the request variants behind selected work_items (folded-in link-surface-work-items).",
+            summary="Link backend surfaces to the request variants behind selected work_items.",
             schema_name="reads GET work-items, writes POST surface-request-variant-links",
             preferred_invocations=(
                 "vigil assess work-buffer link-surface --surface-id 5 --cluster gf:cluster",
@@ -2023,12 +2340,12 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 ("scope", "handoff payload's summary / coverage_gaps / next_steps / "
                           "runtime_issues / working_artifacts / open_questions / "
                           "recommended_next_agent / extras"),
-                ("credentials filter", "fetched only for vulnerability-analyst and "
-                                       "exploit-developer roles, filtered by source_name"),
+                ("credentials", "every engagement credential row, for every role: one line "
+                                "with the row count and ids (no material)"),
             ),
             notes=(
                 "Exits 2 when no handoff exists for the agent-id (404 on dispatch-handoffs/{agent_id}) — the dispatch never wrote one, or the id is mistyped. Specialists are expected to write a handoff before exiting.",
-                "A 404 on a finding slug renders inline as 'slug missing in backend' (distinct from 'fetch error: <reason>') instead of failing the whole render — the operator may have killed the finding between dispatch and handoff.",
+                "A 404 on a finding slug renders inline as 'slug missing (deleted or never recorded)' (distinct from 'fetch error: <reason>') instead of failing the whole render — the operator may have killed the finding between dispatch and handoff.",
                 "The dispatch row is fetched best-effort; when missing, the renderer falls back to the handoff row's metadata.",
                 "Cross-reference: agent/operator-core.md 'Cross-Dispatch Continuity'.",
             ),
@@ -2104,6 +2421,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "This command records dispatch rows; it does not launch specialists. The JSON and Markdown table preserve every attempted worker row so successful writes remain usable after a partial failure.",
                 "If any durable dispatch write fails, the command prints failed_to_record for that row, reports the swarm as incomplete, and exits non-zero. Launch only successfully recorded rows; never treat partial registration as a complete swarm.",
                 "Items beyond workers × batch-size are explicitly reported as uncovered and require a later swarm against the tail.",
+                "ADVISORY: when --workers plus the engagement's in-progress dispatches exceeds the client concurrency budget, stderr warns that the excess specialists queue in the native client rather than run in parallel; every row is still recorded. The budget defaults to 20 (Claude Code's concurrent-subagent limit) and is set with VIGIL_CLIENT_CONCURRENCY_BUDGET or `client.concurrency_budget` in the Vigil config (~/.config/vigil/config.json), the environment winning; a value that is not a positive integer is ignored with a warning.",
             ),
         )
     if verb in {"register", "start"}:
@@ -2160,14 +2478,14 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "captures the backend-derived Code Source Identity block immediately after "
                 "Runtime Identity.",
                 "Every start captures a canonical packet before native launch. Success receipts identify its immutable local path, SHA-256, bytes, lines, short launch_message, and the `authorized_phase` the packet shipped — read that back before launching, because it is the authority grant the role gates enforce. --dry-run validates without capture or launch permission. Exact registration retries recover the same dispatch with launch_required=false; changed input under the same ID conflicts. Local materialization failures print no success receipt. The helper does not attest whether a native process started; inspect client bindings and execution before recovering an uncertain launch.",
-                "`authorized_phase` is NOT ordinary optional context — it is the authority grant the code role gates enforce, so it is always established before the packet renders. An explicit value always wins, because a dispatch is routinely authorized for a phase other than the campaign's current one (a proof-route packet is, by contract); a spelling outside the canonical roster earns an ADVISORY and is recorded as authored, never refused. When the key is omitted — or carries a placeholder like 'not supplied' — `agent start` resolves the engagement's own track phase from scope.json (through the same roster reader `transition-phase` uses), stamps it, and echoes on stderr which track it came from. When scope.json cannot answer unambiguously — a two-track engagement dispatching a role that belongs to neither, or a track sitting at unknown/repair-required/complete — the field carries the literal marker \"MISSING (malformed dispatch)\" and a WARN, and the code role gates stop that dispatch before it reads source. A phase is never guessed: supply it in --prompt-context-json.",
-                "Traffic classification remains explicit. Optional context fields include authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions. Unknown keys are rejected by name; the objective belongs in --task or --packet-file. Omitted fields remain unknown and grant no authority. Blue tenant refs are validated and injected before capture. --packet-file is bounded to 64KiB, UTF-8, regular, engagement-contained inputs. Size and discovery-prescription diagnostics inspect actual authored packet additions and are advisory; verification/reporting recipes are not rejected as discovery caging.",
+                "`authorized_phase` is NOT ordinary optional context — it is the authority grant the code role gates enforce, so it is always established before the packet renders. An explicit value always wins, because a dispatch is routinely authorized for a phase other than the campaign's current one (a proof-route packet is, by contract); a code audit tag (`code-hunt`, `code-verify`, ...) is stored as the code track phase it tags (`hunt`, `verify-variant`, ...) and that is echoed on stderr; any other spelling outside the canonical roster earns an ADVISORY and is recorded as authored, never refused. When the key is omitted — or carries a placeholder like 'not supplied' — `agent start` resolves the engagement's own track phase from scope.json (through the same roster reader `transition-phase` uses), stamps it, and echoes on stderr which track it came from. When scope.json cannot answer unambiguously — a two-track engagement dispatching a role that belongs to neither, or a track sitting at unknown/repair-required/complete — the field carries the literal marker \"MISSING (malformed dispatch)\" and a WARN, and the code role gates stop that dispatch before it reads source. A phase is never guessed: supply it in --prompt-context-json.",
+                "Traffic classification remains explicit. Optional context fields include authorized_phase, target, hunt_scope, mindset_lens, depth_expectation, oob, auth_context, credential_id, prior_state, coverage, cleanup, human_reach_decision, role_specific_additions. Unknown keys are rejected by name; the objective belongs in --task or --packet-file. Omitted fields remain unknown and grant no authority. Blue tenant refs are validated and injected before capture. --packet-file is bounded to 64KiB, UTF-8, regular, engagement-contained inputs. A rendered packet over 12,000 bytes draws a size advisory; it never blocks.",
                 "prompt_context prior_state is losslessly contained data with a 16384-character safety limit; prefer compact working-state pointers. Optional queue_item_ids (1–20 current code queue IDs) are resolved against the selected analysis repository into a backend-derived file/status manifest before dispatch through exact selected-ID reads. Optional lane_file names a generated code queue-fetch JSON file or newline list of indexed paths; it is validated before the write and rendered as exact item/LOC totals with bounded file/directory previews; a queue-fetch preview names each leased item's scratch_dir and current backend family floor. Required families render as one common list plus each file's additions, whose union is the complete per-file floor; suggested families remain hints. Exact path selections read only the selected file facts; paths whose encoded selector exceeds the URL batch bound use the read-only code/files/lookup body endpoint. The ledger total uses a count-only projection. Optional prior_agent_id quotes a bounded `agent render-handoff` result inside the untrusted prior-state boundary. Missing/stale queue IDs, an invalid lane file, or a missing handoff fail before the dispatch row is written.",
                 "--standing-brief-file captures an engagement-contained regular UTF-8 file, up to the same 64KiB input bound as --packet-file, once under tools/dispatch-briefs/<sha256>.md. The packet and launch receipt carry its path and SHA-256, not its body. The specialist reads the captured briefing before work; identity, scope, approval and proof authority retain precedence. Changing the authoring file creates a new capture for a new start; continuation retains and validates its predecessor's capture. A missing or changed captured brief refuses launch/continuation. Dry run validates and renders the reference without publishing its local capture. Captured metadata is helper-owned, not authorable prompt_context.standing_brief.",
                 "`--prompt-context-json` and a `prompt_context` object inside `--from-json` are not mutually exclusive: supplying both SHALLOW-MERGES them key by key, with the flag winning each key it names and leaving the rest of the JSON object intact. Author the wave's shared boilerplate (target, prior_state, coverage, cleanup, oob) once in --from-json and override per lane with --prompt-context-json. Validation runs on the MERGED object, so an unknown key from either side is still rejected by name.",
                 "`--vuln-classes` must name canonical vuln class tokens. A token the taxonomy does not know is refused before the dispatch row is written, and the refusal names the nearest canonical class for each bad token so a typo is recoverable at the keyboard — list them with `vigil assess list-skills --json` or read agent/references/runtime-guides/vuln-taxonomy.md. The value is the dispatch's own declaration and the depth ledger never reads it for coverage, but every class-keyed view does, so an unresolvable token is stored nowhere.",
                 "`--role` is checked against the installed role roster (agent/agents/<role>.md) before the row is written: an unregistered role is REFUSED, with the nearest registered role and the full registered list, because the packet would send the specialist to a prompt that does not exist and it would run with no role prompt and none of its mandatory references. When the roster directory itself does not resolve — a deployment without the agent tree — nothing is provable, so that case WARNs and proceeds instead, the same way unresolvable instruction-identity files report rather than block.",
-                "ADVISORY, not a gate: when the authored guidance (prompt_context.role_specific_additions or the --packet-file assignment text) imposes a per-slug obligation — a slug scope, an assignment quantifier and an obligation verb on one line — and the dispatch carries no finding_slugs, the first few such lines are reported as unsatisfiable by construction. Pass --finding-slugs with the assigned set, or scope the obligation to what the lane was actually given. The authored text is the operator's and is never rewritten.",
+                "Runtime Identity always states `assigned_finding_slugs`: the --finding-slugs set as JSON, or `none`. Authored guidance (prompt_context.role_specific_additions or the --packet-file text) is the operator's and is never rewritten or scanned, so scope any per-finding obligation in it to that set. A proof-bearing variant dispatch (web verify `variant-rotation`, code `verify-variant`) without --finding-slugs is refused.",
                 "`skills` on a specialist dispatch is a WARNING when missing, never a rejection. Explicitly supplied names must resolve to installed skill directories; unknown names are rejected by the CLI before dispatch creation. A specialist picks its skills from what it observes, so the honest list is often known only after the dispatch runs. Set it when the applicable skill is already clear; otherwise name it in the handoff.",
                 "requested_model and requested_reasoning record the recipe YOU selected on the dispatch row; specialist packets carry actionable assignment context without model/reasoning placeholders or empty optional rows. An ordinary dispatch carries no launcher-effective or provider-observed model/reasoning — no trusted launcher integration attests them — so the row is an asserted recipe, never measured truth, and caller-supplied actual_/launcher_effective_ fields are dropped rather than stored. Leaving either unset is visible warning debt: the dispatch stays usable but is not replayable. Never invent a runtime model the client does not expose.",
                 "Discover skill names with `vigil assess list-skills` — each value must match a directory under `agent/skills/<name>/`.",
@@ -2236,8 +2554,8 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Binding history is append-only. A correction is a NEW version that stamps the "
                 "previous one's superseded_by_id; nothing is ever overwritten, so the record of "
                 "what was bound when survives every correction. Re-binding the SAME "
-                "client/namespace/handle is refused with 409 rather than adding a duplicate "
-                "version that would bury the real corrections.",
+                "client/namespace/handle adds no duplicate version that would bury the real "
+                "corrections (see the note on the answered no-op below).",
                 "stdout is one JSON object: {\"binding\": <the new binding>, \"superseded\": "
                 "<the binding it replaced, or null>}. Each binding carries id, agent_id, "
                 "binding_version, superseded_by_id, asserted_client, asserted_session_namespace, "
@@ -2251,6 +2569,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "corrected and the history is worth reading.",
                 "A dispatch with no binding is the normal state between `agent start` and the "
                 "client launch: client_binding is null and client_binding_count is 0.",
+                "Re-binding the identical client/namespace/handle is an answered no-op: HTTP 200 with the current binding, `superseded: null`, `already_bound: true`, and no new version. A new binding answers 201 with `already_bound: false`.",
             ),
             common_mistakes=(
                 (
@@ -2300,7 +2619,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             ),
             author_supplied_fields=(
                 "<agent-id> (one or more; batch applies the same flags to each)",
-                "--status (in-progress|completed|failed|aborted|blocked)",
+                "--status (completed|failed|aborted|blocked)",
             ),
             helper_defaults=(
                 ("--completed-at", "now() when --status is terminal and the flag is omitted"),
@@ -2310,11 +2629,12 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 ("--finding-slugs", dispatch_finding_slugs_help()),
             ),
             notes=(
-                "Use for a deliberate raw lifecycle write when a ready/blocked handoff cannot be closed through `agent close`. Without explicit --status, a ready/blocked handoff is refused so its closure decision is not silently skipped.",
+                "Without --status, an id whose handoff is ready or blocked is closed the way `agent close` closes it (the dispatch_closed_from_handoff decision is recorded, --finding-slugs joins the recorded scope, and stderr names the routing); other ids get the raw write. Pass --status for a deliberate raw lifecycle write.",
                 "For recovery, pair `--status completed --finding-slugs <slugs>` so the row names the slugs the specialist produced; `vigil assess agent render-handoff` reads from there. render-handoff renders the UNION of the dispatch row's slugs and the handoff's own, so a slug on either row still reaches the next dispatch.",
+                "--status words fold case and separator (`Completed` -> `completed`); `agent close --status` and `agent list --status` fold the same way.",
             ),
             common_mistakes=(
-                ("status=done", "status enum is in-progress / completed / failed / aborted / blocked — 'done' is rejected"),
+                ("status=done", "--status is completed / failed / aborted / blocked — 'done' is rejected"),
                 ("missing finding-slugs on completed run", "the slug list is what links the dispatch to its produced findings; missing it means the next operator cannot trace what came out"),
             ),
             examples=(
@@ -2339,6 +2659,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             author_supplied_fields=(
                 "<agent-id> (one or more; batch closes each ready/blocked handoff) — omitted with --all-ready",
                 "--reason",
+                "--completed-at (ISO-8601 completion time stamped on each listed dispatch; default the close time; refused with --all-ready, whose ids come from backend state)",
                 "--status (failed|blocked; only for an absent or checkpointed handoff, and only with --reason)",
                 "--all-ready (close every in-progress dispatch whose handoff is ready or blocked; derives the ids from backend state)",
                 "--quiet (drop the per-dispatch JSON; the stderr tally and the audit rows remain)",
@@ -2348,7 +2669,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Normal close consumes ready/blocked handoffs. For absent or checkpointed handoffs, --status requires a nonblank --reason of at most 8192 characters; it records an operator-authored blocked handoff, preserves checkpoint evidence, and closes an in-progress dispatch terminally. Ordinary work may then continue; proof work requires release and a fresh claim.",
                 "--status failed means the lane returned NO usable output; --status blocked means it produced durable work (receipts, released leases, a checkpoint) but could not finish its scope. The operator_recovery stamp, the --reason requirement and the preserved checkpoint are identical for both — only the recorded terminal status differs, so a lane that did work is not filed as if it had done none.",
                 "Batch: list several agent-ids to close each in a resilient loop; a non-closable/checkpointed dispatch is reported and skipped, not fatal. --all-ready runs the same loop over the ids it selects.",
-                "--all-ready applies `reconcile-stale`'s closable predicate with NO age threshold — every in-progress dispatch whose handoff reads ready or blocked, so a wave that just returned is closable immediately. It cannot be combined with explicit agent ids (the ids come from backend state) or with --status (that records a return which has no final handoff; close those by id). The selected ids print to stderr before the loop.",
+                "--all-ready applies `reconcile-stale`'s closable predicate with NO age threshold — every in-progress dispatch whose handoff reads ready or blocked, so a wave that just returned is closable immediately. It cannot be combined with explicit agent ids (the ids come from backend state), with --status (that records a return which has no final handoff; close those by id), or with --completed-at (one time cannot be each selected dispatch's observed completion; list the ids instead). The selected ids print to stderr before the loop.",
                 "Close PATCHes the stable UNION of the dispatch row's slug list (the input/related scope `agent start --finding-slugs` recorded) and the handoff's own (what the specialist produced), because the raw route replaces the column — sending the handoff's list alone would drop an input slug its author did not repeat. A code-variant-hunter dispatch is exempt — its scope is the immutable parent-finding set the backend 409s any change to, so its produced slugs stay on the handoff.",
                 "Records a dispatch_closed_from_handoff decision row so automated/stale closure stays auditable. Failed-return checkpoint updates compare the observed handoff version and refuse a concurrent newer return. Retrying the same failed recovery can complete a missing audit write without changing its completion timestamp.",
             ),
@@ -2387,7 +2708,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             author_supplied_fields=(
                 "--agent-id <your dispatch agent_id>; the payload's agent_id must match it, so a re-sent handoff file written by another dispatch is refused",
                 "--from-json <path|-> containing the complete structured handoff",
-                "agent_id, agent_role, and summary (target about 2000 characters, hard maximum 16384; required when creating a handoff)",
+                "agent_id and summary (target about 2000 characters, hard maximum 16384; required when creating a handoff); agent_role is optional and, when sent, must be the dispatch's registered role",
                 "structured arrays: next_steps / coverage_gaps / runtime_issues / working_artifacts / open_questions — see the field list and the example payload below for each entry's keys",
             ),
             # Shape source: `HandoffCreate` in
@@ -2401,7 +2722,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             # live model.
             top_level_fields=(
                 ("agent_id", "string, required", "Your dispatch agent_id from the Runtime Identity block. Must equal --agent-id, so a handoff file written by another dispatch is refused rather than overwriting that dispatch's row."),
-                ("agent_role", "string, required", "The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, `code-vuln-hunter`, ...)."),
+                ("agent_role", "string", "The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, `code-vuln-hunter`, ...). Optional: when absent the backend stores the dispatch's registered role and names it on the response's `derived` list; a different role contradicts the dispatch `agent_id` names and is refused (409)."),
                 ("summary", "string, required", "Plain prose: what was done and the headline outcome, so the operator can choose the next dispatch. Target about 2000 characters; 16384 is the hard limit, measured locally before the request."),
                 ("phase", "string", "The phase tag the dispatch was authorized for, from the canonical phase vocabulary (`vigil assess list-commands --phase`). Optional at the backend boundary; a final handoff should carry it."),
                 ("confidence", "string; one of: low, medium, high", "How much of the summary was PROVEN versus inferred. Optional at the backend boundary; a final handoff should carry it."),
@@ -2427,10 +2748,12 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Specialists call this from their closing sequence before exiting; the row is then the canonical 'what was done, what's missing, what's next' record for the dispatch.",
                 "For an existing handoff, a partial JSON object performs a PATCH and preserves omitted summary and structured arrays.",
                 "An unknown key is rejected BY NAME before the request, on the create and the update path alike, so a misspelling fails loudly instead of being dropped behind a success receipt. The keys most often copied back out of a prior row are backend-managed and belong to nobody else: `handoff_version` (pass expected_handoff_version to guard instead), `last_checkpoint_at`, `created_at`, `id` (--agent-id addresses the row) and `engagement_id` (resolved from the engagement, never sent).",
-                "A payload carrying `expected_handoff_version` always takes the UPDATE route, even when it also carries agent_role and summary — the guard is a statement about an existing row, so it is refused when the agent_id has no handoff yet. Without the guard, a payload with agent_role and summary is an idempotent upsert (POST, then PATCH on a duplicate agent_id); anything less is a partial update.",
+                "A payload carrying `expected_handoff_version` always takes the UPDATE route, even when it also carries a summary — the guard is a statement about an existing row, so it is refused when the agent_id has no handoff yet. Without the guard, a payload with a summary is an idempotent upsert (POST, then PATCH on a duplicate agent_id). Anything less is a partial update.",
                 "The receipt lists every `working_artifacts` path with its state (`present` / `missing` / `out-of-engagement`) and warns per unverifiable path. `checkpointed` and `blocked` keep that a warning — an aborted write legitimately names a file it never finished. A `ready` write that claims an absent path exits NON-ZERO, and the row is stored first: the exit reports an unsubstantiated artifact claim, not a failed write, so re-run the same command once the files exist rather than re-authoring the handoff.",
                 "`render-handoff <agent-id>` reads this row, fetches each named finding, and emits the bounded markdown blob the next dispatch pastes.",
                 "JSON payload schema: agent/references/runtime-guides/handoff-schema.md.",
+                "agent_role is optional; the handoff records the dispatch's registered role. An absent one is filled from the dispatch and named on the response's `derived` list; one that differs is refused (409) rather than replaced, so omit it or send the registered role.",
+                "`handoff_status` and `closed_dispatch_status` words fold case and separator (`Ready` -> `ready`).",
             ),
             common_mistakes=(
                 ("transcript paste in summary", "summary aims for about 2000 characters with a 16384-character safety limit; use coverage_gaps / next_steps / runtime_issues when their meaning fits, never to arbitrarily split prose"),
@@ -2517,13 +2840,19 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "vigil assess agent decision --kind human_reach_decision --surfaced-to-user --payload-json '{\"choice\": \"pending\", \"endpoint\": \"<path-or-url>\", \"action\": \"<what-it-does>\", \"live_attempts_used\": <n>, \"destination_class\": \"real_third_party|unknown\", \"evidence\": \"<what steps 1-3 showed>\"}'",
                 "vigil assess agent decision --kind depth_deferral --surfaced-to-user --payload-json '{\"host\": \"<host>\", \"path_prefix\": \"<prefix>\", \"vuln_classes\": [\"sqli\"], \"reason\": \"<why>\"}'",
                 "vigil assess agent decision --kind claim_equivalence --payload-json '{\"finding_slug\":\"<slug>\",\"verdict\":\"equivalent\",\"claim_transition_id\":<id>,\"new_claim_sha256\":\"<digest>\",\"verifier_dispatch_agent_id\":\"<agent-id>\",\"reason\":\"<why the verified claim is unchanged>\"}'",
-                "vigil assess agent decision --kind pass1_qa_verdict --payload-json '{\"finding_slug\":\"<slug>\",\"packet_id\":\"<packet-id>\",\"auditor_dispatch_agent_id\":\"<agent-id>\",\"verdict\":\"pass\",\"reason\":\"<checklist result after fixes>\"}'",
+                "vigil assess agent decision --kind submission_qc_verdict --payload-json '{\"finding_slug\":\"<slug>\",\"packet_id\":\"<triage-packet-id>\",\"reviewer_dispatch_agent_id\":\"<qc-report-writer-id>\",\"writer_dispatch_agent_id\":\"<writer-id>\",\"verdict\":\"blocked\",\"failed_rows\":[{\"row\":\"<checklist row>\",\"quote\":\"<exact failing text>\"}]}'",
+                "vigil assess agent decision --kind report_qc_verdict --payload-json '{\"artifact_id\":<report.md artifact id>,\"sha256\":\"<registered report.md sha256>\",\"reviewer_dispatch_agent_id\":\"<qc-report-writer-id>\",\"writer_dispatch_agent_id\":\"<writer-id>\",\"verdict\":\"pass\",\"failed_rows\":[]}'",
+                "vigil assess agent decision --kind severity_variance --payload-json '{\"finding_slug\":\"<slug>\",\"reason\":\"<why the severity departs from its CVSS band>\"}'",
                 "vigil assess agent decision --kind repro_rehearsal --payload-json '{\"finding_slug\":\"<slug>\",\"verdict\":\"followed\",\"proof_mode\":\"live\",\"verifier_dispatch_agent_id\":\"<agent-id>\",\"observed_outcome\":\"<actual result>\",\"runs_checked\":[<authored-run-id>,<reviewer-run-id>]}'",
+                "vigil assess agent decision --kind coverage_deferral --supersedes <decision-id> --surfaced-to-user --payload-json '{\"hosts\": [\"<host>\"], \"deferred_objectives\": [\"directory_fuzz\"], \"reason\": \"<corrected reason>\"}'",
             ),
             author_supplied_fields=(
-                "--kind (scope_decision|egress_decision|dispatch_blocked|human_reach_decision|depth_deferral|... — the backend accepts any string but report-writer only renders known kinds)",
+                "--kind (scope_decision|egress_decision|dispatch_blocked|human_reach_decision|depth_deferral|... — kinds are open text, except the gated kinds ("
+                + ", ".join(GATED_DECISION_KINDS)
+                + "): another case or separator spelling of one is stored under it and named on the response's `derived`, and a misspelling is refused with a did-you-mean; report-writer only renders known kinds)",
                 "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --reason / --phase) that build the payload dict",
                 "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
+                "--supersedes <decision-id> (optional): the earlier row of the same --kind this row replaces",
             ),
             helper_defaults=(
                 ("payload", "constructed from --host/--vendor/--choice/--note/--reason/--phase when --payload-json is omitted"),
@@ -2532,9 +2861,14 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
             notes=(
                 "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked rows all share this table — keep the --kind taxonomy disciplined so report-writer can summarize by kind.",
                 "Set --surfaced-to-user for operator-facing decisions (vendor-SaaS, egress reputation, blocked dispatch) so the human-visible audit log matches what the operator was shown.",
+                "--supersedes <decision-id> CORRECTS A ROW INSTEAD OF STACKING ONE: the new row records `supersedes_id`, the named row is stamped `superseded_by_id` in the same write, and every gate, readiness reader and approval flow reads only current rows. The superseded row stays readable (`vigil assess fetch dispatch-decisions/<id>`, or `dispatch-decisions?include_superseded=true` for the history) and can no longer be resolved. Refused: a row of another kind (record the correction under that kind), a row this engagement does not hold, a row already superseded (supersede its replacement), and severity_variance (it attaches to the current verification; correct it on a fresh `finding verify --severity-variance-file`).",
+                "For coverage_deferral, deferred_objectives accepts exactly the per-host objectives `check-phase-readiness --by-host` evaluates (its `objectives:` line; a refusal names them). A deferred step that is none of them (authenticated recon, a skipped scan) is not a coverage_deferral; record it as an ungated kind such as `phase_step_deferral` with the hosts, step and reason, which no gate reads.",
                 "--payload-json COMPOSES, THEN THE FLAGS WIN: the JSON object is loaded into the payload first and each supplied shorthand flag (--host / --vendor / --choice / --note / --reason / --phase) then overrides its own key, exactly as `agent start --from-json` and `host-exec --from-json` behave. Supply a value once: a flag repeating a JSON key wins, a flag naming a key the JSON omits adds it, and a flag you leave off changes nothing. The gate reads `payload.choice`, so `choice` must come from one of the two — inside the JSON object or as --choice — and must not be spelled differently in each.",
-                "For claim_equivalence, read finding GET's verification_audit.claim_transition_id and current_claim_sha256. A recorded vulnerability-analyst, code-vuln-verifier, incident-verifier, or exploit-developer dispatch, distinct from the original finding author, compares the changed finding with the verified claim and records verdict=equivalent or changed with those exact values. Equivalent clears claim_review_pending; changed requires a new canonical edit and terminal verification. Report readiness and final export block while review is pending.",
-                "For pass1_qa_verdict, include finding_slug, packet_id, auditor_dispatch_agent_id, verdict (pass|blocked), and reason. Build export triage-packet after the final QA edits, selecting the exact outgoing attachments. The auditor must be a recorded dispatch and may be the editing report-writer or finding author. Submission detail exposes the latest result as missing, current, stale, or blocked against the current body, platform, attachments, and program brief. This is checklist QA, never independent blind acceptance; it adds no publication bypass or new mandatory gate.",
+                "For claim_equivalence, read finding GET's verification_audit.claim_transition_id and current_claim_sha256. A recorded vulnerability-analyst, code-vuln-verifier, incident-verifier, or exploit-developer dispatch, distinct from the original finding author and from any dispatch that edited the claim (the dispatch_agent_id a `finding update --agent-id` records on the edit), compares the changed finding with the verified claim and records verdict=equivalent or changed with those exact values. Equivalent clears claim_review_pending; changed requires a new canonical edit and terminal verification. Report readiness and final export block while review is pending.",
+                "SUBMISSION FLOW (per finding, every severity): the writer authors, renders --draft, runs the checklist without recording a verdict, builds `export triage-packet` with the exact outgoing attachments, and hands back. A separate report-writer dispatch reviews that packet (review only; fixes go back to the writer) and records submission_qc_verdict. A verifier then records repro_rehearsal from a cold start, then claim_equivalence when a claim review is pending. Medium-or-above findings then get blind_triage_verdict on the same packet. Final export runs next, and `finding update --status reported` follows only an exit-0 final export.",
+                "For submission_qc_verdict, include finding_slug, packet_id (a triage packet of that finding), reviewer_dispatch_agent_id, writer_dispatch_agent_id, verdict (pass|blocked) and failed_rows. Each failed_rows entry is {row, quote}: the checklist row and the exact text that fails it; blocked needs at least one, pass has none. Reviewer and writer are distinct recorded report-writer dispatches; the reviewer also differs from the finding provenance author, from every dispatch that edited the finding, and from every dispatch that registered a version of its submission workspace, so writers pass --agent-id on `finding update`, and `export submission` records the rendering writer (resolved from the in-progress report-writer dispatch when --agent-id is omitted). Final export of an offensive engagement requires the latest verdict to pass on a packet matching the exported body, platform, platform fields, recipient guidance, attachments and program brief; a content change needs a new packet and review. Web and code `transition-phase complete` also block (missing_submission_qc) on any submittable verified finding with a registered submission whose latest verdict does not pass.",
+                "For report_qc_verdict, include artifact_id and sha256 of the registered report.md, reviewer_dispatch_agent_id, writer_dispatch_agent_id, verdict (pass|blocked) and failed_rows (same shape and rules as submission_qc_verdict). The reviewer is a report-writer dispatch distinct from the writer and from every agent that has registered report.md; the reviewed bytes must carry a producer attribution, so register them as the writer (`artifact register report.md --agent-id <writer>`; every --agent-id must name a recorded dispatch), and must still match on disk. The backend refuses bytes with no producer and a reviewer who is one of report.md's producers; it does not compare the producer with writer_dispatch_agent_id. When report.md is registered, web and code `transition-phase complete` block (missing_report_qc) unless the file is present and the latest verdict passes for that artifact id and its current sha256.",
+                "For severity_variance, include finding_slug and reason: why the severity departs from the band its cvss_score implies. It attaches to the finding's current receipt-backed confirmed or downgraded verification without fresh proof, because the verdict does not change; normal_band, chosen_severity, actor (the verifier whose receipts decide that verification) and proof_receipt_id are derived, and an authored value that disagrees is refused. A finding with no band departure, no such verification, or a variance already on its current verification is refused; report readiness then lists the departure as severity_cvss_band_divergence with the reason.",
                 "For blind_triage_verdict, include finding_slug, packet_id, verdict, reviewer_dispatch_agent_id and writer_dispatch_agent_id. Both identities must be recorded dispatches in the engagement; the writer has report-writer role. The reviewer differs from the writer and finding provenance author. This enforces attribution, not native context independence. New or changed external content requires a new attributed packet review.",
                 "For repro_rehearsal, verdict is followed, failed, or equivalent; proof_mode is live, source, or fuzz; source requires a finding whose reproduction_basis is source; unknown means no current verification receipts and grants no source exemption. Fuzz requires a file finding. The verifier_dispatch_agent_id must name an independent dispatch with the matching role: vulnerability-analyst, code-vuln-verifier, or code-fuzz-engineer. A followed live/fuzz check needs observed_outcome, all authored repro_runs IDs in runs_checked, and a completed reviewer command run. A followed source check names the independently observed outcome. A failed check needs failed_step. An equivalent step edit needs prior_decision_id of a followed check, a fresh verifier dispatch, and reason. The backend stamps a digest of current steps and ordered run IDs; final publication requires the latest successful digest to match.",
                 # --- human_reach_decision: the side-effect preflight -------------
@@ -2544,6 +2878,7 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "Preflight step 3 — a HARD 1-3 LIVE-FIRE BUDGET, per endpoint/action, for the WHOLE ENGAGEMENT. If step 2 resolves POSITIVE, or static characterization leaves it genuinely unknown, you may spend 1-3 live requests to resolve the ambiguity, and you stop the instant either condition is met: the probe CONFIRMS the endpoint reaches a real third party, or the budget is exhausted. This is a prompt-enforced discipline and a WARN backstop — nothing in the CLI counts or blocks it — so hold yourself to it with the discipline of a hard cap anyway: it exists to bound the harm of a wrong 'unknown' call, not to license routine live-fire against notify-shaped endpoints. 1-3 is the GLOBAL CEILING; ENGAGEMENT.md may only TIGHTEN it for a program (cap at 1, or reinstate zero-fire for a named endpoint), never loosen it.",
                 "CROSS-DISPATCH RULE — check before every fire, and never re-spend. The budget is per endpoint/action for the whole engagement, NOT per dispatch and NOT per specialist: a fresh dispatch does not get a fresh budget, and two specialists must not each independently spend 3 against the same target. Before ANY live human-reach fire, query the authoritative kind-filtered log — `vigil assess fetch \"dispatch-decisions?kind=human_reach_decision\"` (it pages at 100 rows by default; grep the returned JSON for the target host/endpoint) — and if a row on that exact endpoint/action already carries a `payload.choice` of `pending` or `denied`, treat it as BLOCKED and do not fire, regardless of what your own dispatch has spent. The operator is expected to inject any open gate into the dispatch context before sending a specialist at the surface, so the state is inherited rather than rediscovered; check directly anyway.",
                 "RECORDING AND CONTINUATION GATE. Any specialist records the decision itself (same pattern as scope_decision) — see the human_reach_decision invocation above for the payload shape — and then does NOT continue live-firing that endpoint/action until the operator resolves it. Four resolution values, recorded on the decision row: `approved_continue` (proceed with further live-fire; rare — the operator has independent grounds the destination is safe), `approved_limited` (proceed under a named, narrower constraint), `denied` (do not fire again; permanently blocked for this endpoint/action), and `not_real_recipient` (the destination was confirmed NOT a real third party — this RETROACTIVELY LIFTS the cap for that endpoint and its siblings, reverting it to ordinary surface per the step-2 negative list). Irreversible and notifying side-effects are not proved by triggering them past this bounded, gated budget; firing past the budget, or past an open pending/denied gate, is the exact harm the preflight exists to prevent. This gate survives every exploit_policy value, `full_send` included, and applies per-action.",
+                "A malformed repro_rehearsal or blind_triage_verdict payload is refused naming each `payload.<field>` and what it accepts; an unknown QC-verdict field is named with a did-you-mean. `verdict` (both kinds) and `proof_mode` fold case (`accept@p2` -> `Accept@P2`, `Followed` -> `followed`).",
             ),
             common_mistakes=(
                 ("freeform reason in --kind", "kinds are vocabulary; put the prose in --note or --reason"),

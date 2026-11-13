@@ -44,8 +44,11 @@ reshaped="$(printf '%s' "$payload" | jq -c '
       # NAME-AGNOSTIC file-tool branch: any non-shell tool that carries a path field
       # (write/edit/tree/read_image — bare names in goose v1.38.0, which do NOT contain
       # "developer__") becomes `fileop <path>` so the hook can audit the PATH.
+      # source_tool_* keep the original call so application-read-only.sh can tell a
+      # write from a read.
       { tool_name: "Bash",
         tool_input: { command: ("fileop " + $p) },
+        source_tool_name: $tn, source_tool_input: (.tool_input // {}),
         cwd: $cwd, hook_event_name: $evt, tool_use_id: "" }
     else
       { tool_name: $tn, tool_input: (.tool_input // {}),

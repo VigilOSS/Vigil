@@ -45,8 +45,7 @@ _EXTRA_KEYS = ("source", "languages", "bucket", "vuln_class", "weight", "origin"
 _DIR_CATEGORY: dict[str, str] = {
     "api-security": "OWASP API Security Top 10:2023",
     "access-control": "IDOR/BOLA Deep-Dives",
-    "offensive-tactics": "Red Team TTPs (ired.team)",
-    "active-directory": "AD & Kerberos Attacks (ired.team)",
+    "offensive-tactics": "Shells, Tunnels, OOB Callbacks, C2",
     "payloads": "Attack Payload Library (PayloadsAllTheThings)",
     "code-vuln-patterns": "SAST-Surviving Vulnerability Patterns",
     "finding-verification": "Finding Verification Gates",
@@ -65,8 +64,9 @@ _DIR_CATEGORY: dict[str, str] = {
 _CATEGORY_INTRO: dict[str, str] = {
     "OWASP API Security Top 10:2023": "API-specific testing checklists.",
     "IDOR/BOLA Deep-Dives": "In-depth IDOR/BOLA references beyond the OWASP API1 checklist.",
-    "Red Team TTPs (ired.team)": "Attack techniques organized by kill-chain phase.",
-    "AD & Kerberos Attacks (ired.team)": "Active Directory attack techniques.",
+    "Shells, Tunnels, OOB Callbacks, C2": (
+        "Shell listeners, frp tunnels, the OOB mint→poll→correlate loop, and C2 framework notes."
+    ),
     "Attack Payload Library (PayloadsAllTheThings)": "Copy-pasteable payloads organized by attack type.",
     "SAST-Surviving Vulnerability Patterns": (
         "Source-code vulnerability patterns that need multi-function reasoning — bugs that "
@@ -103,8 +103,7 @@ _DEFAULT_CATEGORY = "Other References"
 _CATEGORY_ORDER = [
     "OWASP API Security Top 10:2023",
     "IDOR/BOLA Deep-Dives",
-    "Red Team TTPs (ired.team)",
-    "AD & Kerberos Attacks (ired.team)",
+    "Shells, Tunnels, OOB Callbacks, C2",
     "Attack Payload Library (PayloadsAllTheThings)",
     "SAST-Surviving Vulnerability Patterns",
     "Finding Verification Gates",

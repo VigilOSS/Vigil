@@ -83,21 +83,33 @@ def test_a_shape_citing_its_receipt_and_patch_is_accepted(cited, capsys):
     assert "1 shape(s) valid" in text
 
 
+def test_a_terse_shape_backed_by_its_cited_patch_is_accepted(cited, capsys):
+    """The cited receipt and digest-bound patch carry the code shape; prose length does not."""
+    engagement, commits, diff = cited
+    shape = _shape(commits, diff, bug_pattern="CVE-2026-0001 path traversal", guard_delta="rejects '..'")
+
+    code, out, err = _check(capsys, engagement, [shape], "--json")
+
+    assert code == 0, err
+    assert json.loads(out)["lines"][0]["errors"] == []
+
+
 @pytest.mark.parametrize(
     "overrides",
     [
-        {"bug_pattern": "CVE-2026-0001", "guard_delta": "fixed in GHSA-2c4f-8x9q-m5h7"},
-        {"bug_pattern": "CWE-22 / CVE-2026-0001", "guard_delta": "see commit"},
         {"bug_pattern": "", "guard_delta": ""},
+        {"bug_pattern": "   ", "guard_delta": "\t"},
+        {"bug_pattern": None, "guard_delta": 7},
     ],
-    ids=["ids", "ids-and-a-word", "empty"],
+    ids=["empty", "whitespace", "not-text"],
 )
-def test_an_identifier_only_shape_is_rejected(cited, capsys, overrides):
+def test_a_shape_without_its_descriptions_is_rejected(cited, capsys, overrides):
     engagement, commits, diff = cited
 
     errors = _errors(capsys, engagement, [_shape(commits, diff, **overrides)])
 
-    assert any("identifier" in error or "required" in error for error in errors), errors
+    assert "bug_pattern is required" in errors
+    assert "guard_delta is required" in errors
 
 
 def _tamper_patch(engagement: Path, diff: dict) -> dict:
@@ -156,7 +168,9 @@ def test_a_shape_citing_a_truncated_diff_is_flagged(tmp_path, monkeypatch, capsy
     assert code == 0
     assert json.loads(out)["lines"][0]["evidence_truncated"] is True
     assert text_code == 0
-    assert "TRUNCATED" in text
+    truncated = next(line for line in text.splitlines() if "TRUNCATED" in line)
+    assert "vigil assess code-history diff --commit" in truncated
+    assert "--max-files" in truncated and "--max-bytes" in truncated
 
 
 def test_layout_errors_are_rejected(cited, capsys):

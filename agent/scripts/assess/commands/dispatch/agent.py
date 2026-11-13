@@ -607,15 +607,16 @@ def _record_decision(args) -> None:
             fail("agent decision --payload-json", "must produce a JSON object")
         payload.update(loaded)
     # CLI flags override / supplement the JSON payload — the same rule `agent
-    # start --from-json` and `host-exec --from-json` already apply. The flags
-    # used to be read only when --payload-json was absent, so
-    # `--payload-json '{"choice":"in_scope"}' --host acme.example` recorded a
-    # scope decision with no host at exit 0 and no warning, while
-    # --surfaced-to-user applied on both paths.
+    # start --from-json` and `host-exec --from-json` apply — so
+    # `--payload-json '{"choice":"in_scope"}' --host acme.example` records the
+    # host alongside the choice.
     #
-    # The fields collected depend on the kind, but no strict per-kind shape is
-    # enforced here — the backend accepts any dict, and kind-aware models
-    # validate the kinds that gate behaviour.
+    # The fields collected depend on the kind, but no per-kind shape is enforced
+    # here. The kind vocabulary is open: the backend stores any kind with any
+    # payload object, validates the payload shape of the gated kinds whose gate
+    # depends on it, stores another case/separator spelling of a gated kind
+    # (contract_registry.GATED_DECISION_KINDS) under that kind, and refuses only
+    # a misspelling of one, whose row would otherwise satisfy no gate.
     flag_fields = (
         ("host", getattr(args, "decision_host", None)),
         ("vendor", getattr(args, "decision_vendor", None)),
@@ -638,6 +639,9 @@ def _record_decision(args) -> None:
         "payload": payload,
         "surfaced_to_user": bool(getattr(args, "surfaced_to_user", False)),
     }
+    supersedes = getattr(args, "decision_supersedes", None)
+    if supersedes is not None:
+        body["supersedes"] = supersedes
     client, _ = _client_for(args)
     try:
         row = client.record_decision(body)
@@ -712,9 +716,10 @@ def _record_handoff(args) -> None:
     try:
         agent_id = str(payload.get("agent_id") or "")
         guarded = payload.get("expected_handoff_version") is not None
-        if not guarded and payload.get("agent_role") and payload.get("summary"):
+        if not guarded and payload.get("summary"):
             # Full checkpoints are idempotent: POST on the first write and
-            # transparently PATCH on a duplicate agent_id.
+            # transparently PATCH on a duplicate agent_id. The backend stores
+            # the dispatch's registered role, so agent_role is optional here.
             row = client.record_handoff(payload, upsert=True)
         else:
             # Lifecycle promotion is a true partial update. Requiring the
@@ -731,8 +736,7 @@ def _record_handoff(args) -> None:
                     )
                 fail(
                     "agent handoff --from-json",
-                    "agent_role and summary are required "
-                    f"keys when creating new handoff {agent_id!r}",
+                    f"summary is required when creating new handoff {agent_id!r}",
                 )
             patch = {
                 key: value
@@ -760,6 +764,9 @@ def _record_handoff(args) -> None:
             {"path": path, "state": state} for path, state in artifact_states
         ],
     }, ensure_ascii=False))
+    for entry in row.get("derived") or []:
+        if isinstance(entry, dict):
+            print(f"agent handoff: derived {entry.get('field')} — {entry.get('detail')}", file=sys.stderr)
     _report_handoff_artifact_states(
         artifact_states,
         handoff_status=str(row.get("handoff_status") or payload.get("handoff_status") or ""),

@@ -31,13 +31,14 @@ from .client import (
     AssessmentClient,
     require_command_run_finalize_response,
 )
-from .phases import AUDIT_PHASE_TAGS
+from .phases import AUDIT_PHASE_TAGS, code_audit_tag
 from .scope import execution_policy_notes
 from .config import Config
 from .kali_output import (
     _CURL_NON_ARM_URL_FLAGS,
     _utcnow_iso,
     _wrapped_shell_script_index,
+    audited_execution_policy,
 )
 
 
@@ -68,15 +69,22 @@ def _enum_reject_message(
     values are upper-cased before ``difflib.get_close_matches`` so a lowercase
     ``--probe-kind`` typo or an upper-cased ``--technique`` both surface a
     suggestion, while the echoed suggestion and allowed list keep each enum's
-    own canonical casing.
+    own canonical casing. A ``--phase`` value that is a code track phase leads
+    with its audit tag (``code_audit_tag``) instead of an edit-distance match.
     """
     from .schema_validation import suggest_close_match
 
     bad_upper = (bad_value or "").upper()
     canonical_by_upper = {value.upper(): value for value in allowed}
     raw_suggestion = suggest_close_match(bad_upper, list(canonical_by_upper.keys()))
+    audit_tag = code_audit_tag(bad_value) if flag == "--phase" else ""
     upper_matches: list[str]
-    if raw_suggestion:
+    if audit_tag in allowed and audit_tag != bad_value:
+        # A code track phase (``verify-variant``) is tagged by its audit tag
+        # (``code-verify``); that mapping is exact, so it outranks a near
+        # spelling of a web phase (``verify``) that would mis-tag the run.
+        upper_matches = [audit_tag.upper()]
+    elif raw_suggestion:
         upper_matches = [token.strip() for token in raw_suggestion.split(",")]
     else:
         # Difflib's 0.55 edit-distance cutoff misses the "spelled-out
@@ -113,8 +121,70 @@ def _enum_reject_message(
 # "operator" there is the misattribution signal CR-35 targets.
 _SPECIALIST_ONLY_PHASES: frozenset[str] = frozenset({"exploit", "verify"})
 
+# The backend bound on a command run's ``target_host``
+# (``CommandRunRequest.target_host`` in ``orchestrator/backend/app/api/assessment.py``).
+MAX_COMMAND_RUN_TARGET_HOST_LEN = 512
 
-def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
+
+def _engagement_list_file(value: str, engagement_dir: Path) -> Path | None:
+    """The host-side file behind a tool's list-file argument, or None.
+
+    The runtime mounts the engagement at ``/engagements/<key>/`` and runs every
+    tool from that directory, so an absolute ``/engagements/<key>/<rest>`` and a
+    relative ``<rest>`` both name ``<engagement_dir>/<rest>``. Anything else
+    (another engagement's mount, a container-only path, an escape through
+    ``..``) has no host-side twin this audit may read.
+    """
+    root = Path(engagement_dir).resolve()
+    candidate = Path(value)
+    if candidate.is_absolute():
+        parts = candidate.parts
+        if len(parts) < 4 or parts[1] != "engagements" or parts[2] != root.name:
+            return None
+        candidate = Path(*parts[3:])
+    path = (root / candidate).resolve()
+    if not path.is_relative_to(root) or not path.is_file():
+        return None
+    return path
+
+
+def _list_file_seed_hosts(value: str, engagement_dir: Path | None, host_of) -> str:
+    """The seed hosts a list file names, as one ``target_host`` value.
+
+    One distinct host is that host. Several are the sorted distinct hosts joined
+    by ``,`` — a hostname never holds a comma — so the column names every seed,
+    not one of them. A file that cannot be read beneath the engagement, or whose
+    hosts do not fit :data:`MAX_COMMAND_RUN_TARGET_HOST_LEN`, yields ``""``: an
+    empty column is honest, a column naming some seeds as if they were all is not.
+    """
+    if engagement_dir is None or not value:
+        return ""
+    path = _engagement_list_file(value, engagement_dir)
+    if path is None:
+        return ""
+    hosts: set[str] = set()
+    budget = 0
+    try:
+        with path.open("r", encoding="utf-8", errors="replace") as handle:
+            for line in handle:
+                text = line.strip()
+                if not text or text.startswith("#"):
+                    continue
+                host = host_of(text)
+                if not _is_plausible_host(host) or host in hosts:
+                    continue
+                hosts.add(host)
+                budget += len(host) + (1 if len(hosts) > 1 else 0)
+                if budget > MAX_COMMAND_RUN_TARGET_HOST_LEN:
+                    return ""
+    except OSError:
+        return ""
+    return ",".join(sorted(hosts))
+
+
+def _extract_target_host(
+    tool_name: str, cmd: list[str], *, engagement_dir: Path | None = None
+) -> str:
     """C30: extract a parsed target host from argv for high-traffic verbs.
 
     Operators query coverage with ``vigil assess command-run list
@@ -123,6 +193,10 @@ def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     and deterministic — each kali wrapper knows its argv shape, so the
     parser is a switch on tool_name rather than a generic URL/host
     regex over the whole command string.
+
+    ``engagement_dir`` lets a list-mode crawl (``katana -list <file>``) name
+    the seed hosts its file holds (see :func:`_list_file_seed_hosts`); without
+    it list mode stays empty.
 
     Unhandled tools return ''. The existing FTS ``--q`` search still
     matches those rows, so no row is hidden from coverage queries —
@@ -181,7 +255,34 @@ def _extract_target_host(tool_name: str, cmd: list[str]) -> str:
     if tool == "sqlmap":
         # sqlmap -u <url>; the URL is the canonical target.
         return _host_from_url(_next_value(("-u", "--url")))
+    if tool == "katana":
+        # katana -u <seed url> or -list <file>; list mode names the seed hosts
+        # its file holds.
+        seed = _host_from_url(_next_value(("-u", "--url", "-target", "--target")))
+        if seed:
+            return seed
+        return _list_file_seed_hosts(
+            _next_value(("-list", "--list")), engagement_dir, _host_from_url
+        )
+    if tool == "wafw00f":
+        # wafw00f <url> or -i <file>. List mode names the hosts its file holds,
+        # so a WAF measurement citing the sweep can name each of them. The typed
+        # wrapper (commands/kali_wafw00f.py) appends the positional target last;
+        # a flag's value (a -p proxy above all) is never the target.
+        listed = _next_value(("-i", "--input"))
+        if listed:
+            return _list_file_seed_hosts(listed, engagement_dir, _host_from_url)
+        last = cmd[-1] if len(cmd) > 1 else ""
+        if last and not last.startswith("-") and cmd[-2] not in _WAFW00F_VALUE_FLAGS:
+            return _host_from_url(last)
+        return ""
     return ""
+
+
+# wafw00f options that take a separate value.
+_WAFW00F_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-p", "--proxy", "-o", "--output", "-i", "--input", "-t", "--test", "-H", "--headers", "-f", "--format"}
+)
 
 
 # Where a probe's target anchor comes from, and what it is allowed to be.
@@ -516,7 +617,7 @@ def _resolve_agent_name(
     remembering to set an attribution.
 
     WARN (only when ``warn=True``): a single concise stderr line nudging
-    ``--agent-name <role>`` fires only when the run falls through to the
+    ``--agent-id <dispatch agent_id>`` fires only when the run falls through to the
     "operator" default in a specialist-only phase — see
     :data:`_SPECIALIST_ONLY_PHASES` for which phases and why.
     """
@@ -524,17 +625,36 @@ def _resolve_agent_name(
         return explicit
     if agent_id:
         return agent_id
-    env_value = os.environ.get("AGENT_NAME") or os.environ.get("VIGIL_AGENT_NAME") or ""
+    env_value = next(
+        (os.environ[name] for name in ATTRIBUTION_ENV_NAMES if os.environ.get(name)), ""
+    )
     if env_value:
         return env_value
     if warn and (phase or "").strip().lower() in _SPECIALIST_ONLY_PHASES:
         print(
             f"warning: kali run in --phase '{phase}' resolved to agent_name='operator' "
             "(no --agent-name/--agent-id and no AGENT_NAME env). If you are a specialist, "
-            "pass --agent-name <role> so coverage is attributed to you, not the operator.",
+            "pass --agent-id <your dispatch agent_id> (no --agent-name) so the run is attributed "
+            "to your dispatch, not the operator.",
             file=sys.stderr,
         )
     return "operator"
+
+
+# The env carriers ``_resolve_agent_name`` (and host-exec's own resolver) read.
+ATTRIBUTION_ENV_NAMES: tuple[str, ...] = ("AGENT_NAME", "VIGIL_AGENT_NAME")
+
+
+def attribution_env_pairs(agent_name: str) -> list[tuple[str, str]]:
+    """Env that hands a run's attribution to the process it starts.
+
+    A helper script an audited run executes may itself call ``vigil assess
+    kali exec`` or ``host-exec`` without ``--agent-id``; with these exported it
+    resolves to the same agent instead of falling through to ``operator``.
+    Every carrier is set, because the resolvers read them in different orders
+    and a stale value in the lower-precedence one must not win.
+    """
+    return [(name, agent_name) for name in ATTRIBUTION_ENV_NAMES]
 
 
 def _resolve_engagement_dir(explicit: Path | None, cfg: Config) -> Path:
@@ -587,7 +707,7 @@ def _post_pre_exec_row(
         "route": f"vigil assess kali/{tool_name}",
         "agent_name": agent_name,
         "phase": phase,
-        "target_host": _extract_target_host(tool_name, cmd),
+        "target_host": _extract_target_host(tool_name, cmd, engagement_dir=engagement_dir),
         "started_at": started_at_iso,
         # Empty until the post-exec PATCH-finalize writes the real terminal
         # timestamp. Previously we wrote started_at here to satisfy the
@@ -620,7 +740,12 @@ def _post_pre_exec_row(
         "run_uuid": run_uuid,
     }
     if execution_policy is not None:
-        payload["notes"] = execution_policy_notes(execution_policy)
+        # The row records ``target_facing`` as true / false / "unknown"
+        # (``recorded_target_facing``): a script's destinations are invisible
+        # to the policy's positive-only boolean.
+        payload["notes"] = execution_policy_notes(
+            audited_execution_policy(cmd, execution_policy)
+        )
     return client.post("command-runs", payload)
 
 

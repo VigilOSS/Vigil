@@ -22,7 +22,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from assess.commands.agent import _require_registered_role, _role_roster_dir
+from assess.commands.agent import (
+    _require_registered_role,
+    _role_roster_dir,
+    _warn_undeclared_dispatch_mode,
+)
+from assess.lib import contracts
+from assess.lib.contract_registry import DISPATCH_MODES_BY_ROLE, SPECIALIST_DISPATCH_MODES
 
 REPO_ROOT = Path(__file__).resolve().parents[4]
 AGENT_ROOT = REPO_ROOT / "agent"
@@ -127,3 +133,75 @@ def test_the_gating_skill_reviewer_role_passes_the_start_predicate(
         "track the role the skill actually names"
     )
     _require_registered_role({"agent_role": role}, _cfg())
+
+
+# The iteration modes a role prompt describes: the backticked modes between its
+# "**Iteration mode:**" label and "**Default when omitted:**".
+_ITERATION_MODES_RE = re.compile(r"\*\*Iteration mode:\*\*(?P<modes>.*?)\*\*Default when omitted", re.S)
+_DEFAULT_MODE_RE = re.compile(r"Default when omitted:\*\*\s*`([a-z-]+)`")
+
+
+def test_every_role_prompt_declares_the_modes_the_registry_names() -> None:
+    """`agent start` warns from DISPATCH_MODES_BY_ROLE; each role prompt must
+    describe exactly those modes, defaulting to the first, so the warning and
+    the guidance the specialist reads agree."""
+    roster = _role_roster_dir(_cfg())
+    assert roster is not None
+    roles = {path.stem for path in roster.glob("*.md")}
+    assert set(DISPATCH_MODES_BY_ROLE) == roles
+    for role_file in sorted(roster.glob("*.md")):
+        text = role_file.read_text(encoding="utf-8")
+        declared = _ITERATION_MODES_RE.search(text)
+        assert declared, f"{role_file.name} has no Iteration mode declaration"
+        modes = tuple(re.findall(r"`([a-z-]+)`", declared.group("modes")))
+        registered = DISPATCH_MODES_BY_ROLE[role_file.stem]
+        assert modes == registered, role_file.name
+        assert set(registered) <= set(SPECIALIST_DISPATCH_MODES), role_file.name
+        default = _DEFAULT_MODE_RE.search(text)
+        assert default and default.group(1) == registered[0], role_file.name
+
+
+def test_an_omitted_dispatch_mode_resolves_to_the_role_declared_default() -> None:
+    """`agent start` without --dispatch-mode records the first mode the role
+    declares, which the role prompt's "Default when omitted" line names (pinned
+    above), so a role added to the registry never falls through to the generic
+    fallback."""
+    for role, modes in DISPATCH_MODES_BY_ROLE.items():
+        assert contracts.default_dispatch_mode_for_role(role) == modes[0], role
+        assert contracts.default_dispatch_mode_for_role(role.title()) == modes[0], role
+
+
+@pytest.mark.parametrize(("mode", "warned"), [("item-iterating", True),
+                                              ("deep-manual", False), ("swarm", False)])
+def test_an_undeclared_dispatch_mode_is_named_with_the_role_declaration(
+    capsys, mode: str, warned: bool
+) -> None:
+    _warn_undeclared_dispatch_mode(
+        {"agent_role": "code-architect", "dispatch_mode": mode}, _cfg()
+    )
+    err = capsys.readouterr().err
+    if not warned:
+        assert err == ""
+        return
+    assert "dispatch_mode 'item-iterating'" in err
+    assert "hypothesis-driven, deep-manual" in err
+    assert "code-architect.md" in err
+
+
+def test_the_undeclared_mode_warning_reads_the_registry_not_the_prompt(
+    capsys, tmp_path: Path
+) -> None:
+    """A roster whose prompt carries no parseable declaration still warns."""
+    roster = tmp_path / "agent" / "agents"
+    roster.mkdir(parents=True)
+    (roster / "code-architect.md").write_text("# Acme role prompt\n", encoding="utf-8")
+    cfg = SimpleNamespace(
+        agent_root=str(tmp_path / "agent"),
+        engagement_dir=str(tmp_path / "agent" / "engagements" / "unused"),
+    )
+
+    _warn_undeclared_dispatch_mode(
+        {"agent_role": "code-architect", "dispatch_mode": "item-iterating"}, cfg
+    )
+
+    assert "hypothesis-driven, deep-manual" in capsys.readouterr().err

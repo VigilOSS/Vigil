@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+from urllib.parse import parse_qs, urlsplit
 
 import pytest
 
@@ -62,6 +63,18 @@ class _FakeClient(StubClient):
         self.posts: list[tuple[str, dict]] = []
         self.patches: list[tuple[str, dict]] = []
 
+    def get_all_pages(self, endpoint: str, *, page_size: int = 5000) -> list:
+        # `finding-links` is the one list this fake serves; export reply reads it
+        # to completion through export submission's resolver.
+        self.gets.append(endpoint)
+        if urlsplit(endpoint).path == "finding-links":
+            # The resolver asks the route for this finding's links only.
+            assert parse_qs(urlsplit(endpoint).query)["finding_slug"] == [
+                str(self._finding.get("slug") or "")
+            ]
+            return self._links
+        raise AssessError(f"unexpected paged GET {endpoint}")
+
     def get(self, endpoint: str):
         self.gets.append(endpoint)
         if endpoint.startswith("findings/"):
@@ -69,8 +82,6 @@ class _FakeClient(StubClient):
             if str(self._finding.get("slug") or "") != slug:
                 raise AssessError(f"HTTP 404: finding {slug} not found")
             return self._finding
-        if endpoint == "finding-links":
-            return self._links
         if endpoint.startswith("command-runs/"):
             run_id = int(endpoint.split("/", 1)[1])
             if run_id not in self._command_runs:

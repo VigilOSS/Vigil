@@ -47,7 +47,7 @@ from assess.lib.kali_jobs import (
 )
 from assess.lib.kali_tool_naming import _derive_tool_name
 
-_DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h hard cap parity with `kali exec` budgets
+_DEFAULT_JOB_TIMEOUT_SECONDS = 24 * 60 * 60  # 24h default budget for an operator-owned detached job
 
 
 def register(subparsers) -> None:

@@ -99,7 +99,7 @@ def test_provenance_attach_adds_no_constant_launcher_warning(tmp_path: Path) -> 
 
 
 def test_the_contract_carries_the_permanent_provenance_limit() -> None:
-    rendered = contracts.render_contract("agent start")
+    rendered = contracts.render_contract_notes("agent start")
 
     assert "launcher-effective" in rendered
     assert "requested_model" in rendered

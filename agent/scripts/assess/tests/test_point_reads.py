@@ -228,8 +228,23 @@ def test_fetch_findings_defaults_to_one_bounded_compact_page(capsys) -> None:
             "_point_read": "vigil assess finding get VA-001",
         }
     ]
-    assert calls == ["findings?limit=100&offset=0"]
-    assert "use --paginate" in capsys.readouterr().err
+    assert calls == ["findings?limit=101&offset=0"]
+    assert "it holds every remaining match (1 row(s) from offset 0)" in capsys.readouterr().err
+
+
+def test_fetch_findings_default_page_says_truncated_when_more_rows_match(capsys) -> None:
+    class _Client:
+        def get(self, endpoint: str):
+            assert endpoint == "findings?severity=high&limit=101&offset=0"
+            return [{"slug": f"VA-{index:03d}"} for index in range(1, 102)]
+
+    rows = fetch._fetch_assessment_endpoint(_Client(), "findings?severity=high")
+
+    assert [row["slug"] for row in rows] == [f"VA-{index:03d}" for index in range(1, 101)]
+    err = capsys.readouterr().err
+    assert "TRUNCATED: more rows match (rows 1-100 shown)" in err
+    assert "Continue with ?limit=100&offset=100 and the same filters" in err
+    assert "--paginate" in err
 
 
 def test_fetch_findings_paginate_traverses_every_complete_row(capsys) -> None:
@@ -296,7 +311,7 @@ def test_fetch_findings_offset_only_still_injects_a_bound(capsys) -> None:
     rows = fetch._fetch_assessment_endpoint(_Client(), "findings?offset=100")
 
     assert rows == []
-    assert calls == ["findings?offset=100&limit=100"]
+    assert calls == ["findings?offset=100&limit=101"]
     assert "bounded page" in capsys.readouterr().err
 
 
@@ -349,7 +364,7 @@ def test_fetch_engagement_list_defaults_to_one_bounded_page(capsys) -> None:
     rows = fetch._fetch_engagement_endpoint(_Client(), "intel/notes")
 
     assert rows == [{"id": 1, "body_markdown": "complete"}]
-    assert calls == [("intel/notes", "limit=100&offset=0")]
+    assert calls == [("intel/notes", "limit=101&offset=0")]
     assert "bounded page" in capsys.readouterr().err
 
 
@@ -364,7 +379,7 @@ def test_fetch_credential_alias_defaults_to_one_bounded_page(capsys) -> None:
     rows = fetch._fetch_engagement_endpoint(_Client(), "intel/credentials")
 
     assert rows == [{"id": 1, "credential_key": "opaque-key"}]
-    assert calls == [("intel/credentials", "limit=100&offset=0")]
+    assert calls == [("intel/credentials", "limit=101&offset=0")]
     assert "bounded page" in capsys.readouterr().err
 
 

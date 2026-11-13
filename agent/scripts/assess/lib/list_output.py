@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import argparse
 import sys
-from dataclasses import dataclass
-from typing import Any
+from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from typing import Any, TextIO
 
 
 @dataclass(frozen=True)
@@ -73,6 +74,23 @@ def page_from_backend(
     )
 
 
+def page_with_total(page: ListPage, total: int) -> ListPage:
+    """Settle a bounded page against the exact count of every matching row.
+
+    The rows already read, lookahead row included, are authoritative for
+    themselves, so a count that trails them (a row recorded between the two
+    reads) never shrinks the total below what the page proved exists.
+    """
+    read_floor = page.offset + len(page.rows) if page.rows else 0
+    exact = max(int(total), page.total_at_least or 0, read_floor)
+    return replace(
+        page,
+        total=exact,
+        total_at_least=exact,
+        has_more=page.offset + len(page.rows) < exact,
+    )
+
+
 def lookahead_limit(limit: int, *, maximum: int) -> tuple[int, bool]:
     """Return a legal backend limit and whether it includes one lookahead row."""
 
@@ -88,14 +106,24 @@ def report_page(
     noun: str,
     continuation_command: str | None = None,
     point_read_hint: str | None = None,
+    breakdown: Mapping[str, int] | None = None,
+    breakdown_label: str = "by severity",
+    file: TextIO | None = None,
 ) -> None:
-    """Write pagination metadata to stderr, keeping JSON stdout parseable."""
+    """Write pagination metadata, to stderr by default so JSON stdout stays parseable.
 
+    A page that leaves matching rows unshown starts with ``INCOMPLETE:`` and,
+    when the total is exact, says how many rows it leaves out. ``breakdown``
+    carries counts over every matching row, not just the page. A human table
+    passes ``file=sys.stdout`` so the notice travels with the rows it qualifies.
+    """
+
+    stream = sys.stderr if file is None else file
     count = len(page.rows)
     if not count and page.total is None and page.total_at_least is None:
         print(
             f"showing no matching {noun} at offset {page.offset}; total unavailable",
-            file=sys.stderr,
+            file=stream,
         )
         return
     first = page.offset + 1 if count else 0
@@ -105,11 +133,18 @@ def report_page(
     else:
         total_text = str(page.total)
     message = f"showing {first}-{last} of {total_text} matching {noun}"
+    if page.has_more:
+        message = "INCOMPLETE: " + message
+        if page.total is not None:
+            message += f", {page.total - page.offset - count} more after this page"
+    if breakdown:
+        counts = ", ".join(f"{key} {value}" for key, value in breakdown.items())
+        message += f"; all matching {breakdown_label}: {counts}"
     if page.has_more and continuation_command:
         message += f"; continue with `{continuation_command}`"
     if point_read_hint:
         message += f"; complete rows: {point_read_hint}"
-    print(message, file=sys.stderr)
+    print(message, file=stream)
 
 
 def _validate_window(limit: int, offset: int) -> None:

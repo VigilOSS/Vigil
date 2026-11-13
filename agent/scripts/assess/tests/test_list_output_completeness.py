@@ -10,7 +10,7 @@ from _fake_client import StubClient
 
 from assess.commands import list_command_runs, list_findings, list_intel
 from assess.lib.client import AssessError
-from assess.lib.list_output import page_from_backend, report_page
+from assess.lib.list_output import page_from_backend, page_with_total, report_page
 
 
 class _ContextClient(StubClient):
@@ -117,6 +117,8 @@ def test_finding_list_json_bounds_rows_and_points_to_complete_records(
     class _Client(_ContextClient):
         def get(self, endpoint: str):
             calls.append(endpoint)
+            if endpoint == "findings/count":
+                return {"total": 5, "by_severity": {"high": 5}}
             return [_finding(1), _finding(2), _finding(3)]
 
     monkeypatch.setattr(list_findings, "AssessmentClient", _Client)
@@ -128,12 +130,123 @@ def test_finding_list_json_bounds_rows_and_points_to_complete_records(
 
     captured = capsys.readouterr()
     rows = json.loads(captured.out)
-    assert calls == ["findings?limit=3&offset=0"]
+    assert calls == ["findings?view=list&limit=3&offset=0", "findings/count"]
     assert [row["slug"] for row in rows] == ["VA-001", "VA-002"]
     assert all("details" not in row and "notes" not in row for row in rows)
     assert rows[0]["_point_read"] == "vigil assess finding get VA-001"
-    assert "showing 1-2 of at least 3 matching findings" in captured.err
+    assert (
+        "INCOMPLETE: showing 1-2 of 5 matching findings, 3 more after this page; "
+        "all matching by severity: high 5"
+    ) in captured.err
     assert "continue with `vigil assess finding list --limit 2 --offset 2`" in captured.err
+
+
+def _list_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser()
+    list_findings.register(parser.add_subparsers(dest="action"))
+    return parser
+
+
+@pytest.mark.parametrize(
+    ("argv", "expected_limit"),
+    [
+        ([], 101),
+        (["--severity", "high"], 5000),
+        (["--status", "reported"], 5000),
+        (["--verification-status", "confirmed"], 5000),
+        (["--holding"], 5000),
+        (["--search", "idor"], 5000),
+        (["--severity", "high", "--limit", "20"], 21),
+    ],
+)
+def test_finding_list_default_page_is_complete_for_any_filter(
+    argv: list[str],
+    expected_limit: int,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    class _Client(_ContextClient):
+        def get(self, endpoint: str):
+            if endpoint == "attack-chain-links":
+                return []
+            calls.append(endpoint)
+            return [_finding(1)]
+
+    monkeypatch.setattr(list_findings, "AssessmentClient", _Client)
+    monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
+    args = _list_parser().parse_args(["list", *argv])
+    args.engagement_dir = "/tmp/eng"
+
+    list_findings.run(args)
+
+    # One findings read and no count read: the page itself proves it is whole.
+    assert len(calls) == 1
+    assert f"limit={expected_limit}&offset=0" in calls[0]
+    assert "showing 1-1 of 1 matching findings" in capsys.readouterr().out
+
+
+def test_finding_list_partial_table_names_totals_above_and_below_the_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    calls: list[str] = []
+
+    class _Client(_ContextClient):
+        def get(self, endpoint: str):
+            calls.append(endpoint)
+            if endpoint.startswith("findings/count"):
+                return {"total": 4, "by_severity": {"critical": 1, "high": 3}}
+            return [_finding(1), _finding(2), _finding(3)]
+
+    monkeypatch.setattr(list_findings, "AssessmentClient", _Client)
+    monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
+
+    list_findings.run(_findings_args(source_name="vulnerability-analyst", limit=2, json=False))
+
+    out = capsys.readouterr().out.splitlines()
+    assert calls[1] == "findings/count?source_name=vulnerability-analyst"
+    assert [line.split(" | ", 1)[0] for line in out[1:-1]] == ["VA-001", "VA-002"]
+    for line in (out[0], out[-1]):
+        assert line.startswith(
+            "INCOMPLETE: showing 1-2 of 4 matching findings, 2 more after this page; "
+            "all matching by severity: critical 1, high 3; continue with "
+            "`vigil assess finding list --source-name vulnerability-analyst --limit 2 --offset 2`"
+        )
+
+
+def test_finding_list_refuses_a_malformed_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _Client(_ContextClient):
+        def get(self, endpoint: str):
+            if endpoint.startswith("findings/count"):
+                return {"total": 4}
+            return [_finding(1), _finding(2), _finding(3)]
+
+    monkeypatch.setattr(list_findings, "AssessmentClient", _Client)
+    monkeypatch.setattr(list_findings, "load_config", lambda _path: _config())
+
+    with pytest.raises(AssessError, match="findings/count"):
+        list_findings.run(_findings_args(limit=2, json=True))
+
+
+def test_exact_count_never_shrinks_rows_already_read() -> None:
+    page = page_from_backend([1, 2, 3], limit=2, offset=10, used_lookahead=True)
+
+    settled = page_with_total(page, 5)
+
+    # The lookahead row proved a thirteenth match exists.
+    assert (settled.total, settled.has_more) == (13, True)
+
+
+def test_exact_count_settles_an_offset_past_the_end() -> None:
+    page = page_from_backend([], limit=10, offset=200, used_lookahead=True)
+
+    settled = page_with_total(page, 130)
+
+    assert (settled.total, settled.has_more) == (130, False)
 
 
 def test_finding_list_rejects_removed_unbounded_all_flag(
@@ -421,6 +534,25 @@ def test_command_run_single_page_uses_lookahead_without_printing_the_extra_row(
     assert "showing 1-2 of at least 3 matching command runs" in captured.err
 
 
+def test_command_run_table_puts_the_partial_notice_beside_the_rows(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    class _Client(_ContextClient):
+        def get(self, endpoint: str):
+            return [{"id": 1}, {"id": 2}, {"id": 3}]
+
+    monkeypatch.setattr(list_command_runs, "AssessmentClient", _Client)
+    monkeypatch.setattr(list_command_runs, "load_config", lambda _path: _config())
+
+    list_command_runs.run(_command_runs_args(limit=2, offset=0, as_json=False))
+
+    lines = capsys.readouterr().out.splitlines()
+    for line in (lines[0], lines[-1]):
+        assert line.startswith("INCOMPLETE: showing 1-2 of at least 3 matching command runs")
+        assert "continue with `vigil assess command-run list" in line
+
+
 def test_command_run_list_rejects_malformed_non_list_response(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -502,5 +634,5 @@ def test_human_root_cause_list_applies_common_filters_to_siblings(
     captured = capsys.readouterr()
     assert "VA-002" in captured.out
     assert "VA-003" not in captured.out
-    assert "showing 1-1 of 1 matching root-cause siblings" in captured.err
+    assert "showing 1-1 of 1 matching root-cause siblings" in captured.out
     assert "Siblings: 2 (1 match the filters)" in captured.out

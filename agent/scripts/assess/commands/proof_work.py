@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from assess.lib.client import AssessmentClient, AssessError, require_write_result
 from assess.lib.config import load_config
 from assess.lib.contract_registry import NEXT_TEST_FIELDS
+from assess.lib.phases import resolve_track_phase
 from assess.lib.render_containment import contain_separators
 
 
@@ -142,13 +143,18 @@ def _attach_claim_prompt(payload, work, args, cfg, client) -> None:
 
     context = _load_prompt_context(args)
     phase = work['authorized_phase']
-    if context['authorized_phase'] != phase:
+    # `agent start` stores a code lane's track spelling (`verify-variant`); it
+    # names the same phase as the work's audit tag (`code-verify`), which the
+    # claimed packet keeps.
+    if resolve_track_phase(str(context['authorized_phase'])) != resolve_track_phase(str(phase)):
         raise AssessError(f'proof-work claim: authorized_phase must be {phase}')
+    context['authorized_phase'] = phase
     source = (work.get('binding') or {}).get('source_binding')
     source_identity = []
     if source:
         source_identity = _code_source_identity_lines(
             client, agent_role=payload['agent_role'], requested_repo_id=source['repo_id'],
+            engagement_dir=cfg.engagement_dir,
         )
         observed = dict(line.split(': ', 1) for line in source_identity if ': ' in line)
         if any(str(observed.get(key)) != str(source[key])

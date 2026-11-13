@@ -249,16 +249,41 @@ def test_payload_file_notes_append_needs_no_expected_row_version(
     "payload",
     [
         # A scalar overwrite IS a read-modify-write of the field it changes.
-        {"summary": "rewritten", "notes": "checkpoint", "notes_mode": "append"},
+        {"title": "rewritten", "notes": "checkpoint", "notes_mode": "append"},
         # A details merge replaces a repeated key's whole value.
-        {"details": {"impact": "x"}, "notes": "checkpoint", "notes_mode": "append"},
+        {"details": {"remediation": "x"}, "notes": "checkpoint", "notes_mode": "append"},
+    ],
+)
+def test_payload_file_non_append_patch_reads_the_token_first(
+    payload: dict,
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    fake = _FakeClient()
+    monkeypatch.setattr(update_finding, "load_config", lambda *a, **k: _Cfg(str(tmp_path)))
+    monkeypatch.setattr(update_finding, "AssessmentClient", lambda *a, **k: fake)
+    payload_file = _write_payload(tmp_path, payload)
+
+    update_finding.run(
+        _update_args(["update", "acme-001", "--payload-file", payload_file], str(tmp_path))
+    )
+
+    assert fake.gets == ["findings/acme-001"]
+    assert fake.patches == [("findings/acme-001", {**payload, "expected_row_version": 7})]
+    assert "row_version 7" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
         # The replacement modes are the ones the backend itself gates.
         {"notes": "rewritten", "notes_mode": "replace"},
         {"notes": "rewritten", "notes_mode": "rotate"},
         {"details": {"impact": "x"}, "details_mode": "replace"},
     ],
 )
-def test_payload_file_still_requires_the_token_for_a_non_append_patch(
+def test_payload_file_still_requires_the_token_for_a_replacement(
     payload: dict,
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,
@@ -277,6 +302,7 @@ def test_payload_file_still_requires_the_token_for_a_non_append_patch(
     assert exc_info.value.code == 1
     captured = capsys.readouterr()
     assert "expected_row_version" in captured.err
+    assert not fake.gets
     assert not fake.patches
 
 

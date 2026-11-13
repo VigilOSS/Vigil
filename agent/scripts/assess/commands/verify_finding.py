@@ -15,14 +15,33 @@ from assess.lib.client import (
 from assess.lib.code_record_input import fail
 from assess.lib.code_snapshot_binding import fill_binding
 from assess.lib.config import load_config
-from assess.lib.contracts import VERIFICATION_TRANSITION_STATUSES, render_contract_epilog
+from assess.lib.contract_registry import DECISION_CHECK_FIELDS
+from assess.lib.contracts import (
+    FINDING_SEVERITIES,
+    VERIFICATION_TRANSITION_STATUSES,
+    render_contract_epilog,
+)
 from assess.lib.exploit_targets import is_source_bound
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 from assess.lib.next_test import load_next_test_file, next_test_problems
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
+from assess.lib.vocabulary import word_folder
+from assess.lib.write_envelope import print_write_envelope_notes
 
 
 _FINDING_SCHEMA = load_schema("finding-record.schema.json")
+
+
+# Any case or separator names one transition status, as the backend folds it.
+_fold_status = word_folder(VERIFICATION_TRANSITION_STATUSES)
+
+
+def fold_payload_status(payload: dict) -> dict:
+    """``payload`` with its ``verification_status`` folded to the canonical word,
+    so every local check below reads the spelling the backend will store."""
+    if isinstance(payload.get("verification_status"), str):
+        payload["verification_status"] = _fold_status(payload["verification_status"])
+    return payload
 
 
 def register(subparsers) -> None:
@@ -46,22 +65,41 @@ def register(subparsers) -> None:
     p.add_argument(
         "--payload-file",
         dest="payload_file",
-        help="Path to a final JSON verification-transition payload",
+        help=(
+            "Path to a final JSON verification-transition payload. --agent-id "
+            "(provenance.agent_id), --reason, --reason-code and --source-name fill the "
+            "matching key when the file leaves it out (a different value in both places "
+            "is refused), and --code-repo-id selects the repository a file: finding's "
+            "code_snapshot is derived from, as with flags; other verification flags "
+            "cannot be combined with the file. Each filled value is named on stderr."
+        ),
     )
     p.add_argument(
         "--status",
         dest="verification_status",
+        type=_fold_status,
         choices=VERIFICATION_TRANSITION_STATUSES,
         help=(
-            "Verification status when building the payload from flags. 'blocked' "
-            "requires a block_reason (pass via --details-inline '{\"block_reason\": \"...\"}' "
-            "or already present on the finding) and holds the finding out of the report."
+            "Verification status when building the payload from flags (any case or "
+            "separator: Blocked, pending-runtime-proof). 'blocked' needs a block_reason "
+            "(--details-inline '{\"block_reason\": \"...\"}', or already on the finding); "
+            "without one, --reason is stored as it. A blocked finding stays out of the report."
         ),
     )
-    p.add_argument("--reason", dest="reason_text", help="Required verification rationale when building payload from flags")
+    p.add_argument(
+        "--reason",
+        dest="reason_text",
+        help=(
+            "Verification rationale. Required for disputed, --operator-authority, and "
+            "moving a terminal verdict to an open status; otherwise the backend records "
+            "the structured check's statement when it is omitted and names it on stderr."
+        ),
+    )
     p.add_argument("--reason-code", help="Optional machine-readable reason code")
     p.add_argument(
         "--new-severity",
+        type=str.lower,
+        choices=FINDING_SEVERITIES,
         help=(
             "Required for downgraded verification, and accepted with any terminal "
             "status (confirmed | downgraded | false_positive) to re-band the finding "
@@ -96,6 +134,19 @@ def register(subparsers) -> None:
     )
     p.add_argument("--provenance-inline", help="Inline JSON object for provenance metadata")
     p.add_argument(
+        "--code-repo-id",
+        dest="code_repo_id",
+        type=int,
+        default=None,
+        help="Analysis repository (the repo_id in your Code Source Identity block) to derive "
+             "a file: finding's provenance.code_snapshot from. Needed only when the "
+             "engagement holds several active analysis repositories. Reference repositories "
+             "are never derived automatically; naming one here binds it with a warning that "
+             "it carries no coverage obligation. An "
+             "authored provenance.code_snapshot still wins and must name the same repository, "
+             "and a stored binding naming a different repository is refused.",
+    )
+    p.add_argument(
         "--proof-receipt-id",
         dest="proof_receipt_ids",
         action="append",
@@ -120,7 +171,11 @@ def register(subparsers) -> None:
     )
     p.add_argument(
         "--severity-variance-file",
-        help="JSON file with {normal_band, chosen_severity, actor, reason, proof_receipt_id} when chosen severity differs from its CVSS band; receipt id must also be passed with --proof-receipt-id",
+        help=(
+            "JSON file with {\"reason\": \"...\"} saying why the severity departs from its "
+            "CVSS band; the band, chosen severity, actor and decision receipt are derived "
+            "from this verification (an authored one must agree with it)."
+        ),
     )
     p.add_argument(
         "--operator-authority",
@@ -154,38 +209,45 @@ def register(subparsers) -> None:
 # re-band may ride along with.
 _TERMINAL_STATUSES = frozenset({"confirmed", "downgraded", "false_positive"})
 
-# Hand-kept mirrors of the backend request models (``FindingCounterCheckRequest``,
+# Mirrors of the backend request models (``FindingCounterCheckRequest``,
 # ``FindingConfirmCheckRequest``, ``FindingSeverityVarianceRequest`` in
 # ``app/api/assessment.py``), as (field, kind, text max length). Each model is
-# ``extra="forbid"``, so a misspelled field used to arrive as a bare 422 with no
-# roster while ``--next-test-file`` named every problem locally. Drift is pinned
-# by test_finding_verify_decision_contract_mirror.py.
+# ``extra="forbid"``, so the pre-check names every misspelled field instead of
+# leaving it to a bare 422. The two checks take their field names from
+# ``contract_registry.DECISION_CHECK_FIELDS``, which the contract text renders.
+# Drift is pinned by test_finding_verify_decision_contract_mirror.py.
 _TEXT, _BOOL, _ID, _ID_LIST, _BAND = "text", "bool", "id", "id_list", "band"
 _SEVERITY_BANDS = ("info", "low", "medium", "high", "critical")
 
+_CHECK_TEXT_MAX = 4096
+_CHECK_FIELD_KINDS = {"completed": (_BOOL, None), "proof_receipt_ids": (_ID_LIST, None)}
+
+
+def _check_roster(name: str) -> tuple[tuple[str, str, int | None], ...]:
+    """A check's (field, kind, bound) roster over the contract's field names."""
+    return tuple(
+        (field, *_CHECK_FIELD_KINDS.get(field, (_TEXT, _CHECK_TEXT_MAX)))
+        for field, _domain, _meaning in DECISION_CHECK_FIELDS[name]
+    )
+
+
 _DECISION_FIELDS: dict[str, tuple[tuple[str, str, int | None], ...]] = {
-    "counter_check": (
-        ("method", _TEXT, 4096),
-        ("expected_result", _TEXT, 4096),
-        ("observed_result", _TEXT, 4096),
-        ("falsified_claim", _TEXT, 4096),
-        ("completed", _BOOL, None),
-        ("proof_receipt_ids", _ID_LIST, None),
-    ),
-    "confirm_check": (
-        ("method", _TEXT, 4096),
-        ("attempted_falsification", _TEXT, 4096),
-        ("expected_result", _TEXT, 4096),
-        ("observed_result", _TEXT, 4096),
-        ("completed", _BOOL, None),
-        ("proof_receipt_ids", _ID_LIST, None),
-    ),
+    "counter_check": _check_roster("counter_check"),
+    "confirm_check": _check_roster("confirm_check"),
     "severity_variance": (
         ("normal_band", _BAND, None),
         ("chosen_severity", _BAND, None),
         ("actor", _TEXT, 128),
         ("reason", _TEXT, 4096),
         ("proof_receipt_id", _ID, None),
+    ),
+}
+
+# Fields a decision document may omit because the backend derives them from the
+# verification itself (ADR 0046): of a severity variance only the reason is authored.
+_DERIVED_DECISION_FIELDS: dict[str, frozenset[str]] = {
+    "severity_variance": frozenset(
+        {"normal_band", "chosen_severity", "actor", "proof_receipt_id"}
     ),
 }
 
@@ -216,6 +278,7 @@ def decision_problems(field_name: str, payload) -> list[str]:
     if not isinstance(payload, dict):
         return [f"{field_name} must be a JSON object"]
     names = {name for name, _kind, _bound in fields}
+    derived = _DERIVED_DECISION_FIELDS.get(field_name, frozenset())
     problems: list[str] = []
     for key in payload:
         if key in names:
@@ -226,6 +289,8 @@ def decision_problems(field_name: str, payload) -> list[str]:
             + (f" — {misplaced}" if misplaced else "")
         )
     for name, kind, bound in fields:
+        if name in derived and payload.get(name) is None:
+            continue
         if name not in payload:
             problems.append(f"{field_name}.{name} is required")
             continue
@@ -270,37 +335,6 @@ def _require_decision_shapes(payload: dict) -> None:
             fail("finding verify", f"{flag}: {'; '.join(problems)}")
 
 
-# A kill carries its own annotations beside the structured counter-check: the
-# rationale and the numbered verification check that produced the verdict. The
-# backend refuses a false_positive without both, accepting either from this write
-# or from what the finding already stores — which is why an absent pair is a
-# WARNING here and not a refusal: the CLI cannot see the stored row, and a batch
-# would have to read each slug. What it can do is name the whole requirement
-# before the round trip instead of after it.
-_KILL_DETAIL_FIELDS = ("kill_reason", "kill_check")
-
-
-def _warn_missing_kill_details(payload: dict, slugs: list[str]) -> None:
-    details = payload.get("details")
-    stored = details if isinstance(details, dict) else {}
-    missing = [name for name in _KILL_DETAIL_FIELDS if name not in stored]
-    if not missing:
-        return
-    print(
-        "finding verify: false_positive requires details.kill_reason (why the claim "
-        "does not hold) and details.kill_check (the numbered verification check that "
-        f"produced the verdict, an integer from 1 to 5). This call authors "
-        f"{'neither' if len(missing) == 2 else 'no ' + missing[0]}, so the write is "
-        f"refused unless {', '.join(slugs)} already carries "
-        f"{'them' if len(missing) == 2 else 'it'}: pass "
-        "--details-inline '{\"kill_reason\": \"...\", \"kill_check\": 3}'. A "
-        "kill_reason saying the experiment could not be RUN is `blocked`, not "
-        "`false_positive`, unless details.required_followup names the test that "
-        "would settle it.",
-        file=sys.stderr,
-    )
-
-
 _KNOWN_STATUSES = frozenset(VERIFICATION_TRANSITION_STATUSES)
 
 _CONTENT_FLAGS = (
@@ -315,6 +349,7 @@ _CONTENT_FLAGS = (
     ("details_inline", "--details-inline"),
     ("agent_id", "--agent-id"),
     ("provenance_inline", "--provenance-inline"),
+    ("code_repo_id", "--code-repo-id"),
     ("proof_receipt_ids", "--proof-receipt-id"),
     ("counter_check_file", "--counter-check-file"),
     ("confirm_check_file", "--confirm-check-file"),
@@ -323,6 +358,59 @@ _CONTENT_FLAGS = (
     ("operator_authority", "--operator-authority"),
     ("operator_authority_intel_id", "--intel-id"),
 )
+
+
+# Flags that say who is verifying and why, not what the verdict is. With
+# --payload-file each fills the matching payload key when the file leaves it out;
+# only the same key with two different values is a conflict. --code-repo-id is
+# the derivation selector the flag path takes, so it is allowed beside the file
+# too and never written into it.
+_PAYLOAD_CONTROL_FLAGS = (
+    ("agent_id", "--agent-id", ("provenance", "agent_id")),
+    ("reason_text", "--reason", ("reason_text",)),
+    ("reason_code", "--reason-code", ("reason_code",)),
+    ("source_name", "--source-name", ("source_name",)),
+)
+_PAYLOAD_SELECTOR_FLAGS = ("code_repo_id",)
+
+
+def _fill_payload_controls(payload: dict, args) -> dict:
+    """Take each control flag the payload file leaves out; refuse a contradiction."""
+    filled: list[str] = []
+    for attr, flag, path in _PAYLOAD_CONTROL_FLAGS:
+        value = getattr(args, attr, None)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            fail("finding verify", f"{flag} must not be empty")
+        holder = payload
+        for part in path[:-1]:
+            child = holder.get(part)
+            if child is None:
+                child = holder[part] = {}
+            if not isinstance(child, dict):
+                fail("finding verify", f"payload {part} must be a JSON object")
+            holder = child
+        key = path[-1]
+        dotted = ".".join(path)
+        current = holder.get(key)
+        # A blank string in the file is an unset control, not a competing value.
+        if current is None or (isinstance(current, str) and not current.strip()):
+            holder[key] = value
+            filled.append(dotted)
+        elif current != value:
+            fail(
+                "finding verify",
+                f"{flag} {value!r} contradicts the payload file's {dotted} "
+                f"{current!r}; drop one of them.",
+            )
+    if filled:
+        print(
+            f"finding verify: --payload-file: took {', '.join(filled)} from flags "
+            "(the file did not set them).",
+            file=sys.stderr,
+        )
+    return payload
 
 
 def _looks_like_payload(token: str) -> bool:
@@ -339,7 +427,9 @@ def _stored_binding_repo_id(finding: dict) -> int | None:
     return int(repo_id) if type(repo_id) is int and repo_id >= 1 else None
 
 
-def _request_for_slug(client, payload: dict, slug: str, *, derive_binding: bool) -> dict:
+def _request_for_slug(
+    client, payload: dict, slug: str, *, repo_id: int | None = None
+) -> dict:
     """Return this slug's request, deriving its code-snapshot binding when owed.
 
     A ``file:`` finding cannot be verified without ``provenance.code_snapshot``,
@@ -348,11 +438,24 @@ def _request_for_slug(client, payload: dict, slug: str, *, derive_binding: bool)
     is the identity half: ``--agent-id`` is the dispatch the backend resolves
     into the stored attestation. An authored ``--provenance-inline`` binding
     always wins, and a STALE stored binding is never derived — rebinding is the
-    claim that the new bytes were read, so it stays deliberate.
-    ``--payload-file`` is a complete transition document and is sent verbatim.
+    claim that the new bytes were read, so it stays deliberate. A
+    ``--payload-file`` transition derives the same way, and the derived binding is
+    named on stderr.
     """
     provenance = payload.get("provenance")
-    if not derive_binding or not isinstance(provenance, dict) or provenance.get("code_snapshot"):
+    if provenance is None:
+        provenance = {}
+    authored = provenance.get("code_snapshot") if isinstance(provenance, dict) else None
+    if repo_id is not None and authored:
+        authored_repo = authored.get("repo_id") if isinstance(authored, dict) else None
+        if authored_repo != repo_id:
+            # The contradiction `finding record` refuses; the authored binding
+            # would otherwise win silently over the flag.
+            raise AssessError(
+                f"finding verify: --code-repo-id {repo_id} contradicts the authored "
+                f"provenance.code_snapshot (repo_id {authored_repo!r}); drop one of them."
+            )
+    if not isinstance(provenance, dict) or authored:
         return payload
     try:
         finding = client.get(f"findings/{slug}")
@@ -377,16 +480,32 @@ def _request_for_slug(client, payload: dict, slug: str, *, derive_binding: bool)
             f"finding verify: {slug} is bound to a superseded source snapshot. "
             "Re-read the current sealed bytes, then re-run with an explicit "
             "--provenance-inline '{\"code_snapshot\": {...}}' copied from Code "
-            "Source Identity. The binding is not derived here on purpose: "
+            "Source Identity, with fresh proof receipts for a terminal status "
+            "(confirmed, downgraded, false_positive). The binding is not derived here on purpose: "
             "rebinding is the claim that you reviewed the new bytes."
+        )
+    stored_repo_id = _stored_binding_repo_id(finding)
+    if repo_id is not None and stored_repo_id is not None and repo_id != stored_repo_id:
+        # Rebinding to another repository is a deliberate act, never a derivation.
+        raise AssessError(
+            f"finding verify: --code-repo-id {repo_id} contradicts {slug}'s stored "
+            f"binding (repo_id {stored_repo_id}); drop the flag, or rebind deliberately "
+            "with an explicit --provenance-inline '{\"code_snapshot\": {...}}'."
         )
     request = dict(payload)
     request["provenance"] = dict(provenance)
     fill_binding(
         request["provenance"],
         client,
-        repo_id=_stored_binding_repo_id(finding),
+        repo_id=stored_repo_id if stored_repo_id is not None else repo_id,
+        stored=stored_repo_id is not None,
         operation="finding verify",
+    )
+    binding = request["provenance"]["code_snapshot"]
+    print(
+        f"finding verify: {slug}: derived provenance.code_snapshot from repo "
+        f"{binding.get('repo_id')} generation {binding.get('repo_generation')}.",
+        file=sys.stderr,
     )
     return request
 
@@ -413,9 +532,11 @@ def _require_next_test_pairing(payload: dict) -> None:
         fail("finding verify", f"{'; '.join(problems)}")
 
 
-def _provided_content_flags(args) -> list[str]:
+def _provided_content_flags(args, *, exclude: tuple[str, ...] = ()) -> list[str]:
     provided = []
     for attr, flag in _CONTENT_FLAGS:
+        if attr in exclude:
+            continue
         value = getattr(args, attr, None)
         if value is not None and value is not False:
             provided.append(flag)
@@ -460,7 +581,13 @@ def run(args) -> None:
     if payload_file is not None:
         if not str(payload_file).strip():
             fail("finding verify", "--payload-file must not be empty")
-        provided_flags = _provided_content_flags(args)
+        provided_flags = _provided_content_flags(
+            args,
+            exclude=(
+                *(attr for attr, _flag, _path in _PAYLOAD_CONTROL_FLAGS),
+                *_PAYLOAD_SELECTOR_FLAGS,
+            ),
+        )
         if provided_flags:
             fail(
                 "finding verify",
@@ -482,10 +609,15 @@ def run(args) -> None:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(1)
+        if isinstance(payload, dict):
+            payload = _fill_payload_controls(payload, args)
     else:
-        if not args.verification_status or not args.reason_text:
+        # --reason is optional here: the backend records the structured check's
+        # statement when it is omitted, and refuses (naming reason_text) only where
+        # no check states it — disputed, and a terminal verdict walked back.
+        if not args.verification_status:
             print(
-                "finding verify requires --payload-file or both --status and --reason",
+                "finding verify requires --payload-file or --status",
                 file=sys.stderr,
             )
             sys.exit(1)
@@ -581,6 +713,7 @@ def run(args) -> None:
     if not isinstance(payload, dict):
         print("verification payload must be a JSON object", file=sys.stderr)
         sys.exit(1)
+    fold_payload_status(payload)
     details = payload.get("details")
     details_schema = _FINDING_SCHEMA["properties"].get("details")
     if details is not None and isinstance(details_schema, dict):
@@ -645,12 +778,6 @@ def run(args) -> None:
             "--operator-authority and means nothing without it; attach plain intel "
             "with `vigil assess finding link <slug> --intel <id>`",
         )
-    if verification_status == "false_positive":
-        # Printed before the counter-check refusal below, so a verifier that
-        # forgot both learns both in one run. Required with or without operator
-        # authority: the kill annotations are the verdict's own record, not
-        # evidence, so no waiver covers them.
-        _warn_missing_kill_details(payload, slugs)
     if verification_status == "false_positive" and not operator_authority:
         counter_check = payload.get("counter_check")
         if not isinstance(counter_check, dict):
@@ -744,7 +871,10 @@ def run(args) -> None:
         for slug in slugs:
             try:
                 request = _request_for_slug(
-                    client, payload, slug, derive_binding=payload_file is None
+                    client,
+                    payload,
+                    slug,
+                    repo_id=getattr(args, "code_repo_id", None),
                 )
                 result = require_finding_write_response(
                     client.post(f"findings/{slug}/verify", request),
@@ -757,6 +887,9 @@ def run(args) -> None:
                 continue
 
             results.append(result)
+            # A kill_reason, block_reason or variance field the backend filled in,
+            # and each advisory, is named here rather than left in the JSON.
+            print_write_envelope_notes(f"finding verify: {slug}", result)
             if narrative_path:
                 try:
                     narrative_payload = {

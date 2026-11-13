@@ -1,7 +1,7 @@
 """The packet does not tell a no-skills role to pick skills and write a handoff.
 
 `agent start` renders a skills block into every dispatch packet. With skills
-named it emits a "you MUST read and follow <path>" line per skill; with none it
+named it emits one read-and-follow order and a path line per skill; with none it
 falls back to telling the specialist to self-select and to record the loaded
 names in its handoff.
 
@@ -40,8 +40,6 @@ def test_a_specialist_that_omitted_skills_is_still_told_to_record_them() -> None
 
 
 def test_a_named_skill_still_renders_its_mandatory_read() -> None:
-    rendered = "\n".join(
-        _dispatch_skill_lines("okta-investigation", role="investigator")
-    )
-
-    assert "You MUST read and follow agent/skills/okta-investigation/SKILL.md" in rendered
+    lines = _dispatch_skill_lines("okta-investigation", role="investigator")
+    assert lines[0].startswith("skills (read and follow each before beginning work")
+    assert lines[1:] == ["  - okta-investigation: agent/skills/okta-investigation/SKILL.md"]

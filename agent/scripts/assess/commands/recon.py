@@ -32,6 +32,7 @@ Run modes:
 """
 from __future__ import annotations
 
+import contextlib
 import datetime as _dt
 import hashlib
 import json
@@ -40,12 +41,14 @@ import signal
 import subprocess
 import sys
 import uuid
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import SimpleNamespace
 
 from assess.commands import dns_discovery, gau_endpoints, js_mining, web_discovery
 from assess.lib import host_processes, runtime_route, scope
+from assess.lib.run_notices import notice_scope
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.config import load_config
 
@@ -68,6 +71,112 @@ _WEB_STAGE = _Stage("web", "web-discovery", "scans/web-discovery/httpx_live.json
 _JS_STAGE = _Stage("js", "js-mining", "scans/web-discovery/js-mining/js-mining.done")
 # gau is per-apex + in-container; its sentinel artifact records the apexes mined.
 _GAU_STAGE = _Stage("gau", "gau-endpoints", "scans/recon/gau.done")
+
+
+@dataclass(frozen=True)
+class _StageOutcome:
+    """What a stage runner reports back to the loop.
+
+    ``fatal`` stops the pipeline on a non-zero ``rc`` (dns/web: nothing
+    downstream can run without them). A best-effort stage (js-mining, gau) is
+    not fatal: its failure is recorded with ``counts`` for the work that DID
+    complete and ``errors`` naming what did not, and the next stage still runs.
+    ``partial`` marks a stage that completed (``rc`` 0) while some of its rows
+    did not land — the backend refused them, or their write outcome is unknown —
+    so it reads ``partial`` rather than ``done``.
+    """
+
+    rc: int
+    counts: dict = field(default_factory=dict)
+    errors: tuple[str, ...] = ()
+    fatal: bool = True
+    partial: bool = False
+
+
+# Per-stage states. ``done`` / ``skipped`` / ``partial`` stages produced their
+# artifact; ``failed`` did not. The pipeline's ``overall_state`` is ``done`` when
+# every stage is done or skipped, ``failed`` when a fatal stage failed (the
+# pipeline stopped there), and ``partial`` otherwise: it ran to the end but at
+# least one stage failed or is partial.
+_SETTLED_STAGE_STATES = ("done", "skipped", "partial")
+
+
+def _overall_state(stages: list[dict], *, fatal_failure: bool) -> str:
+    if fatal_failure:
+        return "failed"
+    if all(stage.get("state") in ("done", "skipped") for stage in stages):
+        return "done"
+    return "partial"
+
+
+def _unlanded_rows(summary: object, *, unit: str) -> tuple[dict, list[str]]:
+    """Counts and errors for ingest rows a stage's summary says did not land.
+
+    ``summary`` is a verb summary carrying the ingest's ``backend_refused`` and
+    ``write_uncertain`` counts (gau-endpoints, js-mining). Each refused or
+    uncertain row is named, with the backend's reason, in a WARN line of the
+    stage's stderr — the recon job log under ``--background`` — so the error
+    says where to read them.
+    """
+    if not isinstance(summary, dict):
+        return {}, []
+    counts: dict = {}
+    errors: list[str] = []
+    refused = int(summary.get("backend_refused") or 0)
+    uncertain = int(summary.get("write_uncertain") or 0)
+    if refused:
+        counts["backend_refused"] = refused
+        errors.append(
+            f"{unit}: {refused} row(s) the backend refused are not in the work buffer; "
+            "each is named with its reason in an 'ingest-endpoints: backend rejected' "
+            "WARN line of this run's stderr (the recon job log under --background)"
+        )
+    if uncertain:
+        counts["write_uncertain"] = uncertain
+        errors.append(
+            f"{unit}: {uncertain} row(s) whose write failed with an unknown outcome may "
+            "or may not be in the work buffer; each is named in an 'ingest-endpoints: "
+            "write of ... failed with an unknown outcome' WARN line of this run's stderr"
+        )
+    return counts, errors
+
+
+def _as_outcome(result) -> _StageOutcome:
+    return result if isinstance(result, _StageOutcome) else _StageOutcome(rc=int(result))
+
+
+class _StderrTail:
+    """Tee ``sys.stderr`` while keeping its last few lines.
+
+    A best-effort stage's inner command prints its real error (an HTTP 422, a
+    transport failure) to stderr and then exits 1; the tail lets the stage
+    record carry that error instead of only the exit code. Everything is still
+    written through to the real stream.
+    """
+
+    def __init__(self, stream, *, keep: int = 3) -> None:
+        self._stream = stream
+        self._partial = ""
+        self.lines: deque[str] = deque(maxlen=keep)
+
+    def write(self, text: str) -> int:
+        self._stream.write(text)
+        chunks = (self._partial + text).split("\n")
+        self._partial = chunks.pop()
+        self.lines.extend(line.strip() for line in chunks if line.strip())
+        return len(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+    def __getattr__(self, name):
+        return getattr(self._stream, name)
+
+    def tail(self) -> str:
+        lines = list(self.lines)
+        if self._partial.strip():
+            lines.append(self._partial.strip())
+        return " | ".join(lines[-3:])
 
 
 def _build_stages(args) -> tuple[_Stage, ...]:
@@ -236,7 +345,8 @@ def _init_status(cfg, apexes, args, job_id, stages) -> dict:
         "updated_at": _utcnow_iso(),
         "stages": [
             {"key": s.key, "label": s.label, "state": "pending",
-             "exit_code": None, "ran_at": None, "artifact": s.artifact, "counts": {}}
+             "exit_code": None, "ran_at": None, "artifact": s.artifact, "counts": {},
+             "errors": []}
             for s in stages
         ],
     }
@@ -349,11 +459,14 @@ def _run_web(args, cfg) -> int:
         return _exit_code(exc)
 
 
-def _run_js(args, cfg) -> int:
+def _run_js(args, cfg) -> _StageOutcome:
     """JS endpoint + secret mining over the web-discovery crawl output. Best-effort:
-    a failure is logged but never fails the pipeline; the sentinel is always written
-    so the checkpoint marks the stage done. Carries the engagement's attribution
-    header + rate cap via js_mining's kali_exec body fetch."""
+    a failure never stops the pipeline, but it is recorded — an exception, a
+    non-zero exit, or a step js-mining itself reports in its summary ``errors``
+    (an endpoint ingest the backend refused) marks the stage failed with the
+    error. ``undecodable_bodies`` rides into the stage counts. The sentinel is
+    always written. Carries the engagement's attribution header + rate cap via
+    js_mining's kali_exec body fetch."""
     katana = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "katana.jsonl"
     sentinel = Path(cfg.engagement_dir) / "scans" / "web-discovery" / "js-mining" / "js-mining.done"
     sentinel.parent.mkdir(parents=True, exist_ok=True)
@@ -372,8 +485,17 @@ def _run_js(args, cfg) -> int:
         engagement_dir=args.engagement_dir,
     )
     mined = 0
+    counts: dict = {}
+    errors: list[str] = []
+    unlanded: list[str] = []
     try:
-        js_mining.run(ns)
+        summary = js_mining.run(ns)
+        if isinstance(summary, dict):
+            if "undecodable_bodies" in summary:
+                counts["undecodable_bodies"] = int(summary["undecodable_bodies"])
+            errors.extend(str(error) for error in summary.get("errors") or [])
+            unlanded_counts, unlanded = _unlanded_rows(summary, unit="js-mining")
+            counts.update(unlanded_counts)
         endpoints = (Path(cfg.engagement_dir) / "scans" / "web-discovery"
                      / "js-mining" / "js_endpoints.txt")
         if endpoints.is_file():
@@ -381,44 +503,77 @@ def _run_js(args, cfg) -> int:
                 encoding="utf-8", errors="replace").splitlines() if line.strip())
     except SystemExit as exc:
         if _exit_code(exc) != 0:
-            print(f"recon: js-mining exited {_exit_code(exc)} (non-fatal; continuing).",
-                  file=sys.stderr)
-    except Exception as exc:  # noqa: BLE001 — js-mining is best-effort; never fail the pipeline
-        print(f"recon: js-mining errored ({type(exc).__name__}: {exc}); continuing.",
-              file=sys.stderr)
+            errors.append(f"js-mining exited {_exit_code(exc)}")
+    except Exception as exc:  # noqa: BLE001 — js-mining is best-effort; never stop the pipeline
+        errors.append(f"js-mining errored ({type(exc).__name__}: {exc})")
     sentinel.write_text("".join(f"{i}\n" for i in range(mined)), encoding="utf-8")
-    return 0
+    return _StageOutcome(
+        rc=1 if errors else 0,
+        counts=counts,
+        errors=tuple(errors + unlanded),
+        fatal=False,
+        partial=bool(unlanded),
+    )
 
 
-def _run_gau(args, cfg) -> int:
+def _run_gau(args, cfg) -> _StageOutcome:
     """Historical-URL enrichment: run gau-endpoints per apex (in-container,
-    cache-aware) and write a sentinel listing the apexes mined. gau is
-    best-effort enrichment — a per-apex failure (e.g. a brand-new site with no
-    archive history) is logged but never fails the stage; the sentinel is always
-    written so the checkpoint marks gau done."""
+    cache-aware) and write a sentinel listing the apexes mined. Best-effort: a
+    per-apex failure never stops the pipeline, but it marks the stage failed
+    with ``apexes_failed`` and an error naming the apex, its exit code and the
+    last lines it printed, so an ingest the backend refused is visible on the
+    status surface. Rows the backend refused (or whose write outcome is
+    unknown) in an apex's ingest leave the stage ``partial`` with a
+    ``backend_refused`` / ``write_uncertain`` count and an error naming the apex.
+    A brand-new site with no archive history is not a failure (gau exits 0 with
+    an empty corpus)."""
     apexes = [a.strip() for a in args.apexes if a.strip()]
     processed: list[str] = []
+    errors: list[str] = []
+    unlanded: list[str] = []
+    unlanded_counts: dict = {}
+    first_rc = 0
     for apex in apexes:
         ns = SimpleNamespace(
             target=apex, source="gau", subs=True, providers="",
             refresh=False, max_cache_age_hours=24.0, db_override=None,
             phase="recon", timeout=int(args.stage_timeout), engagement_dir=args.engagement_dir,
         )
+        tail = _StderrTail(sys.stderr)
+        failure = ""
+        rc = 0
+        summary = None
         try:
-            gau_endpoints.run(ns)
-            processed.append(apex)
+            with contextlib.redirect_stderr(tail):
+                summary = gau_endpoints.run(ns)
         except SystemExit as exc:
-            if _exit_code(exc) == 0:
-                processed.append(apex)
-            else:
-                print(f"recon: gau enrichment for {apex} exited {_exit_code(exc)} "
-                      "(non-fatal; continuing).", file=sys.stderr)
-        except Exception as exc:  # noqa: BLE001 — gau is best-effort; never fail the pipeline on it
-            print(f"recon: gau enrichment for {apex} errored ({type(exc).__name__}: {exc}); "
-                  "continuing.", file=sys.stderr)
+            rc = _exit_code(exc)
+            if rc != 0:
+                failure = f"gau-endpoints exited {rc}"
+        except Exception as exc:  # noqa: BLE001 — gau is best-effort; never stop the pipeline on it
+            rc = 1
+            failure = f"gau-endpoints errored ({type(exc).__name__}: {exc})"
+        if not failure:
+            processed.append(apex)
+            apex_counts, apex_unlanded = _unlanded_rows(summary, unit=apex)
+            for key, value in apex_counts.items():
+                unlanded_counts[key] = unlanded_counts.get(key, 0) + value
+            unlanded.extend(apex_unlanded)
+            continue
+        first_rc = first_rc or rc
+        detail = tail.tail()
+        errors.append(f"{apex}: {failure}" + (f"; last output: {detail}" if detail else ""))
     sentinel = _recon_dir(cfg) / "gau.done"
     sentinel.write_text("".join(f"{a}\n" for a in processed), encoding="utf-8")
-    return 0
+    counts = {"apexes_failed": len(errors)} if errors else {}
+    counts.update(unlanded_counts)
+    return _StageOutcome(
+        rc=first_rc,
+        counts=counts,
+        errors=tuple(errors + unlanded),
+        fatal=False,
+        partial=bool(unlanded),
+    )
 
 
 _STAGE_RUNNERS = {"dns": _run_dns, "web": _run_web, "js": _run_js, "gau": _run_gau}
@@ -621,7 +776,14 @@ def run(args) -> None:
     if args.background and not args.foreground:
         _launch_background(args)
         return
+    # One run scope for the whole pipeline: an advisory every stage's tool runs
+    # would print (target concurrency, attribution headers a tool cannot carry)
+    # prints once for the job, child processes included.
+    with notice_scope():
+        _run_pipeline(args)
 
+
+def _run_pipeline(args) -> None:
     cfg = load_config(args.engagement_dir)
     effective = _effective_runtime(args)
     _enforce_host_routing(args, effective)
@@ -640,6 +802,7 @@ def run(args) -> None:
     _write_json_atomic(status_path(cfg), status)
 
     overall_rc = 0
+    fatal_failure = False
     for stage in stages:
         if args.resume and _stage_is_fresh(cfg, stage, fingerprint):
             _set_stage(status, stage.key, state="skipped", counts=_stage_counts(cfg, stage))
@@ -651,8 +814,16 @@ def run(args) -> None:
         _write_json_atomic(status_path(cfg), status)
         print(f"recon: stage {stage.label} starting.", file=sys.stderr)
 
-        rc = _STAGE_RUNNERS[stage.key](args, cfg)
-        counts = _stage_counts(cfg, stage) if rc == 0 else {}
+        outcome = _as_outcome(_STAGE_RUNNERS[stage.key](args, cfg))
+        rc = outcome.rc
+        # A fatal failure produced nothing worth counting; a best-effort stage
+        # keeps the counts of the work that did complete beside its errors.
+        counts = (
+            {**_stage_counts(cfg, stage), **outcome.counts}
+            if rc == 0 or not outcome.fatal
+            else {}
+        )
+        errors = list(outcome.errors)
         meta = {
             "run_uuid": status["run_uuid"],
             "done": rc == 0,
@@ -661,19 +832,31 @@ def run(args) -> None:
             "fingerprint": fingerprint,
             "artifact": stage.artifact,
             "counts": counts,
+            "errors": errors,
         }
         _write_json_atomic(_stage_meta_path(cfg, stage.key), meta)
-        _set_stage(status, stage.key, state="done" if rc == 0 else "failed",
-                   exit_code=rc, counts=counts)
-        _write_json_atomic(status_path(cfg), status)
-        print(f"recon: stage {stage.label} {'done' if rc == 0 else f'failed (rc={rc})'} {counts}", file=sys.stderr)
         if rc != 0:
-            overall_rc = rc
-            # A failed DNS stage leaves no hosts for web-discovery; stop and let
-            # the operator inspect recon-status rather than cascade failures.
-            break
+            state = "failed"
+        else:
+            state = "partial" if outcome.partial else "done"
+        _set_stage(status, stage.key, state=state, exit_code=rc, counts=counts, errors=errors)
+        _write_json_atomic(status_path(cfg), status)
+        print(f"recon: stage {stage.label} {state if rc == 0 else f'failed (rc={rc})'} {counts}", file=sys.stderr)
+        for error in errors:
+            print(f"recon: stage {stage.label} error: {error}"
+                  + ("" if outcome.fatal else " (best-effort stage; continuing)"),
+                  file=sys.stderr)
+        if rc != 0:
+            overall_rc = overall_rc or rc
+            if outcome.fatal:
+                # A failed DNS stage leaves no hosts for web-discovery; stop and
+                # let the operator inspect recon-status rather than cascade.
+                fatal_failure = True
+                break
 
-    status["overall_state"] = "done" if overall_rc == 0 else "failed"
+    # The exit code (and so a background job row's status) still reports any
+    # failed stage; ``overall_state`` says whether the rest of the pipeline ran.
+    status["overall_state"] = _overall_state(status["stages"], fatal_failure=fatal_failure)
     status["updated_at"] = _utcnow_iso()
     _write_json_atomic(status_path(cfg), status)
 

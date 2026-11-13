@@ -104,6 +104,16 @@
         "evidence_quote": {
           "type": "string",
           "description": "Verbatim excerpt (header, banner, response body) that identifies this component."
+        },
+        "waf": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "verdict": {"type": "string", "enum": ["detected", "none_detected"]},
+            "hosts": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+          },
+          "required": ["verdict", "hosts"],
+          "description": "Structured WAF measurement that closes the waf_tier readiness objective for each listed host. verdict none_detected records a measured negative. Requires command_run_id naming the run that measured the hosts; name a detected vendor in component."
         }
       }
     }

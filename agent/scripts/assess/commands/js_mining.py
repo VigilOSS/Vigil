@@ -9,15 +9,22 @@ Pipeline (runs AFTER the crawl stage, default-on):
     select .js URLs from the crawl output (katana.jsonl) / a passed URL list
       -> httpx -store-response over the .js subset (bounded, attribution header
          injected centrally by kali_exec, rate-capped to scope.rate_limit)
-      -> jsluice (AST) endpoint extraction over each stored body, with the
-         LinkFinder-style regex (gau_pipeline.extract_js_endpoints) as the
-         offline fallback when jsluice yields nothing / is unavailable
-      -> trufflehog filesystem secret scan over the stored bodies
+      -> decode each stored body by its Content-Encoding (br/gzip/deflate/zstd)
+         and chunk framing into bodies-decoded/ (lib/stored_responses.py); the
+         raw capture is kept as captured
+      -> jsluice (AST) endpoint extraction over the decoded bodies, relative
+         URLs resolved against the script they came from, with the
+         LinkFinder-style regex (gau_pipeline.extract_js_endpoints) as a second
+         source over the same bodies
+      -> trufflehog filesystem secret scan over the decoded bodies
       -> ingest extracted endpoints into the work buffer (source='js-extract')
 
-The stage is **best-effort**: a failure in any step is logged and the stage
-returns 0 so it never fails the recon pipeline. The asset count is bounded by
-``--max-js`` so a huge crawl cannot blow up the fetch.
+The stage is **best-effort**: a failed step is logged and mining continues
+with what it has, and the command exits 0. The summary (printed and returned)
+counts ``undecodable_bodies`` and lists in ``errors`` any step whose loss means
+the mined endpoints never reached the work buffer, which the recon pipeline
+records as a failed stage. The asset count is bounded by ``--max-js`` so a huge
+crawl cannot blow up the fetch.
 
 Tool choices follow the tool-adopt research: jsluice + trufflehog are ALREADY
 installed in the runtime image; no new binary is required and no image rebuild.
@@ -35,6 +42,7 @@ from assess.lib import scope
 from assess.lib.config import anchor_engagement_relative, load_config
 from assess.lib.gau_pipeline import extract_js_endpoints, resolve_js_endpoint
 from assess.lib.kali import kali_exec
+from assess.lib.stored_responses import mirror_decoded_bodies
 
 _JS_SUFFIXES = (".js", ".mjs", ".cjs")
 _DEFAULT_MAX_JS = 200
@@ -226,13 +234,45 @@ def _source_url_from_body(body_path: Path) -> str:
     return f"{scheme}://{host_m.group(1).strip()}{candidate}"
 
 
+def _host_path_of(cfg, container_path: str) -> Path | None:
+    prefix = f"/engagements/{cfg.engagement_key}/"
+    if not container_path.startswith(prefix):
+        return None
+    return Path(cfg.engagement_dir) / container_path[len(prefix):]
+
+
+def _resolve_jsluice_url(cfg, url: str, filename: str, sources: dict[str, str]) -> str:
+    """Resolve a relative jsluice URL against the script it was found in.
+
+    jsluice reports a URL as written in the script (``app.css``,
+    ``/api/v1/x``) plus the ``filename`` it parsed; the stored response's
+    request line names that script's URL, which is the base a browser resolves
+    against. Without a recoverable base the URL is returned unchanged, so ingest
+    counts it as a relative path rather than guessing a host.
+    """
+    if url.startswith(("http://", "https://")) or not filename:
+        return url
+    if filename not in sources:
+        body = _host_path_of(cfg, filename)
+        sources[filename] = _source_url_from_body(body) if body is not None else ""
+    base = sources[filename]
+    if not base:
+        return url
+    try:
+        return resolve_js_endpoint(url, base_url=base) or url
+    except ValueError:
+        return url
+
+
 def _jsluice_endpoints(args, cfg, *, bodies_host: Path) -> tuple[list[str], bool]:
-    """Run jsluice (AST) over the stored bodies dir. Returns (raw_urls, ran_ok).
+    """Run jsluice (AST) over the decoded bodies dir. Returns (urls, ran_ok).
 
     jsluice `urls` mode parses each JS file with a real AST and recovers endpoints
     the LinkFinder regex misses on concatenated/templated strings. Output is JSON
-    lines with a `url` field. Runs in-container (jsluice is installed). On any
-    failure the caller falls back to the regex extractor, so this is best-effort."""
+    lines with a `url` field and the `filename` it came from; relative URLs are
+    resolved against that file's source URL. Runs in-container (jsluice is
+    installed). On any failure the caller falls back to the regex extractor, so
+    this is best-effort."""
     bodies_container = f"/engagements/{cfg.engagement_key}/scans/web-discovery/js-mining/{bodies_host.name}"
     out_host, _ = _paths(cfg, "jsluice.jsonl")
     out_container = f"/engagements/{cfg.engagement_key}/scans/web-discovery/js-mining/jsluice.jsonl"
@@ -252,6 +292,7 @@ def _jsluice_endpoints(args, cfg, *, bodies_host: Path) -> tuple[list[str], bool
         _warn(f"jsluice exited {res.return_code}; using the regex fallback.")
         return [], False
     urls: list[str] = []
+    sources: dict[str, str] = {}
     if out_host.is_file():
         with out_host.open("r", encoding="utf-8", errors="replace") as fh:
             for line in fh:
@@ -265,7 +306,9 @@ def _jsluice_endpoints(args, cfg, *, bodies_host: Path) -> tuple[list[str], bool
                 if isinstance(obj, dict):
                     u = obj.get("url") or obj.get("endpoint")
                     if u:
-                        urls.append(str(u))
+                        urls.append(_resolve_jsluice_url(
+                            cfg, str(u), str(obj.get("filename") or ""), sources
+                        ))
     return urls, True
 
 
@@ -332,7 +375,30 @@ def _run_trufflehog(args, cfg, *, bodies_host: Path) -> dict:
     }
 
 
-def run(args) -> None:
+_UNDECODABLE_NAMED = 10
+
+
+def _decode_bodies(cfg, bodies_host: Path) -> tuple[Path, dict]:
+    """Mirror the stored bodies decoded; WARN naming every body left undecoded."""
+    decoded_host, _ = _paths(cfg, "bodies-decoded")
+    report = mirror_decoded_bodies(bodies_host, decoded_host)
+    report_host, _ = _paths(cfg, "body-decoding.json")
+    summary = report.summary()
+    report_host.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
+    for kind, verb in (("undecodable", "could not be decoded and were mined as captured"),
+                       ("partial", "decoded only in part (truncated or over the size cap)")):
+        rows = summary[kind]
+        if not rows:
+            continue
+        named = "; ".join(f"{row['file']} ({row['reason']})" for row in rows[:_UNDECODABLE_NAMED])
+        more = len(rows) - _UNDECODABLE_NAMED
+        tail = f"; {more} more listed in {report_host}" if more > 0 else f" (also in {report_host})"
+        noun = "stored body" if len(rows) == 1 else "stored bodies"
+        _warn(f"{len(rows)} {noun} {verb}: {named}{tail}")
+    return decoded_host, {**summary, "report_path": str(report_host)}
+
+
+def run(args) -> dict | None:
     _apply_arg_defaults(args)
     cfg = load_config(args.engagement_dir)
     # `--engagement-dir` defaults to None; load_config resolves the real dir (cwd
@@ -350,7 +416,7 @@ def run(args) -> None:
     js_urls = _collect_js_urls(source_path, int(args.max_js))
     if not js_urls:
         print(f"js-mining: no .js assets found in {source_path}; nothing to mine.", file=sys.stderr)
-        return
+        return None
 
     # Rate cap: clamp the body-fetch httpx -rate-limit DOWN to the configured
     # global req/s ceiling (httpx -rate-limit is one global token bucket, so it
@@ -398,13 +464,15 @@ def run(args) -> None:
     except Exception as exc:  # noqa: BLE001 — best-effort stage
         _warn(f"body fetch errored ({type(exc).__name__}: {exc}); continuing with stored bodies.")
 
-    body_files = _list_body_files(bodies_host)
+    errors: list[str] = []
+    decoded_host, body_decoding = _decode_bodies(cfg, bodies_host)
+    body_files = _list_body_files(decoded_host)
 
     # Endpoint extraction: jsluice (AST) first, regex fallback over the same bodies.
     raw_endpoints: list[str] = []
     jsluice_ran = False
     try:
-        jsluice_urls, jsluice_ran = _jsluice_endpoints(args, cfg, bodies_host=bodies_host)
+        jsluice_urls, jsluice_ran = _jsluice_endpoints(args, cfg, bodies_host=decoded_host)
         raw_endpoints.extend(jsluice_urls)
     except Exception as exc:  # noqa: BLE001
         _warn(f"jsluice errored ({type(exc).__name__}: {exc}); regex fallback only.")
@@ -481,40 +549,56 @@ def run(args) -> None:
         )
 
     ingested = 0
+    backend_refused = 0
+    write_uncertain = 0
     if not getattr(args, "no_ingest", False) and resolved:
         try:
-            ingest_endpoints.run(_ingest_args(args, str(endpoints_host)))
-            ingested = len(resolved)
+            ingest = ingest_endpoints.run(_ingest_args(args, str(endpoints_host)))
+            ingested = int(ingest.get("ingested") or 0)
+            backend_refused = int(ingest.get("backend_refused") or 0)
+            write_uncertain = int(ingest.get("write_uncertain") or 0)
         except SystemExit as exc:
             if (exc.code or 0) != 0:
-                _warn(f"ingest-endpoints exited {exc.code}; endpoints written to {endpoints_host} but not ingested.")
+                errors.append(
+                    f"ingest-endpoints exited {exc.code}; endpoints written to "
+                    f"{endpoints_host} but not ingested"
+                )
+                _warn(f"{errors[-1]}.")
         except Exception as exc:  # noqa: BLE001
-            _warn(f"ingest errored ({type(exc).__name__}: {exc}); endpoints written to {endpoints_host}.")
+            errors.append(
+                f"ingest errored ({type(exc).__name__}: {exc}); endpoints written to "
+                f"{endpoints_host} but not ingested"
+            )
+            _warn(f"{errors[-1]}.")
 
     secrets: dict = {"skipped": True}
     if not args.no_secrets and body_files:
         try:
-            secrets = _run_trufflehog(args, cfg, bodies_host=bodies_host)
+            secrets = _run_trufflehog(args, cfg, bodies_host=decoded_host)
         except Exception as exc:  # noqa: BLE001
             _warn(f"trufflehog errored ({type(exc).__name__}: {exc}).")
             secrets = {"error": str(exc)}
 
-    print(json.dumps(
-        {
-            "verb": "js-mining",
-            "source": str(source_path),
-            "js_assets_selected": len(js_urls),
-            "bodies_fetched": fetched,
-            "bodies_scanned": len(body_files),
-            "jsluice_ran": jsluice_ran,
-            "endpoints_extracted": len(resolved),
-            "endpoints_ingested": ingested,
-            "endpoints_path": str(endpoints_host),
-            "secrets": secrets,
-        },
-        ensure_ascii=False,
-        indent=2,
-    ))
+    summary = {
+        "verb": "js-mining",
+        "source": str(source_path),
+        "js_assets_selected": len(js_urls),
+        "bodies_fetched": fetched,
+        "bodies_scanned": len(body_files),
+        "bodies_decoded_dir": str(decoded_host),
+        "body_decoding": body_decoding,
+        "undecodable_bodies": len(body_decoding["undecodable"]),
+        "jsluice_ran": jsluice_ran,
+        "endpoints_extracted": len(resolved),
+        "endpoints_ingested": ingested,
+        "backend_refused": backend_refused,
+        "write_uncertain": write_uncertain,
+        "endpoints_path": str(endpoints_host),
+        "secrets": secrets,
+        "errors": errors,
+    }
+    print(json.dumps(summary, ensure_ascii=False, indent=2))
+    return summary
 
 
 def _ingest_args(args, urls_file: str):

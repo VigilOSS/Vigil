@@ -242,3 +242,33 @@ def test_append_notes_preserves_explicit_version_without_reading_one(tmp_path, m
         argv += ["--expected-row-version", str(version)]
     update_finding.run(_parse(argv, str(tmp_path)))
     assert fake.patches[0][1].get("expected_row_version") == version
+
+
+# -- What the backend fills in is named, never silent ---------------------------
+
+
+class _EnvelopeClient(_FakeClient):
+    def patch(self, path: str, payload: dict) -> dict:
+        response = super().patch(path, payload)
+        response["derived"] = [{
+            "field": "details.kill_reason",
+            "value": "The guard dominates.",
+            "derived_from": "reason_text",
+            "detail": "details.kill_reason was not supplied; stored the value of reason_text",
+        }]
+        response["advisories"] = [{"kind": "acme_advisory", "detail": "Acme advisory text."}]
+        return response
+
+
+def test_update_names_each_derived_value_and_advisory_on_stderr(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _EnvelopeClient()
+    _install(monkeypatch, tmp_path, fake)
+    args = _parse(["update", "VA-001", "--notes", "Acme note"], str(tmp_path))
+
+    update_finding.run(args)
+
+    err = capsys.readouterr().err
+    assert "finding update: VA-001: derived details.kill_reason" in err
+    assert "finding update: VA-001: advisory [acme_advisory] Acme advisory text." in err

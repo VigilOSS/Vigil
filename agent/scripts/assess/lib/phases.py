@@ -126,6 +126,41 @@ def canonical_phase(phase: str) -> str:
     return PHASE_INPUT_ALIASES.get(key, key)
 
 
+def resolve_track_phase(phase: str) -> str:
+    """Resolve a phase token to the track-roster phase it names.
+
+    ``canonical_phase`` first, then a code audit tag maps to the code track
+    phase it tags (``code-hunt`` → ``hunt``, ``code-verify`` →
+    ``verify-variant``), by the index alignment ``CODE_PHASE_AUDIT_TAGS``
+    guarantees. Two tokens that resolve to the same value name the same phase,
+    which is how a grant and a lane's own account of the phase it ran are
+    compared. Anything else is returned as ``canonical_phase`` leaves it, so
+    an unknown token stays visible to the caller that validates it. This is a
+    comparison and dispatch-grant normalisation, not an input alias: the audit
+    tag stays the spelling ``kali --phase`` and command-run rows require.
+    """
+    key = canonical_phase(phase)
+    if key in CODE_PHASE_AUDIT_TAGS:
+        return CODE_PHASES[CODE_PHASE_AUDIT_TAGS.index(key)]
+    return key
+
+
+def code_audit_tag(phase: str) -> str:
+    """Map a code track phase to its audit tag — the inverse of ``resolve_track_phase``.
+
+    ``canonical_phase`` first, then a ``CODE_PHASES`` entry maps to its
+    index-aligned ``CODE_PHASE_AUDIT_TAGS`` entry (``hunt`` → ``code-hunt``,
+    ``verify-variant`` → ``code-verify``). Anything else is returned as
+    ``canonical_phase`` leaves it. Catalogue lookups use it so the track
+    spelling ``agent start`` stores in a code lane's packet finds the commands
+    tagged for that phase; ``kali --phase`` still requires the audit tag itself.
+    """
+    key = canonical_phase(phase)
+    if key in CODE_PHASES:
+        return CODE_PHASE_AUDIT_TAGS[CODE_PHASES.index(key)]
+    return key
+
+
 __all__ = [
     "AUDIT_PHASE_TAGS",
     "BLUE_PHASES",
@@ -139,4 +174,6 @@ __all__ = [
     "WEB_PHASES",
     "WEB_TRANSITION_PHASES",
     "canonical_phase",
+    "code_audit_tag",
+    "resolve_track_phase",
 ]

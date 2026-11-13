@@ -62,3 +62,32 @@ def test_family_manifest_common_floor_and_deltas_reconstruct_every_item(tmp_path
     assert common == 'injection'
     assert [line.split('additional_applicable_vuln_classes: ', 1)[1].split(';')[0].rstrip(')')
             for line in file_lines] == ['ssrf', 'auth-bypass']
+
+
+def _render(tmp_path, *, phase, skills=None, role='code-vuln-hunter'):
+    context = {key: 'not supplied' for key in agent._PROMPT_CONTEXT_FIELDS}
+    context['authorized_phase'] = phase
+    payload = {'agent_id': 'acme-lane', 'agent_role': role, 'task': 'Review assigned files',
+               'skills': skills}
+    return agent._dispatch_prompt(payload, engagement_dir=tmp_path, agent_root=tmp_path,
+        source_identity=[], args=argparse.Namespace(prompt_context=context, prompt_context_json=None,
+                                no_target_traffic=True, rate_budget=None), client=None)
+
+
+def test_the_missing_phase_stop_rule_renders_only_when_the_phase_is_missing(tmp_path):
+    marker = agent._UNSET_AUTHORIZED_PHASE
+    stamped = _render(tmp_path, phase='code-hunt')
+    missing = _render(tmp_path, phase=marker)
+    assert f"authorized_phase: {marker}" in missing
+    assert missing.count(marker) > stamped.count(marker)
+    assert marker not in stamped
+
+
+def test_named_skills_share_one_read_order_and_list_one_path_each(tmp_path):
+    one = _render(tmp_path, phase='code-hunt', skills='code-vulnerability-analysis')
+    two = _render(tmp_path, phase='code-hunt',
+                  skills='code-vulnerability-analysis,code-variant-analysis')
+    for name in ('code-vulnerability-analysis', 'code-variant-analysis'):
+        assert two.count(f"agent/skills/{name}/SKILL.md") == 1
+    # Adding a skill adds exactly its path line, not another copy of the order.
+    assert len(two.splitlines()) == len(one.splitlines()) + 1

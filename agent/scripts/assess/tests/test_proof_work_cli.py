@@ -331,3 +331,30 @@ def test_every_command_the_proof_work_contract_names_parses(monkeypatch):
         with pytest.raises((_Parsed, SystemExit)) as outcome:
             cli.main(argv)
         assert outcome.type is _Parsed, command
+
+
+@pytest.mark.parametrize(('phase', 'accepted'), [('verify-variant', True), ('code-verify', True), ('hunt', False)])
+def test_claim_accepts_the_track_spelling_of_the_work_phase_and_keeps_the_work_spelling(
+    tmp_path, monkeypatch, capsys, phase, accepted
+):
+    """`agent start` stores `verify-variant` for a code lane; it names the same phase as `code-verify`."""
+    from assess.commands import agent
+    (tmp_path / 'scope.json').write_text('{}\n')
+    monkeypatch.setattr(config, '_verify_backend', lambda _: None)
+    monkeypatch.setattr(agent, '_attach_dispatch_provenance', lambda *_: [])
+    calls = []
+    monkeypatch.setattr(AssessmentClient, 'get', lambda _c, endpoint: _work() if endpoint == 'proof-work/3' else {'rendered_prompt': 'saved prompt'})
+    monkeypatch.setattr(AssessmentClient, 'post', lambda _c, endpoint, payload:
+                        calls.append((endpoint, payload)) or (_work() | {'launch_required': True, 'owner_agent_id': 'PROOF-1', 'prompt_packet': _backend_claimed_packet(payload['prompt_packet'], 'code')}))
+    argv = ['--engagement-dir', str(tmp_path), 'proof-work', 'claim', '3',
+            '--agent-id', 'PROOF-1', '--agent-role', 'exploit-developer',
+            '--prompt-context-json', json.dumps(_context() | {'authorized_phase': phase}), '--no-target-traffic']
+    if not accepted:
+        with pytest.raises(SystemExit):
+            cli.main(argv)
+        assert 'authorized_phase must be code-verify' in capsys.readouterr().err
+        assert calls == []
+        return
+    cli.main(argv)
+    capsys.readouterr()
+    assert calls[0][1]['prompt_packet']['context']['authorized_phase'] == 'code-verify'

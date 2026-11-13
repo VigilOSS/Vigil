@@ -73,6 +73,9 @@ def _install_seams(monkeypatch, tmp_path, *, captured, body_text=None, jsluice_l
 
     def fake_ingest(ns):
         ingested.append(ns.input_file)
+        lines = Path(ns.input_file).read_text(encoding="utf-8").splitlines()
+        return {"ingested": sum(1 for line in lines if line.strip()),
+                "backend_refused": 0, "write_uncertain": 0}
 
     monkeypatch.setattr(js_mining.ingest_endpoints, "run", fake_ingest)
     return ingested

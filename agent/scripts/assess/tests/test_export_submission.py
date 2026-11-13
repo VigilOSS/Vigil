@@ -31,6 +31,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
@@ -56,6 +57,10 @@ class _Cfg:
         self.engagement_key = "test-eng"
 
 
+# The backend ``finding-links`` route's page ceiling and default ``limit``.
+_LINK_PAGE_CEILING = 5000
+
+
 class _FakeClient(StubClient):
     """Routes GETs to canned payloads and records every GET/POST endpoint."""
 
@@ -71,8 +76,12 @@ class _FakeClient(StubClient):
         decisions_error: str = "",
         post_error: str = "",
         post_response: dict | None = None,
+        writers_in_progress=None,
     ) -> None:
         self._finding = finding
+        # In-progress report-writer dispatch rows; none by default, so a render
+        # without --agent-id is the operator's.
+        self._writers_in_progress = writers_in_progress or []
         self._links = links or []
         self._command_runs = command_runs or {}
         self._artifacts = artifacts
@@ -104,13 +113,27 @@ class _FakeClient(StubClient):
         limit = int(params.get("limit", [str(len(matched))])[0])
         return matched[offset : offset + limit]
 
+    def _link_page(self, endpoint: str) -> list[dict]:
+        """One bounded ``finding-links`` page, the way the backend serves it.
+
+        The route defaults ``limit`` to its 5000-row ceiling and orders newest
+        first, so a single unparameterised read stops at the ceiling.
+        """
+        params = parse_qs(urlsplit(endpoint).query)
+        offset = int(params.get("offset", ["0"])[0])
+        limit = int(params.get("limit", [str(_LINK_PAGE_CEILING)])[0])
+        return self._links[offset : offset + limit]
+
     def get_all_pages(self, endpoint: str, *, page_size: int = 5000) -> list[dict]:
+        page_of = (
+            self._link_page
+            if urlsplit(endpoint).path == "finding-links"
+            else self._decision_page
+        )
         rows: list[dict] = []
         while True:
             sep = "&" if "?" in endpoint else "?"
-            page = self._decision_page(
-                f"{endpoint}{sep}limit={page_size}&offset={len(rows)}"
-            )
+            page = page_of(f"{endpoint}{sep}limit={page_size}&offset={len(rows)}")
             self.gets.append(f"{endpoint} [page offset={len(rows)}]")
             rows.extend(page)
             if len(page) < page_size:
@@ -120,13 +143,15 @@ class _FakeClient(StubClient):
         self.gets.append(endpoint)
         if endpoint.startswith("dispatch-decisions?"):
             return self._decision_page(endpoint)
+        if urlsplit(endpoint).path == "dispatches":
+            return list(self._writers_in_progress)
         if endpoint.startswith("findings/"):
             slug = endpoint.split("/", 1)[1]
             if _nonempty_slug(self._finding) != slug:
                 raise AssessError(f"HTTP 404: finding {slug} not found")
             return self._finding
-        if endpoint == "finding-links":
-            return self._links
+        if urlsplit(endpoint).path == "finding-links":
+            return self._link_page(endpoint)
         if endpoint == "report-readiness":
             return self._readiness
         if endpoint.startswith("artifacts/") and not endpoint.startswith("artifacts/search?"):
@@ -1174,6 +1199,78 @@ def test_artifact_registered_as_submission_without_submission_status(tmp_path, m
         assert "submission_status" not in any_payload
 
 
+class _DispatchAwareClient(_FakeClient):
+    """Answers `dispatches/<id>` for the recorded report-writer dispatches."""
+
+    recorded = frozenset({"WRITE-VA-047"})
+
+    def get(self, endpoint: str):
+        if endpoint.startswith("dispatches/"):
+            self.gets.append(endpoint)
+            agent_id = endpoint.removeprefix("dispatches/")
+            if agent_id not in self.recorded:
+                raise AssessError(f"HTTP 404: dispatch {agent_id} not found")
+            return {"agent_id": agent_id, "agent_role": "report-writer"}
+        return super().get(endpoint)
+
+
+def test_agent_id_attributes_the_submission_registration_to_its_writer(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _DispatchAwareClient(_finding(details=_complete_details()))
+    _export(
+        monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd",
+        "--draft", "--agent-id", "WRITE-VA-047",
+    )
+    capsys.readouterr()
+    [payload] = [payload for ep, payload in fake.posts if ep == "artifacts"]
+    assert payload["producer_agent_id"] == "WRITE-VA-047"
+
+
+def test_a_render_without_agent_id_is_attributed_to_the_finding_s_writer(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _FakeClient(_finding(details=_complete_details()), writers_in_progress=[
+        {"agent_id": "WRITE-VA-001", "agent_role": "report-writer", "finding_slugs": ["VA-001"]},
+        {"agent_id": "WRITE-VA-047", "agent_role": "report-writer", "finding_slugs": ["VA-047"]},
+    ])
+    _export(
+        monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft",
+    )
+    assert "WRITE-VA-047" in capsys.readouterr().err
+    [payload] = [payload for ep, payload in fake.posts if ep == "artifacts"]
+    assert payload["producer_agent_id"] == "WRITE-VA-047"
+
+
+def test_an_ambiguous_writer_is_refused_before_rendering(tmp_path, monkeypatch, capsys):
+    fake = _FakeClient(_finding(details=_complete_details()), writers_in_progress=[
+        {"agent_id": "WRITE-A", "agent_role": "report-writer", "finding_slugs": ["VA-047"]},
+        {"agent_id": "WRITE-B", "agent_role": "report-writer", "finding_slugs": ["VA-047"]},
+    ])
+    with pytest.raises(AssessError) as exc:
+        _export(
+            monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd",
+            "--draft",
+        )
+    assert "WRITE-A" in str(exc.value) and "--agent-id" in str(exc.value)
+    assert fake.posts == []
+    assert not _submission_path(tmp_path).exists()
+
+
+def test_agent_id_that_names_no_dispatch_is_refused_before_rendering(
+    tmp_path, monkeypatch, capsys
+):
+    fake = _DispatchAwareClient(_finding(details=_complete_details()))
+    with pytest.raises(AssessError) as exc:
+        _export(
+            monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd",
+            "--draft", "--agent-id", "WRITE-TYPO",
+        )
+    assert "WRITE-TYPO" in str(exc.value) and "--agent-id" in str(exc.value)
+    assert fake.posts == []
+    assert not _submission_path(tmp_path).exists()
+
+
 # -- linked command runs: REFERENCE, not force-rendered Evidence --------------
 
 def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
@@ -1211,7 +1308,7 @@ def test_linked_runs_are_reference_not_evidence(tmp_path, monkeypatch, capsys):
     assert "orders/1002" in runs[0]["command"]
 
     # Decision 4: NO fuzzy command search — only finding-links + the exact run by id.
-    assert "finding-links" in fake.gets
+    assert any(g.startswith("finding-links") for g in fake.gets)
     assert "command-runs/5" in fake.gets
     assert not any(g.startswith("command-runs?") for g in fake.gets)
 
@@ -1257,6 +1354,33 @@ def test_retired_links_are_not_exported_as_current_evidence(
     assert [r["id"] for r in runs] == [5]
     # The retired run is not even fetched — the filter runs before resolution.
     assert "command-runs/6" not in fake.gets
+
+
+def test_linked_runs_beyond_the_first_finding_links_page_are_exported(
+    tmp_path, monkeypatch, capsys
+):
+    """Every live link counts, however many links the engagement holds.
+
+    ``finding-links`` serves one page of at most 5000 rows, newest first, and the
+    slug filter runs on the client. On a large engagement this finding's older
+    command-run link sits past the first page, so a single read drops it out of
+    OPERATOR DETAILS without a word.
+    """
+    filler = [
+        {"finding_slug": "VA-999", "target_kind": "command_run", "target_id": 7}
+        for _ in range(_LINK_PAGE_CEILING)
+    ]
+    links = [*filler, {"finding_slug": "VA-047", "target_kind": "command_run", "target_id": 5}]
+    command_runs = {
+        5: {"id": 5, "command": "curl -sk https://app.example.com/orders/1002", "intent": "reproduce IDOR", "return_code": 0},
+        7: {"id": 7, "command": "curl -s https://app.example.com/other", "intent": "unrelated", "return_code": 0},
+    }
+    fake = _FakeClient(_finding(details=_complete_details()), links=links, command_runs=command_runs)
+    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
+    capsys.readouterr()
+
+    assert [r["id"] for r in _context(tmp_path)["linked_command_runs"]] == [5]
+    assert "orders/1002" in _submission_path(tmp_path).read_text()
 
 
 def test_empty_retired_at_is_treated_as_a_live_link(tmp_path, monkeypatch, capsys):
@@ -1816,51 +1940,6 @@ def test_authored_step_block_renders_byte_for_byte(tmp_path, monkeypatch, capsys
 
 # -- hygiene warnings: diagnostic in draft, strict in final -------------------
 
-@pytest.mark.parametrize(
-    "title, expect_advisory",
-    [
-        # 15 words -> advises.
-        ("This finding demonstrates a very long run on submission title that clearly exceeds the limit", True),
-        # 10 words -> silent.
-        ("Short concise title that stays under the required word limit", False),
-    ],
-)
-def test_title_word_count_advises_but_never_blocks(
-    tmp_path, monkeypatch, capsys, title, expect_advisory
-):
-    """Title length is editorial advice, not a gate.
-
-    Failing a FINAL export on it would let a 13-word title block publication of a
-    finished, verified finding — code overruling the author on prose. It is reported
-    as an advisory and kept out of `hygiene_warnings` (whose entries DO fail closed)
-    so the two authorities cannot be confused.
-    """
-    finding = _finding(details=_complete_details())
-    finding["title"] = title
-    fake = _FakeClient(finding)
-    _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
-    captured = capsys.readouterr()
-
-    # Publishes either way — a long title never blocks.
-    assert _submission_path(tmp_path).exists()
-    context = _context(tmp_path)
-    # Never a hygiene warning, whatever the length.
-    assert not any("max 12" in w for w in context["hygiene_warnings"])
-
-    body = _submission_path(tmp_path).read_text()
-    title_advisories = [a for a in context["advisories"] if "max 12" in a]
-    if expect_advisory:
-        assert title_advisories
-        assert "ADVISORY" in captured.err
-        assert "**Advisories** (non-blocking — your call):" in body
-    else:
-        # Scoped to the TITLE advisory: this finding also has no `repro_runs`, which
-        # earns its own advisory (see the repro-runs tests below). Asserting the
-        # whole list were empty would make this title test fail on any unrelated
-        # advisory the command learns to emit.
-        assert title_advisories == []
-
-
 # -- overwrite guard ----------------------------------------------------------
 
 def test_overwrite_guard(tmp_path, monkeypatch, capsys):
@@ -1870,13 +1949,15 @@ def test_overwrite_guard(tmp_path, monkeypatch, capsys):
     export_submission.run(args)
     capsys.readouterr()
 
-    # Second run without --overwrite must refuse.
+    # A hand edit since the last render is refused without --overwrite.
+    submission = _submission_path(tmp_path)
+    submission.write_text(submission.read_text() + "\nHand edit.\n")
     fake2 = _FakeClient(_finding(details=_complete_details()))
     _install(monkeypatch, tmp_path, fake2)
     args = _parse(["submission", "VA-047", "--platform", "bugcrowd"], str(tmp_path))
     with pytest.raises(AssessError) as exc:
         export_submission.run(args)
-    assert "already exists" in str(exc.value)
+    assert "edited by hand" in str(exc.value)
     assert fake2.posts == []  # nothing re-registered
 
     # With --overwrite it proceeds.
@@ -2021,6 +2102,48 @@ def test_draft_surfaces_target_readiness_blocker_without_gating(tmp_path, monkey
     _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd", "--draft")
     capsys.readouterr()
     assert _context(tmp_path)["readiness_blockers"] == [blocker]
+
+
+@pytest.mark.parametrize("draft", [True, False])
+def test_target_severity_advisories_reach_the_submission_qc_context(
+    tmp_path, monkeypatch, capsys, draft
+):
+    """Submission QC reads the context and OPERATOR DETAILS; a severity/CVSS
+    divergence on the target finding is an advisory there, never a refusal."""
+    mismatch = {
+        "kind": "severity_cvss_mismatch",
+        "slug": "VA-047",
+        "detail": "severity=critical but cvss_score=7.5 expects high",
+    }
+    divergence = {
+        "kind": "severity_cvss_band_divergence",
+        "slug": "VA-047",
+        "detail": "severity=low but cvss_score=5.0 expects medium; approved",
+    }
+    unrelated = {
+        "kind": "severity_cvss_mismatch",
+        "slug": "VA-999",
+        "detail": "severity=high but cvss_score=4.0 expects medium",
+    }
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        readiness={
+            "ready": True,
+            "blockers": [],
+            "advisories": [mismatch, divergence, unrelated],
+        },
+    )
+    argv = ["submission", "VA-047", "--platform", "bugcrowd"] + (["--draft"] if draft else [])
+    _export(monkeypatch, tmp_path, fake, *argv)
+    err = capsys.readouterr().err
+    advisories = _context(tmp_path)["advisories"]
+    assert any(
+        a.startswith("severity_cvss_mismatch:") and "expects high" in a for a in advisories
+    )
+    assert any(a.startswith("severity_cvss_band_divergence:") for a in advisories)
+    assert not any("VA-999" in a or "cvss_score=4.0" in a for a in advisories)
+    assert "severity_cvss_mismatch" in _submission_path(tmp_path).read_text()
+    assert "ADVISORY export submission: severity_cvss_mismatch" in err
 
 
 # -- A2: operational-header overlay (rendered FROM finding fields) ------------
@@ -2182,15 +2305,12 @@ def test_malformed_details_warn_instead_of_blanking_silently(
     assert "VA-047" in captured.err
 
 
-# -- prose advisories: length/shape opinions that never block -----------------
+# -- shape advisories: step count and evidence length, never blocking ----------
 #
-# Same authority split the title advisory is pinned on above: these are surfaced
-# in the context JSON, on stderr, and under OPERATOR DETAILS, and NEVER added to
-# `hygiene_warnings` (whose entries fail a final export closed). The unit tests
-# below drive `prose_advisories` directly because the thing most likely to break
-# them is markdown segmentation, and a false positive there costs the
-# report-writer's trust in every advisory the command emits, existing ones
-# included.
+# These are surfaced in the context JSON, on stderr, and under OPERATOR DETAILS,
+# and NEVER added to `hygiene_warnings` (whose entries fail a final export
+# closed). The unit tests below drive `shape_advisories` directly because the
+# thing most likely to break them is markdown segmentation.
 
 _BODY_SECTIONS = (
     ("summary", "Summary"),
@@ -2221,215 +2341,12 @@ def _words(count: int) -> str:
     return "The tenant " + " ".join(["reads"] * (count - 3)) + " everything."
 
 
-def _tagged_words(tag: str, count: int) -> str:
-    """`_words`, but distinguishable by its opening word, for quote-identity tests."""
-    assert count >= 3
-    return f"{tag} tenant " + " ".join(["reads"] * (count - 3)) + " everything."
-
-
 def _advisories(**kwargs) -> list[str]:
-    return export_submission.prose_advisories(_body(**kwargs))
+    return export_submission.shape_advisories(_body(**kwargs))
 
 
 def _only(advisories: list[str], needle: str) -> list[str]:
     return [a for a in advisories if needle in a]
-
-
-@pytest.mark.parametrize("count, expect", [(26, True), (25, False)])
-def test_sentence_length_advises_at_the_word_budget(count, expect):
-    """25 words is the ceiling, so 25 is silent and 26 speaks."""
-    hits = _only(_advisories(summary=_words(count)), "over 25 words")
-    assert bool(hits) is expect
-    if expect:
-        assert hits == [
-            '1 sentence runs over 25 words (longest 26, in Summary: "The tenant '
-            'reads reads reads reads reads reads…"). Long sentences are the most '
-            "common reason a triager re-reads a submission — consider splitting "
-            "them."
-        ]
-
-
-@pytest.mark.parametrize("count, expect", [(21, True), (20, False)])
-def test_steps_carry_the_tighter_sentence_budget(count, expect):
-    """Steps cap at 20 words, and a Steps sentence is reported ONLY there.
-
-    Partitioning by section rather than layering the two caps is what keeps a
-    23-word step from being named twice, in two advisories, as two problems.
-    """
-    advisories = _advisories(steps_to_reproduce=f"1. {_words(count)}")
-    steps_hits = _only(advisories, "over 20 words in Steps to Reproduce")
-    assert bool(steps_hits) is expect
-    assert _only(advisories, "over 25 words") == []
-
-
-def test_steps_length_advisory_also_carries_the_quote():
-    """The Steps-to-Reproduce advisory names its sentence the same way the
-    general one does — the two message shapes are kept consistent."""
-    advisories = _advisories(steps_to_reproduce=f"1. {_words(21)}")
-    hits = _only(advisories, "over 20 words in Steps to Reproduce")
-    assert hits == [
-        "1 sentence runs over 20 words in Steps to Reproduce (longest 21: "
-        '"The tenant reads reads reads reads reads reads…"). A step that has '
-        "to be re-read is a step a triager can execute wrong — consider "
-        "splitting them."
-    ]
-
-
-def test_length_advisory_quotes_the_longest_offender():
-    """Two sentences trip the same advisory; the quote names the one already
-    picked out by "longest N" — not merely the first or the last one found."""
-    shorter = _tagged_words("Alpha", 26)
-    longer = _tagged_words("Bravo", 30)
-    hits = _only(_advisories(summary=f"{shorter} {longer}"), "over 25 words")
-    assert hits == [
-        "2 sentences run over 25 words (longest 30, in Summary: "
-        '"Bravo tenant reads reads reads reads reads reads…"). Long sentences '
-        "are the most common reason a triager re-reads a submission — consider "
-        "splitting them."
-    ]
-    assert "Alpha" not in hits[0]
-
-
-def test_length_advisory_quote_keeps_exactly_the_word_budget():
-    """The quote is capped to exactly 8 words, not 7 or 9 — the same off-by-one
-    a hand-rolled slice is easiest to get wrong."""
-    sentence = " ".join(f"word{i:02d}" for i in range(1, 27)) + "."
-    hits = _only(_advisories(summary=sentence), "over 25 words")
-    assert hits
-    quoted = hits[0].split('"')[1]
-    assert quoted == "word01 word02 word03 word04 word05 word06 word07 word08…"
-
-
-def test_length_advisory_quote_respects_the_character_ceiling():
-    """A quote made of few but very long words can blow the character budget
-    while still inside the 8-word cap — the same shape an inline code span
-    produces, since `_word_count` treats it as one word. The character ceiling
-    is the backstop."""
-    long_words = " ".join(f"identifier-block-{i:03d}-extra-long" for i in range(8))
-    filler = " ".join(["padding"] * 20)
-    sentence = f"{long_words} {filler} tail."
-    hits = _only(_advisories(summary=sentence), "over 25 words")
-    assert hits
-    quoted = hits[0].split('"')[1]
-    assert quoted.endswith("…")
-    assert len(quoted) <= 71  # 70-char budget plus the ellipsis character
-
-
-def test_length_advisory_quote_neutralizes_backticks_and_pipes():
-    """A quoted fragment must never smuggle a stray backtick, pipe, or newline
-    into the OPERATOR DETAILS bullet it renders inside — any of the three could
-    corrupt the block (an unterminated fence, a stray table row, or a line that
-    escapes the `- ` list item entirely)."""
-    sentence = (
-        "Run `curl -s https://app.example.com/a|b -o out.json` and then read the "
-        "response body twice before moving on to the next step in the flow "
-        + " ".join(["more"] * 8)
-        + "."
-    )
-    hits = _only(_advisories(summary=sentence), "over 25 words")
-    assert hits
-    assert "`" not in hits[0]
-    assert "|" not in hits[0]
-    assert "\n" not in hits[0]
-    assert "'curl" in hits[0]  # the backtick is swapped, not merely dropped
-
-
-@pytest.mark.parametrize(
-    "kind, section",
-    [
-        # A fenced curl invocation: ~30 whitespace-delimited tokens.
-        (
-            "fence",
-            "```\ncurl -s -X POST https://app.example.com/api/v2/invoices/41198/pdf "
-            "-H 'Authorization: Bearer TOKEN' -H 'Accept: application/pdf' "
-            "--resolve app.example.com:443:203.0.113.10 -o other-invoice.pdf "
-            "-w '%{http_code}' --max-time 30 --retry 2\n```",
-        ),
-        # A markdown table: the classic "176-word sentence" false positive.
-        (
-            "table",
-            "| endpoint | tenant | status | body |\n|---|---|---|---|\n"
-            "| the invoice pdf download endpoint under api v2 | tenant a which is "
-            "the attacker account here | two hundred which is the success code | "
-            "another company entirely with its own billing address and line items |",
-        ),
-        # An unfenced HTTP request/response pair, headers included.
-        (
-            "http",
-            "POST /api/v2/invoices/41198/pdf HTTP/1.1\n"
-            "Host: billing.example.com\n"
-            "Authorization: Bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9\n"
-            "Accept: application/pdf, application/json, text/plain, text/html\n"
-            "User-Agent: an extremely long user agent string with many many words\n"
-            "\n"
-            "HTTP/1.1 200 OK\n"
-            "Content-Type: application/pdf\n"
-            "Content-Disposition: attachment; filename=invoice-41198-acme.pdf\n",
-        ),
-    ],
-)
-def test_structural_content_is_never_measured_as_prose(kind, section):
-    """Code fences, tables, and HTTP blocks are removed BEFORE segmentation.
-
-    A splitter that reads any of them as prose reports a sentence nobody wrote —
-    the failure mode that makes this whole class of linter useless. Each fixture
-    here is far over every word budget as raw tokens and must still be silent.
-    """
-    assert _advisories(evidence=section) == [], kind
-    # ...and the same content inside Steps, whose budget is tighter still.
-    assert _advisories(steps_to_reproduce=f"1. Run it.\n{section}") == [], kind
-
-
-def test_prose_around_a_code_block_is_not_joined_across_it():
-    """A dropped block ends the paragraph, so the text either side stays separate.
-
-    Without that, the sentence before a fence and the sentence after it merge into
-    one run and are measured as a single over-long sentence.
-    """
-    body = _body(
-        evidence=f"{_words(15)}\n```\ncurl -s https://app.example.com/x\n```\n{_words(15)}"
-    )
-    assert export_submission.prose_advisories(body) == []
-
-
-def test_exploit_flow_ordered_list_is_not_counted_as_summary_prose():
-    """The WS5 Exploit flow lives INSIDE the authored `summary` string.
-
-    It is a convention (a bold marker plus an ordered list), not a schema key, so a
-    Summary sentence counter that reads its items as prose fires on every finding
-    that has a flow. That is a guaranteed false positive, and the control below
-    proves the exclusion is doing the work rather than the fixture being short.
-    """
-    flow = "\n".join(
-        [
-            "The admin points the webhook at the metadata service.",
-            "",
-            "**Exploit flow**",
-            "",
-            "1. The admin saves a webhook whose URL is the metadata endpoint.",
-            "2. The app fetches that URL server-side.",
-            "3. The response echoes the metadata body back.",
-            "4. That body carries live IAM credentials.",
-            "5. The attacker replays them against the AWS API.",
-        ]
-    )
-    assert _only(_advisories(summary=flow), "Summary is") == []
-
-    # Control: the same six sentences as plain prose DO exceed the 4-sentence budget.
-    prose = flow.replace("**Exploit flow**\n\n", "")
-    prose = "\n".join(line.split(". ", 1)[-1] for line in prose.split("\n"))
-    assert _only(_advisories(summary=prose), "Summary is 6 sentences (budget 4)")
-
-
-def test_exploit_flow_items_are_still_length_checked():
-    """The flow is excluded from the COUNT, not from the document.
-
-    A flow step is prose and a rambling one is worth splitting, so the sentence
-    length budget still reaches it. Scoping the exclusion any wider would create a
-    place to hide unbounded prose inside the Summary.
-    """
-    flow = f"Short lead.\n\n**Exploit flow**\n\n1. {_words(30)}"
-    assert _only(_advisories(summary=flow), "over 25 words")
 
 
 @pytest.mark.parametrize("count, expect", [(11, True), (10, False)])
@@ -2454,14 +2371,14 @@ def test_step_count_reads_the_render_not_the_authored_list_length():
     """
     one_string = "\n".join(f"{i}. Do the thing." for i in range(1, 15))
     assert _only(
-        export_submission.prose_advisories(
+        export_submission.shape_advisories(
             _body(steps_to_reproduce=one_string), steps=[one_string]
         ),
         "has 14 steps",
     )
     items = [f"Do the thing {i}." for i in range(14)]
     assert _only(
-        export_submission.prose_advisories(
+        export_submission.shape_advisories(
             _body(steps_to_reproduce="\n\n".join(items)), steps=items
         ),
         "has 14 steps",
@@ -2474,137 +2391,6 @@ def test_step_headings_win_over_nested_enumerators():
         f"#### Step {i} — [attacker] act\n\n1. first\n2. second" for i in range(1, 5)
     )
     assert _only(_advisories(steps_to_reproduce=steps), "steps_to_reproduce has") == []
-
-
-@pytest.mark.parametrize(
-    "key, heading, budget",
-    [("summary", "Summary", 4), ("attack_scenario", "Attack Scenario", 3), ("impact", "Impact", 2)],
-)
-def test_section_sentence_budgets(key, heading, budget):
-    at_budget = " ".join(f"Sentence {i} sits here." for i in range(budget))
-    over = " ".join(f"Sentence {i} sits here." for i in range(budget + 1))
-    assert _only(_advisories(**{key: at_budget}), f"{heading} is") == []
-    hits = _only(_advisories(**{key: over}), f"{heading} is")
-    assert hits and f"{heading} is {budget + 1} sentences (budget {budget})" in hits[0]
-    assert "ceiling, not a target" in hits[0]
-
-
-@pytest.mark.parametrize(
-    "remediation, expect",
-    [
-        ("- one\n- two\n- three\n- four", True),
-        ("- one\n- two\n- three", False),
-        ("1. one\n2. two\n3. three\n4. four", True),
-        # Prose remediation is measured in sentences: two fixes, one line.
-        ("Parameterize the query. Add a WAF rule as defense-in-depth.", False),
-    ],
-)
-def test_remediation_is_budgeted_in_items(remediation, expect):
-    """An item is a list entry when Remediation is a list, a sentence when it is prose."""
-    hits = _only(_advisories(remediation=remediation), "Remediation is")
-    assert bool(hits) is expect
-
-
-# A submission's sign-off sits after the last `###` heading, so with no heading to
-# close that section it lands INSIDE it. Recognised by SHAPE — a bold label with a
-# bare value — never by the word "Researcher", since a submission may sign off with
-# a role, a handle, or a contact address.
-_SIGN_OFFS = [
-    "**Researcher:** Priya Natarajan — priya.natarajan@research.example",
-    "**Reported by:** @a-handle",
-    "**Contact:** security@example.test",
-    "**Disclosure:**",
-]
-
-
-@pytest.mark.parametrize("sign_off", _SIGN_OFFS)
-def test_trailing_sign_off_is_not_counted_as_last_section_content(sign_off):
-    """A three-fix Remediation under a sign-off is a three-fix Remediation.
-
-    Counting the footer as the third item is a PHANTOM item: it is not in the
-    Structure template and nothing in the schema or the renderer emits it. The cost
-    is not a stray number — a hand-corrected canonical example was compressed to
-    two fixes to leave room for it, so a tool false positive rewrote a teaching
-    artifact.
-    """
-    remediation = (
-        "Parameterize the login query. Add a WAF rule as defense-in-depth. "
-        "Rotate the credentials the injection exposed."
-    )
-    body = _body(remediation=f"{remediation}\n\n{sign_off}")
-    assert _only(export_submission.prose_advisories(body), "Remediation is") == []
-
-
-def test_genuine_over_budget_remediation_still_fires_under_a_sign_off():
-    """Trimming the footer must not blind the check to the items above it."""
-    remediation = "Fix one. Fix two. Fix three. Fix four."
-    body = _body(remediation=f"{remediation}\n\n{_SIGN_OFFS[0]}")
-    assert _only(
-        export_submission.prose_advisories(body), "Remediation is 4 items (budget 3)"
-    )
-
-
-def test_a_bold_label_carrying_a_sentence_is_content_not_a_sign_off():
-    """The shape test is "bare value", not "bold label".
-
-    A labelled line with real sentence punctuation is remediation prose whatever
-    labels it, so it still counts. Otherwise `**Also:** …` would be a place to park
-    unbounded content outside every budget.
-    """
-    body = _body(
-        remediation="Fix one. Fix two. Fix three.\n\n**Also:** rotate the exposed credentials."
-    )
-    assert _only(
-        export_submission.prose_advisories(body), "Remediation is 4 items (budget 3)"
-    )
-
-
-def test_a_section_made_entirely_of_labelled_lines_is_kept_whole():
-    """Trimming must never leave the last section with nothing in it.
-
-    `**Primary fix:** …` / `**Defense in depth:** …` is a plausible Remediation
-    shape, and every one of its lines matches the footer shape. Walking the whole
-    section away would silence every advisory about it — over-trimming that hides a
-    real defect, which is worse than the phantom item the trim exists to remove.
-    """
-    remediation = "\n".join(
-        [
-            "**Primary fix:** parameterize the login query with bound placeholders",
-            "**Defense in depth:** add a WAF rule on the login endpoint",
-            "**Also:** rotate the credentials the injection exposed",
-            "**And:** audit the other three call sites",
-        ]
-    )
-    advisories = export_submission.prose_advisories(_body(remediation=remediation))
-    assert _only(advisories, "Remediation is 4 items (budget 3)")
-    # ...and each labelled line is its own item, so the four are never joined into
-    # one 34-word "sentence" nobody wrote.
-    assert _only(advisories, "over 25 words") == []
-
-
-def test_sign_off_trimming_is_scoped_to_the_document_tail():
-    """Only the LAST section is closed by end-of-body; every other one has a heading.
-
-    A trailing bold-labelled line inside Summary is closed by `### Steps to
-    Reproduce` and is ordinary content, so it is still counted. Trimming every
-    section's tail would delete real prose to fix a defect that exists in one place.
-    """
-    body = _body(
-        summary="One here. Two here. Three here. Four here.\n\n**Note:** see the appendix",
-        remediation="Fix it.",
-    )
-    assert _only(
-        export_submission.prose_advisories(body), "Summary is 5 sentences (budget 4)"
-    )
-
-
-def test_sign_off_trimming_stops_at_a_closing_code_fence():
-    """A Remediation that ends in a fenced patch keeps its fence and its prose."""
-    body = _body(
-        remediation="Apply the escaping helper at the interpolation site:\n"
-        "```python\nrequest = escape(name)\n```"
-    )
-    assert export_submission.prose_advisories(body) == []
 
 
 @pytest.mark.parametrize("count, expect", [(16, True), (15, False)])
@@ -2635,7 +2421,7 @@ def test_evidence_block_length_names_the_block_that_ran_long():
     short = "\n".join(f"line {i}" for i in range(4))
     long = "\n".join(f"line {i}" for i in range(41))
     body = _body(evidence=f"```\n{short}\n```\n\n```\n{long}\n```")
-    assert _only(export_submission.prose_advisories(body), "Evidence block") == [
+    assert _only(export_submission.shape_advisories(body), "Evidence block") == [
         "Evidence block 2 is 41 lines of content (budget 15). Consider truncating "
         "to the lines carrying the proof marker."
     ]
@@ -2645,8 +2431,8 @@ def test_operator_details_content_is_never_measured():
     """Everything below the SECOND `---` is reference the operator never pastes.
 
     It legitimately carries whole PoC requests, response dumps, command
-    transcripts, and investigation notes — measuring any of it as submission prose
-    would fire on every render. The window is `pasteable_body`, the same one the
+    transcripts, and investigation notes — measuring any of it as the submission
+    body would fire on every render. The window is `pasteable_body`, the same one the
     hygiene gate scans.
     """
     reference = "\n".join(
@@ -2663,13 +2449,13 @@ def test_operator_details_content_is_never_measured():
             " ".join(_words(8) for _ in range(9)),
         ]
     )
-    assert export_submission.prose_advisories(_body(operator_details=reference)) == []
+    assert export_submission.shape_advisories(_body(operator_details=reference)) == []
 
 
-# -- prose advisories: wiring through the command ------------------------------
+# -- shape advisories: wiring through the command ------------------------------
 
 def _bloated_details(**overrides) -> dict:
-    """A complete, gate-passing finding that trips EVERY prose advisory at once."""
+    """A complete, gate-passing finding that trips EVERY shape advisory at once."""
     summary = " ".join(
         [
             "An authenticated member reads another member's order by changing the "
@@ -2707,16 +2493,16 @@ def _bloated_finding() -> dict:
     return finding
 
 
-def test_final_export_publishes_with_every_prose_advisory_firing(
+def test_final_export_publishes_with_every_shape_advisory_firing(
     tmp_path, monkeypatch, capsys
 ):
     """THE regression: nothing added here changes the blocking set.
 
-    A finished, verified finding whose prose runs past every ceiling is still a
+    A finished, verified finding that runs past every ceiling is still a
     publishable finding. If any of these ever failed a final export closed, the
-    tool would be overruling the author on style at the last step before filing —
-    and the ceilings would stop being falsifiable, because the report-writer could
-    no longer decide that this finding needs the extra sentence.
+    tool would be overruling the author at the last step before filing — and the
+    ceilings would stop being falsifiable, because the report-writer could no
+    longer decide that this finding needs the extra step.
     """
     fake = _FakeClient(_bloated_finding())
     # final mode, no --draft: must NOT raise
@@ -2729,13 +2515,7 @@ def test_final_export_publishes_with_every_prose_advisory_firing(
     # Every new advisory family present...
     advisories = context["advisories"]
     for needle in (
-        "over 25 words",
-        "over 20 words in Steps to Reproduce",
         "steps_to_reproduce has 12 steps",
-        "Summary is 7 sentences (budget 4)",
-        "Attack Scenario is 5 sentences (budget 3)",
-        "Impact is 4 sentences (budget 2)",
-        "Remediation is 4 items (budget 3)",
         "Evidence block 1 is 20 lines of content (budget 15)",
     ):
         assert _only(advisories, needle), f"missing advisory: {needle}"
@@ -2745,7 +2525,7 @@ def test_final_export_publishes_with_every_prose_advisory_firing(
     assert "WARN export submission:" not in captured.err
 
 
-def test_prose_advisories_surface_in_the_operator_details_block(
+def test_shape_advisories_surface_in_the_operator_details_block(
     tmp_path, monkeypatch, capsys
 ):
     """Surfaced where the report-writer is already reading, under the never-paste line."""
@@ -2756,20 +2536,20 @@ def test_prose_advisories_surface_in_the_operator_details_block(
     body = _submission_path(tmp_path).read_text()
     reference = body[body.index("## OPERATOR DETAILS"):]
     assert "**Advisories** (non-blocking — your call):" in reference
-    assert "Summary is 7 sentences (budget 4)" in reference
+    assert "steps_to_reproduce has 12 steps" in reference
     # The advisory text itself is never re-measured: it is woven in AFTER the scan
-    # render, so the command cannot advise on its own prose.
-    assert sum(a.count("Summary is 7 sentences") for a in _context(tmp_path)["advisories"]) == 1
+    # render, so the command cannot advise on its own text.
+    assert sum(a.count("steps_to_reproduce has 12") for a in _context(tmp_path)["advisories"]) == 1
 
 
-def test_prose_advisories_stay_silent_on_a_tight_finding(tmp_path, monkeypatch, capsys):
-    """The default fixture is inside every ceiling, so it earns no prose advisory."""
+def test_shape_advisories_stay_silent_on_a_tight_finding(tmp_path, monkeypatch, capsys):
+    """The default fixture is inside every ceiling, so it earns no shape advisory."""
     fake = _FakeClient(_finding(details=_complete_details()))
     _export(monkeypatch, tmp_path, fake, "submission", "VA-047", "--platform", "bugcrowd")
     capsys.readouterr()
 
     advisories = _context(tmp_path)["advisories"]
-    for needle in ("over 25 words", "over 20 words", "steps_to_reproduce has", "budget"):
+    for needle in ("steps_to_reproduce has", "Evidence block"):
         assert _only(advisories, needle) == [], needle
 
 
@@ -2828,16 +2608,43 @@ def test_missing_rehearsal_advises_with_the_action_that_clears_it(
     assert _rehearsal_hits(_context(tmp_path)) == [
         "no repro_rehearsal decision is recorded for this finding — a rehearsal is "
         "what catches a step that removes state a later step needs, which reading "
-        "the steps cannot. Run details.steps_to_reproduce from a cold start and "
-        "stamp the outcome with `vigil assess agent decision --kind repro_rehearsal "
-        '--payload-json \'{"finding_slug":"<slug>","verdict":"followed",'
+        "the steps cannot. Have an independent verifier dispatch run "
+        "details.steps_to_reproduce from a cold start and record the outcome with "
+        "`vigil assess agent decision --kind repro_rehearsal --payload-json "
+        '\'{"finding_slug":"<slug>","verdict":"followed","proof_mode":"<live|source|fuzz>",'
+        '"verifier_dispatch_agent_id":"<verifier-agent-id>","observed_outcome":"<observed result>",'
         "\"runs_checked\":[<run_id>, ...]}'` before publishing."
     ]
     assert "ADVISORY export submission:" in captured.err
 
 
+def test_missing_rehearsal_command_names_every_field_the_backend_requires():
+    """The advised command is the recorder's contract: a payload missing a field
+    the backend requires is refused, so the advice would never clear itself."""
+    advisory = export_submission.repro_rehearsal_advisories([], "VA-047")[0]
+    template = advisory.split("--payload-json '", 1)[1].split("'`", 1)[0]
+    keys = set(re.findall(r'"([a-z_]+)":', template))
+    assert {
+        "finding_slug", "verdict", "proof_mode", "verifier_dispatch_agent_id",
+        "observed_outcome", "runs_checked",
+    } <= keys
+
+
+def test_recorded_equivalent_rehearsal_is_silent(tmp_path, monkeypatch, capsys):
+    """`equivalent` carries a prior followed check across a step edit; final
+    export accepts it, so the advisory must not report it as a failure."""
+    fake = _FakeClient(
+        _finding(details=_complete_details()),
+        decisions=[_decision(verdict="equivalent")],
+    )
+    _run_final(tmp_path, monkeypatch, fake)
+    capsys.readouterr()
+
+    assert _rehearsal_hits(_context(tmp_path)) == []
+
+
 def test_missing_rehearsal_never_blocks_a_final_export(tmp_path, monkeypatch, capsys):
-    """THE regression, mirroring the prose-advisory one: the blocking set is unchanged.
+    """THE regression, mirroring the shape-advisory one: the blocking set is unchanged.
 
     A finished, verified finding nobody rehearsed is still a publishable finding —
     the rehearsal is process state, not a fact about the document, and gating on it
@@ -2959,7 +2766,7 @@ def test_failed_rehearsal_quotes_the_recorded_verdict(tmp_path, monkeypatch, cap
 
     hits = _rehearsal_hits(_context(tmp_path))
     assert len(hits) == 1
-    assert "records verdict 'failed', not 'followed'" in hits[0]
+    assert "records verdict 'failed', not 'followed' or 'equivalent'" in hits[0]
     assert "back to the specialist that recorded it" in hits[0]
 
 
@@ -2973,7 +2780,7 @@ def test_unrecognised_verdict_is_named_not_translated(tmp_path, monkeypatch, cap
 
     hits = _rehearsal_hits(_context(tmp_path))
     assert len(hits) == 1
-    assert "records verdict 'pass', not 'followed'" in hits[0]
+    assert "records verdict 'pass', not 'followed' or 'equivalent'" in hits[0]
     # It does NOT claim the rehearsal failed — only that nothing recorded `followed`.
     assert "failed" not in hits[0]
 
@@ -3182,15 +2989,18 @@ def test_authored_body_refuses_escape_and_symlink(tmp_path, monkeypatch, relativ
         export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--body", relative, "--prepare"], str(tmp_path)))
 
 
-def test_authored_capture_cannot_be_silently_replaced_by_house_render(tmp_path, monkeypatch):
+def test_authored_capture_is_not_replaced_by_house_render(tmp_path, monkeypatch, capsys):
+    """A re-render without --body keeps the captured outgoing body, not the house render."""
     fake = _FakeClient(_finding(details=_complete_details()))
     _install(monkeypatch, tmp_path, fake)
     outgoing = tmp_path / "advisory.md"
     outgoing.write_text("Short recipient body.\n")
     export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--body", "advisory.md", "--prepare"], str(tmp_path)))
-    with pytest.raises(AssessError, match="repeat --body"):
-        export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--overwrite", "--prepare"], str(tmp_path)))
+    export_submission.run(_parse(["submission", "VA-047", "--platform", "direct", "--overwrite", "--prepare"], str(tmp_path)))
     assert (_submission_path(tmp_path).parent / "submission-body.md").read_bytes() == outgoing.read_bytes()
+    context = json.loads((_submission_path(tmp_path).parent / "submission-context.json").read_text())
+    assert context["body_source"]["path"] == "advisory.md"
+    assert "reusing the captured --body advisory.md" in capsys.readouterr().err
 
 
 def test_capture_rejects_oversized_final_workspace_before_writing(tmp_path, monkeypatch):

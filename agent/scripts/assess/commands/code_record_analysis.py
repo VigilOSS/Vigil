@@ -47,13 +47,40 @@ def _validate_cwe_coverage(item_index: int, result: dict) -> list[str]:
         else:
             seen_families.add(family)
         if "effort" in entry:
+            effort = entry.get("effort", 0)
             try:
-                float(entry.get("effort", 0))
+                numeric = float(effort)
             except (TypeError, ValueError):
                 problems.append(
                     f"Item {item_index} cwe_coverage entry {idx} has a non-numeric effort"
                 )
+            else:
+                if isinstance(effort, (bool, str)):
+                    problems.append(
+                        f"Item {item_index} cwe_coverage entry {idx} effort must be a JSON "
+                        f"number, not {effort!r}"
+                    )
+                elif not 0 <= numeric <= 100:
+                    problems.append(
+                        f"Item {item_index} cwe_coverage entry {idx} effort {effort!r} is "
+                        "outside 0-100"
+                    )
     return problems
+
+
+_CONFIDENCE_WORDS = ("high", "medium", "low")
+
+
+def _validate_confidence(item_index: int, result: dict) -> list[str]:
+    """Confidence is one of high/medium/low in any case; the backend stores it lowercase."""
+    if "confidence" not in result:
+        return []
+    value = result["confidence"]
+    if isinstance(value, str) and value.strip().lower() in _CONFIDENCE_WORDS:
+        return []
+    return [
+        f"Item {item_index} confidence {value!r} must be one of: {', '.join(_CONFIDENCE_WORDS)}"
+    ]
 
 
 # Keys a hunter plausibly writes in place of a canonical trigger key, mirroring
@@ -368,6 +395,7 @@ def run(args) -> None:
             except (TypeError, ValueError):
                 problems.append(f"Item {i} file_id must be an integer when supplied")
         problems.extend(_validate_cwe_coverage(i, result))
+        problems.extend(_validate_confidence(i, result))
         problems.extend(_validate_cross_file_triggers(i, result))
         problems.extend(_validate_source_receipt(i, result))
         problems.extend(_validate_supersedes(i, result))
@@ -462,6 +490,12 @@ def run(args) -> None:
                 f"({callable_count} callables, {span_count} spans; "
                 f"binding={resp['receipt_binding_status']}) → {disp}"
             )
+            recorded_gaps = resp.get("unreviewed_families_recorded")
+            if isinstance(recorded_gaps, dict):
+                print(f"  {recorded_gaps.get('detail', '')}")
+            depth_floor = resp.get("depth_floor_triggers")
+            if isinstance(depth_floor, dict):
+                print(f"  {depth_floor.get('detail', '')}")
 
     response_snapshot = write_json_snapshot(
         cfg.engagement_dir,

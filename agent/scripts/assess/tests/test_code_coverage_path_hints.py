@@ -51,3 +51,18 @@ def test_files_without_hints_print_no_hint_section(capsys) -> None:
     _print_cwe_matrix([_file(path_suggested_families=[])])
 
     assert "business-logic" not in capsys.readouterr().out
+
+
+def test_unread_code_suggestions_print_beside_the_matrix_and_never_as_owed_columns(capsys) -> None:
+    """A streaming-fallback markup file's code families point, like path hints."""
+    _print_cwe_matrix([_file(
+        file_path="templates/landing.html",
+        path_suggested_families=[],
+        unread_code_suggested_families=["ssrf", "file-upload"],
+    )])
+
+    out = capsys.readouterr().out
+    header = next(line for line in out.splitlines() if line.startswith("File"))
+    assert "ssrf" not in header
+    (hint,) = [line for line in out.splitlines() if "ssrf" in line]
+    assert "landing.html" in hint and "file-upload" in hint

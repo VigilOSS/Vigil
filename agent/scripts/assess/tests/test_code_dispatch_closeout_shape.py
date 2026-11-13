@@ -6,8 +6,8 @@ Three costs a real hunt wave paid:
   omitting it on `disposition=clean` spent a coverage-file parse and a POST
   before the backend said `notes are required when disposition='clean'`. The
   same was true of `--skip-reason` on `disposition=skipped`.
-* `progress` printed only the families still owed relative to recorded
-  receipts, never the full required set `done` enforces — so the authoritative
+* `progress` printed only the families not yet recorded relative to recorded
+  receipts, never the full applicable set `done` measures — so the authoritative
   list was reachable only through `--json`.
 * the `list` table dropped `lease_token`, the one row value a lane needs to
   resume work after a context boundary, with nothing naming where to read it.
@@ -153,20 +153,22 @@ def test_a_clean_close_with_notes_still_reaches_the_backend(monkeypatch, tmp_pat
 def test_a_dry_run_renders_the_payload_and_names_what_would_be_refused(
     monkeypatch, tmp_path, capsys
 ):
-    """A dry run reports; it does not refuse.
+    """A dry run shows the exact payload beside the defect, then exits as the close would.
 
-    `--dry-run` exists to show the operator the exact payload. Exiting early
-    would show less than rendering it beside the defect, so the shape problems
-    become part of the report and the run still succeeds.
+    The shape problems are decidable without the backend, so no request is
+    sent; the exit status says the real close would be refused.
     """
     monkeypatch.setattr(code_dispatch, "AssessmentClient", _ForbiddenClient)
     coverage = tmp_path / "coverage.json"
     coverage.write_text(json.dumps([{"family": "ssrf", "effort": 80}]), encoding="utf-8")
 
-    code_dispatch._done(
-        _config(tmp_path), "42", "HUNT-1", "lease-42", "clean",
-        str(coverage), "", dry_run=True,
-    )
+    with pytest.raises(SystemExit) as raised:
+        code_dispatch._done(
+            _config(tmp_path), "42", "HUNT-1", "lease-42", "clean",
+            str(coverage), "", dry_run=True,
+        )
+
+    assert raised.value.code == 1
 
     out = capsys.readouterr().out
     assert "Dry run only" in out
@@ -197,7 +199,7 @@ _PROGRESS = {
     "missing_cwe_families": ["race-condition", "type-confusion"],
     "receipts": [],
     "receipt_count": 1,
-    "coverage_integrity": {"plausible": True, "authoritative_blockers": [], "advisories": []},
+    "coverage_integrity": {"receipts_consistent": True, "authoritative_blockers": [], "advisories": []},
 }
 
 
@@ -215,7 +217,20 @@ def test_progress_prints_the_full_required_family_set(monkeypatch, tmp_path, cap
     assert "business-logic" in out
     assert "race-condition" in out
     # The remainder stays, because it is the shorter list to act on.
-    assert "still owed" in out
+    assert "not yet recorded" in out
+
+
+def test_progress_prints_unread_code_suggestions_as_advisory(monkeypatch, tmp_path, capsys):
+    class _Client(StubClient):
+        def get(self, _endpoint: str):
+            return {**_PROGRESS, "unread_code_suggested_vuln_classes": ["ssrf", "file-upload"]}
+
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", _Client)
+    code_dispatch._progress(_config(tmp_path), "41", as_json=False)
+
+    (line,) = [line for line in capsys.readouterr().out.splitlines() if "ssrf" in line]
+    assert "file-upload" in line
+    assert "not yet recorded" not in line
 
 
 # ─────────────────────────────────────────────────────────────────────────────

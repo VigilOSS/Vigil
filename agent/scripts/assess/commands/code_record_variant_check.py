@@ -6,7 +6,11 @@ import sys
 from pathlib import Path
 from typing import NoReturn
 
-from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.client import (
+    AssessmentClient,
+    require_recorded_dispatch,
+    require_write_result,
+)
 from assess.lib.code_record_input import sha256
 from assess.lib.code_snapshot import MAX_JSON_ARTIFACT_BYTES, read_bounded_regular_file
 from assess.lib.config import load_config
@@ -41,6 +45,14 @@ def register(subparsers) -> None:
     p.add_argument(
         "receipt_json",
         help="Path to one receipt JSON object, or '-' to read it from stdin",
+    )
+    p.add_argument(
+        "--agent-id",
+        dest="agent_id",
+        default=None,
+        help="Your dispatch agent_id from Runtime Identity. The CLI resolves that dispatch's "
+             "backend row id and sets the receipt's dispatch_id from it, so the receipt JSON "
+             "may omit dispatch_id; one it does carry must name the same dispatch.",
     )
     p.set_defaults(func=run)
 
@@ -120,17 +132,25 @@ def _validate_bounded_string(
         _fail(f"{field} must not have leading or trailing whitespace")
 
 
-def _validate_payload(payload: dict[str, object]) -> None:
+def _validate_payload(payload: dict[str, object], *, dispatch_from_agent_id: bool = False) -> None:
     keys = set(payload)
-    missing = _REQUIRED_FIELDS - keys
+    missing = set(_REQUIRED_FIELDS - keys)
+    if dispatch_from_agent_id:
+        missing.discard("dispatch_id")
     if missing:
-        _fail(f"missing required fields: {', '.join(sorted(missing))}")
+        hint = (
+            "; pass --agent-id <your agent_id> to bind the receipt to your dispatch"
+            if "dispatch_id" in missing
+            else ""
+        )
+        _fail(f"missing required fields: {', '.join(sorted(missing))}{hint}")
     unknown = keys - _REQUIRED_FIELDS
     if unknown:
         _fail(f"unknown fields: {', '.join(sorted(unknown))}")
 
     for field in ("dispatch_id", "file_id", "repo_id"):
-        _validate_positive_integer(payload, field)
+        if field in payload:
+            _validate_positive_integer(payload, field)
     _validate_positive_integer(payload, "repo_generation")
 
     for field in ("source_manifest_digest", "file_sha256"):
@@ -164,12 +184,38 @@ def _validate_payload(payload: dict[str, object]) -> None:
     _validate_bounded_string(payload, "rationale", maximum=20000)
 
 
+def _bind_dispatch(client, payload: dict[str, object], agent_id: str) -> None:
+    """Set ``dispatch_id`` to the row id of the dispatch ``agent_id`` names.
+
+    The packet is captured before the backend assigns the dispatch row id, so a
+    specialist cannot read its own id from the packet; the agent_id in its
+    Runtime Identity names the same row.
+    """
+    row = require_recorded_dispatch(
+        client, agent_id, operation="code-record variant-check",
+        hint="pass the agent_id from your packet's Runtime Identity",
+    )
+    dispatch_id = row.get("id")
+    if isinstance(dispatch_id, bool) or not isinstance(dispatch_id, int) or dispatch_id < 1:
+        _fail(f"dispatch {agent_id!r} has no numeric backend id")
+    supplied = payload.get("dispatch_id")
+    if supplied is not None and supplied != dispatch_id:
+        _fail(
+            f"receipt dispatch_id {supplied} does not match dispatch {agent_id!r} "
+            f"(backend id {dispatch_id}); omit dispatch_id and let --agent-id supply it"
+        )
+    payload["dispatch_id"] = dispatch_id
+
+
 def run(args) -> None:
+    agent_id = str(getattr(args, "agent_id", None) or "").strip()
     payload = _parse_receipt(_read_receipt(args.receipt_json))
-    _validate_payload(payload)
+    _validate_payload(payload, dispatch_from_agent_id=bool(agent_id))
 
     cfg = load_config(args.engagement_dir)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        if agent_id:
+            _bind_dispatch(client, payload, agent_id)
         result = client.post("code/variant-checks", payload)
     if not isinstance(result, dict):
         _fail("backend response must be a JSON object")

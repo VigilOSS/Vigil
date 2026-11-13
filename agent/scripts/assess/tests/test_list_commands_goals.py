@@ -104,13 +104,13 @@ def test_representative_command_goal_assignments(capsys):
 
 
 def test_render_contract_surfaces_goals_for_tagged_command():
-    rendered = contracts.render_contract("finding record")
+    rendered = contracts.render_contract_notes("finding record")
     assert "Goals: finding-lifecycle" in rendered
 
 
 def test_render_contract_omits_goals_line_for_untagged_command():
     # resume-brief carries no goals, so no Goals: line should be emitted.
-    rendered = contracts.render_contract("resume-brief")
+    rendered = contracts.render_contract_notes("resume-brief")
     assert "Goals:" not in rendered
 
 

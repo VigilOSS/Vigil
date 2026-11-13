@@ -35,6 +35,7 @@ from assess.lib.treesitter_catalogues import (
     _PHP_FILE_INCLUSION_VULN_CLASSES,
     _PHP_SERVER_ARGV,
     _SINK_DEFINITIONS,
+    python_imports_flask_only,
 )
 from assess.lib.treesitter_common import (
     _empty_func,
@@ -2877,6 +2878,7 @@ def _detect_entry_points(
                 js_server_calls.append((node, handlers))
     go_http_aliases = _go_http_aliases(source_lines) if language == "go" else set()
     tornado_handlers = _tornado_handler_classes(classes) if language == "python" else set()
+    flask_only = language == "python" and python_imports_flask_only(source_lines)
     php_controllers = _php_controller_classes(classes, file_path) if language == "php" else set()
     # Nested callables share their lines -- a minified bundle is one line every
     # callable spans -- so each pattern reads each line once.
@@ -2943,7 +2945,10 @@ def _detect_entry_points(
         for ann_def in annotation_defs:
             for ann in func.get("annotations", []):
                 if re.search(ann_def["pattern"], ann):
-                    _record_entry(entry_points, func, ann_def["kind"], ann.split("(")[0])
+                    kind = ann_def["kind"]
+                    if flask_only and kind == "fastapi_route":
+                        kind = "flask_route"
+                    _record_entry(entry_points, func, kind, ann.split("(")[0])
                     matched = True
                     break
             if matched:
@@ -5697,7 +5702,8 @@ def index_file(
             routed = {
                 (entry["name"], entry["line"])
                 for entry in entry_points
-                if entry["kind"] in {"fastapi_route", "fastapi_router"}
+                # A Flask view's parameters are its URL path variables.
+                if entry["kind"] in {"fastapi_route", "fastapi_router", "flask_route"}
             }
             for func in functions:
                 if (func["name"], func["line_start"]) not in routed:

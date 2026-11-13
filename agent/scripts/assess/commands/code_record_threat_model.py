@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 from assess.lib.client import AssessmentClient, require_write_result
+from assess.lib.code_record_input import unwrap_request_envelope
 from assess.lib.config import load_config
 
 
@@ -47,7 +48,16 @@ def run(args) -> None:
         print(f"Threat model JSON file not found: {args.threat_model_json}", file=sys.stderr)
         sys.exit(1)
 
-    threat_model = json.loads(json_path.read_text(encoding="utf-8"))
+    threat_model = unwrap_request_envelope(
+        "code-record threat-model",
+        json.loads(json_path.read_text(encoding="utf-8")),
+        inner_key="threat_model",
+        identity={
+            "repo_id": (int(args.repo_id), "repo_id"),
+            "repo_generation": (repo_generation, "--repo-generation"),
+            "source_manifest_digest": (source_manifest_digest, "--source-manifest-digest"),
+        },
+    )
     if not isinstance(threat_model, dict):
         print("Threat model file must contain a JSON object", file=sys.stderr)
         sys.exit(1)

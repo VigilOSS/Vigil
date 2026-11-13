@@ -241,7 +241,7 @@ def _build(tmp_path, monkeypatch, request, files: dict[str, bytes], *, excluded_
     from assess.lib.code_snapshot import SnapshotBuilder, capture_regular_file
 
     origin = tmp_path / "origin"
-    builder = SnapshotBuilder(tmp_path / "snapshots", "acme")
+    builder = SnapshotBuilder(tmp_path / "tools" / "analysis-state" / "code-snapshots", "acme")
     rows = []
     for file_id, (rel_path, raw) in enumerate(sorted(files.items()), 1):
         path = origin / rel_path
@@ -281,8 +281,8 @@ def _build(tmp_path, monkeypatch, request, files: dict[str, bytes], *, excluded_
             return False
 
     monkeypatch.setattr(code_index, "AssessmentClient", Client)
-    monkeypatch.setattr(code_index, "load_config", lambda *_: SimpleNamespace(
-        base_url="http://example.test", engagement_key="eng"))
+    monkeypatch.setattr(code_index, "load_config", lambda flag=None: SimpleNamespace(
+        base_url="http://example.test", engagement_key="eng", engagement_dir=flag))
     monkeypatch.setattr(
         code_index, "index_file",
         lambda path, language, source, **_kwargs: index_file(path, language, source),

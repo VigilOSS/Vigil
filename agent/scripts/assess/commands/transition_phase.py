@@ -14,6 +14,7 @@ import os
 import re
 import sys
 
+from assess.lib import coverage_checks
 from assess.lib.client import AssessError, AssessmentClient
 from assess.lib.code_record_input import fail
 from assess.lib.config import Config, load_config
@@ -52,9 +53,14 @@ def register(subparsers) -> None:
         "--force",
         action="store_true",
         help=(
-            "Override ordinary blockers. Integrity blockers remain non-overrideable "
-            "on every edge, and `--track code` + `complete` cannot be forced at all: "
-            "a completed code scan asserts zero durable debt."
+            "Override ordinary blockers; the override is recorded as a "
+            "forced_transition_override decision naming each blocker, with the "
+            "--reason text when given (--reason is optional, and an override "
+            "without one is recorded as having none). Integrity blockers remain "
+            "non-overrideable on every edge, and `--track code` + `complete` "
+            "cannot be forced past coverage or readiness debt: a completed code "
+            "scan asserts zero durable debt. Its deliverable QC blockers "
+            "(missing_submission_qc, missing_report_qc) are the ones --force opens there."
         ),
     )
     p.add_argument(
@@ -65,7 +71,8 @@ def register(subparsers) -> None:
             "for overriding blockers. A backward transition is allowed with "
             "--reason WITHOUT --force, and the reason is recorded as a durable "
             "decision row. With --force, the reason is attached to the override "
-            "decision so the deferral/override rate stays auditable."
+            "decision so the deferral/override rate stays auditable; --force does "
+            "not require it."
         ),
     )
     p.add_argument(
@@ -155,17 +162,21 @@ def run(args) -> None:
         )
 
     blockers: list[dict[str, str]] = []
-    for phase_to_check in _precondition_targets_for_transition(
-        current_phase=current_phase,
-        target_phase=target_phase,
-        track=track,
-        order=order,
+    for phase_to_check in _walk_without_subsumed_gates(
+        _precondition_targets_for_transition(
+            current_phase=current_phase,
+            target_phase=target_phase,
+            track=track,
+            order=order,
+        ),
+        track,
     ):
         blockers.extend(
             _check_preconditions(
                 phase_to_check, track, engagement_dir, args, cfg,
             )
         )
+    blockers = _distinct_items(blockers)
 
     hard = [b for b in blockers if b.get("severity", "block") != "advisory"]
     advisory = [b for b in blockers if b.get("severity", "block") == "advisory"]
@@ -190,21 +201,36 @@ def run(args) -> None:
             print(f"  - [{b['kind']}] {b['detail']}", file=sys.stderr)
         sys.exit(1)
 
-    if hard and track == "code" and target_phase == "complete":
+    code_debt = [b for b in hard if b.get("gate") != _DELIVERABLE_QC_GATE]
+    if code_debt and track == "code" and target_phase == "complete":
         # The one edge --force cannot open. A completed code scan asserts zero
         # durable debt in its terminal seal, so an override here would make the
         # seal claim coverage that was never achieved. Ordinary intermediate-phase
-        # blockers stay overrideable; this edge does not.
+        # blockers stay overrideable, and so do deliverable QC blockers, which
+        # the seal does not assert; the readiness debt does not.
         print(
             "transition-phase: code cannot be forced to complete while durable "
-            f"debt remains ({len(hard)} blocker(s)):",
+            f"debt remains ({len(code_debt)} blocker(s)):",
             file=sys.stderr,
         )
-        for blocker in hard:
+        for blocker in code_debt:
             print(
                 f"  - [{blocker['kind']}] {blocker['detail']}",
                 file=sys.stderr,
             )
+        review_blockers = [b for b in hard if b.get("gate") == _DELIVERABLE_QC_GATE]
+        if review_blockers:
+            print(
+                f"transition-phase: also outstanding, {len(review_blockers)} deliverable "
+                "QC blocker(s) that `--force` (with an optional `--reason \"...\"`) "
+                "can override with an audited decision once the debt above is cleared:",
+                file=sys.stderr,
+            )
+            for blocker in review_blockers:
+                print(
+                    f"  - [{blocker['kind']}] {blocker['detail']}",
+                    file=sys.stderr,
+                )
         fail(
             "transition-phase",
             "--force does not apply to this edge. Resolve each "
@@ -278,9 +304,7 @@ def _precondition_targets_for_transition(
     A direct FORWARD jump that skips intermediate phases (e.g. web
     ``recon -> exploit`` or code ``ingest -> complete``) must still satisfy
     EVERY skipped phase's preconditions — otherwise a non-adjacent transition
-    silently bypasses gates (S1/R-H4). This walk used to be blue-only; it now
-    applies to ALL tracks, because the same bypass existed on web and code
-    (incident work was simply the case where it had already been noticed).
+    silently bypasses gates (S1/R-H4). The walk applies to every track.
 
     Backward or same-phase transitions check only the target phase; the
     backward move itself is gated separately (by --reason/--force in ``run``).
@@ -293,6 +317,36 @@ def _precondition_targets_for_transition(
         return [target_phase]
     ordered_phases = sorted(order, key=order.get)
     return ordered_phases[start + 1 : end + 1]
+
+
+def _walk_without_subsumed_gates(phases: list[str], track: str) -> list[str]:
+    """Drop a walked gate whose every check a later gate in the walk repeats.
+
+    The web `complete` gate runs everything the `report` gate runs (the
+    report-readiness blockers, the chain-construction advisory and the depth
+    backstop) and adds the deliverable verdicts, so a walk across both runs the
+    terminal checks once, under `complete`.
+    """
+    if track == "web" and "report" in phases and "complete" in phases:
+        return [phase for phase in phases if phase != "report"]
+    return phases
+
+
+def _distinct_items(items: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Keep the first of each identical (kind, severity, detail) item, in order."""
+    seen: set[tuple[str, str, str]] = set()
+    distinct: list[dict[str, str]] = []
+    for item in items:
+        key = (
+            str(item.get("kind", "")),
+            str(item.get("severity", "block")),
+            str(item.get("detail", "")),
+        )
+        if key in seen:
+            continue
+        seen.add(key)
+        distinct.append(item)
+    return distinct
 
 
 def _phase_track(scope: dict, target_phase: str, requested_track: str) -> str:
@@ -372,15 +426,58 @@ def _check_preconditions(
     blockers: list[dict[str, str]] = []
 
     cfg = cfg or load_config(engagement_dir)
-    with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+    with AssessmentClient(cfg.base_url, cfg.engagement_key) as backend:
+        client = _SharedFindingList(backend)
         if track == "code":
             blockers.extend(_check_code_preconditions(target_phase, client))
+            if target_phase == "complete":
+                blockers.extend(_deliverable_qc_blockers(client))
         elif track == "blue":
             blockers.extend(_check_blue_preconditions(target_phase, client, engagement_dir))
         else:
-            blockers.extend(_check_web_preconditions(target_phase, client))
+            blockers.extend(
+                _check_web_preconditions(target_phase, client, engagement_dir=engagement_dir)
+            )
 
     return blockers
+
+
+# The finding ledger's list projection: the slug, severity and status axes the
+# gates below compare, without every finding's details, notes and evidence.
+_FINDING_LIST_ROUTE = "findings?view=list"
+_SHARED_ROUTES = frozenset({_FINDING_LIST_ROUTE, "report-readiness"})
+
+
+class _SharedFindingList:
+    """The precondition client, reading each shared projection once.
+
+    Several gates on one edge (`complete` runs blind triage, submission QC and
+    chain construction) each list the findings, and the readiness items and
+    report QC both read report readiness. Each read of a ``_SHARED_ROUTES``
+    route within one precondition check is kept and served to the rest; every
+    other request passes straight through. A failed read is kept too and raised
+    to each gate, so each still reports its own ``precondition_check_failed``.
+    """
+
+    def __init__(self, client: AssessmentClient) -> None:
+        self._client = client
+        self._shared: dict[str, tuple[bool, object]] = {}
+
+    def __getattr__(self, name: str):
+        return getattr(self._client, name)
+
+    def get(self, endpoint: str, *args, **kwargs):
+        if endpoint not in _SHARED_ROUTES or args or kwargs:
+            return self._client.get(endpoint, *args, **kwargs)
+        if endpoint not in self._shared:
+            try:
+                self._shared[endpoint] = (True, self._client.get(endpoint))
+            except Exception as exc:  # noqa: BLE001 - re-raised to every gate below
+                self._shared[endpoint] = (False, exc)
+        succeeded, value = self._shared[endpoint]
+        if not succeeded:
+            raise value  # type: ignore[misc]
+        return value
 
 
 def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str]:
@@ -388,6 +485,24 @@ def _precondition_check_failed(check_name: str, exc: Exception) -> dict[str, str
     return {
         "kind": "precondition_check_failed",
         "detail": f"{check_name} check failed: {message}",
+    }
+
+
+def _advisory_check_failed(check_name: str, exc: Exception) -> dict[str, str]:
+    """A failed read behind an advisory check: reported, never blocking.
+
+    The check it stands in for cannot block, so neither can its failure; the
+    item says the check was not evaluated so a reader does not take the silence
+    for a clean result.
+    """
+    item = _precondition_check_failed(check_name, exc)
+    return {
+        **item,
+        "severity": "advisory",
+        "detail": (
+            f"{item['detail'].rstrip('.')}. Not blocking: this advisory check was not "
+            "evaluated; rerun the transition or the check's own read once the backend answers."
+        ),
     }
 
 
@@ -406,8 +521,8 @@ def _consumption_advisory(client: AssessmentClient) -> dict[str, str] | None:
     Counts only ``pending`` rows with NO ``terminal_reason`` — i.e. items that
     were neither tested nor explicitly deferred/inert — to match the consume
     gate's honest semantics. Reads the backend work buffer; returns None when the
-    buffer is essentially worked down. A backend fetch failure surfaces (the
-    client raises) rather than silently reporting "worked down".
+    buffer is essentially worked down. A backend fetch failure raises rather
+    than silently reporting "worked down"; the caller reports it as an advisory.
     """
     pending = sum(
         1
@@ -428,11 +543,54 @@ def _consumption_advisory(client: AssessmentClient) -> dict[str, str] | None:
     }
 
 
+# The pipeline phase whose expected-stage checklist each web edge leaves behind.
+_STAGE_AUDIT_PHASE_LEFT = {"collect": "recon", "consume-test": "collect"}
+
+
+def _stage_gap_advisory(client: AssessmentClient, phase: str) -> dict[str, str] | None:
+    """Open recon/collect pipeline-stage gaps, printed on the edge that leaves them.
+
+    The stage audit never blocks, so the edge out of a pipeline phase prints its
+    gaps rather than leaving them to a separate `check-phase-readiness` run.
+    """
+    readiness = client.get(f"phase-readiness?phase={phase}")
+    audit = readiness.get("stage_audit") if isinstance(readiness, dict) else None
+    if not isinstance(audit, dict):
+        raise ValueError("phase-readiness returned no stage_audit block")
+    if not audit.get("applicable"):
+        return None
+    gaps = [gap for gap in audit.get("gaps") or [] if isinstance(gap, dict)]
+    if not gaps:
+        return None
+    expected = len(audit.get("expected_stages") or [])
+    return {
+        "kind": "open_stage_gaps",
+        "severity": "advisory",
+        "detail": (
+            f"{len(gaps)} open stage gap(s) of {expected} expected in the {phase} "
+            f"pipeline: {'; '.join(coverage_checks.stage_gap_lines(gaps))}. Not blocking. "
+            f"{coverage_checks.STAGE_GAP_RESOLUTION} Full audit: "
+            f"`vigil assess check-phase-readiness --phase {phase}`."
+        ),
+    }
+
+
 def _check_web_preconditions(
     target_phase: str,
     client: AssessmentClient,
+    *,
+    engagement_dir: str = "",
 ) -> list[dict[str, str]]:
     blockers: list[dict[str, str]] = []
+
+    left_phase = _STAGE_AUDIT_PHASE_LEFT.get(target_phase)
+    if left_phase is not None:
+        try:
+            stage_gaps = _stage_gap_advisory(client, left_phase)
+        except Exception as exc:
+            stage_gaps = _advisory_check_failed(f"{left_phase} stage-completion audit", exc)
+        if stage_gaps is not None:
+            blockers.append(stage_gaps)
 
     if target_phase == "collect":
         try:
@@ -440,10 +598,16 @@ def _check_web_preconditions(
             if isinstance(services, list) and len(services) == 0:
                 blockers.append({
                     "kind": "no_services",
-                    "detail": "No live services discovered — recon may be incomplete",
+                    "severity": "advisory",
+                    "detail": (
+                        "0 live services recorded — recon may be incomplete. Not "
+                        "blocking; inspect what recon produced per scope host with "
+                        "`vigil assess check-phase-readiness --phase recon --by-host` "
+                        "(and `vigil assess recon-status` for the pipeline stages)."
+                    ),
                 })
         except Exception as exc:
-            blockers.append(_precondition_check_failed("collect services", exc))
+            blockers.append(_advisory_check_failed("collect services", exc))
 
     elif target_phase == "consume-test":
         try:
@@ -451,29 +615,51 @@ def _check_web_preconditions(
             if count == 0:
                 blockers.append({
                     "kind": "empty_work_buffer",
-                    "detail": "No pending work items in the work buffer — nothing to consume",
+                    "severity": "advisory",
+                    "detail": (
+                        "0 pending work items in the work buffer — nothing queued to "
+                        "consume. Not blocking; inspect the buffer by status with "
+                        "`vigil assess work-buffer stats --by status`."
+                    ),
                 })
         except Exception as exc:
-            blockers.append(_precondition_check_failed("consume-test work buffer", exc))
+            blockers.append(_advisory_check_failed("consume-test work buffer", exc))
 
     elif target_phase == "verify":
         try:
-            findings = _require_dict_rows(client.get("findings"))
+            findings = _require_dict_rows(client.get(_FINDING_LIST_ROUTE))
             active = [f for f in findings if f.get("workflow_status") == "active"]
             if len(active) == 0:
+                by_status: dict[str, int] = {}
+                for finding in findings:
+                    status = str(finding.get("workflow_status") or "unknown")
+                    by_status[status] = by_status.get(status, 0) + 1
+                recorded = ", ".join(
+                    f"{status}={count}" for status, count in sorted(by_status.items())
+                )
                 blockers.append({
                     "kind": "no_active_findings",
-                    "detail": "No active findings to verify",
+                    "severity": "advisory",
+                    "detail": (
+                        f"0 active findings to verify ({len(findings)} recorded"
+                        + (f": {recorded}" if recorded else "")
+                        + "). Not blocking; list them with `vigil assess finding "
+                        "list`, and promote a parked one with `vigil assess finding "
+                        "update <slug> --status active`."
+                    ),
                 })
         except Exception as exc:
-            blockers.append(_precondition_check_failed("verify findings", exc))
-        consumption = _consumption_advisory(client)
+            blockers.append(_advisory_check_failed("verify findings", exc))
+        try:
+            consumption = _consumption_advisory(client)
+        except Exception as exc:
+            consumption = _advisory_check_failed("verify consumption", exc)
         if consumption is not None:
             blockers.append(consumption)
 
     elif target_phase == "exploit":
         try:
-            findings = _require_dict_rows(client.get("findings"))
+            findings = _require_dict_rows(client.get(_FINDING_LIST_ROUTE))
             unverified_high = [
                 f for f in findings
                 if f.get("severity") in ("critical", "high")
@@ -481,13 +667,12 @@ def _check_web_preconditions(
                 and f.get("workflow_status") == "active"
             ]
             if unverified_high:
-                slugs = [f.get("slug", "?") for f in unverified_high[:5]]
+                slugs = [str(f.get("slug") or "?") for f in unverified_high]
                 blockers.append({
                     "kind": "unverified_high_findings",
                     "detail": (
                         f"{len(unverified_high)} high/critical finding(s) unverified: "
                         f"{', '.join(slugs)}"
-                        + (" ..." if len(unverified_high) > 5 else "")
                     ),
                 })
 
@@ -500,13 +685,12 @@ def _check_web_preconditions(
                 and f.get("workflow_status") == "active"
             ]
             if confirmed_high:
-                # Filter by role server-side and request the max page size
-                # so engagements with many dispatches don't drop older
-                # variant-pass runs behind the default limit=100.
+                # Filter by role server-side and read every page, so an older
+                # variant-pass run is never missed behind a page boundary.
                 try:
-                    dispatches = _require_dict_rows(client.get(
-                        "dispatches?role=vulnerability-analyst&limit=1000"
-                    ))
+                    dispatches = _every_row(
+                        client, "dispatches", "role=vulnerability-analyst"
+                    )
                 except Exception as exc:
                     blockers.append(
                         _precondition_check_failed("exploit variant dispatches", exc)
@@ -527,16 +711,14 @@ def _check_web_preconditions(
                     if not hit:
                         missing_variant.append(slug)
                 if missing_variant:
-                    sample = ", ".join(missing_variant[:5])
                     blockers.append({
                         "kind": "missing_variant_pass",
                         "detail": (
                             f"{len(missing_variant)} confirmed high/critical finding(s) "
                             f"have no COMPLETED variant-rotation vulnerability-analyst "
                             f"dispatch listing them in finding_slugs: "
-                            f"{sample}"
-                            + (" ..." if len(missing_variant) > 5 else "")
-                            + " — run the variant/sibling hunt as a "
+                            f"{', '.join(missing_variant)}"
+                            " — run the variant/sibling hunt as a "
                             "--dispatch-mode variant-rotation dispatch and let it "
                             "complete before advancing (skipping it is the most "
                             "common way real findings are missed). Pass --force "
@@ -547,77 +729,115 @@ def _check_web_preconditions(
             blockers.append(_precondition_check_failed("exploit findings", exc))
 
     elif target_phase == "report":
-        try:
-            readiness = client.get("report-readiness")
-            if isinstance(readiness, dict) and not readiness.get("ready", False):
-                for b in readiness.get("blockers", []):
-                    if isinstance(b, dict):
-                        blockers.append({
-                            "kind": b.get("kind", "report_readiness"),
-                            "detail": b.get("detail", str(b)),
-                        })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("report readiness", exc))
-        blockers.extend(_blind_triage_blockers(client))
+        blockers.extend(_report_readiness_items(client, "report readiness"))
+        # Blind triage and report-writer QC verdicts are produced inside the
+        # report phase, so entering it cannot require them; `complete` does.
         blockers.extend(_chain_construction_blockers(client))
         blockers.extend(_depth_backstop_blockers(client))
 
     elif target_phase == "complete":
-        try:
-            readiness = client.get("report-readiness")
-            if isinstance(readiness, dict) and not readiness.get("ready", False):
-                blockers.append({
-                    "kind": "report_not_ready",
-                    "detail": "Report readiness check has blockers",
-                })
-        except Exception as exc:
-            blockers.append(_precondition_check_failed("complete readiness", exc))
+        blockers.extend(_report_readiness_items(client, "complete readiness"))
         blockers.extend(_blind_triage_blockers(client))
+        blockers.extend(_deliverable_qc_blockers(client))
         blockers.extend(_chain_construction_blockers(client))
         blockers.extend(_depth_backstop_blockers(client))
 
     return blockers
 
 
-def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str]]:
-    """Gate the terminal report/complete edge on a completed cross-finding
-    chain-construction pass — the second Mandatory Phase-Exit Pass (Exploit ->
-    Report).
+# Report-readiness item keys that name what an item is about, in the order a
+# reader looks for them; the first present one prefixes the item's detail.
+_READINESS_SUBJECT_KEYS = ("slug", "slugs", "host", "path", "chain_key", "repo_id", "agent_id")
+# Example subjects each grouped readiness advisory names before its count.
+_READINESS_ADVISORY_SAMPLES = 3
+_READINESS_FULL_LIST = "vigil assess check-phase-readiness --phase report"
 
-    Mirrors the structural shape of ``_blind_triage_blockers`` /
-    ``missing_variant_pass``: it enumerates the at-risk state (here: confirmed
-    high/critical ACTIVE findings, the same ``confirmed_high`` predicate the
-    Verify->Exploit variant gate uses) and then checks a structured durable
-    signal rather than prose — the existence of a COMPLETED
-    ``exploit-developer`` dispatch. The chain pass enumerates A->B candidates
-    *across* the confirmed set, so it is only meaningful, and only blocks, when
-    there are at least TWO confirmed high/critical findings to chain between;
-    0 or 1 leaves nothing to chain across and never blocks (conservative — this
-    only ever fires when the prose pass was genuinely owed).
 
-    The signal is intentionally coarse: role=exploit-developer + status=completed.
-    Unlike the variant gate (which mandates ``--dispatch-mode variant-rotation``
-    in operator-core), the chain prose does NOT mandate a specific dispatch_mode
-    for the chain pass (exploit-developer defaults to ``deep-manual``), so keying
-    on a mode the operator was never told to set would be a false gate. As with
-    the variant gate, only the operator can confirm the chains were *genuinely*
-    sought; a completed dispatch row is the deterministic floor, the rest stays
-    prose in the Definition of Done.
+def _readiness_subject(item: dict) -> str:
+    for key in _READINESS_SUBJECT_KEYS:
+        value = item.get(key)
+        if isinstance(value, list) and value:
+            return ", ".join(str(entry) for entry in value)
+        if value not in (None, "", []):
+            return str(value)
+    return ""
 
-    A non-empty unsatisfied set appends ONE hard ``missing_chain_construction``
-    blocker at the DEFAULT ``severity="block"`` — the same enforcement level as
-    ``missing_variant_pass`` / ``missing_blind_triage`` — so the existing
-    ``--force``/``--reason`` override (and its audited override-decision row)
-    already covers it. Best-effort on read failure: a backend error degrades to
-    a single ``precondition_check_failed`` blocker rather than wedging the
-    transition.
+
+def _report_readiness_items(client: AssessmentClient, check_name: str) -> list[dict[str, str]]:
+    """The report-readiness gate as transition items: every blocker by name,
+    and the advisories grouped by kind.
+
+    Each blocker keeps its own kind and names its subject (finding slug, host,
+    path), so the transition output is the list to work through rather than a
+    pointer to another command. Advisories never block; one line per kind says
+    how many there are, names a few subjects and points at the readiness command
+    that lists them all.
     """
-    blockers: list[dict[str, str]] = []
     try:
-        findings = _require_dict_rows(client.get("findings"))
+        readiness = client.get("report-readiness")
+        if not isinstance(readiness, dict):
+            raise ValueError("backend returned a non-object response")
     except Exception as exc:
-        blockers.append(_precondition_check_failed("chain-construction findings", exc))
-        return blockers
+        return [_precondition_check_failed(check_name, exc)]
+
+    items: list[dict[str, str]] = []
+    named = [b for b in readiness.get("blockers") or [] if isinstance(b, dict)]
+    for blocker in named:
+        subject = _readiness_subject(blocker)
+        detail = str(blocker.get("detail") or blocker)
+        items.append({
+            "kind": str(blocker.get("kind") or "report_readiness"),
+            "detail": f"{subject}: {detail}" if subject else detail,
+        })
+    if not readiness.get("ready", False) and not named:
+        items.append({
+            "kind": "report_not_ready",
+            "detail": (
+                "report readiness is not ready but named no blocker; read the gate "
+                f"with `{_READINESS_FULL_LIST}`"
+            ),
+        })
+
+    by_kind: dict[str, list[dict]] = {}
+    for advisory in readiness.get("advisories") or []:
+        if isinstance(advisory, dict):
+            by_kind.setdefault(str(advisory.get("kind") or "report_readiness"), []).append(advisory)
+    for kind, rows in by_kind.items():
+        subjects = [_readiness_subject(row) or str(row.get("detail") or "") for row in rows]
+        shown = subjects[:_READINESS_ADVISORY_SAMPLES]
+        more = len(subjects) - len(shown)
+        items.append({
+            "kind": kind,
+            "severity": "advisory",
+            "detail": (
+                f"{len(rows)} report-readiness advisory item(s): "
+                + "; ".join(shown)
+                + (f" +{more} more" if more > 0 else "")
+                + f". First: {str(rows[0].get('detail', '')).rstrip('.')}. Not blocking; "
+                f"every item with its detail: `{_READINESS_FULL_LIST}`."
+            ),
+        })
+    return items
+
+
+def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """Name the confirmed high/critical findings no recorded attack chain links.
+
+    The cross-finding chain pass (Exploit -> Report) looks for A->B chains
+    across the confirmed high/critical set, so it is only meaningful with at
+    least two of them. Whether a chain exists is an operator and
+    exploit-developer judgment, and an independent finding is a legitimate
+    outcome, so this is an advisory, never a blocker: it names each confirmed
+    high/critical ACTIVE finding that no `attack-chain-links` row references
+    (by slug or id, under any relation), counts the completed exploit-developer
+    dispatches on record, and points at `vigil assess chain list`. A read
+    failure is reported as an advisory too, since the check it stands in for
+    cannot block.
+    """
+    try:
+        findings = _require_dict_rows(client.get(_FINDING_LIST_ROUTE))
+    except Exception as exc:
+        return [_advisory_check_failed("chain-construction findings", exc)]
 
     confirmed_high = [
         f for f in findings
@@ -626,9 +846,23 @@ def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str
         and f.get("workflow_status") == "active"
     ]
     # The chain pass runs ACROSS the confirmed set: nothing to chain with fewer
-    # than two confirmed high/critical findings, so never block in that case.
+    # than two confirmed high/critical findings.
     if len(confirmed_high) < 2:
-        return blockers
+        return []
+
+    try:
+        links = _require_dict_rows(client.get("attack-chain-links"))
+    except Exception as exc:
+        return [_advisory_check_failed("chain-construction links", exc)]
+    finding_links = [link for link in links if link.get("entity_kind") == "finding"]
+    chained_slugs = {str(link.get("entity_ref") or "") for link in finding_links} - {""}
+    chained_ids = {link.get("entity_id") for link in finding_links} - {None}
+    unchained = [
+        f for f in confirmed_high
+        if str(f.get("slug") or "") not in chained_slugs and f.get("id") not in chained_ids
+    ]
+    if not unchained:
+        return []
 
     # Filter to completed exploit-developer dispatches server-side and request
     # the max page size so long engagements don't drop the chain pass behind
@@ -637,36 +871,27 @@ def _chain_construction_blockers(client: AssessmentClient) -> list[dict[str, str
         dispatches = _require_dict_rows(client.get(
             "dispatches?role=exploit-developer&status=completed&limit=1000"
         ))
-    except Exception as exc:
-        blockers.append(
-            _precondition_check_failed("chain-construction dispatches", exc)
-        )
-        return blockers
-    completed_chain_dispatches = [
-        d for d in dispatches
-        if isinstance(d, dict)
-        and str(d.get("status") or "").lower() == "completed"
-    ]
-    if completed_chain_dispatches:
-        return blockers
+        completed = str(sum(
+            1 for d in dispatches if str(d.get("status") or "").lower() == "completed"
+        ))
+    except Exception as exc:  # noqa: BLE001 - the count is context, not the check
+        completed = f"an unknown number of (read failed: {exc or type(exc).__name__})"
 
-    sample = ", ".join(f.get("slug", "?") for f in confirmed_high[:5])
-    blockers.append({
-        "kind": "missing_chain_construction",
+    slugs = [str(f.get("slug") or "?") for f in unchained]
+    return [{
+        "kind": "chain_construction_unchained",
+        "severity": "advisory",
         "detail": (
-            f"{len(confirmed_high)} confirmed high/critical finding(s) and NO "
-            f"completed exploit-developer dispatch on record: {sample}"
-            + (" ..." if len(confirmed_high) > 5 else "")
-            + " — the cross-finding chain-construction pass (Exploit -> Report) "
-            "was not run. Dispatch one exploit-developer pass that enumerates "
-            "A->B candidates across the confirmed set (info-disclosure + "
-            "open-redirect, SSRF + token leak, IDOR + impersonation) and let it "
-            "complete before advancing (it is what turns a list of mediums into "
-            "a high). Pass --force --reason \"...\" to override with an audited "
-            "decision."
+            f"{len(unchained)} of {len(confirmed_high)} confirmed high/critical "
+            f"finding(s) appear in no recorded attack chain: {', '.join(slugs)} "
+            f"({completed} completed exploit-developer dispatch(es) on record). Not "
+            "blocking; read the recorded chains with `vigil assess chain list`, and "
+            "if no exploit-developer pass has looked for A->B chains across the "
+            "confirmed set (info-disclosure + open-redirect, SSRF + token leak, "
+            "IDOR + impersonation), dispatch one before reporting. Record a chain "
+            "it finds with `vigil assess record-chain`."
         ),
-    })
-    return blockers
+    }]
 
 
 # Workflow states a finding can actually be submitted from — the same set
@@ -678,8 +903,9 @@ _SUBMITTABLE_WORKFLOW_STATUSES = frozenset(
 
 
 def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
-    """Gate the terminal report/complete edge on a recorded blind-triage Accept
-    verdict for every Medium-or-above SUBMITTABLE finding (FIX E3).
+    """Gate the terminal `complete` edge on a recorded blind-triage Accept
+    verdict for every Medium-or-above SUBMITTABLE finding (FIX E3). The verdicts
+    are produced inside the report phase, so entering `report` does not run it.
 
     Mirrors the ``missing_variant_pass`` Verify->Exploit gate exactly: it
     enumerates the at-risk findings — severity in {medium,high,critical} in a
@@ -704,42 +930,21 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
     """
     blockers: list[dict[str, str]] = []
     try:
-        findings = _require_dict_rows(client.get("findings"))
+        findings = _require_dict_rows(client.get(_FINDING_LIST_ROUTE))
     except Exception as exc:
         blockers.append(_precondition_check_failed("blind-triage findings", exc))
         return blockers
 
     medium_or_above = [
         f for f in findings
-        if f.get("severity") in ("medium", "high", "critical")
-        and str(f.get("workflow_status") or "").strip().lower()
-        in _SUBMITTABLE_WORKFLOW_STATUSES
-        and f.get("verification_status") in ("confirmed", "downgraded")
+        if f.get("severity") in ("medium", "high", "critical") and _submittable_verified(f)
     ]
     if not medium_or_above:
         return blockers
 
-    # Rows are newest-first. Keep only the first verdict for each finding: a
-    # later miss must revoke an earlier Accept. Page until every finding has a
-    # verdict or the decision ledger ends, rather than trusting the first 1000.
     target_slugs = {str(f.get("slug") or "") for f in medium_or_above}
-    latest: dict[str, dict] = {}
-    offset = 0
     try:
-        while target_slugs - latest.keys():
-            decisions = _require_dict_rows(client.get(
-                f"dispatch-decisions?kind=blind_triage_verdict&limit=1000&offset={offset}"
-            ))
-            for row in decisions:
-                payload = row.get("payload")
-                if not isinstance(payload, dict):
-                    continue
-                slug = str(payload.get("finding_slug") or "").strip()
-                if slug in target_slugs and slug not in latest:
-                    latest[slug] = payload
-            if len(decisions) < 1000:
-                break
-            offset += len(decisions)
+        latest = _latest_finding_decisions(client, "blind_triage_verdict", target_slugs)
     except Exception as exc:
         blockers.append(_precondition_check_failed("blind-triage decisions", exc))
         return blockers
@@ -754,14 +959,12 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
         if f.get("slug", "?") not in accepted_slugs
     ]
     if missing:
-        sample = ", ".join(missing[:5])
         blockers.append({
             "kind": "missing_blind_triage",
             "detail": (
                 f"{len(missing)} Medium-or-above submittable finding(s) have no recorded "
-                f"blind-triage Accept verdict: {sample}"
-                + (" ..." if len(missing) > 5 else "")
-                + " — run blind-triage Pass 2 (agent/skills/blind-triage/SKILL.md) "
+                f"blind-triage Accept verdict: {', '.join(missing)}"
+                " — run blind-triage Pass 2 (agent/skills/blind-triage/SKILL.md) "
                 "and record the Accept verdict with `vigil assess agent decision "
                 "--kind blind_triage_verdict --payload-json "
                 "'{\"finding_slug\":\"<slug>\",\"packet_id\":\"<packet id>\",\"reviewer_dispatch_agent_id\":\"<reviewer-id>\",\"writer_dispatch_agent_id\":\"<writer-id>\",\"verdict\":\"Accept@P3\"}'` "
@@ -772,6 +975,198 @@ def _blind_triage_blockers(client: AssessmentClient) -> list[dict[str, str]]:
         })
 
     return blockers
+
+
+def _submittable_verified(finding: dict) -> bool:
+    return (
+        str(finding.get("workflow_status") or "").strip().lower()
+        in _SUBMITTABLE_WORKFLOW_STATUSES
+        and finding.get("verification_status") in ("confirmed", "downgraded")
+    )
+
+
+def _latest_finding_decisions(
+    client: AssessmentClient, kind: str, target_slugs: set[str],
+) -> dict[str, dict]:
+    """The newest ``kind`` decision payload for each slug in ``target_slugs``.
+
+    Rows are newest-first. Keep only the first verdict for each finding: a
+    later miss must revoke an earlier pass. Page until every finding has a
+    verdict or the decision ledger ends, rather than trusting the first 1000.
+    """
+    latest: dict[str, dict] = {}
+    offset = 0
+    while target_slugs - latest.keys():
+        decisions = _require_dict_rows(client.get(
+            f"dispatch-decisions?kind={kind}&limit=1000&offset={offset}"
+        ))
+        for row in decisions:
+            payload = row.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            slug = str(payload.get("finding_slug") or "").strip()
+            if slug in target_slugs and slug not in latest:
+                latest[slug] = payload
+        if len(decisions) < 1000:
+            break
+        offset += len(decisions)
+    return latest
+
+
+def _every_row(client: AssessmentClient, route: str, query: str) -> list[dict]:
+    """Every row of one filtered list read, paged at 1000 until a short page."""
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        page = _require_dict_rows(client.get(
+            f"{route}?{query}&limit=1000&offset={offset}"
+        ))
+        rows.extend(page)
+        if len(page) < 1000:
+            return rows
+        offset += len(page)
+
+
+def _artifact_search(client: AssessmentClient, query: str) -> list[dict]:
+    """Every row of one ``artifacts/search`` read, paged to the end."""
+    return _every_row(client, "artifacts/search", query)
+
+
+def _submission_qc_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """Gate `complete` on independent report-writer QC of every submission.
+
+    Every submittable, verified finding with a registered submission workspace
+    (``kind='submission'``) or exported version (``kind='submission-version'``)
+    needs its newest ``kind='submission_qc_verdict'`` row to be ``pass`` on a
+    content-addressed packet, at any severity. Final export already checks that
+    verdict against the exact package; this is the terminal backstop for a
+    submission that was rendered but never put through the export gate. A miss
+    appends one ``missing_submission_qc`` blocker at the default
+    ``severity="block"``, overridable with ``--force --reason``. Read failures
+    fail closed as ``precondition_check_failed``.
+    """
+    try:
+        findings = _require_dict_rows(client.get(_FINDING_LIST_ROUTE))
+        candidates = {
+            str(f.get("slug") or "") for f in findings if _submittable_verified(f)
+        }
+        if not candidates:
+            return []
+        registered = {
+            str(row.get("related_finding_slug") or "")
+            for kind in ("submission", "submission-version")
+            for row in _artifact_search(client, f"kind={kind}")
+            if str(row.get("kind") or "") == kind
+        }
+        owed = candidates & registered
+        if not owed:
+            return []
+        latest = _latest_finding_decisions(client, "submission_qc_verdict", owed)
+    except Exception as exc:
+        return [_precondition_check_failed("submission QC", exc)]
+    missing = sorted(
+        slug for slug in owed
+        if str((latest.get(slug) or {}).get("verdict") or "") != "pass"
+        or not re.fullmatch(r"[0-9a-f]{64}", str(latest[slug].get("packet_id") or ""))
+    )
+    if not missing:
+        return []
+    return [{
+        "kind": "missing_submission_qc",
+        "detail": (
+            f"{len(missing)} registered submission(s) have no passing independent "
+            f"report-writer QC verdict: {', '.join(missing)}"
+            " — dispatch a report-writer separate from the writer to review the "
+            "finding's triage packet and record `vigil assess agent decision --kind "
+            "submission_qc_verdict` (payload shape: `vigil assess contract agent "
+            "decision`); a blocked verdict goes back to the writer for a new packet "
+            "and review. Pass --force --reason \"...\" to override with an audited decision."
+        ),
+    }]
+
+
+#: Marks a blocker raised by a report-writer deliverable review rather than by a
+#: track's own readiness contract, so the code `complete` edge keeps it
+#: overridable while its coverage debt stays unforceable.
+_DELIVERABLE_QC_GATE = "deliverable_qc"
+
+
+def _deliverable_qc_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """Independent QC of every registered deliverable, for any non-blue `complete`.
+
+    Submissions and ``report.md`` are engagement-wide deliverables, so the web
+    and code tracks both close behind their reviews; blind triage stays a web
+    `complete` gate.
+    """
+    blockers = [
+        *_submission_qc_blockers(client),
+        *_report_qc_blockers(client),
+    ]
+    return [{**blocker, "gate": _DELIVERABLE_QC_GATE} for blocker in blockers]
+
+
+def _report_qc_blockers(client: AssessmentClient) -> list[dict[str, str]]:
+    """Gate `complete` on independent report-writer QC of a registered report.md.
+
+    Report readiness serves the standing as ``report_qc`` (the backend owns the
+    rule: the newest verdict passes for the registered artifact and sha256, and
+    the bytes on disk are still those). A registered report whose standing is
+    not ``current`` blocks with the issue the backend names; an unregistered
+    report owes nothing. A payload without the standing fails closed; a failed
+    report readiness read is ``_report_readiness_unread``'s.
+    """
+    try:
+        readiness = client.get("report-readiness")
+    except Exception as exc:
+        return _report_readiness_unread(client, exc)
+    state = readiness.get("report_qc") if isinstance(readiness, dict) else None
+    if not isinstance(state, dict) or not isinstance(state.get("status"), str):
+        return [_precondition_check_failed(
+            "report QC", ValueError("report readiness carried no report_qc standing")
+        )]
+    if not state.get("required") or state["status"] == "current":
+        return []
+    issue = str(state.get("issue") or f"has report QC status {state['status']}")
+    return [{
+        "kind": "missing_report_qc",
+        "detail": (
+            f"registered report.md {issue} — restore or write its final bytes, register "
+            "them (`vigil assess artifact register report.md --kind report --agent-id "
+            "<writer dispatch>`), dispatch a report-writer separate from the writer to "
+            "review them, and record `vigil assess agent decision --kind report_qc_verdict` "
+            "with the artifact id and sha256 it reviewed (payload shape: `vigil assess "
+            "contract agent decision`). Pass --force --reason \"...\" to override with an "
+            "audited decision."
+        ),
+    }]
+
+
+def _report_readiness_unread(client: AssessmentClient, exc: Exception) -> list[dict[str, str]]:
+    """Report readiness could not be read, so the report.md QC standing it serves
+    is unknown. The item names that read as the failing check, and whether
+    report.md is registered (the backend's rule: an artifact at ``report.md``)
+    decides its weight: registered, or its registration unreadable, fails
+    closed; unregistered owes no report QC, so the failure is reported without
+    blocking this gate.
+    """
+    item = _precondition_check_failed("report readiness", exc)
+    try:
+        registered = bool(_artifact_search(client, "path=report.md"))
+    except Exception as lookup_exc:  # noqa: BLE001 - an unknown registration fails closed
+        return [{**item, "detail": (
+            f"{item['detail']} — report.md's QC standing is served there, and whether "
+            f"report.md is registered could not be read either ({lookup_exc}), so the "
+            "report QC gate fails closed; rerun once the backend answers."
+        )}]
+    if registered:
+        return [{**item, "detail": (
+            f"{item['detail']} — report.md is registered and its QC standing is served "
+            "there, so the report QC gate fails closed; rerun once the backend answers."
+        )}]
+    return [{**item, "severity": "advisory", "detail": (
+        f"{item['detail']}. Not blocking the report QC gate: no report.md is "
+        "registered, so no report QC is owed."
+    )}]
 
 
 def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
@@ -848,7 +1243,7 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
 
     if family_blocking:
         names = [_unit_label(b.get("unit", {})) for b in family_blocking]
-        sample = ", ".join(names[:6]) + (" ..." if len(names) > 6 else "")
+        sample = _unit_sample(names, _DEPTH_FULL_LIST)
         out.append({
             "kind": "depth_unsatisfied_units",
             "severity": "block",
@@ -873,7 +1268,7 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
             f"[{', '.join(str(c) for c in (b.get('uncovered_classes') or [])) or '?'}]"
             for b in class_blocking
         ]
-        sample = "; ".join(parts[:6]) + (" ..." if len(parts) > 6 else "")
+        sample = _unit_sample(parts, _DEPTH_FULL_LIST, separator="; ")
         all_classes = sorted({
             str(c) for b in class_blocking for c in (b.get("uncovered_classes") or [])
         })
@@ -899,7 +1294,7 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
 
     if warned:
         names = [_unit_label(w.get("unit", {})) for w in warned]
-        sample = ", ".join(names[:6]) + (" ..." if len(names) > 6 else "")
+        sample = _unit_sample(names, _DEPTH_WARNED_FULL_LIST)
         out.append({
             "kind": "depth_under_observed_units",
             "severity": "advisory",
@@ -912,6 +1307,25 @@ def _depth_backstop_blockers(client: AssessmentClient) -> list[dict[str, str]]:
             ),
         })
     return out
+
+
+_DEPTH_UNIT_SAMPLES = 6
+# Where every unit of a depth blocker is listed: the readiness preview renders the
+# whole would-block set, and its JSON carries the under-observed set.
+_DEPTH_FULL_LIST = "`vigil assess check-phase-readiness --phase report`"
+_DEPTH_WARNED_FULL_LIST = (
+    "`vigil assess check-phase-readiness --phase report --json`, "
+    "`depth_would_block.warned_under_observed`"
+)
+
+
+def _unit_sample(labels: list[str], full_list: str, *, separator: str = ", ") -> str:
+    """The first units, then how many are left out and where every one is listed."""
+    shown = separator.join(labels[:_DEPTH_UNIT_SAMPLES])
+    more = len(labels) - _DEPTH_UNIT_SAMPLES
+    if more <= 0:
+        return shown
+    return f"{shown} +{more} more (every unit: {full_list})"
 
 
 def _unit_label(unit: dict) -> str:
@@ -988,10 +1402,18 @@ def _check_code_preconditions(
                 "overrideable": False,
             })
             continue
+        detail = str(raw["message"])
+        sample = raw.get("sample_paths")
+        if isinstance(sample, list) and sample:
+            shown = [str(path) for path in sample[:_CODE_ADVISORY_SAMPLES]]
+            more = int(raw.get("omitted") or 0) + len(sample) - len(shown)
+            detail += f" Files: {', '.join(shown)}" + (f" +{more} more" if more > 0 else "")
+            if raw.get("full_list"):
+                detail += f"; every file: `{raw['full_list']}`"
         blockers.append({
             "kind": str(raw["code"]),
             "severity": "block",
-            "detail": str(raw["message"]),
+            "detail": detail,
             # Missing override metadata is treated as an integrity constraint.
             "overrideable": raw.get("overrideable") is True,
         })
@@ -1015,8 +1437,141 @@ def _check_code_preconditions(
                     "detail": str(warning),
                     "overrideable": True,
                 })
-
+    blockers.extend(_code_readiness_advisories(readiness))
     return blockers
+
+
+# Example files a grouped code advisory names before its remaining count.
+_CODE_ADVISORY_SAMPLES = 3
+
+
+def _code_readiness_advisories(readiness: dict) -> list[dict[str, str]]:
+    """The readiness pointers that are neither blockers nor quality warnings.
+
+    Code readiness returns critical/high files whose signal came only from wide
+    passes (`depth_advisories`), classified files that record no context
+    tags (`context_tags_unrecorded`), client-bundle optional families and
+    conflicts, engagement family exclusions, and below-floor families no
+    trigger covers. They do not block; they are printed so the
+    transition does not pass over them in silence.
+    """
+    items: list[dict[str, str]] = []
+    depth = [row for row in readiness.get("depth_advisories") or [] if isinstance(row, dict)]
+    if depth:
+        paths = [str(row.get("file_path") or "?") for row in depth]
+        shown = paths[:_CODE_ADVISORY_SAMPLES]
+        more = len(paths) - len(shown)
+        items.append({
+            "kind": "code_depth_advisory",
+            "severity": "advisory",
+            "detail": (
+                f"{len(depth)} critical/high file(s) produced signal on wide passes "
+                f"only: {', '.join(shown)}" + (f" +{more} more" if more > 0 else "")
+                + ". Not blocking; every file with its pass counts: `vigil assess "
+                "code-coverage`; a deeper read is a `hunt_scope: deep` lane or "
+                "`vigil assess code-dispatch reanalyze`."
+            ),
+            "overrideable": True,
+        })
+    unrecorded = readiness.get("context_tags_unrecorded")
+    if isinstance(unrecorded, dict) and unrecorded.get("count"):
+        paths = [str(path) for path in unrecorded.get("sample_paths") or []]
+        shown = paths[:_CODE_ADVISORY_SAMPLES]
+        more = int(unrecorded["count"]) - len(shown)
+        items.append({
+            "kind": "code_context_tags_unrecorded",
+            "severity": "advisory",
+            "detail": (
+                f"{unrecorded['count']} classified file(s) record no context_tags, so "
+                f"each owes only its slot-type and language families: {', '.join(shown)}"
+                + (f" +{more} more" if more > 0 else "")
+                + f". Not blocking; every file: `{unrecorded.get('full_list')}`"
+                + (f" ({unrecorded['paging']})" if unrecorded.get("paging") else "")
+                + f"; {unrecorded.get('fix')}."
+            ),
+            "overrideable": True,
+        })
+    optional = readiness.get("optional_families")
+    if isinstance(optional, dict) and optional.get("files"):
+        paths = [str(path) for path in optional.get("sample_paths") or []]
+        shown = paths[:_CODE_ADVISORY_SAMPLES]
+        more = int(optional.get("omitted") or 0) + len(paths) - len(shown)
+        families = ", ".join(
+            f"{family} {count}" for family, count in (optional.get("by_family") or {}).items()
+        )
+        items.append({
+            "kind": "code_optional_families",
+            "severity": "advisory",
+            "detail": (
+                f"{optional['files']} client-bundle file(s) carry server-only families nobody "
+                f"measures ({families}): {', '.join(shown)}" + (f" +{more} more" if more > 0 else "")
+                + f". Not blocking; {optional.get('detail')}; every file: `{optional.get('full_list')}`."
+            ),
+            "overrideable": True,
+        })
+    conflicts = readiness.get("client_bundle_conflicts")
+    if isinstance(conflicts, dict) and conflicts.get("count"):
+        entries = [
+            f"{entry.get('file_path')} ({', '.join(entry.get('signals') or [])})"
+            for entry in conflicts.get("sample") or [] if isinstance(entry, dict)
+        ]
+        shown = entries[:_CODE_ADVISORY_SAMPLES]
+        more = int(conflicts.get("omitted") or 0) + len(entries) - len(shown)
+        items.append({
+            "kind": "code_client_bundle_conflicts",
+            "severity": "advisory",
+            "detail": (
+                f"{conflicts['count']} client-bundle file(s) whose language or other tags say "
+                f"server code: {', '.join(shown)}" + (f" +{more} more" if more > 0 else "")
+                + f". Not blocking; every file: `{conflicts.get('full_list')}`; {conflicts.get('fix')}."
+            ),
+            "overrideable": True,
+        })
+    exclusions = readiness.get("family_exclusions")
+    if isinstance(exclusions, dict) and (exclusions.get("families") or exclusions.get("invalid_decisions")):
+        ruled = [
+            f"{row.get('family')} (decision {row.get('decision_id')}: {row.get('ruling')})"
+            for row in exclusions.get("families") or [] if isinstance(row, dict)
+        ]
+        invalid = [
+            f"decision {row.get('decision_id')} excludes nothing: {'; '.join(row.get('problems') or [])}"
+            for row in exclusions.get("invalid_decisions") or [] if isinstance(row, dict)
+        ]
+        items.append({
+            "kind": "code_family_exclusions",
+            "severity": "advisory",
+            "detail": (
+                f"{len(ruled)} review famil(ies) ruled out for every file"
+                + (f": {', '.join(ruled)}" if ruled else "")
+                + f"; {exclusions.get('depth_floor_triggers_ruled_out') or 0} depth_floor "
+                "trigger(s) counted as ruled out"
+                + (f". {'. '.join(invalid)}" if invalid else "")
+                + f". Not blocking; {exclusions.get('detail')}."
+            ),
+            "overrideable": True,
+        })
+    shortfalls = readiness.get("untriggered_depth_shortfalls")
+    if isinstance(shortfalls, dict) and shortfalls.get("total"):
+        groups = [
+            f"{group.get('classification')} {group.get('family')} {group.get('file_count')}"
+            for group in shortfalls.get("groups") or []
+            if isinstance(group, dict)
+        ]
+        shown = groups[:_CODE_ADVISORY_SAMPLES]
+        more = len(groups) - len(shown)
+        items.append({
+            "kind": "code_untriggered_depth_shortfalls",
+            "severity": "advisory",
+            "detail": (
+                f"{shortfalls['total']} critical/high famil(ies) below the effort floor carry "
+                f"no depth_floor trigger (tier family files: {', '.join(shown)}"
+                + (f" +{more} more groups" if more > 0 else "")
+                + "). Not blocking; sample paths per group: `vigil assess code-coverage`. "
+                + str(shortfalls.get("detail") or "")
+            ),
+            "overrideable": True,
+        })
+    return items
 
 
 def _check_blue_preconditions(
@@ -1378,14 +1933,13 @@ def _blue_check_investigate_to_verify(
         if str(f.get("workflow_status") or "") == "draft"
     ]
     if skeleton_drafts:
-        slugs = [str(f.get("slug") or "?") for f in skeleton_drafts[:5]]
+        slugs = [str(f.get("slug") or "?") for f in skeleton_drafts]
         blockers.append({
             "kind": "findings_still_draft",
             "detail": (
                 f"{len(skeleton_drafts)} finding(s) still in draft after investigate: "
                 f"{', '.join(slugs)}"
-                + (" ..." if len(skeleton_drafts) > 5 else "")
-                + " — L2 must promote each skeleton to a full finding "
+                " — L2 must promote each skeleton to a full finding "
                 "(workflow_status='active') before verify."
             ),
         })
@@ -1410,28 +1964,24 @@ def _blue_check_investigate_to_verify(
             missing_artifacts.append(slug)
 
     if missing_mitre:
-        sample = ", ".join(missing_mitre[:5])
         blockers.append({
             "kind": "missing_mitre_techniques",
             "severity": "advisory",
             "detail": (
                 f"{len(missing_mitre)} active finding(s) missing "
-                f"details.mitre_techniques: {sample}"
-                + (" ..." if len(missing_mitre) > 5 else "")
-                + " — triage.md rule 11 asks for MITRE tagging; add it before "
+                f"details.mitre_techniques: {', '.join(missing_mitre)}"
+                " — triage.md rule 11 asks for MITRE tagging; add it before "
                 "report for a complete ATT&CK mapping."
             ),
         })
 
     if missing_artifacts:
-        sample = ", ".join(missing_artifacts[:5])
         blockers.append({
             "kind": "missing_evidence_artifacts",
             "detail": (
                 f"{len(missing_artifacts)} active finding(s) have zero artifacts "
-                f"linked: {sample}"
-                + (" ..." if len(missing_artifacts) > 5 else "")
-                + " — ir-evidence.md requires an evidence trail "
+                f"linked: {', '.join(missing_artifacts)}"
+                " — ir-evidence.md requires an evidence trail "
                 "(register artifacts with --finding <slug>)."
             ),
         })
@@ -1473,14 +2023,13 @@ def _blue_check_verify_to_respond(
         if str(f.get("verification_status") or "unreviewed") == "unreviewed"
     ]
     if unreviewed:
-        slugs = [str(f.get("slug") or "?") for f in unreviewed[:5]]
+        slugs = [str(f.get("slug") or "?") for f in unreviewed]
         blockers.append({
             "kind": "unreviewed_findings",
             "detail": (
                 f"{len(unreviewed)} active finding(s) still verification_status="
                 f"'unreviewed': {', '.join(slugs)}"
-                + (" ..." if len(unreviewed) > 5 else "")
-                + " — verifier must disposition each via "
+                " — verifier must disposition each via "
                 "`vigil blue verify <slug> --status ...`."
             ),
         })
@@ -1622,14 +2171,12 @@ def _blue_check_respond_to_report(
         missing.append(slug)
 
     if missing:
-        sample = ", ".join(missing[:5])
         blockers.append({
             "kind": "missing_containment_closure",
             "detail": (
                 f"{len(missing)} verified high/critical finding(s) lack "
-                f"containment closure: {sample}"
-                + (" ..." if len(missing) > 5 else "")
-                + " — for each slug do one of: (1) propose+approve+contain "
+                f"containment closure: {', '.join(missing)}"
+                " — for each slug do one of: (1) propose+approve+contain "
                 "(vigil blue propose-contain / vigil assess approve-proposal / "
                 "vigil blue contain), or (2) if already mitigated by other "
                 "controls, log `vigil assess log operator <title> "
@@ -1693,15 +2240,14 @@ def _blue_check_report_to_complete(
         if str(f.get("workflow_status") or "") not in terminal_statuses
     ]
     if open_findings:
-        slugs = [str(f.get("slug") or "?") for f in open_findings[:5]]
+        slugs = [str(f.get("slug") or "?") for f in open_findings]
         blockers.append({
             "kind": "findings_not_closed",
             "detail": (
                 f"{len(open_findings)} finding(s) not in a terminal status "
                 f"(reported/false_positive/contained/eradicated/recovered): "
                 f"{', '.join(slugs)}"
-                + (" ..." if len(open_findings) > 5 else "")
-                + " — close each via report/verify/contain before complete."
+                " — close each via report/verify/contain before complete."
             ),
         })
 

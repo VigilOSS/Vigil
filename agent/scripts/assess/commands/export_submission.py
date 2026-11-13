@@ -34,7 +34,7 @@ no imposed ``N.`` counter, and nothing strips an enumerator the author wrote, so
 is container formatting, like the code fences: it keeps each step on its own line
 when the markdown is pasted into a platform form. What code MAY still do is FLAG
 (``hygiene_warnings`` — leaks, and they fail a final export closed), ADVISE
-(``advisories`` — prose opinions that never block), and REFUSE outright (the
+(``advisories`` — editorial opinions that never block), and REFUSE outright (the
 final gate, which writes nothing). Adding a marker, an advisory, or a refusal
 leaves the operator's words intact; rewriting them does not.
 
@@ -151,12 +151,12 @@ from assess.lib.finding_render import (
     operator_authority_reason,
     operator_authority_stamp,
     poc_lines as _poc_lines,
-    prose_advisories,
     repro_rehearsal_advisories,
+    shape_advisories,
     step_lines,
     string_list,
-    title_advisories,
 )
+from assess.lib.producer_identity import resolve_report_writer
 from assess.lib.scope import rate_caps_for_dir
 
 # Mirrors submission_versions workspace read limits; enforced before any output write.
@@ -213,10 +213,27 @@ def register(subparsers) -> None:
         default="",
         help="Override the output directory (default: $ENGAGEMENT_DIR/submissions/<slug>/).",
     )
-    p.add_argument("--body", default="", help="Capture an operator-authored UTF-8 outgoing body inside the engagement, preserving its exact bytes.")
-    p.add_argument("--guidance", default="", help="Capture recipient reporting guidance as presentation-only data; never changes verification or approval gates.")
+    p.add_argument("--body", default="", help="Capture an operator-authored UTF-8 outgoing body inside the engagement, preserving its exact bytes. A re-render without it reuses the body the last render captured.")
+    p.add_argument("--guidance", default="", help="Capture recipient reporting guidance as presentation-only data; never changes verification or approval gates. A re-render without it reuses the guidance the last render captured.")
     p.add_argument("--prepare", action="store_true", help="Prepare and register a final-ready workspace for review without publishing an immutable version.")
-    p.add_argument("--overwrite", action="store_true", help="Overwrite an existing submission.md.")
+    p.add_argument(
+        "--overwrite",
+        action="store_true",
+        help=(
+            "Replace workspace files edited by hand since the last render. Files that "
+            "still match the last render recorded in submission-context.json are "
+            "replaced without it."
+        ),
+    )
+    p.add_argument(
+        "--agent-id",
+        dest="agent_id",
+        default="",
+        help=(
+            "Your recorded dispatch ID; attributes the workspace registration so submission "
+            "QC refuses a reviewer who wrote any version. Omit when the operator renders."
+        ),
+    )
     p.add_argument("--json", dest="as_json", action="store_true", help="Emit a machine-readable summary to stdout.")
     p.add_argument(
         "--recover",
@@ -272,6 +289,83 @@ def _capture_input(engagement_dir: str, value: str, label: str) -> tuple[bytes |
     if not raw.strip():
         raise AssessError(f"export submission: {label} must not be empty")
     return raw, {"path": source.as_posix(), "sha256": hashlib.sha256(raw).hexdigest(), "bytes": len(raw)}
+
+
+def _last_render(context_json: Path) -> dict:
+    """The workspace context the previous render wrote, or {} when there is none."""
+    if not context_json.is_file():
+        return {}
+    try:
+        loaded = json.loads(context_json.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return loaded if isinstance(loaded, dict) else {}
+
+
+def _capture_reused_input(
+    engagement_dir: str, value: str, captured: object, *, label: str, flag: str
+) -> tuple[bytes | None, dict | None]:
+    """Capture ``value``, or the input the last render captured when it is omitted.
+
+    A re-render after a finding edit keeps the outgoing body and recipient
+    guidance it was rendered with; the reuse is named on stderr, with a note when
+    the captured file's bytes moved since that render.
+    """
+    if value or not isinstance(captured, dict) or not captured.get("path"):
+        return _capture_input(engagement_dir, value, label)
+    path = str(captured["path"])
+    try:
+        raw, source = _capture_input(engagement_dir, path, label)
+    except AssessError as exc:
+        raise AssessError(
+            f"export submission: the last render captured {flag} {path}, which can no "
+            f"longer be read ({exc}); pass {flag} <file> to choose the input."
+        ) from exc
+    changed = ""
+    if source is not None and source["sha256"] != captured.get("sha256"):
+        changed = (
+            f"; its bytes changed since that render (sha256 {captured.get('sha256')} -> "
+            f"{source['sha256']})"
+        )
+    print(
+        f"export submission: reusing the captured {flag} {path} from the last render"
+        f"{changed}. Pass {flag} <file> to choose another.",
+        file=sys.stderr,
+    )
+    return raw, source
+
+
+def _require_unedited_outputs(
+    last_render: dict, outputs: tuple[tuple[Path, str], ...], engagement_dir: str
+) -> None:
+    """Refuse to replace a workspace file edited by hand since the last render.
+
+    A file whose bytes still hash to what the last render recorded in
+    submission-context.json holds nothing a re-render would lose, so it is
+    replaced and the replacement is named on stderr. Anything else, including a
+    file with no render record behind it, may hold someone's edits.
+    """
+    replaced: list[str] = []
+    for path, key in outputs:
+        if not path.exists():
+            continue
+        display = _engagement_relative(path.resolve(strict=False), engagement_dir) or str(path)
+        recorded = last_render.get(key)
+        if not recorded or hashlib.sha256(path.read_bytes()).hexdigest() != recorded:
+            raise AssessError(
+                f"export submission: {display} was edited by hand since the last render "
+                "(its sha256 is not the one submission-context.json records); pass "
+                "--overwrite to replace it, or carry the edits into the finding or a "
+                "--body file first."
+            )
+        replaced.append(display)
+    if replaced:
+        print(
+            f"export submission: replacing {', '.join(replaced)}; "
+            f"{'it matches' if len(replaced) == 1 else 'they match'} the last render "
+            "recorded in submission-context.json.",
+            file=sys.stderr,
+        )
 
 
 def _nonempty(value: object) -> str:
@@ -443,25 +537,50 @@ def _durable_evidence(
     }
 
 
-def _target_readiness_blockers(client, slug: str) -> tuple[list[dict], str]:
+# Readiness advisories that concern the submission's own claim. Submission QC
+# reviews this render and its context file, so a severity/CVSS divergence the
+# backend reports for this finding is carried here rather than left in a
+# readiness read QC never makes. Advisories only: neither ever refuses a render.
+_SUBMISSION_READINESS_ADVISORY_KINDS = frozenset(
+    {"severity_cvss_mismatch", "severity_cvss_band_divergence"}
+)
+
+
+def _names_slug(item: dict, slug: str) -> bool:
+    slugs = item.get("slugs", [])
+    matches_many = isinstance(slugs, list) and slug in {str(entry) for entry in slugs}
+    return str(item.get("slug") or item.get("finding_slug") or "") == slug or matches_many
+
+
+def _target_readiness(client, slug: str) -> tuple[list[dict], list[str], str]:
+    """This finding's readiness blockers, its severity advisories, and any read error."""
     try:
         readiness = client.get("report-readiness")
     except AssessError as exc:
-        return [], f"report-readiness unavailable: {exc}"
+        return [], [], f"report-readiness unavailable: {exc}"
     if not isinstance(readiness, dict):
-        return [], "report-readiness returned an unexpected response"
+        return [], [], "report-readiness returned an unexpected response"
     blockers = readiness.get("blockers", [])
     if not isinstance(blockers, list):
-        return [], "report-readiness blockers have an unexpected shape"
-    target: list[dict] = []
-    for blocker in blockers:
-        if not isinstance(blocker, dict):
-            continue
-        slugs = blocker.get("slugs", [])
-        matches_many = isinstance(slugs, list) and slug in {str(item) for item in slugs}
-        if str(blocker.get("slug") or blocker.get("finding_slug") or "") == slug or matches_many:
-            target.append(blocker)
-    return target, ""
+        return [], [], "report-readiness blockers have an unexpected shape"
+    target = [item for item in blockers if isinstance(item, dict) and _names_slug(item, slug)]
+    raw_advisories = readiness.get("advisories", [])
+    if not isinstance(raw_advisories, list):
+        # Advisories never refuse a render, so an unreadable list is named
+        # rather than turned into a blocker.
+        return target, [
+            "report-readiness advisories have an unexpected shape, so this render "
+            "carries no severity/CVSS advisory; read them with `vigil assess fetch "
+            "report-readiness`."
+        ], ""
+    advisories = [
+        f"{item['kind']}: {item.get('detail', '')}".rstrip(": ")
+        for item in raw_advisories
+        if isinstance(item, dict)
+        and item.get("kind") in _SUBMISSION_READINESS_ADVISORY_KINDS
+        and _names_slug(item, slug)
+    ]
+    return target, advisories, ""
 
 
 def _evaluate(
@@ -584,13 +703,17 @@ def _linked_command_runs(client, slug: str) -> list[dict]:
     runs the targeted ``command-run list`` search itself and links the exact
     reproducing run; this command only surfaces what was explicitly linked.
 
+    The route filters to this finding's links in its query, and the listing is
+    read to completion: it serves bounded pages newest first, so a single read
+    would drop this finding's older links once it holds more than a page.
+
     These runs are REFERENCE, not final Evidence — they are handed to the
     report-writer (context JSON ``linked_command_runs`` + the "Linked command runs"
     entry under the single OPERATOR DETAILS section) to author the Evidence section
     from, never auto-formatted into it.
     """
     try:
-        links = client.get("finding-links")
+        links = client.get_all_pages(f"finding-links?{urlencode({'finding_slug': slug})}")
     except AssessError as exc:
         print(f"WARN export submission: could not load finding-links: {exc}", file=sys.stderr)
         return []
@@ -1025,7 +1148,7 @@ def _operator_details_block(ctx: _Render) -> list[str]:
 
     ONE section consolidates everything the operator never pastes and the
     report-writer authors the body FROM: the finding metadata to weave in, any
-    internal-identifier hygiene warnings to strip, prose advisories to weigh, the
+    internal-identifier hygiene warnings to strip, advisories to weigh, the
     structured proof (``poc_*`` / ``evidence_ref``) to preserve in Evidence, and the
     explicitly linked command runs to author Evidence from. It renders in BOTH
     draft and final (it sits below the never-paste line) so the structure never
@@ -1374,6 +1497,7 @@ def run(args) -> None:
             or args.vrt_category
             or args.weakness
             or args.body or args.guidance or args.prepare
+            or args.agent_id
         )
         if incompatible:
             raise AssessError(
@@ -1553,8 +1677,6 @@ def run(args) -> None:
     # scope.json to ``{}`` without raising), so a submission renders whether or not
     # the engagement configured attribution headers.
     _, required_headers = rate_caps_for_dir(engagement_dir)
-    authored_body, body_source = _capture_input(engagement_dir, args.body, "authored outgoing body")
-    guidance, guidance_source = _capture_input(engagement_dir, args.guidance, "recipient guidance")
 
     if args.output_dir:
         out_dir = Path(args.output_dir)
@@ -1565,6 +1687,15 @@ def run(args) -> None:
     submission_md = out_dir / "submission.md"
     external_body_md = out_dir / "submission-body.md"
     context_json = out_dir / "submission-context.json"
+    last_render = _last_render(context_json)
+    authored_body, body_source = _capture_reused_input(
+        engagement_dir, args.body, last_render.get("body_source"),
+        label="authored outgoing body", flag="--body",
+    )
+    guidance, guidance_source = _capture_reused_input(
+        engagement_dir, args.guidance, last_render.get("recipient_guidance"),
+        label="recipient guidance", flag="--guidance",
+    )
     for source in (body_source, guidance_source):
         if source is None:
             continue
@@ -1576,16 +1707,6 @@ def run(args) -> None:
                 raise AssessError("export submission: capture input aliases a workspace output; use an independent authored source file")
     submission_rel = _engagement_relative(submission_md.resolve(strict=False), engagement_dir)
     context_rel = _engagement_relative(context_json.resolve(strict=False), engagement_dir)
-    if context_json.is_file():
-        try:
-            previous_context = json.loads(context_json.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            previous_context = {}
-        if isinstance(previous_context, dict):
-            if previous_context.get("body_source") and not args.body:
-                raise AssessError("export submission: captured recipient body exists; repeat --body to preserve the selected outgoing body")
-            if previous_context.get("recipient_guidance") and not args.guidance:
-                raise AssessError("export submission: captured recipient guidance exists; repeat --guidance to preserve the selected reporting profile")
     if not draft and submission_rel is None:
         raise AssessError(
             "export submission: final output must be inside the engagement directory "
@@ -1593,6 +1714,9 @@ def run(args) -> None:
         )
 
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        producer_agent_id = resolve_report_writer(
+            client, args.agent_id, operation="export submission", finding_slug=slug,
+        )
         finding = client.get(f"findings/{slug}")
         if not isinstance(finding, dict):
             raise AssessError(f"export submission: unexpected response fetching finding {slug!r}")
@@ -1609,7 +1733,9 @@ def run(args) -> None:
             engagement_dir,
             cfg.engagement_key,
         )
-        readiness_blockers, readiness_error = _target_readiness_blockers(client, slug)
+        readiness_blockers, readiness_advisories, readiness_error = _target_readiness(
+            client, slug
+        )
         resolved = _evaluate(
             finding,
             platform,
@@ -1664,14 +1790,14 @@ def run(args) -> None:
         hygiene_warnings = _hygiene_warnings(
             authored_body.decode("utf-8") if authored_body is not None else scan_markdown, slug, internal_ids, engagement_dir
         )
-        # Prose advisories are surfaced, never gated on: only leaks fail closed.
-        advisories = title_advisories(resolved["title"])
-        # Length/shape advice about the body, measured on the SAME scan render the
-        # hygiene gate reads (no warnings or advisories woven in yet, so nothing
-        # measures the tool's own text) and confined to the pasteable body, so the
-        # never-paste OPERATOR DETAILS proof is never counted as submission prose.
+        # Advisories are surfaced, never gated on: only leaks fail closed.
+        advisories = list(readiness_advisories)
+        # Step-count and evidence-length advice about the body, measured on the SAME
+        # scan render the hygiene gate reads (no warnings or advisories woven in yet,
+        # so nothing measures the tool's own text) and confined to the pasteable
+        # body, so the never-paste OPERATOR DETAILS proof is never counted.
         if authored_body is None:
-            advisories += prose_advisories(scan_markdown, steps=resolved["steps"])
+            advisories += shape_advisories(scan_markdown, steps=resolved["steps"])
         # These local advisories help repair legacy findings and transient fetch
         # failures before the backend final-publication gate checks currentness.
         for entry in repro_unresolved:
@@ -1730,10 +1856,11 @@ def run(args) -> None:
 
         # Check only after all final-mode gates so a blocked render never leaves
         # a partial output or obscures its actionable diagnostics.
-        if submission_md.exists() and not args.overwrite:
-            raise AssessError(
-                f"export submission: {submission_rel or submission_md} "
-                "already exists; pass --overwrite to replace it."
+        if not args.overwrite:
+            _require_unedited_outputs(
+                last_render,
+                ((submission_md, "submission_sha256"), (external_body_md, "external_body_sha256")),
+                engagement_dir,
             )
 
         render_ctx = dataclasses.replace(
@@ -1819,7 +1946,9 @@ def run(args) -> None:
                             "path": submission_rel,
                             "kind": "submission",
                             "media_type": "text/markdown",
-                            "producer_agent_id": None,
+                            # The rendering dispatch, so submission QC can
+                            # refuse a reviewer who wrote any version.
+                            "producer_agent_id": producer_agent_id,
                             "producer_agent_role": None,
                             "producer_command_run_id": None,
                             "related_finding_slug": slug,

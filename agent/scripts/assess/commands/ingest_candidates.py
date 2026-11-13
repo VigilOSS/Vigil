@@ -8,7 +8,12 @@ from pathlib import Path
 from urllib.parse import urlparse
 
 from assess.lib.auth import auth_active_context
-from assess.lib.bulk_ingest import DEFAULT_BULK_WRITE_SIZE, post_request_observations_bulk
+from assess.lib.bulk_ingest import (
+    DEFAULT_BULK_WRITE_SIZE,
+    bounded_queue_key,
+    post_request_observations_bulk,
+    post_work_items_bulk,
+)
 from assess.lib.candidate_records import candidate_metadata, candidate_type, json_text, signal_tokens, surface_refs
 from assess.lib.classify_buckets import CLASSIFIER_VERSION, INERT_TYPES, tagged_terminal_reason
 from assess.lib.client import AssessmentClient
@@ -76,14 +81,21 @@ def run(args) -> None:
         pending_direct: list[dict] = []
 
         def _flush_direct() -> None:
+            nonlocal skipped_backend
             if not pending_direct:
                 return
             items = list(pending_direct)
             pending_direct.clear()
-            for start in range(0, len(items), DEFAULT_BULK_WRITE_SIZE):
-                chunk = items[start:start + DEFAULT_BULK_WRITE_SIZE]
-                if chunk:
-                    client.post("work-items/bulk", {"items": chunk})
+            outcomes = post_work_items_bulk(client, items, warn_prefix="ingest-candidates")
+            for item, outcome in zip(items, outcomes, strict=True):
+                if outcome is None:
+                    continue
+                skipped_backend += 1
+                print(
+                    f"WARN ingest-candidates: backend rejected {item['url']}: "
+                    f"{outcome}; skipping this candidate",
+                    file=sys.stderr,
+                )
 
         def _flush_observations() -> None:
             nonlocal count, skipped_backend, links_created, links_skipped
@@ -218,7 +230,7 @@ def run(args) -> None:
                             file=sys.stderr,
                         )
                     pending_direct.append({
-                        "queue_key": f"skipped:out-of-scope:{cand_host}:{url}",
+                        "queue_key": bounded_queue_key(f"skipped:out-of-scope:{cand_host}:{url}"),
                         "method": method,
                         "url": url,
                         "url_path": url_path,

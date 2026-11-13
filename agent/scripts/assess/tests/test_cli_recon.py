@@ -667,15 +667,17 @@ def test_run_web_feeds_scope_filtered_hosts(monkeypatch, tmp_path):
 
 
 def test_run_js_is_best_effort_and_writes_sentinel(monkeypatch, tmp_path):
-    # _run_js must never fail the pipeline even when js_mining.run raises, and it
-    # always writes the checkpoint sentinel.
+    # _run_js must never stop the pipeline even when js_mining.run raises: the
+    # failure is recorded as a non-fatal outcome, and it always writes the
+    # checkpoint sentinel.
     from assess.commands import js_mining
 
     def boom(ns):
         raise RuntimeError("jsluice exploded")
 
     monkeypatch.setattr(js_mining, "run", boom)
-    rc = recon._run_js(_args(tmp_path), _cfg(tmp_path))
-    assert rc == 0
+    outcome = recon._run_js(_args(tmp_path), _cfg(tmp_path))
+    assert outcome.fatal is False
+    assert outcome.rc != 0
     sentinel = tmp_path / "scans" / "web-discovery" / "js-mining" / "js-mining.done"
     assert sentinel.is_file()

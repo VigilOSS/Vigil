@@ -12,8 +12,8 @@ submission is judged by an agent that cannot look up how the submission was
 produced; its entire admissible input is the packet the operator exports. A
 `--skills` name on that dispatch does not add context the packet lacks, it adds
 a filesystem foothold, and it points that foothold at the operator's half of the
-gate — the Pass-1 QA pass, the verdict mapping, and the recording commands the
-blind pass exists to withhold.
+gate — the submission QC review, the verdict mapping, and the recording commands
+the blind pass exists to withhold.
 
 The invariant is structural over two executable facts: which roster roles declare
 no standing load, and which `--role` / `--skills` pairs the installed prompt

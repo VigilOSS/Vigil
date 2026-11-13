@@ -18,10 +18,28 @@ _OPTION_LABEL = re.compile(r"^\*\*(.+?)\*\*")
 # paid again on every dispatch. Keeping the two categories apart stops a session-cost
 # figure from being compared against a per-dispatch budget.
 _OPERATOR_CORE_GLOB = "operator-core*.md"
+# An operator core names what it loads in plain prose: a standing list read once at
+# session start, and trigger-loaded files named beside their trigger (a lead-in line
+# that mentions the trigger followed by bullets, or a Trigger/Load table, or either
+# under a heading that mentions triggers). The census reads those shapes
+# structurally so a trigger-loaded file is visible beside the session figure
+# without being billed as standing load.
+_STANDING_LEAD_IN = re.compile(
+    r"^(?:(?:Always-active|Standing)\s+(?:rules|references)|Primary\s+methodology\s+references?)\b[^:]*:$",
+    re.IGNORECASE,
+)
+_TRIGGER_WORD = re.compile(r"\btrigger", re.IGNORECASE)
+_HEADING = re.compile(r"^#{1,6}\s+(.*)$")
+_TRIGGER_SEPARATOR = re.compile(r"^\s*(?:[\u2014\u2013:-]|--)\s*")
 # Alternative groups multiply combinatorially. Today's prompts carry at most one
 # group per role; beyond this cap the census reports the groups but declines to
 # enumerate every track rather than emitting an unreadable variant list.
 _MAX_VARIANTS = 16
+# A path into an operator core. Specialists never load one (`agent/shared-
+# specialist-core.md` "Specialist Context Isolation"), so a file a role loads
+# that points into one names a rule its reader cannot follow. A structural path
+# check: the bare file name, with or without the `agent/` prefix.
+_OPERATOR_CORE_PATH = re.compile(r"(?<![\w./-])(?:agent/)?(operator-core(?:-[a-z]+)?\.md)\b")
 
 
 def _lines_with_offsets(raw: bytes) -> list[tuple[int, int, str]]:
@@ -160,12 +178,146 @@ def _resolve_reference(
     return {"path": referenced, "present": True, "bytes": len(resolved.read_bytes())}
 
 
+def _lazy_references(
+    prompt_root: Path, lazy_text: str
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Trigger-loaded files a role names under LOAD-ON-FIRST-USE.
+
+    Lazy entries also name globs, directories, and skills chosen at run time, so only
+    pointers that resolve to a regular file are measured; they are reported apart
+    from the standing load because a dispatch pays for them only when the trigger fires.
+    Every other pointer is returned by path so the output can say what it left out.
+    """
+    rows: list[dict[str, Any]] = []
+    unmeasured: list[str] = []
+    for referenced in _ordered_unique(_AGENT_PATH.findall(lazy_text)):
+        resolved = prompt_root / referenced.removeprefix("agent/")
+        if resolved.is_file():
+            rows.append({"path": referenced, "bytes": len(resolved.read_bytes())})
+        else:
+            unmeasured.append(referenced)
+    return rows, unmeasured
+
+
+def _table_cells(line: str) -> list[str]:
+    return [cell.strip() for cell in line.strip().strip("|").split("|")]
+
+
+def _core_rule_lists(
+    prompt_root: Path, text: str, advisories: list[str]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    standing: list[dict[str, Any]] = []
+    triggered: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    section_triggered = False
+    lead_in: list[dict[str, Any]] | None = None
+    trigger_column: int | None = None
+    open_row: dict[str, Any] | None = None
+
+    def add(target: list[dict[str, Any]], referenced: str, trigger: str | None) -> dict[str, Any] | None:
+        if referenced in seen:
+            return None
+        seen.add(referenced)
+        resolved = prompt_root / referenced.removeprefix("agent/")
+        present = resolved.is_file()
+        row: dict[str, Any] = {
+            "path": referenced,
+            "present": present,
+            "bytes": len(resolved.read_bytes()) if present else None,
+        }
+        if target is triggered:
+            row["trigger"] = trigger or ""
+        if not present:
+            kind = "trigger-loaded" if target is triggered else "standing"
+            advisories.append(f"{kind} reference is not a regular file: {referenced}")
+        target.append(row)
+        return row
+
+    for line in text.splitlines():
+        stripped = line.strip()
+        heading = _HEADING.match(stripped)
+        if heading is not None:
+            section_triggered = bool(_TRIGGER_WORD.search(heading.group(1)))
+            lead_in, trigger_column, open_row = None, None, None
+            continue
+        if not stripped:
+            open_row = None
+            continue
+        bare = stripped.strip("*_ ")
+        if not stripped.startswith(("-", "|")) and not line[:1].isspace():
+            open_row, trigger_column = None, None
+            if _STANDING_LEAD_IN.match(bare):
+                lead_in = standing
+            elif bare.endswith(":") and _TRIGGER_WORD.search(bare):
+                lead_in = triggered
+            else:
+                lead_in = None
+            continue
+        target = lead_in if lead_in is not None else (triggered if section_triggered else None)
+        if target is None:
+            continue
+        if stripped.startswith("|"):
+            cells = _table_cells(stripped)
+            if trigger_column is None:
+                lowered = [cell.lower() for cell in cells]
+                if "trigger" in lowered:
+                    trigger_column = lowered.index("trigger")
+                continue
+            if all(set(cell) <= set("-: ") for cell in cells):
+                continue
+            trigger = cells[trigger_column] if trigger_column < len(cells) else ""
+            for index, cell in enumerate(cells):
+                if index == trigger_column:
+                    continue
+                for referenced in _AGENT_PATH.findall(cell):
+                    add(target, referenced, trigger)
+            continue
+        bullet = _BULLET.match(line)
+        if bullet is not None and len(bullet.group(1).expandtabs(4)) == 0:
+            open_row = None
+            match = _AGENT_PATH.search(bullet.group(2))
+            if match is None:
+                continue
+            trailing = bullet.group(2)[match.end():]
+            open_row = add(
+                target,
+                match.group(1),
+                _TRIGGER_SEPARATOR.sub("", trailing, count=1).strip(),
+            )
+            continue
+        if open_row is not None and "trigger" in open_row:
+            # An indented continuation of the bullet above: it extends that entry's
+            # trigger text; paths it mentions are prose, not further loads.
+            open_row["trigger"] = " ".join(f"{open_row['trigger']} {stripped}".split())
+    return standing, triggered
+
+
 def _reference_bytes(references: list[dict[str, Any]]) -> int:
     return sum(
         int(reference["bytes"])
         for reference in references
         if reference["bytes"] is not None
     )
+
+
+def _operator_core_citations(prompt_root: Path, paths: list[str]) -> list[str]:
+    """One advisory per line of a specialist-loaded file that cites an operator core."""
+    advisories: list[str] = []
+    for referenced in _ordered_unique(paths):
+        resolved = prompt_root / referenced.removeprefix("agent/")
+        if not resolved.is_file():
+            continue
+        lines = resolved.read_text(encoding="utf-8", errors="replace").splitlines()
+        for number, line in enumerate(lines, start=1):
+            cores = _ordered_unique(_OPERATOR_CORE_PATH.findall(line))
+            if cores:
+                advisories.append(
+                    f"specialist_cites_operator_core: {referenced}:{number} cites "
+                    f"{', '.join(f'agent/{core}' for core in cores)}; specialists do not "
+                    "load operator cores, so point at a specialist-loaded file or drop "
+                    "the pointer"
+                )
+    return advisories
 
 
 def census_role(prompt_root: Path, role_path: Path, read_bytes: int | None) -> dict[str, Any]:
@@ -202,6 +354,12 @@ def census_role(prompt_root: Path, role_path: Path, read_bytes: int | None) -> d
         for referenced in _ordered_unique(_AGENT_PATH.findall(mandatory_text))
         if referenced not in exclusive
     ]
+    lazy_text = ""
+    if lazy_start is not None and load_end is not None:
+        lazy_text = raw[lazy_start:load_end].decode("utf-8")
+    standing_paths = {reference["path"] for reference in references} | exclusive
+    lazy_rows, unmeasured_lazy = _lazy_references(prompt_root, lazy_text)
+    trigger_loaded = [row for row in lazy_rows if row["path"] not in standing_paths]
 
     expected = {
         "load_first": load_start is not None,
@@ -214,6 +372,18 @@ def census_role(prompt_root: Path, role_path: Path, read_bytes: int | None) -> d
     visibility = _visibility(read_bytes, load_start, load_end)
     if visibility in {"not_reached", "partial"}:
         advisories.append(f"reported read is {visibility} for the Load First section")
+
+    advisories.extend(_operator_core_citations(prompt_root, [
+        f"agent/agents/{role_path.name}",
+        *(reference["path"] for reference in references),
+        *(
+            reference["path"]
+            for group in groups
+            for option in group["options"]
+            for reference in option["references"]
+        ),
+        *(row["path"] for row in trigger_loaded),
+    ]))
 
     referenced_bytes = _reference_bytes(references)
     base_bytes = len(raw) + referenced_bytes
@@ -261,25 +431,42 @@ def census_role(prompt_root: Path, role_path: Path, read_bytes: int | None) -> d
         # the per-track variants below are the only real dispatch costs.
         "approximate_standing_bytes": None if groups else base_bytes,
         "standing_byte_variants": variants,
+        "trigger_loaded_references": trigger_loaded,
+        "approximate_trigger_loaded_bytes": sum(row["bytes"] for row in trigger_loaded),
+        # Globs, directories, missing files, and run-time skill choices: named here
+        # because they are outside the trigger-loaded byte figure.
+        "unmeasured_trigger_pointers": unmeasured_lazy,
         "read_bytes": read_bytes,
         "read_visibility": visibility,
         "advisories": advisories,
     }
 
 
-def census_operator_core(core_path: Path) -> dict[str, Any]:
-    """Measure one operator-doctrine file.
+def census_operator_core(prompt_root: Path, core_path: Path) -> dict[str, Any]:
+    """Measure one operator-doctrine file and the rules it names.
 
-    Reported as size only. Operator cores have no MANDATORY Load-First block to
-    resolve and no per-dispatch multiplier, and this command does not own their
-    budget — inventing one here would create governance the ruleset never set.
+    The session standing figure is the core plus its standing rules, paid once per
+    operator session; trigger-loaded rules are listed with their triggers and summed
+    only into the every-trigger-fires ceiling. Both figures are advisory: this
+    command does not own an operator budget, and inventing one here would create
+    governance the ruleset never set.
     """
     raw = core_path.read_bytes()
+    advisories: list[str] = []
+    standing, triggered = _core_rule_lists(
+        prompt_root, raw.decode("utf-8"), advisories
+    )
+    session = len(raw) + _reference_bytes(standing)
     return {
         "core": core_path.stem,
         "path": f"agent/{core_path.name}",
         "bytes": len(raw),
         "lines": _line_count(raw),
+        "standing_references": standing,
+        "trigger_loaded_references": triggered,
+        "approximate_session_standing_bytes": session,
+        "approximate_session_ceiling_bytes": session + _reference_bytes(triggered),
+        "advisories": advisories,
     }
 
 
@@ -292,7 +479,7 @@ def collect_prompt_census(prompt_root: Path, read_bytes: int | None = None) -> d
         for role_path in sorted(roles_dir.glob("*.md"))
     ]
     cores = [
-        census_operator_core(core_path)
+        census_operator_core(prompt_root, core_path)
         for core_path in sorted(prompt_root.glob(_OPERATOR_CORE_GLOB))
         if core_path.is_file()
     ]
@@ -302,5 +489,5 @@ def collect_prompt_census(prompt_root: Path, read_bytes: int | None = None) -> d
         "read_bytes": read_bytes,
         "operator_cores": cores,
         "roles": roles,
-        "advisory_count": sum(len(role["advisories"]) for role in roles),
+        "advisory_count": sum(len(row["advisories"]) for row in (*roles, *cores)),
     }

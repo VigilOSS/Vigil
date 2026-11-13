@@ -4,8 +4,7 @@ Three consecutive waves shipped a brief quoting a finding total that was already
 wrong when the packet was rendered (269 recorded, 265 stated). Specialists are
 told to dedupe against "the N existing findings", so a stale N quietly
 understates what they must check. The packet renderer therefore interpolates the
-live total, and an authored count that disagrees with it is called out at the
-keyboard.
+live total and states that it supersedes any count in the authored prior state.
 """
 from __future__ import annotations
 
@@ -61,28 +60,6 @@ def test_packet_quotes_the_live_finding_total_from_the_backend(tmp_path: Path):
     assert prompt.index("269") < prompt.index("--- END PERSISTED PRIOR-STATE DATA ---")
 
 
-def test_a_stale_authored_finding_count_is_flagged_against_the_live_total(capsys):
-    agent._packet_advisories(
-        {"agent_id": "hunter-1", "agent_role": "code-vuln-hunter", "task": "review auth"},
-        _context(prior_state="Dedupe against the 265 existing findings before recording."),
-        "rendered",
-        finding_total=269,
-    )
-    err = capsys.readouterr().err
-    assert "265" in err
-    assert "269" in err
-
-
-def test_a_current_authored_finding_count_is_not_flagged(capsys):
-    agent._packet_advisories(
-        {"agent_id": "hunter-1", "agent_role": "code-vuln-hunter", "task": "review auth"},
-        _context(prior_state="Dedupe against the 269 existing findings before recording."),
-        "rendered",
-        finding_total=269,
-    )
-    assert "existing findings" not in capsys.readouterr().err
-
-
 def test_resume_brief_states_the_live_finding_total(capsys):
     brief = {
         "finding_counts": {
@@ -116,10 +93,8 @@ def test_the_ledger_count_covers_more_than_one_listing_page(tmp_path):
     assert client.endpoints == ["findings/count"]
 
 
-def test_the_rendered_count_is_the_one_the_advisory_compares_against(
-    monkeypatch, tmp_path, capsys
-):
-    """One read, one number: the packet and the warning cannot disagree."""
+def test_an_authored_count_is_superseded_by_the_rendered_live_total(monkeypatch, tmp_path):
+    """The started packet quotes the live total after the authored prior state."""
 
     class _Recording(_LedgerClient):
         def __init__(self) -> None:
@@ -159,6 +134,8 @@ def test_the_rendered_count_is_the_one_the_advisory_compares_against(
 
     agent._start(args)
 
-    err = capsys.readouterr().err
-    assert "265" in err and "269" in err
-    assert "269" in recording.writes[0]["prompt_packet"]["rendered_prompt"]
+    rendered = recording.writes[0]["prompt_packet"]["rendered_prompt"]
+    authored = rendered.index("265 existing findings")
+    live = rendered.index("269 recorded finding(s)")
+    assert authored < live
+    assert "superseded by this one" in rendered[live:]

@@ -116,9 +116,9 @@ def test_registration_kinds_do_not_collide_with_semantic_surface_types():
 
 
 def test_contract_documents_the_worked_framework_mappings():
-    from assess.lib.contracts import render_contract
+    from assess.lib.contracts import render_contract_notes
 
-    rendered = render_contract("record-surface")
+    rendered = render_contract_notes("record-surface")
 
     for kind, worked_mapping in FRAMEWORK_REGISTRATION_KINDS.items():
         assert kind in rendered

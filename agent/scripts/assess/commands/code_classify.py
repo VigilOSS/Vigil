@@ -36,6 +36,7 @@ _ALLOWED_CLASSIFICATION_KEYS = frozenset(
         "classification",
         "role",
         "slot_types",
+        "context_tags",
         "language",
         "analysis_priority",
         "skip_reason",
@@ -47,6 +48,12 @@ _VALID_CLASSIFICATIONS = frozenset(
 )
 _VALID_SLOT_TYPES = frozenset(
     _CLASSIFICATION_SCHEMA["properties"]["slot_types"]["items"]["enum"]
+)
+# The tag vocabulary is the backend's (`CodeContextTag`), generated into the
+# schema; `generate_agent_schemas.py --check` holds the two equal, so the CLI
+# refuses exactly what the backend would.
+_VALID_CONTEXT_TAGS = frozenset(
+    _CLASSIFICATION_SCHEMA["properties"]["context_tags"]["items"]["enum"]
 )
 # The skip vocabulary is the backend's. Prefer the generated schema when it
 # declares the enum, and otherwise the one agent-side mirror both skip doors
@@ -227,7 +234,10 @@ def _validate_classification_payload(payload: list[dict]) -> list[str]:
             )
             continue
 
-        slot_types = item.get("slot_types", [])
+        # An omitted (or null) slot_types keeps the file's stored ones on the
+        # backend; `_slot_types_kept_errors` checks there are some to keep.
+        slot_types = item.get("slot_types")
+        slot_types_named = slot_types is not None
         if slot_types is None:
             slot_types = []
         if not isinstance(slot_types, list):
@@ -245,8 +255,24 @@ def _validate_classification_payload(payload: list[dict]) -> list[str]:
                 f"Allowed values: {', '.join(sorted(_VALID_SLOT_TYPES))}"
             )
 
-        if classification in {"critical", "high"} and not slot_types:
+        if classification in {"critical", "high"} and slot_types_named and not slot_types:
             errors.append(f"Item {i} slot_types is required for {classification} classifications")
+
+        context_tags = item.get("context_tags")
+        if context_tags is not None:
+            if not isinstance(context_tags, list):
+                errors.append(f"Item {i} context_tags must be a JSON array")
+            else:
+                invalid_tags = [
+                    tag for tag in context_tags
+                    if not isinstance(tag, str) or tag not in _VALID_CONTEXT_TAGS
+                ]
+                if invalid_tags:
+                    errors.append(
+                        f"Item {i} context_tags contains invalid values: "
+                        f"{', '.join(repr(tag) for tag in invalid_tags)}. "
+                        f"Allowed values: {', '.join(sorted(_VALID_CONTEXT_TAGS))}"
+                    )
 
         errors.extend(_skip_reason_errors(i, item, classification))
 
@@ -289,10 +315,21 @@ def run(args) -> None:
         sys.exit(1)
 
     cfg = load_config(args.engagement_dir)
+    code_files: list[dict] | None = None
     if any(item.get('file_id') in (None, "") for item in payload):
-        normalized_payload = _normalize_classifications(payload, _fetch_code_files(cfg))
+        code_files = _fetch_code_files(cfg)
+        normalized_payload = _normalize_classifications(payload, code_files)
     else:
         normalized_payload = _strip_local_fields(payload)
+    if any(_keeps_stored_slot_types(item) for item in normalized_payload):
+        kept_errors = _slot_types_kept_errors(
+            normalized_payload,
+            code_files if code_files is not None else _fetch_code_files(cfg),
+        )
+        if kept_errors:
+            for error in kept_errors:
+                print(error, file=sys.stderr)
+            sys.exit(1)
 
     seen_file_ids: set[int] = set()
     for index, item in enumerate(normalized_payload):
@@ -314,6 +351,8 @@ def run(args) -> None:
     committed_chunks = 0
     invalidated_repo_ids: list[int] = []
     language_changes: list[dict] = []
+    derived: list[dict] = []
+    obligation_changes: list[dict] = []
     chunk_starts = range(0, len(normalized_payload), DEFAULT_BULK_WRITE_SIZE)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
         for start in chunk_starts:
@@ -371,6 +410,14 @@ def run(args) -> None:
                 if repo_id not in invalidated_repo_ids:
                     invalidated_repo_ids.append(repo_id)
             language_changes.extend(changes)
+            raw_derived = result.get('derived')
+            if isinstance(raw_derived, list):
+                derived.extend(entry for entry in raw_derived if isinstance(entry, dict))
+            raw_changes = result.get('obligation_changes')
+            if isinstance(raw_changes, list):
+                obligation_changes.extend(
+                    change for change in raw_changes if isinstance(change, dict)
+                )
 
     tier_counts = Counter(
         item.get('classification', 'unknown') for item in normalized_payload
@@ -381,6 +428,8 @@ def run(args) -> None:
     print("\nBreakdown by tier:")
     for tier, count in sorted(tier_counts.items()):
         print(f"  {tier}: {count}")
+    _print_derived(derived)
+    _print_obligation_changes(obligation_changes, chunks=committed_chunks)
 
     _warn_on_structural_invalidation(
         {
@@ -388,6 +437,182 @@ def run(args) -> None:
             "language_changes": language_changes,
         }
     )
+
+
+def _keeps_stored_slot_types(item: dict) -> bool:
+    """A critical/high item that leaves slot_types to the file's stored ones."""
+    return item.get("classification") in {"critical", "high"} and item.get("slot_types") is None
+
+
+def _slot_types_kept_errors(payload: list[dict], code_files: list[dict]) -> list[str]:
+    """Refuse, before any chunk is sent, a critical/high item with no slot types to keep.
+
+    The backend keeps the stored slot types when an item omits them and
+    refuses the chunk when there are none, so the same check here keeps a
+    first classification from failing a pass partway.
+    """
+    stored = {
+        int(row["id"]): row.get("slot_types") or []
+        for row in code_files
+        if isinstance(row, dict) and type(row.get("id")) is int
+    }
+    return [
+        f"Item {index} slot_types is required for {item['classification']} "
+        f"classifications: file_id {item.get('file_id')} records none to keep"
+        for index, item in enumerate(payload)
+        if _keeps_stored_slot_types(item) and not stored.get(item.get("file_id"))
+    ]
+
+
+_KEPT_FIELD_HINTS = {
+    "role": "",
+    "slot_types": " (send \"slot_types\": [] only on a tier that needs none)",
+    "context_tags": " (send \"context_tags\": [] to record that none apply)",
+}
+
+
+def _print_derived(derived: list[dict]) -> None:
+    """Name every value the backend stored because a classification left it out.
+
+    A re-classification that omits `role`, `slot_types` or `context_tags`
+    keeps what the file recorded earlier, so the file still owes what they
+    name. Every file is listed, grouped by field.
+    """
+    for field, hint in _KEPT_FIELD_HINTS.items():
+        kept = [entry for entry in derived if entry.get('field') == field]
+        if not kept:
+            continue
+        print(
+            f"\nKept recorded {field} on {len(kept)} file(s) whose classification "
+            f"named none{hint}:"
+        )
+        for entry in kept:
+            value = entry.get('value')
+            shown = (
+                ', '.join(str(item) for item in value)
+                if isinstance(value, list)
+                else str(value or '')
+            )
+            print(
+                f"  {entry.get('file_path', entry.get('file_id', '?'))}: "
+                f"{shown or '(none)'}"
+            )
+
+
+# Files whose obligation change is printed in full; the rest are counted and
+# the audit read below lists every one.
+_OBLIGATION_CHANGE_SAMPLE = 20
+_OBLIGATION_CHANGE_FULL_LIST = (
+    "vigil assess fetch 'activity-entries?q=code-record%20classify&limit={limit}' "
+    "(each classify chunk's audit entry carries metadata.obligation_changes)"
+)
+_RETIRED_TRIGGERS_LIST = (
+    "vigil assess code-dispatch list-triggers --origin depth_floor --include-superseded"
+)
+
+
+def _obligation_change_line(change: dict) -> str:
+    """One file's change: tier, families added and removed, triggers raised and retired."""
+    parts: list[str] = []
+    if change.get('previous_classification') is not None:
+        parts.append(
+            f"tier {change.get('previous_classification')} -> {change.get('classification')}"
+        )
+    for key, label in (
+        ('required_families_added', 'required +'),
+        ('required_families_removed', 'required -'),
+        ('optional_families_added', 'optional +'),
+    ):
+        families = change.get(key)
+        if isinstance(families, list) and families:
+            parts.append(f"{label}{', '.join(str(family) for family in families)}")
+    floor = change.get('depth_floor_triggers')
+    raised = floor.get('raised') if isinstance(floor, dict) else None
+    if isinstance(raised, list) and raised:
+        parts.append(
+            "raised triggers "
+            + ", ".join(
+                f"{entry.get('trigger_id')} ({entry.get('family')})"
+                for entry in raised
+                if isinstance(entry, dict)
+            )
+        )
+    retired = change.get('depth_floor_triggers_retired')
+    if isinstance(retired, list) and retired:
+        reasons = change.get('depth_floor_triggers_retired_reasons')
+        reasons = reasons if isinstance(reasons, dict) else {}
+        parts.append(
+            "retired triggers "
+            + ", ".join(
+                f"{trigger_id}" + (
+                    f" ({reasons[str(trigger_id)]})" if str(trigger_id) in reasons else ""
+                )
+                for trigger_id in retired
+            )
+        )
+    withdrawn = change.get('requeue_withdrawn')
+    if isinstance(withdrawn, list) and withdrawn:
+        parts.append(
+            "withdrew directed attempt(s) "
+            + ", ".join(
+                str(entry.get('queue_item_id')) for entry in withdrawn if isinstance(entry, dict)
+            )
+        )
+    kept = change.get('requeue_kept')
+    if isinstance(kept, list) and kept:
+        parts.append(
+            "kept directed attempt(s) "
+            + "; ".join(
+                f"{entry.get('queue_item_id')}: {entry.get('reason')}"
+                for entry in kept
+                if isinstance(entry, dict)
+            )
+        )
+    return (
+        f"  {change.get('file_path', change.get('file_id', '?'))}: "
+        + ("; ".join(parts) or "obligations recomputed")
+    )
+
+
+def _print_obligation_changes(changes: list[dict], *, chunks: int) -> None:
+    """Say what each tag or tier change moved, bounded for a large pass.
+
+    A tag or tier change reopens no review; it raises depth_floor triggers for
+    families the review on record left below the floor, retires the ones no
+    longer owed and withdraws a directed attempt left with nothing to carry.
+    Up to `_OBLIGATION_CHANGE_SAMPLE` files print in full; the rest are counted
+    and the audit read that lists every one is named.
+    """
+    if not changes:
+        return
+    def count(key: str) -> int:
+        return sum(
+            len(change.get(key) or [])
+            for change in changes
+            if isinstance(change.get(key) or [], list)
+        )
+    raised = sum(
+        len((change.get('depth_floor_triggers') or {}).get('raised') or [])
+        for change in changes
+        if isinstance(change.get('depth_floor_triggers') or {}, dict)
+    )
+    print(
+        f"\nObligations recomputed on {len(changes)} file(s) (no review reopened): "
+        f"{count('required_families_added')} required family addition(s), "
+        f"{count('required_families_removed')} removal(s), {raised} depth_floor "
+        f"trigger(s) raised, {count('depth_floor_triggers_retired')} retired, "
+        f"{count('requeue_withdrawn')} directed attempt(s) withdrawn, "
+        f"{count('requeue_kept')} kept."
+    )
+    for change in changes[:_OBLIGATION_CHANGE_SAMPLE]:
+        print(_obligation_change_line(change))
+    omitted = len(changes) - _OBLIGATION_CHANGE_SAMPLE
+    if omitted > 0:
+        print(
+            f"  ... {omitted} more file(s) not shown; full list: "
+            + _OBLIGATION_CHANGE_FULL_LIST.format(limit=max(1, chunks))
+        )
+        print(f"  retired triggers stay readable: {_RETIRED_TRIGGERS_LIST}")
 
 
 def _report_partial_commit(

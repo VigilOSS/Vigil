@@ -138,6 +138,7 @@ from .kali_tool_naming import (
     _split_inner_pipeline_stages,
 )
 from .execution_recency import emit_foreign_lane_recency
+from . import run_notices
 
 # Test-mode override: when set, skips both audit POST and `docker exec` so
 # argparse round-trip tests don't require a live backend or container. The
@@ -1599,10 +1600,16 @@ def _verify_required_headers_in_script(
     script = interpreter_script_argv(cmd)
     header_names = ", ".join(sorted(headers))
     if not script:
-        print(
+        repeat_note = (
+            " Not repeated for this tool for the rest of this run; each run's "
+            "audit row records required_header_status."
+            if run_notices.in_scope()
+            else ""
+        )
+        run_notices.emit_once(
+            f"required-headers-not-injected:{tool_name}:{header_names}",
             "warning: program-required attribution headers could not be "
-            f"injected into tool '{tool_name}' ({header_names}); continuing.",
-            file=sys.stderr,
+            f"injected into tool '{tool_name}' ({header_names}); continuing.{repeat_note}",
         )
         return "warned"
     root = Path(engagement_dir).resolve()
@@ -1682,7 +1689,9 @@ def prepare_execution_command(
 
     ``report`` is an optional out-dict for facts the caller needs but that do not
     belong in the return value: currently ``required_header_status``, one of
-    ``none_required`` / the ``_apply_required_headers`` vocabulary /
+    ``none_required`` / the ``_apply_required_headers`` vocabulary (which
+    includes ``not_applicable_offline`` for a run whose every executable is
+    declared to make no target traffic) /
     ``referenced_in_script`` / ``not_applicable_no_in_scope_url`` /
     ``unknown_dynamic_target`` / ``unknown_script_unreadable``. It is an
     out-parameter rather than a widened return type because the string return is

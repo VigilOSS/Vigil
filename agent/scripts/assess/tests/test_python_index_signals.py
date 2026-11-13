@@ -40,3 +40,31 @@ def health(request: Request, service: Service = Depends(get_service)):
     indexed = index_file("api.py", "python", source.encode())
     assert indexed["analysis_status"] == "complete"
     assert indexed["security_sources"] == []
+
+
+def test_flask_verb_shortcut_route_is_labelled_flask_and_binds_its_path_variable() -> None:
+    """Flask 2's `@app.get` reads like FastAPI's; the file's import decides."""
+    source = """from flask import Flask
+app = Flask(__name__)
+
+@app.get("/files/<name>")
+def read(name):
+    return open(name).read()
+"""
+    indexed = index_file("app.py", "python", source.encode())
+    assert indexed["analysis_status"] == "complete"
+    assert [(point["name"], point["kind"]) for point in indexed["entry_points"]] == [
+        ("read", "flask_route")
+    ]
+    assert any(item["kind"] == "http_request_input" and item["snippet"] == "name"
+               for item in indexed["security_sources"])
+
+
+def test_streaming_fallback_labels_a_flask_verb_shortcut_route_flask() -> None:
+    from assess.lib.treesitter_index import streaming_security_fallback
+
+    source = b'from flask import Flask\napp = Flask(__name__)\n\n@app.post("/files")\ndef upload():\n    pass\n'
+    indexed = streaming_security_fallback(
+        "app.py", "python", iter([source]), degradation_reason="forced_for_test"
+    )
+    assert {point["kind"] for point in indexed["entry_points"]} == {"flask_route"}

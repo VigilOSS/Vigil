@@ -9,10 +9,15 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient, require_finding_write_response
 from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
-from assess.lib.contracts import SUBMISSION_STATUSES, render_contract_epilog
+from assess.lib.contract_registry import FINDING_CHANGE_EFFECTS
+from assess.lib.contracts import FINDING_SEVERITIES, SUBMISSION_STATUSES, render_contract_epilog
 from assess.lib.evidence_ref import warn_evidence_ref
 from assess.lib.json_inputs import parse_json_argument, parse_optional_inline_json
 from assess.lib.schema_validation import collect_patch_validation_errors, load_schema
+from assess.lib.vocabulary import word_folder
+from assess.lib.write_envelope import print_write_envelope_notes
+
+_EVIDENCE_TYPES = ("network-confirmed", "code-inferred", "theoretical", "informational")
 
 # The same contract `finding record` validates against. Recording a finding and
 # patching one must agree on what a detail key is called and what type it holds:
@@ -44,17 +49,30 @@ def register(subparsers) -> None:
         "--payload-file",
         dest="payload_file",
         help=(
-            "Path to a JSON patch for one finding. Must contain expected_row_version "
-            "as a positive integer unless its only mutation is a notes append "
-            "(notes + notes_mode 'append'), which commutes and needs no "
-            "compare-and-swap; the optional rationale key is reason_text. "
-            "Cannot be combined with request-content flags, including --source-name "
-            "or --reason. A successful update returns the next row_version; refresh "
-            "the file before reusing it. See `vigil assess contract finding update`."
+            "Path to a JSON patch for one finding. --agent-id, --reason, --reason-code, "
+            "--source-name and --expected-row-version fill the matching key when the file "
+            "leaves it out (a different value in both places is refused); content flags "
+            "cannot be combined with the file. Without expected_row_version the current "
+            "row_version is read just before the PATCH only when every change keeps the "
+            "verdict; notes_mode 'replace'/'rotate', details_mode 'replace', and any "
+            "claim-review or invalidating field (summary, severity, evidence_ref, most "
+            "details keys) need the token you read the finding at. notes without "
+            "notes_mode append. The optional rationale key "
+            "is reason_text. Each filled value is named on stderr. See "
+            "`vigil assess contract finding update`."
         ),
     )
     p.add_argument("--title")
-    p.add_argument("--severity")
+    p.add_argument(
+        "--severity",
+        type=str.lower,
+        choices=FINDING_SEVERITIES,
+        help=(
+            "New severity band (case-insensitive): " + ", ".join(FINDING_SEVERITIES)
+            + ". Severity is an invalidating field, so a changed band resets a "
+            "verdict; re-band a verified finding with `finding verify --new-severity`."
+        ),
+    )
     p.add_argument("--workflow-status", "--status", dest="workflow_status")
     p.add_argument(
         "--submission-status",
@@ -93,7 +111,15 @@ def register(subparsers) -> None:
     )
     p.add_argument("--notes")
     p.add_argument("--source-name")
-    p.add_argument("--agent-id", dest="dispatch_agent_id", help="Registered editing dispatch; preserves the original finding author.")
+    p.add_argument(
+        "--agent-id",
+        dest="dispatch_agent_id",
+        help=(
+            "Registered editing dispatch, recorded on the finding transition so "
+            "independent reviews can exclude editors; preserves the original "
+            "finding author."
+        ),
+    )
     p.add_argument("--reason-code")
     p.add_argument("--reason", dest="reason_text")
     p.add_argument("--artifact-ref")
@@ -141,7 +167,8 @@ def register(subparsers) -> None:
         "--evidence-type",
         dest="evidence_type",
         default=None,
-        choices=("network-confirmed", "code-inferred", "theoretical", "informational"),
+        type=word_folder(_EVIDENCE_TYPES),
+        choices=_EVIDENCE_TYPES,
         help=(
             "C44: classify confirmation mode. network-confirmed = captured "
             "HTTP request/response; code-inferred = pattern present in source, "
@@ -188,6 +215,51 @@ _CONTENT_FLAGS = (
     ("evidence_type", "--evidence-type"),
 )
 
+# Flags that say who is writing, why, and which row version the write was read
+# at. They are not finding content, so with --payload-file each one fills the
+# matching payload key when the file leaves it out; only the same key with two
+# different values is a conflict.
+_PAYLOAD_CONTROL_FLAGS = (
+    ("dispatch_agent_id", "--agent-id"),
+    ("expected_row_version", "--expected-row-version"),
+    ("reason_text", "--reason"),
+    ("reason_code", "--reason-code"),
+    ("source_name", "--source-name"),
+)
+
+# Modes that overwrite what another writer may have moved since the author read
+# the finding: a token fetched now would make the compare-and-swap vacuous, so
+# these keep requiring the row version the author read.
+_TOKEN_REQUIRED_MODES = (("notes_mode", {"replace", "rotate"}), ("details_mode", {"replace"}))
+
+# Top-level patch keys whose change can put a verdict under claim review or
+# invalidate it, and the detail keys whose change keeps it, both derived from the
+# finding change-effect table (`details.*` is claim review). A payload file that
+# touches a claim key is a read-modify-write of the claim the verdict rests on,
+# so like the overwrite modes above it needs the row version the author read.
+_CLAIM_PATCH_KEYS = frozenset(
+    axis.split(".", 1)[0]
+    for axis, effect in FINDING_CHANGE_EFFECTS
+    if effect != "keep" and not axis.startswith(("details.", "cvss."))
+)
+_KEEP_DETAIL_KEYS = frozenset(
+    axis.removeprefix("details.")
+    for axis, effect in FINDING_CHANGE_EFFECTS
+    if effect == "keep" and axis.startswith("details.") and axis != "details.*"
+)
+
+
+def _payload_claim_fields(payload: dict) -> list[str]:
+    """Payload fields whose change the verdict does not simply keep."""
+    fields = sorted(key for key in payload if key in _CLAIM_PATCH_KEYS)
+    details = payload.get("details")
+    if isinstance(details, dict):
+        fields += sorted(
+            f"details.{key}" for key in details if key not in _KEEP_DETAIL_KEYS
+        )
+    return fields
+
+
 _PATCH_CONTROL_FIELDS = frozenset(
     {
         "expected_row_version",
@@ -225,7 +297,10 @@ def _is_append_only_notes_patch(payload: dict[str, object]) -> bool:
     'replace'/'rotate' and ``details_mode`` 'replace' only.
 
     Every OTHER field in a patch IS blind-overwritten from what the author read
-    into the document, so one non-append key brings the requirement back.
+    into the document, so one non-append key needs a token: a payload file must
+    carry the one the author read when it touches a claim-review or invalidating
+    field or uses an overwrite mode (``_require_payload_token``); otherwise the
+    helper reads the current row version just before the PATCH.
     """
     if payload.get("notes_mode") != "append":
         return False
@@ -284,13 +359,78 @@ def _silently_dropped_detail_keys(details: object) -> list[str]:
     return [key for key, value in details.items() if value in _MERGE_DROPPED_VALUES]
 
 
-def _provided_content_flags(args) -> list[str]:
+def _provided_content_flags(args, *, exclude: tuple[str, ...] = ()) -> list[str]:
     provided = []
     for attr, flag in _CONTENT_FLAGS:
+        if attr in exclude:
+            continue
         value = getattr(args, attr, None)
         if value is not None and value is not False:
             provided.append(flag)
     return provided
+
+
+def _fill_payload_controls(payload: dict, args) -> dict:
+    """Take each control flag the payload file leaves out; refuse a contradiction."""
+    filled: list[str] = []
+    for key, flag in _PAYLOAD_CONTROL_FLAGS:
+        value = getattr(args, key, None)
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            fail("finding update", f"{flag} must not be empty")
+        current = payload.get(key)
+        # A blank string in the file is an unset control, not a competing value.
+        if current is None or (isinstance(current, str) and not current.strip()):
+            payload[key] = value
+            filled.append(key)
+        elif current != value:
+            fail(
+                "finding update",
+                f"{flag} {value!r} contradicts the payload file's {key} "
+                f"{current!r}; drop one of them.",
+            )
+    if filled:
+        print(
+            f"finding update: --payload-file: took {', '.join(filled)} from flags "
+            "(the file did not set them).",
+            file=sys.stderr,
+        )
+    return payload
+
+
+def _require_payload_token(payload: dict) -> None:
+    """The payload-file row-version rules; an absent token is read later."""
+    row_version = payload.get("expected_row_version")
+    if row_version is not None:
+        if not isinstance(row_version, int) or isinstance(row_version, bool) or row_version < 1:
+            fail(
+                "finding update",
+                "expected_row_version must be a positive integer; refresh it from "
+                "the successful response before the next update, or leave it out to "
+                "have the current row_version read just before the PATCH.",
+            )
+        return
+    for key, modes in _TOKEN_REQUIRED_MODES:
+        if payload.get(key) in modes:
+            fail(
+                "finding update",
+                f"{key} '{payload[key]}' overwrites what another writer may have "
+                "changed, so it needs the row_version you read the finding at: set "
+                "expected_row_version in the file or pass --expected-row-version "
+                "(`vigil assess finding get <slug>` shows it).",
+            )
+    claim_fields = _payload_claim_fields(payload)
+    if claim_fields:
+        fail(
+            "finding update",
+            f"the payload file changes {', '.join(claim_fields)}, which the verdict "
+            "rests on (claim review or invalidation), and a row_version read now "
+            "would let it overwrite another writer's change to the claim. Set "
+            "expected_row_version in the file to the row_version you read the "
+            "finding at, or pass --expected-row-version (`vigil assess finding get "
+            "<slug>` shows it).",
+        )
 
 
 def run(args) -> None:
@@ -324,7 +464,9 @@ def run(args) -> None:
     if payload_file is not None:
         if not str(payload_file).strip():
             fail("finding update", "--payload-file must not be empty")
-        provided_flags = _provided_content_flags(args)
+        provided_flags = _provided_content_flags(
+            args, exclude=tuple(key for key, _flag in _PAYLOAD_CONTROL_FLAGS)
+        )
         if provided_flags:
             fail(
                 "finding update",
@@ -381,6 +523,8 @@ def run(args) -> None:
         except ValueError as exc:
             print(str(exc), file=sys.stderr)
             sys.exit(1)
+        if isinstance(payload, dict):
+            payload = _fill_payload_controls(payload, args)
     else:
         try:
             details = parse_optional_inline_json(
@@ -514,29 +658,21 @@ def run(args) -> None:
         sys.exit(1)
 
     if payload_file:
-        row_version = payload.get("expected_row_version")
-        # An append-only patch is exempt, and only when it names no token at
-        # all: a token the author DID write still has to be a usable one.
-        append_only = row_version is None and _is_append_only_notes_patch(payload)
-        if not append_only and (
-            not isinstance(row_version, int)
-            or isinstance(row_version, bool)
-            or row_version < 1
-        ):
-            fail(
-                "finding update",
-                "a payload file must contain expected_row_version as a positive "
-                "integer; refresh it from the successful response before the next update. "
-                "Exempt: a patch whose only mutation is a notes append (\"notes\" plus "
-                "\"notes_mode\": \"append\"), which commutes and so has nothing to guard.",
+        if payload.get("notes") is not None and payload.get("notes_mode") is None:
+            payload["notes_mode"] = "append"
+            print(
+                "finding update: --payload-file: notes has no notes_mode; appending "
+                "(set notes_mode 'replace' or 'rotate' to overwrite).",
+                file=sys.stderr,
             )
         if "notes" in payload and payload.get("notes_mode") not in {"append", "replace", "rotate"}:
             fail(
                 "finding update",
-                "a payload file containing notes must set notes_mode to "
-                "'replace' (cumulative working document), 'rotate' (ledger-preserved "
-                "reset), or 'append' (deliberate checkpoint).",
+                "notes_mode must be 'append' (deliberate checkpoint, the default), "
+                "'replace' (cumulative working document), or 'rotate' (ledger-preserved "
+                f"reset); got {payload.get('notes_mode')!r}.",
             )
+        _require_payload_token(payload)
 
     if len(slugs) > 1 and payload.get("expected_row_version") is not None:
         fail(
@@ -596,13 +732,20 @@ def run(args) -> None:
                             "backend did not return a positive row_version"
                         )
                     patch_payload["expected_row_version"] = row_version
-                results.append(
-                    require_finding_write_response(
-                        client.patch(f"findings/{slug}", patch_payload),
-                        finding_slug=slug,
-                        operation="finding update",
-                    )
+                    if payload_file:
+                        print(
+                            f"finding update: {slug}: the payload file sets no "
+                            f"expected_row_version; using the current row_version "
+                            f"{row_version} read just now.",
+                            file=sys.stderr,
+                        )
+                result = require_finding_write_response(
+                    client.patch(f"findings/{slug}", patch_payload),
+                    finding_slug=slug,
+                    operation="finding update",
                 )
+                results.append(result)
+                print_write_envelope_notes(f"finding update: {slug}", result)
             except Exception as exc:  # noqa: BLE001 - one bad slug must not drop the rest
                 failed += 1
                 print(f"finding update: {slug} failed: {exc}", file=sys.stderr)

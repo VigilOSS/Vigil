@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import codecs
 import errno
+import fcntl
 import hashlib
 import json
 import os
@@ -18,6 +19,11 @@ from typing import Any, BinaryIO, Callable, Iterator, Self
 SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v3"
 _LEGACY_SOURCE_MANIFEST_SCHEMA = "code-source-manifest/v2"
 SOURCE_MANIFEST_SCHEMAS = frozenset({_LEGACY_SOURCE_MANIFEST_SCHEMA, SOURCE_MANIFEST_SCHEMA})
+# A sealed manifest's source binding: the source tree beside the manifest in its
+# own snapshot root. New seals record it, so a moved or cloned engagement keeps
+# validating. ``_require_source_binding`` also accepts the absolute binding earlier
+# seals recorded, and ``rebind_snapshot_source`` rewrites one to this form.
+SNAPSHOT_SOURCE_BINDING = "source"
 _READ_CHUNK_SIZE = 1024 * 1024
 _MAX_REPO_KEY_BYTES = 255
 MAX_JSON_ARTIFACT_BYTES = 64 * 1024 * 1024
@@ -579,6 +585,10 @@ def _write_all(fd: int, data: bytes) -> None:
         view = view[written:]
 
 
+def _encode_sealed_manifest(manifest: dict[str, Any]) -> bytes:
+    return (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+
+
 def _make_tree_writable(path: Path) -> None:
     if not path.exists():
         return
@@ -724,10 +734,10 @@ class SnapshotBuilder:
         manifest_path = final / "manifest.json"
         manifest = {
             **digest_payload,
-            "source_path": str(source_path.resolve(strict=False)),
+            "source_path": SNAPSHOT_SOURCE_BINDING,
             "snapshot_digest": digest,
         }
-        manifest_bytes = (json.dumps(manifest, indent=2, sort_keys=True) + "\n").encode("utf-8")
+        manifest_bytes = _encode_sealed_manifest(manifest)
         manifest_fd = os.open(
             self.stage / "manifest.json",
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
@@ -778,6 +788,238 @@ class SnapshotBuilder:
             self._finished = True
 
 
+def sealed_source_identity(recorded: object) -> tuple[str, str] | None:
+    """The ``(repo_key, snapshot_digest)`` a recorded sealed-source path names.
+
+    A sealed source always sits at ``<repo_key>/<snapshot_digest>/source``. Its
+    trailing components identify the content-addressed snapshot; whatever precedes
+    them is where the engagement lived when the path was recorded, so comparing
+    identities instead of whole paths keeps a moved engagement bound to the same
+    sealed bytes. Returns ``None`` for a path that cannot name a sealed source.
+    """
+    if not isinstance(recorded, (str, os.PathLike)):
+        return None
+    parts = Path(recorded).parts
+    if len(parts) < 3 or parts[-1] != SNAPSHOT_SOURCE_BINDING:
+        return None
+    return parts[-3], parts[-2]
+
+
+# Where an engagement keeps its sealed snapshots, relative to the engagement.
+ENGAGEMENT_SNAPSHOTS_ROOT = ("tools", "analysis-state", "code-snapshots")
+
+
+def engagement_sealed_source(engagement_dir: str | os.PathLike, recorded: object) -> Path | None:
+    """This engagement's copy of the sealed source a recorded path names.
+
+    The backend records a sealed source's absolute path as it was when it was
+    sealed; after the engagement moves that path points at the old location.
+    The ``<repo_key>/<snapshot_digest>/source`` tail names the content-addressed
+    snapshot, so the copy to read is that tail under this engagement. Returns
+    ``None`` when *recorded* names no sealed source.
+    """
+    identity = sealed_source_identity(recorded)
+    if identity is None:
+        return None
+    repo_key, digest = identity
+    try:
+        validate_repo_key(repo_key)
+    except ValueError:
+        return None
+    if len(digest) != 64 or any(char not in "0123456789abcdef" for char in digest):
+        return None
+    return Path(engagement_dir).resolve().joinpath(
+        *ENGAGEMENT_SNAPSHOTS_ROOT, repo_key, digest, SNAPSHOT_SOURCE_BINDING
+    )
+
+
+def require_engagement_sealed_source(engagement_dir: str | os.PathLike, source: Path) -> None:
+    """Refuse a sealed source that is not this engagement's own copy.
+
+    Comparing only the ``<repo_key>/<digest>`` identity would bind another
+    engagement's snapshot of the same bytes; the source a command reads must
+    sit under this engagement's snapshots root.
+    """
+    expected = engagement_sealed_source(engagement_dir, source)
+    if expected is None or Path(source).resolve() != expected:
+        raise ValueError(
+            f"sealed source {source} is not under this engagement's "
+            f"{'/'.join(ENGAGEMENT_SNAPSHOTS_ROOT)}/<repo_key>/<digest>/source"
+        )
+
+
+def _require_source_binding(
+    manifest: dict[str, Any], snapshot_root: Path, *, repo_key: str, digest: str
+) -> None:
+    """Refuse a manifest whose source binding names another snapshot.
+
+    The source tree is ``snapshot_root / "source"``: the snapshot's own location
+    plus its content address are the authority, never a recorded engagement path.
+    The relative ``SNAPSHOT_SOURCE_BINDING`` always binds it. An absolute binding
+    goes stale when the engagement moves, so it stays acceptable only while its
+    trailing components name this same snapshot.
+    """
+    recorded = manifest.get("source_path")
+    if recorded == SNAPSHOT_SOURCE_BINDING:
+        return
+    if (
+        isinstance(recorded, str)
+        and os.path.isabs(recorded)
+        and sealed_source_identity(recorded) == (repo_key, digest)
+    ):
+        return
+    raise ValueError(f"sealed snapshot source path binding mismatch: {snapshot_root}")
+
+
+@dataclass(frozen=True)
+class SourceRebind:
+    """One sealed manifest whose absolute source binding became the relative one."""
+
+    repo_key: str
+    snapshot_digest: str
+    previous_source_path: str
+    manifest_sha256_before: str
+    manifest_sha256_after: str
+
+
+class SourceRebindUnverified(ValueError):
+    """The manifest was rewritten, but the rewritten snapshot did not validate.
+
+    ``rebind`` is the rewrite that landed, so the caller records it: the
+    manifest on disk is no longer the one the refusal would otherwise imply.
+    """
+
+    def __init__(self, rebind: SourceRebind, reason: str) -> None:
+        super().__init__(
+            f"manifest rewritten, but the rewritten snapshot does not validate: {reason}"
+        )
+        self.rebind = rebind
+        self.reason = reason
+
+
+# The staged manifest a rebind writes beside the sealed one before replacing it.
+_REBIND_STAGED_NAME = ".manifest.json.rebind"
+# The root mode a rebind holds while it writes; a sealed root is 0555.
+_REBIND_WRITABLE_MODE = 0o700
+
+
+def _recover_interrupted_rebind(snapshot_root: Path) -> None:
+    """Restore a snapshot an interrupted rebind left writable.
+
+    Called with the rebind lock held, so no other rebind is writing here: a
+    0700 root and any staged manifest beside it are what a killed run left.
+    `os.replace` is atomic, so the manifest is either the sealed original or
+    the rewritten one, and validation after this decides which.
+    """
+    root_stat = snapshot_root.lstat()
+    if not stat.S_ISDIR(root_stat.st_mode) or stat.S_IMODE(root_stat.st_mode) != (
+        _REBIND_WRITABLE_MODE
+    ):
+        return
+    staged = snapshot_root / _REBIND_STAGED_NAME
+    try:
+        if stat.S_ISREG(staged.lstat().st_mode):
+            staged.unlink()
+    except FileNotFoundError:
+        pass
+    os.chmod(snapshot_root, 0o555, follow_symlinks=False)
+
+
+@contextmanager
+def _rebind_lock(snapshot_root: Path) -> Iterator[None]:
+    """Hold the one rebind of *snapshot_root*; a concurrent one is refused, not waited for."""
+    directory_fd = os.open(
+        snapshot_root,
+        os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    try:
+        try:
+            fcntl.flock(directory_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            raise ValueError(
+                f"another code-snapshot-repair is rewriting {snapshot_root}; retry once it finishes"
+            ) from exc
+        yield
+    finally:
+        os.close(directory_fd)
+
+
+def rebind_snapshot_source(snapshot_root: Path, *, dry_run: bool = False) -> SourceRebind | None:
+    """Rewrite a sealed manifest's absolute source binding to ``SNAPSHOT_SOURCE_BINDING``.
+
+    One rebind per snapshot at a time (`_rebind_lock`); a root an interrupted
+    rebind left writable is restored first (`_recover_interrupted_rebind`).
+    The snapshot is then validated in full, so only a binding that already
+    names this snapshot (``_require_source_binding``) over intact bytes is
+    rewritten. ``source_path`` is outside the content address, so the digest is
+    unchanged. The manifest is replaced atomically and the sealed modes are
+    restored before the snapshot is validated again; a rewrite that fails that
+    check raises `SourceRebindUnverified` carrying the rewrite. Returns ``None``
+    when the binding is already relative, and the planned rewrite without
+    writing when *dry_run* is set (a dry run recovers nothing).
+    """
+    manifest_path = snapshot_root / "manifest.json"
+    with _rebind_lock(snapshot_root):
+        if not dry_run:
+            _recover_interrupted_rebind(snapshot_root)
+        before = read_bounded_regular_file(
+            manifest_path, max_bytes=MAX_JSON_ARTIFACT_BYTES, label="sealed snapshot manifest"
+        )
+        manifest = validate_snapshot(snapshot_root, expected_digest=snapshot_root.name)
+        if json.loads(before.decode("utf-8")) != manifest:
+            raise ValueError(f"sealed snapshot manifest changed during repair: {manifest_path}")
+        previous = manifest.get("source_path")
+        if previous == SNAPSHOT_SOURCE_BINDING:
+            return None
+        after = _encode_sealed_manifest({**manifest, "source_path": SNAPSHOT_SOURCE_BINDING})
+        rebind = SourceRebind(
+            repo_key=str(manifest["repo_key"]),
+            snapshot_digest=str(manifest["snapshot_digest"]),
+            previous_source_path=str(previous),
+            manifest_sha256_before=hashlib.sha256(before).hexdigest(),
+            manifest_sha256_after=hashlib.sha256(after).hexdigest(),
+        )
+        if dry_run:
+            return rebind
+        staged = snapshot_root / _REBIND_STAGED_NAME
+        created = False
+        os.chmod(snapshot_root, _REBIND_WRITABLE_MODE, follow_symlinks=False)
+        try:
+            fd = os.open(
+                staged,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0),
+                0o600,
+            )
+            created = True
+            try:
+                _write_all(fd, after)
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+            os.chmod(staged, 0o444, follow_symlinks=False)
+            os.replace(staged, manifest_path)
+            created = False
+            directory_fd = os.open(snapshot_root, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        finally:
+            # Only the staged file this call created is removed; under the lock
+            # nothing else writes one, and a leftover is recovered above.
+            if created:
+                try:
+                    os.unlink(staged)
+                except FileNotFoundError:
+                    pass
+            os.chmod(snapshot_root, 0o555, follow_symlinks=False)
+        try:
+            validate_snapshot(snapshot_root, expected_digest=rebind.snapshot_digest, deep=False)
+        except ValueError as exc:
+            raise SourceRebindUnverified(rebind, str(exc)) from exc
+        return rebind
+
+
 def validate_snapshot(
     snapshot_root: Path,
     *,
@@ -801,6 +1043,16 @@ def validate_snapshot(
             directory_stat = directory.lstat()
         except OSError as exc:
             raise ValueError(f"invalid sealed snapshot directory: {directory}") from exc
+        if (
+            directory == snapshot_root
+            and stat.S_ISDIR(directory_stat.st_mode)
+            and stat.S_IMODE(directory_stat.st_mode) == _REBIND_WRITABLE_MODE
+        ):
+            raise ValueError(
+                f"sealed snapshot directory is writable, as a code-snapshot-repair leaves it "
+                f"while it rewrites or when it was interrupted: {directory}; run "
+                "`vigil assess code-snapshot-repair` to restore the seal"
+            )
         if not stat.S_ISDIR(directory_stat.st_mode) or stat.S_IMODE(directory_stat.st_mode) != 0o555:
             raise ValueError(f"sealed snapshot directory permission/type drift: {directory}")
     try:
@@ -828,8 +1080,6 @@ def validate_snapshot(
     schema = str(manifest.get("schema") or "")
     if schema not in SOURCE_MANIFEST_SCHEMAS or not digest:
         raise ValueError(f"unsupported sealed snapshot manifest: {manifest_path}")
-    if Path(str(manifest.get("source_path") or "")).resolve() != source.resolve():
-        raise ValueError(f"sealed snapshot source path binding mismatch: {snapshot_root}")
     if expected_digest and digest != expected_digest:
         raise ValueError(f"sealed snapshot digest mismatch: expected {expected_digest}, got {digest}")
     files = manifest.get("files")
@@ -889,6 +1139,7 @@ def validate_snapshot(
         raise ValueError(f"sealed snapshot has invalid repo_key: {manifest_path}") from exc
     if snapshot_root.parent.name != manifest_repo_key:
         raise ValueError(f"sealed snapshot repo_key path binding mismatch: {snapshot_root}")
+    _require_source_binding(manifest, snapshot_root, repo_key=manifest_repo_key, digest=digest)
     digest_payload = {
         "schema": schema,
         "repo_key": manifest["repo_key"],

@@ -35,7 +35,8 @@ from assess.lib.kali import (
     prepare_execution_command,
     required_header_env_pairs,
 )
-from assess.lib.kali_audit import _extract_target_anchor
+from assess.lib.kali_audit import _extract_target_anchor, attribution_env_pairs
+from assess.lib.kali_output import audited_execution_policy
 
 # Conservative destructive-token list. Operators must pass --allow-destructive
 # to bypass. Tokens are matched as substrings in the joined argv after stripping
@@ -1045,7 +1046,7 @@ def run(args) -> None:
     assert stderr_descriptor is not None
 
     command_str = " ".join(argv)
-    notes = _build_notes(args.scope_host, execution_policy)
+    notes = _build_notes(args.scope_host, audited_execution_policy(argv, execution_policy))
 
     pre_payload: dict = {
         "host_record_kind": "pre_exec",
@@ -1131,7 +1132,10 @@ def run(args) -> None:
                 stderr_path=stderr_path,
                 stdout_descriptor=stdout_descriptor,
                 stderr_descriptor=stderr_descriptor,
-                env_pairs=required_header_pairs,
+                env_pairs=[
+                    *required_header_pairs,
+                    *attribution_env_pairs(str(pre_payload["agent_name"])),
+                ],
             )
         except HostProcessNotQuiescent as exc:
             return_code = 1

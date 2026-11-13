@@ -29,6 +29,8 @@ from assess.lib.code_snapshot import (
     capture_regular_file,
     read_bounded_regular_file,
     sealed_source_file_path,
+    require_engagement_sealed_source,
+    sealed_source_identity,
     validate_repo_key,
     validate_snapshot,
 )
@@ -223,8 +225,6 @@ def _load_snapshot(source_path: Path) -> dict[str, Any]:
         )
     digest = source_path.parent.name
     manifest = validate_snapshot(source_path.parent, expected_digest=digest)
-    if Path(str(manifest.get("source_path", ""))).resolve() != source_path:
-        raise ValueError("source snapshot manifest path does not match the selected source")
     if manifest.get("schema") not in SOURCE_MANIFEST_SCHEMAS or len(digest) != 64:
         raise ValueError("source snapshot digest/path binding is invalid")
     files = manifest.get("files")
@@ -255,8 +255,7 @@ def _resolve_backend_repo(client: AssessmentClient, repo_id: int | None, source_
         repo
         for repo in repos
         if isinstance(repo, dict)
-        and repo.get("repo_path")
-        and Path(str(repo["repo_path"])).resolve() == source_path
+        and sealed_source_identity(repo.get("repo_path")) == sealed_source_identity(source_path)
     ]
     if len(exact) != 1:
         raise ValueError(
@@ -343,6 +342,73 @@ def _remove_tree(path: Path) -> None:
     shutil.rmtree(path, ignore_errors=True)
 
 
+# The structural manifest's location fields. A build records each relative to the
+# structural-index root, the root its per-file `index_path` bindings already use,
+# so a moved or cloned engagement still resolves them.
+STRUCTURAL_LOCATION_FIELDS = ("source_path", "source_snapshot_manifest_path", "manifest_path")
+
+
+def structural_location_bindings(
+    source_path: Path, manifest_path: Path, structural_root: Path
+) -> dict[str, str]:
+    """The relative location fields a build records for its sealed source and itself."""
+    return {
+        "source_path": os.path.relpath(source_path, structural_root),
+        "source_snapshot_manifest_path": os.path.relpath(
+            source_path.parent / "manifest.json", structural_root
+        ),
+        "manifest_path": manifest_path.relative_to(structural_root).as_posix(),
+    }
+
+
+def _recorded_structural_root(
+    manifest: dict[str, Any], *, structural_root: Path, manifest_path: Path
+) -> Path | None:
+    """The root an absolute recorded `manifest_path` was written under, if it is this manifest.
+
+    Earlier builds recorded every location field as an absolute path taken at the
+    same moment. When the recorded `manifest_path` ends in this manifest's own
+    identity path, the prefix before it is the structural root of that moment, and
+    every other field keeps its offset from it after the engagement moves.
+    """
+    recorded = manifest.get("manifest_path")
+    if not isinstance(recorded, str) or not os.path.isabs(recorded):
+        return None
+    try:
+        tail = manifest_path.relative_to(structural_root).parts
+    except ValueError:
+        return None
+    parts = Path(recorded).parts
+    if not tail or len(parts) <= len(tail) or parts[-len(tail):] != tail:
+        return None
+    return Path(*parts[: -len(tail)])
+
+
+def structural_manifest_location(
+    manifest: dict[str, Any], field: str, *, structural_root: Path, manifest_path: Path
+) -> Path | None:
+    """Where one location field of the structural manifest at *manifest_path* points now.
+
+    *structural_root* and *manifest_path* are the manifest's current, resolved
+    locations. A relative field resolves against the structural root. An absolute
+    field from an earlier build is rebased through `_recorded_structural_root`; one
+    that cannot be rebased is returned as recorded, except `manifest_path` itself,
+    which then names some other manifest and yields ``None``. The returned path is
+    only a locator: callers still validate what it names against its identity.
+    """
+    raw = manifest.get(field)
+    if not isinstance(raw, str) or not raw:
+        return None
+    if not os.path.isabs(raw):
+        return Path(os.path.normpath(structural_root / raw))
+    recorded_root = _recorded_structural_root(
+        manifest, structural_root=structural_root, manifest_path=manifest_path
+    )
+    if recorded_root is not None:
+        return Path(os.path.normpath(structural_root / os.path.relpath(raw, recorded_root)))
+    return None if field == "manifest_path" else Path(raw)
+
+
 def _validate_existing_generation(
     final_dir: Path,
     expected: dict[str, Any],
@@ -395,10 +461,7 @@ def _validate_existing_generation(
         "source_manifest_digest",
         "structural_input_digest",
         "indexer_digest",
-        "source_path",
-        "source_snapshot_manifest_path",
         "snapshot_digest",
-        "manifest_path",
         "total_files",
         "indexed_files",
         "skipped_unsupported",
@@ -415,7 +478,15 @@ def _validate_existing_generation(
         "files",
         "path_to_index",
     )
-    if any(existing.get(field) != expected.get(field) for field in stable_fields):
+    if any(existing.get(field) != expected.get(field) for field in stable_fields) or any(
+        structural_manifest_location(
+            existing, field, structural_root=structural_root, manifest_path=manifest_path
+        )
+        != structural_manifest_location(
+            expected, field, structural_root=structural_root, manifest_path=manifest_path
+        )
+        for field in STRUCTURAL_LOCATION_FIELDS
+    ):
         raise ValueError("existing generation-scoped index conflicts with the requested build")
 
     expected_files = expected.get("files")
@@ -1059,6 +1130,13 @@ def run(args) -> None:
     print("code-index: binding: checking backend repository and file inventory", file=sys.stderr, flush=True)
     cfg = load_config(getattr(args, "engagement_dir", None))
     try:
+        # The backend names the source by snapshot identity, which another
+        # engagement's copy of the same bytes shares: index only this one's.
+        require_engagement_sealed_source(cfg.engagement_dir, source_path)
+    except ValueError as exc:
+        print(f"Cannot bind structural index: {exc}", file=sys.stderr)
+        sys.exit(1)
+    try:
         with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
             backend_repo = _resolve_backend_repo(client, getattr(args, "repo_id", None), source_path)
             repo_id = int(backend_repo.get("id") or backend_repo.get("repo_id") or 0)
@@ -1070,7 +1148,9 @@ def run(args) -> None:
             backend_repo_key = str(backend_repo.get("repo_key") or "")
             if generation < 1:
                 raise ValueError("backend repo is not on a published generation")
-            if Path(str(backend_repo.get("repo_path") or "")).resolve() != source_path:
+            if sealed_source_identity(backend_repo.get("repo_path")) != sealed_source_identity(
+                source_path
+            ):
                 raise ValueError("backend repo path differs from snapshot")
             if len(source_digest) != 64:
                 raise ValueError("backend has no valid source manifest digest")
@@ -1414,14 +1494,14 @@ def run(args) -> None:
         current_repo_binding = (
             int(current_repo.get("id") or current_repo.get("repo_id") or 0),
             str(current_repo.get("repo_key") or ""),
-            Path(str(current_repo.get("repo_path") or "")).resolve(),
+            sealed_source_identity(current_repo.get("repo_path")),
             int(current_repo.get("active_generation") or 0),
             str(current_repo.get("source_manifest_digest") or ""),
         )
         initial_repo_binding = (
             repo_id,
             backend_repo_key,
-            source_path,
+            sealed_source_identity(source_path),
             generation,
             source_digest,
         )
@@ -1450,10 +1530,8 @@ def run(args) -> None:
             "source_manifest_digest": source_digest,
             "structural_input_digest": input_digest,
             "indexer_digest": indexer_digest,
-            "source_path": str(source_path),
-            "source_snapshot_manifest_path": str(source_path.parent / "manifest.json"),
+            **structural_location_bindings(source_path, manifest_path, structural_root),
             "snapshot_digest": snapshot_digest,
-            "manifest_path": str(manifest_path),
             "indexed_at": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ"),
             "total_files": len(selected),
             "indexed_files": len(files_manifest),

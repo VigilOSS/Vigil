@@ -1063,15 +1063,19 @@ def test_run_audit_reads_reject_malformed_or_wrong_identity(
 def test_run_audit_contract_documents_all_actions() -> None:
     contract = contracts.get_contract("run-audit candidate history")
     assert contract is not None
-    text = " ".join(contract.author_supplied_fields)
-    for action in (
-        "sources commitment/import/list",
-        "source-read record/list",
-        "obligation record/update/release/list",
-        "candidate record/update/list/history",
-        "commands list",
-        "observed-events list",
-        "decision-history list",
-        "compare",
+    assert contract.name == "run-audit candidate"
+    for family, actions in (
+        ("sources", ("commitment", "import", "list")),
+        ("source-read", ("record", "list")),
+        ("obligation", ("record", "update", "release", "list")),
+        ("candidate", ("record", "update", "list", "history")),
+        ("commands", ("list",)),
+        ("observed-events", ("list",)),
+        ("decision-history", ("list",)),
+        ("compare", ()),
     ):
-        assert action in text
+        view = contracts.get_contract(f"run-audit {family}")
+        assert view is not None, family
+        text = " ".join((*view.author_supplied_fields, *view.preferred_invocations))
+        for action in actions:
+            assert action in text, (family, action)

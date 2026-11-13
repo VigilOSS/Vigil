@@ -19,6 +19,8 @@ from assess.lib.code_snapshot import (
     RootedSourceTree,
     read_bounded_regular_file,
     sealed_source_file_path,
+    require_engagement_sealed_source,
+    sealed_source_identity,
     validate_snapshot,
 )
 from assess.lib.code_structural_identity import (
@@ -31,7 +33,7 @@ from assess.lib.code_structural_identity import (
     structural_input_digest,
 )
 from assess.lib.config import load_config
-from assess.commands.code_index import _unsupported_index
+from assess.commands.code_index import _unsupported_index, structural_manifest_location
 from assess.lib.code_structural_metadata import (
     INVALID_ARTIFACT_REASON,
     invalid_artifact_notice,
@@ -230,6 +232,8 @@ def _prepare_repo_payload(
     backend_repo: dict,
     manifest: dict,
     index_root: Path,
+    *,
+    engagement_dir: str | Path,
 ) -> dict[str, Any]:
     repo_id = int(manifest.get("repo_id") or 0)
     if manifest.get("schema") != STRUCTURAL_INDEX_SCHEMA:
@@ -246,9 +250,28 @@ def _prepare_repo_payload(
         )
     if manifest.get("repo_key") and backend_repo.get("repo_key") != manifest.get("repo_key"):
         raise ValueError(f"repo {repo_id} repo_key differs from the backend")
-    source = Path(str(manifest.get("source_path") or "")).resolve()
-    if Path(str(backend_repo.get("repo_path") or "")).resolve() != source:
+    # The structural manifest locates its sealed source relative to the index root,
+    # and the backend names that source by snapshot identity: a moved engagement
+    # keeps both bindings, and the bytes are still validated below.
+    index_root = index_root.resolve()
+    manifest_path = Path(str(manifest["_resolved_manifest_path"])).resolve()
+    locations = {
+        field: structural_manifest_location(
+            manifest, field, structural_root=index_root, manifest_path=manifest_path
+        )
+        for field in ("source_path", "source_snapshot_manifest_path", "manifest_path")
+    }
+    recorded_source = locations["source_path"]
+    if recorded_source is None:
+        raise ValueError(f"repo {repo_id} structural manifest has no sealed source binding")
+    source = recorded_source.resolve()
+    source_identity = sealed_source_identity(source)
+    if source_identity is None or sealed_source_identity(backend_repo.get("repo_path")) != (
+        source_identity
+    ):
         raise ValueError(f"repo {repo_id} sealed source path differs from the backend")
+    # The same identity in another engagement's snapshots is not this one's source.
+    require_engagement_sealed_source(engagement_dir, source)
     files_manifest = manifest.get("files")
     if not isinstance(files_manifest, dict):
         raise ValueError(  # noqa: TRY004 - malformed artifacts are validation failures
@@ -257,15 +280,14 @@ def _prepare_repo_payload(
     for rel_path in files_manifest:
         sealed_source_file_path(source, str(rel_path))
     snapshot_digest = str(manifest.get("snapshot_digest") or "")
-    snapshot_manifest_path = Path(
-        str(manifest.get("source_snapshot_manifest_path") or "")
-    ).resolve()
-    expected_snapshot_manifest = source.parent / "manifest.json"
-    if snapshot_manifest_path != expected_snapshot_manifest or len(snapshot_digest) != 64:
+    snapshot_manifest_path = locations["source_snapshot_manifest_path"]
+    if (
+        snapshot_manifest_path is None
+        or snapshot_manifest_path.resolve() != source.parent / "manifest.json"
+        or len(snapshot_digest) != 64
+    ):
         raise ValueError(f"repo {repo_id} structural manifest has an invalid snapshot binding")
     source_manifest = validate_snapshot(source.parent, expected_digest=snapshot_digest)
-    if Path(str(source_manifest.get("source_path") or "")).resolve() != source:
-        raise ValueError(f"repo {repo_id} source snapshot path binding is invalid")
     source_files = source_manifest.get("files")
     if not isinstance(source_files, list):
         raise ValueError(  # noqa: TRY004 - malformed artifacts are validation failures
@@ -298,7 +320,6 @@ def _prepare_repo_payload(
         raise ValueError(
             f"repo {repo_id} structural input digest/language identity differs from the backend"
         )
-    manifest_path = Path(str(manifest["_resolved_manifest_path"])).resolve()
     identity_root = index_root / str(repo_id) / str(generation) / STRUCTURAL_INDEX_PATH_VERSION / digest
     if "indexer_digest" in manifest:
         indexer_digest = manifest["indexer_digest"]
@@ -313,7 +334,8 @@ def _prepare_repo_payload(
     if (
         _under(index_root, manifest_path, label=f"repo {repo_id} manifest")
         != expected_manifest_path.resolve()
-        or Path(str(manifest.get("manifest_path") or "")).resolve() != manifest_path
+        or locations["manifest_path"] is None
+        or locations["manifest_path"].resolve() != manifest_path
     ):
         raise ValueError(f"repo {repo_id} structural manifest path differs from its identity")
     if manifest.get("indexer_digest") != structural_indexer_digest():
@@ -492,7 +514,9 @@ def run(args) -> None:
                 backend = _find_backend_repo(repos, repo_id=repo_id)
                 if backend is None:
                     raise ValueError(f"no unique backend repo matches repo_id {repo_id}")
-                prepared.append(_prepare_repo_payload(client, backend, manifest, index_root))
+                prepared.append(_prepare_repo_payload(
+                    client, backend, manifest, index_root, engagement_dir=cfg.engagement_dir,
+                ))
             except (OSError, ValueError) as exc:
                 errors.append(f"repo {_key}: {exc}")
         if errors:

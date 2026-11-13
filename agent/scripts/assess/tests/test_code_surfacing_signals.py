@@ -37,7 +37,7 @@ def test_analysis_status_block_distinguishes_classified_from_queued(capsys):
     out = capsys.readouterr().out
     assert "By Analysis Status:" in out
     assert "classified    :  5164" in out
-    assert "5164 file(s) classified but never queued" in out
+    assert "NOTE: 5164 classified file(s)" in out
     assert "code-dispatch queue" in out
 
 
@@ -47,7 +47,7 @@ def test_a_populated_queue_gets_the_census_without_the_hint(capsys):
     )
     out = capsys.readouterr().out
     assert "queued        :     6" in out
-    assert "classified but never queued" not in out
+    assert "code-dispatch queue" not in out
 
 
 def test_source_identity_block_names_an_unbound_repo_and_its_repair(capsys):
@@ -308,6 +308,35 @@ def test_structural_invalidation_is_reported_with_its_repair_command(
     assert "invalidated the structural-index binding for repo(s): 42" in err
     assert "a/b.cc: cpp -> python" in err
     assert "code-index sync --repo-id 42" in err
+
+
+def test_kept_context_tags_are_named_in_the_classify_summary(
+    classify_client, tmp_path, capsys
+):
+    """The backend keeps recorded tags a re-classification omits and lists each
+    such fill on `derived`; the summary names every file it kept them on."""
+    classify_client.response = {
+        "derived": [
+            {
+                "file_id": 7,
+                "file_path": "src/acme/parser.py",
+                "field": "context_tags",
+                "value": ["parser"],
+                "derived_from": "stored",
+                "detail": "kept the context_tags recorded by the file's earlier classification",
+            }
+        ],
+    }
+
+    _classify(
+        tmp_path,
+        [{"file_id": 7, "classification": "high", "slot_types": ["NETWORK-INPUT"],
+          "analysis_priority": 60}],
+    )
+
+    out = capsys.readouterr().out
+    assert "context_tags" in out
+    assert "src/acme/parser.py: parser" in out
 
 
 def test_a_response_without_invalidation_stays_silent(classify_client, tmp_path, capsys):
@@ -642,3 +671,88 @@ def test_the_classify_skip_vocabulary_is_the_shared_mirror() -> None:
     from assess.lib.contracts import CODE_SKIP_REASONS
 
     assert code_classify._VALID_SKIP_REASONS == frozenset(CODE_SKIP_REASONS)
+
+
+def _run_resolve_action(monkeypatch, tmp_path: Path, response: dict, items: list[dict], extra):
+    triggers = tmp_path / "triggers.json"
+    triggers.write_text(json.dumps(items), encoding="utf-8")
+    client = _StubClient(response)
+    monkeypatch.setattr(code_dispatch, "AssessmentClient", client)
+    monkeypatch.setattr(
+        code_dispatch,
+        "write_json_snapshot",
+        lambda *args, **kwargs: SimpleNamespace(name="snapshot.json"),
+    )
+    monkeypatch.setattr(code_dispatch, "load_config", lambda *_a: SimpleNamespace(
+        base_url="http://localhost", engagement_key="k", engagement_dir=str(tmp_path),
+    ))
+    code_dispatch.run(SimpleNamespace(
+        action="resolve-triggers", engagement_dir=str(tmp_path),
+        extra=[token if token != "@file" else str(triggers) for token in extra],
+    ))
+    return client
+
+
+def test_resolve_triggers_amend_sends_a_note_only_amendment(monkeypatch, tmp_path, capsys):
+    client = _run_resolve_action(
+        monkeypatch, tmp_path,
+        {"amended": [{"trigger_id": 7, "status": "source_equivalent_analyzed"}], "not_resolved": []},
+        [{"trigger_id": 7}],
+        ["--amend", "@file", "receipt", "9", "decided", "it"],
+    )
+    [(path, payload)] = client.posts
+    assert path == "code/triggers/resolve"
+    assert payload == {
+        "items": [{"trigger_id": 7}], "resolution_note": "receipt 9 decided it", "amend": True,
+    }
+    assert "Amended 1 of 1 trigger note(s)" in capsys.readouterr().out
+
+
+def test_resolve_triggers_amend_exits_non_zero_when_a_trigger_was_not_amended(
+    monkeypatch, tmp_path, capsys
+):
+    with pytest.raises(SystemExit) as excinfo:
+        _run_resolve_action(
+            monkeypatch, tmp_path,
+            {"amended": [], "not_resolved": ["8"]},
+            [{"trigger_id": 8}],
+            ["--amend", "@file", "note"],
+        )
+    assert excinfo.value.code == 1
+    err = capsys.readouterr().err
+    assert "not amended: 8" in err
+    assert "closed" in err
+
+
+def test_resolve_triggers_amend_needs_a_trigger_id_per_item(monkeypatch, tmp_path, capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        _run_resolve_action(
+            monkeypatch, tmp_path, {}, [{"file_path": "src/a.py"}], ["--amend", "@file", "note"],
+        )
+    assert excinfo.value.code == 1
+    assert "trigger_id" in capsys.readouterr().err
+
+
+def test_by_path_renders_review_depth_columns(capsys):
+    code_coverage._print_coverage_by_path(
+        {
+            "depth": 2, "total": 1, "offset": 0, "has_more": False,
+            "directories": [
+                {
+                    "path": "src/auth", "repo_key": "acme-api", "files": 6,
+                    "loc": 10, "uncovered_critical_high": 0,
+                    "by_classification": {}, "by_status": {},
+                    "structural_debt": {}, "accounted_skips": 0,
+                    "by_review_depth": {"deep": 4, "wide_only": 2, "none": 0},
+                    "critical_high_wide_only": 1,
+                }
+            ],
+        }
+    )
+    out = capsys.readouterr().out
+    header, row = [line for line in out.splitlines() if "PATH" in line or "src/auth" in line][:2]
+    columns = header.split()
+    values = row.split()
+    assert values[columns.index("DEEP")] == "4"
+    assert values[columns.index("CHWIDE")] == "1"
+    assert "DEEP = files with a deep pass" in out

@@ -230,7 +230,16 @@ def _read_vigil_config_value(key: str) -> str | None:
 
 
 def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
-    """Resolve ORCHESTRATOR_BASE_URL through env, engagement, config, legacy defaults."""
+    """Resolve ORCHESTRATOR_BASE_URL; mirrors ``vigil_cli.paths.resolve_orchestrator_base_url``.
+
+    Precedence: the environment variable, the engagement's ``.orchestrator.env``,
+    then the workspace's install-root ``.orchestrator.env`` / ``.env`` when the
+    workspace (``$VIGIL_INSTALL_DIR`` / ``$VIGIL_DIR``) is not the global default
+    one, then the global ``orchestrator_base_url`` setting, then the install-root
+    files, then the loopback default. The global setting belongs to the global
+    default workspace, so ``vigil --root <workspace> assess`` reaches that
+    workspace's own backend.
+    """
     url = os.environ.get("ORCHESTRATOR_BASE_URL", "")
     if url:
         return url.rstrip("/")
@@ -245,18 +254,26 @@ def resolve_base_url(engagement_dir: str, agent_root: str) -> str:
         if val:
             return val.rstrip("/")
 
-    config_value = _read_vigil_config_value("orchestrator_base_url")
-    if config_value:
-        return config_value.rstrip("/")
-
+    own_value = ""
     for env_file in _candidate_env_files(engagement_dir, agent_root):
         if engagement_env_file and env_file == engagement_env_file:
             continue
-        env_vars = _read_env_file(env_file)
-        val = env_vars.get("ORCHESTRATOR_BASE_URL", "")
-        if val:
-            return val.rstrip("/")
+        own_value = _read_env_file(env_file).get("ORCHESTRATOR_BASE_URL", "")
+        if own_value:
+            break
 
+    install_dir = os.environ.get("VIGIL_INSTALL_DIR") or os.environ.get("VIGIL_DIR")
+    global_default = _read_vigil_config_value("install.root") or str(Path.home() / "vigil")
+    if own_value and install_dir and (
+        Path(install_dir).expanduser().resolve() != Path(global_default).expanduser().resolve()
+    ):
+        return own_value.rstrip("/")
+
+    config_value = _read_vigil_config_value("orchestrator_base_url")
+    if config_value:
+        return config_value.rstrip("/")
+    if own_value:
+        return own_value.rstrip("/")
     return "http://127.0.0.1:18000"
 
 

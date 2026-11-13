@@ -106,7 +106,7 @@ _DECISIVE_SATISFIED_WITH_CLASS_GAP = {
 
 def test_render_depth_ledger_decisive_class_gap_reads_will_block():
     lines = cpr._render_depth_ledger(
-        _ledger([_DECISIVE_SATISFIED_WITH_CLASS_GAP]), by_app_unit=False)
+        _ledger([_DECISIVE_SATISFIED_WITH_CLASS_GAP]), by_app_unit=False, phase="verify")
     text = "\n".join(lines)
     assert "per-class signal gaps" in text
     assert "api.example.com/v2/orders" in text
@@ -120,7 +120,7 @@ def test_render_depth_ledger_non_decisive_class_gap_reads_advisory():
         "decisive_surface": False,
         "confidence": "low",
     }
-    lines = cpr._render_depth_ledger(_ledger([non_decisive]), by_app_unit=False)
+    lines = cpr._render_depth_ledger(_ledger([non_decisive]), by_app_unit=False, phase="verify")
     text = "\n".join(lines)
     assert "sqli" in text
     assert "advisory; per-class gap" in text
@@ -129,15 +129,39 @@ def test_render_depth_ledger_non_decisive_class_gap_reads_advisory():
 
 def test_render_depth_ledger_by_app_unit_also_surfaces_class_gap():
     lines = cpr._render_depth_ledger(
-        _ledger([_DECISIVE_SATISFIED_WITH_CLASS_GAP]), by_app_unit=True)
+        _ledger([_DECISIVE_SATISFIED_WITH_CLASS_GAP]), by_app_unit=True, phase="verify")
     text = "\n".join(lines)
     assert "per-class signal gaps" in text
     assert "will block at report unless covered or deferred" in text
 
 
+def _unsatisfied(n: int) -> dict:
+    return {
+        "unit": {"host": "app.acme.example", "path_prefix": f"/area-{n}", "depth_tier": "app-unit"},
+        "depth_satisfied": False, "ev_rank": 10 - n,
+        "missing_block": [{"family": "authz"}], "missing_warn": [],
+        "signal_classes_uncovered": [],
+    }
+
+
+def test_render_depth_ledger_counts_the_unsatisfied_units_it_leaves_out():
+    lines = cpr._render_depth_ledger(
+        _ledger([_unsatisfied(n) for n in range(8)]), by_app_unit=False, phase="verify")
+    text = "\n".join(lines)
+    assert "/area-4 " in text and "/area-5 " not in text
+    assert "+3 more" in text
+    assert "`vigil assess check-phase-readiness --phase verify --by-app-unit`" in text
+
+
+def test_render_depth_ledger_with_every_unit_shown_names_no_omission():
+    lines = cpr._render_depth_ledger(
+        _ledger([_unsatisfied(n) for n in range(5)]), by_app_unit=False, phase="verify")
+    assert "more" not in "\n".join(lines)
+
+
 def test_render_depth_ledger_no_class_gap_omits_section():
     clean = {**_DECISIVE_SATISFIED_WITH_CLASS_GAP, "signal_classes_uncovered": []}
-    lines = cpr._render_depth_ledger(_ledger([clean]), by_app_unit=False)
+    lines = cpr._render_depth_ledger(_ledger([clean]), by_app_unit=False, phase="verify")
     assert "per-class signal gaps" not in "\n".join(lines)
 
 

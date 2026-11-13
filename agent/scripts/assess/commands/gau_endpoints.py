@@ -16,6 +16,7 @@ import io
 import sys
 from pathlib import Path
 from shlex import quote
+from types import SimpleNamespace
 
 from assess.lib.client import AssessError
 from assess.lib.config import load_config
@@ -96,33 +97,33 @@ def _run_ingest_endpoints(
     input_file: Path,
     engagement_dir: Path,
 ) -> dict:
-    """Invoke `ingest-endpoints` in-process via the same CLI entrypoint.
+    """Run `ingest-endpoints` in-process and return its summary.
 
-    Calling `cli.main(argv)` directly avoids a subprocess boundary while
-    still routing through the same argparse + audit + backend-ingest code path
-    `vigil assess ingest endpoints` uses on the host. SystemExit raised by
-    the inner command propagates as a non-zero exit, which we translate
-    into AssessError so the wrapper can surface it cleanly.
+    The same call js-mining and web-discovery make, so the ingest counts —
+    ``ingested``, ``backend_refused`` (rows the backend refused) and
+    ``write_uncertain`` (writes whose outcome is unknown) — reach this verb's
+    summary instead of only the inner command's stderr. A non-zero exit of the
+    inner command becomes an AssessError the wrapper surfaces.
     """
-    from assess.cli import main as assess_main
-    argv = [
-        "--engagement-dir",
-        str(engagement_dir),
-        "ingest",
-        "endpoints",
-        source,
-        "--file",
-        str(input_file),
-    ]
+    from assess.commands import ingest_endpoints
+
     try:
         with contextlib.redirect_stdout(io.StringIO()):
-            assess_main(argv)
+            summary = ingest_endpoints.run(
+                SimpleNamespace(
+                    source=source,
+                    input_file=str(input_file),
+                    egress_blocked_hosts=None,
+                    engagement_dir=str(engagement_dir),
+                )
+            )
     except SystemExit as exc:
         if (exc.code or 0) != 0:
             raise AssessError(
                 f"ingest-endpoints exited {exc.code}"
             ) from exc
-    return {"returncode": 0}
+        summary = None
+    return summary if isinstance(summary, dict) else {}
 
 
 def _summarize_work_buffer(cfg, source: str) -> dict:
@@ -160,7 +161,7 @@ def _summarize_work_buffer(cfg, source: str) -> dict:
     }
 
 
-def run(args: argparse.Namespace) -> None:
+def run(args: argparse.Namespace) -> dict:
     cfg = load_config(args.engagement_dir)
     current_cache_key = gau_cache_key(
         subs=bool(args.subs),
@@ -257,7 +258,7 @@ def run(args: argparse.Namespace) -> None:
         )
 
     try:
-        _run_ingest_endpoints(
+        ingest = _run_ingest_endpoints(
             source=args.source,
             input_file=ingest_input,
             engagement_dir=Path(cfg.engagement_dir),
@@ -268,21 +269,24 @@ def run(args: argparse.Namespace) -> None:
 
     work_summary = _summarize_work_buffer(cfg, args.source)
 
-    emit_pipeline_summary(
-        {
-            "verb": "gau-endpoints",
-            "target": args.target,
-            "cache_reused": decision.reused,
-            "cache_decision_reason": decision.reason,
-            "cache_age_hours": decision.age_hours,
-            "gau_status": gau_status,
-            "gau_exit_code": gau_exit_code,
-            "gau_argv": gau_argv,
-            "gau_output_path": str(paths.output_path),
-            "gau_line_count": line_count,
-            "deduped_count": deduped_count,
-            "ingest_input_path": str(ingest_input),
-            "ingest_source": args.source,
-            **work_summary,
-        }
-    )
+    summary = {
+        "verb": "gau-endpoints",
+        "target": args.target,
+        "cache_reused": decision.reused,
+        "cache_decision_reason": decision.reason,
+        "cache_age_hours": decision.age_hours,
+        "gau_status": gau_status,
+        "gau_exit_code": gau_exit_code,
+        "gau_argv": gau_argv,
+        "gau_output_path": str(paths.output_path),
+        "gau_line_count": line_count,
+        "deduped_count": deduped_count,
+        "ingest_input_path": str(ingest_input),
+        "ingest_source": args.source,
+        "ingested": int(ingest.get("ingested") or 0),
+        "backend_refused": int(ingest.get("backend_refused") or 0),
+        "write_uncertain": int(ingest.get("write_uncertain") or 0),
+        **work_summary,
+    }
+    emit_pipeline_summary(summary)
+    return summary

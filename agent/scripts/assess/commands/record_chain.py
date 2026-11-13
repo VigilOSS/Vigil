@@ -10,6 +10,9 @@ from pathlib import Path
 from assess.lib.client import AssessmentClient
 from assess.lib.code_record_input import fail
 from assess.lib.config import load_config
+from assess.lib.schema_validation import collect_validation_errors, load_schema
+
+SCHEMA_NAME = "attack-chain.schema.json"
 
 # Backend activity-event field cap (CreateEventRequest.task_name max_length at
 # orchestrator/backend/app/api/events.py). The backend derives the chain_key as
@@ -46,6 +49,19 @@ def run(args) -> None:
         sys.exit(1)
     if not chain.get("title"):
         print("chain payload must have a non-empty title", file=sys.stderr)
+        sys.exit(1)
+    # The backend refuses an unknown key too; refusing here names every problem
+    # at once, before the POST, with the home the schema records for each word.
+    errors = collect_validation_errors(chain, load_schema(SCHEMA_NAME))
+    if errors:
+        print(
+            f"record-chain: the chain payload does not match {SCHEMA_NAME} "
+            f"({len(errors)} problem(s)); nothing was recorded:",
+            file=sys.stderr,
+        )
+        for error in errors:
+            print(f"  - {error}", file=sys.stderr)
+        print("`vigil assess contract record-chain` lists every field.", file=sys.stderr)
         sys.exit(1)
 
     # Inject provenance defaults

@@ -152,6 +152,32 @@ def test_resume_brief_renders_bounded_contradiction_review_pointer():
     assert "## Contradiction Reviews (2)" in out
     assert "VA-048 contradicts VA-047" in out
     assert "showing 1 of 2" in out
+    assert ("`vigil assess fetch finding-links --paginate --jq "
+            "'.[] | select(.link_kind == \"contradicts\" and .retired_at == null)'`") in out
+
+
+def test_truncated_credential_needs_name_both_complete_listings():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "credential_needs": {
+            "count": 12,
+            "items": [{"source": "finding", "slug": "VA-001", "identity": "tenant-b"}],
+        },
+    })
+    assert "## Credential and Identity Needs (12)" in out
+    assert "showing 1 of 12" in out
+    assert "`vigil assess fetch 'dispatch-decisions?kind=dispatch_blocked&resolved=false' --paginate`" in out
+    assert "`vigil assess finding list --verification-status blocked`" in out
+
+
+def test_complete_owner_queues_print_no_continuation():
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "credential_needs": {"count": 1, "items": [{"source": "finding", "slug": "VA-001"}]},
+        "contradiction_reviews": {"count": 1, "items": [{
+            "link_id": 3, "source_slug": "VA-002", "target_slug": "VA-001", "notes": ""}]},
+    })
+    assert "showing" not in out
 
 
 def test_code_resume_labels_transition_gate_and_queue_coverage_by_tier():
@@ -1638,3 +1664,31 @@ def test_resume_brief_omits_proof_work_when_nothing_is_owed_or_queued():
                        "read_command": "vigil assess proof-work list"},
     })
     assert "## Proof Work" not in out
+
+
+def test_finding_bucket_names_its_true_total_and_the_complete_listing() -> None:
+    rows = [
+        {
+            "slug": f"VA-{index:03d}",
+            "severity": "high",
+            "workflow_status": "active",
+            "verification_status": "confirmed",
+            "title": "Acme finding",
+        }
+        for index in range(1, 13)
+    ]
+
+    out = resume_brief._render_markdown({
+        "engagement": {"key": "eng"},
+        "findings": {"verified": rows},
+        "finding_bucket_counts": {"verified": 16},
+    })
+
+    bucket = out.split("- verified:", 1)[1].split("\n- killed:", 1)[0]
+    assert bucket.count("VA-0") == 12
+    assert (
+        "INCOMPLETE: showing 12 of 16 (most severe first; medium+ in this window "
+        "always shown); complete list: "
+        "`vigil assess finding list --verification-status confirmed` and "
+        "`vigil assess finding list --verification-status downgraded`"
+    ) in bucket

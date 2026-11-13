@@ -48,7 +48,7 @@ def _acme_sources() -> dict[str, bytes]:
 @pytest.fixture
 def acme_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     origin = tmp_path / "origin"
-    builder = SnapshotBuilder(tmp_path / "snapshots", "acme")
+    builder = SnapshotBuilder(tmp_path / "tools" / "analysis-state" / "code-snapshots", "acme")
     rows = []
     for file_id, (rel_path, raw) in enumerate(sorted(_acme_sources().items()), 1):
         path = origin / rel_path
@@ -72,8 +72,8 @@ def acme_snapshot(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
                     "has_more": False}
 
     monkeypatch.setattr(code_index, "AssessmentClient", Client)
-    monkeypatch.setattr(code_index, "load_config", lambda *_: SimpleNamespace(
-        base_url="http://example.test", engagement_key="eng"))
+    monkeypatch.setattr(code_index, "load_config", lambda flag=None: SimpleNamespace(
+        base_url="http://example.test", engagement_key="eng", engagement_dir=flag))
     yield snapshot.source_path
     for item in snapshot.source_path.parent.rglob("*"):
         item.chmod(0o700 if item.is_dir() else 0o600)

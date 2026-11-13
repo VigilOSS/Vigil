@@ -75,9 +75,8 @@ def test_default_coverage_shows_next_hard_gate_and_bounded_debt(
     class _Client(StubClient):
         def get(self, path):
             requested.append(path)
-            if path == "code/coverage":
-                return _coverage()
             return {
+                "coverage": _coverage(),
                 "target_phase": "verify-variant", "transition_ready": False,
                 "blockers": [{"code": "structural_analysis_debt_unreviewed", "message": "3 files", "repo_id": 7}],
                 "structural_debt_count": 15,
@@ -106,10 +105,10 @@ def test_default_coverage_shows_next_hard_gate_and_bounded_debt(
     assert "unsupported=2" in out and "degraded=13" in out
     assert "src/0.py" in out and "classification=skip" in out
     assert "showing 10 of 15" in out and "src/14.py" not in out
-    assert "code/readiness?target_phase=verify-variant&include_debt_paths=true" in requested[-1]
+    # Readiness gates on the engagement-wide summary and returns it, so the
+    # default view is one read rather than two that each compute the summary.
     assert requested == [
-        "code/coverage",
-        "code/readiness?target_phase=verify-variant&include_debt_paths=true",
+        "code/readiness?target_phase=verify-variant&include_debt_paths=true&include_coverage=true",
     ]
 
 
@@ -139,9 +138,8 @@ def test_code_coverage_can_require_target_transition_readiness(monkeypatch, caps
     class _Client(StubClient):
         def get(self, path: str):
             requested.append(path)
-            if path == "code/coverage":
-                return _coverage()
             return {
+                "coverage": _coverage(),
                 "target_phase": "hunt",
                 "transition_ready": False,
                 "blockers": [{
@@ -160,8 +158,7 @@ def test_code_coverage_can_require_target_transition_readiness(monkeypatch, caps
 
     assert exc.value.code == 1
     assert requested == [
-        "code/coverage",
-        "code/readiness?target_phase=hunt&include_debt_paths=true",
+        "code/readiness?target_phase=hunt&include_debt_paths=true&include_coverage=true",
     ]
     output = capsys.readouterr().out
     assert "Transition Readiness (hunt): BLOCKED" in output
@@ -174,9 +171,8 @@ def test_quality_failure_does_not_fail_transition_readiness_requirement(monkeypa
 
     class _Client(StubClient):
         def get(self, path: str):
-            if path == "code/coverage":
-                return _coverage()
             return {
+                "coverage": _coverage(),
                 "target_phase": "verify-variant",
                 "transition_ready": True,
                 "blockers": [],
@@ -238,7 +234,9 @@ def test_cwe_matrix_does_not_bypass_transition_readiness(monkeypatch):
             }
 
     monkeypatch.setattr(module, "AssessmentClient", _Client)
-    monkeypatch.setattr(module, "_run_cwe_matrix", lambda *_args: rendered.append(True))
+    monkeypatch.setattr(
+        module, "_run_cwe_matrix", lambda *_args: rendered.append(True) or (True, [])
+    )
     _install_offline(monkeypatch, module)
 
     with pytest.raises(SystemExit) as exc:

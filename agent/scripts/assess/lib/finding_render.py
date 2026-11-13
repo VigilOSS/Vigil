@@ -646,79 +646,18 @@ def _credential_store_shapes(text: str) -> list[str]:
     return shapes
 
 
-def title_advisories(title: str) -> list[str]:
-    """Prose-quality advice about a submission title. NEVER blocking.
-
-    Kept apart from :func:`hygiene_warnings` because the two answer different
-    questions and earn different authority. A leaked internal identifier is a fact
-    about the document and rightly fails a final export closed. Title length is an
-    editorial opinion: enforcing it as a refusal lets a 13-word title block
-    publication of a finished, verified finding — the tool overruling the author on
-    style. Surface it and let the report-writer decide.
-    """
-    advisories: list[str] = []
-    title = nonempty(title)
-    if title:
-        word_count = len(title.split())
-        if word_count > 12:
-            advisories.append(
-                f"submission title is {word_count} words (max 12) — tighten it to a concise, "
-                "specific one-liner before external submission"
-            )
-    return advisories
-
-
 # ---------------------------------------------------------------------------
-# Prose advisories — length/shape opinions about the submission body
+# Shape advisories — the structure of the submission body, never its prose
 # ---------------------------------------------------------------------------
 #
-# Every number below mirrors a ceiling already written in
-# ``agent/references/submission-format.md`` ("Section budgets"). Nothing here
-# blocks; see :func:`prose_advisories` for why.
+# Both numbers mirror a ceiling written in ``agent/references/submission-format.md``
+# ("Section budgets"). They count structure — reproduction steps and the lines of
+# a fenced evidence block — and never judge sentences, titles or word counts:
+# whether the writing is tight is the submission QC reviewer's call. Nothing here
+# blocks; see :func:`shape_advisories` for why.
 
-_SENTENCE_WORD_BUDGET = 25
-_STEPS_SENTENCE_WORD_BUDGET = 20
 _STEP_COUNT_BUDGET = 10
-# Sizing the sentence quote in the length advisory (see :func:`_quote`).
-_QUOTE_WORD_BUDGET = 8
-_QUOTE_CHAR_BUDGET = 70
 _EVIDENCE_BLOCK_LINE_BUDGET = 15
-_REMEDIATION_ITEM_BUDGET = 3
-# Sections whose ceiling is a sentence count, with the trailing clause each one
-# uses to say what the over-budget sentences should be weighed against. The clause
-# is carried in both numbers because the advisory names a range ("sentences 5-7")
-# or a single position ("sentence 5") depending on how far past the ceiling the
-# section ran, and an advisory that cannot conjugate reads like a template.
-_SECTION_SENTENCE_BUDGETS = (
-    (
-        "Summary",
-        4,
-        (
-            "carries a fact the reader needs before Steps",
-            "carry a fact the reader needs before Steps",
-        ),
-    ),
-    (
-        "Attack Scenario",
-        3,
-        (
-            "advances the scenario rather than restating Steps",
-            "advance the scenario rather than restate Steps",
-        ),
-    ),
-    (
-        "Impact",
-        2,
-        (
-            "names an impact the first two do not already carry",
-            "name an impact the first two do not already carry",
-        ),
-    ),
-)
-_REMEDIATION_ITEM_CLAUSE = (
-    "is a distinct fix or a restatement of the first three",
-    "are distinct fixes or restatements of the first three",
-)
 _STEPS_SECTION = "Steps to Reproduce"
 
 # A submission body section: exactly three hashes, at column 0. ``#### Step 2 —``
@@ -727,91 +666,8 @@ _SECTION_HEADING_RE = re.compile(r"^###\s+(.+?)\s*$")
 # Fence openers/closers of any length, so a 4-backtick fence chosen by
 # :func:`_fence_for` is recognised as readily as a plain 3-backtick one.
 _FENCE_RE = re.compile(r"^\s{0,3}(`{3,}|~{3,})")
-_ANY_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s")
 _STEP_HEADING_RE = re.compile(r"^\s{0,3}#{1,6}\s*Step\b", re.IGNORECASE)
-_TABLE_ROW_RE = re.compile(r"^\s*\|")
 _ORDERED_ITEM_RE = re.compile(r"^\s{0,3}\d+[.)]\s+")
-_LIST_MARKER_RE = re.compile(r"^\s{0,3}(?:[-*+]|\d+[.)])\s+")
-_HTTP_REQUEST_LINE_RE = re.compile(
-    r"^\s*(GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)\s+\S+"
-    r"(\s+HTTP/\d(\.\d)?)?\s*$"
-)
-_HTTP_STATUS_LINE_RE = re.compile(r"^\s*HTTP/?[\d.]*\s+\d{3}\b")
-_BOLD_LABEL_ONLY_RE = re.compile(r"^\s*\*{2}[^*]+\*{2}:?\s*$")
-# The same bold label, but carrying a value: ``**Researcher:** A. Name — a@x.test``.
-# ``_BOLD_LABEL_ONLY_RE`` is its empty-valued case.
-_BOLD_LABEL_VALUE_RE = re.compile(r"^\s*\*{2}[^*]+\*{2}:?\s*(?P<value>.*?)\s*$")
-# A terminator in PROSE position — followed by whitespace or end of line. The dots
-# in ``priya.natarajan@research.example`` are followed by letters and do not match.
-_SENTENCE_PUNCT_RE = re.compile(r"[.!?](\s|$)")
-_STRUCTURAL_PUNCT_RE = re.compile(r"^\s*[\{\}\[\]\"]")
-_BLOCKQUOTE_RE = re.compile(r"^\s{0,3}>\s?")
-_INLINE_CODE_RE = re.compile(r"`+[^`]+`+")
-_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?]+[\"')\]]*\s+")
-_WORDLIKE_RE = re.compile(r"[0-9A-Za-z]")
-# Trailing tokens that end in a period WITHOUT ending a sentence. Missing a real
-# boundary merges two sentences into one over-long "sentence" — the false
-# positive this list exists to prevent.
-_ABBREVIATIONS = frozenset(
-    {
-        "e.g", "eg", "i.e", "ie", "etc", "vs", "cf", "approx", "fig", "no",
-        "resp", "al", "inc", "ltd", "co", "dr", "mr", "mrs", "ms", "st",
-        "jr", "sr",
-    }
-)
-
-
-def _is_sign_off_line(line: str) -> bool:
-    """Is this line an attribution/sign-off footer rather than section content?
-
-    Shape, never a word list: a bold label carrying a bare value with no
-    sentence-ending punctuation in prose position. ``**Researcher:** A. Name —
-    a@x.test``, ``**Reported by:** @handle``, ``**Contact:** security@x.test`` and a
-    bare ``**Disclosure:**`` all qualify; ``**Fix:** Parameterize the query.`` does
-    not, because a line with a real sentence in it is content whatever labels it.
-    """
-    match = _BOLD_LABEL_VALUE_RE.match(line)
-    if not match:
-        return False
-    return not _SENTENCE_PUNCT_RE.search(match.group("value"))
-
-
-def _strip_trailing_sign_off(lines: list[str]) -> list[str]:
-    """Drop a trailing sign-off footer from the LAST section's lines.
-
-    A submission's sign-off (``**Researcher:** …``) sits after the final ``###``
-    heading, and with no heading to close that section it lands INSIDE it — so
-    Remediation, the last section in the closed 6-section body, counts an
-    attribution footer as one of its three items. That is a phantom item: it is not
-    in the Structure template, nothing in the schema or the renderer produces it,
-    and the cost is real. A hand-corrected exemplar was compressed to two fixes to
-    leave room for a third that does not exist.
-
-    Scoped to the document tail because that is the only place the defect exists:
-    a footer anywhere else is closed by the next heading. Walks back over blank and
-    footer-shaped lines and stops at the first line of real content, so a section
-    that simply ENDS in a bold-labelled value loses only that value.
-
-    A section made ENTIRELY of footer-shaped lines is content, not a footer, and is
-    kept whole: a Remediation written as ``**Primary fix:** …`` / ``**Defense in
-    depth:** …`` matches the shape on every line, and trimming it to nothing would
-    silence every advisory about it — over-trimming that hides a real defect is a
-    worse failure than the phantom item this function exists to remove.
-    """
-    end = len(lines)
-    found = False
-    while end:
-        line = lines[end - 1].rstrip()
-        if not line.strip():
-            end -= 1
-            continue
-        if not _is_sign_off_line(line):
-            break
-        end -= 1
-        found = True
-    if not found or not any(line.strip() for line in lines[:end]):
-        return lines
-    return lines[:end]
 
 
 def _submission_sections(body: str) -> list[tuple[str, list[str]]]:
@@ -820,11 +676,7 @@ def _submission_sections(body: str) -> list[tuple[str, list[str]]]:
     Fence state is tracked while splitting so a ``### `` line that happens to sit
     inside a fenced request/response block is content, not a new section. Anything
     above the first ``### `` heading (the platform copy-paste header — Title / VRT /
-    Severity / CVSS / Asset / Run / Pass if) is metadata rather than prose and is
-    dropped here, which is why no length advice is ever aimed at it.
-
-    The final section is closed by end-of-body rather than by the next heading, so
-    it alone is trimmed of a trailing sign-off (:func:`_strip_trailing_sign_off`).
+    Severity / CVSS / Asset / Run / Pass if) is metadata and is dropped here.
     """
     sections: list[tuple[str, list[str]]] = []
     fence = ""
@@ -854,106 +706,8 @@ def _submission_sections(body: str) -> list[tuple[str, list[str]]]:
         if name:
             buf.append(raw)
     if name:
-        sections.append((name, _strip_trailing_sign_off(buf)))
+        sections.append((name, buf))
     return sections
-
-
-def _prose_blocks(lines: list[str], *, drop_ordered_items: bool = False) -> list[str]:
-    """Paragraph-sized runs of PROSE from a section, structure removed first.
-
-    Sentence segmentation over raw markdown is the failure mode that makes this
-    class of linter useless: a splitter that reads a table row, a curl invocation,
-    or a response dump as prose reports a 176-word "sentence" nobody wrote, and one
-    bogus advisory costs the reader's trust in every other advisory the tool emits.
-    So structure is removed BEFORE any splitting — fenced blocks, markdown tables,
-    headings, unfenced HTTP request/status blocks and their header lines, JSON
-    braces, and bold-only labels are dropped whole.
-
-    Each dropped line also ENDS the current paragraph. Without that, the prose
-    before a code block and the prose after it would join into one run and be
-    measured as a single sentence. List items start their own paragraph for the
-    same reason, and their marker is stripped so ``-`` never counts as a word.
-
-    ``drop_ordered_items`` additionally removes ordered-list items (and their
-    indented continuations). It exists for one caller: the Summary sentence COUNT,
-    where an optional ``**Exploit flow**`` ordered list lives inside the authored
-    ``summary`` string by convention. Counting those items as Summary prose would
-    fire the Summary advisory on every finding that has a flow. Sentence LENGTH
-    still measures them — a flow step is prose, and a long one is worth splitting.
-    """
-    blocks: list[str] = []
-    current: list[str] = []
-    fence = ""
-    in_http_block = False
-    skipping_item = False
-
-    def flush() -> None:
-        nonlocal current
-        if current:
-            text = " ".join(current).strip()
-            if text:
-                blocks.append(text)
-            current = []
-
-    for raw in lines:
-        line = raw.rstrip()
-        if fence:
-            if _FENCE_RE.match(line) and line.strip().startswith(fence):
-                fence = ""
-            continue
-        opening = _FENCE_RE.match(line)
-        if opening:
-            flush()
-            fence = opening.group(1)
-            in_http_block = False
-            skipping_item = False
-            continue
-        if not line.strip():
-            flush()
-            in_http_block = False
-            skipping_item = False
-            continue
-        # An unfenced HTTP block runs from its request/status line to the next
-        # blank line, so ``Cookie: session=…`` is consumed as part of the block
-        # rather than by a generic ``word:`` rule that would also swallow prose.
-        if in_http_block:
-            continue
-        if _ANY_HEADING_RE.match(line) or _TABLE_ROW_RE.match(line):
-            flush()
-            skipping_item = False
-            continue
-        if _HTTP_REQUEST_LINE_RE.match(line) or _HTTP_STATUS_LINE_RE.match(line):
-            flush()
-            in_http_block = True
-            skipping_item = False
-            continue
-        if _STRUCTURAL_PUNCT_RE.match(line) or _BOLD_LABEL_ONLY_RE.match(line):
-            flush()
-            skipping_item = False
-            continue
-        # A ``**Label:** value`` line is its own item, exactly like a list entry:
-        # ``**Primary fix:** …`` / ``**Defense in depth:** …`` is a real Remediation
-        # shape, and joining those lines into one run would both invent a sentence
-        # nobody wrote and collapse several items into one.
-        if _BOLD_LABEL_VALUE_RE.match(line):
-            flush()
-            skipping_item = False
-        if drop_ordered_items and _ORDERED_ITEM_RE.match(line):
-            flush()
-            skipping_item = True
-            continue
-        if skipping_item:
-            if raw[:1].isspace():
-                continue
-            skipping_item = False
-        if _LIST_MARKER_RE.match(line):
-            flush()
-            line = _LIST_MARKER_RE.sub("", line, count=1)
-        else:
-            line = _BLOCKQUOTE_RE.sub("", line)
-        current.append(line.strip())
-    flush()
-    return blocks
 
 
 def _fenced_blocks(lines: list[str]) -> list[list[str]]:
@@ -978,51 +732,6 @@ def _fenced_blocks(lines: list[str]) -> list[list[str]]:
     if current:
         blocks.append(current)
     return blocks
-
-
-def _sentences(block: str) -> list[str]:
-    """Split one prose paragraph into sentences.
-
-    A boundary is a terminator, optional closing quote/bracket, whitespace, and a
-    next character that opens a sentence (upper case, digit, quote, bracket, or a
-    backticked identifier). Anything else is left joined. The bias is deliberate:
-    an over-split produces two SHORTER segments and merely under-reports, while an
-    under-split invents a long sentence and fires a false advisory. The
-    abbreviation guard exists for the same reason — "e.g." must not end a sentence.
-
-    A segment carrying no word-like token (a stray rule, a lone marker) is not a
-    sentence and is dropped, so it can never pad a section's sentence count.
-    """
-    text = block.strip()
-    if not text:
-        return []
-    sentences: list[str] = []
-    start = 0
-    for match in _SENTENCE_BOUNDARY_RE.finditer(text):
-        nxt = text[match.end() : match.end() + 1]
-        if not nxt or not (nxt.isupper() or nxt.isdigit() or nxt in "([\"'`“‘"):
-            continue
-        trailing = re.search(r"([A-Za-z][A-Za-z.]*)\.$", text[: match.start() + 1])
-        if trailing and trailing.group(1).rstrip(".").lower() in _ABBREVIATIONS:
-            continue
-        sentences.append(text[start : match.end()].strip())
-        start = match.end()
-    sentences.append(text[start:].strip())
-    return [piece for piece in sentences if _word_count(piece)]
-
-
-def _word_count(sentence: str) -> int:
-    """Words in one sentence, with each inline-code span counted as ONE word.
-
-    ``Run `curl -sk -H 'Cookie: session=x' https://host/a/b -o out.json` and read
-    the body`` is a short instruction wrapped around one opaque token, not a
-    twenty-word sentence. Counting the argv word by word would fire the length
-    advisory on well-written steps, which is the FP class most likely to teach the
-    report-writer to ignore advisories entirely.
-    """
-    text = _INLINE_CODE_RE.sub(" code ", sentence)
-    text = text.replace("**", " ").replace("__", " ")
-    return sum(1 for token in text.split() if _WORDLIKE_RE.search(token))
 
 
 def _step_count(lines: list[str], steps: object) -> int:
@@ -1058,139 +767,37 @@ def _step_count(lines: list[str], steps: object) -> int:
     return max(marked, len(authored) if len(authored) > 1 else 0)
 
 
-def _list_item_count(lines: list[str]) -> int:
-    """Top-level list items in a section (bullet or ordered), fences skipped.
-
-    Remediation is budgeted in ITEMS, and an item is a list entry whether the
-    author reached for ``-`` or ``1.``. Nested entries (4+ spaces of indent) are
-    sub-points of an item, not items.
-    """
-    count = 0
-    fence = ""
-    for raw in lines:
-        line = raw.rstrip()
-        if fence:
-            if _FENCE_RE.match(line) and line.strip().startswith(fence):
-                fence = ""
-            continue
-        opening = _FENCE_RE.match(line)
-        if opening:
-            fence = opening.group(1)
-            continue
-        if _LIST_MARKER_RE.match(line):
-            count += 1
-    return count
-
-
-def _tail_range(noun: str, budget: int, total: int, clause: tuple[str, str]) -> str:
-    """``sentence 5 carries …`` / ``sentences 5-7 carry …`` — the over-budget part."""
-    if total <= budget + 1:
-        return f"{noun} {total} {clause[0]}"
-    return f"{noun}s {budget + 1}-{total} {clause[1]}"
-
-
-def _quote(sentence: str) -> str:
-    """A short, embeddable excerpt naming the sentence a length advisory points at.
-
-    Whitespace is collapsed first, so a sentence that wraps multiple source lines
-    cannot inject a bare newline into the single OPERATOR DETAILS bullet the quote
-    renders inside — that would break the fragment out of its ``- `` list item.
-    Backticks and pipes are swapped out too, since either can make the excerpt read
-    as a fence or a table cell it never was. Truncation is capped by BOTH words and
-    characters: an inline-code span counts as ONE word to :func:`_word_count`, so an
-    ``_QUOTE_WORD_BUDGET``-word quote can still run long in raw characters when one
-    of those words is an opaque command line — the character cap is the backstop.
-    """
-    flat = " ".join(sentence.split()).replace("`", "'").replace("|", "/")
-    words = flat.split(" ")
-    quote = " ".join(words[:_QUOTE_WORD_BUDGET])
-    truncated = len(words) > _QUOTE_WORD_BUDGET
-    if len(quote) > _QUOTE_CHAR_BUDGET:
-        quote = quote[:_QUOTE_CHAR_BUDGET].rstrip()
-        truncated = True
-    return f"{quote}…" if truncated else quote
-
-
-def prose_advisories(
+def shape_advisories(
     text: str,
     *,
     steps: object = None,
     separator_ordinal: int = 2,
 ) -> list[str]:
-    """Length/shape advice about a rendered submission body. NEVER blocking.
+    """Structure advice about a rendered submission body. NEVER blocking.
 
-    Four measurements, each mirroring a ceiling ``submission-format.md`` already
-    states in prose: sentence length (25 words, 20 inside Steps to Reproduce), step
-    count (10), per-section sentence counts (Summary 4 / Attack Scenario 3 /
-    Impact 2 / Remediation 3 items), and Evidence block length (15 lines per
-    request/response pair).
+    Two measurements, each mirroring a ceiling ``submission-format.md`` states:
+    the reproduction's step count (10) and each Evidence block's length (15 lines
+    of content per request/response pair). Both count structure; the prose itself
+    is judged by the submission QC reviewer, not by a counter.
 
-    They live here with :func:`title_advisories`, and deliberately NOT in
-    :func:`hygiene_warnings`, for the reason that docstring gives: a hygiene
-    warning is a FACT about the document and fails a final export closed, while
-    every number above is an editorial ceiling. A finished, verified finding whose
-    Summary runs to five sentences is a publishable finding; refusing to render it
-    would be the tool overruling the author on style, and would also make the
-    ceilings unfalsifiable — the report-writer could no longer decide that this
-    particular finding needs the extra sentence. So these are surfaced in
-    ``submission-context.json``, on stderr, and under OPERATOR DETAILS, and the
-    report-writer decides.
+    They are kept apart from :func:`hygiene_warnings`: a hygiene warning is a FACT
+    about the document and fails a final export closed, while both numbers are
+    editorial ceilings. A verified finding with eleven steps is a publishable
+    finding, so these are surfaced in ``submission-context.json``, on stderr, and
+    under OPERATOR DETAILS, and the report-writer decides.
 
     Scanning is confined to the PASTEABLE body (above the ``separator_ordinal``-th
     ``---``, the same window :func:`hygiene_warnings` uses) so the never-paste
     OPERATOR DETAILS reference — which legitimately carries whole PoC requests,
-    responses, and command transcripts — is never measured as submission prose.
+    responses, and command transcripts — is never measured.
 
     ``steps`` takes the authored ``details.steps_to_reproduce`` value; it is only a
     floor for the step count (see :func:`_step_count`).
     """
     body = pasteable_body(text, separator_ordinal=separator_ordinal)
-    sections = _submission_sections(body)
+    section_lines = dict(_submission_sections(body))
     advisories: list[str] = []
 
-    # 1. Sentence length. Steps are partitioned out rather than double-counted:
-    #    a Steps sentence is measured against 20 and reported in the Steps
-    #    advisory only, so no sentence appears in two advisories at once. The
-    #    sentence text rides along so the message can quote the longest offender —
-    #    the one it already names by word count — rather than just pointing at a
-    #    section and leaving the author to hunt for it.
-    over_general: list[tuple[int, str, str]] = []
-    over_steps: list[tuple[int, str]] = []
-    for name, lines in sections:
-        in_steps = name == _STEPS_SECTION
-        budget = _STEPS_SENTENCE_WORD_BUDGET if in_steps else _SENTENCE_WORD_BUDGET
-        for block in _prose_blocks(lines):
-            for sentence in _sentences(block):
-                words = _word_count(sentence)
-                if words <= budget:
-                    continue
-                if in_steps:
-                    over_steps.append((words, sentence))
-                else:
-                    over_general.append((words, name, sentence))
-    if over_general:
-        count = len(over_general)
-        longest, where, sentence = max(over_general, key=lambda item: item[0])
-        verb = "sentence runs" if count == 1 else "sentences run"
-        advisories.append(
-            f"{count} {verb} over {_SENTENCE_WORD_BUDGET} words (longest {longest}, "
-            f'in {where}: "{_quote(sentence)}"). Long sentences are the most common '
-            "reason a triager re-reads a submission — consider splitting them."
-        )
-    if over_steps:
-        count = len(over_steps)
-        longest, sentence = max(over_steps, key=lambda item: item[0])
-        verb = "sentence runs" if count == 1 else "sentences run"
-        advisories.append(
-            f"{count} {verb} over {_STEPS_SENTENCE_WORD_BUDGET} words in "
-            f'{_STEPS_SECTION} (longest {longest}: "{_quote(sentence)}"). A step '
-            "that has to be re-read is a step a triager can execute wrong — "
-            "consider splitting them."
-        )
-
-    section_lines = {name: lines for name, lines in sections}
-
-    # 2. Step count.
     step_total = _step_count(section_lines.get(_STEPS_SECTION, []), steps)
     if step_total > _STEP_COUNT_BUDGET:
         advisories.append(
@@ -1200,39 +807,10 @@ def prose_advisories(
             "re-triggers repro rehearsal."
         )
 
-    # 3. Per-section sentence counts. Summary drops ordered-list items so the
-    #    optional Exploit flow inside the authored summary is not counted as prose.
-    for name, budget, clause in _SECTION_SENTENCE_BUDGETS:
-        lines = section_lines.get(name)
-        if lines is None:
-            continue
-        blocks = _prose_blocks(lines, drop_ordered_items=name == "Summary")
-        total = sum(len(_sentences(block)) for block in blocks)
-        if total > budget:
-            advisories.append(
-                f"{name} is {total} sentences (budget {budget}). The budget is a "
-                "ceiling, not a target — consider whether "
-                f"{_tail_range('sentence', budget, total, clause)}."
-            )
-
-    # 4. Remediation is budgeted in ITEMS: its list entries when it is a list, its
-    #    sentences when it is prose (the shape both canonical examples use).
-    remediation = section_lines.get("Remediation")
-    if remediation is not None:
-        items = _list_item_count(remediation)
-        if not items:
-            items = sum(len(_sentences(b)) for b in _prose_blocks(remediation))
-        if items > _REMEDIATION_ITEM_BUDGET:
-            advisories.append(
-                f"Remediation is {items} items (budget {_REMEDIATION_ITEM_BUDGET}). "
-                "The budget is a ceiling, not a target — consider whether "
-                f"{_tail_range('item', _REMEDIATION_ITEM_BUDGET, items, _REMEDIATION_ITEM_CLAUSE)}."
-            )
-
-    # 5. Evidence block length. Blank lines are not counted: a 17-line block that
-    #    is three well-spaced request/response pairs is inside the documented
-    #    "5-15 lines per pair" budget, and firing on its whitespace would be the
-    #    kind of false positive that teaches the reader to skip advisories.
+    # Blank lines are not counted: a 17-line block that is three well-spaced
+    # request/response pairs is inside the documented "5-15 lines per pair"
+    # budget, and firing on its whitespace would teach the reader to skip
+    # advisories.
     for index, block in enumerate(_fenced_blocks(section_lines.get("Evidence", [])), start=1):
         content = sum(1 for line in block if line.strip())
         if content > _EVIDENCE_BLOCK_LINE_BUDGET:
@@ -1255,9 +833,10 @@ def prose_advisories(
 
 # The decision kind stamped by the Phase-8 rehearsal (agent/phases/phase-8-report.md).
 _REHEARSAL_KIND = "repro_rehearsal"
-# The only verdict that clears the finding for drafting; `failed` routes it back to
-# the specialist that recorded it.
-_REHEARSAL_PASS_VERDICT = "followed"
+# The verdicts final export accepts: `followed` is a cold run of the authored steps,
+# `equivalent` carries a prior followed check across a step edit. `failed` routes
+# the finding back to the specialist that recorded it.
+_REHEARSAL_PASS_VERDICTS = ("followed", "equivalent")
 
 
 def _run_id_set(values: object) -> set[int]:
@@ -1316,8 +895,8 @@ def repro_rehearsal_advisories(
     the ``kind='repro_rehearsal'`` decision rows for ``slug`` (newest wins):
 
       1. no row at all — nobody has run this reproduction;
-      2. the newest row's ``verdict`` is not ``followed`` — the recorded rehearsal
-         did not reach the stated outcome;
+      2. the newest row's ``verdict`` is neither ``followed`` nor ``equivalent`` —
+         the recorded rehearsal did not reach the stated outcome;
       3. the newest row's ``runs_checked`` names a run ``details.repro_runs`` no
          longer declares — the reproduction changed after it was rehearsed.
 
@@ -1368,24 +947,27 @@ def repro_rehearsal_advisories(
         return [
             "no repro_rehearsal decision is recorded for this finding — a rehearsal "
             "is what catches a step that removes state a later step needs, which "
-            "reading the steps cannot. Run details.steps_to_reproduce from a cold "
-            "start and stamp the outcome with `vigil assess agent decision --kind "
-            "repro_rehearsal --payload-json '{\"finding_slug\":\"<slug>\","
-            "\"verdict\":\"followed\",\"runs_checked\":[<run_id>, ...]}'` before "
-            "publishing."
+            "reading the steps cannot. Have an independent verifier dispatch run "
+            "details.steps_to_reproduce from a cold start and record the outcome "
+            "with `vigil assess agent decision --kind repro_rehearsal --payload-json "
+            "'{\"finding_slug\":\"<slug>\",\"verdict\":\"followed\","
+            "\"proof_mode\":\"<live|source|fuzz>\","
+            "\"verifier_dispatch_agent_id\":\"<verifier-agent-id>\","
+            "\"observed_outcome\":\"<observed result>\","
+            "\"runs_checked\":[<run_id>, ...]}'` before publishing."
         ]
 
     latest = max(rows, key=_decision_recency)
     payload = latest["payload"]
     verdict = nonempty(payload.get("verdict"))
-    if not verdict.lower().startswith(_REHEARSAL_PASS_VERDICT):
+    if verdict not in _REHEARSAL_PASS_VERDICTS:
         # The observed value is quoted rather than translated: a verdict this
         # command does not recognise is not the same fact as `failed`, and naming
         # the wrong one sends the report-writer to fix something that is fine.
         return [
             "the most recent repro_rehearsal decision for this finding records "
-            f"verdict {verdict or '(none)'!r}, not {_REHEARSAL_PASS_VERDICT!r} — "
-            "only a followed rehearsal clears the reproduction. Route the finding "
+            f"verdict {verdict or '(none)'!r}, not 'followed' or 'equivalent' — "
+            "only those clear the reproduction. Route the finding "
             "back to the specialist that recorded it with the failing step, then "
             "re-rehearse and stamp the new verdict before publishing."
         ]
@@ -1423,7 +1005,7 @@ def hygiene_warnings(
     decide what to strip before an EXTERNAL submission or reply.
 
     Every entry here fails a FINAL export closed, so only a FACT about the document
-    belongs in this list. Prose-quality opinions go to :func:`title_advisories`
+    belongs in this list. Editorial ceilings go to :func:`shape_advisories`
     instead, where they are reported and never gated on.
 
     The slug / engagement-path / internal-UUID and credential-shape checks scan ONLY the PASTEABLE body

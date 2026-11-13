@@ -107,12 +107,35 @@ def run(args) -> None:
                     f"  {role['role']} [{variant['label']}]  "
                     f"{variant['approximate_standing_bytes']}"
                 )
+            unmeasured_pointers = role["unmeasured_trigger_pointers"]
+            if unmeasured_pointers:
+                print(
+                    f"  {role['role']} unmeasured trigger pointers "
+                    f"({len(unmeasured_pointers)}: glob, directory, run-time skill, or "
+                    f"missing file): {', '.join(unmeasured_pointers)}"
+                )
+        print(
+            "Not in this table: each role's trigger-loaded files and bytes. Run with --json "
+            "and read trigger_loaded_references and approximate_trigger_loaded_bytes per role."
+        )
         print()
-        print("OPERATOR_CORE  BYTES  LINES")
+        print("OPERATOR_CORE  BYTES  LINES  APPROX_SESSION_STANDING_BYTES  IF_ALL_TRIGGERS_FIRE")
         if not result["operator_cores"]:
             print(f"(none found under {result['prompt_root']})")
         for core in result["operator_cores"]:
-            print(f"{core['core']}  {core['bytes']}  {core['lines']}")
+            print(
+                f"{core['core']}  {core['bytes']}  {core['lines']}  "
+                f"{core['approximate_session_standing_bytes']}  "
+                f"{core['approximate_session_ceiling_bytes']}"
+            )
+            for kind, rows in (
+                ("standing", core["standing_references"]),
+                ("trigger", core["trigger_loaded_references"]),
+            ):
+                for row in rows:
+                    size = row["bytes"] if row["bytes"] is not None else "missing"
+                    trigger = f"  {row['trigger']}" if row.get("trigger") else ""
+                    print(f"  {kind} {row['path']}  {size}{trigger}")
 
     if unmeasured is not None:
         print(

@@ -21,7 +21,6 @@ from dataclasses import dataclass
 from pathlib import PurePosixPath
 from typing import Any
 
-from .security_history import strip_advisory_ids
 
 RECEIPT_SCHEMA = "code-history-receipt/v1"
 COMMIT_SCHEMA = "code-history-commit/v1"
@@ -56,11 +55,6 @@ DIFF_STATUSES: tuple[tuple[str, str], ...] = (
 
 _HEX_OBJECT_ID = re.compile(r"^(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})$")
 _IDENT_TIME = re.compile(rb">\s*(\d+)\s+[+-]\d{4}\s*$")
-_SHORT_HEX = re.compile(r"(?<![0-9A-Za-z])[0-9a-fA-F]{7,64}(?![0-9A-Za-z])")
-_DESCRIPTIVE_WORD = re.compile(r"[^\W\d_]{2,}")
-# A semantic bug shape names what the code did and what the fix guarded. Fewer
-# words than this, once identifiers and hashes are removed, is a label.
-MIN_DESCRIPTIVE_WORDS = 3
 
 
 def full_object_id(value: str) -> str | None:
@@ -166,7 +160,3 @@ def encode_json_line(record: dict[str, Any]) -> bytes:
 def encode_receipt(receipt: dict[str, Any]) -> bytes:
     return (json.dumps(receipt, indent=2, sort_keys=True, ensure_ascii=True) + "\n").encode("ascii")
 
-
-def descriptive_word_count(text: str) -> int:
-    """Words left in *text* once advisory identifiers and hex hashes are removed."""
-    return len(_DESCRIPTIVE_WORD.findall(_SHORT_HEX.sub(" ", strip_advisory_ids(text))))

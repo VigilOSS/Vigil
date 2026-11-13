@@ -15,6 +15,15 @@ def _row():
             'path_suggested_vuln_classes': []}
 
 
+def _file_row(*, attempt_generation=3):
+    """A `code/files` row: file facts plus the current queue attempt, no generation."""
+    return {'id': 9, 'file_path': 'src/acme.php', 'loc': 21, 'repo_id': 7,
+            'classification': 'core',
+            'queue': {'state': 'current', 'historical_attempts': 0,
+                      'current_attempt': {'id': 44, 'status': 'processing',
+                                          'repo_generation': attempt_generation}}}
+
+
 class SelectedFacts:
     def __init__(self):
         self.calls = []
@@ -30,7 +39,7 @@ class SelectedFacts:
             return {'items': [_row()], 'total': 1, 'count': 1, 'offset': 0, 'has_more': False}
         if path == 'code/files':
             assert params['file_path'] == ['src/acme.php']
-            return {'items': [_row()], 'total': 1, 'count': 1, 'offset': 0, 'has_more': False}
+            return {'items': [_file_row()], 'total': 1, 'count': 1, 'offset': 0, 'has_more': False}
         raise AssertionError(endpoint)
 
 
@@ -84,10 +93,13 @@ def test_required_family_names_preserve_the_complete_backend_floor():
 
 
 def test_path_lane_facts_must_match_the_packet_generation(tmp_path):
+    """A refresh between the identity read and the file read moves the current
+    queue attempt to the new generation."""
     class Client(SelectedFacts):
         def get(self, endpoint):
             page = super().get(endpoint)
-            page['items'][0]['repo_generation'] = 2
+            if urlsplit(endpoint).path == 'code/files':
+                page['items'] = [_file_row(attempt_generation=4)]
             return page
     lane = tmp_path / 'lane.txt'
     lane.write_text('src/acme.php\n')

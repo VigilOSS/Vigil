@@ -484,7 +484,9 @@ def test_finding_record_quiet_suppresses_advisories_but_keeps_slug_stdout(
 
     captured = capsys.readouterr()
     assert captured.out.strip() == "VA-021"
-    assert captured.err == ""
+    # Only the count of what --quiet left out, and how to see it.
+    assert "1 duplicate advisory(ies) not printed under --quiet" in captured.err
+    assert "VA-008" not in captured.err
 
 
 def test_finding_record_parser_exposes_quiet() -> None:

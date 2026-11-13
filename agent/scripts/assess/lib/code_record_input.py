@@ -140,3 +140,41 @@ def canonical_string_list(
         ):
             fail(label, f"{field} entries must be canonical strings up to 256 characters")
     return value
+
+
+def unwrap_request_envelope(
+    label: str,
+    document: object,
+    *,
+    inner_key: str,
+    identity: dict[str, tuple[object, str]],
+) -> object:
+    """Return the inner value of a file written as the whole request envelope.
+
+    Verbs that build the envelope from their arguments read only its inner value
+    from the file. A JSON object holding ``inner_key`` plus nothing but identity
+    keys is that envelope: each identity key it carries must equal the argument
+    (``identity`` maps key -> (argument value, flag spelling)), so the unwrap
+    never overrides what the command line selected. Anything else is returned
+    unchanged.
+    """
+    if (
+        not isinstance(document, dict)
+        or inner_key not in document
+        or set(document) - {inner_key, *identity}
+    ):
+        return document
+    for key, (expected, flag) in identity.items():
+        if key in document and document[key] != expected:
+            fail(
+                label,
+                f"the file is a request envelope whose {key} {document[key]!r} contradicts "
+                f"{flag} {expected}; write only the {inner_key} value to the file (the "
+                "command adds the identity from its arguments) or fix the argument.",
+            )
+    print(
+        f"{label}: the file is a request envelope; recorded its {inner_key} value "
+        "(identity keys match the arguments).",
+        file=sys.stderr,
+    )
+    return document[inner_key]

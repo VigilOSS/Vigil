@@ -22,11 +22,11 @@ from assess.lib.contract_registry import _CONTRACTS
 # The whole `vigil assess` argparse tree, to the depth the CLI contract covers:
 # every leaf path, option string, dest, nargs, const, default, type, choices,
 # required flag, help text and metavar. Pinned as one digest because the tree is
-# an external contract (198 leaves) whose every field is operator-visible.
+# an external contract (200 leaves) whose every field is operator-visible.
 # --------------------------------------------------------------------------- #
 
-_EXPECTED_LEAF_COUNT = 198
-_EXPECTED_TREE_DIGEST = "baf50b614f354c1d6671959882c71dd4b235355ded60f98fbf8cc4ed87b36ab8"
+_EXPECTED_LEAF_COUNT = 200
+_EXPECTED_TREE_DIGEST = "13c5faecbce6d52d41e515372485d11c8a52fe5d244abcedfafa28c1c08085c2"
 
 
 def _stable(value: object) -> object:
@@ -133,9 +133,9 @@ def test_assess_argparse_tree_signature_is_unchanged() -> None:
 _DISPATCH_VERB_ALIASES = ("register", "update-status", "record-handoff", "record-decision")
 _KALI_BESPOKE_VERBS = ("sweep-orphans", "sweep", "tool-help", "gf")
 _KALI_INLINE_VERBS = ("job", "exec", "browser")
-_EXPECTED_CONTRACT_NAME_COUNT = 150
-_EXPECTED_EPILOG_COUNT = 88
-_EXPECTED_CONTRACT_DIGEST = "b45166b9614c09f4c17f74bb8c020ce13bb9657927ecc6a49988abe2e9b3b480"
+_EXPECTED_CONTRACT_NAME_COUNT = 153
+_EXPECTED_EPILOG_COUNT = 90
+_EXPECTED_CONTRACT_DIGEST = "e4f3d656ecb132125534b095f286040f94f3b6c11e5362582ba9d58c9331423d"
 
 
 def _renderable_contract_names() -> list[str]:

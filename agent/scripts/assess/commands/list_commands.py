@@ -18,7 +18,8 @@ discovery; `contract` is the detail.
 Filters:
   --phase <N>   show only commands meaningful in a canonical engagement phase
                 (kali_audit.ALLOWED_PHASES; the `consume` short alias for
-                `consume-test` is accepted).
+                `consume-test` is accepted, and a code track phase such as
+                `hunt` lists its audit tag's slice, `code-hunt`).
   --goal <g>    show only commands tagged with a cross-cutting intent goal
                 (contracts.COMMAND_GOALS); AND-composes with --phase.
   --kali-only   expand the collapsed `kali` row into its per-tool `kali <verb>`
@@ -37,12 +38,13 @@ import argparse
 import json
 
 from assess.lib import contracts
-from assess.lib.phases import PHASE_INPUT_ALIASES
+from assess.lib.phases import CODE_PHASES, PHASE_INPUT_ALIASES, code_audit_tag
 
 
-# `--phase` accepts every canonical phase plus the declared input aliases (both
-# resolve via contracts.canonical_phase).
-_PHASE_CHOICES = (*contracts.CATALOG_PHASES, *PHASE_INPUT_ALIASES)
+# `--phase` accepts every canonical phase, the declared input aliases, and the
+# code track phases `agent start` stores in a code lane's packet; all resolve to
+# the catalogue's audit-tag vocabulary via phases.code_audit_tag.
+_PHASE_CHOICES = (*contracts.CATALOG_PHASES, *PHASE_INPUT_ALIASES, *CODE_PHASES)
 
 # `--goal` accepts the canonical cross-cutting goal vocabulary (a command's
 # `goals` tags are a subset of this). Sourced from contracts so a new goal is
@@ -80,7 +82,8 @@ def register(subparsers: argparse._SubParsersAction) -> None:
         help=(
             "Show only commands meaningful in this phase (canonical "
             "kali_audit.ALLOWED_PHASES vocabulary; `consume` is accepted as the "
-            "short alias for `consume-test`)."
+            "short alias for `consume-test`, and a code track phase such as "
+            "`hunt` lists the commands tagged with its audit tag, `code-hunt`)."
         ),
     )
     p.add_argument(
@@ -115,7 +118,7 @@ def register(subparsers: argparse._SubParsersAction) -> None:
 
 
 def run(args: argparse.Namespace) -> None:
-    phase_filter = contracts.canonical_phase(args.phase) if args.phase else None
+    phase_filter = code_audit_tag(args.phase) if args.phase else None
 
     rows = _collect_rows(kali_only=args.kali_only)
     if args.grep:
