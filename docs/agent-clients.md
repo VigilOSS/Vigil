@@ -81,6 +81,11 @@ hook receipt is not evidence that no work ran. See the [Codex hook contract](htt
 Claude Code selects a registered specialist through its native `Agent` tool with that
 role as `subagent_type`, supplying the saved dispatch packet. The selected wrapper
 provides the specialist instructions; see [custom subagents](https://code.claude.com/docs/en/sub-agents).
+Generated wrappers inherit the session model except `report-writer`, whose single wrapper,
+shared by web, code and blue engagements, runs `claude-sonnet-5-5` at medium reasoning:
+submission authoring and QC read evidence the specialists already proved. The operator passes a
+stronger model only to escalate a contested proof, severity or causality question. Other
+clients' `report-writer` roles use the selected model.
 
 Dispatch fingerprints use `instruction_identity_status=installed` when the expected installed
 instruction files were hashed. They identify disk contents, not observed child execution or
@@ -265,6 +270,15 @@ assessment assets in a separate immutable client workspace. ZCode's absolute
 change the environment of the already running desktop app or arbitrary shell
 commands. Operators and specialists use the literal paths in that context.
 
+## Subagent concurrency budget
+
+`vigil assess agent start-swarm` warns on stderr when its `--workers` plus the engagement's
+in-progress dispatches exceed the client's concurrent-subagent budget, because specialists past
+that budget queue inside the client instead of running in parallel. Every row is still recorded.
+The budget defaults to 20, Claude Code's limit. For another client, set
+`VIGIL_CLIENT_CONCURRENCY_BUDGET` in the environment or `client.concurrency_budget` in
+`~/.config/vigil/config.json`; the environment wins.
+
 ## Forwarding flags to the client
 
 `vigil engagement start` is the one verb parsed leniently: any flag it does not own
@@ -290,3 +304,30 @@ consuming the first client flag value or post-`--` message.
 `vigil engagement start` owns exactly `key`, `--select`, `--client`, `--mode`, `--thinking`,
 `--no-autoprompt`, and `--skip-preflight`. There is no `--model` flag — `--model` is forwarded to the
 client like any other unknown flag.
+
+## Claude operator model
+
+`vigil engagement start --client claude` passes Claude Code the track's model and prints it in the
+launch output's `model:` line:
+
+| Track | Model |
+|---|---|
+| code | `claude-opus-5-5[1m]` (Opus 5.5, 1M context) |
+| web | `claude-opus-5[1m]` (Opus 5, 1M context) |
+
+Specialists the operator dispatches inherit the session model, except `report-writer`, whose wrapper
+pins `claude-sonnet-5-5` at medium. Blue and remediation sessions get no model from Vigil and use
+your Claude Code default.
+
+The first match decides the model:
+
+1. A forwarded `--model`, such as `vigil engagement start <key> --client claude -- --model claude-sonnet-5-5`.
+2. `VIGIL_CLAUDE_MODEL_CODE` or `VIGIL_CLAUDE_MODEL_WEB` in the environment.
+3. `claude.model.code` or `claude.model.web` in `~/.config/vigil/config.json`, for example
+   `vigil config set claude.model.web 'claude-opus-5-5[1m]'` (quote the brackets so the shell does
+   not expand them).
+4. The track model in the table.
+
+An override of `default` passes no `--model`, so Claude Code picks the model from `ANTHROPIC_MODEL` or
+its `model` setting. The `--model` Vigil passes outranks both. `/model` still switches the model
+mid-session.

@@ -32,7 +32,10 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `orchestrator/backend/app/api/assessment_operator.py:_LAUNCHED_CLIENT` owns the clients a dispatch can be
   BOUND to; `_DISPATCH_CLIENT` adds `unknown`, `contract_registry.py:BINDABLE_CLIENTS` mirrors it in the CLI.
   `_MIXED_ASSESSMENT_ROLES` owns mode-required roles; `contract_registry.py:MIXED_ASSESSMENT_ROLES` mirrors it.
-  See: `orchestrator/backend/tests/test_dispatch_client_binding_api.py`.
+  `GATED_DECISION_KINDS` owns the decision kinds stored canonically across case/separator spellings, with misspellings refused;
+  `contract_registry.py:GATED_DECISION_KINDS` mirrors it for `agent decision --kind` help.
+  See: `orchestrator/backend/tests/test_dispatch_client_binding_api.py`,
+  `orchestrator/backend/tests/test_gated_decision_kind_mirror.py`.
 - `agent/scripts/assess/lib/render_containment.py:contain_separators` owns lossless, indent-only containment of
   persisted target-influenced text in agent-readable documents, so none forges a column-zero heading (ADR 0019).
   `operator_checkpoint.py` and `resume_brief.py` render through it.
@@ -63,6 +66,12 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   means; `api/assessment.py:RootCauseLinkRequest` imports it, the CLI's `--effect` default mirrors it, and
   every read-side fallback that labels a sibling residual or root-resolved has to agree with it.
   See: `orchestrator/backend/tests/test_root_cause_effect_wire_default.py`.
+- `state_manager/_common.py:CORROBORATION_LINK_KIND` owns the `corroborated_by` link kind
+  (`target_kind='dispatch'`, naming a recorded dispatch that neither authored nor edited the finding);
+  `state_manager/links.py` validates it, `commands/corroborate_finding.py` (`finding corroborate`) mirrors the
+  kind, and a corroboration never changes verification status. `commands/list_chains.py` (`chain list`)
+  counts a chain step verified on the same confirmed/downgraded pair report gates admit.
+  See: `agent/scripts/assess/tests/test_finding_corroborate_and_chains.py`.
 - `finding_snapshots.py:resolve_snapshot_location` owns whether a cited path and line exist in the sealed
   generation, for finding locations, lead bindings and trigger targets.
 - `repro_currentness.py:reproduction_basis` owns `source`, `runtime`, or `unknown` reproduction; readiness, the report,
@@ -73,9 +82,22 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `code_analysis_support.py:_file_path_scope_sql` owns path scoping for queue list, claims and by-path coverage
   (`test_code_queue_path_scope.py`); `_current_analysis_status_sql`/`_structural_debt_sql` own the status buckets and
   debt the summary, readiness and by-path share (`test_code_coverage_by_path.py`).
-- `code_analysis.py:WORKFLOW_CONTEXT_VULN_CLASSES` owns the workflow families: role words require them
-  (`_applicable_families_for_file`), path words only suggest them (`_path_suggested_families_for_file`). Recomputed on
-  every read. See: `test_workflow_state_families.py`.
+  `_review_depth_sql` owns a file's review depth (deep or wide-only) for the by-path and CWE-matrix depth
+  columns and `depth_advisories`; depth is steering and never enters coverage or a gate (`test_code_review_depth.py`);
+  `review_depth_params` supplies its bound parameters and deep packets are read once per query
+  (`test_code_review_depth_scale.py`). `code_analysis.py:_effort_gap_summary` owns `gate.effort_gaps` (tier x family
+  groups with counts, sample paths, `rows_omitted`, `full_list`; per-file `rows` only on `code/coverage?detail=cwe`).
+  See: `test_code_coverage_payload.py`.
+- `code_analysis.py:_record_depth_floor_triggers` owns what a critical/high closeout leaves below its tier's
+  `code_analysis_support.py:EFFORT_THRESHOLDS` floor: a `depth_floor` trigger per family (`TRIGGER_ORIGIN_DEPTH_FLOOR`),
+  never a refusal (ADR 0046). `trigger_review_basis` holds a bound trigger to the same floor; code readiness names
+  pending ones as `depth_floor_triggers`, which `codeLabels.ts:BLOCKER_LABELS` labels. See: `test_code_depth_floor_triggers.py`.
+- `code_analysis.py:CONTEXT_TAG_VULN_CLASSES` owns the families each architect-recorded context tag (a file's `context_tags`) requires
+  (`_applicable_families_for_file`; `app/api/code_analysis.py:CodeContextTag` is the same vocabulary), and
+  `WORKFLOW_PATH_CONTEXT_TAGS` the tags whose families path words only suggest (`_path_suggested_families_for_file`).
+  The free-text role adds no family. Recomputed on every read. See: `test_workflow_state_families.py`. `_markup_unread_code` owns what unread markup code adds:
+  server-side code requires the code slot families, a browser `<script>` the browser families, and a streaming
+  fallback only suggests them (`_unread_code_suggested_families_for_file`). See: `test_code_effort_obligations.py`.
 - `orchestrator/backend/app/services/state_manager/cvss.py:base_score` owns CVSS v3.1/v4.0 base-vector
   validation and scoring for finding writes and report readiness; `finding_details.py` owns the
   generated schema vocabulary. See: `orchestrator/backend/tests/test_cvss40.py`.
@@ -93,9 +115,36 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   client-delivered HTML carries; `orchestrator/report/src/types.ts` is the other half, index signature
   dropped so a renderer reaching past them is a type error. See: `docs/maintainer-guide.md` report-template section.
 - `agent/scripts/assess/lib/contract_registry.py` owns executable CLI metadata; `contracts.py`
-  resolves and renders it for `contract.py` and `list_commands.py`.
+  resolves and renders it for `contract.py` and `list_commands.py`. `render_contract` is the compact
+  view; `render_field_sections` is the one per-field renderer behind `contract --field` and a refused
+  write's contract block (`lib/contract_sections.py` maps validator errors to the field names).
+- `contract_registry.py:DISPATCH_MODES_BY_ROLE` owns the iteration modes each role prompt describes (default first);
+  `agent start` warns on another mode. Pinned against each role's "Iteration mode" line by
+  `agent/scripts/assess/tests/test_dispatch_role_roster.py`.
+- `agent/scripts/assess/lib/producer_identity.py:resolve_report_writer` owns which dispatch a `report.md` or
+  submission registration is attributed to when `--agent-id` is omitted (`export submission`,
+  `artifact register --kind report`). See: `agent/scripts/assess/tests/test_report_writer_attribution.py`.
+- `state_manager/proofs.py:attach_severity_variance` owns the `severity_variance` decision: only `reason` is
+  authored; band, chosen severity, verifier and receipt come from the current verification, as on `finding verify
+  --severity-variance-file`. Report readiness names an unexplained band departure `severity_cvss_mismatch`.
+  See: `orchestrator/backend/tests/test_severity_variance_derivation.py`.
+- `state_manager/dispatches.py:CURRENT_DECISION_SQL` owns which decision rows are current: a
+  row recorded with `supersedes` stamps the replaced row `superseded_by_id`, and every gate,
+  readiness reader and approval flow reads only current rows (`list_decisions` defaults to
+  them). See: `orchestrator/backend/tests/test_decision_supersession.py`.
+- `state_manager/report_readiness.py:report_qc_state` owns report.md QC currency (ADR 0045),
+  served as report readiness `report_qc`; `transition_phase._report_qc_blockers` reads it.
+  `finding_severity_band` owns the band-departure rule readiness and the finding point read share.
+- `agent/scripts/assess/lib/prompt_census.py` owns the advisory prompt measurements, including
+  `specialist_cites_operator_core` for a specialist-loaded line that points at an operator core.
 - `agent/scripts/assess/lib/config.py` checks backend engagement visibility through the
   engagement detail read before commands; summary/readiness assembly belongs to explicit readers.
+- `src/vigil_cli/orchestrator.py:lifecycle_endpoint` owns the local endpoint backend start/restart bind: the owned
+  receipt's, else the loopback endpoint `preflight.py:managed_backend_endpoint` derives from the workspace's
+  resolved base URL, else 127.0.0.1:18000. `paths.py:global_default_install_root` owns which workspace the global
+  `orchestrator_base_url` and `install.root` settings belong to; `agent/scripts/assess/lib/config.py:resolve_base_url`
+  mirrors `paths.py:resolve_orchestrator_base_url` across the assess exec boundary. See:
+  `tests/test_orchestrator_endpoint_selection.py`, `agent/scripts/assess/tests/test_assess_workspace_base_url.py`.
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
 - `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
 - `agent/scripts/assess/commands/agent.py` captures optional standing briefs by content digest;
@@ -106,6 +155,11 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   its async facade lets HTTP summary/report readers join without occupying request workers.
 - `orchestrator/backend/app/request_diagnostics.py` owns long HTTP request tracking and independent
   all-thread stack capture; `main.py` owns its ASGI/lifespan integration.
+- `orchestrator/backend/app/aggregate_reads.py` owns the engagement-wide aggregate GET routes
+  (`AGGREGATE_READ_ROUTES`: readiness, coverage, by-family/by-host, depth ledger, resume brief), their
+  worker budget (`VIGIL_BACKEND_AGGREGATE_READS`, default 3, capped one below `VIGIL_BACKEND_THREADPOOL`) and
+  single-flight coalescing: a request arriving mid-flight shares the next flight, never an earlier answer.
+  `main.py` registers the middleware inside request diagnostics. See: `test_aggregate_read_limiter.py`.
 - `orchestrator/backend/app/json_response.py` owns lossless JSON escaping for validation errors
   and the activity API; activity response models validate Python values before transport rendering.
 - `artifact_index.py:prepared_artifact_health` owns root-pinned evidence observations;
@@ -171,7 +225,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `render-operator-prompts.sh` renders native assessment command/role assets under
   `agent/.opencode/assessment` and `agent/.zcode/assessment`; `assessment_clients.py`
   stages their immutable workspace/plugin consumers separately from other workflow assets.
-- `agent/scripts/assess/lib/contracts.py` renders engagement binding into every command contract.
+- `agent/scripts/assess/lib/contracts.py` renders engagement binding into every contract's `--notes` view.
 - `src/vigil_cli/client_rosters.py` links those wrapper trees into an engagement as per-entry symlinks, so no stale copy exists and an operator-authored command of the same name wins.
 - `api/assessment.py` and `api/code_analysis.py` feed the generated `agent/schemas/*.json` through `scripts/generate_agent_schemas.py` (`--check` for drift).
 - `agent/scripts/assess/lib/treesitter_index.py` owns parsing and dispatch;
@@ -185,7 +239,8 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   publish v7 beside retained v6 artifacts. See: `orchestrator/backend/tests/test_code_analysis_api.py`.
 - `agent/scripts/assess/lib/code_structural_metadata.py` owns the artifact metadata and callable-identity
   validators shared by structural build and sync. See: `agent/scripts/assess/tests/test_structural_artifact_validation.py`.
-  Its `TOP_LEVEL_CALLABLE_NAME` is mirrored in `code_analysis_support.py`.
+  Its `TOP_LEVEL_CALLABLE_NAME` is mirrored in `code_analysis_support.py`, as is
+  `treesitter_streaming.py:STREAMING_FALLBACK_BASELINE_UNAVAILABLE` (`test_structural_scan_scope_honesty.py`).
 - `agent/scripts/assess/lib/kali_audit.py` threads the command-run audit chain. A persisted Kali flag
   must also land in `kali_cli.py`, `api/assessment.py`, `app/db.py`, and
   `state_manager/command_runs.py`.
@@ -218,7 +273,13 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   `/blocked-techniques/history`), and it builds the OpenAPI `paths` mapping in registration
   order, so `_RUN_CHILD_LISTERS` registers after its sibling POST handlers to keep each path
   item listing `post` before `get`.
-- `contract_registry.py:_INLINE_DOCUMENTED_NAMESPACES` — a `<verb> <action>` leaf documented on its parent contract must have that parent listed here, or `vigil assess contract` cannot resolve it.
+- `api/query_params.py:DeclaredQueryParamsRoute` is the `route_class` of every `api/*.py` router,
+  so every mounted GET route, table-registered ones included, refuses an undeclared query key with
+  400 naming the unknown and accepted keys. The accepted set is read off the route signature and
+  its sub-dependencies by alias; a route that reads `request.query_params` directly must declare
+  those keys as parameters, or they are refused. `reject_unknown_query_params` is the same check as
+  a per-route dependency (`main.py`'s `/healthz` and `/readyz`).
+- `CommandContract.variants` (`ContractVariant`) — an action documented on its command's contract (`code-dispatch done`) must be a variant with a usage line that runs it, or `vigil assess contract <verb> <action>` refuses it. See: `agent/scripts/assess/tests/test_contract_compact_view.py`.
 - `code_analysis_support.py:_analysis_repo_sql` / `_analysis_repo_files_sql`
   — every query counting an OBLIGATION over `code_files` must carry one, or a `reference` repository
   regains coverage, queue and readiness duties. Reads must NOT: reference source stays searchable
@@ -231,8 +292,15 @@ Prompt-defined durable artifacts are executable contracts, not prose-only change
   promotion. Queue rows, results and triggers are stamped superseded; `_rebase_lead_bindings` carries
   a lead binding forward only on an identical `file_hash`. A new generation-bound table needs a line
   here, or it claims a currency it does not have.
-- `state_manager/coverage_readiness.py:PER_HOST_OBJECTIVES` has a CLI
-  mirror in `agent/scripts/assess/lib/coverage_checks.py` and a `coverage_deferral` API literal.
+- `state_manager/coverage_readiness.py:PER_HOST_OBJECTIVES` is the `coverage_deferral`
+  objective vocabulary (`api/assessment_operator.py:CoverageDeferralPayload` derives its literal)
+  and has a CLI mirror in `agent/scripts/assess/lib/coverage_checks.py`. Its
+  `WAF_MEASUREMENT_VERDICTS` (`provenance.waf` on a tech-component row, checked on write by
+  `check_waf_measurement`) is mirrored in `agent/schemas/intel-tech-component.schema.json`;
+  its `_TECH_SCAN_SOURCE_TOKENS` is mirrored by `coverage_checks.py:_TECH_FINGERPRINT_SOURCES`,
+  which the objective hints list.
+  See: `orchestrator/backend/tests/test_recon_objective_records.py`,
+  `agent/scripts/assess/tests/test_recon_objective_hints.py`.
 - `state_manager/command_runs.py` registers output artifacts before and after execution, both
   gated on `route != "host_exec"`; a third route needs both registrations.
 - `agent/scripts/assess/commands/fetch.py` — a paged backend read must be registered or `fetch`

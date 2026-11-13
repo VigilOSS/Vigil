@@ -2,7 +2,7 @@
 
 Everything that shapes an operator session from outside the engagement workflow
 itself: the prompts you paste to start or resume, the `vigil-*` commands
-available mid-session, and the hooks that fire on compaction and session end.
+available mid-session, and the hooks that fire on tool calls, compaction and session end.
 
 Steering prompts for when a session goes shallow, overclaims, or loses the loop
 live in [`engagement-prompt-playbook.md`](engagement-prompt-playbook.md).
@@ -196,13 +196,13 @@ Claude's unfiltered `PreCompact` hook supplies the contract as summarizer instru
 Codex cannot use `PreCompact` stdout for that purpose, so each engagement's installer
 renders a mode-neutral copy of the canonical hook output into Codex's stable
 `compact_prompt` setting. This remains valid if another session selects a different mode.
-Codex then runs `post-compact-resume.sh` through a `SessionStart` hook matching
-`compact`; its developer context reaches the immediate continuation after both manual
+Both clients then run `post-compact-resume.sh` through a `SessionStart` hook matching
+`compact`; its context reaches the immediate continuation after both manual
 and automatic compaction, including an automatic compaction in the middle of a turn.
 The hook verifies the session-selected mode through `vigil engagement mode` and directs
 the operator to only that mode's canonical prompt. If mode selection is unavailable,
 it stops target-facing work. The resumed operator re-hydrates authoritative backend
-state without waiting for the human to invoke `$vigil-resume`.
+state without waiting for the human to invoke `/vigil-resume` or `$vigil-resume`.
 
 Claude sets `CLAUDE_CODE_AUTO_COMPACT_WINDOW`; Codex sets
 `model_auto_compact_token_limit`. Both use an absolute token count, so 510,000 is the
@@ -228,6 +228,28 @@ This explicit recovery does not guarantee that an unattended mid-turn continuati
 waited for hydration, or establish that work already performed used fresh state.
 See [ZCode capability boundaries](zcode-setup.md#capability-boundaries) for native
 acceptance evidence and limitations.
+
+### Application tree is read-only (Claude, Codex, Goose, OpenCode)
+
+An engagement session reads the Vigil application tree (prompts, skills, scripts, CLI) but
+never changes it, even to fix a defect it has diagnosed: the harness defines what every gate,
+receipt and recorded result means, and with an editable install the tree is a maintainer's
+working copy. The operator and specialist cores state the rule. A `PreToolUse` hook,
+`application-read-only.sh`, refuses a call that would modify the directory holding the hook's
+agent root (and `$VIGIL_APPLICATION_DIR`), and its refusal names that directory and says where
+to record the defect instead: the engagement's `ISSUES-AND-ENHANCEMENTS.md` for the operator, the
+handoff's `runtime_issues` for a specialist.
+
+It checks the file tools by their target path, resolved through symlinks, and shell commands
+by their redirection targets, the operands of file-changing programs (`rm`, `mv`, `cp`
+destinations, `sed -i`, `tee`, `patch`, `find -delete` and the like) and git or jj subcommands
+that change a work tree. The engagement directory is always writable. A script file, an
+interpreter's inline code or an unexpanded variable can still write past it: the hook catches
+the ordinary spellings, and [ADR 0048](adr/0048-the-application-tree-is-read-only-from-an-engagement.md)
+records why it is a tripwire rather than a sandbox. Codex and Claude bind it in their generated
+settings, Goose through `goose-hook-adapter.sh`, OpenCode through its standard plugin's
+`tool.execute.before`, which OpenCode does not run for a subagent's tool calls, so a specialist
+dispatched there has the rule alone. ZCode, kimi and pi have no binding.
 
 ### SessionEnd (Claude and Codex)
 

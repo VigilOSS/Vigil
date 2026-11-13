@@ -40,7 +40,7 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
 - `src/vigil_cli/process_identity.py` owns birth-identity checks shared by client sessions and backend process receipts;
   `orchestrator.py` uses those receipts for status/stop, preflight and restore ownership decisions.
 - `src/vigil_cli/client_sessions.py` — live PID/birth-identity bindings, historical starts and bootstrap lock. Shared-config starts reuse the live release without repair; native projects stay independent. Explicit maintenance guards upgrades; historical opens never prove ownership.
-- `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated launchers at session start.
+- `src/vigil_cli/paths.py:resolve_orchestrator_base_url` — backend URL precedence and dotenv normalization; `vigil config resolve orchestrator_base_url` exposes it to generated launchers at session start, and `agent/scripts/assess/lib/config.py:resolve_base_url` mirrors it for `vigil assess`.
 - `src/vigil_cli/preflight.py` owns launch checks shared with blue; managed-local backend recovery never replaces a configured remote endpoint. Static code startup does not query Docker.
 - `src/vigil_cli/remediation.py` — case intake/context rendering, configured workspace/checks, reviewed PR publication, and consented development workflow commands; `remediation_browser.py` owns local browser execution. Backend APIs own case state.
   The canonical engagement wizard creates remediation projects.
@@ -66,7 +66,9 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
   command runs, and bulk ingestion; finding history supports summary and lossless transition reads.
   Coverage ledger reads (`coverage-items/page|facets|reasons|{id}[/position]`) come from `state_manager/coverage.py`.
   Operator pages `command-runs/page|facets|{id}/position` (`command_run_queries.py`) and `request-variants/page|facets|{id}`
-  `[/position|/observations]` (`coverage.py`); bare lists stay the CLI contract. `findings?view=summary` omits `details`/`notes`; `PATCH oob-probes/{nonce}` audits a verdict; `oob.py:oob_verdict_entry` defines one.
+  `[/position|/observations]` (`coverage.py`); bare lists stay the CLI contract. `findings?view=summary` omits `details`/`notes`;
+  `findings?view=list` selects only the list fields (`state_manager/findings.py:FINDING_LIST_VIEW_FIELDS`) for CLI list and
+  gate reads; `finding-links?finding_slug=` filters in SQL; `PATCH oob-probes/{nonce}` audits a verdict; `oob.py:oob_verdict_entry` defines one.
   `assessment_operator.py` owns dispatch/handoff/decision/checkpoint routes; `submissions.py` owns immutable submission/sent-reply APIs.
   `state_manager/dispatches.py` owns atomic packet registration/replay and `HANDOFF_SUMMARY_MAX_CHARS`;
   `commands/agent.py` materializes packets and short web/code/proof launch receipts.
@@ -97,8 +99,9 @@ with two owners, a mirror that must be pinned, a registration that is easy to mi
 - `orchestrator/backend/app/services/submission_versions.py` — CLI/UI submission snapshots; neither changes submission status nor submits externally. See ADR 0025.
   `_ELIGIBLE_ATTACHMENT_SQL` owns what the attachment picker offers (never internal submission-workspace files);
   `publication_readiness` and `attachment_page` back the read-only readiness and attachment routes in `api/submissions.py`.
-  `_packet_review_issue` checks package freshness for blind triage and Pass 1 QA;
-  `_pass1_qa_state` projects selection-specific QA. `state_manager/dispatches.py:record_decision` validates auditor attribution.
+  `_packet_review_issue` gates export on a current blind-triage Accept and a current independent report-writer QC pass
+  (`submission_qc_verdict`); `_submission_qc_state` projects selection-specific QC. `state_manager/dispatches.py:record_decision`
+  validates reviewer, writer and editor independence for both QC kinds, including `report_qc_verdict` on the registered `report.md`.
   Body, guidance, and platform fields bind review identity; `app/db.py:_migrate_submission_platform` expands the GHSA constraint after backup.
 - `orchestrator/backend/app/services/activity_feed.py` owns the merged Activity feed (`GET /activity`, `api/activity.py`):
   categories, mirrored-event exclusion, cursors, cached summary-text search, and entity `ref`/`unlinked_reason`.

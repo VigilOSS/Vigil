@@ -8,8 +8,12 @@ Vigil is built primarily around **Claude Code** and **Codex**.
 | GPT-5.6 Sol, with OpenAI's Trusted Access for Cyber | Web and code |
 | Claude Opus 5.5, GPT-6.1 Sol | Code; web needs an organization-only red-team tier |
 
-- **Claude Code:** CVP works with Opus 5, which is not in the `/model` picker. Select it directly
-  with `/model claude-opus-5[1m]` ([model configuration](https://code.claude.com/docs/en/model-config)).
+- **Claude Code:** `vigil engagement start --client claude` launches code engagements on
+  `claude-opus-5-5[1m]` and web engagements on `claude-opus-5[1m]`, with 1M context. CVP works with
+  Opus 5, which is not in the `/model` picker. Specialists inherit the session model; `report-writer`
+  runs Sonnet 5.5. To choose another model, see
+  [Claude operator model](agent-clients.md#claude-operator-model) and
+  [model configuration](https://code.claude.com/docs/en/model-config).
 - **Codex:** choose GPT-5.6 Sol and its reasoning effort in `/model`.
 
 As of October 2026, red-team access to the newest models is for organizations only:

@@ -12,7 +12,7 @@
 > (ownership/registration), `docs/adr/0001-coverage-as-harness-not-gate.md` (the gating philosophy
 > this doc reflects) as calibrated by `docs/adr/0012-coverage-grain-selective-load-bearing-depth.md`
 > (the decisive-unit class-gate), and `docs/adr/0013-work-buffer-folded-into-backend-ledger.md` (the
-> single-store work-buffer decision this doc now assumes throughout).
+> single-store work-buffer decision this doc assumes throughout).
 
 ---
 
@@ -79,7 +79,7 @@ CLI contract and the named request model/service for payload and persistence tru
 | `resolve coverage-item` | `PATCH /coverage-items/{id}` | `CoverageItemUpdateRequest` | `assessment_coverage_items` | n/a |
 | `finding record` / `intel record` / `record-chain` / `block-technique` / kali `command-runs` | resp. endpoints | resp. models | outcome tables | n/a (outcome writes) |
 
-**Header takeaway:** capture now spans OpenAPI-spec import, hand-authored candidate JSONL, the bulk
+**Header takeaway:** capture spans OpenAPI-spec import, hand-authored candidate JSONL, the bulk
 endpoint-ingest path, and the live proxy — the two highest-volume paths populate `header_schema`
 from data they already hold. Per-header-NAME coverage-items are still not emitted by any
 path. See §6.
@@ -118,8 +118,8 @@ local classifier's signal becomes durable state the depth gate can read.
 | Consumer | Reads | Produces | Blocks? |
 |---|---|---|---|
 | **App-unit scorer** (`app_units.py:584`) | request-variants/observations/surfaces, tech intel, coverage-items (`attack_family` only) | `assessment_application_units`: `deep_required`, `depth_tier`, structure/risk/suppressor scores | **Advisory** (WARN-first) |
-| **Depth ledger** (`depth_ledger.py:112`) | app-units, request-variants (incl. `header_schema_json`), coverage-items + probes (**`attack_family` only, never `input_slot`**), dispatches, findings | per-unit `expected`/`covered`/`missing_block`/`touched`/`signal_classes_uncovered` | **Advisory itself** — but `signal_classes_uncovered` is now selectively load-bearing for decisive units via `terminal_depth_block` below (ADR 0012) |
-| **`terminal_depth_block`** (`depth_ledger.py:918`) | scorer + ledger; `confidence`, `decisive_surface`, `depth_satisfied`, `touched`, `signal_classes_uncovered` (restricted to `BLOCK_HIGH` classes) | two grains of blocking unit, `block_grain="family"` (the historical untouched/unsatisfied case) and `block_grain="class"` (ADR 0012) | feeds the **one** hard gate (in `transition_phase.py`), split into two `severity="block"` blocker `kind`s — `depth_unsatisfied_units` (family) and `depth_uncovered_classes` (class); a decisive/high-confidence unit with a non-empty `BLOCK_HIGH`-class `signal_classes_uncovered` now BLOCKS via the class grain **regardless of `touched`/family `depth_satisfied`** (ADR 0012) |
+| **Depth ledger** (`depth_ledger.py:112`) | app-units, request-variants (incl. `header_schema_json`), coverage-items + probes (**`attack_family` only, never `input_slot`**), dispatches, findings | per-unit `expected`/`covered`/`missing_block`/`touched`/`signal_classes_uncovered` | **Advisory itself** — but `signal_classes_uncovered` is selectively load-bearing for decisive units via `terminal_depth_block` below (ADR 0012) |
+| **`terminal_depth_block`** (`depth_ledger.py:918`) | scorer + ledger; `confidence`, `decisive_surface`, `depth_satisfied`, `touched`, `signal_classes_uncovered` (restricted to `BLOCK_HIGH` classes) | two grains of blocking unit, `block_grain="family"` (an untouched or family-unsatisfied unit) and `block_grain="class"` (ADR 0012) | feeds the **one** hard gate (in `transition_phase.py`), split into two `severity="block"` blocker `kind`s — `depth_unsatisfied_units` (family) and `depth_uncovered_classes` (class); a decisive/high-confidence unit with a non-empty `BLOCK_HIGH`-class `signal_classes_uncovered` BLOCKS via the class grain **regardless of `touched`/family `depth_satisfied`** (ADR 0012) |
 | **Coverage rollup** (`coverage.py:2810`) | coverage-items × host-liveness | `coverage_by_reachability` (reachable/blackholed/…) | Advisory |
 | **Per-host C40 audit** (`coverage.py:2104`) | services/surfaces/intel/findings (never command-runs) | 5 objectives per host (waf/inventory/fuzz/fingerprint/osint) | **WARN-only** |
 | **Resume brief** (`assessment_memory.py:580`) | ~everything | 12-section operating picture incl. **`## Per-Input Coverage`** grid | **Never blocks** (display) |
@@ -162,14 +162,18 @@ override decision):
 
 - **`missing_variant_pass`** — every confirmed critical/high finding needs a completed
   `variant-rotation` VA dispatch naming it. Gates `verify → exploit`.
-- **`missing_chain_construction`** — ≥2 confirmed high/critical findings require a completed EX
-  dispatch. Gates `exploit → report/complete`.
-- **`missing_blind_triage`** — every Medium+ active finding needs an accept-verdict triage decision.
-  Gates `report/complete`.
+- **`missing_blind_triage`** — every Medium+ submittable finding (`active`, `exploited`, `blocked`,
+  `reported`, ...) needs a latest `blind_triage_verdict` of `Accept@P<n>` on a triage packet. The
+  verdicts are produced inside the report phase, so this gates `complete` only.
+- **`missing_submission_qc`** — every submittable finding with a registered submission workspace or
+  exported version, at any severity, needs a latest `submission_qc_verdict` of `pass` on a triage
+  packet from a report-writer other than the writer. Gates `complete`.
+- **`missing_report_qc`** — a registered `report.md` needs a latest `report_qc_verdict` of `pass`
+  naming that artifact and its current sha256. Gates `complete`.
 - **`terminal_depth_block`** — the one hard block from the depth harness, split into two blocker `kind`s
   from the same call (`_depth_backstop_blockers`), both `severity="block"`, both cleared by the same
   `depth_deferral`/`--force` valves (with an optional recorded `--reason`):
-  - `depth_unsatisfied_units` (`block_grain="family"`, the historical block) — fires when an app-unit is
+  - `depth_unsatisfied_units` (`block_grain="family"`) — fires when an app-unit is
     high-confidence-or-decisive **and** unsatisfied **and** untouched **and** undeferred.
   - `depth_uncovered_classes` (`block_grain="class"`, ADR 0012) — fires when a high-confidence-or-decisive
     app-unit's `signal_classes_uncovered`, restricted to `BLOCK_HIGH` classes, is non-empty and undeferred
@@ -178,13 +182,19 @@ override decision):
     unit is unaffected and keeps the unconditional touched→WARN downgrade.
 - **Report readiness** (separate) blocks report export finalize (409) and the `report` transition.
 
+The transition also prints advisories that never block, each with its count and the command that
+inspects it: `no_services` (entering `collect` with no live services), `empty_work_buffer` (entering
+`consume-test` with no pending work items), `no_active_findings` (entering `verify` with no active
+finding), and, at `exploit → report/complete`, `chain_construction_unchained`, which names the
+confirmed high/critical findings no recorded attack chain links (`vigil assess chain list`).
+
 `check-phase-readiness`'s `--strict`/`--strict-deep` are a *different* command's exit codes and do
 **not** drive the `transition_phase` gates. `signal_classes_uncovered` (the per-class refinement)
 renders in the **default** `check-phase-readiness` text (`_render_depth_ledger`) as well as `--json`.
 For decisive and high-confidence units it is not advisory: an uncovered `BLOCK_HIGH` class feeds the
 one hard gate above (ADR 0012). It stays advisory-only for every other unit.
 
-**Preview, not a cold block (ADR 0012).** `_DEPTH_PHASES` (`check_phase_readiness.py:104`) now
+**Preview, not a cold block (ADR 0012).** `_DEPTH_PHASES` (`check_phase_readiness.py:104`)
 includes `report` alongside `consume`/`verify`, so `check-phase-readiness --phase report` renders the
 depth ledger — and specifically the would-block set — as a **preview** before the actual transition,
 with the `depth_deferral` escape named inline. `terminal_depth_block` fires at `report`/`complete`,
@@ -197,7 +207,7 @@ and the readiness surface is where an operator sees the would-block set before r
 ## 6. Header ingestion — current state and the gap
 
 **Populated (real per-header data in `header_schema_json`):** all four request-observation ingest paths
-now capture it — `ingest spec` (OpenAPI `in: header`), `ingest candidates` (only if the JSONL supplies
+capture it — `ingest spec` (OpenAPI `in: header`), `ingest candidates` (only if the JSONL supplies
 `headers` — no automated producer does), **and, per ADR 0012, `ingest endpoints`** (`:667`, header names
 from the ingested rows where present — the highest-volume path, plus everything delegating to it:
 `web-discovery`, `gau-*`) **and the mitmproxy derived observation** (`proxy_addon.py:1013`, populated
@@ -215,21 +225,20 @@ grid — exactly like every other input class.
 (structured, but not read by coverage/depth machinery — it's a HAR/audit surface). Populating
 `header_schema` from the same in-hand headers is a separate, narrower write than either of those.
 
-**The machinery on the far side is now fed, not starved.** The coverage generator's
+**The machinery on the far side is fed across the full ingest breadth.** The coverage generator's
 `header → header-review` candidate (gated on headers being present) and the depth ledger's
 `header_schema_json` presence trigger for the CORS (`client-side`) and proxy/CDN (`protocol`) families
-now fire across the full ingest breadth, not only the spec/candidate slice. Both families are
+fire across the full ingest breadth, not only the spec/candidate slice. Both families are
 `BLOCK_WARN` (§4/§5), so this widens *advisory* coverage completeness — it does **not**, by itself,
 create a new hard block; a header-driven family only enters the hard block-set the same indirect way any
 family would, if the unit is otherwise decisive/high-confidence and its `signal_classes_uncovered`
 includes a `BLOCK_HIGH` class (ADR 0012) — which header presence alone never contributes, since neither
 header-driven family is `BLOCK_HIGH`.
 
-**Full per-header-NAME first-class inputs would still require** (remains carved out as its own,
-sign-off-gated wave — see `ws3-feed-the-grid.md §6`; step 1 below is now done):
-1. ~~Populate `header_schema` in `ingest_endpoints.py:667` + `proxy_addon.py:1013`~~ — **done** (above).
-2. Emit per-header-NAME coverage candidates (`header:X-Forwarded-Host`) instead of one coarse `header`.
-3. Widen the coverage-item natural key (`db.py:912`) to accept the `slot:name` form — **which reverses
+**Full per-header-NAME first-class inputs would require** (carved out as its own, sign-off-gated
+wave — see `ws3-feed-the-grid.md §6`; `header_schema` itself is populated by the ingest paths above):
+1. Emit per-header-NAME coverage candidates (`header:X-Forwarded-Host`) instead of one coarse `header`.
+2. Widen the coverage-item natural key (`db.py:912`) to accept the `slot:name` form — **which reverses
    the coarse-coverage-item invariant** (§7), so it still needs explicit sign-off.
 
 The standing attack-header checklist (`X-Forwarded-Host`, `X-Original-URL`, `X-Rewrite-URL`,
@@ -275,7 +284,7 @@ read side looks past `attack_family`, (3) ADR 0001 rejects fine-grained self-att
 per-input grid — without touching the gate. Reversing this *for headers specifically* is a legitimate,
 scoped, sign-off-gated change (§6), not a bug.
 
-**ADR 0012 addendum.** The gate described in §4/§5 is now selectively load-bearing at the *class* level
+**ADR 0012 addendum.** The gate described in §4/§5 is selectively load-bearing at the *class* level
 for decisive/high-confidence units — but this reads `signal_classes_uncovered`, a signal already derived
 from the same durable, non-self-attested state this section defends (a real `request_variant` + a
 whitelisted `result_status`), never from a widened coverage-item. Coverage-item coarseness (this
@@ -300,7 +309,7 @@ recon/discovery tools  ──►  classify_from_fields (inline, client-side, unc
         │        └─ work-buffer reclassify (idempotent re-classify)
         │
         ├─► request_variant  (query/body/path/cookie/HEADER schema_json;
-        │        │            header_schema is PART of the dedup hash; now
+        │        │            header_schema is PART of the dedup hash;
         │        │            populated by ingest endpoints + proxy_addon too)
         │        ├─► _auto_request_coverage_candidates  (COARSE: 1 item per
         │        │       input CLASS × implied vuln-class)
@@ -352,10 +361,11 @@ phase_readiness() assembles coverage_readiness + per_host + depth_ledger + repor
         │                                                              │
         ▼                                                              ▼
    check-phase-readiness (mixed advisory/blocking, --strict/-deep;   report_readiness ═══► blocks report
-     depth-ledger + would-block preview now render for --phase
+     depth-ledger + would-block preview render for --phase
      report too, not only consume|verify — ADR 0012)
         └── INDEPENDENT of ──►  transition_phase hard gates (missing_variant_pass,
-                                missing_chain_construction, missing_blind_triage, terminal_depth_block)
+                                terminal_depth_block; at complete also missing_blind_triage,
+                                missing_submission_qc, missing_report_qc)
 
 resume-brief ── reads ~everything ──► operator's bounded operating picture (NEVER blocks)
 ```

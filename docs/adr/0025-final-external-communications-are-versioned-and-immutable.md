@@ -1,6 +1,7 @@
 # ADR 0025 — Final external communications are versioned and immutable
 
-- Status: Accepted — implemented
+- Status: Accepted — implemented; amended by
+  [ADR 0045](0045-report-writer-deliverables-pass-independent-qc.md)
 - Date: 2026-09-12
 
 ## Context

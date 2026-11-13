@@ -396,7 +396,14 @@ one line, which is mutating the operator's capture.
   process-parallel safe because every test gets its own temp tree (`isolate_settings`), the one
   stub HTTP server binds port 0, and no test writes into the checkout; keep all three true when
   adding tests.
-- **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects); opt in with `pytest -m integration` only after rebuilding the runtime image (`test_oob_correlate.py`, backend `test_runtime_tooling_contract.py`, `test_kali_cli.py`).
+- **Integration tests are deselected by default** (`-m 'not integration'` in both pyprojects), so a
+  green blocking matrix says nothing about them and no CI job runs them. They live in the root and
+  backend scopes; list them with `-m integration --collect-only -q` per scope. Each skips with the
+  missing prerequisite named: Docker with a `vigil:latest` image current for this checkout
+  (`vigil runtime build`) and a running runtime container for the Kali tests, Chrome/Chromium plus
+  built frontend/report assets, Pandoc, Node 22+, `jj`, and `VIGIL_E2E_UV_CACHE_SEED` naming a
+  populated uv cache (for example `<workspace>/cache/uv`) for the code runtime-proof end-to-end test.
+  Run them with `-m integration` before a release that touches the runtime, report or remediation paths.
 
 - **CI covers all four pytest scopes.** `backend-tests`, `quality-checks` (eval), `root-tests`, and `assess-tests`
   are blocking and run separately. Backend, root and assess jobs each use two workers on hosted

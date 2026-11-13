@@ -34,7 +34,9 @@ what a specialist must establish before writing a negative down.
 
 - Negatives cost a little more traffic and are worth recording.
 - Closed surfaces can be reopened precisely, because each negative says what it covered.
-- The rules live in `agent/rules/hunting.md` §16b, §23, and §27.
+- The rules live in `agent/rules/hunting.md` §12 and §13 (tier, lens, run id, positive control;
+  empty results from your own tooling), with the phase-exhaustion rule in
+  `agent/rules/hunting-operator.md` §1.
 
 ## Alternatives considered
 

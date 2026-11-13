@@ -37,6 +37,11 @@ the orchestrator log, once for that request. This diagnostic runs independently 
 request workers and event loop; it does not cancel or restart work. Set
 `VIGIL_SLOW_REQUEST_SECONDS` before startup to adjust the threshold, or `0` to disable it.
 
+Engagement-wide reads (code and web readiness, coverage, the depth ledger and the resume brief)
+run at most three at a time so writes always have a request worker; identical reads that arrive
+while one is running share the next computation. Set `VIGIL_BACKEND_AGGREGATE_READS` before
+startup to change the limit; it is capped one below the backend's worker pool.
+
 `VIGIL_ORCHESTRATOR_START_TIMEOUT_SECONDS` also applies when engagement startup recovers the managed backend.
 
 - **From the repository:** `uv tool install git+https://github.com/VigilOSS/Vigil vigil` builds
@@ -98,7 +103,9 @@ Each release is materialized once in a persistent cache keyed by version and con
 changing directory does not switch releases.
 Your private workspace holds only operator data and defaults to `~/vigil`; choose another with
 `vigil --root <path>` or `vigil install <path>`. `vigil up` initializes it, and `vigil install`
-initializes or adopts one explicitly:
+initializes or adopts one explicitly. The first workspace you install becomes the default that
+commands without `--root` select. Installing another one leaves that default in place and says so;
+add `--make-default` to `vigil install <path>` to make the new workspace the default instead:
 
 ```text
 workspace.json       # registered private paths and application provenance
@@ -113,6 +120,27 @@ cache/               # dependency environments and disposable build inputs
 Existing workspaces are adopted in place: `workspace.json` registers their engagement, database,
 and tenant-reference locations, and evidence, `.env`, and custom client files stay where they
 are.
+
+### Backend port and side-by-side workspaces
+
+Each workspace's backend binds the loopback port its resolved `ORCHESTRATOR_BASE_URL` names,
+and 18000 otherwise. The URL resolves from the environment, then the engagement's
+`.orchestrator.env`, then `vigil config get orchestrator_base_url`, then the workspace's own
+`.orchestrator.env` or `.env`. The `orchestrator_base_url` setting belongs to the default
+workspace: any other workspace's own file ranks above it. To run a second workspace beside the
+first, give it its own port:
+
+```bash
+echo 'ORCHESTRATOR_BASE_URL=http://127.0.0.1:18030' >> ~/vigil-next/.orchestrator.env
+vigil --root ~/vigil-next orchestrator start
+```
+
+`vigil orchestrator start --port <n>` and `vigil orchestrator restart --port <n>` bind a port
+for that run and warn when the workspace's clients resolve a different URL, naming the setting
+to change. `restart` without `--port` reuses the port the running backend started on, and checks
+that a new port is free before it stops anything. `status`, `stop`, and `open` follow the running
+backend, else the resolved URL. `vigil up` and engagement startup start a stopped backend on its
+resolved loopback port; a remote URL is never started locally.
 
 ## Host recon tools on Docker Desktop
 

@@ -131,6 +131,27 @@ which records a durable override decision. A weak quality score should trigger
 more focused review; `--require-transition-ready` remains the read-only authority
 for the target phase's actual blocker set.
 
+## Re-classifying a reviewed file
+
+A file's review identity is its slot types and its language. Changing either on a reviewed
+file reopens the review: the review, its receipts and the depth-floor triggers it raised on the
+file are superseded and stay readable, and a fresh attempt is queued. A role change is metadata
+and changes nothing else.
+
+A tier or context-tag change reopens nothing. Vigil recomputes what the file owes against the
+review on record. On a critical or high file, each family the change makes owed at the depth
+floor that the review left below it becomes a pending depth-floor trigger. A pending or queued
+trigger the change no longer owes is superseded with its reason (`family_no_longer_required` or
+`tier_floor_lowered`), coverage counts it under `trigger_summary.depth_floor_retired`, and an
+unclaimed `requeue-triggers` attempt left with nothing to carry is withdrawn. Moving a
+skip-closed file to critical, high or medium does reopen it, because those tiers cannot be
+skipped.
+
+A classification that leaves out `role`, `slot_types` or `context_tags` keeps the stored value
+and names it in the output. `code-record classify` prints each file's obligation change and
+writes it to a `code-record classify` activity entry; on a large pass it prints a sample, the
+number left out and the read that lists them all.
+
 ## Working one part of a repository
 
 `code-dispatch list` and `code-dispatch fetch` accept `--path-prefix <dir>` and
@@ -160,6 +181,26 @@ segments and shows files, lines of code, analyzed critical and high files, the s
 analysis-status buckets as the summary, unreviewed structural debt, and accounted
 skips. The rows add up to the summary totals, and the debt column adds up to the
 structural debt that readiness blocks on. Reference repositories never appear.
+
+Each row also counts review depth: `DEEP` files have a successful current review from a
+reanalysis, a `deep-manual` dispatch or a `hunt_scope: deep` packet, and `CHWIDE` critical and
+high files were reviewed by wide passes only. The `code-coverage` summary and `--cwe-matrix`
+add a depth advisory naming critical and high files with signal or findings that have only wide
+passes. Depth points at where to review further; it never enters coverage or a gate.
+
+Effort numbers never refuse a closeout. On a critical or high file, each family a closeout leaves
+below its tier's effort floor (or does not name, which records it at effort 0) becomes a pending
+`depth_floor` trigger, and code readiness lists them as the `depth_floor_triggers` blocker.
+`code-dispatch requeue-triggers` sends a directed pass that settles a trigger once it reaches the
+floor; `code-dispatch resolve-triggers` records why another pass would not move one
+(`reviewed_at_sufficient_depth` when the file was read at depth and the recorded effort understates it).
+A family the closeout marks `not_applicable` never raises a trigger, whatever a receipt scored for
+it. A close recorded before the backend raised depth-floor triggers is not given them retroactively:
+its below-floor families are listed as `untriggered_depth_shortfalls` on the coverage gate and code
+readiness (grouped by tier and family, with sample paths), and they do not block.
+A source-review receipt's `cwe_coverage` is held to the closeout's rules, because the harness
+merges both into one effort per family: a canonical family named once, an effort from 0 to 100, and a
+confidence of high, medium or low. One refusal names every problem.
 
 A file counts as analyzed once it has a successful review. The `code-coverage` gate
 also lists, in `uncovered_high_risk_files`, analyzed critical and high files whose

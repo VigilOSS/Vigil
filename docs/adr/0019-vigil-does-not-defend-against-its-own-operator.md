@@ -69,7 +69,11 @@ deleted by citing this ADR:
    They do not form a destination firewall: an undeclared host in an argv is not
    rejected, because custom clients, raw sockets, and dynamic code make lexical
    destination admission incomplete. Authorization and destination discipline
-   remain the operator's responsibility. An earlier revision of this list also
+   remain the operator's responsibility. A crawler is shaped by scope because each link it
+   follows is a request nobody typed: `kali katana` and `web-discovery` fence the links a crawl
+   follows to the scope.json hosts (a bare host is exact, a wildcard admits its subdomains,
+   `out_of_scope` hosts are excluded), and a caller who passes its own scope flags replaces the
+   fence with a warning rather than being refused. An earlier revision of this list also
    named `scope-check.sh` and its destructive-command blocks here. That was
    wrong on the facts: every filter in that hook guarded the operator's own
    machine, not a third party, and the hook has since been removed (see below).
@@ -108,10 +112,14 @@ one that silently disabled the guard for every repository path containing a
 space. Both passed review. A guard whose failure mode is *silence* is worse than
 no guard, because it is trusted.
 
-A future agent-error guardrail must therefore act where the command is executed
-rather than where it is spelled — the client's own permission layer, or a
-constrained execution surface Vigil owns. Such a change requires a separate review of that
-trust boundary.
+A future agent-error guardrail that anything relies on as a boundary must therefore
+act where the command is executed rather than where it is spelled — the client's own
+permission layer, or a constrained execution surface Vigil owns. A guardrail that reads
+the spelled command can only be a tripwire behind a rule the prompts already carry, with its
+blind spots documented, and it still requires a separate review of that trust boundary.
+[ADR 0048](0048-the-application-tree-is-read-only-from-an-engagement.md) is that review for one
+such tripwire: a `PreToolUse` hook that refuses writes to the Vigil application tree from an
+engagement session, backing a prompt rule rather than standing in for one.
 
 The distinguishing question is always the same: *who is the adversary, and what
 does this stop them reaching?* If the answer is "the operator, from their own

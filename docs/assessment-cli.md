@@ -13,6 +13,39 @@ installs the bundled parser packages automatically. No separate
 Run `vigil assess --help`, or `vigil assess <verb> --help`, for the full flag set
 on any verb.
 
+## Reading a verb's contract
+
+```bash
+vigil assess contract <verb> [<action>|<type>] [--field <name>]... [--notes] [--examples] [--track <track>]...
+```
+
+`vigil assess contract <verb>` prints the compact view of what the verb accepts:
+its usage lines, the fields an author writes (one line each: type, `required` or the
+helper default, the enum, an object's keys), and one example. Its second line counts
+what the view leaves out and names the flag that prints it:
+
+- `--field <name>` prints everything the contract says about one field or flag: the
+  schema description and nested keys, its helper default, and the notes and common
+  mistakes that name it. A flag may be named without its dashes (`--field skip-reason`);
+  a bare leaf name finds its dotted path (`--field evidence` is `details.evidence`).
+- `--notes` prints the notes, common mistakes, helper defaults, phase and goal tags.
+- `--examples` prints every example.
+- `--track <track>` picks the tracks whose fields the view shows. Only the blue IR fields
+  (`x-vigil-extension: blue/v1`, such as the blue `details` keys of `finding record`) are
+  track-bound; every other field shows on every track, because the backend accepts them all.
+  Without the flag the view uses the tracks the bound engagement's `scope.json` declares, and
+  every track when no engagement is bound or its `scope.json` cannot be read (the header says
+  which file and why).
+
+A verb that documents several actions resolves each one on its own:
+`vigil assess contract code-dispatch done` prints only `done`'s usage, fields and
+example, and the notes that name `done` or no action. `vigil assess contract
+code-dispatch` lists the actions, including those with contracts of their own, and an
+unknown name inside a family (`kali nmapscan`) lists that family's contracts. A refused
+`finding record` payload prints the errors with the `--field` sections of the fields they
+name, not the whole contract; an unknown key with no did-you-mean also prints its parent's
+compact line, which lists every key the parent allows.
+
 ---
 
 ## Resuming an engagement
@@ -184,6 +217,13 @@ Attachments are opt-in via repeatable `--attachment-id`. With none, the exact
 Markdown is preserved; with selected registered, hash-valid artifacts, the export
 produces a deterministic ZIP and a manifest.
 
+Without `--agent-id`, the render is attributed to the one in-progress `report-writer` dispatch
+scoped to the finding; several candidates are refused as ambiguous, and none means the render is
+the operator's. `artifact register --kind report` attributes `report.md` the same way.
+The attribution reads dispatch state, not the caller: a specialist's shell carries no dispatch
+identity, so a render the operator runs while exactly one `report-writer` dispatch is in scope is
+credited to that writer. Render as the operator before dispatching the writer or after closing it.
+
 `--recover` reconciles interrupted exports, retains the caller surface in the
 activity ledger, and consumes every bounded failed-version and orphan-diagnostic
 page.
@@ -234,6 +274,8 @@ vigil assess agent start --role <role> --tier <L1|L2|L3|L4> \
 ```
 
 Use `--no-target-traffic` instead of `--rate-budget` for a genuinely offline lane.
+`--dispatch-mode` outside the iteration modes the role prompt describes prints a warning and
+launches anyway; `swarm` applies to any role.
 The mixed-role specialists (`exploit-developer`, `source-analyzer`) require
 `--assessment-mode code|web`.
 For a blue engagement the emitter reads `customer`, `platforms`, and
@@ -252,7 +294,7 @@ The optional prompt-context JSON shape is documented in
 | Discovery | `recon`, `recon-status`, `dns-discovery`, `web-discovery`, `js-mining`, `gau`, `arjun-select`, `arjun-sweep` |
 | HTTP | `http`, `post`, `fetch`, `resolve`, `scaffold-probe`, `classify-payload`, `anomaly-score` |
 | Recording | `record-probe`, `record-surface`, `record-chain`, `record-reply`, `emit-event`, `log`, `block-technique`, `list-blocked-techniques` |
-| State | `coverage`, `work-buffer`, `command-run`, `scope`, `app-unit`, `contract`, `fixture`, `finding`, `intel`, `exploit` |
+| State | `coverage`, `work-buffer`, `command-run`, `scope`, `app-unit`, `contract`, `fixture`, `finding`, `chain`, `intel`, `exploit` |
 | Phases | `transition-phase`, `check-phase-readiness` |
 | Discovery of docs | `list-skills`, `list-references`, `list-commands`, `list-mindsets`, `prompt-census` |
 | Blue | `host-exec`, `approve-proposal` |
@@ -265,6 +307,12 @@ A prefix matches whole path segments and is case-sensitive.
 `vigil assess code-coverage --by-path [--depth N] [--path-prefix PATH]... [--json]` breaks
 coverage down by directory. See
 [code-analysis.md](code-analysis.md#working-one-part-of-a-repository).
+
+`vigil assess finding corroborate <slug> --dispatch <agent_id> [--reason TEXT]` records that a
+recorded dispatch, other than the finding's author or an editor, independently re-derived an
+existing finding. It is a retirable, audited `corroborated_by` link and never changes the
+verification status. `vigil assess chain list [--json]` lists recorded attack chains with their
+finding steps and how many steps are verified.
 
 `vigil assess check-phase-readiness --phase consume-test` also accepts `consume`
 or `consume_test` as input aliases. Its JSON response always returns the canonical

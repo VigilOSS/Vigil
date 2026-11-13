@@ -104,5 +104,4 @@ vigil blue closeout    # customer-facing closeout summary
 vigil blue report      # full incident report
 ```
 
-Methodology: [engagement-methodology.md](../agent/references/runtime-guides/engagement-methodology.md)
-and the [athena-log-investigation skill](../agent/skills/athena-log-investigation/SKILL.md).
+Methodology: the [athena-log-investigation skill](../agent/skills/athena-log-investigation/SKILL.md).

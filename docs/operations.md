@@ -97,8 +97,11 @@ does not invoke a PAM session.
 
 ## Orchestrator data and backups
 
-The orchestrator UI is served from the backend at `http://127.0.0.1:18000` once
-`vigil up` — or `vigil orchestrator start` for a targeted start — is running.
+The orchestrator UI is served from the backend at `http://127.0.0.1:18000` (or the port the
+workspace's resolved base URL names; see
+[Backend port and side-by-side workspaces](installation.md#backend-port-and-side-by-side-workspaces))
+once `vigil up` — or `vigil orchestrator start` for a targeted start — is running.
+`vigil orchestrator open` opens it.
 
 - **Live DB**: `<workspace>/state/orchestrator.sqlite3` in a fresh workspace
 - **Scheduled backups**:
