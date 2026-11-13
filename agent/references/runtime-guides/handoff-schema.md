@@ -1,211 +1,152 @@
 ---
-description: Structured handoff schema written by every specialist via vigil assess agent handoff --agent-id <agent-id> --from-json <path> — fields, length caps, per-role examples, CLI usage
+description: Structured handoff every specialist writes via vigil assess agent handoff --agent-id <agent-id> --from-json <path> — what each field is for, role-specific extras, checkpointing, and per-role examples
 ---
 
 # Specialist Handoff Schema
 
-The structured handoff blob is the canonical "what was done, what's missing, what's
-next" record every specialist writes before its dispatch returns. The blob lives in
-the `assessment_dispatch_handoffs` table and is rendered into the next dispatch's
-prompt by `vigil assess agent render-handoff <agent-id>`.
+The handoff is the "what was done, what's missing, what's next" record every specialist writes
+before its dispatch returns. It lives in `assessment_dispatch_handoffs`; the operator reads it back
+with `vigil assess agent render-handoff <agent-id>` and pastes that bounded blob into the next
+dispatch, so the next agent rebuilds its picture from finding slugs, artifact paths and next steps
+rather than a transcript. Findings, intel, surfaces, credentials and chains have their own tables;
+the handoff carries only what has no other home.
 
-## Purpose
-
-- **Specialists write structured state instead of duplicating it in markdown.** Every
-  finding, intel row, surface, credential, and chain already has a backend table.
-  The handoff captures the cross-cutting fields that don't have their own table:
-  summary, coverage gaps, next steps, runtime issues, working artifacts, open
-  questions, and role-specific extras.
-- **The operator hands the next dispatch a bounded blob.** `render-handoff` reads the
-  handoff row, fetches each finding slug from the backend (404 → "slug missing"),
-  checks every working_artifact path against the engagement directory (missing →
-  "(state: missing)", outside it → "(state: out-of-engagement)"), and
-  emits a context excerpt capped at `--max-lines` (default 40). Use `--max-lines 0` for
-  the complete recorded handoff, including specialty extras; a capped excerpt is not the full result. The next agent
-  rebuilds its mental model from finding slugs, artifact paths, and the next-step
-  list — not from a transcript paste.
-- **The backend dispatch tables are canonical.** Skipping the handoff write means the
-  operator has nothing to feed into the next dispatch.
+Field types, enums and write rules belong to `vigil assess contract agent handoff`; read it (and
+`--field <name>` for one field's rules) before hand-authoring a handoff if you haven't this session.
+A refusal prints the section you need. This file covers what to put in each field.
 
 ## Schema
 
-`Required` reads: **yes** — the write is refused without it; **write it** —
-every specialist-authored handoff sets it and the operator reads it, but the backend
-accepts the row without it, because an operator recovery write for a dispatch that
-returned without a handoff cannot attest a phase or a confidence it never saw;
-**optional** — supply it when it applies.
+**Required:** `agent_id` (equal to `--agent-id`, the id from your Runtime Identity block) and
+`summary` are required to create the row. `agent_role` is optional: the backend stores the role the
+dispatch was registered with and names it on the response's `derived` list, and it refuses a
+different role, so omit it or send your own role file name. Every specialist-authored handoff also
+sets `phase` and `confidence`. The backend accepts a row without them only because an operator
+recovery write cannot attest a phase or confidence it never saw.
 
-| Field | Type | Required | Notes |
-|---|---|---|---|
-| `agent_id` | string | yes | The dispatching agent_id (the same id passed to `vigil assess agent start` / `POST /dispatches`). |
-| `agent_role` | string | yes | The role file the dispatch ran under (`recon-specialist`, `vulnerability-analyst`, etc.). |
-| `phase` | string | write it | The phase tag the dispatch ACTUALLY ran at — the lane's own account, not a copy of the grant (canonical enum via `vigil assess list-commands --phase`; e.g. `recon`, `consume-test`, `exploit`, plus half-phase tags `recon-pivot` / `exploit-recon`). Normally equal to the packet's Runtime Identity `authorized_phase`; when the lane ran a narrower or less privileged branch than it was granted, record the phase it ran. `render-handoff` prints this beside `authorized_phase` from the immutable packet and names a divergence rather than reconciling it, so a self-downgraded lane stops looking identical to one that ran as dispatched. |
-| `summary` | string | yes | target about 2000 chars; hard limit 16384 characters; what was done in your own words. |
-| `confidence` | enum | write it | `low` / `medium` / `high` based on what you proved vs. inferred. |
-| `finding_slugs` | string[] | optional | Slug strings only — the rich data lives in the findings table. The renderer fetches title + severity from the backend per slug. |
-| `coverage_gaps` | object[] | optional | Each entry: `{area, reason, recommended_followup}`. |
-| `next_steps` | object[] | optional | Each entry: `{action, target, recommended_agent, rationale}`. |
-| `runtime_issues` | object[] | optional | Each entry: `{kind, tool_or_target, detail, severity}`. |
-| `working_artifacts` | object[] | optional | Each entry: `{path, description, kind}`. `path` is engagement-relative (e.g. `scans/sans_acme_social.txt`). Both the write and `render-handoff` resolve it against the engagement directory and report `present` / `missing` / `out-of-engagement`; a path outside the engagement cannot be registered as an artifact at all. |
-| `open_questions` | string[] | optional | Free-text questions the operator/human must answer (vendor-SaaS in/out, scope ambiguity, missing credential, etc.). |
-| `recommended_next_agent` | string | optional | The role you'd hand off to (`vulnerability-analyst`, `exploit-developer`, `report-writer`, ...). |
-| `handoff_status` | enum | optional | `checkpointed` / `ready` / `blocked` / `superseded`. Defaults to `checkpointed`; set `ready` or `blocked` in the final handoff so the operator can run `vigil assess agent close <agent_id>`. A `ready` or `blocked` handoff whose dispatch stays `in-progress` past the resume-brief threshold surfaces as a `stale_dispatch_ready_handoff` report-readiness blocker. |
-| `closed_dispatch_status` | enum | optional | Dispatch status for `agent close` to apply (`completed`, `blocked`, `failed`, `aborted`). |
-| `handoff_version` | integer | backend-managed | Incremented on every checkpoint write. Specialists do not set it; the orchestrator increments it on each PATCH so concurrent updates and audit trails stay ordered. |
-| `last_checkpoint_at` | ISO datetime | backend-managed | Timestamp of the most recent handoff write. Backfilled to `created_at` for pre-lifecycle rows; updated by every checkpoint PATCH. Used by `agent reconcile-stale` to find dispatches that have not checkpointed recently. |
-| `extras` | object | optional | Opaque JSON object for role-specific fields (osint CVE-match counts, fuzzer hit/miss ratio, recon live_host_count, etc.). One reserved key: `skills_loaded` — the skills you actually loaded, as a list or a comma-separated string. `render-handoff` reads that exact name, so a dispatch whose `skills` the operator left self-selected has no other way to put its loadout on the record. |
-| `expected_handoff_version` | integer | optional | Update-only guard: the `handoff_version` you read. The write is refused (HTTP 409) if the row has moved since, so a recovery write cannot overwrite a checkpoint that landed in between. Never sent when creating the first handoff. |
+| Field | Entry shape / values | What it is for |
+|---|---|---|
+| `phase` | phase string | The phase you actually ran, in Runtime Identity `authorized_phase` vocabulary: your track's roster (web `recon` … `report`, code `ingest` … `fuzz`, blue `intake` … `report`) or `recon-pivot` / `exploit-recon`. Code lanes may write the audit tag (`code-hunt`, `code-verify`, `code-classify`); `render-handoff` treats both spellings as one phase. If you ran a narrower branch than you were granted, record that branch. `render-handoff` shows it beside the packet's `authorized_phase` and names the divergence. |
+| `summary` | prose, about 2000 chars (hard limit 16384) | What was done and the headline outcome. |
+| `confidence` | `low` / `medium` / `high` | How much of the summary is proven rather than inferred. |
+| `finding_slugs` | `["RE-001", …]` | Slugs recorded with `finding record`. `render-handoff` fetches title and severity. |
+| `coverage_gaps` | `{area, reason, recommended_followup}` | Methodology this dispatch did not cover. |
+| `next_steps` | `{action, target, recommended_agent, rationale}` | Dispatchable actions. |
+| `runtime_issues` | `{kind, tool_or_target, detail, severity}` | Tool or runtime problems that shaped the result. |
+| `working_artifacts` | `{path, description, kind}` | Files you wrote that the next agent may consume. |
+| `open_questions` | strings | Decisions only the operator or the human can make. |
+| `recommended_next_agent` | role name | Your own view of who picks this up. |
+| `handoff_status` | `checkpointed` (default) / `ready` / `blocked` / `superseded` | Lifecycle of this handoff. |
+| `closed_dispatch_status` | `completed` / `blocked` / `failed` / `aborted` | Status `agent close` applies. |
+| `extras` | object | Role-specific fields. |
+| `expected_handoff_version` | integer | Update-only guard: the `handoff_version` you read. A row that has moved since returns 409. Never sent on the first write. |
+
+`handoff_version` and `last_checkpoint_at` are managed by the backend. A key outside this table is
+refused by name, so role-specific fields go under `extras`.
 
 ## Field-by-field guidance
 
 ### `summary`
 
-Aim for about 2000 characters of plain prose; up to 16384 characters are accepted verbatim. Describe what was done and the headline
-outcome so the operator can decide the next dispatch quickly — name the hosts,
-the count of priority surfaces produced, and any blockers that shape the next
-phase. Example: "Phase 1 recon completed against 14 live hosts under
-acme-social.example; five priority surfaces (one admin panel, two upload endpoints,
-two GraphQL introspection-open) recorded; nuclei surfaced two medium CVE
-matches pending exploit-developer validation."
+Name the hosts or modules, what was produced, and any blocker that shapes the next phase, so the
+operator can choose the next dispatch from it. For example: "Phase 1 recon against 14 live hosts
+under acme-social.example; five priority surfaces (one admin panel, two upload endpoints, two
+GraphQL with introspection open); nuclei flagged two medium CVE matches pending validation."
+Fit the summary inside the field. Never split prose across other fields to fit it.
 
 ### `confidence`
 
-Three values — `low` / `medium` / `high`. Pick `high` only when every claim in the
-summary is backed by a recorded finding, intel row, or audit-pipeline command run.
-Drop to `medium` when results rely on inference (CVE version-only matches, banner
-grep, fingerprint heuristics). Drop to `low` when the dispatch hit a hard
-runtime issue (target unreachable, runtime image missing tool, scope blocker)
-that prevented you from confirming most of your claims. Confidence drives the
-operator's decision on whether to trust the summary or re-dispatch.
+- `high`: every claim in the summary is backed by a recorded finding, an intel row, or an audited
+  command run.
+- `medium`: results rest on inference, such as version-only CVE matches, banner greps or
+  fingerprint heuristics.
+- `low`: a hard runtime issue (unreachable target, missing tool, scope blocker) kept you from
+  confirming most claims.
+
+The operator uses confidence to decide whether to trust the summary or re-dispatch.
 
 ### `finding_slugs`
 
-A list of canonical slug strings (`["RE-001", "VA-004"]`).
-The renderer fetches the title + severity from the findings table per slug, so
-you don't repeat them here. If a finding wasn't recorded via `finding record`, do
-not list it here — the renderer would emit "slug missing in backend" and the
-next agent has no way to consume it.
+List only slugs that `finding record` created. An unrecorded slug renders as "slug missing
+(deleted or never recorded)" and gives the next agent nothing to consume.
 
-### `coverage_gaps`
+### `coverage_gaps` and `next_steps`
 
-A list of objects — `{area, reason, recommended_followup}`. Each entry names a
-piece of the methodology the dispatch did NOT cover. `area` is the missing
-coverage in plain language ("non-web service triage on host X", "JS source-map
-extraction for app.foo.com"). `reason` is why the gap exists ("dispatch budget
-spent on subdomain enum", "tool failed", "scope ambiguous"). `recommended_followup`
-is the action that would close the gap ("re-dispatch source-analyzer with
-JS-only objective", "request manual review of vendor-SaaS scope"). The
-operator uses this list to plan the next dispatch.
+A coverage gap names what was not covered, why, and what would close it. For example: area "JS
+source-map extraction for app.acme.example", reason "budget spent on subdomain enum",
+recommended_followup "re-dispatch source-analyzer, JS only". A next step is an action the operator
+can dispatch, with its target, the role that should run it, and one sentence on why now. The
+next dispatch reads the rationale to understand the broader plan.
 
 ### Material observations and the final response
 
-Keep useful observations even when they did not become findings. Put the next experiment and
-its rationale in `next_steps`, uncertainty in `open_questions`, and unexpected relationships in
-`extras` or existing intel notes. State what was observed and what remains hypothetical. The
-final native response should explain those connections and the outcome, not just repeat IDs.
-Use free prose when needed; no fixed word quota, separate detailed investigation file, or new
-operator acknowledgement is required. The summary is only one field, not a cap
-on the investigation or its return. The operator can combine a weak clue with context you lack.
-
-### `next_steps`
-
-A list of objects — `{action, target, recommended_agent, rationale}`. Each entry
-is an actionable next-action the operator could dispatch. `action` is the verb
-("validate CVE-2024-12345 against live target", "extract auth-aware crawl from
-authenticated session", "fuzz the upload parameter"). `target` is the host /
-endpoint / finding the action operates on. `recommended_agent` names the role
-that should run it. `rationale` is one sentence on why now. The next-step list
-is what `render-handoff` shows the next dispatch — the rationale is what the
-new agent reads to understand the broader plan.
+Keep useful observations that did not become findings. Put the next experiment in `next_steps`,
+uncertainty in `open_questions`, and unexpected relationships in `extras` or intel notes, and say
+what was observed versus what is still hypothesis. The operator can combine a weak clue with
+context you lack. The summary is one field, not a cap on the investigation. Your final native
+response should explain the connections and the outcome, not just list IDs.
 
 ### `runtime_issues`
 
-A list of objects — `{kind, tool_or_target, detail, severity}`. Use this to
-warn the operator and the next dispatch about transient or persistent runtime
-problems. `kind` is the category (`tool_failed`, `rate_limited`, `egress_blocked`,
-`runtime_image_missing_dep`, `dependency_failure`, `scope_blocker`, etc.).
-`tool_or_target` names the affected resource. `detail` is the symptom in plain
-language. `severity` is `info` / `warning` / `error` / `blocker`. A `blocker`
-runtime issue means the dispatch could not complete its objective; the next
-dispatch needs to know that before it tries the same approach.
+`kind` is a category: `tool_failed`, `rate_limited`, `egress_blocked`, `runtime_image_missing_dep`,
+`dependency_failure`, `scope_blocker` and so on. `severity` is `info` / `warning` / `error` /
+`blocker`. A `blocker` means the objective could not be completed, and the next dispatch should know
+that before it retries the same approach.
 
 ### `working_artifacts`
 
-A list of objects — `{path, description, kind}`. Each entry is a file the next
-agent might consume. `path` is engagement-relative (`scans/sans_acme_social.txt`,
-`tools/exploit-state/EX-001-payload.sql`, `downloads/app.bundle.js`). `kind` is
-`data` / `script` / `payload` / `exploit_state` / `scan_output` / `download`.
+`path` is engagement-relative (`scans/sans_acme_social.txt`, `tools/exploit-state/EX-001-payload.sql`).
+`kind` is `data` / `script` / `payload` / `exploit_state` / `scan_output` / `download`. The write and
+the renderer both resolve each path and report one of three states:
 
-The write and the renderer resolve each path against the engagement directory and
-report the same three states, so the state you are told at write time is the state
-the next dispatch reads: `present`, `missing`, or `out-of-engagement` for a path
-that resolves outside the engagement (the artifact index refuses to register one, so
-no artifact row can ever exist for it). A `missing` entry survives the renderer's
-line budget ahead of a present one — it is the path the next agent must not chase.
-Declare the artifact after writing the file: a `ready` handoff that names a file it
-did not write is refused, and the row it already stored says so.
+- `present`
+- `missing`
+- `out-of-engagement`: no artifact row can exist for it.
+
+`render-handoff` keeps a `missing` entry ahead of present ones, so the next agent knows not to
+chase that path. Declare an artifact only after the file exists. A `ready` handoff that names an
+absent file exits non-zero after the row is stored, so write the file or drop the entry, then
+re-run the same command.
 
 ### `open_questions`
 
-A free-text list of strings. Use this for things needing a human / operator
-decision that no record-* call can capture: vendor-SaaS in/out scope decisions,
-scope ambiguity, missing credentials that block the next phase, ethical /
-authorization clarifications. The operator surfaces these to the user before
-the next dispatch.
-
-### `recommended_next_agent`
-
-Optional pointer to the role you'd hand off to next (`vulnerability-analyst`,
-`exploit-developer`, `report-writer`, etc.). The operator uses this as one
-input to the dispatch decision — they may override it based on phase and
-parallelism considerations.
+Use this for decisions no `record-*` call can capture: whether vendor SaaS is in scope, scope
+ambiguity, missing credentials that block the next phase, or authorization questions. The operator
+puts these to the user before the next dispatch.
 
 ### `handoff_status`
 
-Use `checkpointed` while the dispatch is still in progress and the handoff is a
-durable progress save. Use `ready` for the final handoff when the operator can
-close the dispatch as completed. Use `blocked` when the dispatch cannot complete
-without new credentials, scope clarification, runtime repair, or another
-operator action. The operator runs `vigil assess agent close <agent_id>` after
-reviewing a ready/blocked handoff; agents do not close their own dispatch rows.
+- `checkpointed`: a progress save while you work.
+- `ready`: final handoff, and the dispatch can close as completed.
+- `blocked`: the dispatch needs new credentials, scope clarification, a runtime repair or another
+  operator action before it can finish.
+
+The operator runs `vigil assess agent close <agent_id>` after reviewing a ready or blocked handoff.
+Agents do not close their own dispatch rows. A ready or blocked handoff whose dispatch stays
+`in-progress` past the resume-brief threshold becomes a `stale_dispatch_ready_handoff`
+report-readiness blocker.
 
 ### `extras`
 
-Opaque JSON object for role-specific fields. Examples:
-
-- `recon-specialist`: `{"live_host_count": 14, "wildcard_subs_resolved": 86, "egress_block_pct": 12}`
-- `osint-analyst`: `{"cve_matches": 3, "high_value_cve_matches": 1, "github_orgs_enumerated": 4}`
-- `fuzzer`: `{"payloads_tried": 1200, "hits": 7, "hit_ratio": 0.0058}`
-- `code-architect`: `{"modules_classified": 38, "critical_count": 4, "high_count": 11}`
-
-Anything that helps the next agent understand the shape of the prior dispatch
-without reading the audit pipeline.
+Use counters and context that tell the next agent the shape of the dispatch without reading the
+audit pipeline. Choose key names freely. Typical keys per role are in the next section.
 
 #### `extras.skills_loaded` — the one reserved key
 
-Every other name here is yours to invent. `skills_loaded` is not: `render-handoff`
-reads that exact spelling and renders it on the blob's **Skills loaded** line, so
-any other name (`skills`, `loaded_skills`, `skills_used`) leaves that line reading
-"not recorded" for the next dispatch. Write it whenever your dispatch prompt said
-`skills: self-selected` — the dispatch row then carries no skill audit at all, and
-this is the only record of which procedure context you ran under.
-
-- as a list: `{"skills_loaded": ["code-vulnerability-analysis", "code-variant-analysis"]}`
-- or comma-separated: `{"skills_loaded": "code-vulnerability-analysis,code-variant-analysis"}`
-
-Use the bare skill directory names (`vigil assess list-skills`), not paths. When the
-operator DID pass `--skills`, the dispatch row already records the request and the
-rendered line shows both; a mismatch between them is a real signal, so report what
-you loaded rather than echoing what was asked for.
+`render-handoff` reads this exact spelling and renders it on the **Skills loaded** line. Any other
+name (`skills`, `loaded_skills`) leaves that line reading "not recorded". Write it whenever your
+dispatch said `skills: self-selected`, because the dispatch row then has no other record of your
+loadout. Use bare skill directory names, either as a list
+(`["code-vulnerability-analysis", "code-variant-analysis"]`) or as a comma-separated string. When
+the operator passed `--skills`, report what you actually loaded rather than echoing the request:
+the rendered line shows both, and a mismatch is a real signal.
 
 ## Per-role examples
 
-Only the fields in the Schema table are top-level keys — `agent handoff` refuses an
-unknown top-level name before the request, and `HandoffCreate` would 422 it. Every
-role-specific field belongs under `extras`, including the blue roles' `disposition`,
-`evidence_refs[]`, `mitre_techniques[]`, `tenant_ref_paths_consulted[]`,
-`cross_platform_correlation_notes` and `proposal_ids[]`. `evidence_refs[]` carries
-registered artifact IDs, never local paths.
+Every example below is a payload `agent handoff` accepts as written. Blue role-specific fields
+(`disposition`, `evidence_refs[]` (registered artifact IDs, never local paths), `mitre_techniques[]`,
+`tenant_ref_paths_consulted[]`, `cross_platform_correlation_notes`, `proposal_ids[]`) live under
+`extras` like any other role's.
 
 ### `alert-triage-specialist` (blue L1 — triage)
 
@@ -366,7 +307,7 @@ registered artifact IDs, never local paths.
 }
 ```
 
-### `recon-specialist`
+### `recon-specialist` (red; final handoff)
 
 ```json
 {
@@ -395,356 +336,57 @@ registered artifact IDs, never local paths.
 }
 ```
 
-### `source-analyzer`
+### Other red roles
 
-```json
-{
-  "agent_id": "source_b2c1",
-  "agent_role": "source-analyzer",
-  "phase": "recon",
-  "summary": "Extracted 142 routes and 4 secrets from app.acme-social.example bundles; APP_VERSION=2.18.4 captured for osint-analyst version triangulation.",
-  "confidence": "high",
-  "finding_slugs": ["SA-001", "SA-002"],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "ingest 142 new routes into work buffer", "target": "app.acme-social.example", "recommended_agent": "surface-collector", "rationale": "extracted routes are the Phase 2 input"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [
-    {"path": "scans/extracted_routes.txt", "description": "142 unique routes from JS bundles", "kind": "data"}
-  ],
-  "open_questions": [],
-  "recommended_next_agent": "surface-collector",
-  "extras": {"routes_extracted": 142, "secrets_found": 4, "app_version": "2.18.4"}
-}
-```
+Every red handoff has the shape shown in the recon example. What changes per role is the phase it
+usually runs at, the extras that summarise its work, and when it checkpoints:
 
-### `surface-collector`
+| Role | Usual `phase` | Typical `extras` | Checkpoint after |
+|---|---|---|---|
+| `source-analyzer` | `recon` | `routes_extracted`, `secrets_found`, `app_version` | each asset class (HTML routes, JS routes, secrets, source maps) |
+| `surface-collector` | `collect` | `urls_ingested`, `clusters`, `deferred_clusters` | Katana ingest, gau ingest, dedup |
+| `vulnerability-analyst` | `consume-test` / `verify` | `surfaces_tested`, `findings_by_severity` | each surface tested |
+| `fuzzer` | `consume-test` | `payloads_tried`, `hits`, `hit_ratio` | each payload family, or every 1000 requests |
+| `osint-analyst` | `exploit` | `cve_matches`, `high_value_cve_matches`, `intel_rows` | each intel category (CVE, breach, social, DNS history) |
+| `exploit-developer` | `exploit` | `chain_id`, `credentials_captured`, `credential_ids` | each chain step proved |
+| `report-writer` | `report` | `findings_in_report` | each section drafted |
+| `code-architect` | `classify-map` | `modules_classified`, `critical_count`, `high_count` | each major step |
+| `code-vuln-hunter` | `hunt` | `modules_hunted`, `findings_by_severity` | each module hunted |
+| `code-variant-hunter` | `verify-variant` | `parent_finding`, `variants_found` | each major step |
+| `code-vuln-verifier` | `verify-variant` | `reviewed`, `confirmed`, `downgraded`, `killed` | each verdict recorded |
 
-```json
-{
-  "agent_id": "surf_c4d8",
-  "agent_role": "surface-collector",
-  "phase": "collect",
-  "summary": "Ingested 1,847 URLs across 12 clusters; inline classification scored 312 priority items above threshold; one large static-asset cluster deferred.",
-  "confidence": "high",
-  "finding_slugs": [],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "fetch-by-priority dispatch on top 30 items", "target": "work buffer", "recommended_agent": "vulnerability-analyst", "rationale": "priority score >40 items dominate the queue"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "vulnerability-analyst",
-  "extras": {"urls_ingested": 1847, "clusters": 12, "deferred_clusters": 1}
-}
-```
-
-### `vulnerability-analyst`
-
-```json
-{
-  "agent_id": "va_e7f2",
-  "agent_role": "vulnerability-analyst",
-  "phase": "consume-test",
-  "summary": "Tested 28 candidate surfaces; recorded 4 findings (1 high IDOR, 2 medium info-disclosure, 1 low); one parameter requires fuzzer follow-up.",
-  "confidence": "high",
-  "finding_slugs": ["VA-001", "VA-002", "VA-003", "VA-004"],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "verify VA-001 IDOR severity", "target": "app.acme-social.example/api/users/{id}", "recommended_agent": "vulnerability-analyst", "rationale": "Phase 4 review mode"}
-  ],
-  "runtime_issues": [
-    {"kind": "fuzzer_needed", "tool_or_target": "app.acme-social.example/search?q=", "detail": "reflected-XSS hint without payload diversity — needs 100+ payload sweep", "severity": "info"}
-  ],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "vulnerability-analyst",
-  "extras": {"surfaces_tested": 28, "findings_by_severity": {"high": 1, "medium": 2, "low": 1}}
-}
-```
-
-### `exploit-developer`
-
-```json
-{
-  "agent_id": "exp_g8h3",
-  "agent_role": "exploit-developer",
-  "phase": "exploit",
-  "summary": "Chained EX-001 (auth-bypass) → EX-002 (RCE) into authenticated webshell on app.acme-social.example; full chain recorded; one credential captured.",
-  "confidence": "high",
-  "finding_slugs": ["EX-001", "EX-002"],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "draft final report including chain narrative", "target": "engagement", "recommended_agent": "report-writer", "rationale": "exploitation phase complete"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [
-    {"path": "tools/exploit-state/EX-001-payload.sql", "description": "Auth-bypass SQL payload", "kind": "exploit_state"},
-    {"path": "tools/exploit-state/EX-002-poc.py", "description": "RCE chain proof", "kind": "exploit_state"}
-  ],
-  "open_questions": [],
-  "recommended_next_agent": "report-writer",
-  "extras": {"chain_id": "chain-7", "credentials_captured": 1, "credential_ids": [17]}
-}
-```
-
-### `fuzzer`
-
-```json
-{
-  "agent_id": "fuzz_i4j7",
-  "agent_role": "fuzzer",
-  "phase": "consume-test",
-  "summary": "1200 payloads against /search?q=; 7 anomalous responses; 1 confirmed reflected-XSS recorded; results dumped for vulnerability-analyst follow-up.",
-  "confidence": "high",
-  "finding_slugs": ["FZ-001"],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "validate the 6 anomalous non-XSS responses", "target": "app.acme-social.example/search?q=", "recommended_agent": "vulnerability-analyst", "rationale": "anomalies need analysis before promotion"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [
-    {"path": "scans/fuzzer/search_q_results.jsonl", "description": "raw fuzzer hit log (7 anomalies marked)", "kind": "scan_output"}
-  ],
-  "open_questions": [],
-  "recommended_next_agent": "vulnerability-analyst",
-  "extras": {"payloads_tried": 1200, "hits": 7, "hit_ratio": 0.0058}
-}
-```
-
-### `osint-analyst`
-
-```json
-{
-  "agent_id": "osint_k1m5",
-  "agent_role": "osint-analyst",
-  "phase": "exploit",
-  "summary": "Recorded 18 intel rows: 4 CVE matches against live tech stack, 8 domain rows, 3 person rows, 3 social-profile rows; 1 high-value CVE match needs validation.",
-  "confidence": "medium",
-  "finding_slugs": [],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "validate CVE-2024-12345 against live app.acme-social.example", "target": "app.acme-social.example", "recommended_agent": "exploit-developer", "rationale": "high-value version-only match; backported patches commonly invalidate"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "exploit-developer",
-  "extras": {"cve_matches": 4, "high_value_cve_matches": 1, "intel_rows": 18}
-}
-```
-
-### `report-writer`
-
-```json
-{
-  "agent_id": "report_n6p9",
-  "agent_role": "report-writer",
-  "phase": "report",
-  "summary": "Final report generated covering 12 confirmed findings (1 critical, 3 high, 6 medium, 2 low) and 1 attack chain; QA pass clean.",
-  "confidence": "high",
-  "finding_slugs": [],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "publish report and mark engagement complete", "target": "engagement", "recommended_agent": "operator", "rationale": "QA PASS"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [
-    {"path": "report.md", "description": "final engagement report", "kind": "data"}
-  ],
-  "open_questions": [],
-  "recommended_next_agent": "operator",
-  "extras": {"qa_status": "PASS", "findings_in_report": 12}
-}
-```
-
-### `code-architect`
-
-```json
-{
-  "agent_id": "carch_q2r4",
-  "agent_role": "code-architect",
-  "phase": "code-record classify",
-  "summary": "Classified 38 modules in target repo (4 critical, 11 high, 23 medium); recorded 9 attack hypotheses as intel notes; threat model recorded.",
-  "confidence": "high",
-  "finding_slugs": [],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "hunt vulnerabilities in critical+high modules", "target": "repo: target-repo", "recommended_agent": "code-vuln-hunter", "rationale": "Phase 2 entry"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "code-vuln-hunter",
-  "extras": {"modules_classified": 38, "critical_count": 4, "high_count": 11}
-}
-```
-
-### `code-vuln-hunter`
-
-```json
-{
-  "agent_id": "cvh_s5t8",
-  "agent_role": "code-vuln-hunter",
-  "phase": "code-hunt",
-  "summary": "Hunted 14 critical+high modules; recorded 6 findings (2 critical, 3 high, 1 medium) across deserialization, path-traversal, auth-bypass classes.",
-  "confidence": "high",
-  "finding_slugs": ["CH-001", "CH-002", "CH-003", "CH-004", "CH-005", "CH-006"],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "verify each new finding via five-check protocol", "target": "6 finding slugs", "recommended_agent": "code-vuln-verifier", "rationale": "Phase 3 entry"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "code-vuln-verifier",
-  "extras": {"modules_hunted": 14, "findings_by_severity": {"critical": 2, "high": 3, "medium": 1}}
-}
-```
-
-### `code-variant-hunter`
-
-```json
-{
-  "agent_id": "cvh_u9w2",
-  "agent_role": "code-variant-hunter",
-  "phase": "code-verify",
-  "summary": "Found 4 variant instances of CH-002 (path-traversal pattern) across 3 sibling modules; all recorded as new findings linked to the parent.",
-  "confidence": "high",
-  "finding_slugs": ["CV-001", "CV-002", "CV-003", "CV-004"],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "verify variants via five-check protocol", "target": "4 new finding slugs", "recommended_agent": "code-vuln-verifier", "rationale": "variants follow the same gating as primaries"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "code-vuln-verifier",
-  "extras": {"parent_finding": "CH-002", "variants_found": 4}
-}
-```
-
-### `code-vuln-verifier`
-
-```json
-{
-  "agent_id": "cvv_x4y6",
-  "agent_role": "code-vuln-verifier",
-  "phase": "code-verify",
-  "summary": "Reviewed 10 findings: 6 confirmed, 2 downgraded (severity over-claimed), 2 killed (false-positive on incomplete reachability).",
-  "confidence": "high",
-  "finding_slugs": [],
-  "coverage_gaps": [],
-  "next_steps": [
-    {"action": "draft code-analysis report from confirmed findings", "target": "repo: target-repo", "recommended_agent": "report-writer", "rationale": "verification gate complete"}
-  ],
-  "runtime_issues": [],
-  "working_artifacts": [],
-  "open_questions": [],
-  "recommended_next_agent": "report-writer",
-  "extras": {"reviewed": 10, "confirmed": 6, "downgraded": 2, "killed": 2}
-}
-```
+The recon specialist checkpoints after each tool in its sequence.
 
 ## CLI usage
 
-The primary path is JSON-on-disk:
-
 ```bash
-cat > /tmp/handoff-recon-a3f9.json <<'JSON'
-{
-  "agent_id": "recon_a3f9",
-  "agent_role": "recon-specialist",
-  "phase": "recon",
-  "summary": "Phase 1 recon ...",
-  "confidence": "medium",
-  "finding_slugs": ["RE-001"],
-  "coverage_gaps": [...],
-  "next_steps": [...],
-  "runtime_issues": [...],
-  "working_artifacts": [...],
-  "open_questions": [...],
-  "recommended_next_agent": "vulnerability-analyst",
-  "extras": {"live_host_count": 14}
-}
-JSON
-
-vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-recon-a3f9.json
-# ...or stream it, without a file on disk:
-#   printf '%s' "$handoff_json" | vigil assess agent handoff --agent-id <agent-id> --from-json -
-# Self-check: confirm the row is readable before exiting (404 → agent_id mismatch)
-vigil assess agent render-handoff a3f9
+vigil assess agent handoff --agent-id <agent-id> --from-json /tmp/handoff-<agent-id>.json
+printf '%s' "$handoff_json" | vigil assess agent handoff --agent-id <agent-id> --from-json -
+vigil assess agent render-handoff <agent-id>                 # bounded excerpt
+vigil assess agent render-handoff <agent-id> --max-lines 0   # complete recorded handoff
 ```
 
-`--from-json` takes a path, `@path`, inline JSON, or `-` for stdin, and it is the
-only payload surface: every field above is recorded through it, including the nested
-ones (`coverage_gaps`, `next_steps`, `runtime_issues`, `working_artifacts`).
-`--agent-id` is the only other flag, and the payload's `agent_id` must equal it — the
-match is what stops another dispatch's handoff file from being re-sent under your id.
-A key the schema does not list is rejected by name before the request, so a misspelled
-`workign_artifacts` cannot be dropped silently.
+`--from-json` takes a path, `@path`, inline JSON or `-` for stdin, and it is the only payload
+surface. The payload's `agent_id` must equal `--agent-id`, which stops a handoff file written by
+another dispatch from being sent under your id. The receipt names `handoff_version`,
+`last_checkpoint_at`, `summary_characters` and the state of each artifact path. Use the receipt to
+confirm a checkpoint landed. Rendering an earlier checkpoint after a refused write proves nothing.
 
-The receipt names `handoff_version`, `last_checkpoint_at`, `summary_characters`, and
-every `working_artifacts` path with its on-disk state. A missing path is a warning; a
-`ready` handoff that claims one exits non-zero after the row is written, because a
-finished result asserting a file it never wrote is a fabricated result — write the file
-or drop the entry, then re-run the same command.
-
-The renderer reads the row back:
-
-```bash
-vigil assess agent render-handoff <agent-id>
-```
-
-The output is a markdown blob, hard-capped at `--max-lines` (default 40), with
-findings collapsed to "... and N more" before runtime_issues / working_artifacts.
-Findings, runtime issues, and artifacts collapse first. When multiline summary,
-coverage-gaps, or next-step prose alone exceeds the requested hard cap, the
-renderer emits an explicit truncation marker; rerun with a larger `--max-lines`
-before relying on omitted content. Paste the bounded output verbatim into
-the next dispatch's prompt.
+By default `render-handoff` prints at most 40 lines and 8000 characters. Findings, runtime issues
+and artifacts collapse first ("... and N more"), and an explicit marker shows where prose was
+truncated. Rerun with a larger `--max-lines` before you rely on omitted content. These display
+bounds never shorten the stored row.
 
 ## Checkpointing — call `vigil assess agent handoff` as you work
 
-`vigil assess agent handoff --agent-id <agent-id> --from-json <path>` is idempotent: every
-call against the same `agent_id` either inserts the row or replaces the prior
-payload. Call it after each major step in your methodology — not just at the
-end.
+`agent handoff` is idempotent per `agent_id`: the first call inserts the row and each later call
+updates it with the fields you send, so the latest write wins. A field you leave out keeps its
+stored value, and the stored `agent_role` never changes. Keep one local handoff JSON file. After each major step, update
+it with everything you know so far and re-run the command. If the dispatch halts before its final
+call (for example on context exhaustion), the operator gets the latest checkpoint as your record
+and can re-dispatch a continuation from it. Per-role cadence is in the table above.
 
-The pattern: maintain a local handoff JSON file (e.g.
-`/tmp/handoff-<agent-id>.json`). After each tool or methodology step, update
-the file with everything-known-so-far, then re-run `vigil assess agent handoff` against it.
-Latest write wins; `vigil assess agent render-handoff <agent-id>` always reflects the most
-recent state.
-
-Why: durable progress accrues in the backend as you work. If your dispatch
-halts before the final closing call (e.g. context exhaustion in Claude Code
-sub-agents), the most recent checkpoint is your canonical record. Operators
-reading `vigil assess agent render-handoff` see whatever step you were on.
-
-### Suggested checkpoint cadence per role
-
-- **recon-specialist** — checkpoint after each numbered tool in the recon
-  sequence (after `wafw00f`, after `nmap`, after `httpx`, after `whatweb`,
-  after `nuclei`, after `ffuf`, after conditional `nikto`).
-- **source-analyzer** — after each major asset class processed (HTML routes
-  extracted, JS routes extracted, secrets scanned, source maps inspected).
-- **surface-collector** — after Katana ingest, after gau ingest, after dedup
-  pass (classification runs inline at ingest, no separate step).
-- **vulnerability-analyst** — after each surface tested. The handoff's
-  `finding_slugs` accumulates as you confirm.
-- **exploit-developer** — after each chain step proved (per cred captured,
-  per access record written).
-- **fuzzer** — after each payload family completes (or every 1000 requests,
-  whichever first).
-- **osint-analyst** — after each intel category (CVE matches, breach data,
-  social profiles, DNS history).
-- **report-writer** — after each section drafted; final call carries the full
-  QA-pass summary.
-
-### Example — recon-specialist after step 3 of 7
+An in-progress checkpoint is a valid payload too:
 
 ```json
 {
@@ -753,11 +395,9 @@ reading `vigil assess agent render-handoff` see whatever step you were on.
   "phase": "recon-pivot",
   "summary": "Recon in progress: wafw00f / nmap / httpx complete. Cloudflare CDN, ports 80/443 only, Webflow tech stack identified.",
   "confidence": "low",
-  "finding_slugs": [],
   "coverage_gaps": [
     {"area": "whatweb / nuclei / ffuf / nikto", "reason": "not yet run — dispatch in progress"}
   ],
-  "next_steps": [],
   "extras": {
     "steps_completed": ["wafw00f", "nmap", "httpx"],
     "steps_remaining": ["whatweb", "nuclei", "ffuf", "nikto"]
@@ -765,22 +405,5 @@ reading `vigil assess agent render-handoff` see whatever step you were on.
 }
 ```
 
-After step 7 completes the same file is rewritten with the full coverage
-gaps, next steps, and a confident summary, and `vigil assess agent handoff` is run again
-against the same path. The backend row is replaced in place.
-
-### What gets persisted on halt
-
-If the harness halts the dispatch (e.g. Claude Code sub-agent context
-exhaustion), the latest checkpoint is what the operator gets. Step 3's
-checkpoint shown above tells the operator "wafw00f / nmap / httpx done;
-whatweb onward not run" — actionable enough to re-dispatch a continuation,
-even though the agent never reached the final synthesis call.
-
-A successful handoff write returns `handoff_version`, `last_checkpoint_at`, and
-`summary_characters`. Use this receipt to confirm the new checkpoint landed; rendering a prior
-checkpoint after a rejected write does not establish success.
-
-Default handoff rendering selects at most 40 lines and 8000 characters, with a visible
-omission notice. `render-handoff --max-lines 0` reads the complete recorded handoff;
-these display bounds never shorten the persisted summary.
+The final write rewrites the same file with the full gaps, next steps, a confident summary and
+`handoff_status: ready`.

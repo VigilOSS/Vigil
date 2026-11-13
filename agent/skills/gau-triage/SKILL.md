@@ -1,14 +1,14 @@
 ---
 name: gau-triage
-description: Decide which gau pipeline verb to run, interpret its structured output, and write findings/surfaces from secrets and JS-discovered endpoints. The full bash pipeline (gau → uro → httpx → trufflehog) is now packaged as `vigil assess gau secrets`; this skill is the dispatch + interpretation layer.
+description: Decide which gau pipeline verb to run, interpret its structured output, and write findings/surfaces from secrets and JS-discovered endpoints. The full pipeline (gau → uro → httpx → trufflehog) is `vigil assess gau secrets`; this skill is the dispatch + interpretation layer.
 origin: Vigil
 ---
 
 # GAU Triage
 
-> **`vigil assess kali` audit flags:** the inner kali invocations (gau, uro, httpx, trufflehog) carry their own audit rows; the wrappers stamp `--technique RECON --probe-kind fingerprint --phase recon` automatically.
+> **`vigil assess kali` audit flags:** the inner kali invocations (gau, uro, httpx, trufflehog) carry their own audit rows; the wrappers stamp `--technique RECON --probe-kind fingerprint` and `--phase recon` by default; pass `--phase collect` (or the phase you run in) so the rows are attributed correctly.
 
-The gau pipeline is now three composable verbs that all share one cached gau corpus:
+The gau pipeline is three composable verbs that all share one cached gau corpus:
 
 | Verb | What it does | Output written to |
 |---|---|---|
@@ -50,41 +50,23 @@ gau secrets <target>
 
 ## Cache reuse semantics
 
-`gau endpoints` and `gau secrets` are the verbs that actually call gau, so they
-own cache reuse. Each looks up `<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/gau_output.txt`
-and checks six conditions before reusing it:
-
-1. Operator did NOT pass `--refresh`
-2. The cached output file exists and is non-empty
-3. Sidecar `gau_output.meta.json` exists and parses
-4. Cached run's `exit_code == 0` and `target` matches the current target
-5. Cached run's `cache_key` matches the current corpus-affecting flags
-   (`--subs`, `--providers`) — toggling one of those triggers a fresh run
-   so the operator does not silently get the wrong corpus
-6. Cached output age ≤ `--max-cache-age-hours` (default 24)
-
-Failure of any condition triggers a fresh gau run and an explicit stderr message
-naming which condition failed. The JSON summary always carries
-`cache_reused: true|false` and `cache_decision_reason: <human string>`.
+`gau endpoints` and `gau secrets` call gau and own cache reuse: a cached corpus is reused when it
+exists, succeeded, matches the target and the corpus-affecting flags (`--subs`, `--providers`),
+and is younger than `--max-cache-age-hours` (24 by default); `--refresh` forces a fresh run. The
+verb names the failing condition on stderr and reports `cache_reused` and `cache_decision_reason`
+in its JSON summary.
 
 `gau js-endpoints` is a post-processor: it reads the existing cache + bodies
 that `gau endpoints`/`gau secrets` produced and does not run gau itself. It
 intentionally does not expose `--refresh` or `--max-cache-age-hours` — refresh
 the corpus by re-running the verb that produced it.
 
-## Output Contract (per verb)
+## Output
 
-### `gau endpoints` JSON keys
-
-`verb`, `target`, `cache_reused`, `cache_decision_reason`, `cache_age_hours`, `gau_status`, `gau_exit_code`, `gau_argv`, `gau_output_path`, `gau_line_count`, `ingest_source`, `db_path`, `work_items_total`, `work_items_pending`, `work_items_skipped`, `top_clusters`.
-
-### `gau secrets` JSON keys
-
-All of `gau endpoints`'s cache keys, plus `gau_raw_count`, `filtered_count`, `deduped_count`, `bodies_dir`, `bodies_captured`, `httpx_results_path`, `reused_bodies`, `trufflehog_path`, `verify_enabled`, `detector_counts`, `findings_count`, `findings_preview`.
-
-### `gau js-endpoints` JSON keys
-
-`verb`, `target`, `bodies_dir`, `bodies_fetched`, `js_bodies_scanned`, `raw_endpoints_extracted`, `unique_in_scope_urls`, `ingested_count`, `ingest_source`, `db_path`, `per_body_preview`.
+Each verb prints a JSON summary (cache decision, gau status and line counts, work-item totals and
+top clusters; for `gau secrets` also dedup counts, bodies captured, trufflehog path, detector
+counts and a findings preview; for `gau js-endpoints` bodies scanned, endpoints extracted and
+ingested). Read the keys from the run's output rather than assuming them.
 
 ## Recording high-confidence hits
 
@@ -93,7 +75,7 @@ For each reproducible high-confidence trufflehog or JS-extracted endpoint where 
 ```bash
 # Inspect required fields, then write the finding draft.
 vigil assess contract finding record
-vigil assess finding record gau-triage <path-to-finding-json> --agent-id <your-agent_id>
+vigil assess finding record <your-role> <path-to-finding-json> --agent-id <your-agent_id>
 ```
 
 ## Key Rules
@@ -111,7 +93,7 @@ vigil assess finding record gau-triage <path-to-finding-json> --agent-id <your-a
 - `agent/scripts/assess/commands/gau_js_endpoints.py` — Stream C wrapper source
 - `agent/references/tools/recon/gau.md` — gau CLI reference (provider list, output format)
 - `agent/references/tools/recon/httpx.md` — httpx body capture and rate tuning
-- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 detector list, verification flag semantics
+- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 syntax traps, verification policy, output keys
 - `agent/scripts/assess/lib/classify_buckets.py` — gf-style bucket weights inline classification uses
 - `agent/skills/surface-collection/SKILL.md` — Phase 2 collection upstream (operator typically calls gau endpoints from there)
 - `agent/skills/sensitive-data-detection/SKILL.md` — ad-hoc body/secret scanning for single responses (not bulk corpora)

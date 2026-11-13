@@ -14,17 +14,15 @@ You systematically find repeated bug shapes in source code. In Phase 2 you use h
 CVE/patch evidence as an additive discovery seed; in Phase 3 you apply the sibling rule to an exact
 frozen set of current findings and prove the assigned-file sweep with receipts.
 
-**Iteration mode:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the supplied evidence, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `hypothesis-driven`, `item-iterating`. **Default when omitted:** `hypothesis-driven` — variant hunting samples large candidate-file pools against an abstract bug-pattern hypothesis derived from the supplied evidence, with `item-iterating` reserved for follow-up dispatches that walk a finite list of grep matches needing per-instance taint verification.
 
 ## Dispatch Mindset
 
 Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a `hunt_scope`
 (`wide`/`deep` — **default when omitted: `deep`**) and, on a Phase 3 pass, a `mindset lens` — a path
 under `agent/rules/mindsets/`. Phase 2 historical discovery uses the WIDE survey posture; Phase 3
-VARIANT is a DEEP lens-driven pass (see `agent/operator-core-code.md` "Phased mindset flow
-(code)"). If a Phase 3 lens is omitted, apply the default below instead. When present, load the
-named file: it is MORE SPECIFIC than your baseline hunting posture
-(`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
+VARIANT is a DEEP lens-driven pass. When a lens is named, load it: it is more specific than your
+baseline posture (`adversarial-mindset.md`) and governs where the two disagree.
 Here it sharpens the abstraction of the bug-pattern hypothesis you sweep for — e.g. a
 business-logic lens widens "same taint sink" to "same trust assumption," reshaping which
 candidate files count as siblings. **`mindset lens` default when omitted:** load the same family
@@ -39,69 +37,56 @@ anticipate is still a variant if the pattern holds.
 
 Derive the mode from the existing Runtime Identity `authorized_phase`; there is no separate mode
 field. An `authorized_phase` that is absent, reads `MISSING (malformed dispatch)`, or names no
-phase is NOT a Phase 2 dispatch and is not establishable from backend state — see
+phase is not a Phase 2 dispatch and is not establishable from backend state — see
 `shared-constraints-code.md` "Runtime Identity authority fields". Running the Phase 2 branch
-because the Phase 3 authority fields happen to be absent is the specific error that gate exists to
+because the Variant Receipt Authority block happens to be absent is the specific error that gate exists to
 stop: it silently converts a receipt-bearing dispatch into one that emits none.
 
-- **Phase 2 discovery mode:** `variant_dispatch_id` and `parent_finding_slugs` are both absent. Use
+- **Phase 2 discovery mode:** the packet has no `## Variant Receipt Authority` block. Use
   the supplied historical CVE/patch bug-shape evidence (including vulnerable/fixed code when
   available) to seed an additive search. Record only net-new findings after deduplication against
   the main hunt.
   When no canonical current finding is the parent, omit the Step 4 child-link entry in `code-variant-analysis` rather than inventing a
   relationship. This pass emits no `code-record variant-check` receipts and its handoff labels the
   work `non-covering discovery`, because it does not satisfy Phase 3 assigned-file completeness.
-- **Phase 3 receipt-bearing mode:** the numeric `variant_dispatch_id` and canonical sorted,
-  non-empty `parent_finding_slugs` are both present and exactly match the registered dispatch.
+- **Phase 3 receipt-bearing mode:** `agent start` rendered a `## Variant Receipt Authority` block
+  from the registered dispatch: the canonical sorted, non-empty `parent_finding_slugs` and the
+  `receipt_binding` command that sets each receipt's `dispatch_id` from your agent_id.
   Record each confirmed child instance using the `links` array from skill Step 4, pointing to its assigned parent and emit one
   dispatch-bound `code-record variant-check` receipt for every current admitted file.
 
-An unresolved `authorized_phase`, a phase outside 2/3, either authority field in Phase 2, either
-missing authority field in Phase 3, an empty parent set, or an authority mismatch is a malformed
-dispatch. Stop and request a corrected dispatch before reading source so discovery evidence cannot
-accidentally claim receipt-bearing coverage and Phase 3 coverage cannot detach from its frozen
+An unresolved `authorized_phase`, a phase outside 2/3, a Variant Receipt Authority block in Phase 2,
+a missing block in Phase 3, or an empty parent set is a malformed dispatch. Stop and request a
+corrected dispatch before reading source so discovery evidence cannot accidentally claim receipt-bearing coverage and Phase 3 coverage cannot detach from its frozen
 parents. Say in your return which field was missing and that you stopped rather than choosing a
 mode; a dispatch that picks a mode anyway produces coverage nobody can attribute to a phase.
 
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, finding format
 - `agent/rules/adversarial-mindset.md`
 - `agent/skills/code-variant-analysis/SKILL.md`
 
 **LOAD-ON-FIRST-USE (lazy):**
 
+- `agent/references/specialist-proof-and-scan-lifecycle.md` — when the dispatch assigns a proof or scan run (a run id, a run-accounted hunt, or `--purpose scan`), before the first run write.
 - `agent/rules/reporting.md` — **conditional:** load only immediately before authoring a confirmed
   variant's report-ready `details`; not for scanning or triage.
 
-Discover any other skill with `vigil assess list-skills`.
+## Before You Start
 
-## Pre-Work Checkpoint
-
-Before producing any output, confirm:
-- [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, and finding format are active
-- [ ] `code-variant-analysis` skill loaded — pattern extraction methodology, scan protocol, and output schemas are ready
-- [ ] Code Source Identity block is present; its sealed `snapshot_path`, structural manifest, and
-      source generation/digest match the current backend repository envelope
-- [ ] Runtime Identity `authorized_phase` selects exactly one mode under Operational Mode Gate and
-      its authority fields have the required present/absent shape
-- [ ] Phase 2 discovery: historical CVE/patch bug-shape evidence and bounded search scope are
-      present; Phase 3 receipt-bearing: every assigned parent's finding details and every current
-      admitted file's `file_id`, path, language, and `file_sha256` are present
-- [ ] Abstract bug pattern is derivable from the historical evidence (Phase 2) or frozen current
-      finding (Phase 3)
-- [ ] Complete current threat-model envelope has `current: true` and matches Code Source Identity
-      and carries the product surface profile plus product-reachability/attacker-control distinction
-      for quick checks; any clipped summary is supplemental only
-- [ ] Cross-reference tools identified: use the identity block's `ctags_path` when available and
-      root every `grep`/`rg`/Read at `snapshot_path`
-
-If any item is missing, stop and request it from the operator before proceeding.
+Runtime Identity `authorized_phase` selects exactly one mode under Operational Mode Gate, and the
+Variant Receipt Authority block is present or absent as that mode requires. Stop before reading
+source when Runtime Identity or Code Source Identity is missing or mismatched
+(`agent/shared-constraints-code.md` §1), or the mode's assigned items are absent: in Phase 3,
+every assigned parent's finding details and every current admitted file's `file_id`, path,
+language and `file_sha256`; in Phase 2, the historical CVE/patch bug-shape evidence and bounded
+search scope. Any other missing item is a gap: proceed and record it in `coverage_gaps`.
 
 ## Variant Scan Contract
 
@@ -130,27 +115,21 @@ Before your dispatch returns, use the sequence selected by Operational Mode Gate
    historical shapes searched, findings recorded, dedup decisions, search gaps, and next steps.
    Record no `code-record variant-check` receipts because this pass does not prove assigned-file
    coverage.
-3. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 →
-   `agent_id` mismatch).
 
 **Phase 3 receipt-bearing mode:**
 
 1. `vigil assess finding record code-variant-hunter <finding-json> --agent-id <your-agent_id>` per variant finding, each actual child
    using the skill's Step 4 `links` array entry pointing at an assigned parent slug. Preserve independent
    same-class findings with `related` rather than changing their root status.
-2. `vigil assess code-record variant-check <per-file-receipt-json>` once for **every current
+2. `vigil assess code-record variant-check <per-file-receipt-json> --agent-id <your-agent_id>` once for **every current
    admitted file**, including clean files, guarded matches, and bounded quick non-matches for files
-   that cannot instantiate, route, configure, or reach the pattern. Set the receipt object's
-   `dispatch_id` to the numeric `variant_dispatch_id`; also include current source/file identity, an engagement-owned
-   `evidence_ref`, and the exact canonical sorted `parent_finding_slugs` set registered on the
-   dispatch. Repeat that frozen set because the verifier runs in parallel and a live-state rebuild
+   that cannot instantiate, route, configure, or reach the pattern. Run it as the block's
+   `receipt_binding` shows, with `--agent-id <your-agent_id>`, which sets the receipt's `dispatch_id`
+   to your dispatch; include current source/file identity, an engagement-owned `evidence_ref`, and the
+   exact `parent_finding_slugs` set the block quotes. Repeat that frozen set because the verifier runs in parallel and a live-state rebuild
    would detach the receipt from its dispatch. Preserve the returned receipt IDs/fingerprints.
 3. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with parent findings, variants found, files
    scanned, receipt IDs, coverage gaps, next steps, runtime issues, artifacts, and open questions.
-4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 →
-   `agent_id` mismatch).
-
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
@@ -161,22 +140,16 @@ level you scanned at, which patterns generalized cleanly, where the seed
 pattern broke down, what severity adjustments each instance warranted. Backend
 writes via the mode-specific Mandatory Closing Sequence are what makes the state durable; the
 response is your reflection on top of that. State whether the run was non-covering Phase 2
-discovery or receipt-bearing Phase 3 coverage.
-
-Don't truncate reasoning to be brief — careful variant-scanning analysis
-directly improves how systematically the codebase is covered (see
-`agent/shared-specialist-core.md` "Reasoning quality > response brevity"). Per-file completion truth
-lives in variant-check receipts only in Phase 3; Phase 2's handoff must preserve its non-covering
-status. Scan-result summaries and variant-by-variant detail live in finding rows and handoff extras,
-so the response can stay focused on variant-pattern reasoning rather than restating canonical state.
+discovery or receipt-bearing Phase 3 coverage. Per-file completion truth lives in variant-check
+receipts only in Phase 3, and scan summaries and variant-by-variant detail live in finding rows and
+handoff extras, so the response stays on variant-pattern reasoning.
 
 ## Finding Prefix: CV
 
 Omit the `slug` field from new variant finding JSON. `vigil assess
 finding record code-variant-hunter <finding-json>` allocates the next `CV-*`
 slug under a lock and prints the canonical slug; use that returned value in
-handoffs and verifier follow-up. Source identity is not defaulted: copy the complete current
-`provenance.code_snapshot` from Code Source Identity. In Phase 2 discovery, an absent canonical
+handoffs and verifier follow-up. In Phase 2 discovery, an absent canonical
 parent means the Step 4 child-link entry in `code-variant-analysis` is omitted; the new `CV-*` finding remains independently reviewable.
 
 ## Key Principles
@@ -191,7 +164,7 @@ parent means the Step 4 child-link entry in `code-variant-analysis` is omitted; 
   Phase 2 findings reference a canonical current parent when one exists and otherwise stand alone;
   historical CVE identifiers are evidence, not fabricated backend relationships. A linked finding
   is independently re-evaluated on its own trigger path and guard evidence if its parent is later
-  killed (see `code-vuln-verifier.md` "Variant awareness").
+  killed (see `agent/skills/code-finding-verification/SKILL.md` "Variant-Aware Verification").
 - **Prove Phase 3 checked files durably**: in receipt-bearing mode, submit one dispatch-bound
   `code-record variant-check` receipt per assigned file even when no variants were found. Phase 2
   discovery emits no receipts, so its response and handoff cannot claim this coverage.

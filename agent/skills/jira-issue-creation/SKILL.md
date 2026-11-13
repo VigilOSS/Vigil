@@ -11,8 +11,8 @@ transport (MCP tools vs REST) and the auth method are interchangeable; the field
 payload — type, fields, labels, priority, custom fields, description — is the
 reusable core and the part worth getting right.
 
-The ADF payload template, field/label/priority tables, response codes, and the
-worked example live in `agent/references/tools/reporting/jira-api.md`. This skill
+The REST endpoints and response codes, field/label/priority tables, and an ADF payload
+skeleton live in `agent/references/tools/reporting/jira-api.md`. This skill
 is the workflow around that reference; push long payloads there, keep this
 skimmable.
 
@@ -27,9 +27,9 @@ Not this skill: choosing a bug-bounty platform or drafting the submission prose 
 that is `report-generation` (submission-first closeout). This skill starts once
 the destination is a Jira instance.
 
-For a Vigil finding, finish its report-writer QA, current reproduction check, and
+For a Vigil finding, finish its independent report-writer QC, current reproduction check, and
 applicable blind triage before creating the Jira issue. Run the final
-`vigil assess export submission <slug> --platform direct --overwrite` gate and
+`vigil assess export submission <slug> --platform direct` gate and
 use its reviewed external body as the issue description. If the ticket is an
 ordinary non-finding record, this finding gate does not apply.
 
@@ -135,8 +135,9 @@ vigil assess finding update <slug> \
 Keep internal cross-reference IDs **out** of the ticket. Describe sibling findings
 by their outcome or code path, and express cross-ticket relationships with Jira's
 native issue links (Linked Issues / Blocks / Epic) referencing the sibling by its
-Jira key. This mirrors Rule 17 in `jira-api.md` ("Standalone-ticket rule") — see
-it there rather than restating it.
+Jira key. This is `agent/rules/reporting.md` §17 ("External deliverables contain only
+client-meaningful content"), applied to Jira in `agent/references/tools/reporting/jira-api.md`
+"Standalone-ticket rule".
 
 ## ADF gotcha (REST / hand-built ADF only)
 
@@ -147,7 +148,7 @@ adjacent text nodes, one per mark. Full detail and example in `jira-api.md`
 
 ## Reference
 
-- `agent/references/tools/reporting/jira-api.md` — ADF node/mark tables, the
-  field / label / priority template, the `code`-mark gotcha, a full worked
-  payload, and response codes. Treat every concrete ID/key/label in it as an
-  example to rediscover per instance, not a canonical value.
+- `agent/references/tools/reporting/jira-api.md` — endpoints and response codes,
+  the `code`-mark gotcha, the field / label / priority template, and an ADF
+  payload skeleton. Treat every concrete ID/key/label in it as an example to
+  rediscover per instance, not a canonical value.

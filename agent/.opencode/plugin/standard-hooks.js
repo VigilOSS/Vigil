@@ -11,9 +11,11 @@
 //       assessment_command_runs, remain visible in the activity trail.
 //       Best-effort: a logging failure never blocks the run.
 //
-// There is deliberately NO tool.execute.before hook here. Vigil does not filter
-// its own operator's shell commands (ADR 0019): a command-string filter cannot
-// see through the shell, and the only party it acted against was the operator.
+//   - tool.execute.before -> scripts/hooks/application-read-only.sh (PreToolUse).
+//       the Vigil application tree is read-only from an engagement session
+//       (ADR 0048): a bash, write, edit or patch call aimed at it is refused with
+//       the hook's message, which names the directory. Any other hook failure
+//       lets the call run.
 // KNOWN LIMITATION (opencode#5894): tool.execute.before/after do NOT fire for
 // subagent (`task`) or MCP tool calls — only for the inline operator's own bash
 // calls. A dispatched specialist's host commands are therefore not activity-logged
@@ -45,7 +47,43 @@ function resolveHook(name) {
   return ""
 }
 
+// The OpenCode tool call reshaped onto the Claude PreToolUse contract the shared
+// hook reads, or null for a tool that cannot write.
+function preToolPayload(tool, args) {
+  const cwd = process.env.ENGAGEMENT_DIR || process.cwd()
+  if (tool === "bash" && args.command) {
+    return { tool_name: "Bash", tool_input: { command: args.command }, cwd }
+  }
+  if ((tool === "write" || tool === "edit" || tool === "multiedit") && args.filePath) {
+    return { tool_name: "Write", tool_input: { file_path: args.filePath }, cwd }
+  }
+  if (tool === "patch" && (args.patchText || args.patch)) {
+    return { tool_name: "apply_patch", tool_input: { command: args.patchText || args.patch }, cwd }
+  }
+  return null
+}
+
 export const VigilStandardHooks = async () => ({
+  // PreToolUse-equivalent. Throwing refuses the call; OpenCode returns the message.
+  "tool.execute.before": async (input, output) => {
+    const tool = String((input && input.tool) || "").toLowerCase()
+    const payload = preToolPayload(tool, (output && output.args) || {})
+    if (!payload) return
+    const guardHook = resolveHook("application-read-only.sh")
+    if (!guardHook) return
+    try {
+      execFileSync("bash", [guardHook], {
+        input: JSON.stringify({ hook_event_name: "PreToolUse", ...payload }),
+        env: process.env,
+        stdio: ["pipe", "ignore", "pipe"],
+      })
+    } catch (e) {
+      if (e && e.status === 2) {
+        throw new Error(String(e.stderr || "").trim() || "refused: the Vigil application tree is read-only")
+      }
+      // any other failure lets the call run
+    }
+  },
   // PostToolUse-equivalent. Best-effort.
   "tool.execute.after": async (input, output) => {
     const tool = String((input && input.tool) || "").toLowerCase()

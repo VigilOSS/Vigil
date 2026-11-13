@@ -38,13 +38,15 @@ before writing anything up — that is the same prove-or-kill discipline
 ## Tools
 
 - `vigil assess kali exec -- curl ...` — all target-facing requests go through the wrapper.
-- `vigil oob mint` / `vigil oob poll` — the only reliable proof for tool-calling / retrieval SSRF:
-  mint a nonce-tagged host (`vigil assess kali exec` is not needed for the mint itself), place the
-  EXACT host it prints inside the prompt or the retrieved document, then poll for the callback. Defer
-  to `agent/skills/ssrf-testing/SKILL.md` for the full mint→fire→poll loop and for classifying what
-  the callback proves.
-- Burp Repeater / `curl` for hand-shaped bodies; the request body IS the attack surface here, so
-  work at the JSON level rather than through the app's own UI.
+- `vigil oob mint` / `vigil oob poll` — attribution for tool-calling and retrieval fetches: place
+  the exact minted host in the prompt or the retrieved document, then poll
+  (`agent/references/offensive-tactics/frp-tunneling.md` "OOB Procedure (mint→poll→correlate)").
+  A callback shows a fetch happened, not SSRF: a fetch tool fetching a URL is its feature, and the
+  request may come from the provider's tool-execution egress (out of scope, below). SSRF needs the
+  source address to be the target's infrastructure plus internal reach or cross-tenant data
+  (`agent/skills/ssrf-testing/SKILL.md`).
+- Hand-shaped JSON bodies through `curl`; the request body is the attack surface here, so work at
+  the JSON level rather than through the app's own UI.
 
 ## Methodology
 
@@ -73,7 +75,8 @@ before writing anything up — that is the same prove-or-kill discipline
 - [ ] Direct: instructions in the user turn that override the system policy.
 - [ ] **Indirect (the one that matters):** plant instructions in content the model will *retrieve* —
       an uploaded document, a profile field, a web page the agent fetches, a support-ticket body —
-      and confirm they execute on a DIFFERENT user's request. Indirect injection is the variant with
+      and confirm they execute on a request made by a second identity you own (after the
+      side-effect preflight, `agent/shared-constraints.md` §2d, when the content reaches staff). Indirect injection is the variant with
       a real victim and the one most often left untested.
 - [ ] Confirm the boundary crossed, not merely that the model complied.
 
@@ -84,8 +87,8 @@ before writing anything up — that is the same prove-or-kill discipline
 - [ ] For each tool, ask what it would take to invoke it with attacker-chosen arguments. A fetch /
       browse / webhook tool is SSRF; a database or search tool is injection; an email or payment
       tool is business logic.
-- [ ] Prove a tool-driven fetch with an OOB callback — an agent that renders a markdown image from
-      attacker text is an exfiltration channel, not a rendering bug.
+- [ ] Attribute a tool-driven fetch with an OOB callback, then show what it reaches; an agent that
+      renders a markdown image from attacker text is an exfiltration channel, not a rendering bug.
 - [ ] Check whether tool results are re-fed to the model unescaped (the second injection hop).
 
 ### 5. Conversation and tenancy boundaries
@@ -122,7 +125,8 @@ Before recording, confirm all of:
 ## Recording
 
 Record against `prompt-injection` for injection and system-prompt disclosure. When the injection's
-IMPACT lands in another class, record the class of the outcome — a tool-calling fetch is `ssrf`, a
+IMPACT lands in another class, record the class of the outcome — a tool-calling fetch that reaches
+internal targets from the target's infrastructure is `ssrf`, a
 cross-tenant conversation read is `idor`, leaked context is `info-disclosure` — and cite the
 injection as the entry point in the attacker-outcome statement.
 

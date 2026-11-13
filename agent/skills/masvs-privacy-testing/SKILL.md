@@ -1,91 +1,56 @@
 ---
 name: masvs-privacy-testing
-description: OWASP MASVS-PRIVACY testing for identifier auditing, tracking transparency (ATT/Privacy Sandbox), data deletion verification, privacy label compliance, and analytics/telemetry over-collection assessment
+description: OWASP MASVS-PRIVACY testing for identifier auditing, tracking transparency (ATT/Privacy Sandbox), data deletion verification, privacy label validation, and analytics SDK data collection auditing
 origin: Vigil
 ---
 
-# MASVS-PRIVACY Testing
+# MASVS Privacy Testing
 
 ## When to Activate
 
-- Testing whether an app collects, stores, or transmits device identifiers (IDFA, GAID, IMEI, MAC, ANDROID_ID) in ways that violate privacy policies or regulations.
-- Verifying App Tracking Transparency (iOS) or Privacy Sandbox (Android) compliance: consent state, fingerprinting workarounds, server-side attribution bypass.
-- Validating that account deletion removes all user data from local storage, Keychain/Keystore, backups, and server-side state.
-- Comparing App Store Privacy Labels (iOS) or Data Safety declarations (Android) against actual app behavior observed through traffic analysis.
-- Auditing analytics SDKs, ad SDKs, and crash reporters for over-collection of PII, location, user content, or sensitive screen names.
+- Device identifiers (IDFA, IDFV, GAID, IMEI, MAC, ANDROID_ID) may be collected or sent without
+  consent; ATT or Privacy Sandbox compliance needs checking; account deletion must be verified;
+  a Privacy Label / Data Safety declaration needs comparing with observed behaviour.
 
 ## Scope Gate
 
-Test only apps, accounts, devices, APIs, and analytics endpoints under written authorization. Use synthetic test accounts and test data. Avoid capturing real user traffic or PII from production analytics pipelines. Coordinate with app developers when testing server-side deletion to avoid disrupting production data.
+Only apps, accounts, devices, APIs and analytics endpoints under written authorization, with
+synthetic accounts and data. Never capture real users' traffic or production analytics data.
+Coordinate server-side deletion tests with the app owner.
 
-## Core Workflow
+Hook targets, traffic signals (identifier patterns, ATT tracking parameters, privacy-label category
+keys), deletion residue locations and per-platform API lists:
+`agent/references/mobile/masvs-privacy-testing.md`; load it before hooking. Lab and
+proxy setup: `agent/skills/mobile-lab-setup/SKILL.md`.
 
-### 1. Identifier Audit
+## Checks
 
-Deploy Frida hooks on the target device to intercept identifier access APIs. On iOS, hook `ASIdentifierManager` (IDFA), `UIDevice.identifierForVendor` (IDFV), and fingerprinting signals (screen, locale, timezone, model, fonts, sensors). On Android, hook `AdvertisingIdClient.getAdvertisingIdInfo` (GAID), `TelephonyManager.getDeviceId`/`getImei` (IMEI), `Settings.Secure.getString` (ANDROID_ID), and `NetworkInterface.getHardwareAddress` (MAC).
+1. **Identifiers:** hook identifier APIs and flag outbound identifier patterns. Each access needs
+   a consent gate or a legitimate purpose; an identifier sent to a third-party domain without the
+   user's knowledge is the candidate.
+2. **Tracking transparency (iOS ATT):** fresh install, deny (or never trigger) the prompt, capture
+   a full session. Look for IDFA/IDFV to tracking domains before `.authorized`; **probabilistic
+   fingerprints** (four or more device signals in one payload) to attribution/analytics domains;
+   hidden zero-size or 1x1 WebViews used as a fingerprinting surface; raw device signals sent to
+   first-party domains for server-side joining.
+3. **Privacy Sandbox (Android):** GAID still used alongside Topics/Attribution Reporting; PII or
+   precise identifiers in attribution registration URIs; ad SDKs still in the main process rather
+   than the SDK Runtime.
+4. **Deletion:** snapshot local storage, Keychain/Keystore and caches; delete the account; re-scan
+   for residue and orphaned entries; search a backup (for Android, `adb backup` only works on
+   debuggable or targetSdk ≤ 30 apps); then the impactful checks — **server access with a cached
+   token after deletion**, and **re-registration with the same email resurrecting old data**.
+5. **Declared vs observed:** build a matrix of declared data types against observed traffic and
+   storage; an observed-but-undeclared type is a candidate.
+6. **Analytics, crash and ad SDK over-collection** is owned by
+   `agent/skills/sdk-supply-chain-security/SKILL.md` ("Data exfiltration"); run it there.
 
-Run mitmproxy with the identifier filter script from the reference to flag outbound requests containing UUID patterns (IDFA/GAID format), IMEI patterns, MAC address patterns, and ANDROID_ID hex strings.
+## Reportability and evidence
 
-Cross-reference: each identifier access must have a corresponding consent gate or legitimate purpose. Any identifier transmitted to a third-party domain without user awareness is a candidate finding.
-
-### 2. Tracking Transparency Testing
-
-**iOS ATT:** Hook `ATTrackingManager.trackingAuthorizationStatus` and `requestTrackingAuthorizationWithCompletionHandler:`. Fresh-install the app, deny ATT when prompted (or do not trigger the prompt), then capture all traffic for a full usage session. Analyze captured traffic for:
-- IDFA or IDFV sent to third-party tracking domains before ATT is `.authorized`.
-- Probabilistic fingerprints (four or more device signals in a single payload) sent to attribution/analytics domains.
-- Hidden WebView creation (zero-size or 1x1 frames) that serves as a fingerprinting surface.
-- Server-side attribution attempts that send raw device signals to first-party domains for server-side joining.
-
-**Android Privacy Sandbox:** Hook `TopicsManager.getTopics`, `MeasurementManager.registerSource`/`registerTrigger`, and check whether the app still uses GAID directly alongside Privacy Sandbox APIs. Verify that Attribution Reporting registration URIs do not contain PII or precise identifiers in query parameters. Check whether ad SDKs have migrated to SDK Runtime or still run in the main app process.
-
-### 3. Data Deletion Verification
-
-Before deletion: snapshot all local storage (SharedPreferences/UserDefaults, databases, files, Keychain/Keystore entries, caches). Execute account deletion through the app's UI. After deletion:
-- Re-scan local storage for residual PII, tokens, session data, and cached content.
-- Check Keychain/Keystore for orphaned entries.
-- Create a backup and search for pre-deletion data.
-- Attempt server-side access with cached auth tokens.
-- Attempt re-registration with the same email and check if old data reappears.
-
-### 4. Privacy Label Audit
-
-Collect the declared Privacy Labels (iOS) or Data Safety section (Android) from the store listing. Run a comprehensive traffic capture during a full app usage session covering all major features. Use the privacy label audit mitmproxy script from the reference to categorize observed data types (location, contact info, identifiers, usage data, financial, health, browsing history, search history, user content, diagnostics, purchases). Inspect local storage for additional data types not visible in network traffic.
-
-Build a comparison matrix: declared data types versus observed data types. Any data type observed but not declared is a candidate finding.
-
-### 5. Analytics/Telemetry Audit
-
-Identify all analytics, crash reporting, and ad SDKs through static analysis (jadx/strings/framework inspection). Map each SDK to its known network domains. Capture traffic and categorize by SDK using the analytics audit mitmproxy script from the reference.
-
-For each SDK, assess whether its data collection is proportionate:
-- Does the analytics payload contain PII (email, phone, name) in standard events?
-- Does the crash reporter capture auth tokens, request bodies, or session cookies?
-- Do ad SDKs collect precise location when the app has no location features?
-- Do analytics events capture sensitive screen names or user-generated content?
-- Are multiple analytics SDKs collecting redundant device identifiers?
-
-### 6. Evidence Capture
-
-For each finding, capture:
-- Frida hook output showing the API call, backtrace, and return value.
-- Network request/response showing the data transmitted (via Burp or mitmproxy).
-- Destination domain and its ownership/purpose.
-- Consent state at time of data collection (ATT status, opt-out flag, Privacy Sandbox state).
-- Privacy Label/Data Safety declaration text for comparison.
-- OWASP MASVS-PRIVACY control mapping.
-
-## Output Checklist
-
-- [ ] Identifier inventory complete: all accessed identifiers listed with purpose and consent gate status.
-- [ ] Tracking transparency verified: ATT/Privacy Sandbox compliance tested with consent denied.
-- [ ] Data deletion verified: local storage, Keychain/Keystore, backups, and server-side state checked post-deletion.
-- [ ] Privacy label comparison complete: declared versus observed data types matrix built.
-- [ ] Analytics SDK audit complete: each SDK's data collection assessed for proportionality.
-- [ ] Findings mapped to OWASP MASVS-PRIVACY controls with reproducible evidence.
-
-## Extended Resources
-
-- `agent/references/mobile/masvs-privacy-testing.md` - identifier hooks, ATT testing, Privacy Sandbox, deletion verification, privacy label audit scripts, analytics audit scripts, and evidence standards.
-- `agent/references/mobile/android-app-security.md` - Android storage, crypto, network, and IPC context.
-- `agent/references/mobile/ios-app-security.md` - iOS Keychain, storage, ATS, and link context.
-- `agent/references/mobile/mobile-lab-setup.md` - device, proxy, and Frida setup.
+Label mismatches and telemetry over-collection are often compliance issues rather than security
+findings, and many programs exclude them: report when the data is sensitive, leaves the user's
+control without consent, or a deletion leaves data reachable
+(`agent/references/finding-fp-and-severity-gate.md`). Capture the hook output with backtrace,
+the request carrying the data, the destination's owner, the consent state at that moment, the
+declaration text, and the MASVS-PRIVACY control. Format:
+`agent/references/runtime-guides/web-finding-recording.md`.

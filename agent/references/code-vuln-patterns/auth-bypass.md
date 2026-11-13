@@ -1,171 +1,75 @@
 ---
-description: Generic/C auth gaps, fallback bypasses, token validation gaps. Framework-specific → see `web-app-auth.md`
+description: Generic/C auth gaps, trusted proxy header injection, token validation gaps. Framework-specific → see `web-app-auth.md`
 skill: code-vulnerability-analysis, code-variant-analysis
-languages: C/C++ (frameworks → web-app-auth)
+languages: C/C++, Python, JS (frameworks → web-app-auth)
 ---
 
 # Authentication Bypass — Logic-Level Authentication Gaps
 
-> For web framework-specific auth bypass patterns (Django, Flask, FastAPI, Express, Next.js, NestJS, Spring),
-> see `web-app-auth.md` which provides per-framework code examples and CVEs. This file covers
-> generic/C/C++ auth bypass patterns and cross-framework logic bugs.
+Generic and C/C++ authentication gaps, client-controlled "infrastructure" headers, and token claim
+checks. Framework middleware, decorator, path-normalization, role-check, session, and method
+patterns are in `web-app-auth.md`.
 
 ## What You're Hunting (LLM-Advantage Patterns)
 
-### Auth Check on Wrong Operation or Wrong Point
-The auth check exists but is applied incorrectly:
-- Auth checked before request parsing, but redirect after parsing bypasses the check
-- Auth checked on the GET handler, but the same endpoint's POST handler lacks the check
-- Auth checked in middleware, but a route exception list accidentally includes the sensitive route
-- Auth checked before processing, but error recovery path continues without re-checking
+### Auth checked at the wrong point
 
-### Privilege Confusion Across Roles
-Role A's capabilities are accidentally granted to role B:
-- Role check compares `user.role` against `"admin"` but the DB stores `"Admin"` (case sensitivity)
-- JWT role claim checked with `includes("admin")` which matches `"readonly-admin"` or `"admin-viewer"`
-- Permission bitfield operations use OR when AND was intended, granting union of permissions
-- Role hierarchy check uses string comparison (`"user" < "admin"`) which is locale-dependent
+- Auth evaluated before request parsing, while a redirect or rewrite produced by parsing reaches the
+  handler afterwards.
+- An error-recovery path that continues without re-checking.
+- A TLS client-certificate failure that falls back to basic auth or to anonymous access.
 
-### Session State Surviving Auth Boundaries
-Pre-auth state leaks into post-auth context:
-- Session created during login page visit, retains attacker-set values after successful authentication
-- Cart/preferences set by user A persist when user B logs into the same session (session fixation variant)
-- OAuth state parameter reused across different authentication flows
-- Cookie scope too broad — auth cookie set for `.example.com` accessible by `evil.example.com`
+### Token validation gaps
 
-### Fallback Path Bypasses
-When primary auth fails, the fallback is weaker or absent:
-- TLS client certificate auth fails → falls back to basic auth (or no auth)
-- LDAP auth unavailable → fails open instead of fails closed
-- API key validation fails → request proceeds with anonymous privileges instead of being rejected
-- MFA verification timeout → user proceeds without completing MFA
+- JWT signature verified but `exp` not checked, or `aud` not validated (a token for one service
+  accepted by another).
+- An API key checked for existence but not scope, so any valid key reaches any resource.
+- The `sub` claim never compared with the owner of the requested resource.
 
-### Path Normalization Bypass
-Auth middleware checks normalized path, but the handler receives the raw path:
-- `/admin/` blocked but `/admin` (no trailing slash) allowed
-- `/admin` blocked but `//admin`, `/./admin`, `/%61dmin` (URL encoding) allowed
-- `/api/admin/users` blocked but `/api/users/../admin/users` allowed
-- Case-insensitive filesystem + case-sensitive route matching: `/Admin` vs `/admin`
+### Trusted proxy header injection
 
-### HTTP Method Confusion
-Auth applies to one method but not others on the same endpoint:
-- GET `/api/config` requires admin → blocked. PUT `/api/config` has no auth check → writable by anyone
-- DELETE requires auth but OPTIONS pre-flight response leaks information
-- PATCH handler added later without copying the auth middleware from GET/POST
+A header that looks like infrastructure metadata is ordinary client input at the edge unless a
+fronting proxy is guaranteed to strip or overwrite it. Find where the value feeds a security decision,
+then confirm from the deployment configuration, not the handler, that it cannot originate from the
+client.
 
-### Token Validation Gaps
-Token is validated but incompletely:
-- JWT signature verified but expiration (`exp`) claim not checked
-- JWT verified but audience (`aud`) claim not validated — token from one service accepted by another
-- API key checked for existence but not scoped — any valid key accesses any resource
-- OAuth token validated but `sub` claim not matched to the requested resource's owner
-
-### Trusted Proxy Header Injection
-The auth/redirect/rate-limit decision reads a header that looks like infrastructure metadata
-but is, at the network edge, an ordinary client-controlled input unless a fronting proxy
-strips or overwrites it first. Whitebox detection: grep for the header name, find where its
-value feeds a security decision, then verify — from the deployment config, not from reading
-the handler in isolation — that the value cannot originate from the client (i.e. the request
-actually always transits a trusted proxy hop that sets/overwrites it before the app sees it).
-If no such proxy config guarantees that, the header is attacker-controlled.
-
-- **`X-Forwarded-Host` / `Host` into a password-reset link, redirect target, or cache key**
-  — read without an allowlist, the value becomes the origin used to build a link the victim
-  will click, or the key used to serve/cache a response.
+- **`X-Forwarded-Host`/`Host` into reset links, redirects, or cache keys.**
   ```python
-  # Flask: password reset link built from the Host header, no allowlist
-  def send_reset_link(user):
-      host = request.headers.get("X-Forwarded-Host", request.host)
-      reset_url = f"https://{host}/reset?token={make_token(user)}"
-      send_email(user.email, reset_url)
-      # Attacker sets X-Forwarded-Host: evil.example -> victim's valid token is
-      # emailed inside a link pointing at the attacker's host.
+  host = request.headers.get("X-Forwarded-Host", request.host)
+  reset_url = f"https://{host}/reset?token={make_token(user)}"   # emailed to the victim
   ```
-  Grep for `X-Forwarded-Host`, `request.host`, `HTTP_HOST`, `Host` reads feeding URL
-  construction, redirect targets, or cache-key derivation. A fix allowlists known hostnames
-  or uses a server-side configured canonical host instead of the header.
+  `X-Forwarded-Host: attacker.example` puts the victim's valid token in a link to the attacker.
+  Grep `X-Forwarded-Host`, `request.host`, `HTTP_HOST`, and `Host` reads feeding URL construction,
+  redirects, or cache keys; the fix is a hostname allowlist or a configured canonical host.
+- **`X-Original-URL`/`X-Rewrite-URL` honored for routing.** The auth middleware or an upstream
+  matcher evaluates the request path (`/public/x`) while a front controller dispatches on the header
+  (`/admin/delete`); older Symfony and Zend setups trusted it. Verify the auth layer evaluated the same
+  path value the router dispatches on.
+- **`X-Forwarded-For`/`X-Real-IP` for allowlists and rate limits.** `req.headers['x-forwarded-for']
+  .split(',')[0]` is whatever the client sent. The trusted-proxy setting must honor the header only
+  from a known immediate upstream: Express `trust proxy` set to that hop (not `true`), Flask/Werkzeug
+  `ProxyFix(x_for=1)` with the right hop count, Django custom middleware (Django has no built-in
+  trusted-proxy IP setting; `SECURE_PROXY_SSL_HEADER` only governs `request.is_secure()`). Grep
+  `X-Forwarded-For`, `X-Real-IP`, `req.ip`, `remote_addr` feeding allowlist, internal, rate-limit, or
+  geofence decisions.
 
-- **`X-Original-URL` / `X-Rewrite-URL` consumed by a reverse-proxy rewrite the auth
-  route-matcher never sees** — the app-facing framework routes on the rewritten path while
-  the auth middleware (or a WAF/route-matcher upstream) evaluated the original request path,
-  so a request that looks safe to the matcher is rewritten to a sensitive route internally.
-  ```nginx
-  # nginx passes X-Original-URL through to the app; some frameworks (e.g. older
-  # Symfony/Zend setups with front-controller rewriting) trust it for internal routing.
-  # Auth middleware inspects request.path (the original URL: /public/x);
-  # the framework's router dispatches on X-Original-URL (/admin/delete) instead.
-  ```
-  Grep for `X-Original-URL`, `X-Rewrite-URL` reads in routing/dispatch code; verify the
-  same path value is what the auth layer evaluated.
+## C/C++ Specifics
 
-- **`X-Forwarded-For` / `X-Real-IP` trusted for an IP-allowlist or rate-limit decision
-  without a trusted-proxy-hop check** — the app treats the header as the client's real IP,
-  but any client can set it directly unless a specific, verified proxy hop is guaranteed to
-  overwrite or append to it before the app reads it.
-  ```javascript
-  // Express: IP allowlist keyed off a client-settable header
-  function isInternalIp(req) {
-      const ip = req.headers['x-forwarded-for']?.split(',')[0].trim();
-      return INTERNAL_CIDRS.some(cidr => inCidr(ip, cidr));
-      // BUG: no `trust proxy` config verified, and no check that this request
-      // actually traversed the trusted load balancer — client sets
-      // X-Forwarded-For: 10.0.0.1 directly and passes the allowlist.
-  }
-  ```
-  Grep for `X-Forwarded-For`, `X-Real-IP`, `req.ip`, `remote_addr` reads feeding
-  `allowlist`/`internal`/`rate_limit`/`geofence` decisions; confirm the framework's trusted-proxy
-  setting (e.g. Express `trust proxy`, Django `SECURE_PROXY_SSL_HEADER`/custom middleware) is
-  configured to only honor the header from a known, immediate upstream hop — not from the
-  public internet.
+- An auth check inside a wrapper that internal callers bypass by calling the underlying function.
+- Unchecked `setuid`/`setgid`/`setgroups` return values: a failed drop leaves the process privileged.
+- Capabilities granted more broadly than the operation needs, or retained across `exec`.
+- Auth state in a global shared across forked workers or threads.
+- Auth tokens left in buffers that are reused or not zeroed.
 
-## C/C++ Specific
-
-**Dangerous patterns**:
-- Auth check in wrapper function, but direct callers bypass the wrapper via internal function call
-- `setuid`/`setgid` not checked for failure (can fail silently on some systems, leaving elevated privileges)
-- `capabilities(7)` set incorrectly — `CAP_NET_BIND_SERVICE` granted when `CAP_NET_RAW` was intended
-- Auth state stored in global variable, shared across forked processes or threads
-- Buffer containing auth token not zeroed after use (info leak via memory reuse)
-
-**Detection approach**: For every privileged operation, trace backward to find the auth check. Verify it checks the right principal, the right permission, and cannot be bypassed via any alternative code path.
-
-## Python / JavaScript / Java Framework-Specific
-
-See `web-app-auth.md` for comprehensive per-framework patterns including:
-- Django decorator ordering, DRF permission_classes, Flask @before_request gaps
-- Express middleware ordering, Next.js middleware matcher, NestJS guard bypass
-- Spring @PreAuthorize, antMatchers vs mvcMatchers, HiddenHttpMethodFilter
-- FastAPI Depends() gaps, Flask-Login overrides, JWT algorithm confusion
-
-The patterns below in C/C++ Specific are NOT covered in web-app-auth.md and remain here.
-
-## Detection Questions
-
-1. **For every sensitive operation, where is the auth check?** Trace from the operation backward to find it. If you can't find it, that's a finding.
-2. **Can the auth check be bypassed via an alternative path?** Different HTTP method, URL encoding, redirect, error path?
-3. **Is the auth check checking the right thing?** Right user, right permission, right resource, right scope?
-4. **What happens when auth fails?** Reject? Fallback? Fail open?
-5. **Are there any paths that were added after the auth middleware and might have been missed?** Check git log for routes added after the initial auth implementation.
+For every privileged operation, trace back to the check and confirm it tests the right principal,
+permission, and resource on every path that reaches the operation.
 
 ## Real CVE Examples
 
-### CVE-2021-41773 (Apache httpd — path normalization auth bypass)
-Apache 2.4.49 introduced a path normalization flaw where `/.%2e/` sequences bypassed
-`<Directory>` access controls. The URL decoder resolved `%2e` to `.` after the auth
-check had already evaluated the un-decoded path. The auth layer and the file-serving
-layer disagreed on which path was being accessed — a classic multi-function normalization
-mismatch across the request processing pipeline.
-
-### CVE-2023-22602 (Apache Shiro + Spring Boot — path matching bypass)
-Shiro's `PathMatchingFilter` used Ant-style path matching while Spring Boot used its
-own path matching. Requests with trailing slashes or path parameters (`;param`) matched
-in Spring but not in Shiro, bypassing auth checks. The fix required Shiro to delegate
-path matching to the framework rather than maintaining its own matcher.
-
-### CVE-2019-19844 (Django — Unicode case-folding password reset)
-Django's password reset accepted email addresses that differed only in Unicode case
-folding. An attacker could request a reset for `admin@example.com` using a
-confusable Unicode equivalent, and the reset email would be sent to the attacker's
-address if the email system resolved the confusable differently than Django's
-`iexact` lookup. The auth check (email lookup) and the action (send email) operated
-on different normalizations of the same input.
+- **CVE-2021-41773 (Apache httpd 2.4.49).** The new normalization missed `/.%2e/`, so the encoded
+  traversal passed the `<Directory>` access check and was decoded later in the file-serving path; the
+  auth layer and the file layer disagreed on which path was requested.
+- **CVE-2023-22602 (Apache Shiro with Spring Boot 2.6+).** Spring Boot switched its default matcher to
+  `PathPatternParser`, so requests Spring routed (trailing slashes, path variants) were not matched by
+  Shiro's Ant-style filter chain. Fixed in Shiro 1.11.0, with `spring.mvc.pathmatch.matching-strategy
+  =ant_path_matcher` restoring agreement.

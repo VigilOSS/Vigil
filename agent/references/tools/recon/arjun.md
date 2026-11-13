@@ -1,60 +1,72 @@
 ---
-description: Hidden HTTP parameter discovery (GET/POST/JSON/XML), passive OSINT param mining, auth-aware
+description: Hidden HTTP parameter discovery with Arjun — arjun-sweep vs manual kali arjun, per-method lists, bounded-first sizing ("size to finish"; a timed-out run is not a negative), --passive and --identity, the patched batch-abort bug, ingest-and-route, and the sqlmap doctrine
 skill: parameter-fuzzing
 ---
 
 # arjun
 
-**Purpose:** Discover *hidden* HTTP parameters an endpoint silently accepts but never advertises — the inputs no crawler or archive surfaces. Arjun fires batches from a ~25k parameter-name wordlist, diffs each response against a baseline (reflection / status / length / content factors), and binary-splits to isolate the params that actually change behavior.
-
-Run all target-facing Arjun via `vigil assess kali arjun` (typed verb, audit-flag-aware, runs inside the isolated runtime). Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. Use `--technique PARAM-DISCOVERY` for active runs, `--technique OSINT` for `--passive` runs. Pull `--rate-limit`/`-d`/`-T` values from the matching trait row in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" before running in volume.
-
-## Full capability — use all of it (nothing is narrowed)
-- **Methods** (`-m GET|POST|XML|JSON`): JSON/XML matter for modern APIs — discover hidden *body* fields on JSON endpoints, not just query params.
-- **Passive-augmented mode** (bare `--passive` harvests the `-u` target's own domain; `--passive <host>` harvests a different domain): adds parameter names mined from wayback / commoncrawl / otx to the wordlist, *then scans actively* — so it deepens coverage and **raises** request volume, it does not lower it. Bare `--passive` derives the harvest host from the URL, so give it a single `-u` (not an `-i` list). Keep `--stable --rate-limit` set when using it on a rate-sensitive target.
-- **Auth-aware** — runs discovery as an authenticated user, finding params gated behind auth. Prefer **`--identity <name>`**: it resolves the named store identity and folds its session/bearer into arjun's `--headers` for you (also stamps `auth_context` for cross-identity depth), so no raw token ever lands on the command line or in the audit argv. Fall back to manual `--headers $'Authorization: Bearer …\nCookie: …'` only for material not in the credential store.
-- **Tuning / politeness** (`--stable`, `--rate-limit`, `-d` delay, `-T` timeout, `-t` threads, `-c` chunk size): essential on content-heavy targets.
-- **Output:** JSON is ALWAYS written under `scans/arjun/<target>/<hash>.json` for `ingest arjun`; `-oT` text and `-oB` Burp are also available.
-- **Misc:** `--include` (data in every request), `--casing` (`like_this`/`likeThis`/`likethis`), `--disable-redirects`, `-w` custom wordlist (default = Arjun's full `db/large.txt`).
+Arjun finds parameters an endpoint accepts but never advertises, which no crawler or archive
+surfaces: it fires batches from a ~25k-name list, diffs each response against a baseline, and
+binary-splits to the parameters that change behaviour. Run it as `vigil assess arjun-sweep` or
+`vigil assess kali arjun`; flags, the always-written JSON path, method semantics and politeness
+knobs are in `vigil assess contract kali arjun`. Use `--technique PARAM-DISCOVERY` for every run,
+`--passive` included: Arjun 2.2.7 adds the harvested names to the wordlist and then scans the target
+actively. Take `--rate-limit`/`-d`/`-T` from the matching row of
+`agent/references/recon/rate-calibration.md` before running in volume.
 
 ## One-shot: `vigil assess arjun-sweep`
-The three steps below (select → per-method scan → ingest) are composed into a single audited verb:
-`vigil assess arjun-sweep [--param-poor-only] [--max-per-host N] [--include-unknown]
---technique PARAM-DISCOVERY --intent "..." --probe-kind fingerprint --phase consume-test --timeout 1800`.
-It gates the list, scans **each method-list under its own `-m`** (so POST/JSON/XML body surfaces are
-not scanned as GET), and **always ingests** — removing the foot-guns (single-`-m` union scan,
-forgotten ingest). It is **sized to finish**: `--stable` is opt-in (off), `-T 7` fails dead targets
-fast, and `--max-targets 100`/method caps the list so it completes inside `--stage-timeout` (deferred
-targets are reported, not dropped). Drop to the manual steps below only for `--passive` (single-`-u`)
-harvesting or per-call control.
 
-The verb carries the same exit-code contract as every other kali surface, aggregated
-worst-arm-when-all-failed: it exits non-zero only when **every** method arm produced no usable
-output (the shared status's code, or `3` for a mixed set). A partial failure exits `0` — one dead
-arm out of four is still a useful sweep — and names the dead arms in `failed_methods` in the JSON
-plus a stderr line. Those arms are holes, not negatives; re-run them before reading their absence
-as "no hidden params".
+The verb gates the work buffer, scans each method list under its own `-m` (so POST/JSON/XML body
+surfaces are not scanned as GET) and always ingests. It is sized to finish: `--stable` is off,
+`-T 7` fails dead targets fast, and `--max-targets 100` per method caps the list; deferred targets
+are reported, not dropped. `--timeout` bounds the whole sweep: each method gets the smaller of
+`--stage-timeout` (default 600) and the time left, and a method left without time is listed in
+`deferred_methods`. Its exit code follows the kali worst-arm-when-all-failed rule, so a partial
+failure exits 0 and names the dead arms in `failed_methods`. When every arm failed it exits with
+their shared status's code (4 all timed out, 6 all transport errors), or 3 (`failed`) when the arms
+failed in different ways. A deferred or failed arm is a hole to re-run, not a negative. Use the
+manual steps below for a `--passive` single-`-u` harvest or per-call control.
 
-> **A timed-out arjun run is NOT a "no params" negative.** A slow config (low `--rate-limit` ×
-> `--stable` × high `-T`) over a large or junk (`--include-unknown`/Wayback) list gets SIGTERM-killed
-> after only a couple of targets; its empty `-oJ` then masquerades as a clean result. The wrapper now
-> prints a loud `INCOMPLETE: arjun ... ~K of N targets` warning on any timed-out/killed list run —
-> treat that as "re-run on a smaller curated live list, sized to finish", never as a verdict. **Size
-> to finish > scan everything once**: a completed run over 16 confirmed-live API endpoints is worth
-> more than a killed run over 134 historic URLs.
+**Size to finish.** A slow configuration (low `--rate-limit` × `--stable` × high `-T`) over a large
+or junk list (`--include-unknown`, Wayback URLs) is SIGTERM-killed after a couple of targets, and
+its empty output reads like a clean result. On a timed-out or killed list run the wrapper prints
+`INCOMPLETE: arjun ... ~K of N targets`; re-run on a smaller curated live list. A completed run over
+16 confirmed-live API endpoints is worth more than a killed run over 134 historic URLs.
 
-## Workflow — discover → enrich → route → test
-1. **Gate the target list.** NEVER aim Arjun at a raw URL dump or inert assets — on a content-heavy target that's thousands of requests for nothing. Build a disciplined list first:
-   `vigil assess arjun-select -o <list> [--param-poor-only] [--max-per-host N]`
-   (live + dynamic + path-template-deduped + param-poor — collapses id-varied URLs to one route, but keeps **method variants separate**: a route exposed as both GET and POST/JSON is two entries). Besides the union `<list>`, it writes a **per-method list `<list>.GET` / `<list>.POST` / `<list>.JSON` / `<list>.XML`** for each verb present (the JSON `summary.method_outputs` names them).
-2. **Run — bounded first, escalate for depth.** `kali arjun -i` applies ONE global `-m`, so scan **each method-list under its own verb** — running the union under a single `-m` would scan POST/JSON body surfaces as GET and miss their hidden params. Start with a focused `-w` list and `--stable --rate-limit` so each run stays gentle; Arjun's default wordlist expands to ~100+ request chunks per host, enough to overload a rate-sensitive or production target if left unbounded:
+## Manual workflow — gate, run per method, ingest
+
+1. **Gate the list.** Never aim Arjun at a raw URL dump or inert assets.
+   `vigil assess arjun-select -o <list> [--param-poor-only] [--max-per-host N]` keeps live,
+   dynamic, template-deduped, param-poor routes and keeps method variants separate. Besides the
+   union `<list>` it writes `<list>.GET` / `.POST` / `.JSON` / `.XML` for each verb present
+   (`summary.method_outputs` names them).
+2. **Run each method list under its own `-m`**, bounded first: Arjun's default list expands to
+   100+ request chunks per host, enough to overload a rate-sensitive target.
    `for M in GET POST JSON XML; do [ -s <list>.$M ] && vigil assess kali arjun -i <list>.$M -m "$M" -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 --technique PARAM-DISCOVERY …; done`
-   Escalate for depth by dropping `-w` (Arjun's full ~25k default list) and/or adding `--passive`.
-   - **Reach for `--passive` to deepen coverage on a single `-u` endpoint** — it folds wayback/commoncrawl/otx parameter names into the wordlist and then scans actively, so it raises request volume rather than lowering it. Keep `--stable --rate-limit` set, and give it a `-u` target (an `-i` list leaves it no domain to harvest from).
-   - **Run high-value endpoints with `-u`, or keep `-i` batches small via `arjun-select --max-per-host`** — for politeness and a small blast radius. (Upstream Arjun 2.2.7 aborts the whole `-i` batch when a single endpoint returns a 4xx/5xx — a `request.status_code` bug in its error path that a 429 trips — so the runtime ships a patched Arjun that skips a bad endpoint instead of ending the run; `agent/docker/patches/arjun-batch-resilience.py`.) The verb also writes an empty `{}` artifact even on a failed or partial run, so `ingest arjun` always has a file to read.
-3. **Enrich:** `vigil assess ingest arjun <arjun.json>` folds the discovered params onto the matching work-buffer row (GET→`query_params`, POST/JSON/XML→`body_params`; header-mode params recorded as a signal) and re-runs the EXISTING classifier. The now-parameterized endpoint **auto-routes** — `url=`→`gf:ssrf`, `file=`→`gf:lfi`, `id=`→`gf:idor`/`gf:sqli` — with no new classification logic. Rows are stamped `selected_by=arjun`, the discovered params land in `signals`, and an LLM instruction in `triage_rationale`.
+   Escalate for depth by dropping `-w` (the full default list) and/or adding `--passive`.
+   - `--passive` folds wayback/commoncrawl/otx parameter names into the list and then scans
+     actively, so it raises request volume. Bare `--passive` derives the harvest domain from the
+     URL, so give it one `-u`; keep `--stable --rate-limit` set.
+   - Prefer `--identity <name>` for authenticated discovery: it folds the identity's session into
+     Arjun's `--headers` and stamps `auth_context`, so no raw token lands in the audit argv.
+     Hand-written `--headers $'Authorization: ...\nCookie: ...'` is for material outside the
+     credential store.
+   - Keep `-i` batches small (`arjun-select --max-per-host`) or use `-u` for high-value endpoints.
+     Upstream Arjun 2.2.7 aborts the whole `-i` batch when one endpoint returns a 4xx/5xx (a 429
+     trips it); the runtime ships a patched Arjun that skips the endpoint instead
+     (`agent/docker/patches/arjun-batch-resilience.py`). The verb writes an empty `{}` artifact even
+     on a failed run, so ingest always has a file.
+3. **Ingest:** `vigil assess ingest arjun <arjun.json>` folds the parameters onto the matching
+   work-buffer row (GET → `query_params`, POST/JSON/XML → `body_params`, header-mode params as a
+   signal) and re-runs the classifier, so the endpoint auto-routes (`url=` → `gf:ssrf`, `file=` →
+   `gf:lfi`, `id=` → `gf:idor`/`gf:sqli`). Rows carry `selected_by=arjun`, the parameters in
+   `signals`, and an instruction in `triage_rationale`.
 
 ## SQLMAP doctrine
-When an enriched row routes to a DB-backed surface (`gf:sqli`, or an `id=`/numeric param on a DB-ish route), `ingest arjun` names **`vigil assess kali sqlmap`** in the `triage_rationale` as the next step. Division of labor: **Arjun + the classifier ISOLATE the injectable parameter; sqlmap CONFIRMS and does the high-volume blind/time-based extraction** across DBMS variants. A capable LLM can spot error-based/obvious SQLi, but blind/time-based extraction is hundreds-to-thousands of timed inference requests — mechanical work sqlmap does deterministically. sqlmap is **suggested and operator-invoked, never auto-fired.**
 
-Canonical annotated invocations: `vigil assess contract kali arjun`.
+When an enriched row routes to a DB-backed surface (`gf:sqli`, or an `id=`/numeric parameter on a
+DB-ish route), `ingest arjun` names `vigil assess kali sqlmap` in `triage_rationale` as the next
+step. Arjun and the classifier isolate the injectable parameter; sqlmap confirms it and does the
+blind/time-based extraction, which is hundreds to thousands of timed inference requests across
+DBMS variants and mechanical work sqlmap does deterministically. sqlmap is suggested and
+operator-invoked, never auto-fired.

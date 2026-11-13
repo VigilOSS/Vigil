@@ -5,10 +5,6 @@ skill: bff-parameter-override
 
 # BFF / Middleware Parameter Override Payloads
 
-Framework-specific internal parameters that middleware layers set before forwarding to backend
-services. The vulnerability pattern: middleware enriches the request with identity/context params
-but does NOT strip client-supplied values, allowing client-side override of server-set values.
-
 ## Express / Node.js BFF
 
 The most common BFF override pattern. Express middleware frequently sets parameters on
@@ -117,12 +113,6 @@ X-On-Behalf-Of
 ### Next.js Internal Parameters
 
 ```
-# Routing/locale (middleware sets from geolocation/headers)
-__nextLocale
-__nextDefaultLocale
-_nextI18Next
-_nextData
-
 # Auth context (NextAuth.js / Auth.js)
 userId
 sessionId
@@ -192,14 +182,6 @@ _changelist_filters
 ### Strong Parameters Bypass Vectors
 
 ```
-# Method override
-_method
-X-Http-Method-Override
-
-# CSRF bypass
-authenticity_token
-csrf_token
-
 # Identity override (common in Devise/Warden)
 current_user_id
 warden_user_id
@@ -217,8 +199,6 @@ user[permissions][]
 ### Header-Based (Rack)
 
 ```
-X-Forwarded-For
-X-Real-IP
 X-Original-URL
 X-Rewrite-URL
 X-User-Id
@@ -303,35 +283,21 @@ Test each candidate parameter in ALL locations:
 | HTTP header | `Header: value` | `X-User-Id: VICTIM_ID` |
 | Cookie | `name=value` | `userId=VICTIM_ID` |
 
-### Priority Order for Testing
-
-1. **Identity params** (userId, $id$, notAuthUserId) → account takeover
-2. **Tenant params** (agencyId, tenantId, orgId) → cross-tenant data access
-3. **Role params** (isAdmin, role, permissions) → privilege escalation
-4. **Bypass flags** (skipAuth, checkPassword=false) → auth bypass
-5. **Object resolution** (ownerId, parentId) → IDOR via BFF
-
-### False Positive Indicators
-
-- Parameter accepted but response identical to baseline → ignored by backend
-- Parameter triggers 400 with validation error naming the field → backend validates
-- Parameter works but requires admin session → feature, not vulnerability
-- Parameter only affects client-side rendering (e.g., locale) → no security impact
-
 ---
 
 ## Real-World Examples
 
-### CVE-2021-XXXXX Pattern: Express BFF Identity Override
+### Express BFF Identity Override Pattern
 
 ```javascript
-// Vulnerable middleware pattern:
+// Vulnerable middleware pattern: identity is filled from the session only when absent,
+// so a client-supplied ?$id$=VICTIM_ID survives into the backend call.
 app.use((req, res, next) => {
-  req.query.$id$ = req.session.userId;  // Sets identity from session
+  req.query.$id$ = req.query.$id$ ?? req.session.userId;
   next();
-  // BUG: does NOT delete req.query.$id$ if client already supplied it
-  // Client can supply ?$id$=VICTIM_ID which survives into the backend call
 });
+// A forwarder that copies headers or body fields wholesale has the same flaw for
+// X-User-Id / tenantId; the fix is to delete client-supplied values before enriching.
 ```
 
 ### MongoDB Passthrough Pattern
@@ -343,16 +309,5 @@ router.put('/orders/:orderId', authCheck, (req, res) => {
   // But the update uses req.body._id instead:
   db.orders.findOneAndUpdate({_id: req.body._id}, {$set: req.body});
   // Attacker: PUT /orders/MY_ID with body._id = VICTIM_ID
-});
-```
-
-### Header Trust Pattern
-
-```javascript
-// Vulnerable: backend microservice trusts X-User-Id header
-// Gateway is supposed to set it, but doesn't strip client-supplied value
-app.get('/api/data', (req, res) => {
-  const userId = req.headers['x-user-id']; // Trusts header unconditionally
-  return db.getData(userId);
 });
 ```

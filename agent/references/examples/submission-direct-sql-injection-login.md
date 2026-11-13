@@ -50,7 +50,7 @@ curl -si -X POST https://portal.example.com/login \
 ```
 HTTP/1.1 302 Found
 Location: /dashboard
-Set-Cookie: session=eyJhbGciOi...                                 <-- authenticated session, no valid password supplied
+Set-Cookie: session=4b9e2f71c0d84a6db3e5f8a1c27d9e06; HttpOnly   <-- authenticated session, no valid password supplied
 ```
 
 **Root cause.** The password field is parameterized; the username field is the one still built by string concatenation, which is why every payload above targets it instead.
@@ -63,4 +63,4 @@ Unauthenticated login as the portal administrator, and full database read throug
 
 Parameterize the login query — bind `username` and `password` through prepared-statement placeholders instead of string concatenation; this is the only fix, not a mitigation. Add a WAF rule blocking SQL metacharacters on the login endpoint as defense-in-depth while the code fix rolls out.
 
-**Researcher:** Priya Natarajan — priya.natarajan@research.example
+**Researcher:** Acme Security Research — research@acme.example

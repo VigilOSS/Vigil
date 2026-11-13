@@ -12,11 +12,12 @@ rule CobaltStrike_Beacon_Config {
         description = "Detects Cobalt Strike beacon configuration block"
         author = "Vigil"
     strings:
-        // XOR'd config markers
-        $config_v3 = { 00 01 00 01 00 02 ?? ?? 00 01 00 02 }  // v3.x after XOR 0x69
-        $config_v4 = { 00 01 00 01 00 02 ?? ?? 00 01 00 02 }  // v4.x after XOR 0x2e
+        // Config TLV header (setting 0x0001 BeaconType, then 0x0002 port; type short, length 2),
+        // XOR-encoded with the per-version single-byte key
+        $config_v3 = { 69 68 69 68 69 6B ?? ?? 69 6B 69 68 69 6B ?? ?? }  // v3.x, XOR 0x69
+        $config_v4 = { 2E 2F 2E 2F 2E 2C ?? ?? 2E 2C 2E 2F 2E 2C ?? ?? }  // v4.x, XOR 0x2e
         // Default named pipe
-        $pipe = "\\.\pipe\msagent_" ascii wide
+        $pipe = "\\\\.\\pipe\\msagent_" ascii wide
         // Default User-Agent
         $ua_default = "Mozilla/5.0 (compatible; MSIE" ascii
     condition:
@@ -30,7 +31,7 @@ rule CobaltStrike_Default_Cert {
     meta:
         description = "Detects default Cobalt Strike TLS certificate"
     strings:
-        $serial = { 00 8b b0 0e e }  // Serial: 8bb00ee
+        $serial = { 02 04 08 BB 00 EE }  // DER INTEGER, serial 146473198 (0x08BB00EE)
         $cn = "Major Cobalt Strike" ascii
     condition:
         any of them
@@ -54,5 +55,5 @@ rule CobaltStrike_Stager_x86 {
 ## XOR Key Reference
 | Version | XOR Key | Marker After XOR |
 |---------|---------|-----------------|
-| 3.x | 0x69 | Look for 0x69 XOR'd TLV header |
-| 4.x | 0x2e | Look for 0x2e XOR'd TLV header |
+| 3.x | 0x69 | `69 68 69 68 69 6B` (TLV header `00 01 00 01 00 02`) |
+| 4.x | 0x2e | `2E 2F 2E 2F 2E 2C` (same header) |

@@ -8,172 +8,173 @@ origin: Vigil
 
 ## Identity
 
-A pre-send audit that runs on a critical-severity finding's disclosure bundle, hunting for the class of overstatement that source-only verification (`code-finding-verification`) does not catch — facts about the *runtime deployment* of the target that a source-grounded analyst misses because they aren't visible from the code alone.
-
-The triggering incident: a confirmed pre-auth heap-OOB-to-RCE in Fluent Bit v5.0.5 was disclosed against `cr.fluentbit.io/fluent/fluent-bit:5.0.5`, but the upstream Docker image builds with `-DFLB_JEMALLOC=On` and the chain composes only under glibc malloc. The OOB write fires under jemalloc, but the size-class slab segregation and out-of-band metadata structurally prevent the finalizer-array overwrite — under jemalloc the chain degrades to DoS, not RCE. The bug was real; the deployment claim was overstated. This skill exists so the next disclosure does not have the same gap.
-
-A second incident on the same engagement: a confirmed CRLF/multi-tenant escape claimed "operator's outbound TLS connection to Loki" but the PoC was run against a plain-HTTP mock-loki on port 13100. The bug works above TLS, but the claim was made without runtime evidence. Same class of mistake: source-correct, deployment-incorrect.
-
-The categories below are derived from those two incidents and from the general "claim what you proved, not what you believe to be true" stance.
+A pre-send audit of a high-severity finding's disclosure bundle, hunting the overstatement that
+source-only verification (`code-finding-verification`) does not catch: facts about the target's
+*runtime deployment* that are invisible from the code alone. The typical failure is source-correct,
+deployment-incorrect — a real bug whose claimed reach (the official image, TLS, every multi-tenant
+deployment) was never shown. The worked examples at the end calibrate it.
 
 ## When to Activate
 
-- Before sending any disclosure with claimed CVSS ≥ 8.0
-- Before adding an end-to-end RCE / auth-bypass / smuggling claim to a report's headline
-- When `code-finding-verification` passes but the finding will be communicated externally (vendor email, GHSA, CERT/CC VINCE, BugCrowd, public CVE)
-- During `report-writer` final-pass before the disclosure bundle is sealed
-- When a reviewer asks "are we sure this is exploitable on the real product, not just the test harness?"
+- Before sending any disclosure with claimed CVSS ≥ 8.0, when the report-writer runs that finding's
+  `agent/references/submission-format.md` checklist, or before an end-to-end RCE / auth-bypass /
+  smuggling claim reaches a headline.
+- When a reviewer asks whether the claim holds on the real product rather than the test harness.
 
-This skill does NOT replace `code-finding-verification` (which kills source-side false positives). It runs *after* — the verification protocol confirms the bug class is real and reachable from external input; this skill confirms the *claim about reach and impact* matches the deployment-shape evidence the bundle carries.
+It runs after `code-finding-verification`, which confirms the bug class is real and reachable; this
+audit confirms the claim about reach and impact matches the deployment evidence the bundle carries.
+The report-writer creates no proof, so a check it cannot settle from the finding, its linked runs and
+artifacts, and the staged bundle becomes a "Required runtime work" item routed to the operator
+(`QA BLOCKED`), not a test it runs.
 
 ## The Eight Severity-Downgrader Categories
 
-Every disclosure gets walked through these. For each category: ✓ verified-and-claim-matches, ✗ unverified-or-claim-overstates, or N/A. Anything but ✓ is either a re-run or a text qualification before send.
+Mark each ✓ (verified and the claim matches), ✗ (unverified or the claim overstates), or N/A. Anything
+but ✓ needs a re-run or a text qualification before send.
 
 ### 1. Allocator dependence
 
-**Question**: Does the chain compose under the allocator(s) the deployed binaries actually use?
+Does the chain compose under the allocator the deployed binaries actually use? Read the build-system
+default and override flags (`ACME_JEMALLOC`, `USE_TCMALLOC`, `WITH_MIMALLOC`, …) and whether the
+upstream Dockerfile or packaging overrides them. A chain relying on glibc-malloc behaviour (chunk
+metadata adjacency, tcache, safe-linking, fastbin LIFO) needs a run under another allocator (jemalloc
+5.x, tcmalloc, mimalloc) or a precise argument that the structural property is allocator-portable. A
+text-manipulation chain (CRLF, format string, parser bug) is allocator-independent only if no hidden
+allocation path carries the bug.
 
-**Check**:
-- Read the source tree's `cmake/options.cmake` (or equivalent build-system config) for the allocator default and the names of override flags (`FLB_JEMALLOC`, `USE_TCMALLOC`, `WITH_MIMALLOC`, etc.)
-- Read the upstream Docker / packaging Dockerfiles for whether the allocator is overridden in production binaries
-- If the chain depends on glibc-malloc-specific behavior (chunk metadata adjacency, tcache rescuing, safe-linking encoding, fastbin LIFO), test it under at least one other allocator (jemalloc 5.x, tcmalloc, mimalloc) OR document precisely why the structural property is allocator-portable
-- If the chain is text-manipulation (CRLF injection, format-string, parser bug), tag as allocator-independent — but verify there's no hidden `flb_sds_create_len` / `malloc` path that the bug depends on
-
-**Disclosure language**: "affects builds compiled with allocator X" — never "affects deployment Y" without naming the allocator deployment Y compiles with.
+**Disclosure language:** "affects builds compiled with allocator X", never "affects deployment Y"
+without naming the allocator Y uses.
 
 ### 2. Plugin / module build-flag gate
 
-**Question**: Is the vulnerable plugin compiled into the binaries the disclosure claims to affect?
+Is the vulnerable plugin compiled into the binaries the disclosure names? Find the build option
+(`ACME_OUT_SINK`, `ACME_IN_FORWARD`), its upstream default, and the production Dockerfile and
+per-distro settings. An opt-in plugin must be called opt-in.
 
-**Check**:
-- Find the CMake / Bazel / Meson option that controls compilation of the vulnerable plugin (`FLB_OUT_LOKI`, `FLB_IN_FORWARD`, etc.)
-- Determine the upstream default and whether the production Dockerfile / packaging override it
-- For vendor distros (aws-for-fluent-bit, Debian package, etc.) — verify the flag setting per distro
-- If the plugin is opt-in by default, the disclosure must say so
-
-**Disclosure language**: "affects builds with `FLB_X=On` (the default)" or "affects deployments that explicitly enable `FLB_X` (opt-in; the upstream default is `Off`)" — never just "affects the upstream image" without checking.
+**Disclosure language:** "affects builds with `ACME_X=On` (the default)" or "affects deployments that
+enable `ACME_X` (opt-in; upstream default `Off`)".
 
 ### 3. Default-config reach (minimum precondition)
 
-**Question**: What is the *minimum* operator configuration where the chain fires?
+What is the minimum operator configuration where the chain fires? Trace each config key the chain
+touches from registration to consumption, separate always-on surfaces from operator-set values, and
+say whether each operator-set precondition is the documented canonical configuration or a niche
+tunable. An unsafe default (`tls.verify_hostname Off`) is still a precondition.
 
-**Check**:
-- Trace every config key the chain touches from `flb_config_map_*` to its consumption site
-- Distinguish between "always-on" (input plugin listening on a default port) and "operator-set" (a specific config key set to a specific value)
-- For each operator-set precondition: is it the documented canonical configuration (e.g., `tenant_id_key` for multi-tenant Loki) or a niche tunable?
-- If a config key has a default that is unsafe (e.g., `tls.verify_hostname Off`), the chain still depends on its presence
-
-**Disclosure language**: state the minimum precondition explicitly. "Affects deployments with `out_loki` and `tenant_id_key` set" is honest. "Affects all multi-tenant Loki deployments" is an inference that the next reader will challenge.
+**Disclosure language:** "affects deployments with the sink plugin and its tenant key set", not
+"affects all multi-tenant deployments".
 
 ### 4. Vendor-distro variation
 
-**Question**: For every distribution the disclosure mentions or implies, has the specific build config been verified?
+For every distribution the disclosure names or implies, has its build config been checked? Build a
+matrix over upstream Docker / `.deb` / `.rpm`, cloud-provider forks, Alpine, Fedora, Helm values,
+Bottlerocket, and OS-distro packages, recording each recipe's load-bearing flags (allocator, plugin
+gate, TLS defaults). Say so when a recipe is not public, and record N/A for distros that don't ship
+the product so nobody re-checks.
 
-**Check**:
-- Build a per-distro matrix: upstream Docker, upstream `.deb`, upstream `.rpm`, AWS / Azure / GCP fork, Alpine APKBUILD, Fedora spec, Helm chart values, Bottlerocket, OS-distro packages (Debian / Ubuntu / Fedora / Arch / Nix / Homebrew)
-- For each: what does the packaging recipe set for the load-bearing flags (allocator, plugin gate, TLS defaults)?
-- If a recipe is not publicly readable (private ECR, vendor-internal builds), say so and qualify the claim
-- Distros that don't ship the product (e.g., Bottlerocket doesn't ship Fluent Bit) get N/A — record that too so a later reader doesn't re-check
-
-**Disclosure language**: name the verified bucket and the unverified bucket explicitly. "Affects: A, B, C (verified). Status unknown for: D, E (vendor-internal builds)."
+**Disclosure language:** "Affects: A, B, C (verified). Status unknown for: D, E (vendor-internal
+builds)."
 
 ### 5. Architecture dependence
 
-**Question**: Does the chain rely on x86_64 / aarch64 / riscv-specific behavior?
+Name the architecture the PoC was calibrated on: offsets, size-class bits, libc symbol offsets,
+endianness, pointer size, and allocator page sizes differ across x86_64, aarch64, and 32-bit targets.
 
-**Check**:
-- Calibration constants (offsets, size-class bits, libc symbol offsets) are arch-specific by definition — note which arch the PoC was calibrated for
-- Endianness — chain that depends on little-endian byte order needs to declare that
-- Pointer size — chains that assume 8-byte pointers fail under 32-bit ARM
-- SIMD-related allocator behavior (jemalloc page sizes differ on aarch64 vs x86_64)
-
-**Disclosure language**: "calibrated on x86_64 / glibc 2.42 / Linux 6.1; structurally equivalent on aarch64 with re-calibration" is honest. "Cross-platform" without per-arch evidence is overstatement.
+**Disclosure language:** "calibrated on x86_64 / glibc 2.42 / Linux 6.1; structurally equivalent on
+aarch64 with re-calibration", not "cross-platform" without per-arch evidence.
 
 ### 6. Version-range lower bound
 
-**Question**: When was the bug introduced? When was the affected codepath added?
+When was the bug introduced? A claim of "affects v2.4.1" with no lower bound reads as "2.4.1 only".
+Use the bug-site file's history (pull upstream history when the tree is a shallow clone) and look for
+refactors that introduced or fixed it earlier.
 
-**Check**:
-- `git log --follow` on the bug-site file
-- If the source tree is a shallow clone (only the tag commit), pull the history from the upstream repo to bisect
-- Look for refactors that may have introduced OR fixed the bug at an earlier version
-- A claim of "affects v5.0.5" without a lower bound is read by users as "5.0.5 only" — almost always wrong
-
-**Disclosure language**: "v5.0.5 confirmed; affected since X.Y based on git history" or honest "lower bound not established; maintainers will have the git history".
+**Disclosure language:** "v2.4.1 confirmed; affected since X.Y based on git history", or "lower bound
+not established; maintainers will have the history".
 
 ### 7. Claim-vs-evidence fidelity (TLS, auth, multi-tenant)
 
-**Question**: Does every adjective in the disclosure language map to evidence the bundle carries?
+Does every adjective in the disclosure map to evidence the bundle carries? "TLS-authenticated
+connection" needs a PoC over TLS, "pre-auth" needs pre-auth proof rather than an operator
+misconfiguration, "multi-tenant" needs cross-tenant impact, and every cited evidence file must exist
+in the bundle. This is the most common overstatement: proven under X, believed to generalize to Y,
+written as if Y were proven.
 
-**Check**:
-- If the email says "operator's TLS-authenticated connection", does the PoC actually use TLS? Or did it run over plain HTTP?
-- If the email says "pre-auth", does the bundle prove pre-auth, or did the PoC bypass auth via some operator misconfig?
-- If the email says "multi-tenant", does the bundle prove cross-tenant impact, or just intra-tenant impact?
-- If the email cites a specific evidence file path, does that file exist in the bundle (not just in the engagement working directory)?
-
-This is the most common overstatement class. Pattern: the analyst proved it under condition X, knows it generalizes to condition Y, and writes the disclosure as if Y was proven. Don't.
-
-**Disclosure language**: claim the version that was proven. If you believe it generalizes, say "proven under X; identical primitive applies to Y because [structural reason]" — make the generalization explicit so the reader can evaluate.
+**Disclosure language:** claim what was proven; to generalize, say "proven under X; the identical
+primitive applies to Y because [structural reason]".
 
 ### 8. Negative-control bundling completeness
 
-**Question**: Does the disclosure bundle contain every evidence file the email and writeup cite?
+Does the bundle contain every evidence file the email and writeup cite? List every evidence reference
+in the staged deliverables (`submissions/<slug>/submission.md`, `disclosure.txt`), list the files
+actually staged or attached (`submissions/<slug>/`, the registered artifacts the export selects), and
+diff them. Negative-control files are the ones most often cited from the engagement working directory
+and never copied in; copy them or rewrite the citation to what ships.
 
-**Check**:
-- Read the disclosure-email.md and writeup.md, list every `evidence/...` reference
-- Ls the bundle's `evidence/` directory, list every file present
-- Diff the two — every cited file must be present
-- Negative-control files (the most important pieces of proof) are most often cited from the engagement working directory but never copied into the bundle
-- If a citation says "produced by `run-chain.sh`" but the JSONLs aren't in the bundle, either copy them or rewrite the citation to match what's actually shipped
-
-**Disclosure language**: cite what's actually in the bundle. Re-citing engagement-internal paths in an external disclosure is a tell that the bundle was assembled in a hurry.
+**Disclosure language:** cite what is in the bundle. An engagement-internal path in an external
+disclosure tells the reader the bundle was assembled in a hurry.
 
 ## Output Contract
 
-A passed disclosure-deployment-shape check produces:
-
 | Item | Where |
 |------|-------|
-| Eight-category check table | Top of the disclosure's audit memo, one row per category with ✓/✗/N/A and citation |
-| Per-distro deployment matrix | Section of the disclosure or the audit memo; rows per vendor distro × columns per load-bearing flag (allocator, plugin gate, key defaults) |
-| Evidence-bundle citation diff | List of every `evidence/...` mention in email + writeup, paired with files actually present in the bundle |
-| Required text edits | If any category is ✗, the specific lines in disclosure-email.md / writeup.md / README.md that need correction, plus the corrected text |
-| Required runtime work | If a category is ✗ because evidence was claimed but not collected (e.g., TLS claimed, HTTP tested), the specific re-run required before send |
+| Eight-category check table | Top of the audit memo, one row per category with ✓/✗/N/A and citation |
+| Per-distro deployment matrix | The disclosure or the audit memo; rows per vendor distro × columns per load-bearing flag (allocator, plugin gate, key defaults) |
+| Evidence-bundle citation diff | Every evidence reference in the staged deliverables, paired with the files actually staged or attached |
+| Required text edits | For each ✗, the lines in `submission.md` / `disclosure.txt` that need correction, plus the corrected text |
+| Required runtime work | For each ✗ caused by evidence claimed but not collected (TLS claimed, HTTP tested), the re-run required before send |
 
-The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md` and is referenced from the finding's `notes` field. A finding without a passed audit memo does not ship as a critical-severity disclosure.
+The audit memo lives at `tools/analysis-state/disclosure-shape-check-<slug>.md`, registered with
+`vigil assess artifact register tools/analysis-state/disclosure-shape-check-<slug>.md --finding <slug>`
+so it is attached to the finding (`agent/shared-specialist-core.md` "Output Hygiene"). A finding
+without a passed audit memo does not ship as a critical-severity disclosure.
 
 ## Severity Recalibration Against Categories
 
-When a category fails, CVSS framing must update:
-
-- Category 1 fail (allocator): "affects glibc-malloc builds" subset, document the DoS-only behavior under other allocators. Headline claim splits into RCE-bucket and DoS-bucket with separate CVSSes.
-- Category 2 fail (plugin gate): only affected deployments are those with the plugin compiled in. Claim must say so.
-- Category 3 fail (config reach): scope must shrink to "deployments with the precondition set" — the precondition becomes part of the CVSS Attack Complexity calibration (AC:L if it's a documented canonical config, AC:H if it's niche).
+- Category 1 fail (allocator): scope to "affects glibc-malloc builds" and document the DoS-only
+  behaviour under other allocators; the headline splits into an RCE bucket and a DoS bucket with
+  separate CVSS vectors.
+- Category 2 fail (plugin gate): only deployments with the plugin compiled in are affected, and the
+  claim says so.
+- Category 3 fail (config reach): scope shrinks to deployments with the precondition set, which feeds
+  Attack Complexity (`AC:L` for a documented canonical config, `AC:H` for a niche one).
 - Category 4 fail (vendor variation): name the verified distros explicitly.
-- Category 7 fail (claim fidelity): the strongest claim must drop to what was actually proven, OR the missing evidence must be collected before send.
-- Category 8 fail (negative-control bundling): not a severity issue — but a credibility issue. Triagers downgrade disclosures whose evidence references don't resolve.
+- Category 7 fail (claim fidelity): the strongest claim drops to what was proven, or the missing
+  evidence is collected before send.
+- Category 8 fail (bundling): a credibility issue rather than a severity one; triagers downgrade
+  disclosures whose evidence references don't resolve.
 
 ## Worked Examples
 
-### CH-018 (Fluent Bit Forward RCE) — what category 1 caught
+Both on the fictional Acme LogShipper agent.
 
-- **Before audit**: "lands `uid=0(root)` on the live release binary (`cr.fluentbit.io/fluent/fluent-bit:5.0.5`)"
-- **Category 1 (allocator)** check: `cmake/options.cmake:184` default is `FLB_JEMALLOC OFF`, but `dockerfiles/Dockerfile:83` overrides with `-DFLB_JEMALLOC=On`. The official image runs jemalloc. Chain composes only under glibc.
-- **Category 4 (vendor variation)** confirms: upstream `.deb` / `.rpm`, aws-for-fluent-bit, Helm chart, Sumo Logic OpenShift all explicitly set `-DFLB_JEMALLOC=On`. RCE bucket is the long tail of source builds + OS-distro packages that omit the flag.
-- **After audit**: split claim into "RCE 9.8 on glibc source builds" and "DoS 7.5 on builds with `-DFLB_JEMALLOC=On` (upstream image + mainstream packages)"
+### Forward-input heap OOB to RCE — what category 1 caught
 
-### CH-034 (Fluent Bit Loki tenant smuggling) — what categories 7 + 8 caught
+- **Before audit:** "lands `uid=0(root)` on the official release image".
+- **Category 1 (allocator):** the build system defaults `ACME_JEMALLOC` to Off, but the official
+  Dockerfile overrides it to On. Under jemalloc the OOB write still fires, but size-class slab
+  segregation and out-of-band metadata prevent the finalizer-array overwrite, so the chain degrades to
+  DoS; it composes only under glibc malloc.
+- **Category 4 (vendor variation):** the upstream `.deb`/`.rpm`, the cloud-provider fork and the Helm
+  chart all set jemalloc on; the RCE bucket is the long tail of source builds and OS-distro packages
+  that omit the flag.
+- **After audit:** split the claim into "RCE 9.8 on glibc source builds" and "DoS 7.5 on jemalloc
+  builds (official image and mainstream packages)".
 
-- **Before audit**: "operator's outbound TLS connection to Loki", evidence-file citations include `negative-no-tenant-key-*` and `negative-with-crlf-filter-*` JSONLs
-- **Category 7 (claim fidelity)** check: PoC config is `Host 127.0.0.1 / Port 13100` — plain HTTP. TLS was never demonstrated.
-- **Category 8 (bundling)** check: bundle's `evidence/` contains 9 positive JSONLs + parser-confirmation. The 6 negative-control JSONLs cited by email/writeup exist only in `tools/exploit-state/...`, not in the bundle.
-- **After audit**: either re-run under TLS (strongest version of claim) AND copy negative-control files into bundle; or qualify language and copy files. Don't send until both are resolved.
+### Tenant smuggling via CRLF — what categories 7 + 8 caught
+
+- **Before audit:** "the operator's outbound TLS connection to the log store", citing negative-control
+  runs (no tenant key; CRLF filter enabled).
+- **Category 7 (claim fidelity):** the PoC config pointed at a local plain-HTTP mock; TLS was never
+  demonstrated, although the bug works above TLS.
+- **Category 8 (bundling):** the staged evidence held the positive runs and parser confirmation; the
+  cited negative-control runs existed only under `tools/exploit-state/`.
+- **After audit:** re-run under TLS (the strongest version of the claim) and stage the negative
+  controls, or qualify the language and stage them. Do not send until both are resolved.
 
 ## Extended Resources
 
 - `agent/skills/code-finding-verification/SKILL.md` — source-side FP elimination (runs first)
 - `agent/skills/heap-rce-evidence-ladder/SKILL.md` — per-rung evidence bar (runs alongside)
-- `agent/skills/exploit-playbook-authoring/SKILL.md` — playbook + lab-assist-equivalence (runs alongside)
-- `agent/rules/reporting.md` — disclosure-language rules; this skill enforces them on the deployment-shape side
-- `agent/agents/report-writer.md` — reaches this skill indirectly, not by direct invocation: its QA pass runs the `agent/references/submission-format.md` checklist, whose critical-severity (`CVSS ≥ 8.0`) item is the trigger that pulls in this skill's eight-category audit before a critical bundle ships
+- `agent/skills/exploit-playbook-authoring/SKILL.md` — lab assists and their production equivalents
+- `agent/rules/reporting.md` — disclosure-language rules; this skill applies them to deployment shape

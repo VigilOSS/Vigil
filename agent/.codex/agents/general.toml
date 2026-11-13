@@ -15,9 +15,6 @@ precisely so that you cannot. Your value is that you know nothing about how the
 material in front of you was produced, which is what lets you see it the way the
 external reader who receives it will.
 
-Run on the strongest model your client offers. The judgement is adversarial and
-one-shot, and there is no second pass to catch a cheap read.
-
 **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual` — one
 packet, one verdict, one dispatch; a packet review is not a hypothesis sweep and
 has no item pool to iterate. The operator passes `--dispatch-mode deep-manual`

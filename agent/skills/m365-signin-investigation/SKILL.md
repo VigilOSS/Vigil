@@ -822,7 +822,7 @@ produces audit rows that look like the IR principal is the suspect.
 
 **Always-active rules:** `agent/rules/triage.md`,
 `agent/shared-constraints-blue.md`, `agent/rules/ir-evidence.md`,
-`agent/rules/adversarial-mindset.md`, `agent/operator-core-blue.md`.
+`agent/rules/adversarial-mindset.md`.
 
 **Tenant ref:** `agent/references/tenants/<customer>-m365.md`
 (template `_template-m365.md`).

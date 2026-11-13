@@ -7,143 +7,53 @@ vuln_class: mass-assignment
 
 # Mass Assignment Testing
 
-> **`vigil assess kali` audit flags:** use `--technique AUTH` (mass assignment is authorization bypass via client-controlled fields — the attacker escalates privileges by injecting `is_admin`, `role`, or `permissions` into the request body). Set `--destructive` whenever the forged request creates, modifies, or deletes a resource.
-
 ## When to Activate
 
-- API accepts JSON or form-encoded bodies for create/update operations
-- Testing for unauthorized field binding, privilege escalation via extra parameters, or excessive data exposure
-- User registration, profile update, or resource creation endpoints
+- Create/update endpoints bind request bodies to models (register, profile, settings, orders),
+  responses return more fields than the UI uses, or a GraphQL mutation input takes nested objects.
 
-## Tools
-
-- `vigil assess kali exec -- curl ...` (manual parameter injection and response analysis — all target-facing curl must go through the kali exec wrapper so the request lands in the audit pipeline; use `--technique AUTH --probe-kind payload --phase consume-test --timeout 30` for injection attempts, and add `--destructive` when the request creates or modifies a resource)
-- `Arjun` / `param-miner` (hidden parameter discovery and fuzzing)
-- Browser DevTools (compare request fields vs response fields)
+`--technique MASS-ASSIGNMENT` (credits the `mass-assignment` class). Mark every write
+`--destructive`. Injecting `role:admin` into your own test account's profile is a change to our
+own test data and needs no approval; exploit approval is needed only when the write touches
+another user's or the target's real state, triggers fulfilment, or moves money
+(`agent/shared-constraints.md` §1). Run probes as named identities
+(idor-testing "Vigil mechanics"). The field checklist (privilege, financial, verification and
+state fields; response over-exposure; nested and GraphQL property access) is
+`agent/references/api-security/API03-broken-property-authz.md`; load it for the field families.
 
 ## Methodology
 
-### 1. Response Field Enumeration
-- [ ] Send a GET request and record all fields in the response
-```bash
-curl -s https://target/api/user/profile | jq .
-```
-- [ ] Compare response fields against API documentation — flag extra fields returned
-- [ ] Look for internal fields: `id`, `uuid`, `created_at`, `updated_at`, `role`, `is_admin`, `is_staff`, `permissions`, `balance`, `credits`, `internal_id`, `password_hash`
-- [ ] Check if PII fields are exposed: `email`, `phone`, `ssn`, `address`, `dob`
+1. **Collect candidate fields:** every field a GET returns, echoed back into the write; framework
+   debug/schema endpoints; hidden-parameter discovery with the typed verb
+   (`vigil assess kali arjun -u <url> -m JSON --technique MASS-ASSIGNMENT --intent "<purpose>"
+   --probe-kind payload --phase consume-test --timeout 300`; `-m POST` for form bodies).
+2. **Inject** privileged/state fields on create and update, including nested objects
+   (`{"profile":{"role":"admin"}}`, `{"organization":{"owner_id":…}}`).
+3. **Identifier fields** (`id`, `owner_id`, `user_id`): `vigil assess classify-payload <value>
+   --mutations`; send the `escalation` variants to reassign to the first/admin object and the
+   `format` variants (`"456"`, `[456]`, `{"id":456}`, `null`) because ORMs often coerce types the
+   validator rejects.
+4. **Content-Type divergence:** repeat the injection as JSON, form-encoded and XML; frameworks
+   bind each with different rules.
+5. **Framework binders:** Rails fields outside `params.permit`; DRF `fields` vs `exclude` on a
+   ModelSerializer; Express body-parser output passed straight to Mongoose/Sequelize; Spring
+   `@ModelAttribute` binding every request parameter.
 
-### 2. Privilege Escalation via Extra Fields
-- [ ] Add privileged fields to POST/PUT/PATCH requests
-```bash
-# Registration with role injection
-curl -X POST https://target/api/register -H "Content-Type: application/json" \
-  -d '{"username":"test","password":"test123","role":"admin"}'
+Related: unfiltered list/search endpoints → idor-testing; client-supplied identity parameters a
+BFF should have stripped → `agent/skills/bff-parameter-override/SKILL.md`; GraphQL input
+over-posting → graphql-testing.
 
-# Profile update with privilege escalation
-curl -X PUT https://target/api/user/profile -H "Content-Type: application/json" \
-  -d '{"name":"test","isAdmin":true,"is_staff":true,"role":"administrator"}'
+## Proof
 
-# Balance/credits manipulation
-curl -X PATCH https://target/api/user/profile -H "Content-Type: application/json" \
-  -d '{"balance":999999,"credits":999999,"verified":true}'
-```
-- [ ] Test common privilege fields
-```
-role, admin, isAdmin, is_admin, is_staff, verified, email_verified,
-active, approved, permissions, group, level, type, plan, tier,
-balance, credits, discount, price, amount
-```
+GET before, the write with the extra field, GET after: the field changed and the change grants
+something (`role: admin` reaching `/admin`, `is_verified: true` skipping confirmation, a balance
+value persisted). A read-back is enough; completing a purchase or other financial action needs
+explicit approval. Severity: `agent/references/finding-fp-and-severity-gate.md`. Format:
+`agent/references/runtime-guides/web-finding-recording.md`.
 
-### 3. PATCH Request Field Injection
-- [ ] Test if PATCH accepts fields not intended for update
-```bash
-curl -X PATCH https://target/api/users/123 -H "Content-Type: application/json" \
-  -d '{"id":456}'
+## Kill and escalate
 
-curl -X PATCH https://target/api/users/123 -H "Content-Type: application/json" \
-  -d '{"email":"attacker@evil.example","email_verified":true}'
-```
-- [ ] When injecting an **identifier-bearing** field (`id`, `owner_id`, `user_id`), don't send one
-      guess — classify the value and reuse its type-confusion + escalation variants so you catch
-      binders that coerce types differently than the validator:
-```bash
-vigil assess classify-payload 456 --mutations
-#   type: sequential_id
-#   format:     '"456"'  '[456]'  '{"id": 456}'  'null'  '[]'   ← type confusion (string/array/object)
-#   escalation: '1' '0' '2' 'admin' 'root'                       ← reassign to first/admin object
-#   boundary:   '0' '-1' '1' '99999999' '2147483647'
-```
-      Send the `escalation` variants to reassign the record to the first/admin object, and the
-      `format` variants because some ORMs accept `"456"`/`[456]` where strict validation expects an
-      int — a binding gap that lets a field through.
-- [ ] Test field overwrite on related objects (nested assignment)
-```json
-{"profile": {"role": "admin"}, "organization": {"owner_id": 123}}
-```
-
-### 4. Content-Type Mutation Testing
-- [ ] Test same endpoint with different Content-Types
-```bash
-# JSON
-curl -X POST https://target/api/update -H "Content-Type: application/json" \
-  -d '{"name":"test","role":"admin"}'
-
-# Form-encoded
-curl -X POST https://target/api/update \
-  -d "name=test&role=admin"
-
-# XML
-curl -X POST https://target/api/update -H "Content-Type: application/xml" \
-  -d '<user><name>test</name><role>admin</role></user>'
-```
-- [ ] Some frameworks parse multiple Content-Types with different binding rules
-
-### 5. GraphQL Mutation Injection
-- [ ] Add extra fields to mutation variables
-```graphql
-mutation {
-  updateUser(input: {name: "test", role: "ADMIN", isVerified: true}) {
-    id name role
-  }
-}
-```
-- [ ] Use introspection to discover all input fields on mutation types
-- [ ] Test if undocumented fields are accepted by the resolver
-
-### 6. Hidden Parameter Discovery
-- [ ] Use parameter name fuzzing tools
-```bash
-arjun -u https://target/api/register -m POST --json
-```
-- [ ] Fuzz based on response fields — send each GET response field back in POST
-- [ ] Check framework debug endpoints for model/schema definitions
-
-### 7. Bulk Endpoint Data Leakage
-- [ ] Test list/search endpoints for data belonging to other users
-```bash
-curl https://target/api/users
-curl https://target/api/users?limit=1000
-curl https://target/api/admin/users
-```
-- [ ] Check if filtering reveals unauthorized records
-```bash
-curl "https://target/api/orders?user_id=other_user_id"
-```
-
-### 8. Framework-Specific Testing
-- [ ] **Rails**: check for `params.permit` allowlisting — test fields outside the permit list
-- [ ] **Django**: test serializer field restrictions — `fields` vs `exclude` in ModelSerializer
-- [ ] **Express**: test body-parser output going directly to Mongoose/Sequelize update
-- [ ] **Spring**: test `@ModelAttribute` binding — all request params bound to object fields
-
-## What to Record
-
-- Endpoint, HTTP method, and Content-Type where assignment succeeds
-- Exact field names that were injected and accepted
-- Before/after state showing the unauthorized change (GET before, POST with extra field, GET after)
-- Impact: privilege escalation, balance manipulation, PII access, data leakage — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the account now has `role: admin` and can access `/admin` endpoints, balance was set to $999999 and a purchase completed for free, `is_verified: true` bypassed email confirmation and granted access to restricted features
-- Full request/response for reproducibility
-
-## Extended Resources
-
-- `agent/references/api-security/API03-broken-property-authz.md` — OWASP API Security Top 10:2023 excessive data exposure / mass assignment
+- A field that is accepted but not persisted (read-back unchanged) is not a finding.
+- Every binder and Content-Type ignores unknown fields → move on.
+- Escalate when an identity or tenant field binds (cross-account), or a verification/approval flag
+  binds (workflow bypass); combine with idor-testing or business-logic-testing.

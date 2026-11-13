@@ -1,46 +1,19 @@
 ---
-description: Directory/file, DNS, and vhost brute-forcing
+description: gobuster through kali exec; its DNS, S3 and vhost modes and the vhost domain quirk
 skill: directory-fuzzing
 ---
 
 # gobuster
 
-**Purpose:** Directory, DNS, and vhost brute-forcing
-For live engagement targets, run Gobuster via `vigil assess kali exec --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- gobuster ...` with the standard audit-flag set.
-Long-running gobuster sweeps should use `vigil assess kali job start --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- gobuster ...` so they survive across calling-shell exit.
+gobuster has no typed verb; run it through `vigil assess kali exec --technique RECON --intent
+"<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> -- gobuster ...` with the
+standard audit-flag set. Live help: `vigil assess kali tool-help gobuster`. Directory work belongs
+to `vigil assess kali ffuf` and feroxbuster (`agent/skills/directory-fuzzing/SKILL.md`); gobuster
+earns a run only for its `s3` bucket mode or a quick `vhost` pass. Subdomain brute force goes
+through the typed DNS verbs in `agent/skills/subdomain-enumeration/SKILL.md`, which carry the
+resolver-load profiles.
 
-## Directory Mode
-
-**Basic:** `gobuster dir -u https://target -w /usr/share/seclists/Discovery/Web-Content/raft-medium-directories.txt`
-**With extensions:** `gobuster dir -u https://target -w wordlist.txt -x php,html,txt`
-**Status codes to include:** `-s "200,204,301,302,307"`
-**Status codes to exclude:** `-b "404,403"`
-**Cookie auth:** `-c "session=abc123"`
-**Custom header:** `-H "Authorization: Bearer token"`
-**TLS skip verification:** `-k`
-**Proxy:** `--proxy http://127.0.0.1:8080`
-**Delay between requests:** `--delay 100ms`
-**Threads:** `-t 50`
-**Output:** `-o results.txt`
-
-## DNS Subdomain Mode
-
-**Basic:** `gobuster dns -d target.example -w /usr/share/seclists/Discovery/DNS/subdomains-top1million-5000.txt`
-**Show IPs:** `-i`
-**Wildcard detection:** `--wildcard`
-
-## Vhost Mode
-
-**Basic:** `gobuster vhost -u https://target -w subdomains.txt`
-**Append domain:** `--append-domain`
-
-## S3 Bucket Enumeration
-
-**S3 mode:** `gobuster s3 -w bucket-names.txt`
-
-## When to Use
-
-Use gobuster when: (1) you need DNS or S3 enumeration (ffuf/feroxbuster don't have these modes),
-(2) you want non-recursive directory scanning (simpler output than feroxbuster), or (3) feroxbuster
-is unavailable. For recursive content discovery, prefer feroxbuster. For parameter/vhost fuzzing,
-prefer ffuf.
+- `gobuster vhost` sends each word as the whole `Host` header unless `--append-domain` is set, so a
+  list of bare labels without it tests nothing useful.
+- gobuster has no requests-per-second cap; pace it with `-t` and `--delay` inside the dir-fuzz rate
+  of the `agent/references/recon/rate-calibration.md` row.

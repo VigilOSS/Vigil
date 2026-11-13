@@ -6,12 +6,6 @@ languages: Python, JS, PHP, Ruby, Java, Go, C#
 
 # Business Logic — Workflow, Value and Attempt-Limit Flaws
 
-> Target: Flaws where every line is memory-safe and every query is parameterized, yet
-> the application does something its owner never intended: refunds more than was
-> charged, skips the payment step, redeems a coupon twice, or lets a six-digit code be
-> guessed. SAST has no sink to match. The defect is the gap between the invariant the
-> business needs and the checks the code performs.
-
 Read the handler against the invariant, not against a pattern list. Write the invariant
 down first ("a refund never exceeds the captured amount minus earlier refunds"), then
 find the code that enforces it on the server for every path that can reach the write.
@@ -127,18 +121,6 @@ Check, in source:
    Name it in one sentence, then find the server-side line that enforces it for every
    path that reaches the write.
 
-2. **"Which values in this request should the server have derived instead?"**
-   Any amount, quantity, price, currency, owner or role taken from the request and used
-   in a charge, credit or grant.
-
-3. **"From which states may this transition start, and is that checked here?"**
-   A state-changing endpoint that does not read and verify the current state can be
-   called out of order.
-
-4. **"What bounds this grant, and can the caller reset or multiply the bound?"**
-   Per-user limits keyed on attacker-controlled identity, stacking rules, and refund
-   paths that return the benefit.
-
-5. **"How many guesses does an attacker get at this secret, and across how many
+2. **"How many guesses does an attacker get at this secret, and across how many
    endpoints?"** Count the attempts allowed per account per code, check the counter is
    atomic and survives code reissue, and check every endpoint that verifies the secret.

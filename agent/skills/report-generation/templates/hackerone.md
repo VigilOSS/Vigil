@@ -6,17 +6,15 @@ category: Disclosure & Reporting Formats
 
 # HackerOne Submission Template
 
-HackerOne-specific scaffold for `vigil assess export submission <slug> --platform hackerone`.
-Shared rules (voice, section budgets, evidence fidelity, PoC authoring, de-harnessing, the
-pre-submission checklist, and the finding-is-source-of-truth flow — author each section, write it
-back to the finding, re-render) live in `agent/references/submission-format.md` — this
-file only adds what HackerOne needs in place of Bugcrowd's VRT: a CWE weakness, and how HackerOne
-derives its severity bucket.
+Scaffold for `vigil assess export submission <slug> --platform hackerone`. Every shared rule — layout,
+section budgets, evidence fidelity, PoC authoring, the pre-submission checklist, and the
+finding-is-source-of-truth flow — lives in `agent/references/submission-format.md`. This file adds
+only what HackerOne needs in place of Bugcrowd's VRT: a CWE weakness, and its CVSS-derived severity.
 
 ## Strict-gate fields
 
-Same gate as Bugcrowd (the strict-gate rule in `export submission` is platform-agnostic), with
-**Weakness (CWE)** in place of VRT:
+`--draft` marks whatever is missing with `[NEEDS: ...]`; the final export refuses to write with any
+row empty (`vigil assess contract export submission` owns the gate).
 
 | Field | Populated from |
 |---|---|
@@ -24,11 +22,8 @@ Same gate as Bugcrowd (the strict-gate rule in `export submission` is platform-a
 | Severity + CVSS vector | finding `severity`, `details.cvss_vector` |
 | Weakness (CWE) | `--weakness` flag, else `details.weakness`, else `details.cwe_id` |
 | Attacker-impact statement | finding `impact` or `details.impact` |
-| Durable proof | Per `vigil assess contract export submission`; inline PoC is supporting content |
+| Durable proof | per the export contract; inline PoC is supporting content |
 | Remediation | finding `remediation` |
-
-`--draft` marks whatever is missing with `[NEEDS: ...]`; final export refuses to write with any
-row above empty.
 
 ## Scaffold
 
@@ -44,54 +39,30 @@ row above empty.
 ---
 
 ### Summary
-[2-4 sentences. Attacker outcome first, then the fault, then what the PoC proves. Optionally followed
-by a `**Exploit flow**` marker + a 3-5 item ordered list of plain sentences, no commands, same string.]
-
 ### Steps to Reproduce
-[Numbered, ≤10 steps, no narrative between them. Prefix each step with the acting identity
-(`[attacker]`/`[administrator]`/`[server]`/`[both]`); one action per step, its outcome on a `**Expect:**` line.]
-
 ### Evidence
-[AUTHORED, and only proof the steps cannot show — root cause, negative controls, post-exploitation
-boundaries, minimum privilege, load-bearing environment facts. From the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`command-run list` search, all captured values preserved verbatim (see submission-format.md
-"Evidence fidelity"), truncated to the proof lines, annotated with
-<-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
-
-### Attack Scenario
-[2-3 sentences. Realistic adversary class + starting access + action, ending at first compromise —
-no scope counts (those go in Impact). Optional: drop it when Steps + Impact already show
-reachability, and omit it outright whenever the Summary carries an Exploit flow.]
-
+### Attack Scenario   (optional)
 ### Impact
-[1-2 sentences. Consequence + blast radius, quantified by shape/count. Don't re-describe the actor or
-the steps — this is the severity justification. See "Attack Scenario vs Impact" in submission-format.md.]
-
 ### Remediation
-[≤3 items, primary fix first, ≤1 defense-in-depth.]
 ```
+
+Section content and ceilings: submission-format.md "Structure", "Steps to Reproduce vs Evidence",
+"Attack Scenario vs Impact", and "Section budgets".
 
 ## HackerOne-specific notes
 
-- **Weakness replaces VRT.** Pick the single most specific CWE the fault maps to (`CWE-89`, not
-  `CWE-20`). If two CWEs are plausible, use the one the PoC actually exercises. Confirm that the
-  candidate is available in HackerOne's current weakness selector and use MITRE CWE to distinguish
-  it from broader parent categories.
-- **CVSS-derived severity.** Use a CVSS version enabled by the program; HackerOne supports
-  standard v3.1 and v4.0 calculators. Keep Vigil's base vector and score consistent. Platform
-  asset severity caps or environmental adjustments are separate from that base pair. See
-  `agent/references/reporting/hackerone-weaknesses.md` for the CVSS→band table and the guardrail
-  that weakness and severity are decoupled — never carry a Bugcrowd P-rating into this field.
-- **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
-  it as `submissions/<slug>/poc.<ext>` and attach it in the HackerOne form — see
-  `submission-format.md` "PoC block". `export submission` emits no attachment block into the body;
-  the **Run:** / **Pass if:** pointer lines in the operational header ARE rendered, from the
-  finding's `details.run` and `details.pass_if` — write there so they reproduce on the next
-  `--overwrite` instead of typing them only into the body. The proof pointer itself
-  (`evidence_ref`/`poc_code`) stays under OPERATOR DETAILS, not the pasteable header.
-- Some HackerOne programs add an "Asset" field mapped to their published scope (e.g.,
-  `api.example.com` vs `www.example.com`). Name the exact in-scope asset in Steps to Reproduce —
-  this template doesn't carry a separate field for it because it isn't part of the strict gate.
+- **Weakness replaces VRT.** Pick the single most specific CWE available in HackerOne's current
+  weakness selector, the one the PoC actually exercises; `agent/references/reporting/hackerone-weaknesses.md`
+  has the selection rule and the severity bands.
+- **Severity comes from the CVSS base vector** in a version the program enables (v3.1 or v4.0).
+  Platform asset severity caps or environmental adjustments are separate from Vigil's base pair, and
+  a Bugcrowd priority never appears on a HackerOne submission.
+- **PoC script:** stage it as `submissions/<slug>/poc.<ext>` and attach it in the HackerOne form
+  (submission-format.md "PoC block"); write `details.run` / `details.pass_if` so the header lines
+  survive re-render.
+- **Asset:** some programs map reports to a published scope asset (`api.example.com` vs
+  `www.example.com`). The `**Asset:**` header renders `canonical_location`; name the exact in-scope
+  asset in Steps to Reproduce as well when the program's asset field differs from it.
 
 ## Worked example
 

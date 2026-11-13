@@ -10,6 +10,12 @@ source: Custom — compiled from the Drupal JSON:API module documentation and en
 
 Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a Drupal JSON:API fingerprint. The `/jsonapi/` namespace exposes every content entity, user, taxonomy term, and file as a REST resource; the access decision is per-resource (entity-type / bundle / field) so one missing access-control hook on one resource exposes adjacent resources too.
 
+## Fingerprint markers
+
+`X-Generator: Drupal X (https://www.drupal.org)`; `SESS<hash>` or `Drupal.visitor.*` cookies;
+paths `/sites/default/files/`, `/core/misc/`, `/themes/<name>/css/`. Trigger: a 200 from
+`/jsonapi/` returning `{"jsonapi":{"version":"1.0"},…}` (the entity-type root).
+
 ## Root document — `GET /jsonapi/`
 
 The root document lists every entity-type / bundle pair the API exposes. Anonymous callers usually receive the same root document that authenticated callers do — the access decision happens at the resource level, not the root.
@@ -60,7 +66,7 @@ For each pair, send `GET /jsonapi/<type>/<bundle>?page[limit]=1`. A 200 with non
 
 Drupal JSON:API supports the JSON:API spec's `?fields[<type>--<bundle>]=...` parameter. The default field set sometimes hides sensitive fields when the access check runs on the default include list — but the sparse-fieldset request can force the response to include them when the per-field access check is missing or misconfigured.
 
-Send each probe via `vigil assess kali exec -- curl -sS 'https://TARGET<path>' -H 'Accept: application/vnd.api+json'` with the required audit flags. URL patterns:
+Send each probe via `vigil assess kali exec … -- curl -sS 'https://TARGET<path>' -H 'Accept: application/vnd.api+json'`, with the required audit flags in place of `…`. URL patterns:
 
 ```
 /jsonapi/user/user?page[limit]=1&fields[user--user]=mail,name,roles,field_phone,field_internal_note,uid,init,langcode,timezone,status
@@ -104,15 +110,14 @@ Walk each reference with `?include=<reference-field>`. The chain depth is usuall
 
 ## Bounded-vs-systemic IDOR test
 
-Take one leaked UUID (e.g., the `uid.id` from a leaked node) and replace it with a different UUID:
+UUIDs are random, so a modified UUID points at nothing and always fails: that tells you nothing. Test enumerability with the collection itself:
 
 ```
-GET /jsonapi/user/user/<modified-uuid>
-GET /jsonapi/node/article?filter[uid.id]=<modified-uuid>
+GET /jsonapi/user/user?page[limit]=5
 ```
 
-- **Bounded** — modified UUID returns 404 or empty `data[]`. The leak is the original entity plus its chain.
-- **Systemic** — modified UUID returns 200 with a different user. The whole resource is anonymous-enumerable, severity escalates.
+- **Bounded** — the collection is refused or returns only entities the chain walk already reached. The leak is the original entity plus its chain.
+- **Systemic** — the collection returns entities you were not pointed at. The whole resource is anonymous-enumerable; severity escalates.
 
 ## Index discovery — `?include` traversal
 

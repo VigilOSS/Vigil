@@ -519,12 +519,12 @@ vigil assess finding verify <slug> --status false_positive \
   }'
 ```
 
-`kill_reason` and `kill_check` (the numbered check that falsified the claim, 1-5) are both
-required: the write is refused without them, which leaves the finding `unreviewed` and still a
-report candidate. `discharged: false` on the devil's-advocate entry is what records that the
-benign hypothesis held. When the structured counter-check cannot be completed at all, `disputed`
-is the cheap withdrawal — only `--reason` is required, and it survives a later sweep the same way
-`false_positive` does.
+Record the rationale in `details.kill_reason` and, when a numbered verification check (1-5)
+produced the kill, its number in `details.kill_check` (optional); without a kill_reason the backend
+stores your `--reason`. `discharged: false` on
+the devil's-advocate entry is what records that the benign hypothesis held. When the structured
+counter-check cannot be completed at all, `disputed` is the cheap withdrawal — only `--reason` is
+required, and it survives a later sweep the same way `false_positive` does.
 
 `counter-check.json` contains `method`, `expected_result`, `observed_result`,
 `falsified_claim`, `completed: true`, and `proof_receipt_ids`. If the check is
@@ -689,10 +689,8 @@ handoff schema.
    verifier could not close), `mitre_techniques`,
    `tenant_ref_paths_consulted`, and a one-paragraph
    `cross_platform_correlation_notes` if `scope.json.platforms` has
-   more than one entry.
-7. **Self-check** with `vigil assess agent render-handoff <agent-id>`.
-   A 404 means the `agent_id` did not match the dispatch row; fix and
-   re-handoff before returning.
+   more than one entry. `agent handoff` refuses an unregistered
+   `agent_id` and prints the stored row.
 
 ## Common Failure Modes
 
@@ -703,7 +701,7 @@ handoff schema.
   `verification_status` field is the only lifecycle truth; narrative may explain
   the decision but must not shadow it with `verified` or `escalated` aliases.
 - **Using prose as false-positive proof.** A KILL requires a completed structured
-  counter-check and its proof receipts, not a legacy prose substring.
+  counter-check and its proof receipts, not a prose substring.
 - **Citing local file paths in `evidence_refs`.** Always artifact IDs.
   A local path cannot survive resume hydration in the next dispatch.
 - **Disposing by elimination.** "Couldn't find evidence" is not KILL.

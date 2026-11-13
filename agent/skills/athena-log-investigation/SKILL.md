@@ -1,101 +1,53 @@
 ---
 name: athena-log-investigation
 description: Use Athena-backed logs as an optional final validation phase to determine whether discovered attack paths or payloads show evidence of prior exploitation.
+origin: Vigil
 ---
 
 # Athena Log Investigation
 
 ## When to Activate
 
-- Meaningful findings exist from Phases 3-4 and you need to check for prior exploitation
-- AWS Athena-accessible logs are available (ALB, WAF, CloudTrail, application logs)
-- The operator has dispatched you for the optional post-exploit log investigation phase
+- The operator dispatched the optional post-exploit log investigation (before final report
+  closure) and AWS Athena reaches the target's ALB, WAF, CloudTrail, application or custom
+  security logs.
+- Confirmed findings or chains from Phases 4-6 raise "has this been exploited before?"
 
-Best fit:
-- AWS Athena over ALB, WAF, CloudTrail, application, or custom security logs
-- validating whether a discovered path or payload family was already used
-- answering "has this been exploited before?" before final report closure
+It enriches the report; it never replaces technical validation.
 
 ## Inputs
 
-Before using this skill, collect:
-- affected hosts, paths, endpoints, and parameters
-- auth contexts or identity markers involved
-- payload families, strings, user agents, callback domains, and IPs used during testing
-- Athena database, table, region, and time window
+Affected hosts, paths, endpoints and parameters; auth contexts or identity markers; payload
+families and strings; the Athena database, table, region and time window.
 
-## Investigation Goals
+**Exclude Vigil's own traffic.** Pull the engagement's own egress IPs, user agents, attribution
+headers and minted OOB hosts from `vigil assess command-run list --phase <phase> --json` and
+`vigil oob poll --client <name> --json` per engagement client, and filter them out (or label them) in every query; otherwise the
+engagement's testing reads as prior exploitation.
 
-Answer one or more of:
-- Is there historical evidence of the same path or exploit attempt?
-- Did anyone hit the vulnerable route with the same payload family?
-- Are there suspicious spikes, enumeration patterns, or attacker-like sequences?
-- Did exploitation appear to succeed or only get attempted?
+## Mechanics
 
-## Query Strategy
+The runtime holds no AWS credentials, so Athena calls are signed on the host:
+`vigil assess host-exec --tool aws --technique LOG-READ --phase <phase> --intent "<question>" --
+aws athena start-query-execution …`, then `get-query-results`. Keep queries bounded to the
+window and partitions you need: Athena bills by data scanned.
 
-Start broad, then narrow:
+## Questions and query shape
 
-1. Search by route or host:
-   - vulnerable hostnames
-   - exact paths
-   - path prefixes when variants exist
+Start broad (host, exact path, path prefix), then narrow by payload indicators (parameters,
+fragments, callback domains, OOB markers), attacker behaviour (enumeration from one IP, bursts
+across object IDs, auth failures then success, exploit path followed by admin or exfiltration
+routes) and chain timing (precursor recon → exploit → follow-up).
 
-2. Search by payload indicators:
-   - suspicious query parameters
-   - payload fragments
-   - callback domains
-   - blind OOB markers
+## Output
 
-3. Search by attacker behavior:
-   - repeated enumeration from one IP
-   - bursts across many object IDs
-   - auth failures followed by success
-   - exploit path followed by admin or data-exfil routes
+For each result record the finding or chain investigated, the log source and table, the window,
+the exact query, and one conclusion: `evidence of exploitation`, `evidence of attempts only`,
+`no evidence in available logs`, or `inconclusive due to data gaps`. Write it to the finding with
+`vigil assess finding update <slug> --payload-file <file>` (query and conclusion in its notes or
+details) and register exported result files with `vigil assess artifact register <paths>
+--finding <slug>`; investigation-wide observations go to `vigil assess intel record note`.
 
-4. Search by chain timing:
-   - precursor recon
-   - exploit request
-   - post-exploit follow-up requests
-
-## Output Requirements
-
-For each meaningful result, record:
-- the finding or attack chain being investigated
-- the log source and Athena table
-- the time window searched
-- the exact query used
-- the conclusion:
-  - `evidence of exploitation`
-  - `evidence of attempts only`
-  - `no evidence in available logs`
-  - `inconclusive due to data gaps`
-
-## Reporting Guidance
-
-Match certainty to evidence strength.
-
-Preferred phrasing:
-- `Confirmed in logs` when exploitation evidence is strong and attributable
-- `Likely seen in logs` when behavior strongly matches but proof is partial
-- `No evidence observed in available Athena logs` when nothing surfaced in the searched window
-- `Could not determine` when retention, schema, or access blocked a meaningful search
-
-When this affects finding state, prefer these report outcomes:
-- `exploited in the wild`
-- `likely exploited`
-- `no evidence in available retention`
-- `inconclusive due to coverage gap`
-
-## Phase Placement
-
-Treat Athena as an optional final phase:
-- after recon, collection, validation, and exploit work
-- before final report closure
-- after checking whether the strongest findings or chains deserve log validation
-
-It should enrich the report, not replace technical validation.
-
-## Extended Resources
-
-None — this skill works from engagement findings and Athena query results.
+Report phrasing matches certainty: "Confirmed in logs" (strong and attributable), "Likely seen in
+logs" (strong match, partial proof), "No evidence observed in available Athena logs" (searched
+window only), "Could not determine" (retention, schema or access blocked the search).

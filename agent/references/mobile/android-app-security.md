@@ -20,7 +20,7 @@ Request a debug or instrumentation build when possible, but validate findings on
 - Code: auth/session logic, WebView settings, deep-link handlers, intent forwarding, `PendingIntent` creation, provider access checks, crypto primitives, Keystore use, logging, emulator/root checks, and JNI registration.
 - Native libraries: ABI coverage, exported JNI symbols, dynamic registration, parsers, crypto/compression/media code, RASP/pinning libraries, and memory-unsafe dependencies.
 
-Primary tools: `apktool` for resources/smali, `jadx` for Java/Kotlin cross-reference, MobSF for first-pass triage, Ghidra/IDA/radare2 for native code, and `apksigner`/`bundletool` for signing and bundle details.
+Which of these tools the Kali runtime carries and which run from the lab host: `agent/references/mobile/mobile-lab-setup.md` "Vigil Runtime And The Lab Host".
 
 ## Dynamic Review Targets
 
@@ -45,40 +45,18 @@ Primary tools: `apktool` for resources/smali, `jadx` for Java/Kotlin cross-refer
 - API 35 matters because Google Play requires new apps and app updates to target Android 15 or higher as of August 31, 2025: https://developer.android.com/google/play/requirements/target-sdk
 - API 36 matters because Android 16 hardens default behavior against general intent-redirection attacks: https://developer.android.com/about/versions/16/behavior-changes-all
 - API 37 matters in 2026 because Android 17 beta images are available for Pixel devices and emulators, but preview APIs can change until Platform Stability: https://developer.android.com/about/versions/17/overview
-- API 35 introduced 16KB page size support — native libraries compiled with 4KB-aligned LOAD segments crash on 16KB devices, and code that hard-codes `PAGE_SIZE=4096` produces incorrect size calculations. Test native code on both page sizes because allocation gaps between 4KB and 16KB boundaries can expose stale data.
+- API 35 introduced 16KB page size support on compatible devices. Native libraries with 4KB-aligned ELF LOAD segments crash on 16KB devices (check with `llvm-objdump -p libfoo.so | grep LOAD`; 16KB-ready shows `align 2**14`), and code hard-coding `PAGE_SIZE=4096` miscalculates sizes. Test native code on both page sizes because allocation gaps between 4KB and 16KB boundaries can expose stale data.
 
-## Privacy Testing (MASVS-PRIVACY)
+## Adjacent Areas
 
-- **Identifier audit:** check for GAID usage via `AdvertisingIdClient`, hardware identifiers (IMEI via `TelephonyManager`, MAC via `WifiInfo`, `ANDROID_ID`), and fingerprinting signals (screen metrics, installed packages, sensor data). Frida hook: `Java.perform(function(){ var AIC = Java.use('com.google.android.gms.ads.identifier.AdvertisingIdClient'); AIC.getAdvertisingIdInfo.overload('android.content.Context').implementation = function(ctx){ var info = this.getAdvertisingIdInfo(ctx); console.log('[GAID] ' + info.getId()); return info; }; });`
-- **Privacy Sandbox:** check whether the app uses Topics API, Attribution Reporting, or Protected Audiences instead of legacy GAID tracking. Apps still using GAID after Privacy Sandbox migration deadlines may be collecting unnecessary identifiers.
-- **Data deletion:** after account deletion request, verify that SharedPreferences, SQLite databases, Keystore entries, cached files, WebView storage, logs, and backup-eligible data are actually removed. Re-login and check whether any prior state persists.
-- **Data Safety declaration vs behavior:** compare the Play Store Data Safety section declarations against actual network traffic and local storage. Use proxy captures to identify analytics/telemetry SDKs sending data types not declared in the Data Safety form.
-- **Analytics/telemetry audit:** identify Firebase Analytics, Amplitude, Mixpanel, Adjust, AppsFlyer, and ad SDKs in decompiled code; capture their outbound requests; assess whether data collection scope exceeds what the app's stated purpose requires.
-
-## AI/ML On-Device Features
-
-- **Model file extraction:** search APK for TFLite models (`.tflite`), ONNX models (`.onnx`), and ML Kit models in `assets/` or downloaded to app-private storage. Extract and inspect model architecture, input/output shapes, and embedded metadata.
-- **Inference data leakage:** after exercising AI features (smart compose, image classification, summarization), check SharedPreferences, SQLite, logs, and crash reports for model input/output data persisting in cleartext.
-- **Prompt injection:** if the app integrates Gemini Nano, on-device LLM, or cloud LLM features, test whether user input fields that feed the model accept prompt injection payloads that change model behavior, bypass content filters, or extract system prompts.
-- **Federated learning:** if the app contributes to federated learning (Firebase ML, custom FL), check whether training data samples or model gradients are observable in local storage or network traffic.
-
-## SDK Supply Chain
-
-- **SDK bill of materials:** enumerate third-party SDKs from `build.gradle` dependencies, library fingerprinting in APK (`jadx` + class package patterns), and `classes.dex` class lists. Record SDK name, version, and purpose.
-- **SDK CVE checking:** check bundled SDK versions against NVD, Snyk, and vendor advisories. Focus on high-value SDKs: OkHttp, Retrofit, Google Play Services, Firebase, React Native, Flutter engine, WebView, Conscrypt.
-- **Known malicious SDK detection:** search for behavioral indicators of trojanized SDKs (SpinOK, Goldoson patterns): invisible WebView loading ad URLs, background data exfiltration to non-app-related domains, clipboard monitoring, device fingerprinting sent to third-party endpoints.
-- **SDK data exfiltration:** capture outbound traffic from analytics/ad SDKs and compare against the app's stated data collection. SDKs that collect device identifiers, location, installed packages, or contact data beyond the app's declared purposes indicate supply chain risk.
+Privacy and identifier auditing, on-device AI/ML, and third-party SDK inventory, CVE and
+over-collection checks have their own skills and references, routed from the skill's "Adjacent
+Mobile Skills": `agent/references/mobile/masvs-privacy-testing.md`,
+`agent/references/mobile/ai-ml-on-device-security.md`,
+`agent/references/mobile/sdk-supply-chain-security.md`.
 
 ## Source Anchors
 
-- Android security best practices: https://developer.android.com/privacy-and-security/security-best-practices
-- Network Security Config: https://developer.android.com/privacy-and-security/security-config
-- Android Keystore: https://developer.android.com/privacy-and-security/keystore
-- Intents and intent filters: https://developer.android.com/guide/components/intents-filters
 - PendingIntent risks: https://developer.android.com/privacy-and-security/risks/pending-intent
 - WebView JavaScript bridge risks: https://developer.android.com/develop/ui/views/layout/webapps/native-api-access-jsbridge
-- JNI tips: https://developer.android.com/ndk/guides/jni-tips
-- Frida Android: https://frida.re/docs/android/
-- Objection: https://github.com/sensepost/objection
-- apktool: https://apktool.org/
-- jadx: https://github.com/skylot/jadx
+- Network Security Config: https://developer.android.com/privacy-and-security/security-config

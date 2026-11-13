@@ -16,16 +16,19 @@ operator mode; the engagement's enabled tracks do not select a combined role.
 Use this command explicitly after native manual or automatic compaction when fresh
 Vigil recovery has not been verified. It restores instructions and backend state
 through this task's original context-bound helper; it does not change the task's
-binding or ZCode's compaction settings. Native compression alone does not establish
-Vigil recovery, and a later resume cannot guarantee that an unattended continuation
-waited for hydration. If required context or hydration is unavailable, report the
-failure and wait before dependent work.
+binding or ZCode's compaction settings. A startup receipt, a compacted summary, or
+successful native compression is not evidence of fresh recovery context or completed
+backend hydration. Without a verified compact callback, recovery before an unattended
+continuation is not guaranteed: say so rather than promising automatic recovery or
+inferring that compaction was detected. If required context or hydration is
+unavailable, report the failure and wait before dependent work.
 
 **1. Resolve and restore the session role.** Run `vigil engagement mode` as a standalone
 command. It resolves the selected mode from the session environment; confirm the reported
 `mode:` matches the selected operator seat, and read only the canonical file shown as `prompt:`.
-Read this engagement's `AGENTS.md` router first, then the selected prompt in bounded parts,
-following its Map of This File. If mode resolution fails, the reported mode differs from the selected operator seat, or no mode is
+Read this engagement's `AGENTS.md` router first, then the selected prompt in bounded parts to
+the end, following its Map of This File when it opens with one (the web and blue cores do; the
+code core does not). If mode resolution fails, the reported mode differs from the selected operator seat, or no mode is
 selected, STOP before target-facing work. Start a new client with
 `vigil engagement start <key> --mode <mode> --client <client>`; do not infer a role from
 `scope.json`, another track's findings, a handoff, or this session's summary. Operator

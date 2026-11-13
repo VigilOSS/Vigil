@@ -1,6 +1,6 @@
 ---
 name: parameter-fuzzing
-description: Discover hidden parameters, test values, and identify input handling anomalies
+description: Discover hidden parameters and fuzz parameter values for injection, access control, and logic flaws
 origin: Vigil
 ---
 
@@ -8,167 +8,65 @@ origin: Vigil
 
 ## When to Activate
 
-- Endpoint needs parameter testing or hidden/debug parameter discovery
-- IDOR, access control, or logic bug testing via parameter manipulation
-- API accepts unknown parameters
+- An endpoint needs hidden or debug parameter discovery, or parameter manipulation for IDOR,
+  access control or logic testing; an API accepts unknown parameters.
 
-## Tools
+All target traffic goes through `vigil assess kali …` (`agent/shared-constraints.md` §2): the
+typed `kali ffuf` verb (POST data, cookies and clusterbomb mode via `--extra-args`, which is
+shlex-split, so quote JSON inside it), `kali arjun`, and `arjun-sweep`. Flags and wordlists:
+`agent/references/tools/fuzzing/ffuf.md`, `agent/references/tools/recon/arjun.md`. Parameter-name
+list: `/usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt`.
+Container paths are `/engagements/$ENGAGEMENT_KEY/...`; host-side files use `$DIR/...`.
 
-`ffuf` (primary), `curl` (verification), `arjun` (dedicated param discovery), `vigil assess gau endpoints` (historical parameter mining)
+## 1. Name discovery
 
-## Methodology
+- **Buffer-wide:** `vigil assess arjun-sweep --param-poor-only --max-per-host 5 --technique
+  PARAM-DISCOVERY --intent "hidden-param discovery" --probe-kind fingerprint --phase consume-test
+  --timeout 600` gates the work-buffer list, scans each method under its own `-m` (POST/JSON/XML
+  bodies are not scanned as GET) and ingests the results, so a discovered `file=`/`url=`/`id=`
+  re-routes the endpoint to its class. Add `--include-unknown` only when no liveness ledger exists;
+  a timed-out or failed arm is a hole to re-run, not a negative.
+- **One high-value endpoint:** `vigil assess kali arjun -u <url> --passive --stable --rate-limit
+  10 …` folds archive parameter names in (more coverage and more requests), then
+  `vigil assess ingest arjun <output.json>`.
+- **Manual ffuf** for GET (`?FUZZ=test`), form and JSON bodies (`--extra-args "-X POST -d
+  '{\"FUZZ\":\"test\"}'" -H 'Content-Type: application/json'`, `-H` being a typed flag),
+  headers (`-H "FUZZ: test"`) and cookies, with `-ac` or a measured baseline filter.
+- **Historical:** `vigil assess gau endpoints <domain>`, then `vigil assess work-buffer clusters
+  --host <domain>` (read-only). Claim only the unit the operator assigned with `work-buffer
+  fetch-by-unit --unit-id <id> --agent <your-role>`; `fetch-by-priority` can claim another host.
+- Proxy-trusted headers (`X-Forwarded-For`, `X-Original-URL`, `X-Forwarded-Host`, debug flags) are
+  their own sweep (`agent/rules/hunting.md` §10, `agent/skills/host-header-injection/SKILL.md`).
 
-### 1. Establish Baseline
-```bash
-curl -s -o /dev/null -w "Code: %{http_code}, Size: %{size_download}" https://TARGET/endpoint
-```
-Record baseline response size for `-fs` filter.
+## 2. Value fuzzing
 
-### 2. GET Parameter Discovery
-```bash
-ffuf -u "https://TARGET/endpoint?FUZZ=test" \
-  -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fs BASELINE_SIZE
-# Or with auto-calibration: -ac
-```
-
-### 3. POST Parameter Discovery
-```bash
-# URL-encoded
-ffuf -u "https://TARGET/endpoint" -X POST -d "FUZZ=test" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fs BASELINE_SIZE
-# JSON
-ffuf -u "https://TARGET/endpoint" -X POST -d '{"FUZZ":"test"}' \
-  -H "Content-Type: application/json" \
-  -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fs BASELINE_SIZE
-```
-
-### 4. Value Fuzzing
-
-Generate the value wordlist from the parameter's observed value instead of hand-rolling ranges and
-toggle lists. `vigil assess classify-payload` types the value and emits intent-keyed variants
-(neighbor / boundary / escalation / format / empty) you can pipe straight into ffuf:
+Type the observed value and fuzz with its variants rather than a generic list:
 
 ```bash
-# Build a type-aware value wordlist from a captured value, then fuzz with it
 vigil assess classify-payload 1042 --mutations --json \
-  | jq -r '.intents | to_entries[].value[]' | sort -u > /tmp/values.txt
-ffuf -u "https://TARGET/endpoint?id=FUZZ" -w /tmp/values.txt -fs BASELINE_SIZE   # IDOR / boundary / escalation in one sweep
-
-ffuf -u "https://TARGET/endpoint?param=FUZZ" -w /usr/share/seclists/Fuzzing/special-chars.txt -fs BASELINE_SIZE
-```
-`classify-payload` replaces the ad-hoc loops: a `sequential_id` already yields the IDOR neighbours
-(`<seq 1 1000>` equivalents around the real value), the `0/-1/overflow` boundaries, and the
-`admin`/`root`/`1` escalation values; a `boolean` yields the `true/false/1/0` toggles; an `email`
-yields `admin@`/`root@` escalation. Classify each discovered parameter's value and fuzz with its
-variant set rather than a generic list.
-
-### 5. Header Fuzzing
-```bash
-ffuf -u "https://TARGET/endpoint" -H "FUZZ: test" \
-  -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fs BASELINE_SIZE
-# Common bypass headers:
-for header in "X-Forwarded-For: 127.0.0.1" "X-Real-IP: 127.0.0.1" "X-Original-URL: /admin" \
-  "X-Debug: true" "X-Debug-Mode: 1" "X-Forwarded-Host: localhost"; do
-  curl -s -o /dev/null -w "%{http_code} %{size_download}" -H "$header" "https://TARGET/endpoint"
-done
+  | jq -r '.intents | to_entries[].value[]' | sort -u > "$DIR/scans/values.txt"
+vigil assess kali ffuf -u "https://TARGET/endpoint?id=FUZZ" \
+  -w /engagements/$ENGAGEMENT_KEY/scans/values.txt -ac \
+  -o /engagements/$ENGAGEMENT_KEY/scans/ffuf_values.json -of json \
+  --technique IDOR --intent "typed value sweep on id" \
+  --probe-kind payload --phase consume-test --timeout 600
 ```
 
-### 6. Cookie Fuzzing
-```bash
-ffuf -u "https://TARGET/endpoint" -b "FUZZ=test" \
-  -w /usr/share/seclists/Discovery/Web-Content/burp-parameter-names.txt -fs BASELINE_SIZE
-```
+A `sequential_id` yields IDOR neighbours, `0`/`-1`/overflow boundaries and escalation values; a
+`boolean` yields toggles; an `email` yields `admin@`/`root@` variants. Special characters:
+`/usr/share/wordlists/SecLists/Fuzzing/special-chars.txt`.
 
-### 7. Multi-Parameter / Clusterbomb
-```bash
-ffuf -u "https://TARGET/endpoint?W1=W2" -w params.txt:W1 -w values.txt:W2 \
-  -mode clusterbomb -fs BASELINE_SIZE
-```
+## 3. Triage
 
-### 8. Arjun (typed verb + work-buffer enrichment)
-
-Prefer Arjun through the audited verb so the run is recorded AND its findings flow back into the work buffer (where the classifier re-routes the now-parameterized endpoint). Passive-first, then escalate.
+A size filter catches only size deltas from the baseline you picked. Rank the whole population
+instead (ffuf JSON results carry `status`, `length`, `words`, `lines`, `url`; rename
+`content-type`):
 
 ```bash
-# (a) GATE the target list from the buffer (live + dynamic + template-deduped + param-poor).
-#     On an engagement with no liveness ledger, add --include-unknown.
-vigil assess arjun-select -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
-
-# (b) BOUNDED first pass — arjun-select wrote a per-method list (targets.txt.GET / .POST / .JSON /
-#     .XML); `kali arjun -i` takes ONE global -m, so run one bounded pass per method-list present so
-#     POST/JSON body surfaces are scanned under their own verb (not silently as GET). A focused -w
-#     list + --stable --rate-limit keep each run gentle; Arjun's default list expands to ~100+
-#     chunks/host, enough to overload a rate-sensitive or production target. Auth via --headers. Keep
-#     the batch small (--max-per-host above) for politeness. (The runtime patches Arjun so one
-#     endpoint returning 4xx/5xx is skipped, not fatal — a 429 no longer ends the run.)
-for M in GET POST JSON XML; do
-  [ -s "$DIR/scans/arjun/targets.txt.$M" ] || continue
-  vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.$M -m "$M" \
-    -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
-    --headers $'Authorization: Bearer TOKEN' \
-    --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery" \
-    --probe-kind fingerprint --phase consume-test --timeout 1800
-done
-
-# (c) ESCALATE for depth on one high-value endpoint: drop -w (full ~25k list) and/or add --passive.
-#     --passive folds wayback/otx param names into the wordlist and then scans actively, so it adds
-#     coverage and request volume; keep --stable --rate-limit set and give it a single -u target.
-vigil assess kali arjun -u "https://TARGET/high-value" --passive --stable --rate-limit 10 \
-  --technique PARAM-DISCOVERY --intent "deep archive-augmented hidden-param discovery" \
-  --probe-kind fingerprint --phase consume-test --timeout 1800
-
-# (d) FOLD findings back in — discovered params re-route the endpoint (file=->gf:lfi, url=->gf:ssrf,
-#     id=->gf:sqli/idor) and stamp a triage_rationale that names `kali sqlmap` for DB-class params:
-vigil assess ingest arjun /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
-```
-
-Use `vigil assess kali arjun -u …` only for a one-off manual check; the audited
-verb path is what feeds Phase 4. Full reference:
-`agent/references/tools/recon/arjun.md`.
-
-### 9. Historical Parameter Mining
-```bash
-# Mine parameterized URLs from the supported historical corpus and ingest them.
-vigil assess gau endpoints TARGET_DOMAIN
-
-# Review the resulting classified clusters for this host.
-vigil assess work-buffer clusters --host TARGET_DOMAIN
-```
-The gau corpus includes archive sources that expose historically known parameters
-active fuzzing can miss; keeping them in the work buffer preserves classification,
-deduplication, and downstream coverage accounting. The host-filtered view is
-read-only: claim only the application unit assigned by the operator with
-`work-buffer fetch-by-unit --unit-id <id> --agent vulnerability-analyst`. The global
-`fetch-by-priority` claim can select another host and does not belong in this
-target-specific recipe.
-
-### 10. Triage and Verification
-
-A single `-fs BASELINE_SIZE` filter catches only size deltas and assumes you picked the right
-baseline. To find every parameter/value that altered the response — including status flips, title
-changes, and word/line shifts a size filter misses — rank the ffuf result population with
-`vigil assess anomaly-score`. ffuf's JSON `results` carry `status`, `length`, `words`, `lines`,
-`url`, which the oracle reads directly (rename only the hyphenated `content-type`):
-
-```bash
-ffuf -u "https://TARGET/endpoint?FUZZ=test" -w params.txt \
-  -o /tmp/ffuf_params.json -of json    # discovery sweep, no -fs needed
 jq '[.results[] | {url, status, length, words, lines, content_type: .["content-type"]}]' \
-  /tmp/ffuf_params.json > /tmp/ffuf_pop.json
-vigil assess anomaly-score /tmp/ffuf_pop.json --top 10
-#   #1  score=4.17  status=200  len=2210  url=...?debug=test   ← the param that changed behaviour
-#       ^ length_bucket=...  ^ words_bucket=...                 the inert params clustered at the baseline
+  "$DIR/scans/ffuf_values.json" > "$DIR/scans/ffuf_pop.json"
+vigil assess anomaly-score "$DIR/scans/ffuf_pop.json" --top 10
 ```
 
-The high-scoring records are the parameters/values worth investigating (their response diverged
-from the inert cluster); the flat low-scoring tail is noise. Then confirm the specific hit by hand:
-
-```bash
-curl -sv "https://TARGET/endpoint?discovered_param=test" 2>&1
-diff <(curl -s "https://TARGET/endpoint") <(curl -s "https://TARGET/endpoint?param=value")
-```
-
-## Extended Resources
-
-- `agent/references/tools/fuzzing/ffuf.md` — ffuf flags, filter/matcher options, wordlist selection
+High scorers diverged from the inert cluster (status flips, title, word or line shifts); confirm
+each with a single `vigil assess kali exec … -- curl -s -i` replay against the baseline.

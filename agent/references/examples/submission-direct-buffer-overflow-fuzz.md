@@ -75,4 +75,4 @@ An unauthenticated client crashes the listener on demand, dropping in-flight che
 
 Bounds-check `label_len` against `sizeof(label_buf)` before the `memcpy` in `frame_parse_header()`, rejecting or truncating frames past the buffer. The parser's `payload_len` field (elided from this excerpt) already receives that same validation further down. Separately, compile with `-fstack-protector-strong` (the shipped binary carries no stack canary today) and add this harness to CI as a regression target.
 
-**Researcher:** Daniel Osei — daniel.osei@research.example
+**Researcher:** Acme Security Research — research@acme.example

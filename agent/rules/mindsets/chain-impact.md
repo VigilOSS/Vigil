@@ -9,7 +9,7 @@ between the two.
 ## 1. Name the crown jewel, work backward
 
 The forward/backward framing this shape rests on is the baseline's — see
-`agent/rules/adversarial-mindset.md` §6. What this lens adds is target-specific: before chaining
+`agent/rules/adversarial-mindset.md` §5. What this lens adds is target-specific: before chaining
 forward from whatever primitive you hold, name the crown jewel on *this* target — the data,
 credential, admin surface, or infra access that would actually matter to the business here — and
 ask what the shortest *proven* path from here to there looks like. Forward-chaining from a
@@ -73,7 +73,7 @@ Build the smallest chain that proves the impact tier, not the most elaborate one
 extra hop that doesn't change severity or scope is effort spent, not evidence gained — stop as
 soon as the impact claim is proven, then move to the next candidate. This governs the *depth* of a
 single chain only. It does not authorize leaving the sibling/variant sweep undone
-(`agent/rules/hunting.md` §9, the sibling rule; §16a, exhaust confirmed leads first) or walking
+(`agent/rules/hunting.md` §6, the sibling rule; §5, exhaust confirmed leads first) or walking
 away from a confirmed-but-unexploited lead — "move to the next candidate" means actually moving to
 it, not ending the pass.
 

@@ -123,8 +123,8 @@ Measured before this bucket existed: `/v1/chat/completions` reached only `25 gf:
 (from the generic `/v<n>/` regex, i.e. it was indistinguishable from any other versioned route),
 and `?system_prompt=` scored **0**, landing in the `path:/api/assistant` fallback. The code track
 already recognised the surface —
-`code_analysis.ROLE_CONTEXT_VULN_CLASSES` maps the `llm`/`prompt`/`rag`/`mcp`/`embedding` role
-keywords to `ai-ml-security` — so the web track was the only one blind to it.
+`code_analysis.CONTEXT_TAG_VULN_CLASSES` maps the architect's `ai-model` context tag to
+`ai-ml-security` — so the web track was the only one blind to it.
 
 ## Sources
 

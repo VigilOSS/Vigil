@@ -1,23 +1,20 @@
 ---
-description: "Bugcrowd submission scaffold: VRT category, CVSS vector, PoC, remediation"
+description: "Bugcrowd submission scaffold: VRT leaf, CVSS vector, PoC, remediation"
 skill: report-generation
 category: Disclosure & Reporting Formats
 ---
 
 # Bugcrowd Submission Template
 
-Bugcrowd-specific scaffold for `vigil assess export submission <slug> --platform bugcrowd`.
-Every shared rule — voice, section budgets, evidence fidelity, PoC authoring, de-harnessing, the
-pre-submission checklist, and the finding-is-source-of-truth flow (author each section, write it
-back to the finding, re-render) — lives in `agent/references/submission-format.md`. This
-file only adds what's Bugcrowd-specific: the VRT field, and how Bugcrowd's own P1-P4 scale sits next
-to the CVSS vector.
+Scaffold for `vigil assess export submission <slug> --platform bugcrowd`. Every shared rule — layout,
+section budgets, evidence fidelity, PoC authoring, the pre-submission checklist, and the
+finding-is-source-of-truth flow — lives in `agent/references/submission-format.md`. This file adds
+only the VRT field and how Bugcrowd's priority sits next to the CVSS vector.
 
 ## Strict-gate fields
 
-`export submission bugcrowd` (final, non-`--draft`) refuses to write unless every row below is
-populated. `--draft` writes the same scaffold with `[NEEDS: ...]` markers for whatever is missing —
-that's the normal report-writer entrypoint.
+`--draft` marks whatever is missing with `[NEEDS: ...]`; the final export refuses to write with any
+row empty (`vigil assess contract export submission` owns the gate).
 
 | Field | Populated from |
 |---|---|
@@ -25,7 +22,7 @@ that's the normal report-writer entrypoint.
 | Severity + CVSS vector | finding `severity`, `details.cvss_vector` |
 | VRT category | `--vrt-category` flag, else `details.vrt_category` |
 | Attacker-impact statement | finding `impact` or `details.impact` |
-| Durable proof | Per `vigil assess contract export submission`; inline PoC is supporting content |
+| Durable proof | per the export contract; inline PoC is supporting content |
 | Remediation | finding `remediation` |
 
 ## Scaffold
@@ -33,7 +30,7 @@ that's the normal report-writer entrypoint.
 ```
 **Title:** [Bug Class] in [exact component] allows [attacker role] to [impact]
 
-**VRT:** [Bugcrowd VRT category path, most specific leaf — e.g. Broken Access Control > IDOR]
+**VRT:** [Bugcrowd VRT path, most specific leaf — e.g. Broken Access Control (BAC) > Insecure Direct Object References (IDOR) > ...]
 
 **Severity:** [CRITICAL/HIGH/MEDIUM/LOW]
 
@@ -42,63 +39,38 @@ that's the normal report-writer entrypoint.
 ---
 
 ### Summary
-[2-4 sentences. Attacker outcome first, then the fault, then what the PoC proves. Optionally followed
-by a `**Exploit flow**` marker + a 3-5 item ordered list of plain sentences, no commands, same string.]
-
 ### Steps to Reproduce
-[Numbered, ≤10 steps, no narrative between them. Prefix each step with the acting identity
-(`[attacker]`/`[administrator]`/`[server]`/`[both]`); one action per step, its outcome on a `**Expect:**` line.]
-
 ### Evidence
-[AUTHORED, and only proof the steps cannot show — root cause, negative controls, post-exploitation
-boundaries, minimum privilege, load-bearing environment facts. From the OPERATOR DETAILS section's structured proof + linked runs + a targeted
-`command-run list` search, all captured values preserved verbatim (see submission-format.md
-"Evidence fidelity"), truncated to the proof lines, annotated with
-<-- proof markers. Stored back on the finding as `details.evidence`; the raw output stays in `scans/`.]
-
-### Attack Scenario
-[2-3 sentences. Realistic adversary class + starting access + action, ending at first compromise —
-no scope counts (those go in Impact). Optional: drop it when Steps + Impact already show
-reachability, and omit it outright whenever the Summary carries an Exploit flow.]
-
+### Attack Scenario   (optional)
 ### Impact
-[1-2 sentences. Consequence + blast radius, quantified by shape/count. Don't re-describe the actor or
-the steps — this is the severity justification. See "Attack Scenario vs Impact" in submission-format.md.]
-
 ### Remediation
-[≤3 items, primary fix first, ≤1 defense-in-depth.]
 ```
+
+Section content and ceilings: submission-format.md "Structure", "Steps to Reproduce vs Evidence",
+"Attack Scenario vs Impact", and "Section budgets".
 
 ## Bugcrowd-specific notes
 
-- **VRT is the platform-taxonomy field for this template.** HackerOne uses a CWE weakness instead
-  — see `templates/hackerone.md`. Resolve against the live taxonomy at
-  bugcrowd.com/vulnerability-rating-taxonomy and pick the leaf, not the category head. Never leave
-  it blank, "TBD", or "N/A" — the strict gate rejects those the same as an empty field. Offline,
-  grep `agent/references/reporting/bugcrowd-vrt.tsv` for the leaf, its default P1–P5 priority, and
-  suggested CVSS; for the IDOR Iterable-vs-Complex fork, the harvestable-identifier exception, and
-  other ambiguous-leaf calls, consult `agent/references/reporting/bugcrowd-vrt.md`.
-- **P1-P4 is Bugcrowd's own priority scale, not a CVSS band.** A category's default VRT priority
-  can sit above its raw CVSS score — Bugcrowd's technical-severity matrix assigns categories like
-  broken access control a default P2 even when the calculated vector lands in the CVSS "Medium"
-  range. Report the calculated CVSS honestly; justify a priority above the raw score by naming the
-  VRT default, not by inflating the vector. The renderer's `Severity:` line always emits the plain
-  severity word on every platform (`export_submission.py` `severity.upper()`), matched to the CVSS
-  band — so a P2 access-control finding whose vector computes to 6.5 correctly reads
-  `**Severity:** MEDIUM`, and the P2 lives in Bugcrowd's own priority field, not in this document.
-  **Do not append the P-rating to the `VRT:` line** — that line is pasted verbatim into the
-  platform's VRT selector, so anything beyond the taxonomy path breaks the paste. The leaf you name
-  already carries its default priority.
-- **PoC is an operator-side attachment, not a rendered body line.** If the proof is a script, stage
-  it as `submissions/<slug>/poc.<ext>` and attach it in the Bugcrowd form — see
-  `submission-format.md` "PoC block". `export submission` emits no attachment block into the body;
-  the **Run:** / **Pass if:** pointer lines in the operational header ARE rendered, from the
-  finding's `details.run` and `details.pass_if` — write there so they reproduce on the next
-  `--overwrite` instead of typing them only into the body. The proof pointer itself
-  (`evidence_ref`/`poc_code`) stays under OPERATOR DETAILS, not the pasteable header.
-- Bugcrowd programs frequently require a deconfliction line (researcher ID / source IP / UTC
-  window) for active-testing categories. If the brief asks for one, add it after Remediation — 3
-  lines max, see "Section budgets" in the generic format.
+- **Name the VRT leaf, not the category head.** Resolve against the live taxonomy at
+  bugcrowd.com/vulnerability-rating-taxonomy, or offline by grepping
+  `agent/references/reporting/bugcrowd-vrt.tsv` for the leaf, its default P1–P5 priority, and
+  suggested CVSS. `agent/references/reporting/bugcrowd-vrt.md` holds the ambiguous-leaf calls (the
+  IDOR Iterable-vs-Complex fork, the harvestable-identifier exception, BFLA). The gate rejects
+  "TBD" and "N/A" like an empty field.
+- **The priority is Bugcrowd's own scale, not a CVSS band.** A leaf's default priority can sit above
+  its raw CVSS score: broken access control defaults to P2 even when the vector computes to Medium.
+  Report the calculated CVSS honestly and justify a higher priority by naming the VRT default, never
+  by inflating the vector. `Severity:` always renders the plain severity word matched to the CVSS
+  band, so a P2 access-control finding at 6.5 reads `**Severity:** MEDIUM`; the P2 lives in
+  Bugcrowd's priority field. Nothing follows the taxonomy path on the `VRT:` line, because that line
+  is pasted verbatim into the VRT selector.
+- **PoC script:** stage it as `submissions/<slug>/poc.<ext>` and attach it in the Bugcrowd form
+  (submission-format.md "PoC block"); write `details.run` / `details.pass_if` so the header lines
+  survive re-render.
+- **Deconfliction:** the rendered `**Deconfliction:**` header carries `scope.json:required_headers`.
+  A brief that also asks for researcher ID, source IP, and UTC window gets them in at most three
+  lines; the default render has no field for them, so they arrive through an operator-selected
+  `--body` (submission-format.md "Recipient-specific outgoing body").
 
 ## Worked example
 

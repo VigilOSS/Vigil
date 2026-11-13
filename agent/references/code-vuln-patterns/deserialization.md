@@ -6,10 +6,10 @@ languages: C/C++, Python, JS, Java
 
 # Deserialization — Trust-Boundary Object Materialization and Gadget Reachability
 
-> Target: Decode paths where attacker-controlled structured data becomes objects, executable
-> behavior, privileged types, or security decisions across a trust boundary.
-
----
+Decode paths where attacker-controlled structured data becomes objects, executable behavior,
+privileged types, or security decisions across a trust boundary. Concrete language sinks (pickle,
+PyYAML loaders, Java `ObjectInputStream`, Spring Session, PHP `unserialize`, Django cache, Celery)
+are in `web-app-injection.md` §4.
 
 ## What You're Hunting
 
@@ -25,9 +25,11 @@ The code treats a format as trusted because the producer is “supposed” to be
 
 The decode path chooses a class or handler based on a type tag, discriminator, or registry lookup.
 
-- Polymorphic decode by user-controlled type field — in Java, `ObjectMapper.enableDefaultTyping`
-  or a `@JsonTypeInfo` annotation is the switch that turns a JSON body into arbitrary class
-  instantiation
+- Polymorphic decode by user-controlled type field — in Jackson, default typing
+  (`enableDefaultTyping`, deprecated since 2.10, or `activateDefaultTyping` with a permissive
+  `PolymorphicTypeValidator`) or `@JsonTypeInfo(use = Id.CLASS | Id.MINIMAL_CLASS)` on a broad base
+  type (`Object`, `Serializable`) lets a JSON body name the class to instantiate; `Id.NAME` with
+  registered subtypes is the safe form
 - Reflection-based object construction
 - Variant dispatch to privileged handlers
 

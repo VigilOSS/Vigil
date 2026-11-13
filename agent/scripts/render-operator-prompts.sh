@@ -146,10 +146,10 @@ AGENT_NAMES=(
 
 # Blue specialist roster. Note that `operator`, `osint-analyst`,
 # `report-writer`, and `general` are shared with red and their source files live
-# under agent/agents/<name>.md exactly as before. The other four are blue-only.
-# `general` is the blind-triage Pass-2 reviewer. The gate it clears
-# (`transition-phase report` / `complete` blocking every Medium-or-above
-# finding) applies to both tracks, so both rosters render its wrapper.
+# under agent/agents/<name>.md. The other four are blue-only.
+# `general` is the blind-triage reviewer: its Accept verdict gates final export
+# and web `transition-phase complete` for every Medium-or-above submittable
+# finding. Both rosters render its wrapper so the role resolves in either tree.
 BLUE_AGENT_NAMES=(
   operator
   alert-triage-specialist
@@ -611,9 +611,10 @@ agent_description() {
 # opposite-tier sibling so the operator can dispatch either a fast (Flash) or a
 # deep (Pro) variant of any specialist by name (`<role>` + `<role>-pro` or
 # `<role>-flash`). The sibling shares the canonical's prompt body verbatim; only
-# the `model:` frontmatter and a short description suffix differ. This is
-# OpenCode-only: `.claude`/`.codex` wrappers do NOT consume wrapper `model:`
-# frontmatter, so no variants are emitted there (pure clutter). See
+# the `model:` frontmatter and a short description suffix differ. The variant
+# pair is OpenCode-only, because OpenCode task dispatch has no per-call override.
+# A Claude Code wrapper pins `model:`/`effort:` only for the roles in
+# claude_wrapper_model_frontmatter below; Codex wrappers carry no pin. See
 # render_opencode_wrapper / opencode_variant_suffix below.
 OPENCODE_PRO_MODEL="deepseek/deepseek-v4-pro"
 OPENCODE_FLASH_MODEL="deepseek/deepseek-v4-flash"
@@ -731,7 +732,7 @@ render_prompt_locality() {
 - Operator instructions: `AGENTS.md` (canonical). `CLAUDE.md` is a pointer.
 - Specialist prompt sources: `agent/agents/*.md`
 - Generated specialist definitions: `.codex/agents/*.toml` / `.claude/agents/*.md` / `.opencode/agent/*.md` / `.goose/recipes/*.yaml`
-- Always-active rules: `agent/rules/resume.md`, `agent/rules/hunting.md`, `agent/rules/adversarial-mindset.md`. `agent/rules/reporting.md` is specialist/Report-phase-loaded (named in report-writer dispatch Load lists, not loaded into operator context before Phase 8).
+- Rules load on their trigger, not at session start; the rules section below names each with its trigger: `agent/rules/resume.md` (resume and after compaction), `agent/rules/hunting.md` (judging a negative or closing a surface, inline probes, accepting a returned finding or recording a verdict yourself, stalls), and `agent/rules/hunting-operator.md` (phase exit, concurrent lanes against a WAF-fronted estate, `deep_required` app units). `agent/rules/reporting.md` is specialist/Report-phase-loaded (named in report-writer dispatch Load lists, not operator context).
 - Skill discovery: `vigil assess list-skills` (compact name + one-line "Use when").
 - Detailed skills: `agent/skills/*/SKILL.md`
 - Reference discovery: `vigil assess list-references` (compact name + one-line description + paired skill; `--skill <name>` for a skill's paired refs).
@@ -852,6 +853,17 @@ render_agents() {
   fi
 }
 
+# Claude Code subagent frontmatter pins for specific roles. agent_prompt_body
+# strips the source role's own frontmatter, so a pin lives here. Evidence-complete
+# report authoring and QC run well on Sonnet at medium effort; every other role
+# inherits the session model.
+claude_wrapper_model_frontmatter() {
+  case "$1" in
+    report-writer)
+      printf '%s\n' "model: claude-sonnet-5-5" "effort: medium" ;;
+  esac
+}
+
 render_claude_wrapper() {
   local agent_name="$1"
   local description
@@ -888,6 +900,9 @@ EOF
 ---
 name: $agent_name
 description: $description
+EOF
+    claude_wrapper_model_frontmatter "$agent_name"
+    cat <<EOF
 ---
 
 <!-- GENERATED FILE — DO NOT EDIT. -->

@@ -98,7 +98,7 @@ vigil assess kali katana \
   -u https://TARGET -d 3 -headless \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_TARGET.txt \
   --technique DISCOVERY --intent "browser-semantic crawl: <trigger>" \
-  --probe-kind fingerprint --phase <recon|collect|consume-test> --timeout 1800
+  --probe-kind fingerprint --phase <recon|collect|consume-test> --timeout 600
 ```
 
 For a bounded Playwright observation:
@@ -145,10 +145,12 @@ Return bounded facts, not a transcript dump:
 - New requestable endpoints: ingest with `vigil assess ingest endpoints browser-semantic`
   or include them in a curated candidate JSONL for
   `ingest candidates`.
-- Browser-enforced vulnerability lead: dispatch `vulnerability-analyst` with the
-  matching vuln-class skill and this skill as secondary context.
+- Browser-enforced vulnerability lead: recommend in handoff `next_steps` a
+  `vulnerability-analyst` dispatch with the matching vuln-class skill and this skill as secondary
+  context (the operator owns dispatch).
 - Edge or bot-management block: surface an operator decision with the exact
-  baseline/browser delta and do not improvise bypasses.
+  baseline/browser delta; a headed-stealth login (`agent/skills/browser-automation/SKILL.md`)
+  runs only once the operator authorizes it, never as an improvised bypass.
 - Headed-only success: record the coverage gap and ask the operator whether
   headed-browser collection is authorized for the engagement.
 

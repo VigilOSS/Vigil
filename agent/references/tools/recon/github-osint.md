@@ -1,65 +1,27 @@
 ---
-description: GitHub OSINT — org-name pattern enumeration (literal/parent/contractor variants), public-member listing, commit-author email mining, code-search cross-reference; rate-limit etiquette and `GITHUB_TOKEN` pattern
+description: GitHub OSINT pipelines for the osint-recon "Org-name Pattern Enumeration" step — GITHUB_TOKEN in the runtime env, audit-flag placement, org-variant search, members, commit-author email mining, code and contractor cross-search, secondary-rate-limit pacing, intel record types
 skill: osint-recon
 ---
 
 # GitHub OSINT — Org Enumeration & Commit-Author Email Mining
 
-GitHub's Search and REST APIs expose enough public data that an org-name pattern
-enumeration plus a commit-author email mining pass can confirm an organization's
-GitHub footprint, sibling orgs, named developers, and corporate email format
-without sending a single probe at the target's own infrastructure. This file
-carries the concrete curl + jq pipelines that `agent/skills/osint-recon/SKILL.md`
-references from its "Org-name pattern enumeration" section.
+Pipelines for `agent/skills/osint-recon/SKILL.md` "Org-name Pattern Enumeration", which owns what
+to enumerate. No probe reaches the target's own infrastructure.
 
-All examples wrap the HTTP probe in `vigil assess kali exec` so the run lands
-in the audit pipeline. Place every audit flag (`--technique OSINT --intent
-"<concise>" --probe-kind fingerprint --phase <current> --timeout <seconds>`)
-BEFORE the trailing `-- bash -c '...'`. Flags after the heredoc go to bash
-itself and are silently dropped by vigil.
+**Running it.** Each call is `vigil assess kali exec` with every audit flag before the trailing
+`-- bash -c '...'`; anything after `--` belongs to the command, so a flag placed there never reaches
+vigil. The token comes from the container environment: set `GITHUB_TOKEN` in `<install>/.env` and
+re-run `vigil runtime start` (an `export` inside one `kali exec` dies with that call). Use a PAT
+with no extra scopes for public resources, and never echo it into stdout or `scans/`. Anonymous
+rate is 60 requests/hour, authenticated 5,000; check budget with `/rate_limit` before a long run.
 
-## Authentication
-
-GitHub anonymous rate is **60 requests / hour**. Authenticated rate is **5,000
-requests / hour**. A pattern enumeration that issues 50–200 lookups in a session
-will exhaust the anonymous budget within minutes; pass a personal access token
-via `Authorization: Bearer $GITHUB_TOKEN` so the call counts against the
-authenticated bucket instead.
+## Org variants, members, code cross-search
 
 ```bash
-# Set once per session inside the runtime
-export GITHUB_TOKEN="<least-privilege-personal-access-token>"
-
-# Sanity-check the token's remaining budget before a long enumeration run
-vigil assess kali exec --technique OSINT --intent "GitHub rate-limit sanity check" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-    https://api.github.com/rate_limit \
-    | jq ".rate"
-'
-```
-
-For public-code OSINT, use the least-privilege token that raises the rate
-limit without granting repository write or private-data access. A classic or
-fine-grained PAT with no extra scopes is sufficient for public resources; add
-endpoint-specific permissions only when the engagement explicitly requires
-private or organization-restricted data.
-
-The token never leaves the runtime container; it is read from the container's
-environment at probe time. Do not echo it into stdout or commit it to scans/.
-
-## 1. Org Enumeration via Pattern Variants
-
-When one org is known, the rest of the family is usually nearby under a
-predictable suffix family. Enumerate variants on the literal name and the
-parent name with `/search/users?q=<pattern>+type:org`.
-
-```bash
-# Variants on the literal name "Acme"
 vigil assess kali exec --technique OSINT \
   --intent "GitHub org-name pattern enumeration for Acme variants" \
   --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
-  for variant in acme Acme ACME acme-corp acmegov acme-internal acme-tools acme-research acme-oss Acme-Inc; do
+  for variant in acme acme-corp acme-internal acme-tools acme-research acme-oss Acme-Inc; do
     curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
       "https://api.github.com/search/users?q=${variant}+type:org" \
       | jq -c --arg v "$variant" "{variant: \$v, total_count, hits: [.items[] | {login, html_url, avatar_url}]}"
@@ -68,58 +30,28 @@ vigil assess kali exec --technique OSINT \
 '
 ```
 
-The `sleep 1` between requests keeps the call rate well below the 5,000/hr
-authenticated ceiling and avoids tripping GitHub's secondary rate-limit
-heuristic, which throttles bursty automation for several minutes.
+- The `sleep 1` keeps clear of GitHub's secondary rate limit, which throttles bursty automation for
+  5-10 minutes once tripped. In longer loops, read `X-RateLimit-Remaining` and pause below 100.
+- `avatar_url` often resolves to the parent organisation's logo, which separates real target
+  orgs from look-alike squatters.
+- `/orgs/<org>/members?per_page=100` returns public members only; profiles often link LinkedIn or
+  a personal site.
+- `/search/code?q=%22<org>%22` finds the org slug in other repos (forks, README links, CI configs
+  pulling private packages), exposing internal repo names, deployment hostnames and registry URLs.
+- `/orgs/<contractor>/repos` filtered on a target keyword finds contractor repos with
+  target-specific configuration, deployment scripts and hard-coded internal URLs.
 
-For each hit, capture `login`, `html_url`, and `avatar_url`. The avatar URL
-often resolves to the parent organization's public corporate logo, which
-disambiguates legitimate target-related orgs from squatters using a similar
-name.
+## Commit-author email mining
 
-## 2. Public Member Listing per Org
-
-Once an org is confirmed, list its public members:
-
-```bash
-vigil assess kali exec --technique OSINT --intent "GitHub public-member listing for <org>" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-    "https://api.github.com/orgs/<org>/members?per_page=100" \
-    | jq "[.[] | {login, html_url}]"
-'
-```
-
-`/orgs/<org>/members` returns only public members; private membership is not
-exposed. Cross-reference each `login` against LinkedIn (the `html_url` carries
-the GitHub profile, which often links to LinkedIn or a personal site).
-
-## 3. Commit-author Email Mining
-
-The richest source of corporate email patterns is the per-commit `author.email`
-and `committer.email` fields on recent commits. These are not hidden behind
-GitHub's email-privacy toggle if the developer has not enabled it.
+`author.email` and `committer.email` on recent commits carry the corporate email format unless the
+developer enabled GitHub's email privacy.
 
 ```bash
 vigil assess kali exec --technique OSINT \
-  --intent "GitHub commit-author email mining for <org>/<repo>" \
-  --probe-kind fingerprint --phase recon --timeout 120 -- bash -c '
-  curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-    "https://api.github.com/repos/<org>/<repo>/commits?per_page=100" \
-    | jq -r "[.[].commit | .author.email, .committer.email] | unique | .[]"
-'
-```
-
-Aggregate across the org's most-active repos:
-
-```bash
-vigil assess kali exec --technique OSINT \
-  --intent "GitHub commit-author emails across <org>'s top 30 repos" \
-  --probe-kind fingerprint --phase recon --timeout 1200 -- bash -c '
-  REPOS=$(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-    "https://api.github.com/orgs/<org>/repos?per_page=30&sort=updated" \
-    | jq -r ".[].name")
-  for repo in $REPOS; do
+  --intent "GitHub commit-author emails across <org> top 30 repos" \
+  --probe-kind fingerprint --phase recon --timeout 600 -- bash -c '
+  for repo in $(curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
+      "https://api.github.com/orgs/<org>/repos?per_page=30&sort=updated" | jq -r ".[].name"); do
     curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
       "https://api.github.com/repos/<org>/${repo}/commits?per_page=50" \
       | jq -r "[.[].commit | .author.email, .committer.email] | unique | .[]"
@@ -128,92 +60,12 @@ vigil assess kali exec --technique OSINT \
 '
 ```
 
-Filter on the corporate domain to drop personal/no-reply emails and emit the
-canonical email pattern:
+Keep the corporate-domain addresses; the dominant shape (`first.last@`, `flast@`, ...) is the email
+convention, a high-confidence input for later password-spray candidate lists.
 
-```bash
-# Pipe the previous output through this to keep only emails that match the corp domain
-vigil assess kali exec --technique OSINT --intent "Filter commit-author emails to corp domain" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  cat /tmp/raw_emails.txt | grep -iE "@(<corp>\\.com|<subsidiary>\\.com)$" | sort -u
-'
-```
+## Recording
 
-The dominant pattern (e.g. `FirstName.LastName@<corp>.com`,
-`flastname@<corp>.com`, `firstname_lastname@<corp>.com`) is the corporate
-email convention. Confirming it gives osint-analyst a high-confidence input
-for `vigil assess intel record email` and feeds password-spray candidate
-lists in later phases.
-
-## 4. Cross-search Public Code for Discovered Org Names
-
-A confirmed org name often appears in OTHER public repos (forks, contributor
-README links, CI configuration that pulls private packages by org slug).
-GitHub's code search exposes those references:
-
-```bash
-vigil assess kali exec --technique OSINT --intent "GitHub code search cross-reference for <org>" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-    "https://api.github.com/search/code?q=%22<org>%22&per_page=50" \
-    | jq "[.items[] | {repo: .repository.full_name, path, html_url}]"
-'
-```
-
-Hits in third-party repos surface internal repo names, deployment hostnames,
-and CI registry URLs that the org's owner page hides behind private visibility.
-
-## 5. Contractor / Vendor Cross-search
-
-When procurement records, public case studies, or LinkedIn show a consulting
-firm working with the target, search GitHub for tagged forks or affiliated
-repos under the contractor's org slug:
-
-```bash
-vigil assess kali exec --technique OSINT \
-  --intent "Contractor org repo cross-search for target-keyword" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
-  for contractor_slug in <contractor1> <contractor2>; do
-    curl -s -H "Authorization: Bearer $GITHUB_TOKEN" \
-      "https://api.github.com/orgs/${contractor_slug}/repos?per_page=100" \
-      | jq -c --arg c "$contractor_slug" "{contractor: \$c, repos: [.[] | select(.name | test(\"<target-keyword>\"; \"i\")) | {name, html_url, description}]}"
-    sleep 1
-  done
-'
-```
-
-Contractor repos often contain target-specific configuration, deployment
-scripts, or proof-of-concept code with hardcoded internal URLs and credentials
-— grep the matching repos for `<target-keyword>` and fingerprint any
-references back to the target's infrastructure before recording findings.
-
-## Output Recording
-
-Translate the discovered orgs, emails, and developer names into structured
-intel writes:
-
-- Each org → `vigil assess intel record org-fact <json-file>`
-- Each confirmed email → `vigil assess intel record email <json-file>`
-- Each named developer → `vigil assess intel record person <json-file>`
-- Free-form prose context (e.g. "contractor X manages target Y's deployment
-  pipeline based on repo Z") → `vigil assess intel record note <json-file>`
-
-Run `vigil assess contract intel record <type>` first to confirm field names
-before authoring the JSON; intel schemas reject guessed aliases.
-
-## Rate-limit Etiquette
-
-- Respect GitHub's published 5,000 req/hr authenticated ceiling. A typical
-  pattern enumeration plus per-org member + commit pass runs 200–500 requests;
-  well within budget but enough to stack onto a parallel automation run.
-- The `sleep 1` interval between requests in the pattern-enumeration loop is
-  there to avoid the secondary rate-limit heuristic, which throttles bursty
-  automation for 5–10 minutes once tripped.
-- For the org-repo `for` loop, pull the rate-limit header on each response
-  (`X-RateLimit-Remaining`) and pause if it drops below 100 before continuing.
-
-## Cross-references
-
-- `agent/skills/osint-recon/SKILL.md` — methodology section "Org-name pattern enumeration"
-- `agent/references/payloads/version-fingerprint-probes.md` — package-registry probes for vendor exact-version triangulation
-- `vigil assess list-references` — the reference library index (run it; `--skill <name>` filters to a skill's paired refs)
+Orgs → `vigil assess intel record org-fact`; confirmed emails → `email`; named developers →
+`person`; relationship context (e.g. a contractor runs the deployment pipeline, per repo Z) →
+`note`. The schemas reject guessed aliases; `vigil assess contract intel record <type>` prints the
+accepted fields.

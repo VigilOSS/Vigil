@@ -1,12 +1,8 @@
 # Shared Subagent Constraints
 
-Load this file as part of your Load First set — together with your role file and
-`agent/shared-specialist-core.md` — before any target-facing work. All three load together, not
-in a race to be "first". Skills and references are trigger-gated — loaded on-signal throughout the
-task, not as a pre-work gate — with one exception: a role's single always-applicable methodology
-skill loads in Load First too. See §3 below and `agent/shared-specialist-core.md` "Load Sequence".
-These rules apply to every specialist agent regardless of role.
-They are extracted from the operator prompt so you receive only what is relevant to you.
+Load this file with your role file and `agent/shared-specialist-core.md` before any
+target-facing work; the core's "Load Sequence" covers on-signal skill loading. These rules apply
+to every web specialist regardless of role.
 
 ---
 
@@ -96,33 +92,6 @@ against scoped targets, `docker run` / `docker exec` against the runtime, and
 ad-hoc curl/nmap/sqlmap/etc. from the host. The host boundary is for
 orchestration, not target traffic.
 
-Target-facing dispatches run **synchronously by default**: each
-`vigil assess kali <verb> ... --timeout N` call is blocking and awaited to
-completion in-band — no `run_in_background`, no `vigil assess kali job start`,
-no dtach, and no watcher/poll loop. A specialist that backgrounds target
-traffic and halts for a completion notification gets auto-resumed, launches the
-next detached job, and halts again — unbounded relaunch thrash, duplicate
-probes, near-zero net coverage. A generous `--timeout` is the correct tool for a
-single long probe; on expiry the audit pipeline cascades SIGTERM→SIGKILL into
-the in-container PID, so the call is killed cleanly and never orphaned. **Above
-the CLI's own `--timeout` sits a separate agent-harness ceiling you do not
-control**: a blocking call that runs too long is auto-backgrounded and the agent
-is killed (**exit 144 / SIGUSR1**), orphaning the probe and writing no handoff. A
-larger `--timeout` only widens that window — a single synchronous probe must fit
-in minutes, not tens of minutes; genuinely long enumeration belongs in an
-operator-owned supervised job.
-
-**"Synchronous" means awaited-in-band, NOT one-call-at-a-time** — issuing several
-blocking calls in parallel, each awaited in-band, is fine; the ban is on
-detaching a job and reaping it later, not on concurrency. `vigil assess kali job
-start` (the dtach-supervised worker that survives shell exit) is **operator-only**
-— a single long sweep the operator launches and monitors, never a per-step or
-fan-out pattern in a specialist loop. A specialist that needs a probe to outlive
-its dispatch says so in its handoff and lets the operator own the job.
-
-Full sync-vs-async decision, the mode table, and the SIGUSR1 rationale:
-`agent/skills/kali-exec/SKILL.md` "Synchronous vs. async decision".
-
 Host-side commands are limited to coordination and non-target support only:
 `jq`, `sqlite3`, `python3`, `grep` / `rg`, `sed`, `awk`, `base64`, `openssl`,
 plus `vigil assess` helpers for backend state writes.
@@ -133,14 +102,37 @@ runtime image is the single source of truth for the tool surface. A skill's tool
 list is not proof of installation: `vigil assess kali exec ... -- command -v <tool>`
 before you plan a step around a tool you have not run in this engagement.
 
+### Synchronous execution and process cleanup
+
+- **Await every target-facing call in-band.** Each `vigil assess kali <verb> ... --timeout N` call
+  blocks until it finishes: no `run_in_background`, no `vigil assess kali job start`, no dtach, no
+  watcher or poll loop. Several blocking calls in parallel are fine (keep it to a handful, since
+  `docker exec` stalls at high parallelism); detaching a job and reaping it
+  later is not, because a specialist that halts for a completion notice is auto-resumed, relaunches,
+  and halts again. On `--timeout` expiry the CLI cascades SIGTERM→SIGKILL into the in-container
+  PID, so the call ends cleanly.
+- **Fit each call in minutes.** Above the CLI's `--timeout` sits an agent-harness ceiling you do
+  not control: a call that runs too long is auto-backgrounded and the agent is killed (exit 144 /
+  SIGUSR1), orphaning the probe and writing no handoff. Keep `--timeout` at or under 600 seconds
+  so the CLI's clean kill fires first (where your shell tool takes its own timeout, give it at
+  least as long), and size each sweep (host list, wordlist, rate) to finish inside it.
+  Enumeration that cannot fit belongs to an operator-owned `kali job`; say so in `next_steps`
+  instead of starting one.
+- **Signal only your own run.** Never `pkill`/`killall` by binary name (`pkill -f nmap`): the
+  runtime is shared, so a broad selector kills sibling specialists' scans. When you must stop a
+  run, use its PID file: `kill -TERM "$(cat /tmp/vigil-pid-<run_uuid>.pid)"` (every audit row
+  carries its `run_uuid`). Operator jobs stop with `vigil assess kali job stop <id>`.
+
+The mode table and runtime troubleshooting live in `agent/skills/kali-exec/SKILL.md` and
+`agent/references/runtime-guides/kali-cli.md`.
+
 ### What the container has, and what it does not
 
 The runtime is a tool sandbox, not a copy of your host. These gaps fail silently or
 mid-run, so treat them as settled facts rather than rediscovering them:
 
-- **`/engagements` is the bind mount.** `/engagements/$ENGAGEMENT_KEY/...` is the
-  same bytes as the host's `$DIR/...` (§11); it is the only path whose contents
-  survive back to the host.
+- **`/engagements` is the bind mount** — the only container path whose contents survive back to
+  the host (§11).
 - **There is no `vigil` executable in the container** — `command -v vigil` finds
   nothing. A helper script that shells out to `vigil assess ...` works when you
   test it on the host and dies with exit 127 on the only approved target-execution
@@ -149,12 +141,6 @@ mid-run, so treat them as settled facts rather than rediscovering them:
   it needs in as argv, parse manifests and `scope.json` off the bind mount
   directly, and make the `vigil assess` recording calls from the host once the run
   returns.
-- **The `aws` binary is installed but holds no credentials.** No `~/.aws`, no
-  `AWS_PROFILE`, no `AWS_ACCESS_KEY_ID` is injected, so every signed call returns
-  `NoCredentials`. Unsigned calls (`--no-sign-request`, unauthenticated Cognito)
-  belong here; signed ones run on the host via `vigil assess host-exec`, which
-  writes the same audit row (`route='host_exec'`) and so is an audited route, not
-  a bypass of §2.
 
 **Reserve `echo` inside `vigil assess kali` commands for functional output only.**
 Stdout is captured to the audit log, not shown to the user, and commentary-echoes
@@ -163,25 +149,12 @@ bloat the preview and pollute FTS search without adding retrievable signal. Use
 is the command's real purpose — writing
 to a file (`echo X > file`), piping into another tool, or generating a payload.
 
-### Process cleanup — no broad `pkill`/`killall` by binary name
-
-Never signal shared-runtime processes by binary name (`pkill -f nmap`,
-`killall nuclei`) — a broad selector kills sibling specialists' parallel scans
-in the shared runtime, losing hours of recon. Synchronous `--timeout` expiry
-already cascades SIGTERM→SIGKILL into the in-container PID, so manual cleanup is
-rarely needed; operator jobs stop with `vigil assess kali job stop <id>`. When
-you must clean up mid-run, use the **PID selector**, not the binary name: every
-audit row carries a `run_uuid` and the runtime writes its in-container PID to
-`/tmp/vigil-pid-<run_uuid>`, so `kill -TERM "$(cat /tmp/vigil-pid-<run_uuid>)"`
-signals only your run. Full rationale: `agent/skills/kali-exec/SKILL.md`
-"Process cleanup discipline".
-
 ### Command Metadata
 
 Every target-facing `vigil assess kali` call carries audit metadata as required CLI flags, and the
 CLI fails closed when they're missing rather than degrading to a stale env-var default.
 `vigil assess contract kali <verb>` owns the required set, each flag's purpose, the
-`--technique`/`--probe-kind`/`--phase` enum values, and the `--agent-name` attribution rule;
+`--technique`/`--probe-kind`/`--phase` enum values, and the `--agent-id` attribution rule;
 `agent/skills/kali-exec/SKILL.md` ("Audit-flag mapping", "Phase tags") is the worked-example form.
 
 Two judgment points that the mechanical layers can't give you: derive `--technique` from the
@@ -198,18 +171,14 @@ processes belongs to the **operator** — these are global runtime state whose d
 other concurrent specialists: pwncat-vl listeners, frp tunnels, chisel listeners, `nc -lvp`,
 `socat` listeners, `frpc`, `oob-server`, interactsh servers, or equivalent.
 
-Agent-side OOB readiness checks, named per-agent clients, and the mint→poll→correlate
-procedure are canonical in `agent/references/offensive-tactics/frp-tunneling.md`
-("Agent OOB Readiness Check" and "OOB Procedure (mint→poll→correlate)") — read those
-sections there; do not re-derive the workflow here.
-
 When exploitation requires a reverse-shell listener or tunnel exposure:
 1. Provide the exact listener or tunnel commands in your output using `# MANUAL:`
    annotation, because the operator owns shared listener processes.
 2. Reference `agent/references/offensive-tactics/shell-handling.md` for shell
    listener commands.
-3. Reference `agent/references/offensive-tactics/frp-tunneling.md` for OOB
-   readiness, per-agent clients, tunnel exposure, and log interpretation.
+3. Reference `agent/references/offensive-tactics/frp-tunneling.md` ("Agent OOB Readiness
+   Check", "OOB Procedure (mint→poll→correlate)") for OOB readiness, per-agent clients, tunnel
+   exposure, and log interpretation; §12 has the callback files.
 4. Proceed after the listener URL file or `vigil oob` client is available; do not
    block on the operator for checks that `vigil oob status`, `vigil oob poll`, or
    the raw-debug tails (`vigil logs oob`, `vigil oob client logs`) can answer
@@ -265,15 +234,6 @@ Full coverage-vs-duplicate decision table and output-field interpretation:
 
 ---
 
-## 2c. Resource-safety preflight
-
-Active recon dispatches must declare candidate count, rate limit, thread count, retry,
-timeout, output mode, stop condition, and expected wall-clock in dispatch context. The
-Recon Dispatch Resource Policy in `agent/references/runtime-guides/dispatch-resource-policy.md` is the calibration source of
-truth.
-
----
-
 ## 2d. Side-Effect Preflight
 
 Before sending a request that could **create persistent state or reach a human** —
@@ -293,59 +253,24 @@ request.
 
 ---
 
-## Contract-First Rule
+## 3. Skills and References Load By Signal
 
-Canonical in `agent/shared-specialist-core.md` (in your Load First), which every
-specialist loads on every track: run `vigil assess contract <verb>` before the
-first invocation of any verb that mutates durable state, dispatches a runtime
-tool, or seats work-buffer rows. That file carries the covered/not-covered verb
-rosters and the errors the round-trip prevents.
-
----
-
-## 3. Skills and References Are Trigger-Gated Procedures — With One Exception
-
-The dividing line: **does the role pick this skill, or does the signal?** Role picks once and
-always → MANDATORY, load it in your Load First batch. Signal picks → trigger-gated, load it the
-instant the signal appears, never before.
-
-**MANDATORY exception — a role's one always-applicable methodology skill.** Where a role pairs 1:1
-with a single skill that applies on every dispatch it ever receives — `recon-specialist` ↔
-`web-recon`, `surface-collector` ↔ `surface-collection` — that skill IS the role's methodology,
-not a per-signal choice, so it belongs in the role's own `## Load First` MANDATORY list. (The code
-track's analogous 1:1 pairs — `code-vuln-hunter` ↔ `code-vulnerability-analysis`, `code-architect`
-↔ `code-architecture-mapping`, `code-vuln-verifier` ↔ `code-finding-verification`,
-`code-fuzz-engineer` ↔ `code-fuzz-campaign` — follow the same rule; `agent/shared-constraints-code.md`
-states them for that track.)
-
-**Everything else is trigger-gated — load it the instant the signal appears, not before:**
-- Every vuln-class skill selected by observed signal (`ssrf-testing`, `sqli-testing`,
-  `idor-testing`, `jwt-testing`, …) — a `vulnerability-analyst` cannot know which applies until it
-  sees the surface. A URL/hostname-shaped parameter or a fetch-on-behalf-of feature (webhook,
-  importer, preview, PDF/screenshot renderer) → `ssrf-testing`; a JWT on the wire → `jwt-testing`.
-- All CWE/vuln-pattern references (`agent/references/code-vuln-patterns/**`) — selected by the
-  slot types actually observed in the code.
-- **Every skill's `## Extended Resources` list, without exception — including a MANDATORY
-  skill's own list.** This is the load-bearing half: Extended Resources are a menu the skill
-  itself points at, loaded when the skill's own procedure needs one of them — never auto-required
-   just because you loaded (or were required to load) the skill.
-
-When your dispatch names a skill, load it before acting on that signal; when it doesn't and you
-observe a signal a skill exists for, load that skill yourself — `vigil assess list-skills`
-(compact name + one-line "Use when:") finds it faster than guessing. State which skill you loaded
-and why in your response's `#### Recommended Next Actions` (and in the handoff if you checkpoint)
-— that is the reporting requirement; loading it does not need an operator round-trip first.
+A role's one always-applicable methodology skill is in its MANDATORY list; every vuln-class skill,
+reference, and skill `## Extended Resources` entry loads when the signal it covers appears (core
+"Load Sequence"). On this track, a URL/hostname-shaped parameter or a fetch-on-behalf-of feature
+(webhook, importer, preview, PDF/screenshot renderer) points at `ssrf-testing`, and a JWT on the
+wire at `jwt-testing`. Name each self-selected skill and why in the handoff
+(`extras.skills_loaded`); loading it needs no operator round-trip.
 
 Reach for the skill rather than improvising the invocation whenever one exists for what you are
 about to do: it usually encodes harness specifics and measured calibration — mitmproxy setup, OOB
 mint→poll binding, rate ceilings, tool-flag defaults — that you cannot derive from general
-knowledge. Once you've loaded a skill, run `vigil assess list-references --skill <name>` for its
-paired payload files, tool cheatsheets, and checklists — the same trigger-gated principle applies:
-load the ones your current probe needs, not the whole set up front. The `references/` library:
+knowledge. `vigil assess list-references --skill <name>` lists a loaded skill's paired files; load
+the ones your current probe needs. The `references/` library:
 - `payloads/` — copy-pasteable attack payload files per bug class
 - `api-security/` — OWASP API Security Top 10:2023 checklists
-- `offensive-tactics/` — red team TTPs by kill-chain phase
-- `tools/` — CLI tool cheatsheets (nmap, ffuf, sqlmap, hydra, etc.)
+- `offensive-tactics/` — shell listeners, frp tunnels and the OOB mint→poll→correlate loop
+- `tools/` — per-tool Vigil usage: typed `kali` verb, runtime image facts, known traps (live flags: `vigil assess kali tool-help <tool>`)
 
 ---
 
@@ -353,11 +278,11 @@ load the ones your current probe needs, not the whole set up front. The `referen
 
 Record every finding through `vigil assess finding record` with your dispatch `--agent-id`;
 use the returned canonical slug. Before the first finding write, load
-`agent/references/runtime-guides/web-finding-recording.md` and the finding-record contract.
-They own deduplication, exact run-backed reproduction, chain metadata, and replayable notes.
+`agent/references/runtime-guides/web-finding-recording.md`; it owns deduplication, exact
+run-backed reproduction, chain metadata, and replayable notes.
 Record proof while the session is live; the report-writer cannot reconstruct unrecorded requests.
-Preserve operator-owned evidence verbatim. One minimal sample proves access; never bulk-pull
-real user records or credentials to strengthen an already decisive proof.
+One minimal sample proves access; never bulk-pull real user records or credentials to strengthen
+an already decisive proof.
 
 ---
 
@@ -377,10 +302,8 @@ Return structured output using these section headers when relevant to your role:
 `#### Summary` · `#### Stats` · `#### Findings` · `#### Evidence`
 `#### Surface Candidates` · `#### Intelligence` · `#### Recommended Next Actions`
 
-Use `#### Decision` and `#### Action` for validation output (vulnerability-analyst).
-
-Every `#### Findings` block must contain finding payloads ready for `vigil assess finding record`,
-not prose descriptions.
+Use `#### Decision` and `#### Action` for validation output (vulnerability-analyst). A
+`#### Findings` block cites recorded findings per the core "Reasoned final return".
 
 ---
 
@@ -390,27 +313,11 @@ Convey severity through the `severity` field and the CVSS vector plus calm, prec
 
 Everything else commonly violated — no theoretical findings, kill weak leads fast, the sibling
 rule, credentials require proof, evidence beats volume, precondition analysis governing severity —
-is owned by `agent/rules/hunting.md`, which every hunting role loads alongside this file (on the
-code track, `agent/shared-constraints-code.md` §5 carries the equivalent bar). Read it there, not a
-restatement here. `agent/rules/reporting.md` owns report *prose* and submission wording and is not
-part of this Load-First set: load it only when you are authoring a confirmed finding's
-report-ready `details` or an external submission.
-
----
-
-## 8. OWASP Quick Reference
-
-The OWASP Top 10:2021 category-code lookup is reference material, not a per-dispatch
-constraint — it lives in `agent/references/owasp-quick-reference.md` (load on demand when
-mapping a finding to a category). API-specific checklists: `agent/references/api-security/`.
-
----
-
-## 9. Script Path Convention
-
-Canonical in `agent/shared-specialist-core.md` "Script Path Convention" — `vigil assess
-<subcommand>` from any directory, with full-record versus bounded nested JSON input rules. Read it there, do not
-re-derive it here.
+is owned by `agent/rules/hunting.md`. Hunting roles load it with this file; a role that only
+collects or enriches loads it before its first finding, negative verdict, or probe verdict, as its
+Load First states. On the code track `agent/shared-constraints-code.md` §5 carries the equivalent
+bar. `agent/rules/reporting.md` owns report prose and submission wording: load it only when you
+author a confirmed finding's report-ready `details` or an external submission.
 
 ---
 
@@ -441,10 +348,8 @@ Record state immediately using `vigil assess` with JSON files:
   default to `anonymous` collapses every identity you actually tested into one cell and hides the
   exact cross-identity IDOR/BOLA gap the grid exists to surface.
 
-Write payloads to `/tmp/<type>-<slug>.json` before calling — inline JSON shell arguments cause
-escaping damage and are not auditable. This is host-side only: a transient JSON payload file for
-the `vigil assess` call itself, distinct from the container-side rule in §11 below, which forbids
-`/tmp`/`/data` for durable engagement artifacts written inside the Kali runtime.
+Write each payload to a host-side JSON file (for example `/tmp/<type>-<slug>.json`) before
+calling — inline JSON shell arguments cause escaping damage and are not auditable.
 
 These follow the same backend-first principle as finding recording. Do not defer chain or credential
 recording to the operator. The agent that proves the state writes it; the operator verifies it landed in
@@ -458,14 +363,13 @@ Engagement artifacts live at one physical location on disk but have two names de
 
 - **Host side** — `$DIR = $ROOT_DIR/engagements/<engagement_key>`. Launchers export this as `ENGAGEMENT_DIR` for local file work; assessment-state selection follows the short binding rule in `agent/shared-specialist-core.md`, not this path variable. Use `$DIR/...` (or `$ENGAGEMENT_DIR/...`) for local files and host-side scripts. The Kali runtime remains engagement-agnostic (per-command working dir). The shared mitmproxy normally routes by target host; only an otherwise-unclaimed flow uses the global active pointer, and only when that selected engagement declares `scope_enforcement: bypass`, so attribution and capture still have one owner. Neither service reads `ENGAGEMENT_DIR`, and switching needs no restart.
 - **Kali side** — `/engagements/$ENGAGEMENT_KEY` is the same directory via the bind mount managed by `vigil runtime start`. Launchers also export `ENGAGEMENT_KEY` (the basename of `$DIR`) so commands inside the runtime can resolve it.
-- **`vigil assess kali ...` invocations MUST reference paths as
+- **`vigil assess kali ...` invocations reference paths as
   `/engagements/$ENGAGEMENT_KEY/...`** in their command argv — the host path `$DIR` is not valid
   inside the container. Writing to `/tmp` or `/data` for engagement-scoped artifacts loses them:
   `/tmp` is container-local scratch that dies with the container, and `/data` — while a real bind
   mount — is the runtime's shared, engagement-agnostic data dir, so anything written there is
-  detached from the engagement and invisible at `$DIR`. (Different `/tmp` than §10's host-side
-  `/tmp/<type>-<slug>.json` payload convention above — that one is a transient JSON file for a
-  host-side `vigil assess` call, never written inside the Kali container.)
+  detached from the engagement and invisible at `$DIR`. A host-side payload file for a
+  `vigil assess` call (§10) is a separate, transient thing.
 
 ---
 
@@ -480,14 +384,10 @@ getting the prefix wrong causes silent file-not-found failures.
   `$ENGAGEMENT_DIR/scripts/<name>.py`) — the path the operator, reviewers, `vigil
   assess` artifact recording, and commit diffs see.
 - **Execute inside Kali** via `vigil assess kali exec ... -- python3
-  /engagements/$ENGAGEMENT_KEY/scripts/<name>.py ...`. The container sees the mount
-  at `/engagements/<engagement_key>`, so a literal `$DIR` in the argv resolves to
-  nothing. The `--` separator forwards everything after it as raw argv, keeping the
-  invocation auditable through the same wrapper that records typed verbs.
-- **Outputs land back on the host** — anything the script writes under
-  `/engagements/$ENGAGEMENT_KEY/...` appears at the matching `$DIR/...` path.
-  Keep engagement-scoped output under that tree, never `/tmp` or `/data` inside the
-  container, so artifacts survive restarts and stay attached to the engagement.
+  /engagements/$ENGAGEMENT_KEY/scripts/<name>.py ...` (§11 path rules). The `--` separator
+  forwards everything after it as raw argv, keeping the invocation auditable through the same
+  wrapper that records typed verbs; outputs written under that tree appear at the matching
+  `$DIR/...` path.
 
 A worked example lives in `agent/skills/kali-exec/SKILL.md` "Run a custom Python
 helper inside the runtime".
@@ -507,9 +407,9 @@ and exploitation needs one, record a blocked technique via `vigil assess
 block-technique` instead of attempting to bind a port yourself.
 
 OOB callback domains are not engagement files. The mint→poll→correlate workflow — readiness,
-named clients, minting the callback host, and correlating hits — is canonical in
-`agent/references/offensive-tactics/frp-tunneling.md` ("OOB Procedure (mint→poll→correlate)");
-do not re-derive it here. Shell listener session output is a separate surface: `vigil runtime
+named clients, minting the callback host, and correlating hits — is in
+`agent/references/offensive-tactics/frp-tunneling.md` ("OOB Procedure (mint→poll→correlate)").
+Shell listener session output is a separate surface: `vigil runtime
 shell-exec "tail -80 /data/shell-<name>.log"`.
 
 Record the result in the relevant finding, probe-run, or handoff after reading
@@ -526,30 +426,13 @@ When your output includes `#### Intelligence`, write each row as a structured JS
 vigil assess intel record <type> <json-file>
 ```
 
-Run `vigil assess contract intel record` for the registered `<type>` values and
-`vigil assess contract intel record <type>` before authoring the JSON — intel schemas are strict
-(`additionalProperties=false`) and reject unknown fields.
+`vigil assess contract intel record` lists the registered `<type>` values, and
+`vigil assess contract intel record <type>` prints that type's schema, which is strict
+(`additionalProperties=false`).
 
 The backend deduplicates per-engagement on natural keys: tech stack on Component (+ Version), people on Name, emails on Address, domains on Identity + Kind, CVEs on `cve_id`. Credentials live in the assessment domain (`assessment_credentials`); use `vigil assess post credentials`, not `intel record`.
 
 Prose intel that doesn't fit a structured row goes to `intel record note` — it is FTS-indexed and engagement-scoped. Notes and org facts are authored interpretation, so supply their top-level `authored_by`, `scope`, and `validity_context` strings whenever you know them; use `provenance` separately for source evidence such as `agent_name` or `artifact_ref`. The backend supplies visible unknown-author, engagement-scope, and unreviewed-validity defaults when context is unavailable; those defaults are a revalidation warning, never authorization or permission to act.
-
----
-
-## 14. Per-Target Rate Calibration
-
-Recon-class roles (recon-specialist, surface-collector, osint-analyst when
-running active enumeration) load **`agent/references/recon/rate-calibration.md`**
-on first use — that file owns the trait-row table (Cloud-fronted / Origin /
-WAF-protected / High-friction / Vendor SaaS), the runtime-tier × DNS-profile
-matrix, and the concurrent-nmap-procs cap. Tier-selection prose and the
-step-down rules live in `agent/references/runtime-guides/dispatch-resource-policy.md`;
-the operator picks the trait row before dispatch and the specialist
-applies it.
-
-Non-recon roles (vulnerability-analyst, source-analyzer, fuzzer,
-exploit-developer, report-writer) consume per-call rate hints from the dispatch
-context instead, and do not load that table at all.
 
 ---
 
@@ -559,8 +442,8 @@ context instead, and do not load that table at all.
 |------|-----------|
 | Downloaded pages/JS/CSS | downloads/ |
 | Scan output | scans/ |
-| Custom scripts/exploits | tools/ |
-| Background PIDs | pids/ |
+| Custom scripts and PoCs (`vigil assess scaffold-probe` writes here) | scripts/ |
+| Tool and lane state (`analysis-state/`, `exploit-state/`, `fuzz-state/`) | tools/ |
 
 Keep engagement-control metadata, `report.md`, and the transient worker buffer at
 the engagement root only. Credentials, activity log, and intel live in the
@@ -571,17 +454,6 @@ activity-entries`, and `vigil assess intel list`.
 
 ## 16. Mandatory Closing Sequence
 
-**Two authorities, not one universal list.** The closing-sequence *wrapper* — the parts true
-across every role regardless of what it records (why `agent handoff` is idempotent and worth
-checkpointing mid-task, the exact `agent_id`/`agent_role`/`phase` values to use from the Runtime
-Identity block and why a mismatch orphans the row, why `agent done`/`agent close` are
-operator-only, the plan-state digest cadence) — is canonical in `agent/shared-specialist-core.md`
-"Mandatory Closing Sequence — wrapper". Read it there; do not re-derive it here.
-
-**The exact numbered verb list is role-specific.** Your role prompt states its own under
-`### Closing verbs` (or its own `## Mandatory Closing Sequence` heading) — that list, not a fixed
-sequence in this file, is what you run before returning. Every role's list draws on the same pool
-of backend writes documented elsewhere in this file (finding record §4, intel record §13,
-record-surface §5, `agent handoff` + `render-handoff` self-check), instantiated with that role's
-agent-name, its own additional verbs, and its own ordering — there is no single sequence that
-fits every role, which is why this file does not assert one.
+Your role prompt lists the closing verbs you run; the wrapper that applies to every role
+(checkpoint cadence, `agent_id` keying, operator-owned `agent done` / `agent close`) is
+`agent/shared-specialist-core.md` "Mandatory Closing Sequence — wrapper".

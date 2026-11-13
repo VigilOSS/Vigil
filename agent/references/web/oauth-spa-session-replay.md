@@ -15,12 +15,19 @@ This is a replay method, not a universal OAuth recipe. Derive every endpoint,
 client ID, redirect URI, scope, and envelope header from the target's own working
 SPA flow. The example hostnames are fictional.
 
+`curl_chrome116` and the jar live in the runtime, so save steps 1–4 as
+`$DIR/scripts/spa-mint.sh` and run it through `vigil assess kali exec --technique OAUTH --intent
+"<why>" --probe-kind replay --phase <phase> --timeout 120 -- bash
+/engagements/$ENGAGEMENT_KEY/scripts/spa-mint.sh` (`agent/shared-constraints.md` §11a). On a
+required-headers program the wrapper refuses a script whose requests never reference the
+attribution headers, and the refusal names the exported variables to add.
+
 ## Inputs from the authorized session
 
 Set these from captured browser traffic or the SPA bundle:
 
 ```bash
-JAR=/engagements/ENGAGEMENT_KEY/auth/user_a.cookies
+JAR=/engagements/$ENGAGEMENT_KEY/auth/user_a.cookies
 AUTHORIZE_URL=https://login.acme-bank.example/oauth2/authorize
 TOKEN_URL=https://login.acme-bank.example/oauth2/token
 CLIENT_ID=spa-client-from-target
@@ -118,11 +125,11 @@ curl_chrome116 -sS -b "$JAR" \
   "$LIVE_URL"
 ```
 
-The cookie and header names are examples. The real gateway multiline request may
-also require device proof, a channel header, or another cookie/header equality
-check. If no token, a known-good token, and a different token all produce the same
-validation error, diff the SPA's working request header-by-header before declaring
-authentication broken.
+The cookie and header names are examples; the real gateway may also require device proof, a
+channel header, or another cookie/header equality check. A validation error that does not change
+across no token, a known-good token and a different token is a pre-auth envelope check
+(`agent/references/recon/cdn-edge-and-bff-reachability.md` "Cross-issuer and request-envelope
+checks").
 
 ## 5. Gate every batch on liveness
 
@@ -156,18 +163,8 @@ the same issuer.
 - Treating any redirect as session expiry without inspecting its destination.
 - Trying more bearer tokens when the unchanged error is from a pre-auth envelope check.
 - Calling a response-embedded BFF path directly and assuming it was browser-routable.
-- Treating sibling hosts as one trust domain without comparing issuer and audience.
-- Recording “unreachable” without a same-batch live control.
-
-## Completion checklist
-
-- OAuth metadata came from the target's own bundle, discovery, or captured request.
-- PKCE state was checked and the redirect chain retained.
-- The token response and exact scopes were preserved.
-- The API request reproduced the working cookies and envelope headers.
-- A known own-object control was live in the same batch.
-- Issuer and audience were checked per host.
-- Failed liveness invalidated the batch rather than becoming endpoint evidence.
+- Recording "unreachable" without a same-batch live control, or letting a failed control become
+  endpoint evidence instead of invalidating the batch.
 
 ## Cross-references
 

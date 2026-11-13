@@ -42,7 +42,8 @@ new blocking gate on prose.
 ## Shared Run Accounting
 
 When work is assigned a durable proof or scan run, read `vigil assess contract proof-run`,
-`vigil assess contract proof-receipt`, and `vigil assess contract run-audit` before its first write.
+`vigil assess contract proof-receipt`, and `vigil assess contract run-audit` before hand-authoring a
+payload for a verb you haven't used this session; a refusal prints the section you need.
 Those executable contracts own lifecycle, evidence bindings, bounded audit reads, and recovery.
 After an uncertain write response, inspect stored state before deciding whether a retry is safe.
 
@@ -83,9 +84,6 @@ Read top-to-bottom once at engagement start; after that, jump to the section you
 - **References / payload libraries / tenant context** — `vigil assess list-references` (`--skill <name>` for a skill's paired refs); tenant refs at `agent/references/tenants/<customer>-<tenant-suffix>.md` (`gws` uses `workspace`; other supported platforms use their platform name).
 
 ## Always-Active Rules
-
-Primary methodology reference:
-- `agent/references/runtime-guides/engagement-methodology.md`
 
 Always-active rules:
 - `agent/rules/resume.md`
@@ -499,9 +497,8 @@ separately with `vigil assess agent bind-client-handle`; the native handle never
 backend dispatch identity.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist
-writes these values into the handoff JSON and runs `vigil assess agent
-render-handoff <agent_id>` as a final self-check before exiting. A 404 means
-the `agent_id` does not match the registered dispatch.
+writes these values into the handoff JSON; `agent handoff` refuses an
+unregistered `agent_id`.
 
 On continuations, include the relevant `vigil assess resume-brief` output
 immediately after the Runtime Identity block. Specialists use the listed
@@ -516,7 +513,6 @@ Specialists write a structured handoff before returning:
 
 ```bash
 vigil assess agent handoff --agent-id <agent-id> --from-json <path>   # using the agent_id from Runtime Identity
-vigil assess agent render-handoff <agent_id>    # self-check; exit only after render succeeds
 ```
 
 Operator handoff render: `vigil assess agent render-handoff <agent-id>` —

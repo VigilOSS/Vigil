@@ -6,95 +6,47 @@ origin: Vigil
 
 # Case Dispatching
 
-Guides consumption of the backend work buffer (`assessment_work_items`) for batching worker tasks. The orchestrator backend is canonical for the work buffer itself — not only for findings, coverage, services, request variants, and chains: ingest verbs derive each work-item row server-side from the posted request-observation in the same transaction (ADR 0013), so there is no separate local queue to keep in sync or drift from canonical backend identities.
+Coordination for consuming the backend work buffer (`assessment_work_items`). Ingest verbs derive
+each work item from the posted request observation in the same transaction (ADR 0013), so the
+backend is canonical and there is no local queue to keep in sync. This skill inspects, routes,
+completes and requeues work items. All target-facing execution stays in `vigil assess kali ...`.
+Use `vigil assess work-buffer <action>` rather than the backend API, because the verbs apply the
+classification and priority logic.
 
-This skill is coordination-only. Use it to inspect the work buffer, route batches, mark completion or errors, and requeue canonical work items. Do not use host-side shell commands from this skill to probe, crawl, fuzz, or exploit targets directly. All target-facing execution must happen through `vigil assess kali ...` subcommands so the audit pipeline stays truthful.
-
-## When to Activate
-
-- Phase 4 (Consume & Test) after surface-collector has populated the work buffer
-- When pending work items exist in the work buffer
-- When a producer has added new work items
+Load it in Phase 4 once surface-collector has populated the buffer, and again whenever a producer
+adds work.
 
 ## The Consumption Loop
 
-**Routing rule: Fetch work items and route per the type-to-agent table below. Each agent is specialized — vulnerability-analyst lacks the DOM/JS parsing context that source-analyzer has, and source-analyzer lacks the request-crafting methodology that vulnerability-analyst has, so mixing types produces shallow analysis.**
-
-**Dispatch mode switches on work-buffer volume.** Type-based fetch orders within a type by id, which is fine for small buffers but blind to signal quality. At 2000+ pending items, switch to priority-first fetch so specialists see high-signal clusters first.
-
-Each iteration:
-```
-1. Reset stale: vigil assess work-buffer reset-stale 10
-2. Check stats: vigil assess work-buffer stats    # read total pending
-3a. Pending < 2000 → type-based dispatch (vulnerability-analyst and source-analyzer can run IN PARALLEL):
-
-    vulnerability-analyst: api, api-spec, form, upload, graphql, websocket
-    source-analyzer: page, javascript, stylesheet, data
-      (register source-analyzer with `agent start --assessment-mode web`)
-
-    vigil assess work-buffer fetch <type> 10 <agent_name>
-
-3b. Pending >= 2000 → priority-first dispatch:
-
-    # Classification ran inline at ingestion, so priority_score / cluster_key
-    # are already populated. Re-run `work-buffer reclassify` only if you
-    # intentionally changed _BUCKETS in classify_buckets.py and want to
-    # re-apply the new weights to already-ingested rows.
-
-    # Review clusters and defer low-signal ones before dispatch:
-    vigil assess work-buffer clusters
-    vigil assess work-buffer defer-cluster <cluster_key> --reason "..."
-
-    # Fetch across types by priority. `fetch-by-priority` is route-aware: it
-    # only claims rows whose type maps to a real specialist route and rejects
-    # free-form agent names so stray labels can't mix work types.
-    #   auto                      — claim the top N routable rows globally and
-    #                               stamp each with its canonical owner.
-    #   vulnerability-analyst[-N] — claim only API/auth/workflow/debug/portal/
-    #                               event rows (N is an optional instance label).
-    #   source-analyzer[-N]       — claim only page/javascript/stylesheet/data rows.
-    vigil assess work-buffer fetch-by-priority 10 auto
-    vigil assess work-buffer fetch-by-priority 10 vulnerability-analyst
-    vigil assess work-buffer fetch-by-priority 10 source-analyzer-2
-
-4. On subagent return:
-   - Done: vigil assess work-buffer done 101 102 103
-   - New endpoints: feed them back through `vigil assess ingest endpoints <source>` or `vigil assess ingest spec <spec-file>` — those paths run inline classification so the new rows enter the priority queue with scores immediately
-   - Findings: write structured finding state with `vigil assess finding record`
-   - Errors: vigil assess work-buffer error 101 102 103
-5. pending=0 and producers stopped → report completion
-6. Otherwise → loop back to step 1
-```
+`agent/phases/phase-4-consume-test.md` steps b-g own the loop: reset stale, read stats, fetch by
+type (pending < 2000) or by priority (pending ≥ 2000), dispatch with the raw fetched rows, mark
+`done` only after the subagent wrote durable findings, probe runs and coverage, and repeat until
+pending is 0 for every consumable type. This skill adds the routing tables, the signal → skill
+triggers and the queue-hygiene steps below.
 
 ### Priority-mode scoring reference
 
-Classification runs inline during `db_insert_work_item()` and populates four fields on
-each work item from the URL structure (see `agent/scripts/assess/lib/classify_buckets.py`
-for the authoritative weight table):
+Classification runs inline at ingestion and stamps each row from its URL structure;
+`agent/scripts/assess/lib/classify_buckets.py` holds the authoritative bucket weights and
+`agent/references/gf-patterns/<bucket>.md` explains each bucket.
 
-- `cluster_key` — `gf:<bucket>` when a parameter or path pattern matches a gf bucket; otherwise
-  `path:/<first-two-url-segments>` as the fallback when nothing matches.
-- `priority_score` — integer 0-50 for automatic gf buckets; curated candidate-record
-  ingest may carry higher operator scores. Weights (highest first): rce (50), ssrf (40), sqli/lfi (40),
-  img_traversal (35), trust_surface (35), idor (35), upload_fields (30), debug_logic (30),
-  redirect/ssti/cors (25), xss (20), interestingparams (15), interestingext (10).
-  Cluster_key and priority_score track the single highest-weight match; when two buckets tie,
-  earlier declaration order wins deterministically.
-- `priority_reason` — e.g. `"gf:ssrf+gf:idor"` listing every matched bucket, so the operator sees
-  why an item scored high without running gf manually.
-- `terminal_reason` — set on hopeless items (`inert_type` for image/video/font/archive/sourcemap/manifest);
-  these are excluded from `fetch-by-priority`.
+- `cluster_key` — `gf:<bucket>` for the highest-weight matching gf bucket (ties go to declaration
+  order); otherwise `path:/<first-two-url-segments>`.
+- `priority_score` — that bucket's weight (curated candidate ingest may carry higher operator
+  scores).
+- `priority_reason` — every matched bucket (`"gf:ssrf+gf:idor"`), so the operator sees why a row
+  scored high.
+- `terminal_reason` — set on hopeless rows (`inert_type`), which `fetch-by-priority` excludes.
 
-Each gf bucket has a reference at `agent/references/gf-patterns/<bucket>.md` — consult it when
-you're unsure why a cluster scored the way it did.
+Review clusters with `vigil assess work-buffer clusters` and drop low-signal ones with
+`vigil assess work-buffer defer-cluster <cluster_key> --reason "…"` before dispatch.
+`fetch-by-priority <n> auto|vulnerability-analyst[-N]|source-analyzer[-N]` is route-aware: it
+claims only rows whose type maps to that specialist. Re-run `work-buffer reclassify` only after
+intentionally changing the bucket table.
 
 ## Type → Agent Routing
 
-The inert/skipped type list is owned by
-`agent/scripts/assess/lib/classify_buckets.py:INERT_TYPES`; this table mirrors
-that set so an operator reading the skill gets the same answer as the
-inline classifier. If the table goes stale, fix the drift in this file
-because the code is the source of truth.
+The inert type set is `INERT_TYPES` in `agent/scripts/assess/lib/classify_buckets.py`.
 
 | Type        | Agent                  |
 |-------------|------------------------|
@@ -115,13 +67,13 @@ because the code is the source of truth.
 | stylesheet  | source-analyzer        |
 | data        | source-analyzer        |
 | unknown     | operator (manual)      |
-| image / video / font / archive / sourcemap / manifest | skipped at insert (status='skipped', terminal_reason='inert_type') |
+| image / video / font / archive / manifest | skipped at insert (status='skipped', terminal_reason='inert_type') |
 
 ## Signal → Skill Trigger Table
 
-Before dispatching a batch, scan the work items for these signals. When a signal matches,
-the named skill MUST be included in the dispatch context (`--skills` on `agent start`)
-in addition to the specialist's default skill. This prevents new skills from going unused.
+Before dispatching a batch, scan the work items and intel for these signals. When one matches,
+name the skill in the dispatch context (`--skills` on `agent start`) alongside the specialist's
+default skill. The signals point at likely classes; they do not limit what the specialist tests.
 
 | Signal in Work Item / Intel | Required Skill | Agent |
 |-----------------------------|----------------|-------|
@@ -139,45 +91,45 @@ in addition to the specialist's default skill. This prevents new skills from goi
 | XML input accepted (SOAP, SVG upload, RSS, SAML) | `xxe-testing` | vulnerability-analyst |
 | LLM/agent endpoint (`gf:llm_api` cluster, `/v1/chat/completions`, `/embeddings`, `/inference`, or a `messages`/`system_prompt`/`max_tokens`/`tool_choice` parameter — a bare `?prompt=` is an OIDC parameter, not an LLM one) | `llm-api-testing` | vulnerability-analyst |
 
-**Operator obligation**: When fetching work items, scan the URL patterns and intel for these
-signals. If a signal matches, name the skill in the dispatch prompt. The specialist loads what
-the operator names — if the operator omits it, the specialist won't know the skill exists.
+Naming the skill puts it in the specialist's first load; specialists can still find others with
+`vigil assess list-skills`, but a named skill is the one the lane is built around.
 
-## Batch Strategy
+## Batch strategy and progress
 
-- Up to 10 same-type work items per cycle, dispatch immediately
-- Priority: api-spec > api > form > graphql > page > javascript > others
-
-## Progress Display (after EVERY batch)
+Send up to 10 same-type items per cycle and dispatch at once, in the priority order api-spec > api
+> form > graphql > page > javascript > others. After every batch, run `vigil assess work-buffer
+stats` (one `status|type|count` row per pair) and show a progress line:
 
 ```
-Phases: [x] Recon (pass 1)  [x] Recon (gate ✓)  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
+Phases: [x] Recon  [x] Collect  [>] Consume & Test  [ ] Exploit  [ ] Report
 [work-buffer] 120/495 done (24%) | api: 15/21 | page: 98/464 | js: 7/10 | findings: 5
 ```
-```bash
-vigil assess work-buffer stats
-```
-`stats` (default `--by status`) prints a `status|type|count` row per (status, type) pair —
-the per-type done/total breakdown the progress line above summarizes.
+
+When a subagent errors, mark its items `error`, log it and carry on; halting abandons the rest of
+the batch. If the producer itself (surface-collector, ingestion, a nuclei sweep) is stuck or
+failing, stop looping and escalate the producer issue, because looping over a broken producer burns
+dispatch budget on nothing.
 
 ## Out-of-Scope Triage (operator-only, before the dispatching pass)
 
-Before dispatching specialists against the surface-candidate list, walk the top of the queue and mark any candidates that are out of scope per the engagement's `scope.json` as `not_applicable` with a one-line rationale. Each out-of-scope dispatch costs a full specialist context window; the operator can kill those candidates in two seconds.
+Before the dispatching pass, walk the top of the queue and resolve the candidates `scope.json` puts
+out of scope. Each one would cost a specialist a full context window before it noticed. Common
+cases are:
 
-Examples that recur in real engagements:
-
-- Subdomains explicitly excluded in the program brief (named in `scope.json` `exclusions` or scope-policy text)
-- `*.dev` / `*.staging` / `*.sandbox` subdomains when the brief is production-only
-- Third-party-hosted assets (CDN edges, marketing platforms, support portals, Helpdesk widgets) that surfaced because the in-scope domain links to them
-- Azure SCM / Kudu / `*.scm.azurewebsites.net` and other deployment-platform endpoints when the in-scope target is the application surface, not the deployment platform
-- Salesforce-managed vendor SaaS hosts when the brief covers the customer's app, not the vendor platform
+- subdomains the brief excludes
+- `*.dev` / `*.staging` / `*.sandbox` hosts on a production-only brief
+- third-party assets the in-scope domain links to (CDN edges, marketing platforms, helpdesk
+  widgets)
+- deployment-platform endpoints such as Azure SCM/Kudu (`*.scm.azurewebsites.net`)
+- vendor-managed SaaS hosts when the brief covers only the customer's app
 
 ```bash
 vigil assess resolve surface <id> --status not_applicable \
   --rationale "Out of scope per program brief: <quote the relevant exclusion>"
 ```
 
-Triage these BEFORE the dispatching pass, not during. A specialist that opens an out-of-scope candidate runs the full skill methodology before realising the scope error, then writes a handoff explaining why it stopped — the operator could have prevented all of that with one `resolve surface` call. This is queue hygiene under `agent/shared-constraints.md` §1: remove non-admitted work before selecting a dispatch objective.
+This is queue hygiene under `agent/shared-constraints.md` §1: remove non-admitted work before you
+pick a dispatch objective.
 
 ## Linking Surfaces to Work-Buffer Clusters
 
@@ -189,19 +141,6 @@ vigil assess work-buffer link-surface --cluster <cluster_key> --surface-id <id> 
 ```
 
 Selection is by `--cluster` (the work buffer's `cluster_key`) or `--queue-key`; a work item that never successfully posted to the backend (no `request_variant_id`) is skipped with a warning rather than failing the whole run.
-
-## Key Rules
-
-- Use `vigil assess work-buffer <action>` for all work-buffer operations — calling the backend API directly bypasses the classification/priority logic these verbs apply and can produce stale or inconsistent state
-- Treat this skill as host-side coordination only. All real target testing stays in `vigil assess kali ...`.
-- Record findings in backend state immediately via `vigil assess finding record`
-- Re-ingest new endpoints through backend-first producers; let the work buffer mirror the resulting canonical ids
-- Use reset-stale at start of each iteration
-- **Loop until pending=0 for all consumable types** — stopping early leaves tested surfaces unrecorded and forces a re-dispatch to pick up the tail
-- On subagent error: mark work items `error`, log, CONTINUE — halting the loop on a single error abandons the remaining batch
-- Stop on any of:
-  - pending=0 everywhere (normal completion)
-  - the upstream work-buffer producer (surface-collector, ingestion, nuclei sweep) is itself stuck or failing — looping against an empty or broken producer burns dispatch budget on no real work. Escalate the producer issue first, then resume.
 
 ## Dispatcher Quick Reference
 

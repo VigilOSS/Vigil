@@ -1,58 +1,21 @@
 ---
-description: Canonical cross-track vuln-class taxonomy — the single vocabulary the web, code, and blue tracks share. Lists the 66 canonical classes grouped into families, and which surface_types / gf-buckets / techniques / skills map to which class. Source of truth is assess.lib.vuln_taxonomy; this doc is the human-readable view.
+description: Canonical vuln_class vocabulary shared by every track, and the class token `record-probe --attack-family` takes. Lists the 66 canonical classes in their families, with the surface_type, gf-bucket, technique and skill mappings onto them. agent/scripts/assess/lib/vuln_taxonomy.py is authoritative; this is its readable mirror.
 last_reviewed: 2026-09-17
 origin: Vigil
 ---
 
 # Canonical Vuln-Class Taxonomy
 
-> **Source of truth:** `agent/scripts/assess/lib/vuln_taxonomy.py`. This doc is the
-> human-readable mirror. The drift tests in
-> `orchestrator/backend/tests/test_vuln_taxonomy.py` cover both sides: they check
-> code against code (a skill, gf-bucket, surface_type, technique, or code family
-> that references a non-canonical class breaks the build), and they parse this
-> file's family, class and bucket tables against the module, so the two cannot
-> silently disagree. They read the data, never the prose — keep the narrative
-> current by review (see `last_reviewed:` below). If this file and the module ever
-> disagree, the module is authoritative.
->
-> **Review cadence:** re-confirm against OWASP WSTG / OWASP ASVS / OWASP API
-> Security Top 10 (2023) / NIST SP 800-115 and the live skill roster each
-> engagement-program review (≈quarterly), and whenever a new offensive skill or
-> framework is added. The taxonomy is **data, not control flow** — adding a class
-> or framework is a one-line edit to `VULN_CLASSES` plus (for skills) a
-> `vuln_class:` frontmatter line. `last_reviewed:` above tracks the last audit.
+`vuln_class` is the one class vocabulary the web, code and blue tracks share. gf-buckets, skill
+`vuln_class:` frontmatter, `surface_type` and the code track's family lists all map onto it.
+`agent/scripts/assess/lib/vuln_taxonomy.py` is authoritative; the drift tests fail when a skill,
+gf-bucket, surface_type, technique or code family names a non-canonical class. Code-track classes
+(`buffer-overflow`, `web-app-auth`, …) sit inside code-oriented families instead of forming a
+parallel vocabulary, and are marked _(code track)_ below.
 
-`vuln_class` is the **one canonical cross-track term**. It
-replaces four taxonomies that drifted independently — gf-buckets, the
-hand-maintained `BUCKET_SKILLS` dict, `surface_type`, and the code track's
-family lists. The canonical set is the **union** of the web attack classes and
-the code families, so the code track **aligns by inclusion**: every string the
-code track validates against (`buffer-overflow`, `web-app-auth`, …) is a
-canonical class here, **namespaced** into a code-oriented family
-(`memory-safety`, `crypto`, `error-handling`, `ai-ml`, `infrastructure`) rather
-than forked into a parallel term. Code-specific classes are marked _(code track)_
-below.
-
-## Attack-surface-enumeration anchors
-
-The class list is kept exhaustive against these external references (cited for
-completeness of attack-surface enumeration, not as a compliance checklist):
-**OWASP WSTG** (Web Security Testing Guide), **OWASP ASVS** (Application Security
-Verification Standard), **OWASP API Security Top 10 (2023)**, and **NIST SP
-800-115** (Technical Guide to Information Security Testing and Assessment). When a
-new framework / API style / auth method appears (e.g. passkeys/WebAuthn, gRPC-web,
-tRPC), check these anchors and add the missing class here.
-
-## Recording a probe with `--attack-family`
-
-`vigil assess record-probe --attack-family <value>` (and the backend
-`attack_family` field) takes one of the backtick-quoted **class** tokens
-listed under `## Families` below (e.g. `idor`,
-`sqli`, `ssrf`) — despite the flag's name, pass the CLASS, not the coarser family
-heading (`access-control`, `injection`). An out-of-vocab value WARNs but is still
-stored verbatim (`probe_args.normalize_attack_family`), so a new/unlisted class is
-recorded rather than rejected.
+`vigil assess record-probe --attack-family <value>` takes a **class** token from the list below
+(`idor`, `sqli`, `ssrf`), not the family heading (`access-control`, `injection`), despite the flag's
+name. An unlisted value warns and is stored verbatim.
 
 ## Families
 
@@ -153,16 +116,10 @@ family.
 - `network-exposure` — Service/port exposed beyond its intended network boundary _(code track)_.
 - `supply-chain` — Build/deploy supply chain: remote or unpinned code and assets executed as trusted _(code track)_.
 
-These three are what `treesitter_index.py`'s Dockerfile / shell / HTML / CSS
-extractors emit. They had no canonical home until 2026-09 because no family was
-about infrastructure, and every candidate remap misroutes on the family
-definitions above: `injection` requires untrusted input reaching an interpreter
-(an `ADD https://…` has none), `rfi` means request-time remote inclusion (a
-build-time fetch has no request), `access-control` presumes a principal and a
-routed function (a Dockerfile with no `USER` has neither), and
-`debug-exposure`/`info-disclosure` mean an HTTP endpoint (`EXPOSE 5432` is a
-declared port). The FAMILY is the fix; a bare class forced into `injection` or
-`disclosure` would reproduce the misroute one level up.
+`treesitter_index.py`'s Dockerfile, shell, HTML and CSS extractors emit these three. Keep them in
+this family. They have no untrusted input reaching an interpreter (`injection`), no request-time
+inclusion (`rfi`), no principal or routed function (`access-control`) and no HTTP endpoint
+(`disclosure`), so filing them under any of those misroutes the depth gate.
 
 ## surface_type → expected classes
 
@@ -241,141 +198,18 @@ hand-maintained bucket→skill dict anymore.
 
 ## technique → class
 
-Each `--technique` audit-enum value (`assess.lib.audit_enums.TECHNIQUE_ENUM`)
-maps to a canonical class (operational tags map to nothing).
-
-| technique | class |
-|---|---|
-| `SSRF` | `ssrf` |
-| `XSS` | `xss` |
-| `XXE` | `xxe` |
-| `SQLI` | `sqli` |
-| `NOSQLI` | `nosqli` |
-| `SSTI` | `ssti` |
-| `RCE` | `cmdi` |
-| `CMDI` | `cmdi` |
-| `LFI` | `lfi` |
-| `RFI` | `rfi` |
-| `PATH-TRAVERSAL` | `path-traversal` |
-| `CRLF` | `crlf` |
-| `DESERIALIZATION` | `deserialization` |
-| `PROTOTYPE-POLLUTION` | `prototype-pollution` |
-| `MASS-ASSIGNMENT` | `mass-assignment` |
-| `IDOR` | `idor` |
-| `BOLA` | `bola` |
-| `BFLA` | `bfla` |
-| `AUTH` | `auth-bypass` |
-| `JWT` | `jwt` |
-| `OAUTH` | `oauth` |
-| `SAML` | `saml` |
-| `SESSION` | `session` |
-| `USER-ENUMERATION` | `user-enumeration` |
-| `OPEN-REDIRECT` | `open-redirect` |
-| `CSRF` | `csrf` |
-| `CORS` | `cors` |
-| `REQUEST-SMUGGLING` | `request-smuggling` |
-| `HOST-HEADER` | `host-header-injection` |
-| `CACHE-POISONING` | `cache-poisoning` |
-| `WEBSOCKET` | `websocket` |
-| `GRAPHQL` | `graphql-injection` |
-| `FILE-UPLOAD` | `file-upload` |
-| `BUSINESS-LOGIC` | `business-logic` |
-| `RACE-CONDITION` | `race-condition` |
-| `RATE-LIMIT` | `rate-limit` |
-| `INFO-DISCLOSURE` | `info-disclosure` |
-| `NETWORK-EXPOSURE` | `network-exposure` |
-
-Operational / non-vuln technique tags (no class): `RECON`, `DISCOVERY`,
-`PARAM-DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`,
-`HEALTH`, `LOG-READ`, `OTHER`.
+`vuln_taxonomy.TECHNIQUE_TO_CLASS` maps each `--technique` value (`vigil assess kali exec --help`
+lists the enum) to the lowercase class of the same name (`SQLI` → `sqli`, `PATH-TRAVERSAL` →
+`path-traversal`). Four exceptions: `RCE` → `cmdi`, `AUTH` → `auth-bypass`, `HOST-HEADER` →
+`host-header-injection` and `GRAPHQL` → `graphql-injection`. The operational tags `RECON`,
+`DISCOVERY`, `PARAM-DISCOVERY`, `FUZZ`, `OSINT`, `CVE-VALIDATION`, `EXPLOIT-CHAIN`, `META`,
+`HEALTH`, `LOG-READ` and `OTHER` map to no class.
 
 ## class → skills
 
-Which `agent/skills/<name>/SKILL.md` declares each class in its `vuln_class:`
-frontmatter (derived live by `vuln_taxonomy.build_class_to_skills()`). The 11
-web-exclusive classes (`idor`, `sqli`, `ssrf`, `xss`, `ssti`, `lfi`,
-`img-traversal`, `cmdi`, `open-redirect`, `cors`, `file-upload`) are reserved to
-their web skills and never declared by a code skill. Nine classes
-(`ldap-injection`, `path-authz`, `ssi-injection`, `xpath-injection`,
-`clickjacking`, `csv-injection`, `privilege-escalation`, `network-exposure`,
-`supply-chain`) intentionally have no dedicated skill yet — they are tracked in
-the test's `KNOWN_SKILLLESS_CLASSES` allowlist so the completeness drift test
-stays honest. `ssi-injection` DOES have a gf-bucket (`ssi`, extension-based) but
-still has no dedicated skill, and the three `infrastructure` classes await a real
-build/deployment-hardening skill rather than being bolted onto a skill whose
-scope does not cover them.
-
-| class | skills |
-|---|---|
-| `idor` | `idor-testing`, `split-brain-idor` |
-| `bola` | `bff-parameter-override`, `graphql-testing` |
-| `bfla` | `auth-bypass` |
-| `path-authz` | _(no dedicated skill — allowlisted)_ |
-| `auth-bypass` | `auth-bypass` |
-| `jwt` | `jwt-testing` |
-| `oauth` | `oauth-oidc-testing` |
-| `saml` | `saml-sso-testing` |
-| `session` | `auth-bypass` |
-| `user-enumeration` | `user-enumeration` |
-| `web-app-auth` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `sqli` | `sqli-testing` |
-| `nosqli` | `nosql-injection` |
-| `cmdi` | `command-injection` |
-| `ssti` | `ssti-testing` |
-| `xxe` | `xxe-testing` |
-| `ssi-injection` | _(no dedicated skill — allowlisted)_ |
-| `ldap-injection` | _(no dedicated skill — allowlisted)_ |
-| `xpath-injection` | _(no dedicated skill — allowlisted)_ |
-| `graphql-injection` | `graphql-testing` |
-| `elasticsearch-injection` | `elasticsearch-injection` |
-| `mass-assignment` | `bff-parameter-override`, `mass-assignment` |
-| `crlf` | `crlf-injection` |
-| `deserialization` | `code-variant-analysis`, `code-vulnerability-analysis`, `deserialization-testing` |
-| `csv-injection` | _(no dedicated skill — allowlisted)_ |
-| `injection` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `web-app-injection` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `ssrf` | `ssrf-testing` |
-| `open-redirect` | `open-redirect-testing` |
-| `file-upload` | `file-upload-testing` |
-| `lfi` | `file-inclusion` |
-| `rfi` | `file-inclusion` |
-| `path-traversal` | `file-inclusion` |
-| `img-traversal` | `file-inclusion` |
-| `info-disclosure` | `info-disclosure-testing` |
-| `secrets-exposure` | `sensitive-data-detection`, `source-analysis` |
-| `debug-exposure` | `info-disclosure-testing` |
-| `source-disclosure` | `sensitive-data-detection`, `source-analysis` |
-| `web-app-data-exposure` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `business-logic` | `business-logic-testing` |
-| `race-condition` | `race-condition-testing` |
-| `rate-limit` | `rate-limit-bypass` |
-| `algorithmic-dos` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis` |
-| `xss` | `xss-testing` |
-| `csrf` | `csrf-testing` |
-| `cors` | `cors-testing` |
-| `prototype-pollution` | `prototype-pollution` |
-| `clickjacking` | _(no dedicated skill — allowlisted)_ |
-| `request-smuggling` | `request-smuggling` |
-| `host-header-injection` | `host-header-injection` |
-| `cache-poisoning` | `cache-poisoning` |
-| `websocket` | `websocket-testing` |
-| `crypto-misuse` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `buffer-overflow` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis`, `heap-rce-evidence-ladder` |
-| `integer-overflow` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis` |
-| `format-string` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis` |
-| `null-dereference` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis` |
-| `use-after-free` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis`, `heap-rce-evidence-ladder` |
-| `uninitialized-memory` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis` |
-| `type-confusion` | `code-fuzz-campaign`, `code-variant-analysis`, `code-vulnerability-analysis`, `heap-rce-evidence-ladder` |
-| `error-handling` | `code-variant-analysis`, `code-vulnerability-analysis` |
-| `ai-ml-security` | `ai-ml-on-device-security`, `llm-api-testing` |
-| `prompt-injection` | `ai-ml-on-device-security`, `llm-api-testing` |
-| `privilege-escalation` | _(no dedicated skill — allowlisted)_ |
-| `network-exposure` | _(no dedicated skill — allowlisted)_ |
-| `supply-chain` | _(no dedicated skill — allowlisted)_ |
-
-> The `class → skills` table is a snapshot of derived state; the live answer is
-> `vigil assess list-skills --json` (each offensive skill carries its
-> `vuln_class`) and `vuln_taxonomy.build_class_to_skills()`. Supporting / recon /
-> fuzzing / triage / reporting / dispatching / blue-team skills intentionally
-> omit `vuln_class:`.
+`vigil assess list-skills --json` gives each offensive skill's `vuln_class` (derived by
+`vuln_taxonomy.build_class_to_skills()`). Supporting, recon, fuzzing, triage, reporting,
+dispatching and blue skills have no `vuln_class`. These classes have no dedicated skill, so use the
+family's nearest skill and your own method: `path-authz`, `ssi-injection`, `ldap-injection`,
+`xpath-injection`, `csv-injection`, `clickjacking`, `privilege-escalation`, `network-exposure`,
+`supply-chain`.

@@ -1,42 +1,34 @@
 ---
-description: Excessive data exposure, mass assignment
-skill: parameter-fuzzing
+description: Mass-assignment field families and excessive property exposure (REST and GraphQL)
+skill: parameter-fuzzing, mass-assignment
 ---
 
 # API3:2023 — Broken Object Property Level Authorization
 
-> Skill: `parameter-fuzzing`
+Workflow and Vigil mechanics: `agent/skills/mass-assignment/SKILL.md`. Class boundary (BOLA vs
+BOPLA vs BFLA): `API01-broken-object-level-authz.md`.
 
 ## Mass Assignment — Extra Fields in Write Requests
-- [ ] Add `"role": "admin"` to user profile update: `curl -X PUT -d '{"name":"test","role":"admin"}' https://api/users/me`
-- [ ] Add `"is_admin": true`, `"is_staff": true`, `"verified": true` to registration/update
-- [ ] Add `"permissions": ["*"]` or `"groups": ["admin"]` to user endpoints
-- [ ] Add `"price": 0`, `"discount": 100` to order/product endpoints
-- [ ] Add `"approved": true`, `"status": "active"` to bypass approval workflows
-- [ ] Test with nested objects: `{"profile": {"role": "admin"}}` in case flat-field filtering misses nested
-- [ ] Add `"id": 1` or `"user_id": VICTIM_ID` to creation endpoints to hijack ownership
+
+Field families to add to register/profile/order/settings writes, flat and nested
+(`{"profile":{"role":"admin"}}`, since flat-field filtering often misses nesting):
+- privilege: `role`, `is_admin`, `is_staff`, `permissions: ["*"]`, `groups: ["admin"]`;
+- financial: `price: 0`, `discount: 100`, `salary` (a PATCH carrying only the sensitive field shows
+  whether it is writable);
+- verification and state: `verified`, `approved`, `status: "active"` (approval-workflow bypass);
+- ownership: `id` or `user_id: VICTIM_ID` on create, to hijack ownership.
 
 ## Excessive Data Exposure in Responses
-- [ ] Compare GET response fields with what the UI actually renders — extra fields are exposure
-- [ ] Check for password hashes in user object responses: `password_hash`, `encrypted_password`
-- [ ] Check for internal IDs, database IDs, or debug fields: `_id`, `internal_id`, `debug_info`
-- [ ] Check for PII not needed by the client: SSN, full DOB, phone number in listing endpoints
-- [ ] Check for other users' data leaked in shared resource responses
-- [ ] Test verbose mode parameters: `?verbose=true`, `?fields=all`, `?include=private`
+
+Fields the response returns but the UI never renders: password hashes (`password_hash`,
+`encrypted_password`), internal or debug fields (`_id`, `internal_id`, `debug_info`), PII on listing
+endpoints, and other users' data inside shared resources. Projection parameters widen it:
+`?fields=` / `?select=` / `?fields=all`, `?expand=` / `?include=private`, `?verbose=true`. Compare
+the same endpoint across roles; the field set often differs. Whether exposed data is non-public is
+`agent/rules/reporting.md` §4.
 
 ## GraphQL Field-Level Access
-- [ ] Request sensitive fields in GraphQL queries that the UI never requests:
-  ```
-  query { user(id: "ME") { email password_hash ssn internal_notes admin_flag } }
-  ```
-- [ ] Use introspection to discover all available fields, then request hidden/sensitive ones
-- [ ] Test field aliases to bypass field-level filtering: `query { u1: user { email } u2: user { ssn } }`
 
-## REST API Specific Checks
-- [ ] Check `?fields=` or `?select=` query parameters for field filtering bypass
-- [ ] Test `?expand=` or `?include=` parameters to pull related objects with sensitive data
-- [ ] Send `PATCH` with only sensitive fields to test if they're writable: `{"salary": 999999}`
-- [ ] Compare responses from different roles — same endpoint may return different field sets
-
----
-> Cross-reference: A01 checklist, `parameter-fuzzing` skill
+Request fields the UI never asks for (introspection or a leaked schema lists them), and split
+sensitive fields across aliases (`u1: user { email } u2: user { ssn }`) to get past field-level
+filtering. Schema recovery without introspection: `agent/skills/graphql-testing/SKILL.md`.

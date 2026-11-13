@@ -15,8 +15,8 @@ mode-specific recording and receipt sequence. The web hunting rules are not requ
 ## When to Activate
 
 - **Phase 2 discovery mode:** use supplied historical CVE/patch bug-shape evidence as an additive,
-  non-covering discovery seed before the main hunt. This mode has no `variant_dispatch_id` or
-  `parent_finding_slugs` and produces no variant-check receipts.
+  non-covering discovery seed before the main hunt. This mode's packet has no
+  `## Variant Receipt Authority` block and produces no variant-check receipts.
 - **Phase 3 receipt-bearing mode:** use the exact frozen, non-empty current parent set registered on
   the dispatch to find siblings and account for every current admitted file with a receipt.
 - Goal: maximize yield by finding semantic repeats without letting exploratory Phase 2 work claim
@@ -24,13 +24,9 @@ mode-specific recording and receipt sequence. The web hunting rules are not requ
 
 ## Tools
 
-- `rg` — pattern matching for function names, code shapes, and anti-patterns
-- `Read` — inspect candidate files for detailed analysis
-- `Glob` — locate files by naming or extension pattern
-
-Cross-reference tools:
-- **ctags index** — `grep '^<symbol>\t' <ctags_path>` using the generation-bound Code Source Identity path
-- **rg** — find every call site of a vulnerable function across the entire codebase, trace incoming calls to identify all code paths that reach a vulnerable pattern
+`rg`, Read, Glob, and ctags (`grep '^<symbol>\t' "$ctags_path"` from the generation-bound Code
+Source Identity) beneath the sealed `snapshot_path`: find every call site of the vulnerable function
+and trace the incoming paths that reach the pattern.
 
 ## Required Dispatch Inputs
 
@@ -39,10 +35,10 @@ and the complete backend threat-model envelope only when `current: true` and its
 match that identity. Runtime Identity `authorized_phase` selects the mode:
 
 - Phase 2 supplies historical CVE/patch bug-shape evidence (including vulnerable/fixed code when
-  available) and a bounded search scope while omitting both receipt-authority fields.
-- Phase 3 supplies both the numeric `variant_dispatch_id` and canonical sorted, non-empty
-  `parent_finding_slugs`, the corresponding finding/pattern evidence, and every current admitted
-  file's identity.
+  available) and a bounded search scope; its packet has no Variant Receipt Authority block.
+- Phase 3's packet carries the `## Variant Receipt Authority` block `agent start` renders (the
+  canonical sorted, non-empty `parent_finding_slugs` and the `--agent-id` receipt binding), plus
+  the corresponding finding/pattern evidence and every current admitted file's identity.
 
 Apply the malformed/partial-input stop in the role prompt before source reading. A clipped threat
 summary is supplemental and never substitutes for the bound envelope.
@@ -51,62 +47,31 @@ summary is supplemental and never substitutes for the bound envelope.
 
 ### Step 1: Extract Abstract Pattern
 
-From the historical vulnerable/fixed evidence (Phase 2) or frozen current finding (Phase 3), derive
-a search pattern at the right level of abstraction. The pattern must be:
+From the historical vulnerable/fixed evidence (Phase 2) or the frozen current finding (Phase 3),
+derive a pattern specific enough to yield a manageable candidate set (dozens, not thousands) and
+general enough to catch renamed variables, wrappers, and restructured code. Start from the concrete
+bug, identify its structural elements (an untrusted flow reaching a sink without its guard, or a
+valid operation/state/lifetime sequence breaking an invariant), replace names with categories
+(memcpy-like sink, untrusted size, missing bound; borrowed lifetime, persistent handle, missing
+reset), and keep the distinguishing constraint — the specific reason the guard is missing or
+insufficient.
 
-- **Specific enough** to produce a manageable candidate set (dozens, not thousands)
-- **General enough** to catch all variants, including those using different variable names, wrapper functions, or slightly different code structure
-
-**Abstraction process:**
-1. Start with the concrete bug: exact function, exact variable, exact line
-2. Identify the structural elements: either an untrusted-input flow reaches a sink without its guard, or a valid operation/state/lifetime sequence breaks a security invariant
-3. Generalize those elements: replace names with categories such as memcpy-like sink/untrusted size/missing bound, or borrowed lifetime/persistent handle/missing state reset
-4. Preserve the distinguishing constraint: the specific reason the guard is missing or insufficient
-
-**Example abstraction levels:**
-
-| Level | Pattern | Quality |
-|-------|---------|---------|
-| Too specific | `memcpy(header->value, raw, actual_len)` at line 270 of parser.c | Only finds the exact known bug |
-| Too general | Any call to `memcpy` anywhere | Thousands of results, mostly false positives |
-| Just right | `memcpy` where size argument derives from untrusted input via `strlen` arithmetic without subsequent bounds check against destination buffer size | Catches the structural pattern with manageable results |
+| Original | Too specific | Too general | Just right |
+|----------|-------------|-------------|------------|
+| `memcpy(dst, src, untrusted_len)` unchecked | Same variable names | Any `memcpy` | `memcpy` whose length derives from network input with no prior `min(len, sizeof(dst))` |
+| Off-by-one `for (i=0; i<=len; i++)` | Same loop variable | Any `<=` loop | `<=` bound with an untrusted-derived limit on a buffer indexed by the loop variable |
+| `malloc(count * sizeof(item))` overflow | Same struct | Any multiplication in `malloc` | `malloc(A * B)` with A untrusted and no overflow check before the multiply |
+| `uint16_t total = a + b` truncation | Same names | Any addition | Untrusted sum stored narrower than its operands, then used as a size or bound |
+| Empty password authenticates | Same auth function | Any auth check | Auth functions where empty or null input returns success early |
+| `access()`/`stat()` then `open()` | Same path | Any file-operation pair | Check-then-use on one path with no lock across both and no descriptor-based check (open first with per-component `O_NOFOLLOW` or `RESOLVE_NO_SYMLINKS`, then `fstat`) |
 
 ### Step 2: Generate Search Queries
 
-From the abstract pattern, generate multiple concrete search queries to cast a wide net:
-
-**Function name queries:**
-- The exact sink function: `memcpy`, `strcpy`, `sprintf`
-- Project-specific wrappers: search for functions that call the sink internally (e.g., `my_buffer_copy`, `safe_strcpy` that is not actually safe)
-- Macro wrappers: `#define COPY_BUFFER(...)` that expand to the sink
-
-```bash
-# Find all callers of the vulnerable sink
-rg "memcpy\s*\(" --type c -l "$snapshot_path"
-
-# Find project-specific wrappers
-rg "memcpy|memmove|bcopy" --type c -l "$snapshot_path"  # files that use these
-rg "void\s+\w+copy\w*\s*\(" --type c "$snapshot_path"  # functions with "copy" in name
-```
-
-**Code shape queries:**
-- Size variables derived from the same untrusted source: `strlen(untrusted)`, `header->length`, `ntohs(pkt->len)`
-- Arithmetic patterns: `size + offset`, `len * count`, `base + strlen(str)`
-- Missing guard patterns: sink call NOT preceded by bounds check in the same function
-
-```bash
-# Find strlen-derived size used in memcpy
-rg "strlen\(.+\)" --type c -l "$snapshot_path"
-rg "len\s*=\s*strlen" --type c "$snapshot_path"
-
-# Find allocation-copy patterns (common source of mismatched sizes)
-rg "malloc.*strlen" --type c -A5 "$snapshot_path"
-```
-
-**Anti-pattern queries (absence of guards):**
-- Functions that use the sink but do NOT contain the expected bounds check
-- Functions that check bounds on one path but not another (partial guard)
-- Functions where the bounds check uses a different variable than the sink
+Cast a wide net from the pattern: the sink itself; project wrappers that call it (including a
+`safe_*` helper that is not safe) and macros that expand to it; size variables from the same
+untrusted source (`strlen(untrusted)`, `header->length`, `ntohs(pkt->len)`); the arithmetic shapes
+(`size + offset`, `len * count`); and the absence of guards — sinks with no preceding bounds check,
+checks on one path only, and checks against a different variable than the sink uses.
 
 ### Step 3: Scan Systematically
 
@@ -115,22 +80,15 @@ admitted file. For a file that cannot instantiate, route, configure, or reach an
 perform a bounded pattern-inapplicability check and retain that rationale for its non-match receipt.
 For each candidate match that survives that quick check:
 
-1. **Read the candidate function** in full, including enough surrounding context to understand the call chain
-2. **Quick target-kind reachability check**: Apply `agent/shared-constraints-code.md` §5. For an
-   application, trace the actor-controlled slot input. For a library/framework, a supported public
-   API and valid invocation/state sequence can establish the same intrinsic bug variant even when
-   consumer source is absent; retain the consumer gap for impact grading. Use the shipped CLI input
-   or registered plugin host contract for those surfaces. Skip only when no applicable product path
-   exists, the trigger violates a documented precondition, or the value/state is genuinely trusted
-   for the claim being tested.
-3. **Guard assessment**: Are the guards present? Are they correct? Apply the same guard evaluation criteria from the vulnerability analysis protocol:
-   - Right variable?
-   - Right type?
-   - Right bound?
-   - All paths covered?
-   - Before the dangerous operation?
-   - Not bypassable?
-4. **Classify**: Is this a true variant, a false positive (properly guarded), or a different bug entirely?
+1. **Read the candidate function** in full, with enough context for its call chain.
+2. **Quick target-kind reachability check** (§5): the actor-controlled slot input for an application;
+   a supported public API and valid invocation/state sequence for a library or framework (keep the
+   consumer gap for impact grading); the shipped CLI input or registered plugin host contract. Skip
+   only when no applicable product path exists, the trigger violates a documented precondition, or
+   the value or state is genuinely trusted for the claim.
+3. **Guard assessment** by the hunt skill's criteria: right variable, type, and bound, every path,
+   before the dangerous operation, not bypassable.
+4. **Classify**: true variant, properly guarded, or a different bug.
 
 ### Step 4: Record Variants
 
@@ -147,55 +105,18 @@ remaining independent use `link_kind: "related"`; neither the finding's prefix n
 determines ancestry. `details.variant_of` is informational attribution, not a substitute for this
 relationship. Keep severity and verification independent for each finding.
 
-For the evidence description:
+The evidence description carries `Variant Of` (the canonical current parent; omitted in Phase 2
+when none exists), `Link Kind`, file:lines, function, its own severity, trigger path (taint flow or
+supported operation/state/lifetime sequence), guard failure (the original's structural issue or a
+different one), its own impact, and an evidence snippet.
 
-```
-VARIANT FINDING: [CWE-XXX] [Brief title]
-Variant Of: [assigned/canonical current parent ID; omit in Phase 2 when none exists]
-Link Kind: variant_of
-File: [path]:[start_line]-[end_line]
-Function: [name]
-Severity: [own severity assessment — variants may be more or less severe than the original]
-Trigger Path: [taint flow OR supported operation/state/lifetime sequence]
-Guard Failure: [same structural issue as original, or a different specific failure]
-Impact: [concrete impact for THIS instance — may differ from original]
-Evidence: [code snippet]
-```
-
-**Severity independence**: Variants receive their own severity assessment. A variant may be:
-- **More severe** than the original (e.g., reachable from a more exposed entry point, larger overflow, in a more privileged context)
-- **Less severe** (e.g., partially guarded, reachable only from authenticated context, smaller impact)
-- **Same severity** (structurally identical exposure)
-
-Product reachability and attacker reachability remain separate during this assessment. Missing
-consumer/host context caps a supported-path variant's attacker claim and severity; generic
-caller-selected capability or correctness-only behavior still fails the shared net-new/impact gate.
-In Phase 2, deduplicate against main-hunt findings before recording and omit the child relationship when no
-canonical current parent exists; a historical CVE identifier is supporting evidence, not a Vigil
-finding relationship.
-
-## Abstraction Level Guide
-
-### Buffer Overflow Variants
-
-| Original | Too Specific | Too General | Just Right |
-|----------|-------------|-------------|------------|
-| `memcpy(dst, src, untrusted_len)` without check | Same exact variable names | Any `memcpy` | `memcpy` where third arg derives from network input without prior `min(len, sizeof(dst))` |
-| Off-by-one in `for (i=0; i<=len; i++)` | Same loop variable | Any `<=` in loops | Loop bound uses `<=` with untrusted-derived limit on buffer indexed by loop variable |
-
-### Integer Overflow Variants
-
-| Original | Too Specific | Too General | Just Right |
-|----------|-------------|-------------|------------|
-| `malloc(count * sizeof(item))` overflow | Same struct type | Any multiplication in `malloc` | `malloc(A * B)` where A is untrusted and no overflow check before multiplication |
-| `uint16_t total = a + b` truncation | Same variable names | Any addition | Addition of untrusted values stored in narrower type than operands, used as allocation size or bounds check |
-
-### Logic Bug Variants
-
-| Original | Too Specific | Too General | Just Right |
-|----------|-------------|-------------|------------|
-| Auth bypass via empty password | Same auth function | Any auth check | Authentication functions where empty/null input causes early success return instead of failure |
-| TOCTOU in file check-then-use | Same file path | Any file operation pair | `access()`/`stat()` followed by `open()` on same path without O_NOFOLLOW or lock |
+Each variant gets its own severity: more severe from a more exposed entry, a larger overflow, or a
+more privileged context; less severe behind a partial guard or authentication; the same when the
+exposure is structurally identical. Product and attacker reachability stay separate: missing
+consumer or host context caps a supported-path variant's claim, and generic caller-selected
+capability or correctness-only behavior still fails the shared net-new and impact gate. In Phase 2,
+deduplicate against main-hunt findings first and omit the child relationship when no canonical
+current parent exists; a historical CVE id is supporting evidence, not a Vigil finding relationship.
 
 ### Grep Idiom for Variant Scans
 
@@ -236,27 +157,21 @@ handoff, and keep the result explicitly non-covering.
 
 ## Output Format
 
-For each scan, produce:
-1. **Pattern Summary**: abstract pattern derived from original finding
-2. **Search Queries Used**: exact grep/rg commands run
-3. **Candidates Examined**: count of files/functions read and assessed
-4. **Confirmed Instances**: full finding records; include the Step 4 child-link entry only for a real canonical
-   parent of that instance; independent same-class findings use `related`
-5. **False Positives**: count with brief reasoning (e.g., "12 instances properly guarded by upstream bounds check in `validate_input()`")
-6. **Per-File Evidence (Phase 3 only)**: one engagement-owned artifact per current admitted file,
-   including clean and bounded non-match files, ready for the role's dispatch-bound `code-record variant-check` step
-7. **Coverage Assessment**: Phase 3 reports exact admitted-file completion with no unassigned gap;
-   Phase 2 labels the result `non-covering discovery` and reports its bounded search scope and gaps
-
-Receipt payload shape and closing order belong to `vigil assess contract code-record variant-check`
-and the `code-variant-hunter` role prompt; use those executable owners instead of copying the schema
-into this skill.
+Per scan: the abstract pattern; the exact search commands run; candidates read and assessed;
+confirmed instances as full finding records (the Step 4 child link only for a real canonical
+parent, `related` for independent same-class findings); false positives with a brief reason ("12
+guarded by the upstream bounds check in `validate_input()`"); in Phase 3, one engagement-owned
+evidence artifact per current admitted file, clean and bounded non-matches included, ready for the
+role's `code-record variant-check` step; and coverage — exact admitted-file completion in Phase 3,
+or `non-covering discovery` with the bounded scope and gaps in Phase 2. Receipt shape and closing
+order belong to `vigil assess contract code-record variant-check` and the `code-variant-hunter`
+role prompt.
 
 ## Extended Resources
 
-- Historical CVE/patch evidence (Phase 2) or frozen current finding details (Phase 3) — the
-  concrete bug shape that seeds the search
-- Architecture map from Phase 1 — file classifications and module groupings for systematic scanning
-- Call graph from Phase 1 — cross-module call chains for tracing untrusted data flow during quick taint checks
-- Full sealed-source access — read source files beneath `snapshot_path` for pattern matching and taint verification
-- **CWE pattern reference (REQUIRED)** — load the `agent/references/code-vuln-patterns/*.md` file matching the original finding's CWE. The pattern taxonomy, language-specific idioms, and "What You're Hunting" sections define what a variant looks like for this bug class. Without this, variant scanning degrades to grep-for-similar-syntax rather than hunting the underlying pattern.
+- **CWE pattern reference (REQUIRED once the pattern is extracted):** the
+  `agent/references/code-vuln-patterns/*.md` file for the original finding's CWE. Its idioms and
+  "What You're Hunting" section define what a variant of the class looks like; without it, variant
+  scanning degrades to grepping for similar syntax.
+- The seed evidence (historical vulnerable/fixed code in Phase 2, frozen finding details in
+  Phase 3), the Phase 1 architecture map and call graph, and full sealed-source access.

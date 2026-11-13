@@ -6,265 +6,139 @@ origin: Vigil
 
 # Surface Collection
 
-> **`vigil assess kali` audit flags:** use `--technique DISCOVERY` (Katana, gau, and wayback URL collection plus triage expand the attack-surface inventory without sending attack payloads).
+> **`vigil assess kali` audit flags:** use `--technique DISCOVERY`. Katana, gau and wayback
+> collection plus triage expand the inventory without sending attack payloads.
 
-Guides surface-collector through the Phase 2 URL collection pipeline: live crawling, historical
-enrichment, deduplication, intelligent triage, and work-buffer population. The goal is to turn
-raw tool output into a prioritized, attack-signal-enriched work buffer that drives Phase 4.
-
-## When to Activate
-
-- Phase 2 (Collect) of a web/runtime engagement
-- After Phase 1 (Recon) completes and endpoint artifacts are available
-- When the operator dispatches surface-collector with targets and Phase 1 output
+This skill is the Phase 2 pipeline that turns Phase 1 output and crawl/archive results into a
+prioritized, attack-signal-enriched work buffer for Phase 4. The surface-collector role prompt
+owns the triage categories, the output sections and the closing verbs. This skill owns the
+commands and the order to run them in. Tag every ingestion source correctly (`recon`, `katana`,
+`gau`, `source-analysis`, `spec`), because coverage tracking uses source provenance.
 
 ## Pipeline
 
-Set variables from dispatch context:
 ```bash
 DIR="${ENGAGEMENT_DIR:?set by the engagement launcher}"
 ```
 
 ### Step 1: Ingest Phase 1 Endpoints
 
-Recon-specialist and source-analyzer produce endpoint lists during Phase 1. Ingest them
-as the baseline work-buffer seed:
-
 ```bash
 cat "$DIR/scans/endpoints.txt" | vigil assess ingest endpoints recon
-```
-
-If source-analyzer produced a separate endpoint file, ingest it with a distinct source tag:
-
-```bash
-cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest endpoints source-analysis
+cat "$DIR/scans/source-endpoints.txt" | vigil assess ingest endpoints source-analysis   # if source-analyzer wrote one
 ```
 
 ### Step 2: Live Crawl via Katana
 
-Run Katana via `vigil assess kali katana` to crawl live targets. Katana is
-installed in the runtime container; the typed verb wraps it with audit
-recording. Use `agent/references/tools/recon/katana.md` for crawl depth,
-headless escalation, rate, exclusion, and ingestion doctrine.
+Crawl depth, headless escalation, rate, exclusions and version-specific `--extra-args` are in
+`agent/references/tools/recon/katana.md`. Run one crawl per in-scope web host in `scope.json`.
 
 ```bash
 vigil assess kali katana \
   -u https://target.example -d 3 -c 10 -rl 20 \
   -o /engagements/$ENGAGEMENT_KEY/scans/katana_output.txt \
   --technique DISCOVERY --intent "live crawl of target.example" \
-  --probe-kind fingerprint --phase collect --timeout 1800
-```
-
-**Browser-semantic crawl trigger:** add `-headless` and load
-`agent/skills/browser-semantic-analysis/SKILL.md` when that skill's activation
-triggers apply. Browser mode is a targeted evidence-correction lane because
-API-only and high-volume work stays more accurate in the normal
-gau/httpx/fuzzing path.
-
-```bash
-vigil assess kali katana \
-  -u https://target.example -d 3 -headless -c 5 -rl 10 \
-  -o /engagements/$ENGAGEMENT_KEY/scans/katana_headless_output.txt \
-  --technique DISCOVERY --intent "browser-semantic crawl of target.example" \
-  --probe-kind fingerprint --phase collect --timeout 1800
-```
-
-**TLS handling:** If the installed Katana version cannot skip invalid TLS, use
-audited `curl -k` for spot validation and continue with other collection sources
-instead of assuming Katana can crawl it. See the Katana reference before using
-version-specific `--extra-args`.
-
-**Auth-aware crawl:** If the engagement's credential record (`vigil auth status`) has
-`use_for_requests` set to `true` and a usable credential available, pass cookies/headers:
-
-```bash
-vigil assess kali katana \
-  -u URL -d 3 -c 10 -rl 20 \
-  -H "Cookie: ..." -H "Authorization: Bearer ..." \
-  -o /engagements/$ENGAGEMENT_KEY/scans/katana_auth_output.txt \
-  --technique DISCOVERY --intent "auth-aware crawl of URL" \
-  --probe-kind fingerprint --phase collect --timeout 1800
-```
-
-**Multi-target:** Run Katana once per in-scope web target from `scope.json` hosts. Combine
-output files or ingest each separately with the same source tag.
-
-Ingest:
-```bash
+  --probe-kind fingerprint --phase collect --timeout 600
 cat "$DIR/scans/katana_output.txt" | vigil assess ingest endpoints katana
 ```
 
-If triage produced metadata-rich candidate JSONL (for example `candidate_records.jsonl`
-with curated score, signals, rationale, selected signal, bucket, or live status), ingest
-that file through the metadata-preserving path instead of flattening it to URLs:
-
-```bash
-vigil assess ingest candidates surface-collector-curated \
-  "$DIR/scans/surface-collector/candidate_records.jsonl"
-```
+- **Auth-aware.** When `vigil auth status` shows a usable credential with `use_for_requests: true`,
+  re-crawl with `--identity <name>` (it injects that identity's session and stamps the run's
+  `auth_context` without a raw token in the audit argv); for material outside the credential store
+  use the typed `-H 'Cookie: ...'` / `-H 'Authorization: Bearer ...'`, repeated per header. Write
+  the re-crawl to its own output file. `ingest endpoints` stamps `auth_context` from the
+  engagement's active credential state, not from the crawl that produced the file, so diff the
+  authenticated output against the anonymous one: endpoints that appear only with auth are
+  high-priority IDOR and privilege-escalation targets.
+- **Browser-semantic.** Add `-headless` (use `-c 5 -rl 10`) and load
+  `agent/skills/browser-semantic-analysis/SKILL.md` when its triggers apply. Keep API-only and
+  high-volume work on the normal path, which is more accurate for it.
+- **TLS.** If the installed Katana can't skip invalid TLS, spot-check with an audited `curl -k`
+  and carry on with the other sources rather than assuming Katana crawled it.
+- **Curated candidates.** If triage produced metadata-rich candidate JSONL (score, signals,
+  rationale, bucket, live status), ingest it with `vigil assess ingest candidates
+  surface-collector-curated "$DIR/scans/surface-collector/candidate_records.jsonl"`. Flattening it
+  to URLs throws away the priority metadata.
 
 ### Step 3: Historical URL Enrichment via gau
 
-Use the cache-aware pipeline wrapper. It runs gau (or reuses a fresh cached corpus),
-ingests the URLs into the work buffer (`assessment_work_items`) with inline classification, and emits a structured
-JSON summary with `cache_reused: true|false` so the dispatch decision is auditable.
+Run once per in-scope domain:
 
 ```bash
-vigil assess gau endpoints TARGET_DOMAIN --subs \
-  --providers wayback,otx,commoncrawl,urlscan
+vigil assess gau endpoints TARGET_DOMAIN --subs --providers wayback,otx,commoncrawl,urlscan
 ```
 
-That single verb runs `kali gau` (or reuses
-`<engagement>/scans/gau-pipeline/<target_slug>/<cache_key_slug>/gau_output.txt` when a
-fresh run is cached for this exact target + flag combination), then pipes the output
-through `ingest endpoints` so inline classification scores every URL at insert time
-and inert types (images, fonts) are filtered downstream. The `--max-cache-age-hours`
-flag (default 24) tunes reuse aggressiveness; pass `--refresh` to force a fresh gau
-run. Different targets — or the same target with different `--subs`/`--providers` —
-land in disjoint directories, so caches never cross-contaminate.
+When `waymore` is installed (it is not in the runtime image; `agent/skills/osint-recon/SKILL.md`
+Tools) and gau's Wayback coverage looks thin, run it through `vigil assess kali exec -- waymore ...`
+and fold its output into the same dedup and ingest pass.
 
-**Multi-domain:** Run `gau endpoints` for each in-scope domain. Each run writes its own
-sidecar meta keyed by target so reuse decisions stay per-host.
+This runs `kali gau`, or reuses a cached corpus for the exact target and flag set (by default
+`--max-cache-age-hours 24`; `--refresh` forces a new run). It ingests the URLs with inline
+classification and prints a JSON summary that includes `cache_reused`. Archives find what Katana
+can't: deprecated routes, old API versions, test and admin paths that were public once. Two
+follow-ons share the same corpus:
 
-**Follow-on verbs that share the same cached corpus:**
+- `vigil assess gau js-endpoints TARGET_DOMAIN --fetch-if-missing` extracts routes that exist only
+  in minified JS bundles and ingests them as `source='js-extract'`.
+- `vigil assess gau secrets TARGET_DOMAIN` captures bodies and runs a trufflehog scan, with
+  `--no-verification` by default and `--verify` to enable verification.
 
-- `vigil assess gau secrets TARGET_DOMAIN` — body capture + trufflehog secret scan.
-  Defaults to `--no-verification`; pass `--verify` to enable trufflehog's verification.
-- `vigil assess gau js-endpoints TARGET_DOMAIN --fetch-if-missing` — extract endpoints
-  hidden in minified JS bundles (shipped route patterns) and ingest them as
-  `source='js-extract'`. Catches admin/internal routes that exist only in JS code
-  paths — a class of endpoint live crawls and HTML-only inspection consistently miss.
-
-**Why gau matters:** Katana only discovers what is currently linked. gau finds endpoints
-that existed historically — deprecated routes, old API versions, test endpoints, admin
-paths that were once public. These are often still functional but hidden from the live
-sitemap. Pairing gau with `gau js-endpoints` closes the additional gap of routes that
-were never linked anywhere except inside compiled JS.
+Use `vigil assess ingest endpoints` directly only for non-gau sources (Katana, specs, mitmproxy
+captures).
 
 ### Step 4: OpenAPI/Swagger Spec Ingestion
 
-If Phase 1 discovered API specifications (source-analyzer may have saved them to `scans/`):
+`vigil assess ingest spec "$DIR/scans/openapi.json"` creates `api-spec` work items with their
+parameter schemas and generates coverage candidates.
 
-```bash
-vigil assess ingest spec "$DIR/scans/openapi.json"
-```
+### Step 5: Volume and Dedup Check
 
-This creates `api-spec` work items with full endpoint/parameter schemas and generates
-coverage candidates automatically.
+`vigil assess work-buffer stats`. Ingestion dedups by parameter structure, so the same endpoint
+with different values is one item. If one source contributed a disproportionate count, check
+whether dedup is working. There is no per-host URL cap; volume is controlled at ingest:
 
-### Step 5: Dedup Verification
-
-After all sources are ingested, verify the work buffer is clean:
-
-```bash
-vigil assess work-buffer stats
-```
-
-The ingestion pipeline handles param-structure deduplication automatically (same endpoint
-with different parameter values = one work item). Review stats to confirm reasonable
-counts — if a single source contributed disproportionately, investigate whether dedup
-is working correctly.
-
-### Volume control happens at ingest, not via budgets
-
-There is no per-host URL cap. Volume control happens at ingest:
-
-- **Inert types skip the dispatch queue at insert time.** `image`, `video`, `font`,
-  `archive`, `sourcemap`, and `manifest` types are stamped `status='skipped'` in
-  `db_insert_work_item()` so they never enter the priority-mode dispatch.
-- **Classification runs inline at ingestion** so every URL gets a `cluster_key` and
-  `priority_score` immediately. Run `vigil assess work-buffer clusters` to review the
-  resulting cluster set and `vigil assess work-buffer defer-cluster <key> --reason "…"`
-  to drop low-signal clusters before Phase 4.
-- **Egress-blocked hosts still defer** (see "Egress-blocked hosts" below) — that is a
-  network-failure class, not a volume cap.
-
-If a real-world ingest produces a cluster the operator does not want to deal with right
-now, defer that cluster explicitly. Do not introduce a new budget gate — the silent
-truncation is the bug, not the verbose buffer.
-
-#### Egress-blocked hosts
-
-A host that responds to every probe with HTTP 403 (CDN-IP-blocked egress) belongs in a
-`deferred` cluster with `terminal_reason=egress-blocked, see CDN-IP playbook` and a
-cross-link to `agent/references/runtime-guides/cdn-ip-blocking.md`. The egress-blocked
-deferral path is owned by `_insert_egress_blocked_work_item` in
-`ingest_endpoints.py` and is the only deferral class that still gates URLs at insert
-time — every other URL is admitted and classified inline.
-
-#### Newly-discovered hosts post-OSINT
-
-Subdomain enumeration deltas and Phase 1 OSINT discoveries that surface a new host
-AFTER initial ingestion MUST receive their own gau pass — surface-collector cannot
-skip them on the assumption that initial collection was exhaustive. A new host
-ingests through the standard path; inline classification scores its rows
-immediately, and any low-signal cluster gets explicit operator control via
-`vigil assess work-buffer defer-cluster` rather than an automatic URL cap.
-
-#### Admin / internal / config URL preservation under egress block
-
-When historical gau discovers admin / internal / config paths on a host that is
-currently egress-blocked, save those URLs as intel-notes via
-`vigil assess intel record note` even though the live work item lands in the
-deferred bucket. The path patterns themselves reveal target-environment exposure
-(staging hostnames, internal-tooling routes, config endpoints) and feed the report
-narrative even when live testing is blocked.
+- `image`, `video`, `font`, `archive` and `manifest` rows are stamped `skipped`. Source maps are
+  not inert: they classify as `gf:interestingext` and stay queued.
+- Every row gets a `cluster_key` and `priority_score` at insert time. Review clusters with
+  `vigil assess work-buffer clusters` and defer low-signal ones explicitly with `vigil assess
+  work-buffer defer-cluster <key> --reason "…"`, so nothing is silently truncated.
+- Out-of-scope URLs are skipped at insert. A CDN-IP-blocked host
+  (`agent/references/runtime-guides/cdn-ip-blocking.md`) is deferred by passing
+  `--egress-blocked-hosts <file>` to `ingest endpoints`, and its URLs land under
+  `cluster_key=deferred:egress-blocked`. Admin, internal or config paths that gau finds on a
+  blocked host still tell you about the environment, so save them as `vigil assess intel record
+  note` for the report.
+- A host that appears after initial ingestion (an enumeration delta or an OSINT discovery) gets
+  its own gau pass. Don't assume the first collection was exhaustive.
 
 ### Step 6: Intelligent Triage
 
-After mechanical ingestion is complete, analyze the full URL corpus for attack signals.
-
-**Deep triage (large corpora):** when the gau output exceeds ~500 URLs, or response-body
-secret scanning is in scope, stop here and ask the operator to dispatch a follow-up
-surface-collector invocation loaded with `agent/skills/gau-triage/SKILL.md`. That skill
-layers `gf` parameter classification, `httpx` body capture, and `trufflehog` secret
-scanning on top of the URL corpus this step produces — it is a deeper pass, not a
-replacement.
-
-**Retrieve work items for analysis:**
-```bash
-vigil assess work-buffer fetch api 50 surface-collector
-vigil assess work-buffer fetch page 50 surface-collector
-vigil assess work-buffer fetch unknown 50 surface-collector
-```
-
-Analyze the fetched URLs (without testing them — triage is classification, not probing)
-and produce the priority manifest. Then release them back:
+Triage is classification, so it sends no target-facing probes. Read rows without claiming them:
 
 ```bash
-vigil assess work-buffer reset-stale 0
+vigil assess work-buffer peek api 50    # also: page, unknown, …
 ```
 
-**Auth-gate redirect classification:** A URL that returns a 302 (or 301/307/308) redirect to a login page, SSO entry point, or policy wall is NOT a terminal "covered / gated" classification — it is a **bypass-test LEAD.** The redirect proves the route exists and is being enforced, which is exactly the signal the auth-bypass sweep needs. Emit a `bypass-lead` surface record for it rather than closing the work item:
+`peek` leaves rows pending. Claiming with `fetch` for triage and then releasing with `reset-stale`
+returns every processing row in the engagement to pending, sibling lanes' claims included.
+
+For corpora over about 500 URLs, or when response-body secret scanning is in scope, ask the
+operator for a follow-up surface-collector dispatch with `agent/skills/gau-triage/SKILL.md`.
+It adds `gf` classification, httpx body capture and trufflehog on top of this corpus.
+
+**Auth-gate redirects are leads.** A 301/302/307/308 to a login page, SSO entry or policy wall is
+a bypass-test lead, not a "gated" closure (`agent/rules/hunting.md` §12(e)). Record it, and the
+auth-bypass sweep (`agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") picks it up:
 
 ```bash
-vigil assess record-surface auth-bypass-lead "https://TARGET/protected" surface-collector \
-  --rationale "302 -> /login: gate confirmed; route exists and is enforced — bypass-test target" \
-  --status discovered
+vigil assess record-surface auth_entry "https://TARGET/protected" surface-collector \
+  --rationale "auth-bypass lead: 302 -> /login; route exists and is enforced" --status discovered
 ```
-
-Triage must not consume the redirect signal and silently close the work item as "gated." Closing it ends the lead. The auth-bypass sweep (see `agent/skills/auth-bypass/SKILL.md` "Attack the Gate Itself") consumes these leads in Phase 2. See `agent/rules/hunting.md §23` for the general lead-not-verdict doctrine.
-
-**Triage categories** (see agent prompt for full pattern lists):
-
-1. **Leaked secrets in parameters** — credential-like query param names
-2. **Admin/debug paths** — privileged path patterns
-3. **API version spread** — older versions of the same resource path
-4. **Backup/config files** — sensitive file extensions from historical URLs
-5. **Injectable parameter surfaces** — search, ID, file, redirect, template params
-
-For each category, produce:
-- Count of matching URLs
-- Representative examples (3-5 per category)
-- Recommended Phase 4 priority and vuln-class skill
 
 ### Step 6.5: URL-shape body-field harvest (SSRF candidates)
 
-URL / host fields inside admin / settings POST and PUT bodies are SSRF candidates regardless of where the URL appears in the request *path*. The triage in Step 6 keys on URL path patterns; this step keys on *body field names* so SSRF-shaped fields are not missed.
-
-Run this against every captured POST/PUT body in the work buffer. There is no single
-"dump every type" verb, so loop `peek` (read-only; does not claim rows) across the
-POST/PUT-bearing types and slurp the per-type arrays together before filtering:
+Path-pattern triage misses URL and host fields inside admin or settings POST/PUT bodies, which are
+SSRF candidates wherever they appear. `peek` is per type, so loop it across the body-bearing types:
 
 ```bash
 for t in api api-spec form upload graphql websocket auth_entry workflow api_route event_feed debug_config portal_session; do
@@ -274,121 +148,52 @@ done | jq -s -r 'add // [] | .[] | select(.method=="POST" or .method=="PUT")
   | grep -iE '\b(url|uri|host|hostname|endpoint|callback|webhook|notify|postback|target|destination|return|redirect|next|continue|origin|fetch|import|source|metadata|discovery)\b\s*[:=]'
 ```
 
-For each hit, record the candidate so Phase 4 dispatching does not lose it:
+Record each hit:
 
 ```bash
-vigil assess record-surface ssrf-candidate "<endpoint>" surface-collector-url-shape \
-  --rationale "POST/PUT body field <field> accepts a URL — server-side fetch on save / connection-test (SaaS connector pattern)" \
+vigil assess record-surface privileged_write "<endpoint>" surface-collector-url-shape \
+  --rationale "SSRF candidate: POST/PUT body field <field> accepts a URL — server-side fetch on save / connection-test (SaaS connector pattern)" \
   --status discovered
 ```
 
-Then dispatch `vulnerability-analyst` with `--skills ssrf-testing` against the highest-yield candidates — typically admin/settings/enterprise pages, integration list endpoints, and any connection-test handler. See `agent/skills/ssrf-testing/SKILL.md` "SaaS Integration Connector Pattern" for the full testing recipe.
+Then recommend in `next_steps` a `vulnerability-analyst` dispatch with `--skills ssrf-testing` on
+the highest-yield candidates: admin and settings pages, integration lists, connection-test
+handlers. The testing recipe is `agent/skills/ssrf-testing/SKILL.md` "SaaS integration connectors".
 
 ### Step 6.6: Hidden-parameter discovery via Arjun (collect→consume bridge)
 
-The triage above keys on parameters the corpus already shows. Arjun discovers parameters an
-endpoint silently accepts but never advertised — inputs no crawl or archive surfaced. Run it on
-the param-poor dynamic endpoints with a **bounded first pass** (focused wordlist + `--stable --rate-limit`), escalating for depth.
-
-**On a JS-bundle SPA over an allowlisted JSON:API, mine the bundles first and treat Arjun and a
-deep Katana crawl as confirmation.** Where the client is a compiled SPA, the endpoint and parameter
-surface is *in the shipped JavaScript* — routes, field names, and request builders are all readable
-there — so mining the bundles enumerates it directly instead of guessing at it. Blind discovery
-does badly on this shape for two structural reasons: a server that allowlists its accepted
-parameters (a JSON:API layer, a strong-params filter) will reject anything not already in the
-allowlist, so a wordlist cannot find what the server refuses by design; and a deep crawl of a
-client-rendered app mostly re-walks routes the bundle already declares. Both still earn their place
-confirming that a mined parameter is live and reachable — run them against the mined manifest
-rather than against a wordlist. On a server-rendered estate the ordering reverses: Arjun is
-discovery there, because the parameters are not published anywhere the client can be read from.
+Arjun finds parameters an endpoint accepts but never advertised. Start with a bounded first pass
+over param-poor dynamic endpoints:
 
 ```bash
-# Gate the target list (live + dynamic + template-deduped + param-poor).
-# This engagement has no liveness ledger? add --include-unknown.
-vigil assess arjun-select -o "$DIR/scans/arjun/targets.txt" --param-poor-only --max-per-host 5
-
-# arjun-select also writes a per-method list (targets.txt.GET / .POST / .JSON / .XML) for each verb
-# the buffer exposes on a route. `kali arjun -i` takes ONE global -m, so scanning the union under a
-# single method would miss the others' hidden params — run one bounded pass per method-list present,
-# so POST/JSON body surfaces are scanned under their own verb (not silently as GET).
-# Bounded first pass — a focused -w list + --stable --rate-limit keep each run gentle; the default
-# list expands to ~100+ chunks/host, enough to overload a rate-sensitive or production target. Keep
-# batches small (--max-per-host above) for politeness and a small blast radius. (The runtime patches
-# Arjun so one endpoint returning 4xx/5xx is skipped, not fatal — a 429 no longer ends the batch.)
-for M in GET POST JSON XML; do
-  [ -s "$DIR/scans/arjun/targets.txt.$M" ] || continue   # only methods the buffer actually exposed
-  vigil assess kali arjun -i /engagements/$ENGAGEMENT_KEY/scans/arjun/targets.txt.$M -m "$M" \
-    -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt --stable --rate-limit 10 \
-    --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery over gated buffer" \
-    --probe-kind fingerprint --phase collect --timeout 1800
-done
-
-# Fold discovered params back in — they re-route the endpoint to its real bucket:
-vigil assess ingest arjun /engagements/$ENGAGEMENT_KEY/scans/arjun/<target>/<hash>.json
+vigil assess arjun-sweep --param-poor-only --max-per-host 5 \
+  -w /usr/share/wordlists/SecLists/Discovery/Web-Content/burp-parameter-names.txt \
+  --technique PARAM-DISCOVERY --intent "bounded hidden-param discovery over gated buffer" \
+  --probe-kind fingerprint --phase collect --timeout 600
 ```
 
-For more depth on a high-value endpoint, drop `-w` (full default list) and/or add `--passive`
-(it archive-augments the wordlist — note it still actively scans, so it adds traffic, not
-politeness; see `agent/skills/parameter-fuzzing/SKILL.md` and `agent/references/tools/recon/arjun.md`).
-Enriched rows carry `selected_by=arjun` and a `triage_rationale` (which names `kali sqlmap` for
-DB-class params), so Phase 4 dispatch picks them up like any other high-priority cluster.
+`arjun-sweep` gates the buffer (live, dynamic, template-deduped, param-poor). Add
+`--include-unknown` only when there is no liveness ledger. It scans each method list under its own
+`-m`, so POST/JSON/XML bodies aren't scanned as GET, and ingests the results with
+`selected_by=arjun` and a `triage_rationale`. A failed or timed-out arm is a hole to re-run, not a
+negative. For depth on one high-value endpoint, use `kali arjun -u … --passive`
+(`agent/references/tools/recon/arjun.md`).
 
-### Step 7: Surface and Finding Recording
+On a compiled SPA over an allowlisting JSON:API or strong-params layer, mine the bundles first.
+The routes and field names are in the shipped JavaScript, and a wordlist can't find parameters the
+server's allowlist refuses by design, so run Arjun and deep Katana against the mined manifest as
+confirmation. On a server-rendered estate the order flips, and Arjun is the discovery step.
 
-Before returning to the operator:
+### Step 7: Record and report
 
-**Record surfaces** for all high-signal discoveries:
-```bash
-vigil assess record-surface <type> <target> <source> \
-  --rationale "<why this is high-signal>" \
-  --status discovered
-```
-
-**Record findings** when triage produces decisive evidence (e.g., an API key with a
-non-empty value visible in a URL parameter):
-```bash
-vigil assess finding record surface-collector <finding-json-file> --agent-id <your-agent_id>
-```
-
-### Step 8: Stats and Priority Manifest
-
-Produce the final stats:
-```bash
-vigil assess work-buffer stats
-```
-
-Build the priority manifest in the output — a ranked list of attack surface clusters
-with triage signals, recommended dispatch order, and suggested vuln-class skills.
-
-## Key Rules
-
-- Keep all URL crawling and enrichment in `vigil assess kali katana` / `vigil assess gau endpoints` (or `gau secrets` / `gau js-endpoints`) — host-side crawling bypasses the audit pipeline that downstream specialists rely on
-- Use the `gau-*` wrappers for gau collection — they pair gau with ingest in one shot and emit a structured JSON summary with cache-decision metadata
-- Use `vigil assess ingest candidates` whenever a triage step produced rich candidate JSONL — flattening those records to URLs discards the priority metadata specialists rely on
-- Use `vigil assess ingest endpoints` directly only for non-gau sources (katana output, OpenAPI specs, mitmproxy captures) — gau callers should use `gau endpoints` unless they have a curated candidate JSONL output
-- Use `vigil assess record-surface` for all surface writes — bypassing loses backend sync
-- Use `vigil assess finding record` for any findings — unrecorded findings are lost data
-- Triage is classification and pattern matching — analyze URLs without sending target-facing probes during triage
-- Tag each ingestion source correctly (recon, katana, gau, source-analysis, spec) — source provenance matters for coverage tracking
-
-## Output Contract Reference
-
-The surface-collector agent prompt defines the full output format. Key sections:
-
-| Section | Purpose |
-|---------|---------|
-| `#### Summary` | Collection totals by source, dedup stats |
-| `#### Stats` | Work-buffer breakdown by type |
-| `#### Priority Attack Surfaces` | Ranked triage clusters — the key deliverable |
-| `#### Coverage Gaps` | Which sources failed and why |
-| `#### Intelligence` | Extracted attack signals |
-| `#### Recommended Phase 4 Ordering` | Risk-informed dispatch order |
+Record high-signal discoveries with `vigil assess record-surface <type> <target> <source>
+--rationale "<why>" --status discovered`. Record decisive triage evidence (for example an API key
+with a real value in a URL parameter) with `vigil assess finding record surface-collector
+<finding-json-file> --agent-id <your-agent_id>`. Finish with `vigil assess work-buffer stats` and
+a ranked priority manifest of clusters, each with its triage signals, dispatch order and suggested
+vuln-class skill.
 
 ## Extended Resources
 
-- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
-- `agent/references/tools/recon/gau.md` — gau CLI reference and pipeline patterns
-- `agent/references/tools/recon/httpx.md` — HTTP probing reference for URL validation
-- `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
-- `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
-- `agent/skills/gau-triage/SKILL.md` — deeper follow-up pass for large historical URL corpora: cluster review on top of inline-classified buffer, httpx body capture, and trufflehog secret scan
+- `agent/references/tools/recon/katana.md`, `gau.md`, `httpx.md`: tool doctrine
+- `agent/references/runtime-guides/browser-semantic-evidence.md`: browser evidence contract

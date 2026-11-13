@@ -9,343 +9,46 @@ vuln_class: secrets-exposure, source-disclosure
 
 ## When to Activate
 
-- API responses contain user data (JSON/XML with user objects, lists, profiles)
-- Source code analysis reveals hardcoded data or config files
-- File downloads (CSV, SQL dumps, backups, logs) need PII triage
-- SQLi extraction results need data classification
-- HTTP headers or cookies contain suspicious encoded data
-- Any endpoint returns more data fields than expected
-
-## Tools
-
-`grep`, `rg` (ripgrep), `jq`, `curl`, `base64`, `python3`
-
-## Detection Methodology
-
-### Phase 1: Automated Pattern Scan
-
-Run against any text corpus (API response, source file, database dump, downloaded file):
-
-```bash
-# Save target content to a temp file first, then scan all patterns in one pass
-TARGET_FILE=$(mktemp)
-trap 'rm -f "$TARGET_FILE"' EXIT
-
-# === IDENTITY DOCUMENTS ===
-
-# China — 18-digit ID card (with checksum digit X)
-rg -oN '[1-9]\d{5}(19|20)\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\d|3[01])\d{3}[\dXx]' "$TARGET_FILE"
-
-# US — Social Security Number
-rg -oN '\b\d{3}-\d{2}-\d{4}\b' "$TARGET_FILE"
-
-# UK — National Insurance Number
-rg -oN '\b[A-CEGHJ-PR-TW-Z]{2}\d{6}[A-D]\b' "$TARGET_FILE"
-
-# Japan — My Number (12 digits)
-rg -oN '\b\d{12}\b' "$TARGET_FILE"
-
-# South Korea — Resident Registration Number
-rg -oN '\b\d{6}-[1-4]\d{6}\b' "$TARGET_FILE"
-
-# India — Aadhaar (12 digits, starts with 2-9)
-rg -oN '\b[2-9]\d{3}\s?\d{4}\s?\d{4}\b' "$TARGET_FILE"
-
-# EU/International — Passport (common formats)
-rg -oN '\b[A-Z]{1,2}\d{6,9}\b' "$TARGET_FILE"
-
-# Brazil — CPF
-rg -oN '\b\d{3}\.\d{3}\.\d{3}-\d{2}\b' "$TARGET_FILE"
-
-# Germany — Personalausweis
-rg -oN '\b[CFGHJKLMNPRTVWXYZ0-9]{9}\b' "$TARGET_FILE"
-
-# === FINANCIAL ===
-
-# Credit card numbers (13-19 digits, common prefixes)
-rg -oN '\b(?:4\d{3}|5[1-5]\d{2}|3[47]\d{2}|6(?:011|5\d{2}))[- ]?\d{4}[- ]?\d{4}[- ]?\d{1,7}\b' "$TARGET_FILE"
-
-# IBAN (international bank account)
-rg -oN '\b[A-Z]{2}\d{2}[A-Z0-9]{4}\d{7}([A-Z0-9]?){0,16}\b' "$TARGET_FILE"
-
-# China — Bank card (16-19 digits, starts with 62)
-rg -oN '\b62\d{14,17}\b' "$TARGET_FILE"
-
-# Bitcoin address
-rg -oN '\b[13][a-km-zA-HJ-NP-Z1-9]{25,34}\b' "$TARGET_FILE"
-rg -oN '\bbc1[a-zA-HJ-NP-Z0-9]{25,90}\b' "$TARGET_FILE"
-
-# === CONTACT ===
-
-# Email
-rg -oN '\b[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}\b' "$TARGET_FILE"
-
-# Phone — international with country code
-rg -oN '\+\d{1,3}[-.\s]?\(?\d{1,4}\)?[-.\s]?\d{1,4}[-.\s]?\d{1,9}' "$TARGET_FILE"
-
-# Phone — China mobile (11 digits starting with 1)
-rg -oN '\b1[3-9]\d{9}\b' "$TARGET_FILE"
-
-# Phone — US (10 digits)
-rg -oN '\b\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4}\b' "$TARGET_FILE"
-
-# Phone — Japan
-rg -oN '\b0[789]0-\d{4}-\d{4}\b' "$TARGET_FILE"
-
-# Physical address patterns (street number + name)
-rg -oN '\b\d{1,5}\s[A-Z][a-z]+\s(St|Ave|Rd|Blvd|Dr|Ln|Ct|Way|Pl)\b' "$TARGET_FILE"
-
-# === CREDENTIALS & SECRETS ===
-
-# API keys (high entropy strings)
-rg -oN '(?i)(api[_-]?key|apikey|api[_-]?secret|access[_-]?key)["\s:=]+["\x27]?[A-Za-z0-9/+=_-]{20,}' "$TARGET_FILE"
-
-# AWS keys
-rg -oN '\bAKIA[A-Z0-9]{16}\b' "$TARGET_FILE"
-rg -oN '(?i)(aws[_-]?secret|secret[_-]?key)["\s:=]+["\x27]?[A-Za-z0-9/+=]{40}' "$TARGET_FILE"
-
-# Azure / GCP
-rg -oN '(?i)(azure|subscription)[_-]?(id|key|secret|token)["\s:=]+["\x27]?[A-Za-z0-9/+=_-]{20,}' "$TARGET_FILE"
-rg -oN '\bAIza[A-Za-z0-9_-]{35}\b' "$TARGET_FILE"
-
-# JWT tokens
-rg -oN '\beyJ[A-Za-z0-9_-]+\.eyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+' "$TARGET_FILE"
-
-# Private keys
-rg -oN '-----BEGIN (RSA |EC |DSA |OPENSSH )?PRIVATE KEY-----' "$TARGET_FILE"
-
-# Generic password patterns
-rg -oN '(?i)(password|passwd|pwd|pass)["\s:=]+["\x27]?[^\s"'\'']{4,}' "$TARGET_FILE"
-
-# Bearer tokens
-rg -oN '(?i)bearer\s+[A-Za-z0-9_.-]{20,}' "$TARGET_FILE"
-
-# Database connection strings
-rg -oN '(?i)(mysql|postgres|mongodb|redis|mssql)://[^\s"<>]+' "$TARGET_FILE"
-
-# Webhook URLs (Slack, Discord, etc)
-rg -oN 'https://hooks\.(slack|discord)\.com/[^\s"<>]+' "$TARGET_FILE"
-
-# === CORPORATE INFRASTRUCTURE ===
-
-# Internal IPs (RFC1918)
-rg -oN '\b(10\.\d{1,3}\.\d{1,3}\.\d{1,3}|172\.(1[6-9]|2\d|3[01])\.\d{1,3}\.\d{1,3}|192\.168\.\d{1,3}\.\d{1,3})\b' "$TARGET_FILE"
-
-# Internal hostnames
-rg -oN '(?i)\b[a-z0-9-]+\.(internal|local|corp|intranet|private|lan)\b' "$TARGET_FILE"
-
-# AWS Account ID (12 digits)
-rg -oN '\b\d{12}\b' "$TARGET_FILE"
-
-# S3 bucket names
-rg -oN '(?i)(s3://|s3\.amazonaws\.com/|\.s3\.)[a-z0-9.-]+' "$TARGET_FILE"
-
-# Docker registry
-rg -oN '(?i)\b[a-z0-9.-]+\.(azurecr\.io|gcr\.io|ecr\.[a-z-]+\.amazonaws\.com)/[^\s"]+' "$TARGET_FILE"
-
-# === MEDICAL (HIPAA) ===
-
-# ICD codes (diagnosis)
-rg -oN '\b[A-Z]\d{2}(\.\d{1,4})?\b' "$TARGET_FILE"
-
-# US Medicare/Medicaid ID
-rg -oN '\b\d{10}[A-Z]\b' "$TARGET_FILE"
-
-# DEA number (prescriber)
-rg -oN '\b[ABCDFGHMJKLPT][A-Z9]\d{7}\b' "$TARGET_FILE"
-```
-
-### Phase 2: JSON Field Name Analysis
-
-For API responses, scan field names for sensitive data indicators:
-
-```bash
-# Extract all JSON keys and check against sensitive patterns
-echo "$RESPONSE" | jq -r '[paths(scalars)] | .[] | join(".")' | \
-  rg -i '(ssn|social.?security|tax.?id|national.?id|identity|passport|license|permit|
-          card.?num|cvv|expir|account.?num|routing|iban|swift|
-          password|secret|token|key|hash|salt|credential|
-          phone|mobile|cell|fax|tel|
-          email|mail|
-          birth|dob|age|gender|sex|race|ethnic|religion|
-          salary|income|wage|compensation|
-          address|street|city|zip|postal|
-          diagnosis|medical|health|prescription|allergy|blood|
-          biometric|fingerprint|face.?id|iris|
-          employee.?id|staff.?id|badge|department|manager|
-          customer.?id|member.?id|subscriber|
-          latitude|longitude|geo|location|ip.?addr)'
-```
-
-### Phase 3: HTTP Header & Cookie Inspection
-
-```bash
-# Check response headers for leaked info
-curl -sI "$TARGET_URL" | rg -i '(x-user|x-customer|x-employee|x-account|x-session|x-token|x-debug|x-internal|x-forwarded-for|x-real-ip)'
-
-# Decode and inspect cookies
-curl -s -c - "$TARGET_URL" | while read -r line; do
-  cookie_val=$(echo "$line" | awk '{print $NF}')
-  # Try base64 decode
-  decoded=$(echo "$cookie_val" | base64 -d 2>/dev/null)
-  if [ -n "$decoded" ]; then
-    echo "[cookie:b64] $decoded"
-  fi
-  # Try URL decode
-  echo "$cookie_val" | python3 -c "import sys,urllib.parse; print(urllib.parse.unquote(sys.stdin.read()))" 2>/dev/null
-done
-```
-
-### Phase 4: File Content Classification
-
-For downloaded files (CSV, SQL dumps, logs, backups):
-
-```bash
-# Detect file type and choose scan strategy
-FILE_TYPE=$(file -b "$DOWNLOADED_FILE")
-case "$FILE_TYPE" in
-  *CSV*|*comma*)
-    # Extract header row, check for PII column names
-    head -1 "$DOWNLOADED_FILE" | tr ',' '\n' | \
-      rg -i '(name|email|phone|ssn|address|dob|birth|salary|card|account|password)'
-    ;;
-  *SQL*)
-    # Look for INSERT statements with PII patterns
-    rg -i 'INSERT INTO.*(user|customer|employee|patient|member)' "$DOWNLOADED_FILE" | head -5
-    # Look for CREATE TABLE with sensitive columns
-    rg -i 'CREATE TABLE' "$DOWNLOADED_FILE" -A 20 | \
-      rg -i '(ssn|password|phone|email|address|salary|card_num|dob|birth)'
-    ;;
-  *JSON*)
-    # Run Phase 2 field name analysis
-    jq -r '[paths(scalars)] | .[] | join(".")' "$DOWNLOADED_FILE" | \
-      rg -i '(ssn|password|phone|email|address|salary|card|birth|token|secret)'
-    ;;
-  *XML*|*HTML*)
-    rg -i '(<password|<ssn|<email|<phone|<address|<credit|<token|<secret)' "$DOWNLOADED_FILE"
-    ;;
-esac
-```
-
-### Phase 5: Database Extract Classification
-
-After SQLi extraction, classify the data:
-
-```bash
-# For each extracted column, sample values and detect type
-# Run Phase 1 patterns against extracted data
-# Also scan for:
-
-# MD5 hashes (likely password hashes)
-rg -oN '\b[a-f0-9]{32}\b' "$EXTRACT_FILE"
-
-# SHA-256 hashes
-rg -oN '\b[a-f0-9]{64}\b' "$EXTRACT_FILE"
-
-# bcrypt hashes
-rg -oN '\$2[aby]?\$\d{2}\$[./A-Za-z0-9]{53}' "$EXTRACT_FILE"
-
-# Base64-encoded blobs (may contain PII)
-rg -oN '\b[A-Za-z0-9+/]{40,}={0,2}\b' "$EXTRACT_FILE"
-```
-
-## Luhn Checksum Validation
-
-For suspected credit card numbers, validate before reporting:
-
-```bash
-# Python one-liner for Luhn validation
-python3 -c "
-import sys
-n = sys.argv[1].replace('-','').replace(' ','')
-if not n.isdigit(): sys.exit(1)
-digits = [int(d) for d in n]
-odd_digits = digits[-1::-2]
-even_digits = digits[-2::-2]
-total = sum(odd_digits) + sum(sum(divmod(2*d, 10)) for d in even_digits)
-sys.exit(0 if total % 10 == 0 else 1)
-" "$CARD_NUMBER" && echo "VALID" || echo "INVALID"
-```
-
-## Severity Classification
-
-| Data Type | Severity | Rationale |
-|-----------|----------|-----------|
-| Credentials (passwords, keys, tokens) | CRITICAL | Direct system access |
-| Credit card / bank account | CRITICAL | Financial fraud |
-| Identity documents (SSN, national ID, passport) | CRITICAL | Identity theft |
-| Private keys / certificates | CRITICAL | Infrastructure compromise |
-| Medical records (HIPAA) | HIGH | Regulatory + personal harm |
-| Database connection strings | HIGH | Infrastructure access |
-| Internal IPs / hostnames | HIGH | Lateral movement |
-| Phone numbers + email | MEDIUM | Social engineering |
-| Physical addresses | MEDIUM | Privacy violation |
-| Employee IDs / org structure | MEDIUM | Internal reconnaissance |
-| Names / usernames | LOW | Context for other findings |
-| Gender / age / preferences | LOW | Privacy concern |
-
-## Output Format
-
-When PII or sensitive data is detected, report as:
-
-```markdown
-#### Sensitive Data Detected
-| Type | Value | Location | Severity | Count |
-|------|-------|----------|----------|-------|
-| Credit Card (Visa) | 4532015112831234 | /api/Users response | CRITICAL | 3 |
-| Email Address | alice@example.com | /rest/memories | MEDIUM | 42 |
-| Password Hash (MD5) | 0192023a7bbd73250516f069df18b500 | SQLi extraction | CRITICAL | 42 |
-| Internal IP | 10.0.4.17 | JS config object | HIGH | 2 |
-| AWS Key | AKIAIOSFODNN7EXAMPLE | .env in FTP backup | CRITICAL | 1 |
-```
-
-Record the detected value as evidence — it is self-owned local working state (see
-`agent/shared-constraints.md`, "Credentials and Local State Are Self-Owned"). Published reports
-preserve those exact values (`agent/references/submission-format.md`).
-
-## Priority Order
-
-1. Credentials and keys (immediate access risk)
-2. Financial data with valid Luhn (provable exposure)
-3. Identity documents (regulatory and legal exposure)
-4. Infrastructure details (attack surface expansion)
-5. Medical / biometric data (compliance risk)
-6. Contact information in bulk (social engineering enabler)
-7. Individual PII fields (privacy concern)
-
-## Integration with Backend Intel Tables
-
-Detected PII feeds into the backend intel tables via `vigil assess intel record <type> <json-file>`:
-- Email addresses → `intel record email` (intel_emails)
-- People names + roles → `intel record person` (intel_people)
-- Internal IPs / domains → `intel record domain` (intel_domains, use the right `kind`: `subdomain`/`ip`/`asn`/...)
-- Credentials → `vigil assess post credentials <credential-json-file>` (assessment_credentials — NOT intel record; credentials live in the assessment domain with their own schema)
-- Bulk PII exposure → durable finding via `vigil assess finding record`
-
-## Cryptographic Weakness Checks
-
-### Insecure Randomness
-- [ ] Collect multiple session tokens and analyze for sequential patterns
-- [ ] Check reset tokens for predictability: timestamp-based, sequential, short length
-- [ ] Test if CSRF tokens are reusable or predictable
-- [ ] Verify OTP/verification codes have sufficient entropy (6+ digits, not sequential)
-- [ ] Check UUID versions in API responses — UUIDv1 contains timestamp and MAC address
-
-### Weak Password Hashing
-- [ ] If password hashes are exposed, identify the algorithm (MD5, SHA1, SHA256, bcrypt, scrypt, argon2)
-- [ ] Check for unsalted hashes — identical passwords produce identical hashes
-- [ ] Verify bcrypt cost factor is >= 12 (if observable from timing or source; 10 is absolute minimum)
-- [ ] Check for reversible encryption used instead of hashing for passwords
-- [ ] Look for custom/homegrown hashing schemes in source code
-
-### Key Management
-- [ ] Check for exposed key material: `/keys/`, `/certs/`, `/.ssh/`
-- [ ] Look for JWT secrets in source code or configuration files
-- [ ] Check if the same key is used for multiple purposes (signing + encryption)
-- [ ] Verify key rotation — are old keys still accepted?
-
-## Extended Resources
-
-- `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints and metadata paths
-- `agent/skills/gau-triage/SKILL.md` — pipeline-driven bulk scanning across large historical URL corpora (use this skill when scanning a single response or bundle; use gau-triage when you have hundreds of stored response bodies to scan with `trufflehog`)
-- `agent/references/tools/recon/trufflehog.md` — TruffleHog v3 CLI for structured secret detection with 800+ detectors
+- API responses carry user objects or more fields than the UI uses; source or config files may
+  hold hardcoded data; downloaded files (CSV, SQL dumps, backups, logs) or SQLi extraction output
+  need classifying; headers or cookies carry encoded data.
+
+Classification runs on the local copy of captured data, not as target traffic. One response or
+bundle belongs here; hundreds of stored bodies go through `agent/skills/gau-triage/SKILL.md`.
+
+## Method
+
+1. **Secrets first:** `trufflehog` (800+ detectors, verification; `agent/references/tools/recon/trufflehog.md`)
+   beats hand regex for keys, tokens, connection strings and webhooks.
+2. **Typed PII and infrastructure identifiers:** the regex catalogue in
+   `agent/references/payloads/pii-regex-catalogue.md` (national IDs, financial, contact,
+   infrastructure, medical); load it when classifying a corpus by data type. Broad patterns are
+   candidates until context and a check digit confirm them.
+3. **JSON responses:** scan key paths rather than values; it is faster and catches fields the
+   UI never shows:
+   `jq -r '[paths(scalars)] | .[] | join(".")' resp.json | rg -i 'ssn|national.?id|passport|card|cvv|iban|password|secret|token|hash|salt|phone|email|birth|dob|salary|address|diagnosis|biometric|employee.?id|latitude|ip.?addr'`
+4. **Headers and cookies:** base64/URL-decode cookie and custom-header values (`x-user`,
+   `x-account`, `x-debug`, `x-internal`).
+5. **Files and dumps:** classify by structure before rows (CSV header, `CREATE TABLE` columns,
+   JSON key paths, XML element names); triage hash shapes (32/64-hex, `$2[aby]$` bcrypt) to say
+   what was exposed.
+6. **Cards:** Luhn-validate before claiming card exposure; an invalid number is test data.
+
+Priority when several types appear: credentials and keys, Luhn-valid financial data, identity
+documents, infrastructure details, medical/biometric data, bulk contact data, individual fields.
+
+## Recording
+
+- Evidence keeps the detected values verbatim (ADR 0019; `agent/shared-constraints.md`
+  "Credentials and Local State Are Self-Owned"); one minimal sample proves exposure
+  (`agent/rules/hunting.md` §10).
+- Emails → `vigil assess intel record email`; people and roles → `intel record person`; internal
+  IPs/domains → `intel record domain` (with the right `kind`); credentials →
+  `vigil assess post credentials <file>` (the assessment credential store, not intel); exposure
+  of other users' data → `vigil assess finding record`, severity per
+  `agent/references/finding-fp-and-severity-gate.md` (internal IPs alone are informational).
+- Weak randomness, hashing or key management seen in the data go to the owning class
+  (auth-bypass for session/reset tokens, jwt-testing for signing keys). The checks worth naming:
+  exposed key material (paths in `agent/references/payloads/info-disclosure-probes.md`), old or
+  rotated keys still accepted, one key used for both signing and encryption, and an exposed
+  bcrypt hash whose cost factor is below 12.

@@ -12,10 +12,10 @@ category: Finding Verification Gates
 > calculator cannot: *would a real attacker actually achieve meaningful harm here, and is the
 > data/impact what we claim?* Score what is **proven and meaningful**, not what fits a band.
 
-**Why this exists.** Findings here have been filed High/near-Critical and then downgraded to Medium
-by an independent triager — the calculator produced a number, but the proven real-world impact was
-lower (a "read" that exposed no PII because no read endpoint existed; a "file attach" that was an
-orphan write never proven to land on a real record). This gate catches that before it ships.
+**Why this exists.** Findings filed High or near-Critical have been downgraded to Medium by an
+independent triager because the proven impact was lower than the calculator's number: a "read"
+that exposed no PII because no read endpoint existed, or a "file attach" that was an orphan write
+never shown to land on a real record.
 
 **Applicability.** The catalog below is written against data-exposure and write-impact findings, but
 the gate is not limited to them: it applies to **any finding that skips the Phase-4 Ideator-vs-Tracer
@@ -41,16 +41,14 @@ consumer; missing consumer/deployment evidence limits the proven actor, asset, C
 severity rather than erasing the defect. In C5, "attacker" means the supported caller/consumer
 threat model actually evidenced; do not invent remote or cross-tenant reach from an unknown host.
 
-This file is the codified home of the recurring FP/overclaim catalog — when a new overclaim pattern
-recurs across engagements, land it here (as a kill/downgrade trigger below or a per-metric C-check),
-so the verifier and the pre-submission blind gate share one bar. The late, zero-context counterpart
-that re-applies these same patterns just before submission is `agent/skills/blind-triage/SKILL.md`.
+`agent/skills/blind-triage/SKILL.md` re-applies the same catalog zero-context just before
+submission, so the verifier and the blind gate hold one bar.
 
 Each check yields **PASS** (cite evidence at the bar a KILL would), **DOWNGRADE** (lower the
 metric/severity, with the reason), **KILL** (false positive — don't record), or **GAP** (cannot
-resolve → blocks; do not default to PASS). It maps onto the verifier's existing
-`PASS / KILL / DOWNGRADE / UPGRADE` decision framework. C5, C6, and C7 are the net-new core; the rest
-cross-references the always-loaded rules rather than restating them.
+resolve → blocks; do not default to PASS). It maps onto the verifier's
+`PASS / KILL / DOWNGRADE / UPGRADE` decision framework. C1–C4 cross-reference the always-loaded
+rules rather than restating them.
 
 ## The checks
 
@@ -73,8 +71,8 @@ cross-references the always-loaded rules rather than restating them.
   it. A "High IDOR" whose ids are only knowable to an admin is not a High. (See `reporting.md §3`
   Precondition analysis + `hunting.md §3`; id structure/prediction lives in
   `agent/references/access-control/idor-identifier-prediction.md`.)
-- **C5 — Does the CVSS reflect real-world attacker impact (not inflated)?** *(net-new — extends the
-  band-level severity-CVSS alignment audit (`agent/operator-core.md` "Mandatory Phase-Exit Passes") to a per-metric one.)* Recompute the vector and confirm it
+- **C5 — Does the CVSS reflect real-world attacker impact (not inflated)?** *(extends the
+  band-level severity↔CVSS alignment check to each metric.)* Recompute the vector and confirm it
   equals the stated score (a vector that does not compute to its score is an automatic blocker).
   Justify each base metric against the proof:
   - `S:C` only if the vulnerable component's authority differs from the impacted component's
@@ -88,7 +86,7 @@ cross-references the always-loaded rules rather than restating them.
   - `PR:N` / `UI:N` / `AC:L` must match the actual attacker steps.
   - **Gut-check:** *"In one sentence, what does a real attacker walk away with?"* If the sentence is
     weaker than the score, the score is wrong.
-- **C6 — Is the impact on a REAL object proven, or just an orphan / unvalidated write?** *(net-new.)*
+- **C6 — Is the impact on a REAL object proven, or just an orphan / unvalidated write?**
   A write/read that returns `success` for nonexistent/garbage ids (`99999999`, `-1`, `abcdefgh`) is
   not validating the target — you proved you can create an unlinked/orphan artifact, not that you
   affected a victim's object. Require a **read-back or observable side effect on a real object** (the
@@ -96,7 +94,7 @@ cross-references the always-loaded rules rather than restating them.
   retrievable). No read-back **and** success-for-nonexistent-ids ⇒ real-object impact is unproven ⇒
   `I` is not `H`; the finding may be only storage pollution / informational.
 - **C7 — Is this by-design / documented / precedented, or a genuine boundary break?**
-  *(net-new — first-class gate item; run before scoring, not after.)* Answer explicitly:
+  Run it before scoring, not after. Answer explicitly:
   - **Is this documented or intended behavior?** Check the vendor's own docs and any published
     security/trust-boundary statement (a repo's `SECURITY.md`, a platform's trust-and-safety page)
     for the feature the finding touches. If the docs describe the exact behavior observed, the
@@ -214,21 +212,19 @@ context), the `remediation`, the `steps_to_reproduce` with its
 `repro_runs`, and — when C7 was material to the disposition — the exact vendor doc URL/line cited
 and, if found, the precedent disclosure it was compared against. See the "Report-ready story gate" in `agent/agents/vulnerability-analyst.md`.
 
-`steps_to_reproduce` is written from what you actually ran, with concrete values, and each step
-carries the `command-run` id behind it in `repro_runs` — **a step with no run id behind it was
-imagined, not executed.** The report-writer cannot run probes, so an unrecorded reproduction is one
-it can only infer; those concrete values remain verbatim through submission.
+`steps_to_reproduce` and `repro_runs` follow `agent/references/runtime-guides/web-finding-recording.md`
+(on both tracks): concrete values, a run id behind every step, kept verbatim through submission. A
+step with no run id behind it was imagined, not executed.
 
 ## Related
 
-- `agent/rules/hunting.md` — §2 (existence-vs-exploitation), §3 (precondition equivalence)
-- `agent/operator-core.md` — "Mandatory Phase-Exit Passes" (severity-CVSS alignment audit)
-- `agent/rules/reporting.md` — §2 (proof), §3 (severity follows impact + precondition analysis; also the home of the info-disclosure / stack-trace "informational unless it enables a proven higher-impact attack" rule), §4 (non-public data), §5 (distinct identities)
-- `agent/skills/osint-recon/SKILL.md` — the CVE/disclosure-history research C7's precedent question
-  draws on; also the role best placed to build a per-capability vendor-docs boundary map (docs SHOULD
-  vs. documented BOUNDARY, cited by URL/line) ahead of scoring a cluster of related findings
-- `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission blind gate that re-applies the same overclaim catalog on the submission bytes before publish (this gate is the in-context Phase-4 version)
-- `agent/agents/vulnerability-analyst.md` — the 8-Question Gate, Chain-Only List, Fast Kill Signals, Report-ready story gate
-- `agent/skills/code-finding-verification/SKILL.md` — the code-side bug-EXISTENCE protocol (five-check: reachability, guards, build-config, feasibility, devil's advocate); it establishes that a source finding is real, then defers the severity-calibration half (C5/C7 + the `hunting.md §3` net-new test) to this gate
-- `agent/references/api-security/API01-broken-object-level-authz.md` — CWE taxonomy + BOLA/BOPLA/BFLA
-- `agent/references/access-control/idor-identifier-prediction.md` — id enumerability / prediction (C4)
+- `agent/rules/hunting.md` §2 (existence vs exploitation), §3 (precondition equivalence)
+- `agent/rules/reporting.md` §2 (proof) and §3 (severity follows impact; the informational rule)
+- `agent/rules/reporting.md` §4 (non-public data) and §5 (distinct identities)
+- `agent/skills/osint-recon/SKILL.md`: the CVE and disclosure-history research behind C7's
+  precedent question, and the role best placed to build a per-capability docs-boundary map
+- `agent/agents/vulnerability-analyst.md`: 8-Question Gate, Chain-Only List, Fast Kill Signals,
+  Report-ready story gate
+- `agent/skills/code-finding-verification/SKILL.md`: the code bug-existence protocol that defers
+  here for C5/C7 and the net-new test
+- `agent/references/access-control/idor-identifier-prediction.md`: id enumerability (C4)

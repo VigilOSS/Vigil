@@ -13,7 +13,7 @@ category: Disclosure & Reporting Formats
 **CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:H/I:H/A:N (8.1)
 
 **Run:** `python3 poc-ldap-injection.py`
-**Pass if:** every `[CONFIRMED]` line prints
+**Pass if:** the `plain_hijack` case prints `modify_password called on it`
 
 ---
 
@@ -33,11 +33,8 @@ An attacker with edit access to a shared credential record takes over any Active
 ```
 python3 poc-ldap-injection.py
 ```
-**Expect:** the PLAIN_HIJACK case resolves the administrator's DN and changes their password with no metacharacters. The two injection cases separately show unescaped metacharacters reaching the filter. Full output in Evidence.
-
-For end-to-end reproduction on a live AD environment:
-
-2. [attacker] Create a credential record with the AD rotation plugin, a valid AD host, and valid bind credentials.
+**Expect:** the `plain_hijack` case resolves the administrator's DN and changes their password with no metacharacters. The two injection cases separately show unescaped metacharacters reaching the filter. Full output in Evidence.
+2. [attacker] On a live AD environment, create a credential record with the AD rotation plugin, a valid AD host, and valid bind credentials.
 3. [attacker] Set the login field to `DOMAIN\administrator` — a plain, valid account name with no LDAP syntax in it.
 4. [server] Run the scheduled rotation.
 **Expect:** the administrator's password changes and the new value is stored in the vault record, with no metacharacter ever sent.
@@ -45,23 +42,18 @@ For end-to-end reproduction on a live AD environment:
 ### Evidence
 
 ```
---- PLAIN_HIJACK: no metacharacters, no injection -- just a name you don't own ---
-  Login field value:  DOMAIN\administrator
-  CAPTURED filter:    (&(objectClass=user)(sAMAccountName=administrator))     <-- ordinary, well-formed filter
-  [CONFIRMED] Resolves to admin DN; modify_password changes admin password    <-- ATO, zero LDAP syntax used
-
---- WILDCARD_ENUM: the same field is also injectable -- enumerate ALL users ---
-  Login field value:  DOMAIN\*
-  CAPTURED filter:    (&(objectClass=user)(sAMAccountName=*))       <-- rotate() output
-  [CONFIRMED] Returns every user object in the domain instead of one
-
---- BLIND_BOOLEAN: boolean-based blind extraction of email prefix ---
-  Login field value:  DOMAIN\administrator)(mail=admin@*
-  CAPTURED filter:    (&(objectClass=user)(sAMAccountName=administrator)(mail=admin@*))
-  [CONFIRMED] Binary oracle: result count reveals if email starts with admin@
+case=plain_hijack   login=DOMAIN\administrator
+  filter=(&(objectClass=user)(sAMAccountName=administrator))     <-- ordinary, well-formed filter
+  result=resolves to the administrator DN; modify_password called on it   <-- ATO, zero LDAP syntax used
+case=wildcard_enum  login=DOMAIN\*
+  filter=(&(objectClass=user)(sAMAccountName=*))                 <-- rotate() output
+  result=matches every user object in the domain instead of one
+case=blind_boolean  login=DOMAIN\administrator)(mail=admin@*
+  filter=(&(objectClass=user)(sAMAccountName=administrator)(mail=admin@*))
+  result=match count reveals whether the email starts with admin@
 ```
 
-All filters captured from the installed `rotate()` function. PLAIN_HIJACK proves the takeover needs no injection: the plugin never checks the resolved account against what the record is scoped to manage. `escape_filter_chars()` from `ldap3` is already used elsewhere in the same codebase but wasn't applied here. That closes WILDCARD_ENUM and BLIND_BOOLEAN, but does nothing for PLAIN_HIJACK: `administrator` has no character in it to escape.
+All filters captured from the installed `rotate()` function. `plain_hijack` proves the takeover needs no injection: the plugin never checks the resolved account against what the record is scoped to manage. `escape_filter_chars()` from `ldap3` is already used elsewhere in the same codebase but wasn't applied here. That closes `wildcard_enum` and `blind_boolean`, but does nothing for `plain_hijack`: `administrator` has no character in it to escape.
 
 ### Impact
 

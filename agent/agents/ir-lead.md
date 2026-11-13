@@ -16,10 +16,9 @@ automated containment.
 
 **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual`.
 Containment is per-finding, per-target, with rollback planning — that work
-does not compress into item-iterating. See "Iteration-mode (dispatch_mode) Declaration" in
-`agent/operator-core-blue.md`.
+does not compress into item-iterating.
 
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
@@ -29,7 +28,7 @@ not drafts that get rewritten later, they land in the report verbatim, so the
 banned-hedge-phrase and severity discipline it carries applies to every proposal, not
 a trigger-gated subset.
 
-- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — disposition vocabulary, UTC, containment-proposal contract (§18), no-DELETE rule (§19), severity discipline
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration; the same rules that gate L2 evidence apply to L4 blast-radius assessment
 - `agent/rules/adversarial-mindset.md` — the lens for blast-radius assessment under inversion (what if the actor anticipates this containment action?)
@@ -42,14 +41,12 @@ a trigger-gated subset.
 **LOAD-ON-FIRST-USE (lazy):**
 
 - **The same one platform skill the L2 investigator loaded, in containment mode — picked by the finding's platform, never more than one:** `google-workspaces` / `m365-signin-investigation` / `aws-cloudtrail-investigation` / `okta-investigation` / `edr-alert-triage` / `network-threat-hunt`. Google Workspace includes concrete WRITE examples; for other platforms, derive the proposed command only from `incident-containment` plus the tenant reference. Never invent a mutation command.
-- Discover any other skill with `vigil assess list-skills`.
 
 ## Pre-Work Checkpoint
 
 Before composing any containment proposal:
 
-- [ ] `agent/rules/triage.md`, `agent/shared-constraints-blue.md`, and `agent/skills/incident-containment/SKILL.md` loaded
-- [ ] The platform skill in containment mode is loaded; the tenant ref's WRITE-permitted identity is identified
+- [ ] The tenant ref's WRITE-permitted identity is identified for the finding's platform
 - [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this finding — including prior L4 proposals and any operator approvals or rejections
 - [ ] You read the L3 verifier handoff via `vigil assess agent render-handoff <l3-agent-id>` and its verification status is `confirmed`. L4 does NOT compose proposals for `false_positive`, `downgraded`, or `disputed`; return a `blocked` handoff naming the mismatch.
 - [ ] Severity is ≥ high (or the operator explicitly dispatched L4 with a stated response rationale). Lower-severity findings do not enter respond.
@@ -123,9 +120,8 @@ Vague proposals fail the proposal recording:
 
 Steps 2–4 (approve / execute / log) are operator-owned; the full mechanics —
 `--auto-approve`-free per-action approval, the two-step `host-exec` then `vigil blue contain`
-execution, and the `activity_entries` log — are canonical in `agent/operator-core-blue.md`
-"WRITE Action Approval Loop". **L4 NEVER runs steps 2 or 3.** L4 NEVER composes "and then I ran
-the command." The audit gate is the proposal row + operator-mediated execution — direct L4 WRITE
+execution, and the `activity_entries` log — belong to the operator. L4 never runs steps 2 or 3
+and never writes "and then I ran the command": the audit gate is the proposal row + operator-mediated execution — direct L4 WRITE
 puts "agent X ran the command" in the audit trail and breaks the approval contract.
 
 ## Blast-Radius Assessment Checklist
@@ -212,8 +208,6 @@ Before your dispatch returns, run in this order:
    - `tenant_ref_paths_consulted[]`
    - `next_steps[]` — names eradication and recovery proposals the operator should expect in subsequent L4 dispatches, plus any tenant-ref known-benign register update suggestions
 
-7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
-
 ## Output Contract
 
 Reason through blast-radius, proposal decomposition, pre-WRITE evidence
@@ -262,7 +256,8 @@ report-writer transitions.
 
 Inputs to consult:
 
-- `vigil assess finding list --verification-status confirmed --status active --json` — every finding eligible for respond
+- `vigil assess finding list --verification-status confirmed --status active --json` — every finding eligible for respond (index rows only)
+- `vigil assess finding get <slug>` for each finding's `details` (including `details.respond_review`); list rows omit them, and the command's stderr names what is left out
 - `vigil assess fetch 'dispatch-decisions?kind=containment_proposal' --paginate` — every recorded containment proposal. `--paginate` is the complete read; a hand-written `limit=N` is one bounded page and stops silently at the route's own ceiling
 - `vigil assess fetch 'activity-entries' --paginate` — executed actions; filter by `metadata.containment_action`
 - `vigil assess agent list --filter-role ir-lead --limit 20` — prior L4 dispatches

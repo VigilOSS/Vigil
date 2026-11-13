@@ -113,28 +113,11 @@ Vague titles that fail this formula:
 
 Every claim in the report traces back to a recorded finding, backend state, or confirmed evidence reference — the report reflects proved state, not memory or inference.
 
-## 10. Section length ceilings — internal `report.md` only
+## 10. Section length ceilings
 
-Reports are for humans who scan fast, and these are ceilings, not targets: a Description that uses
-one sentence because one sentence carries the fact is better written than one that pads out to four.
-Hitting the ceiling on every finding is a sign of padding, not thoroughness.
-
-| Section | Ceiling |
-|---------|---------|
-| Description | 2-4 sentences |
-| Steps to Reproduce | Numbered steps, one action per step, no narrative between steps. Each step that sends a request includes the request block and the relevant response excerpt (truncated to 5-15 lines) inline — proof lives inside the step that produces it. |
-| Impact | 1-2 sentences |
-| Remediation | 1-2 sentences |
-
-If you need more space, the finding is probably two findings. Split it.
-
-The executive summary is one page maximum. If it does not fit on one page, cut words, not font size.
-
-**External submissions have their own, separate ceiling table.** This table governs the internal
-`report.md`'s `Description`/`Steps to Reproduce`/`Impact`/`Remediation` sections only.
-`agent/references/submission-format.md` "Section budgets" is the sole owner of ceilings for a
-submission's `Summary`/`Steps to Reproduce`/`Evidence`/`Attack Scenario`/`Impact`/`Remediation` — do
-not cross-apply either table to the other artifact.
+Each deliverable has one ceiling table: the internal `report.md` in the report-generation skill's
+"Section length ceilings", and an external submission in `agent/references/submission-format.md`
+"Section budgets". Neither table applies to the other artifact.
 
 ## 11. Language that signals confidence and precision
 
@@ -152,7 +135,7 @@ Name the actor, action, and observed result when they matter; use the register a
 
 **Request block:** Full HTTP request in a fenced code block immediately after the step instruction. Annotate injected payloads or manipulated parameters with inline comments if the critical part is not obvious.
 
-**Response block:** Immediately below the request (in an external submission the step's own outcome is a short `**Expect:**` line inside that step, and only proof the steps cannot show reaches Evidence — see "Placement" below), truncate to only the lines that prove the finding — Rule 10 above sets the internal `report.md` ceiling; `agent/references/submission-format.md` "Section budgets" sets the submission Evidence ceiling. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
+**Response block:** Immediately below the request (in an external submission the step's own outcome is a short `**Expect:**` line inside that step, and only proof the steps cannot show reaches Evidence — see "Placement" below), truncate to only the lines that prove the finding — Rule 10 names each deliverable's ceiling table. Bold or annotate the specific data that constitutes the proof — the leaked PII field, the unauthorized record, the injected output. 10 lines that show the proof beat 200 lines that bury it.
 
 **Highlighting:** Use `**bold**` or `← proof` / `<-- proof` annotations to draw the eye to the critical line in response blocks. A reviewer should find the proof in under 3 seconds.
 
@@ -160,7 +143,7 @@ Name the actor, action, and observed result when they matter; use the register a
 
 **Placement differs by format — do not mix them:**
 
-- **Internal `report.md` (legacy):** evidence lives inside the Steps to Reproduce step that produces it — no separate Evidence section. See "Report Structure (Legacy Internal Report)" in the report-generation skill.
+- **Internal `report.md`:** evidence lives inside the Steps to Reproduce step that produces it — no separate Evidence section. See "Report Structure (Internal Report — On-Demand Only)" in the report-generation skill.
 - **External submissions:** evidence lives in its own `### Evidence` section, separate from Steps to Reproduce — see `agent/references/submission-format.md` "Structure" and "Steps to Reproduce vs Evidence." A step's own outcome is inline in that step's `**Expect:**` line, not here — Evidence carries only proof the steps cannot show, so nothing in it is a second copy of what a step already proved (Rule 21).
 
 ## 14. Remediation must be specific
@@ -210,47 +193,9 @@ Common patterns that require consolidation:
 - Credential exposure as a direct consequence of an auth bypass on the same system
 - Multiple unauthenticated routes on the same API when the root cause is a single missing-auth control
 
-### Cross-finding dedup pass — pick a lead, flag dup-risk siblings (operator-run, not part of a per-finding dispatch)
-
-Consolidation (above) collapses findings into one. The other axis is **which findings a program
-will treat as duplicates of each other even when you file them separately.** Blind pre-submission
-triage cannot catch this: it judges one finding's bytes in isolation and never sees the cluster.
-The vulnerability hunt is per-surface and never sees it either. So before submitting two-or-more
-findings that share a root cause, run an explicit **cross-finding pass** over the whole submittable
-set:
-
-1. **Cluster by root cause** — group findings that share the same vulnerable control, component, or
-   endpoint family (not merely the same host). A shared *selector* — e.g. every handler trusting the
-   same client-supplied `userId`/`id`/`eps_sirp_id` — is a cluster signal.
-2. **Pick the lead** — the highest-impact finding in the cluster is the canonical submission and
-   carries the cluster's severity. A cross-user *write* leads a cross-user *read*; an RCE leads the
-   info-leak that enabled it.
-3. **Decide consolidate vs separate-with-framing** using the dup-risk heuristic:
-   - **Same endpoint family + same selector/object class → high dup risk.** Consolidate into the lead
-     as "root cause + all demonstrated impacts", or — if filing separately — expect a merge and frame
-     each sibling by its *distinct primitive* (the read is the *discovery/harvest* primitive; the
-     write is the *tampering* primitive) so the incremental value is explicit.
-   - **Different endpoint + different object + different authority/impact axis → low dup risk.** File
-     separately; a one-line cross-reference to the shared root is enough.
-4. **Record the decision** so it is not re-litigated: `finding link <sibling> --root-cause <lead>`
-   for the backend cluster, and state the lead-vs-sibling framing in each submission's dedup notes.
-   Pick `--effect` by a question step 3 did not ask — **would the same programmatic fix resolve
-   both?** Step 3 decided how many tickets to file; `--effect` states what the root *fix* retires,
-   and the two can part ways:
-   - **Distinct fixes → `eliminates_attack_path`**, the default, so the bare command above is
-     already this. The sibling survives the root fix as a standalone remediation item, so the
-     grouping costs nothing and disturbs no verdict. Use it even when step 3 said consolidate: a
-     cluster can be one ticket to the program and still two fixes in the code.
-   - **One fix → add `--effect eliminates_finding`.** Say it explicitly; the default does not.
-     Answer from where the fix would land — two endpoints missing the same check are one fix when
-     the check lives in shared code and two when it does not. The claim raises a claim review on a
-     confirmed or downgraded sibling, plus a `finding_claim_review_pending` report blocker, so
-     settle it with an independent `claim_equivalence` decision before the report.
-
-The failure mode this prevents: filing a P3 read and a P2 write on the same broken endpoint family as
-two independent tickets, then having the read dup-closed into the write — burning triage goodwill and
-a submission slot. One root cause, one lead; siblings either merge in or carry an explicit
-distinct-primitive justification.
+Choosing which findings in a cluster lead and which file separately is the operator's
+cross-finding pass at the start of `agent/phases/phase-8-report.md` step 8; a per-finding writer
+works from the resulting root-cause links rather than re-deciding them.
 
 ## 19. Keep internal sections out of external reports
 

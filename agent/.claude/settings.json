@@ -4,6 +4,18 @@
     "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "510000"
   },
   "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash|Write|Edit|MultiEdit|NotebookEdit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/application-read-only.sh\"; fi; if [ -f scripts/hooks/application-read-only.sh ]; then exec bash scripts/hooks/application-read-only.sh; fi; if [ -f agent/scripts/hooks/application-read-only.sh ]; then exec bash agent/scripts/hooks/application-read-only.sh; fi'",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
     "PostToolUse": [
       {
         "matcher": "Bash",
@@ -50,6 +62,18 @@
             "type": "command",
             "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/session-end.sh\"; fi; if [ -f scripts/hooks/session-end.sh ]; then exec bash scripts/hooks/session-end.sh; fi; if [ -f agent/scripts/hooks/session-end.sh ]; then exec bash agent/scripts/hooks/session-end.sh; fi'",
             "timeout": 10
+          }
+        ]
+      }
+    ],
+    "SessionStart": [
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/post-compact-resume.sh\"; fi; if [ -f scripts/hooks/post-compact-resume.sh ]; then exec bash scripts/hooks/post-compact-resume.sh; fi; if [ -f agent/scripts/hooks/post-compact-resume.sh ]; then exec bash agent/scripts/hooks/post-compact-resume.sh; fi'",
+            "timeout": 30
           }
         ]
       }

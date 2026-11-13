@@ -7,129 +7,61 @@ vuln_class: graphql-injection, bola
 
 # GraphQL Security Testing
 
-> **`vigil assess kali` audit flags:** use `--technique RECON` for introspection and schema discovery; when sending attack payloads via resolvers, switch to the matching vuln class (`SQLI` / `AUTH` / `IDOR` / `INFO-DISCLOSURE`).
-
 ## When to Activate
 
-- Application exposes a GraphQL endpoint (`/graphql`, `/gql`, `/api/graphql`)
-- Requests contain `query`, `mutation`, or `operationName` parameters
-- GraphQL Playground or GraphiQL interface discovered
+- A GraphQL endpoint (`/graphql`, `/gql`, `/api/graphql`, POST, GET or WebSocket subscription
+  transport), requests carrying `query`/`mutation`/`operationName`, or GraphiQL/Playground.
 
-## Tools
+`--technique GRAPHQL` for schema and resolver probes (credits `graphql-injection`); switch to the
+sink's class (`SQLI`, `IDOR`, `AUTH`, `SSRF`) when a resolver argument reaches that sink. Craft in
+any client, replay through `vigil assess kali exec … --intent … --phase consume-test --timeout <N>`.
 
-- `vigil assess kali exec -- curl ...` (all target-facing GraphQL requests must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for introspection, and the appropriate class (`SQLI`, `AUTH`, `IDOR`, `INFO-DISCLOSURE`) for payload probes)
-- Burp Suite Repeater / Altair GraphQL Client (use to craft requests, then replay via kali exec for audit pipeline coverage)
-- InQL (Burp extension for GraphQL)
-- graphql-voyager (schema visualization — host-side analysis)
-- BatchQL (batch query testing)
-- CrackQL (brute-force via GraphQL)
-- `vigil oob mint` / `vigil oob poll` — when a resolver argument reaches a downstream SQL/NoSQL/OS/SSRF sink, mint a nonce-tagged callback host (`vigil oob mint --client <name> --technique <t> --target-url <graphql-url> --param <arg>` binds the nonce under a running interactsh client's id and prints the exact host so poll can correlate; pass `--client <name>` when several clients run), embed the EXACT host it prints (`$OOB_HOST` — never hand-build a bare `<nonce>.oob...` host) in the string argument, then `vigil oob poll --client <name>` returns the matched probe<->callback pair (check readiness with `vigil oob status --json`; `vigil oob client logs` is raw infra debug, not correlation). Defer to the wired injection skills — `agent/skills/sqli-testing/SKILL.md`, `agent/skills/command-injection/SKILL.md`, `agent/skills/ssrf-testing/SKILL.md` — for the full mint→fire→poll loop on the matched sink.
+Payloads (endpoint discovery, introspection, partial `__type`, field suggestion, batching,
+DoS shapes): `agent/references/payloads/graphql-payloads.md`. Resolver
+authorization beyond `node(id:)` (Relay global-ID forging, alias/batch enumeration, mutation BOLA,
+GraphQL-over-WebSocket subscriptions): `agent/references/access-control/idor-modern-architectures.md`
+"GraphQL" — load it as soon as any resolver takes an ID.
 
 ## Methodology
 
-### 1. Endpoint Discovery
-
-- [ ] Common paths: `/graphql`, `/gql`, `/api/graphql`, `/graphql/console`
-- [ ] Check for GraphiQL / Playground: `/graphiql`, `/playground`
-- [ ] Look in JavaScript bundles for endpoint URLs
-- [ ] Test both GET and POST methods
-- [ ] Check WebSocket subscriptions: `ws://target/graphql`
-
-### 2. Introspection Query
-
-- [ ] Full schema dump:
-      ```graphql
-      { __schema { types { name fields { name type { name } } } } }
-      ```
-- [ ] Query types: `{ __schema { queryType { fields { name } } } }`
-- [ ] Mutation types: `{ __schema { mutationType { fields { name } } } }`
-- [ ] If introspection disabled, test partial: `{ __type(name: "User") { fields { name } } }`
-- [ ] Field suggestion: send typo, observe "Did you mean..." errors
-- [ ] If introspection fully disabled, use clairvoyance for field/type brute-forcing:
-      `clairvoyance -o schema.json -w /path/to/wordlist.txt -d https://target/graphql`
-
-### 3. Information Gathering
-
-- [ ] Enumerate all types, queries, mutations, subscriptions
-- [ ] Identify sensitive fields: password, token, secret, ssn, creditCard
-- [ ] Map relationships: User→Orders→Payments
-- [ ] Find hidden/internal queries not exposed in docs
-- [ ] Check for debug fields: `_debug`, `__internal`
-
-### 4. Authorization Testing
-
-- [ ] Query other users' data via relationships:
-      `{ user(id: "other-id") { email orders { total } } }`
-- [ ] Access admin-only mutations with user token
-- [ ] Test field-level access: can user query `user { role passwordHash }`?
-- [ ] Nested IDOR: `{ order(id: 1) { user { email } } }`
-- [ ] Remove or modify authorization header — test anonymous access
-
-### 5. Injection via GraphQL
-
-- [ ] SQLi in arguments: `{ user(name: "' OR 1=1--") { id } }`
-- [ ] NoSQL injection in filters
-- [ ] Variables injection: pass malicious input via `$variables`
-- [ ] Stored XSS through mutations that save user content
-
-### 6. Denial of Service
-
-- [ ] Deeply nested queries:
-      ```graphql
-      { user { friends { friends { friends { friends { name } } } } } }
-      ```
-- [ ] Circular relationships: exploit to consume server resources
-- [ ] Batch queries: send array of queries `[{query:...},{query:...},...]`
-- [ ] Alias-based amplification:
-      ```graphql
-      { a: user(id:1){name} b: user(id:2){name} ... z: user(id:26){name} }
-      ```
-- [ ] Test depth limit, complexity limit, rate limit
-- [ ] Fragment circular reference: `fragment A on User { friends { ...B } }` + `fragment B on User { friends { ...A } }` — causes infinite recursion
-- [ ] Unbounded pagination: `{ users(first: 1000000) { id name } }` — server may attempt to load all records
-
-### 7. Batched Query Attacks
-
-- [ ] Array-body batching: `[{"query":"{ me { id } }"},{"query":"{ me { id } }"},...]` — many operations in single HTTP request
-- [ ] Alias-based batching for rate limit bypass:
-      ```graphql
-      { a1: login(user:"admin",pass:"pass1"){token} a2: login(user:"admin",pass:"pass2"){token} }
-      ```
-      Single request, N login attempts — bypasses per-request rate limits
-- [ ] Brute-force via batching: send 1000 login mutations in one request
-- [ ] OTP bypass: batch OTP verification attempts
-- [ ] Rate limit bypass: single HTTP request with multiple operations
-
-### 8. Mutation Abuse
-
-- [ ] Mass assignment: include extra fields in mutation input
-- [ ] Test all mutations without auth
-- [ ] Modify other users' data via mutations
-- [ ] Delete/destructive mutations access control
+1. **Schema.** Introspection, then partial `__type` queries and field suggestions. With
+   introspection off, a "Did you mean …" suggestion still leaks the schema: rebuild it with
+   clairvoyance (`clairvoyance -o schema.json -w <wordlist> -d https://target/graphql`). Map
+   sensitive fields, relationships, hidden/internal and debug fields.
+2. **Resolver authorization.** Authorization usually lives on resolvers, not the gateway, so it is
+   commonly missed: swap IDs on every ID-taking resolver (cross-tenant included), traverse
+   relationships (`order(id){ user { email } }`), request privileged fields (`role`,
+   `passwordHash`), call admin mutations with a user token, and drop the auth header entirely.
+   Mutation inputs that accept undocumented nested fields (`role`, `isAdmin`, `ownerId`) go to
+   `agent/skills/mass-assignment/SKILL.md`.
+3. **Injection through variables:** variables are not sanitised; a string argument interpolated
+   into SQL/NoSQL/OS/URL sinks takes the classic payloads — hand off to `sqli-testing`,
+   `nosql-injection`, `command-injection` or `ssrf-testing` for the confirmation loop (OOB via
+   `agent/references/offensive-tactics/frp-tunneling.md`).
+4. **Batching defeats per-request limits.** Array-body batching and alias batching
+   (`a1: login(...) a2: login(...)`) put N attempts in one HTTP request: login, OTP, coupon and
+   enumeration endpoints. Show the limit is bypassed with a small batch; brute force at volume
+   only where the VDP permits (`agent/rules/hunting.md` §10, `agent/skills/rate-limit-bypass/SKILL.md`).
+5. **Resource exhaustion** (depth, circular fragments, alias amplification, huge pagination) only
+   when the ROE allows availability testing; otherwise record the missing depth/complexity limit
+   with a single bounded measurement, since a DoS claim on its own is usually out of scope.
 
 ## What to Record
 
-- GraphQL endpoint URL and supported methods
-- Schema dump or partial schema (sanitized)
-- Queries/mutations with broken access control
-- Injection payload and result — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the IDOR query returned the victim's email, billing address, and payment method; the injection payload executed OS command `id` and returned `uid=0(root)`; the batched alias attack enumerated 500 valid usernames in a single HTTP request
-- DoS threshold (depth/complexity before failure)
-- Severity based on impact (data leak, RCE, DoS)
-- Remediation: disable introspection in prod, enforce depth/complexity limits, field-level authz
+Endpoint and transports, the schema evidence as captured (verbatim; ADR 0019), the query or
+mutation with broken access control, and the attacker outcome with one minimal sample
+(`agent/rules/hunting.md` §2, §10). Format: `agent/references/runtime-guides/web-finding-recording.md`.
 
-## Kill Signals — Stop Testing When
-- Introspection disabled AND clairvoyance/field suggestion finds zero types → limited attack surface, test only known query names from source analysis
-- All mutations require valid authorization AND no IDOR found in query resolvers → authorization is effective, move on
-- Depth/complexity limits enforced AND rate limiting active → DoS not feasible, skip DoS testing
+## Kill Signals
+
+- Introspection off and suggestions/clairvoyance find nothing → test only query names from
+  source analysis.
+- Every mutation enforces authorization and resolver ID swaps return nothing foreign.
+- Depth/complexity limits and per-operation rate limits are enforced.
 
 ## Escalate When
-- Introspection is disabled on `/graphql` but a malformed query returns a "Did you mean …" suggestion — field suggestions leak the schema, run clairvoyance/graphql-cop and rebuild the type map before moving on
-- Any resolver accepts an ID, UUID, or numeric handle as an argument — test cross-tenant reads by swapping to another user's ID, GraphQL IDOR is commonly missed because authorization lives on the resolver, not the gateway
-- Query batching or aliasing (`a: login(...), b: login(...), c: login(...)`) is accepted — rate limits apply per HTTP request not per operation, stack dozens of aliases against login/OTP/coupon endpoints
-- A mutation's input type accepts a nested object field that was not documented or exposed by the UI — over-posting/mass-assignment (setting `role`, `isAdmin`, `ownerId`, `createdBy`) routinely bypasses field-level checks
-- Query parameters are interpolated into a downstream SQL/NoSQL/OS call (visible via errors, timing, or OAST callback from a string arg) — GraphQL variables do not sanitize, classic injection works through the resolver
 
-## Extended Resources
-
-- `agent/references/payloads/graphql-payloads.md` — introspection, batching, field suggestion, injection in variables
-- `agent/references/api-security/API05-broken-function-authz.md` — OWASP API Security: function-level authorization checklist
+- Suggestions leak the schema → rebuild it before moving on.
+- A resolver takes an ID → cross-tenant reads (modern-architectures reference).
+- Batching/aliasing is accepted → stack aliases against login/OTP/coupon.
+- Errors, timing or an OOB callback show a variable reaching a downstream sink → injection skill.

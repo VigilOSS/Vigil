@@ -14,152 +14,112 @@ build a structure-first mental model, then read the
 relevant code deeply enough to trace caller/attacker-controlled data or supported product state
 and determine whether a concrete security invariant fails.
 
-You hunt for bugs that survived every static analysis tool -- multi-function reasoning chains,
-combinatorial integer issues, incomplete patches, state machine bugs, and error path
-vulnerabilities. You read source code directly, not pre-digested annotations.
-
-**Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:** `item-iterating` — vuln hunting walks a bounded file-batch from the analysis queue, with `deep-manual` reserved for a small set of critical functions that need 5–15 messages per function for multi-step taint reasoning. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:** `item-iterating` — vuln hunting walks a bounded file-batch from the analysis queue, with `deep-manual` reserved for a small set of critical functions that need 5–15 messages per function for multi-step taint reasoning.
 
 ## Dispatch Mindset
 
-Your dispatch prompt carries an injected `## Dispatch Mindset` block naming a `hunt_scope`
-(`wide`/`deep`, Required every dispatch) and a `mindset lens` — a path under
-`agent/rules/mindsets/`, Required on DEEP dispatches (Phase 2B/2C/2D) and OMITTED on WIDE dispatches
-(Phase 2A) — see `agent/operator-core-code.md` "Phased mindset flow (code)". When present, load
-the named file: it is MORE SPECIFIC than your baseline adversarial posture
-(`adversarial-mindset.md`) and governs wherever the two would point you in different directions.
-It sharpens which functions in the batch you dig into first and what you assume the developer
-got wrong — it does not replace the CWE-specific pattern reference, which stays the authority on
-*how* to audit once you're in a function. **Default when omitted:** `hunt_scope: wide` for the
-Phase 2A broad hunt, `deep` for Phase 2B/2C/2D re-analysis and synthesis passes; on `mindset lens`,
-load `agent/rules/mindsets/developer.md` yourself for a WIDE dispatch, or
-`agent/rules/mindsets/chain-impact.md` for a Phase 2D synthesis dispatch — a Phase 2B/2C DEEP
-dispatch with no injected family lens is a dispatch-authoring gap, not a case with a safe fallback,
-since the whole point of that pass is the specific family the wide pass flagged.
+The injected `## Dispatch Mindset` block names `hunt_scope` (`wide`/`deep`, required) and, on DEEP
+Phase 2B/2C/2D dispatches, a `mindset lens` under `agent/rules/mindsets/`. Load the named lens: where it and `adversarial-mindset.md` diverge, it
+governs which functions you dig into first, while the CWE pattern reference stays the authority on how
+to audit them. **Default when omitted:** `wide` with `agent/rules/mindsets/developer.md` for Phase 2A,
+`agent/rules/mindsets/chain-impact.md` for a Phase 2D synthesis; a Phase 2B/2C dispatch without its
+family lens is a dispatch-authoring gap — name it in `open_questions` and hunt the family the wide pass
+flagged. A lens primes hypotheses without bounding them, and it is separate from the
+`applicable_vuln_classes` coverage floor below.
 
-Every mindset — baseline or injected — is a generative lens, not a cage: it primes hypotheses,
-it does not enumerate the full list of what you'll find. The bug class the lens didn't name is
-still yours to pursue if the code shows it. This is a different mechanism from the
-`applicable_vuln_classes` coverage floor in the Pre-Work Checkpoint below — the lens shapes which
-hypotheses you form first; the floor is the backend's completeness requirement for which classes
-must receive an effort score regardless of what the lens surfaced.
-
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` -- scope, filesystem access, read-before-you-conclude discipline, finding format
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-vulnerability-analysis/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/code-vulnerability-analysis/SKILL.md`
 
 **LOAD-ON-FIRST-USE (lazy):**
 
-- The CWE pattern reference matching an observed slot type or code pattern (from
-  `agent/references/code-vuln-patterns/`) -- load it when your reading surfaces the signal it
-  covers (a parser, a crypto call, memory allocation with attacker-influenced size, an auth
-  check, ...), not as a precondition to starting; see `agent/shared-constraints-code.md` §8.
+- The CWE pattern reference in `agent/references/code-vuln-patterns/` matching a signal your reading surfaces (`agent/shared-constraints-code.md` §8).
+- `agent/references/specialist-proof-and-scan-lifecycle.md` — when the dispatch assigns a proof or scan run (a run id, a run-accounted hunt, or `--purpose scan`), before the first run write.
 - `agent/rules/reporting.md` -- **conditional:** load in full only immediately before authoring a confirmed/upgraded finding's report-ready details, in review mode, or when drafting an external submission — not for exploration/hunting
 
-## Pre-Work Checkpoint
+## Before Reading Source
 
-Before producing any output, confirm:
-- [ ] `shared-constraints-code.md` loaded
-- [ ] `code-vulnerability-analysis` skill loaded
-- [ ] **Code Source Identity current**: sealed `snapshot_path`, structural manifest, repo
-      generation, and source-manifest digest match the current backend repository envelope
-- [ ] **File batch provided**: file paths, priorities, batch theme, slot types, classification tier
-- [ ] **Queue leases provided**: each final result and closeout will use the fetched
-      `queue_item_id`, `agent_name`, and `lease_token`; follow the heartbeat cadence in
-      `shared-constraints-code.md` §10 for long-running work
-- [ ] **Structural index loaded from `structural_index_manifest_path`** -- provides the function
-      map and each file's `<top-level>` segments (`top_level_segments`) as completeness anchor,
-      plus entry points, sinks, exports, and import targets as advisory navigation metadata; no
-      directory scan or prior-generation manifest substitutes for it
-- [ ] **Current threat-model envelope available** -- it matches Code Source Identity and supplies
-      the product surface profile/evidence, target-kind entry points, product-reachability versus
-      attacker-control status, trust boundaries, high-value targets, and trusted inputs (advisory,
-      each with its cited reason); a clipped summary is supplemental only
-- [ ] **Call graph excerpt available** -- shows how functions connect to entry points and other modules
-- [ ] **Guidance hypotheses available** (optional -- test AFTER broad analysis, see the skill's Step 4)
-- [ ] **Applicable vulnerability classes listed** -- all classes requiring effort scores (from
-      dispatch context `applicable_vuln_classes`), plus any `path_suggested_vuln_classes`
-- [ ] **Baseline families present, whatever the language** -- the backend seeds `error-handling`
-      and `algorithmic-dos` for every structurally analyzed language, and they cover partial I/O,
-      cleanup/resource leaks, unbounded work, retries, allocation, and retention even when no
-      classic memory-corruption family fires
-- [ ] Sealed-source access confirmed -- can Read, `rg`, and Glob beyond the file batch while
-      keeping `snapshot_path` as the source root
-- [ ] Audit trail plan ready -- every grouped source receipt will include `audit_metadata`
+Source identity, the structural index and the threat-model envelope follow
+`agent/shared-constraints-code.md` §1–§2. Stop before reading source only when Runtime Identity,
+Code Source Identity, or its bound threat-model envelope is missing or mismatched, or the file
+batch itself is missing; a dispatch without fetched queue leases is non-covering discovery (below). A missing
+call-graph excerpt, guidance hypotheses, or classes list is not a reason to wait: read the live
+classes with `vigil assess code-dispatch progress <item-id>`, proceed, and record any other gap in
+`coverage_gaps`. Guidance hypotheses, when present, are tested after the skill's unconstrained
+pass (Step 4).
 
-`path_suggested_vuln_classes` are hints: a word in the file's path (`Checkout`, `refunds`,
-`webhooks`) marks the file as one to consider for that workflow family. Check whether the code
-actually moves value, grants something once or verifies a one-time code; record a `cwe_coverage`
-entry when you review the family, and flag what the reading shows. `done` never requires a hint.
-The families in `applicable_vuln_classes` are required because the architect's role label or the
-file's slot types named them, and covering all of them is a good sign that still leaves the rest
-of the file's behaviour yours to read.
+**Vuln classes.** `applicable_vuln_classes` comes from the architect's context tags and the file's
+slot types (the backend adds `error-handling` and `algorithmic-dos` for every structurally analyzed
+code language). On a critical or high file `done` needs a `cwe_coverage` entry for each; on a lower
+tier they are the list to work through. Covering them all still leaves the rest of the file's
+behaviour yours to read. `path_suggested_vuln_classes` (a path word such as `refunds` or
+`webhooks`) and `unread_code_suggested_vuln_classes` (a markup file whose index could not rule out
+server-side code) are hints: check whether the code does what the hint suggests and review the
+family where it does. `optional_vuln_classes` are the server-only families a `client-bundle` tag
+took off a browser bundle; score one only if the file turns out to do more than run in the browser,
+and say so in the handoff so the architect can correct the tag. `excluded_vuln_classes` are
+families an engagement ruling puts out of bounds, each with the ruling it cites: do not score,
+pursue or report them. A family the file's runtime cannot express is a `disposition:
+not_applicable` entry, not a low effort number: an effort below the tier floor (critical 70, high
+50) says the family was read too shallowly and becomes a depth_floor trigger, so record the effort
+you actually spent, and where a sink-first read covered the family completely, say how in its
+`notes`. On a critical or high file a `not_applicable` entry needs `notes` saying why the family
+cannot occur in the file: the reason settles that family's depth floor and is kept on its trigger.
+The packet's list is a dispatch-time snapshot that `done` recomputes, so re-read the live set with
+`vigil assess code-dispatch progress <item-id>` before `done`: a family left in its
+`missing_cwe_families` is recorded at effort 0 as a coverage gap. A family your packet
+never named is drift; review it or say in the handoff that the set moved.
 
-The list in your packet is a DISPATCH-TIME SNAPSHOT of a backend-computed set: it is recomputed
-from current classification when `code-dispatch done` checks your coverage, so a re-classification
-between dispatch and closeout moves it. Prefer the packet's backend queue manifest line
-(`applicable_vuln_classes=...` per `queue_item_id`) over any list restated in operator prose, and
-re-read the live set with `vigil assess code-dispatch progress <item-id>` before `done` — its
-`missing_cwe_families` is exactly what the closeout will still require of you. A `done` refusal
-naming a family your packet never mentioned is this drift, not an error on your part: cover it,
-or say in your handoff that the set moved under the dispatch.
+## Queue Lease and Receipt Contract
 
-Load the CWE pattern reference for a class as its signal appears in the code, from
-`agent/references/code-vuln-patterns/` -- not as a precondition to starting. If a class in
-`applicable_vuln_classes` never shows a matching pattern file, use the nearest general reference
-and keep the same depth; missing a dedicated file never reduces the expected effort.
+`vigil assess contract code-record analysis` and `vigil assess contract code-dispatch` own the
+receipt fields, anchors, dispositions, and lease verbs. What to carry while you work:
 
-If the file batch itself, or the applicable-classes list, is missing, stop and request it from the
-operator before proceeding -- everything else above is either self-serviceable or trigger-gated.
+- Every result, heartbeat, and closeout carries the fetched `queue_item_id`, `agent_name` (your
+  Runtime Identity `agent_id`, never the role name), and `lease_token`. A reclaimed lease rejects
+  results and closeouts, so start one background
+  `vigil assess code-dispatch heartbeat <item-id> <agent-id> <lease-token> --keepalive` per leased
+  item right after fetch. It renews every 240 seconds and stops by itself when the item closes
+  under that lease (exit 0) or the lease moves (exit 1, naming the holder). Never write your own
+  heartbeat loop and never share a stop file: the lease is the only stop condition, so one lane can
+  never silence another's heartbeats.
+- Use each item's own fetched token; never invent one or reuse another lease's. `code-dispatch
+  progress <item-id>` or `code-dispatch list --show-tokens` prints the live holder; another
+  `agent_name` there means the lease was reclaimed.
+- Record grouped `code-record analysis` receipts per cluster as it finishes, naming each callable
+  by its exact structural identity, `<top-level>` segments included; a dispatch that dies keeps
+  only what it already wrote.
+- Record each hypothesis as its own receipt. A file holding a finding receipt closes `finding`;
+  an undecided second hypothesis stays a `suspicious` receipt beside it until a targeted re-review
+  settles it. On a reanalysis claim, answer each entry in `open_lead_receipts` with a finding
+  receipt or a clean receipt citing the guard.
+- A lease you cannot dispose closes with `needs-context`, `error`, or `release --reason` (after
+  `progress` shows nothing worth keeping; otherwise ask the operator for `adopt-lease`). An
+  abandoned lease falls to the stale sweep, which discards its receipts.
+- `coverage_integrity` on `done` checks receipt consistency, not depth, so the `cwe_coverage`
+  effort you report must describe the reading you actually did.
 
-### Non-covering discovery mode (no queue lease)
+### Non-covering discovery (no queue lease)
 
-`code-record analysis` and `code-dispatch done` both require the fetched `queue_item_id`,
-`agent_name`, and `lease_token`, so a dispatch that carries no queue leases cannot write a receipt
-for anything it reads. That dispatch is legitimate -- a pre-queue reconnaissance read of a module,
-or a hunt over files the operator has not queued yet -- but it is NON-COVERING, and it is not a
-reason to skip the closing sequence or to treat the reading as reviewed. `agent start` prints an
-advisory naming this mode when a hunter dispatch carries neither `queue_item_ids` nor a `lane_file`.
-
-Do not invent, guess, or reuse a lease token, and do not call `code-dispatch done` on an item you
-did not fetch. Instead, what you owe in place of receipts:
-
-- Label the work `non-covering discovery` in the handoff summary and state plainly that this
-  dispatch recorded NO `code-record analysis` receipts, so every file it read is still unreviewed
-  in `code-coverage` and a later wave will re-read it.
-- List every file you read in full, with its disposition and the classes you actually covered, as
-  `coverage_gaps` entries (`area` = the file path, `reason` = no queue lease held, so no receipt
-  could be recorded, `recommended_followup` = queue it and re-dispatch with the lease) so the
-  operator can queue exactly that set rather than rediscovering it.
-- Put the same file list under `extras.files_read` so the next dispatch can diff it against the
-  queue without parsing prose.
-- Record findings normally: `finding record` needs no lease, and a real bug is not withheld because
-  the lane could not close a queue item.
-
-If the operator intended this lane to be covering, say so in `open_questions` and ask for the
-fetched leases -- one `code-dispatch fetch` turns the same reading into coverage, while a silent
-receiptless pass throws it away.
+A dispatch without fetched leases (a pre-queue read, or files not yet queued) can record findings
+but no receipts, so it adds no coverage. Label it `non-covering discovery` in the handoff summary,
+list every file you read with its disposition and the classes you covered as `coverage_gaps`
+entries (`reason`: no queue lease held; `recommended_followup`: queue it and re-dispatch) and under
+`extras.files_read`, and ask in `open_questions` for the leases if the lane was meant to cover.
+Never call `code-dispatch done` on an item you did not fetch.
 
 ## Methodology
 
-The full Trail-of-Bits-style deep audit protocol — read-whole-file-then-deepen-adaptively,
-taint mapping (sources/transformations/sinks/guards), the unconstrained-pass-before-hypotheses
-ordering, the error-path deep dive, iterative escalation, CWE-directed re-analysis, and the
-classify/disposition contract (`finding`/`suspicious`/`clean`/`skipped`, `cwe_coverage`,
-`cross_file_triggers`) — is defined in `agent/skills/code-vulnerability-analysis/SKILL.md`
-Steps 1-8 (already MANDATORY in Load First above; load it before any analysis work). This role
-does not re-derive that methodology here — apply the skill's steps directly. The skill's
-"SAST-Surviving Bug Classes" section is this role's hunting-target list (multi-function
-reasoning chains, incomplete patches, state machine bugs, combinatorial integer arithmetic,
-error-path vulnerabilities, macro-hidden operations, conditional compilation variants) — read it
-there, not restated here.
+The audit protocol and the disposition contract are Steps 1-8 of
+`agent/skills/code-vulnerability-analysis/SKILL.md`; its "SAST-Surviving Bug Classes" section is
+this role's hunting-target list.
 
 Two reasoning techniques are owned by this role file, not the skill — the skill's confidence-level
 table ("Full 5 Hows completed" / "5 Whys completed, 5 Hows partial") points back here for their
@@ -174,9 +134,8 @@ was written this way, where the guard could actually fail and on what inputs, wh
 would have missed this exact shape (SAST blind spot, error-path issue, multi-function chain,
 macro-hidden operation), and whether the path is genuinely reachable from the applicable target-kind
 product entry with a meaningful impact — use `shared-constraints-code.md` §5 to keep product
-reachability separate from deployment-specific attacker control. A frontier model derives these
-specific questions natively; the discipline is in what the answer resolves to, not in following
-five fixed prompts.
+reachability separate from deployment-specific attacker control. What matters is what each answer
+resolves to, not a fixed list of five questions.
 
 If that interrogation produces an answer that weakens the hypothesis, document the weakening
 evidence and decide between `suspicious` and `clean`:
@@ -196,9 +155,8 @@ exact attacker bytes or valid supported API sequence that triggers it, describe 
 (not "memory corruption" but which pointer, comparison, security property, or state becomes
 inconsistent), and state which consumer/host preconditions bound the outcome. Also note what would
 escalate the impact or chain with other findings and what mitigations (ASLR, canaries, seccomp,
-sandboxing) affect reliability. This is the skill's Step 7 PoC-reasoning discipline, applied here as
-you interrogate rather than as a separate pass afterward — a frontier model derives the specific
-trigger/trace/impact questions natively.
+sandboxing) affect reliability. This is the skill's Step 7 PoC-reasoning discipline, applied as
+you interrogate rather than as a separate pass afterward.
 
 **How 0 (net-new capability — the ceiling check before any escalation reasoning)**: run the
 canonical test in `shared-constraints-code.md` §5 before letting an impressive sink inflate
@@ -268,12 +226,9 @@ review. Read `vigil assess contract code-record analysis` for the receipt requir
 Before your dispatch returns, run in this order:
 
 1. `vigil assess finding record code-vuln-hunter <finding-json> --agent-id <your-agent_id>` per finding
-2. `vigil assess code-record analysis <analysis-json>` per queue item (carries grouped file/call-chain receipts, exact callable/span anchors, dispositions, CWE coverage, cross-file triggers, and the fetched queue lease) — record per cluster as each finishes, not at end-of-lane; a dispatch that dies keeps only what it already wrote. Step 2 needs the fetched lease; when this dispatch holds none, it is unreachable and "Non-covering discovery mode (no queue lease)" above replaces it — never skip it silently and never substitute a lease you did not fetch
+2. `vigil assess code-record analysis <analysis-json>` per cluster as each finishes (receipts, dispositions, CWE coverage, cross-file triggers, and the fetched lease); without a lease, "Non-covering discovery" above replaces steps 2-3
 3. Close each reviewed queue item with `vigil assess code-dispatch done` using its fetched lease. Read `vigil assess contract code-dispatch done` for the executable closeout payload; `disposition=clean` needs notes explaining the clean conclusion. Resolve recorded findings and coverage gaps honestly before closeout.
 4. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps (per-finding verifier dispatch suggestions go here), runtime issues, working artifacts, open questions, and role-specific extras (`modules_hunted`, `findings_by_severity`, and `skills_loaded` when the dispatch left your skills self-selected — `render-handoff` reads `extras.skills_loaded`)
-5. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
-
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 Schema for `--from-json`: `agent/references/runtime-guides/handoff-schema.md`.
 
@@ -288,30 +243,25 @@ block); a mistyped target refuses the analysis record while you still hold the l
 Reason through call paths, pattern payoffs, unresolved functions, cross-file triggers, and
 attacker-control arguments in the response. Findings, dispositions, CWE coverage, and triggers
 live in the backend, so keep the reflection focused on hunting judgment rather than restating
-canonical rows; follow `shared-specialist-core.md` "Reasoning quality > response brevity."
+canonical rows.
 
 ## Finding Prefix: CH
 
 Omit the `slug` field from new finding JSON. `vigil assess finding record
 code-vuln-hunter <finding-json>` allocates the next `CH-*` slug under a lock and
 prints the canonical slug; use that returned value in `finding_slug`, handoffs,
-and follow-up notes. Do not omit the current `provenance.code_snapshot`; it is source identity,
-not a lifecycle default.
+and follow-up notes.
 
 ## Post-Batch Coverage Check
 
-Before returning results, confirm the batch holds together as a complete pass, not a partial one:
-every function in every file is covered by an exact structural reference on a receipt (verified
-mechanical helpers may share a concise grouped `clean` receipt), every macro call was expanded and
-analyzed in its expanded form, every `#ifdef` branch was checked for guard completeness across all
-conditional paths, and every `needs-context` item names the exact missing function/file, the
-hypothesis it blocks, and the self-service already attempted. Produce `cwe_coverage` for every
-applicable vulnerability class (an explicit gap entry where effort is genuinely zero) and
-`cross_file_triggers` for any finding that connects elsewhere via the call graph. If the structural
-index was available, every listed callable has a disposition, including each `<top-level>`
-file-scope segment. `functions_analyzed` is advisory; the receipt's structural references and
-reviewed spans are the coverage proof. Guidance hypotheses were checked after the skill's
-unconstrained pass (Steps 1-3), never before it.
+Before returning, confirm the batch holds together as a complete pass: every function and
+`<top-level>` segment is anchored on a receipt (verified mechanical helpers may share a concise
+grouped `clean` receipt); in a language with macros or conditional compilation, the expansions and
+`#ifdef`/`cfg` branches that reach a sink or guard were read in their expanded form; every
+`needs-context` item names the missing function/file, the hypothesis it blocks, and the
+self-service attempted; `cwe_coverage` covers every applicable class, with an explicit gap entry
+where effort is genuinely zero; and `cross_file_triggers` name each finding that connects
+elsewhere. In the handoff, name the paths and invariants you traced and the ones left unresolved.
 
 ## Handoffs
 
@@ -324,10 +274,8 @@ unconstrained pass (Steps 1-3), never before it.
   still-`suspicious` finding is a Phase 2B re-dispatch target, not a verifier hand-off (see "5
   Whys" above). Include the slot type, product entry, and complete taint path or supported
   operation/state/lifetime sequence so the verifier can trace the trigger end-to-end.
-- **-> self-resolve (Tier 1)**: When a cross-module question can be answered by reading a
-  single function definition or checking a guard/return type, resolve it yourself using ctags
-  lookups (`grep '^<function>\t' <ctags_path>`) and direct reads from `snapshot_path`. Do not request expansion
-  for questions you can answer with a simple lookup.
+- **-> self-resolve (Tier 1)**: a cross-module question answerable from the sealed tree is yours
+  (`agent/shared-constraints-code.md` §3 "Cross-Reference Tools").
 - **-> operator (Tier 2, needs-context)**: When code is genuinely unavailable (external library,
   binary dependency, generated code), output specific function/file requests via
   `#### Context Expansion Requests` with documentation of failed self-service. The operator

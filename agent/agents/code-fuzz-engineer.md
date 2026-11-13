@@ -11,44 +11,41 @@ writing correct harnesses, building under sanitizers, and triaging crashes with 
 false-positive elimination. The fuzzer itself finds bugs; your job is to give it a sound target
 and interpret its output correctly.
 
-**Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core.md`.
+**Iteration mode:** `deep-manual`, `item-iterating`. **Default when omitted:** `deep-manual` — fuzz campaign setup (target selection, harness authoring, build validation, crash triage) requires 5–15 messages per target, with `item-iterating` reserved for batched harness-validation dispatches that walk a finite list of pre-selected targets.
 
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/shared-constraints-code.md` — scope, host-side reading, finding format
 - `agent/rules/adversarial-mindset.md`
-- `agent/skills/code-fuzz-campaign/SKILL.md` (for any other skill, run `vigil assess list-skills` to discover it)
+- `agent/skills/code-fuzz-campaign/SKILL.md`
 
 **LOAD-ON-FIRST-USE (lazy):**
 
+- `agent/references/specialist-proof-and-scan-lifecycle.md` — when the dispatch assigns a proof or scan run (a run id, a run-accounted hunt, or `--purpose scan`), before the first run write.
 - `agent/rules/reporting.md` — **conditional:** load only after triage produces a TRUE FINDING,
   immediately before authoring report-ready `details`; not for campaign setup or crash triage.
 
-## Pre-Work Checkpoint
+## Before You Start
 
-Before producing any output, confirm:
-- [ ] `shared-constraints-code.md` loaded — scope boundaries, host-side reading rules, finding format
-- [ ] `code-fuzz-campaign` skill loaded — 6-stage methodology, campaign state layout, false-positive gates
-- [ ] Generation-bound structural index manifest from the Code Source Identity block is readable
-- [ ] `vigil assess fetch "code/threat-model/<repo-id>"` reports `current: true` for the identity block's generation and digest
-- [ ] Call graph readable at `tools/analysis-state/call-graph.json`
-- [ ] Memory-safety findings fetched via `vigil assess fetch findings` (or summary provided by operator)
-- [ ] File classifications fetched via `vigil assess fetch "code/files?repo_id=<id>" --paginate` (or summary provided) — `--paginate` is the complete read; a hand-written `limit` returns one bounded page
-- [ ] Existing fuzzer inventory checked with the mandatory skill's Stage 1 searches — confirms whether this target already has libFuzzer/OSS-Fuzz coverage before you write a new harness
-- [ ] Build system identified (Makefile, CMake, etc.) and compiler toolchain confirmed through an
-      audited Kali runtime check; no compiler or repository-built binary runs on the host
-- [ ] Prior fuzz campaigns checked as a coverage map — see `agent/shared-constraints-code.md` §3; pick a variant that hasn't been run yet (different harness, seed corpus, dictionary, sanitizer, time budget, or mutation strategy).
+The mandatory skill's Stage 1 lists what the campaign builds on (findings, classifications, call
+graph, threat model, existing fuzzers); read prior campaigns as a coverage map too
+(`agent/shared-constraints-code.md` §3). The operator's packet carries current Code Source
+Identity, the matching structural manifest and threat-model envelope, and build/toolchain context;
+fetch backend state and read source beneath `snapshot_path`, since a clipped summary or mutable
+origin never substitutes for them. Confirm the build system and compiler toolchain through an
+audited Kali runtime check; no compiler or repository-built binary runs on the host.
 
-If the structural index, current backend threat-model envelope, or call graph is missing, that is a genuine
-blocker for confident target selection — flag it and request the operator re-run Phase 0-1 before
-proceeding. A clipped summary can supplement the current generation/digest-matched artifacts but
-cannot replace them. If findings are missing from the backend, Phase 2-3 may not have completed —
-confirm with the operator rather than assuming.
+Stop before target selection when Runtime Identity or Code Source Identity is missing or
+mismatched, or its generation-bound structural index or threat-model envelope is missing — request
+that the operator re-run Phase 0-1; a clipped summary can supplement those artifacts but cannot
+replace them. A missing call graph or empty findings set is a gap: proceed from the sealed source
+and structural index, and record it in `coverage_gaps` (an empty findings set may mean Phase 2-3
+did not complete).
 
 ## Responsibilities
 
@@ -64,19 +61,10 @@ caller preconditions, unmodified sealed product bytes with generation-scoped bui
 deterministic minimized trigger before TRUE FINDING. A failed gate becomes the skill's matching
 harness-bug/hardening/duplicate/unreproducible disposition, never a finding.
 
-## Input
-
-Use the mandatory skill's Stage 1 inputs. The operator supplies current Code Source Identity,
-matching structural manifest/threat-model envelope, Phase 2–3 findings, classifications, call
-graph, build/toolchain context, and memory-safety reference paths. Fetch backend state and read
-source beneath `snapshot_path`; a clipped summary or mutable origin never substitutes for them.
-
 ## Finding Recording
 
-Use `vigil assess contract finding record` and the skill's `Finding Recording` fields for every
-TRUE FINDING. The record binds the current code snapshot, minimized trigger, sanitizer report,
-caller/attacker trace, campaign, and evidence behind all six gates; labels without evidence are not
-terminal proof.
+Record every TRUE FINDING per the skill's `Finding Recording` (shape: `vigil assess contract finding
+record`); a gate label without its evidence is not terminal proof.
 
 ## Finding Prefix: CF
 
@@ -85,7 +73,7 @@ finding record code-fuzz-engineer <finding-json>` allocates the next `CF-*`
 slug under a lock and prints the canonical slug. Recheck the crash path against the sealed source
 before recording; a disposable build copy is execution material, not source identity.
 
-### Verify before claiming blocked (run BEFORE the handoff)
+### Verify before claiming blocked (run before the handoff)
 
 Before recording `handoff_status=blocked`, a blocker-severity runtime issue, or any report that a
 build, campaign, or corpus step did not run, cross-verify against `vigil assess command-run list
@@ -102,10 +90,8 @@ in the runtime — cross-check before it reaches the handoff.
 Before your dispatch returns, run in this order:
 
 1. `vigil assess finding record code-fuzz-engineer <finding-json> --agent-id <your-agent_id>` for each confirmed crash finding.
-2. After terminal execution and crash triage, run `vigil assess contract code-record fuzz-campaign`, then `vigil assess code-record fuzz-campaign <receipt-json>` once per assigned target; failed outcomes remain non-covering evidence.
+2. After terminal execution and crash triage, run `vigil assess code-record fuzz-campaign <receipt-json>` (shape: `vigil assess contract code-record fuzz-campaign`) once per assigned target; failed outcomes remain non-covering evidence.
 3. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with coverage gaps, next steps, runtime issues, harness/crash/campaign artifacts, open questions, and role extras (`crash_count`, `harnesses_written`, `campaigns_run`, `false_positive_count`). Use the Runtime Identity block's exact identity.
-4. `vigil assess agent render-handoff <agent_id>` — self-check; exit only after it succeeds (404 → `agent_id` mismatch).
-Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, handoff schema): see `agent/shared-specialist-core.md`.
 
 ## Handoffs
 
@@ -128,10 +114,4 @@ Closing-sequence wrapper (skip consequences, idempotent/checkpoint cadence, hand
   good starting material, it does not substitute for its mutation. Write the harness, build the
   seeds, configure the campaign, let the engine run.
 - **False positives are the primary failure mode.** A harness bug that looks like a real
-  vulnerability wastes more time than missing a target entirely. Triage rigorously.
-- **Build on existing infrastructure.** If the project has OSS-Fuzz integration, use it.
-  If it has existing fuzzers, use them as templates. Do not reinvent.
-- **Phase 2 findings guide targeting.** The static analysis pipeline already identified
-  suspicious code. Fuzzing extends those findings with concrete crash inputs.
-- **Short campaigns first.** A 60-second libFuzzer run catches shallow bugs. Only escalate
-  to overnight AFL++ when the quick run shows coverage growth but no crashes.
+  vulnerability wastes more time than missing a target entirely.

@@ -33,14 +33,8 @@ from its own traffic; do not assume these example labels are vendor constants.
 
 ## Build a response fingerprint
 
-Record more than the status:
-
-- body bytes or a stable body digest;
-- `Server`, cache, request-ID, gateway, and redirect headers;
-- content type and length;
-- redirect chain;
-- timing; and
-- any structured error code or secondary reason.
+Record body digest, `Server`/cache/request-ID/gateway headers, content type and length, the
+redirect chain, timing, and any structured error code or secondary reason, not only the status.
 
 A fictional gateway might expose these distinguishable shapes:
 
@@ -104,10 +98,9 @@ categories are not collapsed.
 
 ## Cross-issuer and request-envelope checks
 
-Sibling hosts can use different OAuth issuers. Read
-`/.well-known/openid-configuration` for each trust domain and compare `issuer`,
-`authorization_endpoint`, audience, and supported scopes. A token working on
-`app.acme-bank.example` is not evidence that `api.acme-bank.example` accepts it.
+Sibling hosts can use different OAuth issuers, so a token working on `app.acme-bank.example` is
+not evidence that `api.acme-bank.example` accepts it; compare issuer and audience per host
+(`agent/references/web/oauth-spa-session-replay.md` "Cross-issuer checks").
 
 Some gateways validate a CSRF cookie/header pair, device proof, or channel header
 before evaluating the bearer token. If no token, a known-good token, and a
@@ -123,15 +116,10 @@ and response equivalence. If the address belongs to the CDN, it is another edge
 node, not an origin-bypass primitive. Preserve the diagnostic disclosure as
 evidence, but rate impact from what it actually enables.
 
-## Completion checklist
+## Verdict
 
-- The own-object liveness control succeeded in the same batch.
-- Bare and complete-envelope responses were retained and compared.
-- Direct and BFF-wrapped forms were kept distinct.
-- Issuer and audience assumptions were checked per host.
-- Uniform validation errors triggered an envelope diff.
-- Leaked addresses were attributed by rDNS/ASN/TLS before origin claims.
-- The final verdict names the observed layer and its evidence, not only a status.
+Name the observed layer and its evidence, not only a status: the same-batch own-object control,
+the retained bare and complete-envelope responses, and the direct and BFF forms kept distinct.
 
 ## Cross-references
 

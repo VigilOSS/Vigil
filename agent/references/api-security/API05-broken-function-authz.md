@@ -1,50 +1,35 @@
 ---
-description: Admin endpoint access with user tokens
+description: BFLA on APIs — admin functions with user tokens, method-override verb tampering, version and gRPC gaps
 skill: auth-bypass
 ---
 
 # API5:2023 — Broken Function Level Authorization
 
-> Skill: `auth-bypass`
+Workflow: `agent/skills/auth-bypass/SKILL.md`. Class boundary (BOLA vs BOPLA vs BFLA):
+`API01-broken-object-level-authz.md`. Classifier signals for state-change verbs:
+`agent/references/gf-patterns/privileged_action.md`.
 
 ## Admin Endpoint Access with User Tokens
-- [ ] Test admin paths with regular user token: `curl -H "Authorization: Bearer USER_TOKEN" https://api/admin/users`
-- [ ] Test admin actions: `curl -H "Authorization: Bearer USER_TOKEN" -X DELETE https://api/admin/users/123`
-- [ ] Enumerate admin endpoints from OpenAPI spec, JS bundles, or common paths: `/admin/`, `/manage/`, `/internal/`
-- [ ] Check if admin frontend routes hint at admin API endpoints not tested
+
+Call every admin or higher-role function directly with a lower-role token (viewer → editor →
+org-admin → admin), reads and destructive actions both. Candidates come from the OpenAPI spec, JS
+bundles, admin frontend routes, and GraphQL mutations the frontend never sends (`deleteUser`,
+`updateRole`); a function hidden in the UI but callable through the API is the finding.
 
 ## HTTP Method-Based Access Control Bypass
-- [ ] If GET is allowed but DELETE is blocked, test with method override: `curl -X POST -H "X-HTTP-Method-Override: DELETE" https://api/resource/123`
-- [ ] Test `_method=DELETE` parameter (Rails, Laravel): `curl -X POST -d "_method=DELETE" https://api/resource/123`
-- [ ] Test if PUT/PATCH on read-only endpoints is accepted with user token
-- [ ] Try HEAD and OPTIONS on restricted endpoints — may leak info or bypass checks
 
-## Hidden Admin API Paths
-- [ ] Fuzz for admin endpoints: `/api/admin/`, `/api/internal/`, `/api/management/`, `/api/debug/`
-- [ ] Check for GraphQL admin mutations not exposed in the frontend:
-  ```
-  mutation { deleteUser(id: "123") { success } }
-  mutation { updateRole(userId: "123", role: "admin") { success } }
-  ```
-- [ ] Test undocumented endpoints found in JS source or OpenAPI spec
+When GET is allowed and DELETE refused, send `POST` with `X-HTTP-Method-Override: DELETE` or
+`_method=DELETE` in the body (Rails, Laravel); PUT/PATCH on endpoints exposed read-only; HEAD and
+OPTIONS on restricted endpoints, which may share GET's handler and skip its check.
 
-## Version-Specific Authorization Gaps
-- [ ] Test `/v1/admin/users` with user token (if `/v2/admin/users` is properly secured)
-- [ ] Check if deprecated API versions lack authorization middleware added in newer versions
-- [ ] Test beta/preview endpoints: `/beta/`, `/preview/`, `/canary/` — often under-secured
+## Version and Scope Gaps
 
-## Role & Permission Boundary Testing
-- [ ] Test with different role tokens: viewer accessing editor endpoints, editor accessing admin
-- [ ] Verify function-level checks are not only on the frontend (call API directly)
-- [ ] Test if creating/modifying resources in one scope allows cross-scope access
-- [ ] Check if organization member can access organization-admin functions
+`/v1/admin/…` or `/beta/`, `/preview/`, `/canary/` routes that predate or bypass the authz
+middleware the current version enforces; a resource created in one org or project scope that grants
+a function in another.
 
 ## gRPC Function Authorization
-- [ ] Test gRPC methods with user-level metadata instead of admin metadata
-- [ ] Use `grpcurl` to call admin service methods with non-admin tokens:
-  ```
-  grpcurl -H "authorization: Bearer USER_TOKEN" target:443 admin.AdminService/ListUsers
-  ```
 
----
-> Cross-reference: A01 checklist, `auth-bypass` skill
+Call admin service methods (`admin.AdminService/ListUsers`-style) with user-level
+`authorization` metadata. gRPC-web decode and replay:
+`agent/references/access-control/idor-modern-architectures.md` "WebSocket / gRPC / SSE / Event-Driven".

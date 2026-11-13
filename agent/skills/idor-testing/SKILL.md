@@ -7,351 +7,118 @@ vuln_class: idor
 
 # IDOR Testing (Insecure Direct Object Reference)
 
-> **`vigil assess kali` audit flags:** use `--technique IDOR` for object-reference probes, `--technique AUTH` for identity/tenant override. `--probe-kind payload` for ID-swap/divergence tests, `--probe-kind exploit` for confirmed cross-user access.
->
-> **Named identities (use `--identity`, not hand-pasted tokens).** Cross-user / cross-tenant IDOR is only *real* across **≥2 named identities**. Put each test account in the credential store under a name (`vigil auth import <key> --identity user_a` / `user_b` / `admin`) and replay with `vigil assess kali <tool> --identity user_a` / `--identity user_b`. The identity name is stamped as the probe's `auth_context` when Vigil can inject the material into the tool, so prefer direct injectable tools (`curl`, `httpx`, `nuclei`, `ffuf`) over shell wrappers or manually pasted cookies. A single-identity IDOR probe, a shell-wrapped probe whose identity was not injected, or a hand-pasted-token probe with anonymous audit context is "started but not cross-identity" and does NOT satisfy access-control depth.
-
-This is the **entry-point skill** for broken object-level authorization. It covers the
-full BOLA/IDOR workflow and tells you when to escalate into the specialist skills
-(split-brain, BFF override, mass assignment, GraphQL, JWT, cache poisoning).
+The **entry-point skill** for broken object-level authorization: the BOLA/IDOR workflow and
+when to escalate into split-brain-idor, bff-parameter-override, mass-assignment, graphql-testing,
+jwt-testing or cache-poisoning.
 
 ## When to Activate
 
-- API endpoints reference objects by ID (numeric, UUID, slug)
-- User-specific resources accessible via direct reference
-- Multi-tenant application with shared API surface
+- APIs reference objects by ID (numeric, UUID, slug, encoded), user-specific resources are
+  addressable directly, or a multi-tenant app shares an API surface.
 
-## Tools
+## Vigil mechanics
 
-- `vigil assess kali exec -- curl ...` for all target-facing requests (mandatory audit pipeline)
-- `vigil assess classify-payload <value> --mutations` to type an ID and emit attack variants
-- `vigil assess anomaly-score <file.jsonl> --top N` to rank batch-sweep response outliers
-- `vigil oob mint` / `vigil oob poll` for blind / side-effect confirmation (mint binds the nonce under a running interactsh client's id and prints the exact callback host so poll can correlate; pass `--client <name>` when several clients run, and fire the exact host mint prints)
-- Two or more test accounts (different privilege levels + separate tenants for SaaS)
-- Burp Suite Repeater + Autorize / Auth Analyzer / AuthMatrix for differential replay
-- Burp Comparer for response diffing
+- Audit flags: `--technique IDOR` for object-reference probes, `AUTH` for identity/tenant
+  override; `--probe-kind payload` for swaps, `exploit` for confirmed cross-user access.
+  `vigil assess kali exec` also needs `--intent`, `--phase` and `--timeout` (see `--help`).
+- **Named identities.** Cross-user/tenant IDOR is only real across ≥ 2 named identities. Import
+  each test account (`vigil auth import [engagement] --identity user_a --source <file>`, likewise
+  `user_b`, `admin`; SaaS accounts in separate tenants) and replay with `--identity <name>`, which
+  stamps the probe's `auth_context`. To run **one** command as two identities, use
+  `--identity-env A=user_a --identity-env B=user_b` (exports `VIGIL_COOKIE_A`, `VIGIL_HEADERS_B`,
+  …); that is the cross-identity proof carrier. Prefer injectable tools (`curl`, `httpx`,
+  `nuclei`, `ffuf`). A single-identity probe, a shell-wrapped probe whose identity was not
+  injected, or a hand-pasted token with anonymous audit context does not count as
+  access-control depth.
+- `vigil assess classify-payload <id> --mutations` types an ID and emits neighbor, boundary,
+  escalation, format (type-confusion) and empty variants; fire those instead of hand-picking.
+  `vigil assess anomaly-score <file.jsonl> --top N` ranks a replay sweep's outliers.
+- Blind-write proof over OOB: `agent/references/offensive-tactics/frp-tunneling.md`
+  "OOB Procedure (mint→poll→correlate)". A callback proves the write reached the victim object
+  only when the injected host is one only that object would surface.
 
 ## Methodology
 
-### 1. Map Object References
+Map every ID in path, query, body and headers (tenant IDs included) per object type and CRUD
+operation, then:
 
-- [ ] Identify all IDs in URLs: `/api/users/123`, `/orders/456`
-- [ ] Identify IDs in request body and query params
-- [ ] Identify IDs in headers (custom auth, tenant ID)
-- [ ] Note ID formats: numeric, UUID, base64-encoded, hashed
-- [ ] Catalog all CRUD operations per object type
+1. **Fingerprint the identifier** — it picks the tactic and the severity (iterable IDs score
+   higher). Sequential int: sweep neighbours/boundaries. UUID v1/v6: time+MAC derived, so
+   timestamp-bracket ("sandwich") a victim's GUID. UUID v4: guessing is dead, harvest instead.
+   UUIDv7/ULID/Snowflake/KSUID/ObjectId leak creation time: window-bounded enumeration. Scheme
+   table and recipes: `agent/references/access-control/idor-identifier-prediction.md`.
+2. **Swap IDs** horizontally (same tier, other tenant) and vertically (user → admin IDs and
+   admin actions), on read, write, delete and on create with a foreign parent ID; include files,
+   exports and downloads. Also try another user's real ID observed elsewhere; `classify-payload`
+   covers structural guesses only. Array/CSV/wildcard IDs (`id[]=`, `*`, `all`) are in
+   `API01-broken-object-level-authz.md`.
+3. **Per-verb authorization matrix.** Authz is often wired to one verb: replay the swapped ID
+   across GET/POST/PUT/PATCH/DELETE/HEAD/OPTIONS. Observed: `GET /api/v4/user/1` → 403 while
+   `PUT /api/v4/user/1?include=email` → 200 with the victim's PII (the write path skipped the
+   read-path filter). `HEAD` often shares GET's handler but skips its authz wrapper; `OPTIONS`
+   can leak the allowed verb set.
+4. **Harvest, don't guess, opaque IDs.** A v4 UUID is not "safe — stop". Harvest real victim IDs
+   from the app's own over-sharing (list/search/feed nesting, exports, GraphQL GID decode, JWT
+   claims, mention/typeahead APIs, archives and source maps, bulk-action echoes, notifications,
+   404-vs-403/length/timing oracles); the channel list is the prediction reference "Harvesting".
+5. **Two-session differential replay.** Replay every owner request as the other-user identity
+   and unauthenticated. Use content-length + body fingerprint as the oracle, not status. A
+   200-vs-403 or length delta is a candidate: `404` ≠ safe (scoping can mask an object) and equal
+   lengths can be coincidence. **Hand-verify the returned data belongs to the other account**
+   (names, emails, order contents) before recording.
+6. **403 → IDOR ladder** when a straight swap is refused: ID type-confusion, wrapping, path
+   mangling, case/slash, content-type and API-version swaps (the variants pass a scalar
+   validator at the edge but reach the data layer intact). Load the concrete variant list in
+   `API01-broken-object-level-authz.md` "Parameter Injection for BOLA" when the first swap returns
+   401/403/404. Most productive: **serializer/format
+   twins** — `?_format=json`, `.json` or another format suffix often hits a different,
+   unauthorised controller for the same object.
+7. **Body/route divergence** (route ID owner-checked, body carries an ID): escalate to
+   `agent/skills/split-brain-idor/SKILL.md`.
+8. **Second-order / workflow rebinding.** Ownership checked at creation is often not re-checked
+   later: replay the approve/resume/schedule step against a foreign object; set client-supplied
+   scope fields (`owner_id`, `account_id`, `sender`, `tenant_id`) to the victim's value; test
+   deactivated/archived/removed members' old sessions and tokens.
+9. **Blind writes** (empty 204, `{}`): prove impact by a victim-visible side effect
+   (notification, state change), a 200-vs-error/length/timing oracle, or OOB as above.
+10. **Listings without a filter**, a blanked user filter, or GraphQL relationship traversal can
+    return other users' objects; privileged-field binding goes to `agent/skills/mass-assignment/SKILL.md`.
+11. **Web cache deception** can deliver IDOR without the victim's ID (situational): per-architecture
+    probes in `agent/references/access-control/idor-modern-architectures.md`, plus `cache-poisoning`.
 
-### 2. Fingerprint the Identifier Type (Decision Branch)
-
-Before swapping anything, parse the captured ID and branch — the right tactic depends on
-the scheme, and so does the eventual VRT severity (iterable IDs score higher):
-
-- **Sequential int** → sweep neighbors/boundaries; mass-harvestable, highest severity.
-- **UUID** → read the version nibble (the digit after the 2nd hyphen group):
-  - **v1 / v6** are time + MAC derived and therefore *predictable* → timestamp-bracketing /
-    "sandwich" attack to reconstruct a victim's GUID.
-  - **v4** is random → guessing is hopeless; switch to **harvest-not-guess** (§7).
-- **Time-ordered schemes** (UUIDv7, ULID, Snowflake, KSUID, Mongo ObjectId) leak creation
-  time → window-bounded enumeration around a known timestamp.
-
-Keep this branch short — the full scheme table, version-nibble cheatsheet, and per-scheme
-enumeration recipes live in `agent/references/access-control/idor-identifier-prediction.md`.
-
-### 3. ID Manipulation Techniques
-
-Do not hand-pick the variants. Feed the captured ID to `vigil assess classify-payload`,
-which recognises the type (`sequential_id`, `uuid`, `integer`, `base64`, `hex`, ...) and
-emits intent-keyed attack variants so you cover neighbor/boundary/escalation/format/empty
-systematically:
-
-```bash
-# Numeric / auto-increment ID → neighbours, boundaries, escalation IDs, type-confusion
-vigil assess classify-payload 1042 --mutations
-#   type:  sequential_id
-#   neighbor:   '1043' '1041' '1044' '1040' '2084'        ← adjacent objects (horizontal IDOR)
-#   boundary:   '0' '-1' '1' '99999999' '2147483647'      ← edge IDs (first record / overflow)
-#   escalation: '1' '0' '2' 'admin' 'root'                ← likely-privileged IDs
-#   format:     '"1042"' '[1042]' '{"id": 1042}' 'null'   ← type confusion (string/array/object)
-#   empty:      '' 'null' 'undefined' ' ' '\x00'
-
-# UUID → increment last group, all-zeros / all-Fs, first-user GUID, case + no-hyphen confusion
-vigil assess classify-payload 550e8400-e29b-41d4-a716-446655440000 --mutations --json
-```
-
-- [ ] Run `classify-payload --mutations` on each captured ID; fire the `neighbor` and
-      `boundary` variants for **horizontal** access (adjacent / first objects) and the
-      `escalation` variants (`1`, `0`, `00000000-...-000000000001`, `admin`) for **vertical** access
-- [ ] UUID: also try the real UUID of another user's object (obtained via another endpoint) —
-      `classify-payload` covers the structural guesses, not values you can only observe
-- [ ] Use the `format` variants for type-confusion (int as `"1042"` string / `[1042]` array /
-      `{"id":1042}` object) — some authz checks only validate the scalar shape
-- [ ] Base64 / hex IDs: `classify-payload` classifies them and the `format`/`boundary` intents
-      emit decode-modify-reencode and truncation variants; confirm whether the value is predictable
-- [ ] Array injection: `id[]=1&id[]=2` — may return multiple objects
-- [ ] Wildcard or special values: `*`, `all`, `null`
-
-### 4. Horizontal Access Testing (Same Role)
-
-- [ ] Create two accounts: User A and User B
-- [ ] As User A, access User B's resources by swapping ID
-- [ ] Test on GET (read), PUT/PATCH (modify), DELETE (remove)
-- [ ] Test POST with another user's parent ID (e.g., create order for User B)
-- [ ] Check file/document access: `/files/{fileId}`
-- [ ] Check export/download endpoints with swapped IDs
-
-### 5. Vertical Access Testing (Cross Role)
-
-- [ ] As regular user, access admin-only resource IDs
-- [ ] Swap user ID to admin ID in requests
-- [ ] Test admin actions (delete user, change role) with user token
-- [ ] Check if API hides endpoints but doesn't enforce authz on IDs
-
-### 6. Per-Verb Authorization Matrix
-
-Authorization is frequently wired to a single verb. For **every** protected object route,
-replay the swapped-ID request across all methods — a GET may be blocked while PUT/PATCH/HEAD
-leak or write.
-
-> Real example: `GET /api/v4/user/1` → 403, but `PUT /api/v4/user/1?include=email` → 200
-> returning the victim's PII. The write path skipped the read-path authz filter.
-
-```bash
-# Replay one victim object ID across every verb AS user_a; rank what diverges.
-# --identity user_a selects user_a's auth material and stamps the probe so the
-# depth ledger sees who ran it (no hand-pasted Cookie: session= token).
-for m in GET POST PUT PATCH DELETE HEAD OPTIONS; do
-  vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
-    curl -s -o /dev/null -w "$m %{http_code} %{size_download}\n" \
-    -X "$m" "https://target/api/v4/user/VICTIM_ID?include=email"
-done
-```
-
-- [ ] Note that `HEAD` often shares GET's handler but skips its authz wrapper
-- [ ] `OPTIONS` can leak the allowed verb set (the unprotected one is your candidate)
-- [ ] When a verb returns differently, escalate it through §7–§10 with a real victim ID
-
-### 7. Harvest Victim Object IDs (When Guessing Fails)
-
-A random v4 UUID / opaque key does **not** mean "safe — stop." It means *guessing* is dead;
-go *harvest* real victim IDs from the application's own over-sharing, then replay them:
-
-- [ ] **Cross-endpoint over-sharing** — list / search / `/me` / dashboard / activity-feed
-      responses leak *other* users' IDs in nested fields, author refs, assignee lists
-- [ ] **Export / report metadata** — CSV/PDF/XLSX exports embed raw object IDs
-- [ ] **GraphQL GID decode** — base64 `gid://platform/Type/123` exposes the underlying int
-- [ ] **JWT claims** — decode the token; `sub`, `org_id`, `tenant_id` are object IDs
-- [ ] **Autocomplete / mention / typeahead APIs** — `@`-mention and share-dialog endpoints
-      enumerate users org-wide
-- [ ] **Public/shared links + OSINT** — Wayback, CommonCrawl, URLScan, JS bundles, source maps
-      (`.map` files) leak historical IDs and internal route shapes
-- [ ] **Activation / bulk-action oracles** — "select all" / bulk-action requests echo every
-      object ID in scope
-- [ ] **Notification side-channels** — webhooks, emails, in-app notifications carry IDs
-- [ ] **404-vs-403 / length / timing oracle** — distinguish "exists but forbidden" from
-      "does not exist" to confirm an ID before full enumeration
-
-Then replay each harvested ID through the access tests above. For the *prediction* side
-(when IDs are semi-structured), see `agent/references/access-control/idor-identifier-prediction.md`.
-
-### 8. Two-Session Differential Replay (Primitive)
-
-Make this a first-class setup step, not an afterthought. Register each account as a **named
-identity** in the credential store (`vigil auth import <key> --identity <name>`) so you replay
-with `--identity` instead of pasting tokens:
-
-- **`user_a`** = victim (owns objects)
-- **`user_b`** = attacker at the **same tier** (horizontal) AND, for vertical, a higher-tier
-  identity (e.g. `admin`)
-- **Unauthenticated** context (no `--identity`, or an `anon` identity with no auth material)
-- For SaaS, put `user_a` and `user_b` in **separate tenants/orgs**
-
-Replay every owner request under (a) the other-user identity and (b) unauthenticated. This is
-the **Burp Autorize / Auth Analyzer / AuthMatrix** model — they automate exactly this replay.
-Because each replay is stamped with its identity name, the depth ledger registers a real
-**cross-identity** access-control pass (≥2 distinct identities); a single-identity run does not.
-
-Use **content-length + body-fingerprint** as the oracle, not status code alone.
-
-```bash
-# Replay user_a's object AS user_b; the --identity name is stamped onto the probe
-# so the cross-identity pass is recorded (no hand-pasted Cookie: session= token).
-vigil assess kali exec --technique IDOR --probe-kind payload --identity user_b -- \
-  curl -s -o b_resp.json -w '{"url":"%{url_effective}","status":%{http_code},"content_length":%{size_download}}\n' \
-  "https://target/api/orders/VICTIM_ORDER_ID" >> replay.jsonl
-vigil assess anomaly-score replay.jsonl --top 5
-```
-
-**Critical caveat (state this explicitly in findings):** request-level automation can only
-*hint* at BOLA. A `200`-vs-`403` or a length delta is a candidate, not a confirmation — the
-tool has no object-ownership context. **`404` ≠ safe** (scoping can mask an existing object),
-and a matching length can be coincidental. **Always hand-verify that the returned data actually
-belongs to the other account** (names, emails, order contents) before reporting.
-
-### 9. 403 → IDOR Bypass Ladder
-
-When a straight ID swap returns `401/403/404`, do not abandon — escalate systematically. These
-variants frequently pass a scalar-shape validator at the edge but reach the data layer intact.
-Cross-ref `agent/references/api-security/API01-broken-object-level-authz.md`.
-
-- [ ] **JSON type-confusion on the ID:** `[1234,1235]` array · `true` · `*` / `%` wildcard ·
-      `00001235` zero-pad · `-1` · `1235.0` float · `"1234,1235"` CSV-string
-- [ ] **Object / array wrapping:** `{"id":1234}` · `[1234]` · nested `[[1234]]` ·
-      `{"id":{"id":1234}}`
-- [ ] **Path mangling:** `%00` null byte · `/own/../victim/` traversal · trailing `;` or `.json` ·
-      wildcard segment `/workspaces/*/users`
-- [ ] **Content-Type swap:** json ↔ form-encoded ↔ xml (different binders, different authz)
-- [ ] **Version-prefix swap:** `/v1/` vs `/v2/` (older/newer route may lack the check)
-- [ ] **Serializer / format twins:** the same object via an uncovered route — append `?_format=json` /
-      `.json` / other format suffixes (and alternate API versions), which often hit a different
-      (unauthorized) serializer/controller path than the protected route
-- [ ] **Case + trailing-slash:** `/API/Users/123`, `/api/users/123/`
-
-```bash
-# Type-confusion / wrapping sweep on a blocked ID
-for body in '1235' '[1234,1235]' 'true' '{"id":1235}' '[1235]' '"1234,1235"' '00001235' '1235.0'; do
-  vigil assess kali exec --technique IDOR --probe-kind payload --identity user_a -- \
-    curl -s -o /dev/null -w "$body -> %{http_code} %{size_download}\n" \
-    -X PATCH -H "Content-Type: application/json" \
-    -d "{\"id\":$body}" "https://target/api/orders"
-done
-```
-
-### 10. Split-Brain IDOR (Body/Route Divergence)
-
-The server validates authorization against the URL ID but operates on the body ID. This
-bypasses standard IDOR protections where ownership is checked on the route param.
-
-- [ ] On PUT/PATCH: send request with YOUR ID in the URL + VICTIM's ID in the body
-  ```
-  PUT /api/orders/MY_ORDER_ID
-  {"_id": "VICTIM_ORDER_ID", "status": "cancelled"}
-  ```
-- [ ] Test all body ID field names: `_id`, `id`, `objectId`, `orderId`, `userId`, `documentId`
-- [ ] Verify which ID the server actually used: read the object back and check which one changed
-- [ ] Test nested object IDs: `{"items": [{"_id": "VICTIM_ITEM"}]}`
-- [ ] Test bulk endpoints: `{"ids": ["MY_ID", "VICTIM_ID"]}`
-- [ ] If body ID is normally omitted, test what happens when you ADD it (may override URL routing)
-
-**Confirmation protocol:** (1) baseline with matching URL+body IDs → works, (2) swap body ID to victim → check if victim's object was modified, (3) remove override → confirm reversion.
-
-This is a full specialist workflow — escalate into `agent/skills/split-brain-idor/SKILL.md`
-once the basic divergence pattern is confirmed.
-
-### 11. Second-Order / Workflow-Resume & Object-Rebinding
-
-Ownership is often validated at object *creation* but NOT re-checked when a later step resumes,
-approves, or schedules it.
-
-- [ ] **Workflow resume:** in create→approve / create→resume / create→schedule flows, store your
-      own ID then replay the **later** step against a *foreign* object (the resume handler trusts
-      the earlier authz)
-- [ ] **Client-supplied scope fields:** always test `owner_id` / `account_id` / `sender` /
-      `tenant_id` body fields as authorization-scope inputs — set them to the **victim's** value
-- [ ] **Lifecycle replay:** deactivated / archived / dissociated / removed members can often still
-      read objects with a previously issued session or token
-
-(Client-supplied scope fields overlap with mass assignment — see §13 cross-reference.)
-
-### 12. Blind IDOR — Confirm via Side Effects
-
-When a write returns no data (empty `204`, generic `200 {}`), do not abandon the finding — prove
-cross-object impact out-of-band:
-
-- [ ] Victim receives a **notification / email / state change** triggered by your write
-- [ ] **200-vs-error / length / timing oracle** distinguishes "did something" from "no-op"
-- [ ] Wire the proof to OOB infra:
-
-```bash
-vigil oob mint --client <name> --technique idor --probe-kind blind-write
-# → host  <nonce>.<client-id>.<configured-oob-domain>   (= $OOB_HOST)
-# mint binds the nonce under the client's id; inject that EXACT host ($OOB_HOST) where the
-# victim's object would surface it (webhook URL, email, etc.) — never hand-build a bare
-# <nonce>.oob... host. Then correlate on the same client:
-vigil oob poll --client <name>   # a matched hit confirms the write reached the victim object
-```
-
-### 13. Bulk / Mass Assignment
-
-- [ ] Test listing endpoints without filter: `/api/orders` returns all
-- [ ] Remove or blank the user filter parameter
-- [ ] GraphQL: query relationships to access other users' nested data
-
-Privileged-field and `owner_id`-rebinding injection is its own specialist workflow —
-do not duplicate it here; escalate into `agent/skills/mass-assignment/SKILL.md`.
-
-### 14. Web Cache Deception Delivers IDOR Without the Victim's ID
-
-Confidence: situational. Appending a cacheable suffix to an authed JSON view —
-`/account/settings/x.css`, `;x.js`, `%2f..%2f`, `%23.css` — can cause a CDN/proxy to cache the
-victim's **personalized** response under a static key that the attacker then fetches
-**unauthenticated**. Check `cf-cache-status` / `x-cache: HIT` to confirm the cache landed.
-Cross-ref `agent/skills/cache-poisoning/SKILL.md`; the per-architecture cache/IDOR catalog lives
-in `agent/references/access-control/idor-modern-architectures.md`.
-
-### 15. Validate Impact
-
-- [ ] Confirm data belongs to another user (check names, emails)
-- [ ] Demonstrate modification: change another user's data
-- [ ] Demonstrate deletion if safe to do so (staging only)
+Proof follows `agent/references/finding-fp-and-severity-gate.md`: two contexts and a real foreign
+object. A destructive demonstration needs `--destructive` and exploit approval under the ROE.
 
 ## What to Record
 
-- Endpoint, HTTP method, and parameter with IDOR
-- Auth context — the **named identity** (`--identity user_a` / `user_b` / `admin`) that ran the probe — and the verb/variant that worked
-- Object accessed/modified and its owner — **hand-verified** as belonging to another account
-- Horizontal vs vertical access; cross-tenant if SaaS
-- Request/response evidence
-- **VRT severity (BugCrowd model — iterability is the multiplier):**
-  - iterable + sensitive + **modify** → **P1**
-  - **modify** of an *iterable* ID → P2
-  - **view** of an *iterable* ID → P3
-  - modify/view gated behind a complex GUID/UUID → **P4 (still in scope — report it, not informational)**
-  - view of non-sensitive data → P5
-- **CWE tag:** default **CWE-639** (authz bypass through user-controlled key); use **CWE-566**
-  for the SQL-primary-key variant; **CWE-862** if there is no authz check at all, **CWE-863** if a
-  check exists but is wrong; **CWE-602** when enforcement is only client-side. Pillar is CWE-284.
-- **Class the finding correctly:** BOLA (OWASP API1) = wrong *object* · BOPLA (API3) = wrong
-  *property* · BFLA (API5) = wrong *function* — file it under the right one.
-- Remediation: enforce server-side ownership checks tied to session identity; use indirect /
-  unpredictable references; re-check authz on every verb and every workflow step.
+- Endpoint, method, parameter, the verb/variant that worked, and the **named identity** that ran
+  it; the object and its owner, hand-verified; horizontal/vertical/cross-tenant.
+- Class it correctly: BOLA (API1, wrong object), BOPLA (API3, wrong property), BFLA (API5, wrong
+  function). Severity calibration when the program uses Bugcrowd VRT (iterability is the
+  multiplier; a GUID-gated view/modify is still P4, not informational) and the CWE mapping are in
+  `API01-broken-object-level-authz.md`.
+- Recording format: `agent/references/runtime-guides/web-finding-recording.md`.
 
-## Kill Signals — Stop Testing When
+## Kill Signals
 
-- Every verb + every wrapping/type-confusion variant + the unauthenticated and other-user
-  differential replays all return identical **owner-scoped** data (you only ever see your own)
-- A hard `403` persists where identity is **server-side session-derived** and there is **no
-  client-controllable scope field** (no `owner_id`/`tenant_id`/body ID to override)
-- IDs are random **v4 UUIDs** AND harvesting (§7) yields no foreign IDs AND no oracle leaks them
-- The object truly does not exist (confirmed, not just `404`-masked) across all accounts
+- Every verb, ladder variant and the unauth/other-user replays return only owner-scoped data.
+- A hard 403 persists where identity is server-side session-derived and no client-controllable
+  scope field exists.
+- IDs are random v4 UUIDs, harvesting yields no foreign IDs, and no oracle leaks them.
+- The object is confirmed absent (not merely 404-masked) across all accounts.
 
 ## Escalate When
 
-- One ID swap returns **another user's data** → sweep all object types and every endpoint;
-  harvest at scale (GraphQL batching / aliasing) and enumerate the population
-- The leak is on a profile / settings / reset / password endpoint → chain to **account takeover**
-- A write/delete verb succeeds cross-user → demonstrate destructive impact (P1/P2)
-- Straight IDOR is blocked but a body ID diverges → escalate to **split-brain-idor**
-- A client-supplied identity/scope param changes the response → escalate to
-  **bff-parameter-override**
-- Privileged fields bind on create/update → escalate to **mass-assignment**
+- One swap returns another user's data → sweep all object types and endpoints; harvest at scale
+  (GraphQL batching/aliasing) and size the population.
+- The leak is on profile/settings/reset/password → chain to account takeover.
+- A cross-user write/delete succeeds → demonstrate impact (with approval) for P1/P2.
+- Body ID diverges → split-brain-idor; a client-supplied identity/scope param changes the response
+  → bff-parameter-override; privileged fields bind → mass-assignment; `node(id)`/GID → graphql-testing;
+  claim-derived IDs → jwt-testing.
 
-## Extended Resources
-
-This skill is the **entry point**; the following are SEPARATE specialist skills to escalate into
-once you have confirmed the matching pattern:
-
-- `agent/skills/split-brain-idor/SKILL.md` — body/route ID divergence (specialist)
-- `agent/skills/bff-parameter-override/SKILL.md` — client-supplied identity/scope override (specialist)
-- `agent/skills/mass-assignment/SKILL.md` — privileged-field / `owner_id` rebinding (specialist)
-- `agent/skills/graphql-testing/SKILL.md` — `node(id)` / batching / GID enumeration (specialist)
-- `agent/skills/jwt-testing/SKILL.md` — claim-derived object IDs and identity tampering (specialist)
-- `agent/skills/cache-poisoning/SKILL.md` — web cache deception delivering IDOR (specialist)
-
-Reference material (link, don't inline):
-
-- `agent/references/access-control/idor-modern-architectures.md` — GraphQL / JWT / signed-refs /
-  cloud / AI-LLM / realtime / mesh / cache IDOR per-architecture probes
-- `agent/references/access-control/idor-identifier-prediction.md` — ID-scheme prediction table +
-  ID-harvesting techniques
-- `agent/references/api-security/API01-broken-object-level-authz.md` — OWASP API Security
-  Top 10:2023 BOLA checklist
+`vigil assess list-references --skill idor-testing` lists the paired references
+(`access-control/idor-modern-architectures.md` — GraphQL/JWT/signed-refs/cloud/AI/realtime/mesh/cache
+probes, load when the app uses one of those architectures; `access-control/idor-identifier-prediction.md`
+— load on a non-sequential ID; `api-security/API01-broken-object-level-authz.md` — load before
+recording, for VRT/CWE classing).

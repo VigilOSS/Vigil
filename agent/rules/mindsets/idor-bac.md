@@ -1,7 +1,7 @@
 # IDOR / Broken-Access-Control Mindset
 
-The generative layer that runs *before* `agent/agents/vulnerability-analyst.md`'s Multi-Perspective
-Checklist and the `idor-testing` skill's methodology — those gate and structure the work; this
+The generative layer that runs *before* `agent/agents/vulnerability-analyst.md`'s "Before Writing
+an Endpoint Off" checks and the `idor-testing` skill's methodology — those gate and structure the work; this
 primes what to go looking for. The operator injects this lens wherever an object, a role, or a
 tenant boundary is in play — which is nearly every authenticated surface. Stop reading an endpoint
 as "the profile page"; read it as *whose data, reachable by what proof of ownership, checked

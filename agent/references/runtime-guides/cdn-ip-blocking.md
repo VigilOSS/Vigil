@@ -1,287 +1,85 @@
 ---
-description: CDN/edge IP-reputation block detection signals (403 + reference codes, TCP reset, 000-status), the egress reputation curl script, four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the vigil assess ingest endpoints --egress-blocked-hosts cross-reference
+description: CDN/edge IP-reputation block detection with vigil assess egress-check (403 + reference codes, TCP reset, 000-status as candidate signals), the four mitigation options (program allowlist / residential proxy / browser-based tool / accept-gap), give-up-vs-escalate rule, and the vigil assess ingest endpoints --egress-blocked-hosts deferral
 ---
 
 # CDN / Edge IP-Reputation Blocking — Detection and Mitigation
 
-> **Automated version:** `vigil assess egress-check --hosts <hosts> --control example.com --emit-blocked-hosts <file>`
-> runs this detection robustly — it samples in-scope hosts + a known-good control, classifies each with the
-> shared `reachability.classify_probe` verdict (a bare `connect=000` is NOT treated as blocked unless there is
-> no TCP connect AND no resolved IP; a TLS-1.3 reset is retried with `--tls-max 1.2`), captures bounded
-> headers/body bytes so an edge block cannot look reachable, records every outcome as an evidence-backed
-> advisory `egress_decision`, and writes the
-> blocked-hosts file for `ingest endpoints --egress-blocked-hosts`. The manual script below is the reference it
-> supersedes — prefer the verb. The legacy script is only a candidate-signal sampler because it discards
-> headers/bodies and cannot distinguish a WAF response from an application response.
+This guide covers the case where the runtime's own egress IP is on a CDN or WAF reputation list
+(datacenter and shared-runtime IPs collect hits over time). Recon then collapses into hard 403s
+and 000-status timeouts on every host, and each specialist wastes a dispatch rediscovering it. The
+operator's Egress reputation checkpoint (`agent/phases/phase-1-recon.md`) catches it once. When a
+single probe is denied but the host otherwise answers, read
+`agent/references/runtime-guides/cdn-edge-behavior.md` instead.
 
-When the runtime container's egress IP is on a CDN edge's reputation list,
-target-facing recon collapses into uninformative 403s and 000-status timeouts.
-This guide documents the detection signals, the egress reputation curl script,
-the four mitigation options exposed at the operator's Egress reputation
-checkpoint, and the give-up-vs-escalate decision.
+## Detection
 
-## Why this matters
+Run `vigil assess egress-check --hosts <hosts> --control example.com --emit-blocked-hosts <file>`.
+It samples in-scope hosts and known-good controls and classifies each with the shared
+reachability verdict. It retries a TLS-1.3 reset with `--tls-max 1.2`, keeps bounded headers and
+body bytes so an edge block can't pass as reachable, and records each outcome as an advisory
+`egress_decision`. A bare `connect=000` counts as blocked only when there was neither a TCP
+connect nor a resolved IP. Only a control-live, mostly transport-blackholed sample yields
+`cluster_blackholed` and the blocked-hosts file. The Overview egress banner and `/summary`
+`egress_status` read only the latest `egress-check` result.
 
-Datacenter, cloud-VPS, and shared-runtime IPs accumulate reputation hits over
-time — open proxies, scraping farms, and prior abuse all leave fingerprints
-that CDN edges (and several enterprise WAFs) recognize. Once the runtime IP
-sits on the reputation list, the edge serves a hard 403 (often with a vendor
-reference code header) or drops the TCP connection on geoblock-style policies.
-Specialists hitting that wall produce no signal and burn a full context
-window per dispatch. The Egress reputation checkpoint catches the failure
-once and routes the operator to a fix instead of letting every Phase 4
-specialist rediscover it.
+These are the candidate shapes behind a block. Each is a lead, not a verdict, until the retained
+response evidence and an independent control or route agree:
 
-## Detection signals
+1. **Hard 403 with a CDN reference code** on a path that should be 200/3xx (`/`, `/robots.txt`, a
+   public asset). A header carries a support-correlation id (`x-reference-id`,
+   `x-akamai-edgescape`, `x-amzn-cf-id`, `x-edge-request-id`, …), and the 403 is the same across
+   paths. A per-path authorization 403 would vary by path.
+2. **TCP reset or refusal on connect** (geo or ASN policy): curl exits 7 or reports `000` almost
+   at once on every host behind the same edge.
+3. **Consistent `000` on a host other tools show is up**, which also covers TLS handshake aborts
+   and possible JA3/JA4 fingerprint blocks. `000` alone means only that no HTTP answer was seen.
 
-The egress block presents in three common shapes. A shape is a candidate, not a
-verdict: retain its response evidence and compare multiple controls/routes before
-dispatching the checkpoint.
-
-### 1. Hard 403 with a CDN reference code
-
-The edge serves an HTTP 403 with a vendor reference identifier in a response
-header — typically a UUID or hex blob — meant for support-side correlation.
-The body may carry a generic "Access Denied" page. Pattern:
-
-- Response is 403 against an endpoint that should plausibly return 200/3xx
-  (the apex `/`, a public asset, a `/robots.txt`).
-- A response header carries a reference code. Major CDN edges use
-  `x-reference-id`, `x-akamai-edgescape`, `x-amzn-cf-id`, `x-edge-request-id`,
-  or vendor-specific equivalents — different vendors, same shape.
-- The 403 is consistent across the representative set (not a per-endpoint
-  authorization 403, which would vary by path).
-
-### 2. TCP reset / connection refused on connect
-
-The edge implements geoblocking or a connection-time policy (commonly a
-country-of-origin or ASN block). The TCP handshake does not complete; curl
-returns exit code 7 (CURLE_COULDNT_CONNECT) or status 000 with a connection
-error. Pattern:
-
-- `curl -m 10` returns immediately (well under the timeout).
-- The HTTP code captured is `000` because no HTTP exchange happened.
-- The pattern is consistent on every representative host the egress IP
-  reaches the same edge through.
-
-### 3. Consistent 000-status from curl on a known-up host
-
-A host other tools confirm is up returns `000` from curl with no HTTP body.
-This usually overlaps with shape #2 but also covers TLS handshake aborts
-(including possible JA3/JA4 fingerprint blocks). On its own `000` means only
-that no HTTP answer was observed; it does not prove a dead host or the cause.
-
-## Egress reputation script
-
-This historical fallback illustrates the earlier percentage calculation. Run it
-only when the supported verb is unavailable, and do not turn its percentage into
-a blocked-hosts file or target verdict without separately retaining headers/body
-and performing the control/route disambiguation above. Run it against the live-host list during Phase 1 Step 0b (recon-specialist,
-after subdomain-enum + httpx have populated `live_hosts.txt`). It samples up
-to 10 representative hosts, distinguishes alive-and-blocked from dead, and
-emits the block percentage over the alive sample. Default-conservative: do
-not increase the sample size or remove the per-host timeout. The script is
-intentionally lightweight to avoid adding load on hosts that are already
-403'ing. Wrap the whole script in `vigil assess kali exec` so the audit row
-records the sweep against the runtime egress IP.
+If the verdict is blackholed, re-sample after five minutes, because a transient rate-limit
+window often clears. Surface the four options below only when the second sample agrees. Pass the
+emitted file to later ingestion so URLs to those hosts defer with
+`cluster_key=deferred:egress-blocked` instead of filling the work buffer:
 
 ```bash
-vigil assess kali exec --technique RECON \
-  --intent "egress reputation sample (CDN-IP-block detection)" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
-REPRS=$(head -10 "$ENGAGEMENT_DIR/scans/live_hosts.txt")
-blocked=0; total=0
-for h in $REPRS; do
-  # curl -w "%{http_code}" prints "000" cleanly on connection failure; no
-  # ||-fallback needed (the fallback would print "000\n000" and break the
-  # comparison below).
-  code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/")
-  case "$code" in
-    000)
-      # No HTTP answer observed. Cause unknown; exclude from this legacy
-      # percentage rather than pretending it is dead or blocked.
-      ;;
-    403)
-      blocked=$((blocked+1)); total=$((total+1))
-      ;;
-    *)
-      total=$((total+1))
-      ;;
-  esac
-  sleep 1
-done
-if [ "$total" -eq 0 ]; then
-  echo "egress check skipped: no live hosts to sample"
-  exit 0
-fi
-pct=$((blocked * 100 / total))
-echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
-[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of alive sampled hosts"
-'
-```
-
-When the fallback script reports `egress_block_pct > 50`, treat that as a lead and
-re-run an evidence-retaining check after a
-five-minute pause; transient rate-limit shape often clears on its own and
-fires the sweep above the 50% line for one sample window. Only fire the
-four-way checkpoint below when the second sample also stays >50% and the retained
-response/control evidence supports the same conclusion. Record
-the chosen option via:
-
-```bash
-vigil assess agent decision --kind egress_decision \
-    --choice <option> --payload-json '{"blocked_pct": N}' \
-    --note "<one-line rationale>"
-```
-
-Do not create a blocked-hosts file from the fallback's 403 percentage. Use the
-supported verb's emitted file only after it reports an observed transport
-blackhole, then pass that file to subsequent ingestion runs:
-
-```bash
-vigil assess ingest endpoints \
-  --egress-blocked-hosts "$DIR/scans/egress_blocked_hosts.txt" \
+vigil assess ingest endpoints --egress-blocked-hosts "$DIR/scans/egress_blocked_hosts.txt" \
   katana < "$DIR/scans/katana.txt"
 ```
 
-URLs to those hosts defer with `cluster_key=deferred:egress-blocked` instead
-of polluting the work buffer; specialists do not rediscover the block per-URL.
+Record the operator's choice with its evidence-backed percentage:
+`vigil assess agent decision --kind egress_decision --choice <option> --payload-json
+'{"blocked_pct": N, ...}' --note "<rationale>"`.
 
 ## Mitigation options
 
-The four options the checkpoint exposes — each with when-to-choose, setup
-shape, and audit-pipeline considerations.
-
-### 1. Request IP allowlisting from the target program
-
-**When to choose.** First-line option for any authorized VDP / bug-bounty
-program. The program owner can add the runtime egress IP to the WAF
-allowlist, which is the standard answer for legitimate testing and the only
-option that produces a clean signal (no JA3 mismatch, no proxy artifact, no
-TLS fingerprint drift).
-
-**How to set up.** Capture the runtime egress IP via
-`vigil assess kali exec --technique HEALTH --intent "capture runtime egress IP" --probe-kind fingerprint --phase recon --timeout 30 -- curl -s https://api.ipify.org`. Email or message
-the program contact with the IP and the engagement scope. Wait for
-confirmation before retesting. Record the request via
-`vigil assess agent decision --kind egress_decision --choice allowlist-requested --payload-json '{"egress_ip": "...", "program_contact": "..."}'`
-so a later operator can reproduce it.
-
-**Audit-pipeline considerations.** The audit row reflects the runtime egress
-IP only — the audit pipeline does not see the program's allowlist, so the
-audit story is the same whether the allowlist is in place or not. The
-operator records the allowlisting outcome via
-`vigil assess agent decision` and the
-activity log; downstream specialists see clean responses again and treat
-them as the truth.
-
-### 2. Route through a residential proxy or clean-IP VPS
-
-**When to choose.** When the program owner cannot allowlist the IP (large
-program, slow turnaround) or when the engagement explicitly authorizes
-testing through a clean-reputation egress. Residential proxies present a
-consumer-grade IP that most CDN reputation lists treat as benign; a
-clean-IP VPS works when the target's reputation feed is conservative.
-
-**How to set up.** Configure the proxy in `vigil assess kali exec` via the
-runtime's standard `HTTPS_PROXY` / `HTTP_PROXY` env vars. Verify the egress
-IP shifted before re-running the egress reputation script. Document the
-proxy provider, the egress IP range, and the engagement-side authorization
-via `vigil assess agent decision --kind egress_decision --choice residential-proxy --payload-json '{"provider": "...", "egress_range": "..."}'`.
-Exploitation traffic through a proxy requires explicit operator and program approval — proxy logs are
-out-of-pipeline and complicate the audit trail.
-
-**Audit-pipeline considerations.** The audit row records `vigil assess kali`
-invocations regardless of proxy state, but the proxy provider's logs are
-outside the audit pipeline. Treat the proxy as a privileged egress; record
-the proxy config and the egress-IP-of-record on the egress-decision row.
-Rate-limit through the proxy is the proxy provider's concern; cap concurrency
-and request rate on the runtime side anyway to stay under the residential-IP
-abuse threshold.
-
-### 3. Use a browser-based tool inside the runtime
-
-**When to choose.** When the edge implements a JA3/JA4 TLS fingerprint
-block (the runtime's curl/httpx fingerprint is on a vendor blacklist of
-known scanners). A browser inside the runtime (Playwright, headless
-Chromium, real Firefox) presents a legitimate browser TLS fingerprint and
-defeats the JA3 block without changing the egress IP.
-
-**How to set up.** The runtime image carries a Chromium binary, and the
-supported first-class browser-adjacent crawl path today is the Katana wrapper's
-`-headless` mode. Note that **headless** Chromium is itself fingerprinted and
-blocked by Akamai/Cloudflare bot-manager tiers — for a defended *login* you need
-a **headed stealth** browser, not headless: see
-`agent/skills/browser-automation/SKILL.md` and its runnable skeleton
-`agent/scripts/browser/playwright-login.js` (host node). For crawl-only JA3
-defeat, drive `vigil assess kali katana -headless ...`, or ask the operator to
-approve a scoped one-off Playwright script via `vigil assess kali exec` when
-precise request/DOM/console evidence is required. See
-`agent/references/tools/recon/katana.md` and
-`agent/references/runtime-guides/browser-semantic-evidence.md`.
-
-**Audit-pipeline considerations.** Browser-driven traffic still flows
-through `vigil assess kali` so the audit row records the invocation. The
-TLS fingerprint of record is the browser's, not the runtime's curl —
-specialists reading the audit history should not assume a curl-style
-fingerprint. Some recon tools (nmap, raw-socket fingerprinters) cannot be
-proxied through a browser; in that case fall back to option 1 or 2.
-
-### 4. Accept the limited coverage and document the gap
-
-**When to choose.** When the program does not allowlist, no clean egress
-is available, and the JA3 block is layered behind WAF policy that the
-browser path also fails. The engagement records the egress block as a
-Phase-4 blocker and ships the report with the documented gap; this is a
-real failure mode for some heavily-CDN-fronted programs.
-
-**How to set up.** Record the decision via
-`vigil assess agent decision --kind egress_decision --choice accept-gap --payload-json '{"blocked_pct": N}' --surfaced-to-user`,
-write the gap into `agent/skills/report-generation` Phase-4 coverage notes via
-`vigil assess intel record note` so the report-writer surfaces it. Mark
-affected scope entries `status=deferred` in `scope.json` so the scope
-coverage gate accepts them as terminal.
-
-**Audit-pipeline considerations.** The audit row reflects what actually
-ran — every 403 is recorded as a 403, not as a synthetic skip. The
-report-writer reads `vigil assess fetch summary` and the
-`vendor_saas_pending_decision` / `egress_block_status` projections (both
-exposed under `/summary`) and includes the documented gap in the
-Methodology / Coverage section.
+1. **Program allowlist** (`allowlist-requested`). Try this first for any authorized program. It is
+   the only option with a clean signal: no proxy artifact and no fingerprint drift. Capture the
+   egress IP with `vigil assess kali exec --technique HEALTH --intent "capture runtime egress IP"
+   --probe-kind fingerprint --phase recon --timeout 30 -- curl -s https://api.ipify.org`, send it
+   to the program contact with the scope, wait for confirmation, and record `{"egress_ip",
+   "program_contact"}` on the decision. Audit rows look the same either way, so the decision row
+   and the activity log carry the outcome.
+2. **Residential proxy or clean-IP VPS** (`residential-proxy`). Use this when the program can't
+   allowlist, or when the engagement explicitly authorizes a clean egress. Set `HTTPS_PROXY` /
+   `HTTP_PROXY` for the runtime, confirm the egress IP changed, and record `{"provider",
+   "egress_range"}`. Exploitation through a proxy needs explicit operator and program approval,
+   because the proxy's logs sit outside the audit pipeline. Keep concurrency and rate capped on the
+   runtime side to stay under residential-IP abuse thresholds.
+3. **Browser-based tool in the runtime** (`browser-based-tool`). Use this when the evidence is
+   JA3/JA4 or TLS-fingerprint shaped (reset mid-handshake, 403 only for curl-class fingerprints). A
+   real browser fingerprint gets past the block without changing the IP. For crawling, use
+   `vigil assess kali katana -headless …`. Headless Chromium is itself fingerprinted by
+   Akamai/Cloudflare bot-manager tiers, so a defended login needs a headed stealth browser
+   (`agent/skills/browser-automation/SKILL.md`). Raw-socket tools such as nmap can't go through a
+   browser, so for those use option 1 or 2. In the audit history, the TLS fingerprint of record is
+   the browser's, not curl's.
+4. **Accept and document the gap** (`accept-gap`). Use this when 1–3 fail. Record the decision with
+   `--surfaced-to-user`, write the gap as a `vigil assess intel record note` so the report-writer
+   puts it in Methodology/Coverage, and mark the affected scope entries `status=deferred` in
+   `scope.json` so the coverage gate treats them as terminal. Every 403 stays recorded as a 403.
 
 ## When to give up vs when to escalate
 
-The operator's escalation rule, in priority order:
-
-1. **First pass: option 1 (allowlist).** Always try the program contact
-   first. The cost is one message and a wait; the upside is a clean
-   audit trail.
-2. **Second pass: option 3 (browser).** When the symptom shape is JA3 /
-   TLS-fingerprint-shaped (TLS reset mid-handshake, 403 only on curl-class
-   fingerprints), a browser inside the runtime sidesteps the block
-   without changing the egress IP. Cheap to try.
-3. **Third pass: option 2 (proxy).** When the symptom is IP-reputation
-   shaped (403 on every TLS fingerprint, hard 403 with a vendor reference
-   code), the only fix is a different egress IP. Proxy or clean-IP VPS
-   resolves it; document the operator-side authorization.
-4. **Last resort: option 4 (accept).** When 1–3 all fail and the
-   engagement timeline does not allow further escalation. Document the
-   gap and ship.
-
-Step away from a path that produces no signal after one mitigation attempt
-fails; do not stack five proxy hops to push through a hardened block. The
-report value of a documented coverage gap exceeds the value of a noisy,
-unaudited bypass attempt.
-
-## Cross-references
-
-- `agent/operator-core.md` "Phase 1 — Egress reputation checkpoint"
-  sub-bullet — the user-facing numbered choice.
-- `agent/skills/web-recon/SKILL.md` "Egress reputation check" step — the
-  recon-side trigger that runs the script after wafw00f.
-- `agent/skills/subdomain-enumeration/SKILL.md` "Tooling preflight" cross-link
-  — DNS resolution success-rate parallels egress reputation; if every host
-  resolves but no host responds, run the reputation script.
-- `agent/scripts/assess/commands/ingest_endpoints.py` `--egress-blocked-hosts`
-  flag — the deferral path that turns the per-host block list into
-  `cluster_key=deferred:egress-blocked` work-buffer rows.
+Try allowlisting first. Then pick by symptom: a fingerprint-shaped block goes to the browser path
+(cheap), and an IP-reputation-shaped block (403 on every fingerprint, vendor reference code) goes
+to a different egress. Accept the gap when the timeline allows nothing more. Once one mitigation
+attempt produces no signal, stop rather than stacking proxy hops: a documented coverage gap is
+worth more in the report than a noisy, unaudited bypass.

@@ -200,9 +200,8 @@ register after the verifier confirms it.
 ### Step 5 — Draft the finding skeleton
 
 `vigil assess contract finding record` owns the payload — every required top-level
-field, the supported `details` keys, and the validation the write applies. Read it
-before the first write; a template copied into a skill drifts from the schema and
-the write is then refused.
+field, the supported `details` keys, and the validation the write applies. A template copied into a skill drifts from the
+schema and the write is then refused.
 
 ```bash
 vigil assess contract finding record

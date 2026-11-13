@@ -1,113 +1,97 @@
 ---
 name: blind-triage
-description: Two-pass pre-submission review gate that stops false-positive / overclaimed / over-severity submissions. Pass 1 is the in-context report-writer QA+fix; Pass 2 is a decisive BLIND zero-context triage (read ONLY the submission bytes, like a real Bugcrowd reviewer) that gates publish — anything other than Accept blocks submission. Run on EVERY Medium-or-above.
+description: Blind pre-submission triage (phase 8 step d) that stops false-positive / overclaimed / over-severity submissions. It runs after the in-context reviews (writer authoring, independent report-writer QC, cold reproduction and claim check — Pass 1) on the same packet, as a decisive BLIND zero-context review (Pass 2, read ONLY the submission bytes, like a real Bugcrowd reviewer) that gates final export — anything other than Accept blocks submission. Run on EVERY Medium-or-above.
 origin: Vigil
 ---
 
-# Blind Triage — pre-submission review gate (QA + blind triage)
+# Blind Triage — pre-submission review gate
 
 ## When to Activate
 
-Run this gate on **EVERY Medium-or-above finding** before it is submitted or
-published. Its purpose is to **stop false-positive, overclaimed, and
-over-severity submissions** before they leave the engagement. It is a two-pass
-gate: an in-context QA+fix pass, then a decisive **blind** triage pass that
-gates the submission.
+Run this gate on every Medium-or-above finding before it is submitted or published, to stop
+false-positive, overclaimed, and over-severity submissions. It is step d of the per-finding closeout
+in `agent/phases/phase-8-report.md`, which owns the order: the writer authors and builds the triage
+packet (a) → an independent report-writer QC records `submission_qc_verdict` (b) → a cold verifier
+records `repro_rehearsal`, then `claim_equivalence` when pending (c) → this blind triage on the same
+packet (d) → final export (e).
 
-The two passes are deliberately separate jobs. Pass 1 has full engagement
-context and fixes the report; Pass 2 has **zero** context and judges only the
-bytes a real external reviewer would see. Do not collapse them into one — the
-blind isolation is the whole point of Pass 2, and mixing context back in defeats
-it.
+Steps a–c are Pass 1. They have full engagement context and check the submission against its finding:
+the `agent/references/submission-format.md` checklist (format, AI-tells, PoC hygiene, CVSS consistent
+with the claimed severity, repro traceability, claimed-vs-proven impact), the QC review in
+`agent/agents/report-writer.md` "Closing verbs (submission QC)", and the cold rehearsal. Pass 1
+reliably catches presentation, traceability, and reproduction problems; it does not reliably catch
+whether impact was actually demonstrated to a reader without context. Pass 2, this blind review, has
+zero context and judges only the bytes an external reviewer would see. Keep them separate, because the
+blind isolation is what gives Pass 2 its value.
 
-## Pass 1 — Report-writer QA+fix (specialist WITH engagement context)
+## What the packaged rubric binds
 
-A report-writer specialist, **with** full engagement context, fixes the
-submission in place:
+`vigil assess export triage-packet` embeds this file verbatim as the packet's `## Verdict rubric
+(verbatim)` section, digested under `inputs.verdict_rubric`. It binds the reviewer to the review
+request, the verdict table, and the FP/overclaim bar below; that vocabulary and that bar are what the
+reviewer answers in. The operator's sections — Pass 1 above, "Running the review", and "Gating rule" —
+say what the operator does with the verdict and are not instructions to the reviewer;
+`agent/agents/general.md` ("Your Return") holds that line.
 
-- format and structure,
-- AI-tells (Rule 20 human-voice check),
-- PoC script hygiene (`submission-format.md` § "PoC Script Authoring" — minimal,
-  de-harnessed, no decorative banners or agent-env handling),
-- CVSS stated exactly once and consistent with the claimed severity,
-- repro-step correctness,
-- overclaim language ("I" vs "H" — impact-claimed vs impact-proven).
+## Running the review (operator)
 
-Pass 1 reliably fixes presentation and language. It does **not** reliably catch
-whether **impact was actually demonstrated** — that is what Pass 2 exists for.
-Pass 1 produces the clean submission bytes that Pass 2 then judges blind.
+**Build the packet.** `vigil assess export triage-packet <slug> [--attachment-id <id> ...]`, with
+exactly the attachment IDs intended for export. Hand over bytes, not a path: the command prints the
+packet directory and the reviewer makes no tool call, so paste `packet.md`'s contents into the
+dispatch prompt and attach each file under `attachments/` to the launch message. A reviewer handed the
+printed path has no submission to judge and no way to say so.
 
-(Pass 1 is the existing `agent/skills/report-generation/SKILL.md` "Review-and-Fix
-QA Mode" / the `agent/references/submission-format.md` pre-submission
-checklist — frame that pass as Pass 1 of this gate; it returns QA PASS / QA
-BLOCKED. Do not re-implement it here.)
+**Register the reviewer.** Before native launch, run `vigil assess agent start` with a fresh ID,
+`--role general`, `--dispatch-mode deep-manual`, and `--no-target-traffic`, on the strongest available
+model; the reviewer is neither the report-writer nor the analyst who found the issue. `general` is the
+registered zero-context reviewer role (`agent/agents/general.md`): its `## Load First` is empty by
+design, while any investigative role's packet orders it to read its role file and mandatory
+references, which carry engagement-shaped instruction this reviewer must not have. Bind the returned
+native handle to that registered ID.
 
-## Pass 2 — BLIND unbiased triage (the decisive gate)
+**Name no skills on this dispatch, not even this one.** `agent start` turns each named skill into an
+order to read its repository path ahead of the packet, which on the one role that must open nothing is
+an instruction to read the repository; naming this skill would also hand the reviewer the operator's
+half of the gate. `export triage-packet` already packages this file as the rubric, and `general` is
+exempt from the skill-audit requirement for this reason, so `agent start` asks for no skills and warns
+about none, and the handoff written from the return names none either.
 
-Pass 2 is an agent with **ZERO engagement context** that judges the exact
-external submission body and selected attachments a program reviewer would see.
-It is the decisive gate.
+**Keep the first pass blind.** The reviewer receives the program brief, the rubric, the external
+submission body, and the selected attachments: no OPERATOR DETAILS and no other engagement state. A
+claim not proven inside those bytes is unproven for triage purposes. Packet generation records
+`process_isolation_enforced=false`: it proves which bytes were packaged, not what the reviewer's
+process could reach, so that isolation is the operator's responsibility. After a recorded miss the
+reviewer may inspect the canonical finding solely to diagnose the gap; the writer or analyst makes the
+correction, then a fresh packet and a fresh blind reviewer judge the changed submission.
 
-**Reviewer setup (all of these are required):**
+**Record the verdict.** After the reviewer returns the table, record one decision row per finding,
+naming the reviewer dispatch and the report-writer dispatch that authored the reviewed packet. Both
+must be recorded dispatches of this engagement, and the reviewer must differ from the finding author
+and the writer. These identities establish attribution; native context isolation stays the operator's
+and reviewer's responsibility, not a backend-proven fact.
 
-- **Non-specialist general agent, strongest model.** Register its own dispatch identity. Not the report-writer, not
-  the vulnerability-analyst who found it — a fresh general agent on the strongest
-  available model, so it brings an unbiased, adversarial reviewer's eye.
-- **Zero engagement context on the first pass.** The reviewer receives the
-  program brief, verdict rubric, external submission body, and the exact selected
-  attachments. It receives no internal OPERATOR DETAILS section. After a
-  recorded miss, the reviewer may inspect the canonical finding solely to
-  diagnose the gap; the writer or analyst makes the correction, then a fresh
-  packet and fresh blind reviewer judge the changed submission.
-- **Reviewer input discipline.** Build the content-addressed input with
-  `vigil assess export triage-packet <slug> [--attachment-id <id> ...]` and give
-  the reviewer only that packet. Use the exact attachment IDs intended for export.
-  **Hand over bytes, not a path.** The command prints the packet DIRECTORY, and the reviewer
-  makes no tool call, so paste `packet.md`'s contents into the dispatch prompt and attach each
-  file under `attachments/` to the launch message. A reviewer handed the printed path has no
-  submission to judge and no way to say so.
-  Packet generation records `process_isolation_enforced=false`: it proves which bytes
-  were packaged but does not control the reviewer's process. The reviewer reads only the
-  packaged external submission, attachments, program brief, and rubric; it does not
-  query other engagement state on the first pass.
-  If a claim is not proven inside the submission bytes, it is unproven for triage purposes —
-  that is the reviewer judging exactly what an external triager can see.
-- **What the packaged rubric binds.** The rubric the packet carries is this file, embedded
-  verbatim as its `## Verdict rubric (verbatim)` section and digested under
-  `inputs.verdict_rubric`. It binds the reviewer to the review request, the verdict table, and
-  the FP/overclaim bar below — that vocabulary and that bar are what the reviewer answers in.
-  The operator's own steps here — Pass 1, this reviewer setup, the recording commands, the
-  gating rule — say what the operator does with the verdict and are not instructions to the
-  reviewer; `agent/agents/general.md` ("Your Return") holds that line.
+```bash
+vigil assess agent decision --kind blind_triage_verdict --payload-json \
+  '{"finding_slug":"<slug>","packet_id":"<64-char packet id>","reviewer_dispatch_agent_id":"<reviewer-id>","writer_dispatch_agent_id":"<writer-id>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable-Informational|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
+```
 
-The operator registers this review before native launch with `vigil assess agent start`
-using a fresh ID, `--role general`, `--dispatch-mode deep-manual`, and
-`--no-target-traffic`. `general` is the registered zero-context reviewer role
-(`agent/agents/general.md`): its `## Load First` is empty by design, so the role the packet
-names loads no constraint layer, rule, skill, or reference of its own — which is what makes
-`--role general` the only roster role that can take this dispatch. An investigative
-specialist role cannot: `agent start` renders "read `agent/agents/<role>.md` and its
-mandatory references before work" into the packet, and every other role's mandatory
-references carry engagement-shaped instruction this reviewer must not have. Pass
-`--dispatch-mode deep-manual` explicitly — one packet, one verdict, no item pool to iterate.
-The general agent receives only the prepared packet and the review request below; it does
-not load an investigative specialist role, a skill, or engagement history. Bind the returned
-native handle to that registered ID separately. The operator records its verdict after it
-returns.
+Then preserve the reviewer's actual reasoning, weak points, uncertainty, and suggested next tests in
+the handoff fields and run the ordinary `agent close` sequence for that reviewer; do not reduce its
+return to the word `Accept`.
 
-**Name no `--skills` on this dispatch — not even this skill.** `agent start` renders one
-mandatory-read order per named skill: the skill's repository path, plus "if a skill
-contradicts this prompt, the skill wins for procedural steps". On the one role that must open
-nothing, that turns the launch envelope into an instruction to read a repository file and
-ranks that file above the packet. Naming this skill specifically would hand the reviewer the
-operator's half of the gate — Pass 1, this setup, the recording commands — and it would add
-no information, because `export triage-packet` already packages this file as the rubric.
-Omitting the flag is clean here, not merely tolerated: `general` is exempt from the
-skill-audit requirement for exactly this reason, so `agent start` asks for no skills and
-warns about none. This reviewer loads none and selects none, so the handoff the operator
-writes from its return names none either.
+## Gating rule
 
-**The dispatch prompt must, verbatim, give the blind reviewer:**
+`vigil assess transition-phase complete` blocks with `missing_blind_triage` for any Medium-or-above
+finding in a submittable workflow state whose latest verdict is not `Accept@P1`..`Accept@P5` on a
+packet, so an unrecorded verdict reads the same as no triage. Final export also checks that the latest
+Accept's packet covers the current external body, selected attachments, platform, program brief, and
+rubric; any changed input needs a new packet and review.
+
+Any verdict other than `Accept` (at any priority) blocks submission. Route the finding back to the
+report-writer or operator with the reviewer's weak points, fix or kill it, and send the rebuilt packet
+back through QC and a new blind pass, recording the new verdict.
+
+## Review request (verbatim in the dispatch prompt)
 
 > You are an independent bug-bounty triager. You have ZERO context on how this
 > finding was produced. Read ONLY the submission text below — do not read any
@@ -117,7 +101,9 @@ writes from its return names none either.
 > [the `.md` bytes]. Judge it as a real reviewer would: is the impact actually
 > demonstrated in what you can see, at the severity claimed?
 
-**Required output — the verdict table.** The reviewer must return:
+## Verdict table
+
+The reviewer returns:
 
 | Field | Value |
 |---|---|
@@ -126,48 +112,13 @@ writes from its return names none either.
 | **Triage reasoning** | why this verdict — what is proven vs. asserted in the bytes |
 | **Weak points** | the specific gaps a real reviewer would push back on |
 
-**Record the verdict (durable, enforced).** The verdict is not advisory prose —
-persist it so the report/complete transition gate can SEE it. After the reviewer
-returns the table, the operator records one decision row per finding. Include the actual
-reviewer dispatch and the report-writer dispatch that authored the reviewed packet; both must
-belong to this engagement. The reviewer must differ from the finding author and the writer.
-These recorded identities establish attribution; native context isolation remains the
-operator/reviewer responsibility, not a backend-proven fact:
-
-```bash
-vigil assess agent decision --kind blind_triage_verdict --payload-json \
-  '{"finding_slug":"<slug>","packet_id":"<64-char packet id>","reviewer_dispatch_agent_id":"<reviewer-id>","writer_dispatch_agent_id":"<writer-id>","verdict":"<Accept@P1..P5|Need-More-Info|Not-Applicable-Informational|Out-of-Scope|Duplicate>","claimed_severity":"<sev>","weak_points":"..."}'
-```
-
-After recording the returned verdict, the operator preserves the reviewer's actual reasoning,
-weak points, uncertainty, and suggested next tests in the existing handoff fields, then runs
-the existing `agent close` sequence for that registered reviewer. The packet-only reviewer
-makes no tool calls. This is ordinary dispatch closure, not another human acknowledgement
-or a new review gate; do not reduce its final return to the word `Accept`.
-
-This writes a `kind='blind_triage_verdict'` row to the `assessment_dispatch_decisions`
-table. `vigil assess transition-phase report` (and `complete`) reads these rows and
-**blocks** with `kind=missing_blind_triage` for any Medium-or-above finding in a
-submittable workflow state (`active`, `exploited`, `blocked`, `reported`, ...) that
-lacks a recorded verdict whose `verdict` starts `Accept` — so an un-recorded
-verdict reads identically to no triage at all. The verdict string must start with
-`Accept` (e.g. `Accept@P3`) to clear the gate; any other value records the
-disposition but does not unblock publish. Final export also verifies that the
-latest Accept's packet covers the current external body, selected attachments,
-platform, program brief, and rubric. Any changed input needs a new packet and
-review.
-
-**Gating rule (hard block).** If the blind verdict is **anything other than
-`Accept` (at any priority)**, **do NOT submit.** Route the finding back to the
-report-writer / operator with the reviewer's weak points, fix or kill it, and
-re-run the blind pass (recording the new verdict). Only an `Accept` verdict
-clears the finding for submission.
+`P1`..`P5` is Bugcrowd's scale; for HackerOne, direct and GHSA submissions the reviewer maps the
+program's own severity bands onto it (Critical→P1 … Informational→P5) so the recorded verdict stays
+comparable.
 
 ## What this gate catches — recurring FP / overclaim patterns
 
-The blind reviewer's bar. These are the recurring patterns that produce
-false-positive / overclaimed / over-severity submissions; a submission that rests
-on any of them should **not** get an `Accept`:
+The blind reviewer's bar. A submission that rests on any of these should not get an `Accept`:
 
 1. **Self-induced precondition presented as real** — the attacker manufactured
    the trigger condition (disabled a protection they control, supplied their own
@@ -193,19 +144,12 @@ on any of them should **not** get an `Accept`:
    is the intended UX, not a bug.
 8. **Documented capability with no proven boundary break** — the vendor's own docs
    describe the exact behavior demonstrated, and the submission does not show a
-   boundary the docs mark as protected actually being crossed (C7). "The docs say
+   boundary the docs mark as protected actually being crossed. "The docs say
    this is possible, and it sounds dangerous" is not the same as "the docs say
    this must not happen, and it happened."
 
 ## Cross-references
 
-- `agent/references/finding-fp-and-severity-gate.md` — the in-context C1–C7
-  FP/severity-downgrade gate the vulnerability-analyst runs at Phase-4
-  verification (the same overclaim catalog, applied earlier in the lifecycle and
-  *with* context). This blind gate is the late, zero-context safety net before
-  submission.
-- `agent/skills/report-generation/SKILL.md` "Review-and-Fix QA Mode" — Pass 1 of
-  this gate.
-- `agent/references/submission-format.md` — the in-context
-  pre-submission checklist (Rule 20 AI-tell + "I is not H" overclaim check) that
-  Pass 1 applies.
+- `agent/references/finding-fp-and-severity-gate.md` — the in-context C1–C7 FP/severity-downgrade
+  gate the vulnerability-analyst runs at verification; the same overclaim catalog applied earlier,
+  with context. This blind gate is the late, zero-context safety net before submission.

@@ -20,7 +20,7 @@ This skill is generic across heap-allocators (glibc malloc, jemalloc, tcmalloc, 
 - A report-writer dispatch is structuring evidence for a critical-severity heap-corruption finding and needs to enumerate what is and isn't proven
 - An adversarial re-verification is being done on a heap-RCE claim that may be overstated
 
-The rung ladder is not specific to msgpack-c, fluent-bit, or any particular finding — it's the general structure a heap-OOB-to-RCE chain decomposes into, and the per-rung evidence bar is the calibration that lets a triager believe each step.
+The rung ladder is not specific to any library or finding — it's the general structure a heap-OOB-to-RCE chain decomposes into, and the per-rung evidence bar is the calibration that lets a triager believe each step.
 
 ## The Rung Ladder
 
@@ -35,7 +35,7 @@ A heap-OOB primitive becomes a disclosure-grade RCE chain by climbing six rungs.
 | 1A — live RIP control | Live release binary, network-delivered, attacker-chosen function pointer fires with attacker-chosen argument; observable side effect (file written, command output captured, callback URL hit) | 3× deterministic `system("id")` output or equivalent on the live release binary |
 | 0 — no-assist | All of 1A but with no LD_PRELOAD instrumentation on the victim, no `/proc/PID/maps` reads from the attacker process, no debugger attach | Same 1A evidence + explicit negative controls showing each assist's production equivalent is sufficient |
 
-Climb in numerical order until you reach the rung that matches the claim you want to make. **Stop honestly at the highest rung you can prove**; don't claim higher.
+Climb in table order (1 → 1B → 2 → 2.5 → 1A → 0) until you reach the rung that matches the claim you want to make. **Stop honestly at the highest rung you can prove**; don't claim higher.
 
 ## Per-Rung Evidence Bar
 
@@ -48,7 +48,7 @@ Each rung has a calibration that a triager checks. If the bar isn't met, the run
 
 ### Rung 1B — sink reachable
 
-- Identify the specific struct field that the OOB bytes land on. Name it (e.g., `msgpack_zone_finalizer.func`, `Object::vtable`, `link_map::l_addr`).
+- Identify the specific struct field that the OOB bytes land on. Name it (e.g., a finalizer function pointer, `Object::vtable`, `link_map::l_addr`).
 - Demonstrate the field is consulted via indirect call, vtable dispatch, or callback. Trace the call path from corruption-site to sink-fire in source code with file:line refs.
 - Harness binary, 3× deterministic invocation of the planted function pointer with planted data argument. Capture a side effect that proves it's the planted pointer (e.g., the planted address is `libc!system` and the planted data is a string the attacker chose).
 
@@ -78,16 +78,13 @@ Each rung has a calibration that a triager checks. If the bar isn't met, the run
 
 ## Lab Assists and Production Equivalents
 
-A "lab assist" is anything in the PoC that does not generalize to the target's production deployment: LD_PRELOAD shims, debugger attachment, `/proc/PID/maps` reads from the attacker, hardcoded ASLR bases, manual interrupt-and-resume, kernel parameters that aren't deployment defaults.
-
-For every assist present in the PoC, document:
-
-1. **What the assist does** in the PoC — exact mechanism (e.g., "fault-injects `malloc(N)` to return NULL").
-2. **What the production equivalent is** — the network-only or deployment-realistic primitive that achieves the same condition (e.g., "Kubernetes cgroup memory cap at Helm chart default + attacker-controlled allocation pattern saturates the heap; the same `realloc` returns NULL naturally").
-3. **A negative control proving the production equivalent suffices** — a 3× deterministic reproduction of the same condition without the assist.
-4. **An honest acknowledgment if the production equivalent is unproven** — say so. "Plausible but unverified" is acceptable disclosure; "proven equivalent" without the negative control is not.
-
-A disclosure that ships with assists undisclosed gets downgraded by triagers as soon as they notice. A disclosure that names every assist and its production equivalent gets believed.
+A lab assist is anything in the PoC that does not generalize to the production deployment
+(LD_PRELOAD shims, debugger attachment, attacker reads of `/proc/PID/maps`, hardcoded ASLR bases,
+manual interrupt-and-resume, non-default kernel parameters). Each one is named with its mechanism,
+its production equivalent, a negative control proving the equivalent suffices, or an honest
+"unverified" note; `agent/skills/exploit-playbook-authoring/SKILL.md` "Lab Assists and Production
+Equivalents" owns the procedure. On this ladder, assists may be present up to Rung 1A and must all
+be gone at Rung 0.
 
 ## Output Contract
 
@@ -102,13 +99,16 @@ A heap-RCE finding using this skill's framework includes, in its evidence bundle
 | Three deterministic replays per claimed rung | At minimum, the highest claimed rung has 3× deterministic evidence |
 | Negative controls | For Rung 2 and above, controls demonstrating the precondition is necessary |
 
+Register each rung's evidence with `vigil assess artifact register <paths> --finding <slug>` so the
+finding carries it, not just the working directory.
+
 The rung-ladder status table is the document a triager reads first. If the highest-claimed rung is Rung 2 (live crash), the chain is a DoS, not an RCE — write the finding as a DoS regardless of the underlying primitive's RIP-control potential.
 
 ## Severity Calibration Against Rungs
 
 CVSS framing should match the highest proven rung:
 
-- Rung 1 / 1B only (primitive + harness sink) — claim CWE-787 / out-of-bounds write with "exploitability theorized." CVSS 6.5–7.5 (high) depending on attacker context. Do not claim 9.x.
+- Rung 1 / 1B only (primitive + harness sink) — claim CWE-787 / out-of-bounds write with "exploitability theorized." CVSS 6.5–7.5 (Medium to High) depending on attacker context. Do not claim 9.x.
 - Rung 2 (live crash) — DoS chain. CVSS up to 7.5 (AV:N AC:L/H A:H, no C/I impact).
 - Rung 2.5 (live adjacency) — DoS + RCE structurally complete. CVSS 8.0–8.5 (AC:H) if RIP-control requires a separately-unproven primitive (timing window, info-leak).
 - Rung 1A (live RIP control) — full RCE. CVSS 9.8 if the chain composes pre-auth with no improbable preconditions.

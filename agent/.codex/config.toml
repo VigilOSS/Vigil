@@ -32,6 +32,17 @@ multi_agent_v2 = false
 
 [hooks]
 
+# The Vigil application tree is read-only from an engagement session (ADR 0048).
+# Exit 2 refuses the call and returns the hook's stderr, which names the directory.
+[[hooks.PreToolUse]]
+matcher = "^(Bash|Write|Edit|apply_patch)$"
+
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command = "bash -c 'if [ -n \"${VIGIL_AGENT_ROOT:-}\" ]; then exec bash \"$VIGIL_AGENT_ROOT/scripts/hooks/application-read-only.sh\"; fi; if [ -f scripts/hooks/application-read-only.sh ]; then exec bash scripts/hooks/application-read-only.sh; fi; if [ -f agent/scripts/hooks/application-read-only.sh ]; then exec bash agent/scripts/hooks/application-read-only.sh; fi'"
+timeout = 10
+statusMessage = "Checking the application tree is untouched"
+
 [[hooks.PostToolUse]]
 matcher = "^(Bash|Agent|Write|Edit|apply_patch|mcp__.*)$"
 

@@ -616,9 +616,9 @@ vigil assess log <agent-name> \
   --metadata-file metadata.json
 ```
 
-The CLI verb is `vigil assess log`. The legacy shorthand (`log` with
-a trailing `-entry`) does not route and entries that use it never
-land in `activity_entries`.
+The CLI verb is `vigil assess log`; spell it exactly, because any
+other spelling (such as `log` with a trailing `-entry`) does not route
+and its entries never land in `activity_entries`.
 
 ## Output Contract
 

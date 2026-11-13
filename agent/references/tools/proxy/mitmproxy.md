@@ -1,306 +1,163 @@
 ---
-description: "Mitmproxy session capture: setup, CA cert install, FoxyProxy config, login capture workflow, troubleshooting"
+description: "Vigil's shared mitmproxy: start, browser proxy and CA trust, login capture into the multi-identity credential store, liveness and keepalives, hostname routing, attribution headers, full-flow capture policy"
 ---
 
 # Mitmproxy Session Capture
 
-Intercept browser traffic to capture authenticated sessions (cookies, tokens, headers) into the engagement's backend credential store for use by engagement agents. Capture is append-only and multi-identity — each distinct login becomes its own identity row rather than overwriting whatever was captured before.
+Vigil's shared mitmproxy intercepts browser traffic and captures authenticated sessions (cookies,
+tokens, headers) into the engagement's backend credential store. Capture is append-only and
+multi-identity: each distinct login becomes its own identity row instead of overwriting the last.
 
 ## Quick Start
 
 ```bash
-vigil mitmproxy start
+vigil mitmproxy start            # --port <n> to bind another host port (default 8080)
 ```
 
-`vigil mitmproxy start` takes **no engagement key**. One shared proxy serves
-every active engagement at once and routes each captured flow to the matching
-engagement by hostname (see "How It Works"). An otherwise-unclaimed host falls
-back to the `vigil use` / launcher-selected engagement only when its
-`scope.json` declares `scope_enforcement: bypass`. Capture is a per-engagement
-policy, not a launch-time selector.
+`vigil mitmproxy start` takes no engagement key. One shared proxy serves every active engagement
+and routes each captured flow to the owning engagement by hostname ("How It Works"). A host no
+engagement claims falls back to the `vigil use` / launcher-selected engagement only when its
+`scope.json` declares `scope_enforcement: bypass`. Capture is a per-engagement policy, not a
+launch-time selector. `vigil mitmproxy status | stop | routes | reload` and
+`vigil logs mitmproxy --lines 80` manage it.
 
-## Browser Proxy Setup (FoxyProxy)
+## Browser proxy and CA trust
 
-1. Install FoxyProxy browser extension
-2. Add a new proxy:
-   - **Type: HTTP** (not HTTPS -- this is the most common mistake)
-   - **Host:** `127.0.0.1`
-   - **Port:** `8080`
-   - Do NOT set anything in the HTTPS/SSL proxy field
-3. Enable the proxy profile
-
-**Why HTTP, not HTTPS?** The browser sends a plaintext HTTP `CONNECT` request to the proxy, which then handles TLS interception internally. Setting the proxy type to HTTPS double-wraps TLS around the CONNECT tunnel, which breaks mitmproxy's interception.
-
-## CA Certificate Installation (First Time Only)
-
-The CA cert must be trusted by your browser/OS for HTTPS interception to work.
-
-### Option A: Browser Install
-
-1. With the proxy active, navigate to **http://mitm.it** (note: **http**, not https)
-2. If the page says "traffic is not passing through mitmproxy" -- verify FoxyProxy is set to HTTP mode
-3. Download the macOS certificate
-4. Open **Keychain Access** > search `mitmproxy`
-5. Double-click the cert > expand **Trust** > set to **Always Trust**
-6. **Quit and reopen your browser** (browsers cache cert decisions per session)
-
-### Option B: Terminal Install
-
-```bash
-docker cp vigil-proxy:/root/.mitmproxy/mitmproxy-ca-cert.pem ~/Desktop/mitmproxy-ca-cert.pem
-sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ~/Desktop/mitmproxy-ca-cert.pem
-```
-
-`vigil mitmproxy cert` prints the same commands for the active Docker-managed proxy.
-
-Restart the browser after trusting.
-
-### CA Key Persistence
-
-The launcher stores CA keys in a named Docker volume (`mitmproxy-ca`). Container restarts and rebuilds reuse the same CA keys, so you only need to install and trust the certificate once.
-
-If you need to regenerate the CA (e.g., compromise, rotation):
-```bash
-docker volume rm mitmproxy-ca
-vigil mitmproxy start
-# Re-install the new cert using Option A or B above
-```
+- Set the browser proxy (FoxyProxy or similar) to type **HTTP**, `127.0.0.1:8080`, with nothing in
+  an HTTPS/SSL proxy field. An HTTPS proxy type wraps TLS around the `CONNECT` tunnel and breaks
+  interception; it is the usual cause of `http://mitm.it` saying traffic is not passing through
+  mitmproxy.
+- Trust the CA once: `vigil mitmproxy cert` prints the `docker cp` and macOS keychain-trust
+  commands for the running proxy (or download it from `http://mitm.it` with the proxy active).
+  Quit and reopen the browser afterwards; browsers cache certificate decisions per session.
+- The CA keys live in the `mitmproxy-ca` Docker volume, so restarts and rebuilds keep the same CA.
+  Certificate errors after a restart mean the volume is gone and the CA was regenerated; re-trust
+  it. To rotate deliberately: `docker volume rm mitmproxy-ca`, then `vigil mitmproxy start` and
+  re-trust.
+- A proxy container that exits immediately usually means port 8080 is taken; check
+  `vigil logs mitmproxy --lines 20`.
 
 ## Login Capture Workflow
 
-1. Start the shared proxy (no engagement key): `vigil mitmproxy start` — it routes captures to whichever active engagement owns the hostname; for a global-bypass engagement, select it first with `vigil use <key>` so otherwise-unclaimed hosts have an explicit owner
-2. Configure browser proxy (see above)
-3. Navigate to the target login page and authenticate
-4. Browse a few authenticated pages (admin, settings, API endpoints)
-5. The proxy addon auto-detects login flows and POSTs the captured cookies/tokens to the engagement's backend credential store, which derives an identity name from the session-anchor material and appends or refreshes accordingly (see "Multi-Identity Capture" below)
-6. Disable the proxy in FoxyProxy when done
+1. `vigil mitmproxy start`. For a global-bypass engagement, select it first with `vigil use <key>`
+   so otherwise-unclaimed hosts have an explicit owner.
+2. Point the browser at the proxy, log in to the target, and browse a few authenticated pages
+   (admin, settings, API calls).
+3. The addon detects the login flow and posts the session material to the credential store, which
+   derives the identity name and appends or refreshes ("Multi-Identity Capture").
+4. Turn the browser proxy off when done.
 
-If auto-capture misses the session (addon error, non-standard login flow):
-- Check proxy logs: `vigil logs mitmproxy --lines 30`
-- Fall back to manual cookie extraction from browser DevTools
-
-To capture a second account for cross-account testing, repeat steps 2-5 logged
-in as the other user through the same proxy — the addon detects the different
-session-anchor material and appends a new identity instead of overwriting the
-first.
+If `vigil auth status` still shows anonymous after a login, read `vigil logs mitmproxy --lines 30`
+for addon errors; the detector keys on `set-cookie` headers and token fields in response bodies, so
+a non-standard login flow can need manual extraction from DevTools and `vigil auth import`. To
+capture a second account for cross-account testing, repeat the login as the other user through the
+same proxy.
 
 ## Multi-Identity Capture (append-only)
 
-Each captured login becomes its own identity in the credential store. The
-backend derives an opaque identity name server-side from the capture's
-session-anchor cookies (`sid`, `sessionid`, `jsessionid`, `connect.sid`,
-`laravel_session`, ... case-insensitive) or a JWT `sub`/`uid`/`user_id`/`email`
-claim — never from raw high-entropy cookies in general, since a shared
-per-CDN/load-balancer cookie (`AWSALB`) would otherwise merge two accounts and a
-rotating anti-CSRF cookie would otherwise churn a fresh identity on every
-reload. Reloading an already-captured login refreshes that one identity in
-place; logging in as a different account appends a new identity — the property
-cross-account IDOR/BOLA testing depends on. Anonymous/pre-login traffic (a
-consent-banner cookie, no session material yet) carries no anchor and is never
+The backend derives an opaque identity name from the capture's session-anchor cookies (`sid`,
+`sessionid`, `jsessionid`, `connect.sid`, `laravel_session`, ... case-insensitive) or a JWT
+`sub`/`uid`/`user_id`/`email` claim, never from high-entropy cookies in general: a shared
+load-balancer cookie (`AWSALB`) would merge two accounts and a rotating anti-CSRF cookie would mint
+a fresh identity on every reload. Reloading a captured login refreshes that identity in place;
+logging in as a different account appends a new one, which cross-account IDOR/BOLA testing depends
+on. Pre-login traffic (a consent-banner cookie, no session material) carries no anchor and is never
 captured.
-
-List what's stored for a host, and which identity is active:
 
 ```bash
 vigil assess auth list --host <host> [--include-dead] [--json]
 ```
 
-Each row shows the identity name, `auth_context`, `state`, liveness verdict,
-age, and cookie *names* only — never raw values; the active identity is marked
-`*`. A session with no fresh capture for 8h is flagged `stale` (advisory — not
-dead); one with no fresh capture for 5 days is purged. Age alone never marks an
-identity `dead` — only a proven-dead liveness probe does (next section).
+Rows show identity name, `auth_context`, `state`, liveness verdict, age, and cookie names; the
+active identity is marked `*`. No fresh capture for 8h flags an identity `stale` (advisory); 5 days
+purges it. Age alone never marks an identity `dead`.
 
 ## Per-Identity Liveness
-
-Keepalives (below) defeat the *idle* clock; they don't tell you whether a
-session has already died (logout, absolute-lifetime expiry, server-side
-revocation). Prove liveness explicitly before trusting a captured identity and
-before recording a "dead"/"unreachable" verdict against it:
 
 ```bash
 vigil assess auth status --probe --identity <name> --probe-url <authed-url>
 ```
 
-The probe never follows redirects and returns a real verdict only once that
-identity has a declared `material.liveness = {expect_status, authed_marker,
-dead_marker}` oracle (set via `vigil auth import`/`edit`) — a transport error
-or a missing signature returns `unknown`, never a false verdict. `live` clears
-a `stale` mark; `dead` is written only by this probe, never by hand and never
-by age alone. Liveness is per-identity and LLM/operator-owned: whoever takes an
-identity for a task probes it before trusting it, and re-probes on a
-401/403/redirect-to-login shape.
+Prove liveness before trusting a captured identity and before recording a dead or unreachable
+verdict against it; re-probe on a 401, 403 or redirect-to-login shape. The probe never follows
+redirects and returns a real verdict only once the identity has a `material.liveness =
+{expect_status, authed_marker, dead_marker}` oracle (set with `vigil auth import` or `edit`); a
+transport error or missing signature returns `unknown`. `live` clears `stale`; only this probe
+writes `dead`.
 
 ## Keeping a Captured Session Alive (Keepalives)
 
-A captured session is not static — it idle-times-out. Enterprise auth stacks
-(F5 BIG-IP APM, SiteMinder, Okta) enforce **two** clocks: a short **idle timeout**
-(commonly ~15–30 min of no activity) and a longer **absolute lifetime** (often
-several hours). The failure mode operators hit repeatedly: a long dispatch, or a
-gap *between* dispatches, lets the idle clock expire, and every subsequent probe
-comes back as a soft `HTTP 2xx/3xx` session-expired page (e.g. CMS portal returns
-`203 {"sessionExpired":"true"}`) — a silent false-negative that looks like
-"fail-closed" but just means "your session went stale."
+Enterprise auth stacks (F5 BIG-IP APM, SiteMinder, Okta) enforce a short idle timeout (often 15–30
+minutes) and a longer absolute lifetime (often several hours). When the idle clock expires during a
+long dispatch or in the gap between dispatches, every later probe gets a soft 2xx/3xx
+session-expired page (for example `203 {"sessionExpired":"true"}`): a silent false negative that
+reads like fail-closed. Any successful authenticated request resets the idle clock, since SPAs
+typically call a session-extend on every XHR, so periodic touches keep a session warm for its whole
+absolute lifetime.
 
-**The key mechanic: activity resets the idle clock.** Modern SPAs call a
-session-extend on essentially every XHR (the CMS portal's Angular
-`SessionInterceptor` invokes `oktaSessionExtend()` on each request). So **any**
-successful authenticated request slides the idle window forward. A session that
-would die in 20 idle minutes stays live for the full multi-hour absolute lifetime
-**as long as you touch it periodically**.
+`vigil auth keepalive <engagement> --anchor-cookie <name> --probe-url <authed-read> --detach` does
+this: one read-only authenticated GET per identity per `--interval` (keep it under the idle window),
+routed through `vigil assess kali exec` for audit and identity injection, with a LIVE/DEAD verdict
+logged to `<engagement>/tools/keepalive.log`. `vigil auth keepalive --help` has the rest.
 
-**Technique — periodic keepalive probe.** Fire one benign, READ-ONLY authenticated
-request every N minutes, where N is comfortably under the idle timeout (every
-~5–10 min is safe for a 15–30 min idle window):
-
-```bash
-# bare top-level curl through the credential store — NOT wrapped in bash -c
-vigil assess kali exec --identity <name> \
-  --technique AUTH --intent "session keepalive" --probe-kind fingerprint \
-  --phase <phase> --timeout 30 \
-  -- curl -sS -i https://<host>/<lightweight-authed-read> \
-     -H 'Xhr_Request: true' -H 'Accept: application/json' \
-     -H 'X-Bug-Bounty: <handle>' -H 'X-Bug-Bounty-Program: <program>' \
-     --resolve <host>:443:<pin-ip>
-```
-
-Pick the cheapest state-non-mutating read as the keepalive target — a
-`whoami` / `user/profile` / `session` / `role/summary`-style endpoint. Confirm a
-`200` with the expected identity in the body; a session-expired soft page means
-the absolute lifetime was hit and you must re-authenticate.
-
-**Why this matters for future engagements:**
-- It converts a fragile 15–30-minute testing window into a **stable multi-hour
-  session**, so long specialist dispatches and serialized one-at-a-time portal
-  runs don't die mid-flight and burn a context window on a false negative.
-- During an *active* dispatch the specialist's own probes are the keepalive; the
-  real risk is the **idle gap between dispatches** — fire one operator keepalive
-  in that gap (a Core-Loop step-7 credential-validation carve-out: a single
-  authenticated GET) to hand the next dispatch a warm session.
-- Multi-account cross-user tests (BOLA/BFLA needing two live sessions
-  simultaneously) are only feasible if **both** captured identities stay warm —
-  keepalive each named identity.
-
-**When keepalives are not enough — self-service re-auth.** Once the absolute
-lifetime is hit, only a fresh login helps. If the program mailbox is a configured
-Mail.app account, `vigil email <mailbox> --from <sender> --extract` retrieves the
-short-lived MFA/verification code, so an operator with the account password can
-drive a fresh login (through the proxied browser, which re-captures) rather than
-blocking on the user. Keep credentials out of durable notes; pull the code
-on-demand.
-
-**Caveats:**
-- The keepalive **must** be a bare top-level `curl` under `--identity` — a
-  `bash -c`/`sh -c` wrapper sends the injected `Cookie`/`Authorization` to the
-  shell, so the inner curl runs unauthenticated and the "keepalive" actually
-  reports the session as expired (a self-inflicted false negative).
-- A genuine **logout** (not idle timeout) still kills the session immediately;
-  keepalives only defeat the idle clock. Don't navigate the proxied browser to a
-  logout URL while a session is in use.
-- Keep the keepalive **read-only** so it never mutates state or notifies a
-  human queue (e.g. an approver inbox).
-
-## Troubleshooting
-
-| Symptom | Fix |
-|---------|-----|
-| `http://mitm.it` says "traffic not passing through mitmproxy" | FoxyProxy is set to HTTPS mode -- change to HTTP |
-| Certificate errors after proxy restart | Check if the `mitmproxy-ca` volume exists: `docker volume ls \| grep mitmproxy`. If missing, the CA was regenerated -- re-install the cert |
-| Proxy container exits immediately | Check logs: `vigil logs mitmproxy --lines 20`. Common: port 8080 already in use |
-| Credentials not updated after login (`vigil auth status` still anonymous) | Check for addon errors in logs. The `_detect_login` function looks for `set-cookie` headers and token fields in response bodies |
-| Browser still shows cert errors after trusting | Quit browser fully and reopen. macOS may also need: System Settings > Network > clear DNS cache |
-
-## Container Management
-
-```bash
-# Status
-vigil mitmproxy status
-
-# Logs
-vigil logs mitmproxy --lines 80
-
-# Stop
-vigil mitmproxy stop
-
-# Restart (reuses same CA cert from volume)
-vigil mitmproxy start
-
-# Custom port
-vigil mitmproxy start --port 9090
-```
+- Pick the cheapest state-free read (`whoami`, `user/profile`, `session`) so the keepalive never
+  mutates state or notifies a human queue such as an approver inbox. Confirm a 200 with the expected
+  identity in the body.
+- During an active dispatch the specialist's own probes keep the session warm; the risk is the idle
+  gap between dispatches. The operator covers that gap with `vigil auth keepalive`: one read-only
+  authenticated GET per identity, an operator-executed exception of the same kind as credential
+  auto-use validation. Cross-user BOLA/BFLA tests need both identities warm.
+- Keepalives defeat only the idle clock. A real logout kills the session at once, so never send the
+  proxied browser to a logout URL while a session is in use, and a same-user browser re-login ends
+  the prior session.
+- Once the absolute lifetime is hit, only a fresh login helps. If the program mailbox is a
+  configured Mail.app account, `vigil email <mailbox> --from <sender> --extract` retrieves the MFA
+  or verification code so an operator with the password can log in again through the proxied
+  browser, which re-captures. Keep credentials out of durable notes.
 
 ## How It Works
 
 The proxy runs `mitmdump` with `proxy_addon.py`, which:
-- **Serves every active engagement from one shared, selector-less proxy.**
-  `vigil mitmproxy start` takes no engagement key. The addon keeps a registry of
-  all in-progress engagements (synced from the orchestrator, with a filesystem
-  `scope.json` scan as fallback) and routes each captured flow to the
-  best-matching engagement **by hostname** — literal scope hosts beat wildcards
-  and narrower wildcards beat broader ones. Under normal capture routing, an
-  `out_of_scope` carve-out (host, URL, or CIDR) leaves the flow unowned for
-  engagement capture. When no hostname pattern claims a host, the addon consults
-  `<engagements_root>/.active` and binds the flow only if that selected
-  engagement declares `scope_enforcement: bypass`; the bypass admits both allow-
-  and deny-misses for capture. A normal hostname owner always wins over this
-  fallback, so a selected bypass engagement cannot steal another engagement's
-  traffic. This ownership decision never blocks the proxied request or replaces
-  its upstream response.
-- **Injects program-mandated attribution headers on outbound in-scope
-  requests.** For an engagement whose `scope.json` declares `required_headers`
-  (e.g. a BugCrowd program that mandates `X-Bug-Bounty: <handle>`), the addon
-  adds those headers to each in-scope request it forwards — the same
-  `required_headers` the tool-exec path injects (ADR 0010), now applied to
-  browser/proxied traffic too. This makes **manual browsing and login capture
-  through FoxyProxy ROE-compliant** without you setting the header per request.
-  It is gated by the same engagement binding as capture, including the selected
-  global-bypass fallback, and is non-destructive — a header the client already
-  set is never overwritten. Scope/path metadata never synthesizes a proxy
-  response or blocks the upstream request. Engagements without
-  `required_headers` are unaffected. Run `vigil mitmproxy routes` to see which
-  headers each engagement will inject.
-- Filters noise (analytics, CDNs, tracking pixels)
-- Classifies requests by type (API, form, page, JS, GraphQL, WebSocket, etc.)
-- Detects login flows and POSTs captured session material to the backend credential store, which derives the identity name from the capture's session-anchor material so distinct logins append rather than overwrite (see "Multi-Identity Capture" above)
-- Posts request observations to the orchestrator backend (when available), which derives the
-  work-buffer row (`assessment_work_items`) server-side in the same transaction — no local
-  database write (ADR 0013)
-- When an engagement's capture policy is enabled, additionally persists a
-  **full-flow metadata record** in the JSONL index and backend; request and
-  response body sidecars are stored only when their individual flags are enabled
+
+- **Routes every flow by hostname across all active engagements.** The addon keeps a registry of
+  in-progress engagements (synced from the orchestrator, with a filesystem `scope.json` scan as
+  fallback). Literal scope hosts beat wildcards and narrower wildcards beat broader ones. An
+  `out_of_scope` carve-out (host, URL, or CIDR) leaves the flow unowned for capture. When no
+  hostname pattern claims a host, the addon consults `<engagements_root>/.active` and binds the flow
+  only if that engagement declares `scope_enforcement: bypass`; a normal hostname owner always wins,
+  so a selected bypass engagement cannot take another engagement's traffic. Ownership never blocks
+  the proxied request or replaces its response.
+- **Injects program-mandated attribution headers** (`scope.json` `required_headers`, such as
+  `X-Bug-Bounty: <handle>`) on outbound in-scope requests, the same set the tool-exec path injects,
+  so manual browsing and login capture are ROE-compliant without setting headers by hand. It uses
+  the same engagement binding as capture, never overwrites a header the client set, and
+  `vigil mitmproxy routes` shows which headers each engagement injects.
+- Filters analytics, CDN and tracking noise, and classifies requests (API, form, page, JS, GraphQL,
+  WebSocket).
+- Posts session material to the credential store ("Multi-Identity Capture").
+- Posts request observations to the backend, which derives the work-buffer row
+  (`assessment_work_items`) server-side in the same transaction.
+- Records full-flow metadata, and body sidecars, only under the engagement's capture policy (below).
 
 ## Full-Flow Capture Policy
 
-Beyond the compact request-observation + derived work-item the addon always
-records, each engagement has an opt-in **full-flow capture policy** with three
-states:
+Beyond the compact observation and derived work item it always records, each engagement has an
+opt-in full-flow policy (`vigil assess http policy set`; reference: `vigil assess contract http`):
 
-1. `--no-enabled`: compact observation only; no full-flow index/backend row and no body sidecars.
-2. `--enabled` with both body flags false: full-flow metadata in the JSONL index and backend, with no bodies stored.
-3. `--enabled` plus `--capture-request-bodies` and/or `--capture-response-bodies`: the same metadata plus only the selected body sidecars (subject to size/content-type policy).
+1. `--no-enabled` (default): compact observation only.
+2. `--enabled` with both body flags off: full-flow metadata in the JSONL index and backend, no bodies.
+3. `--enabled` plus `--capture-request-bodies` and/or `--capture-response-bodies`: the same metadata
+   plus the selected body sidecars, subject to `--max-body-bytes` and the content-type filters.
 
-**Full-flow recording and raw-body storage are OFF by default.** Restarting the
-shared proxy never silently changes capture behavior; opt in per engagement and
-select body sides explicitly when their contents are needed.
-
-For the full `vigil assess http policy` command reference (inspecting,
-enabling/scoping, and disabling raw-body capture), run `vigil assess contract
-http`.
-
-The policy is authoritative in the backend and mirrored to
-`capture-policy.json` next to `scope.json` in the engagement root, so the shared
-proxy honors it even when the orchestrator registry fetch is unavailable.
-
-On-disk layout (engagement-root-relative), written only while full-flow recording is enabled:
+Restarting the proxy never changes capture behavior. The policy is authoritative in the backend and
+mirrored to `capture-policy.json` next to `scope.json`, so the proxy honors it when the registry
+fetch is unavailable. While recording is enabled the engagement root holds:
 
 ```
-traffic/mitmproxy/bodies/<sha256>.bin   # one file per distinct stored body
+traffic/mitmproxy/bodies/<sha256>.bin       # one file per distinct stored body
 traffic/mitmproxy/flows/<YYYY-MM-DD>.jsonl  # one JSON line per captured flow
 ```
 
-Bodies larger than `max-body-bytes` are truncated on disk with the truncation
-flag set honestly in both the JSONL index and the backend record. Query or
-export captured flows with the `vigil assess http` verbs (`list` / `show` /
-`search` / `export-har` / `import-har`; run `vigil assess contract http` for the
-full reference) — these wrap the backend `GET .../assessment/http-flows` routes
-so query-string details stay out of operator instructions.
+Bodies over `max-body-bytes` are truncated on disk, with the truncation flag set in both the JSONL
+index and the backend record. Query or export flows with `vigil assess http list | show | search |
+export-har | import-har`.

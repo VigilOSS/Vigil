@@ -6,259 +6,205 @@ origin: Vigil
 
 # Kali Execution via `vigil assess kali`
 
-> **Use when:** Always — every target-facing call uses `vigil assess kali ...`. This skill is foundational and is paired with `agent/shared-constraints.md`. Load it before any other skill that runs probes against scoped targets — the sync-vs-async, attribution-header, and out-of-scope rules below are what keep the runtime auditable and the orchestrator backend in sync; `vigil assess list-commands` and `vigil assess contract kali <verb>` are how you find and shape the actual call.
+> **Use when:** every target-facing call, because all of them go through `vigil assess kali ...`.
+> Pair it with `agent/shared-constraints.md` §2, which owns the execution rules: synchronous calls
+> only for specialists, the `--timeout` ceiling, signalling only your own run, and no host-side
+> probes. This skill covers what the per-verb mechanical layers don't tell you.
 
-`vigil assess kali` is the host-side CLI that runs Kali tools inside the runtime container with audit recording. It writes a queued audit row to the orchestrator backend before exec, streams stdout/stderr to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line one, and finalizes the row on exit. The CLI is the only sanctioned path for target-facing work — host Bash, `docker run`, `docker exec`, and ad-hoc curl/nmap from the host bypass the audit pipeline and the runtime's network isolation.
+`vigil assess kali` runs Kali tools inside the runtime container. It writes a queued audit row
+before exec, streams stdout/stderr to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line
+one, and finalizes the row on exit.
 
-## Discovery layers
+## Finding the right call
 
-The CLI surface is intentionally large. Four discovery layers keep per-turn context cost bounded while still letting you find the right invocation fast:
+- `vigil assess list-commands --kali-only [--phase <tag>] [--grep <tool>]` is the catalog of every
+  verb (typed wrappers, the `exec`/`job` fallbacks, the `sweep` fan-out, and the
+  `sweep-orphans`/`tool-help` maintenance verbs), each with a one-line use.
+- `vigil assess kali <verb> --help` gives live flag spellings and defaults.
+- `vigil assess contract kali <verb>` gives the schema, helper defaults, common mistakes and an
+  example. It is generated from the same source as argparse, so it is always current.
 
-1. **This skill (methodology layer)** — sync-vs-async decision, the required-attribution-header three-way split, out-of-scope carve-out semantics, common invocation patterns, and troubleshooting. Load for the judgment calls the mechanical layers below cannot give you.
-2. **`vigil assess list-commands [--phase <N>] [--kali-only] [--grep <s>]`** — grouped-by-phase catalog of every command (typed verbs, fallbacks, batch, maintenance) with a one-line summary and a pointer to its contract. Use to find the right verb for a phase or keyword.
-3. **`vigil assess kali --help` and `vigil assess kali <verb> --help`** — live argparse output. Use when you are composing an invocation and need the exact flag spelling or default for a verb you have already chosen.
-4. **`vigil assess contract kali <verb>`** — canonical schema introspection: preferred invocations, helper-supplied defaults, common mistakes, and a JSON example payload. Use when you are authoring a complex invocation and want the canonical field list — same purpose `contract intel record <type>` serves for intel writes. The schema is derived from `agent/scripts/assess/lib/contracts.py`, so it stays current with the implementation.
+`kali exec` runs tools the typed surface does not model (dirb, gobuster, hydra, john, hashcat,
+custom scripts) and takes the same audit flags.
 
-Skills should point you at `vigil assess list-commands` for the verb catalog and `vigil assess contract kali <verb>` for field tables instead of duplicating them, because both are generated from the same source as the CLI's argparse. When this skill omits a verb or flag detail, that is intentional — go to layer 2, 3, or 4.
+## Reading a result
 
-## Verb menu
+Every typed verb's result JSON has `resolved_argv`: the argv that actually ran after the
+transparent injections (attribution `-H` headers, the `--resolve` IP pin, nuclei's default
+`-exclude-tags`). Read it to see what was sent.
 
-28 verbs total: 22 typed, 1 local filter (`gf`, no audit flags), 2 fallback (`exec`, `job`), 1 batch fan-out (`sweep`), and 2 host-side maintenance commands (`sweep-orphans`, `tool-help`). Each typed verb wraps a tool with argparse-validated flags and the audit recording path; the fallback verbs cover unmodeled tools and async lifecycles; the batch verb fans one audited command out across an operator-supplied value list; the maintenance commands reconcile stuck audit rows and print a tool's live help.
+The exit code carries the run's verdict:
 
-Every typed verb's result JSON includes a `resolved_argv` — the argv that ACTUALLY ran inside the container AFTER the transparent injections (program attribution `-H` headers, the `--resolve` IP-pin, nuclei's default `-exclude-tags`). Read it to see what executed, not just what you typed.
+| Exit | Meaning |
+|---|---|
+| `0` | completed, or `waf_challenge`. A WAF or edge block is a complete exchange but not a target verdict. Use `kali browser` only for a JS interstitial; hard blocks need a route, request or egress correction. |
+| `3` / `4` / `5` / `6` | failed / timed_out / killed / transport_error. No complete output exists to interpret. |
+| `1` / `2` | Vigil refusal (scope, policy, audit) / argparse rejection. |
+| `7` | The target response is in the JSON, but the terminal audit row never became durable. Reconcile with `kali sweep-orphans` instead of re-probing the target. |
+| `141` | The reader of stdout went away, so the JSON never arrived. It overrides every status above, but a refusal that reached stderr still stands. |
 
-The process EXIT CODE now carries the run's own verdict, so a chain does not have to parse the JSON to notice a dead run: `0` = completed, or `waf_challenge` (a WAF/challenge/edge-block response is a complete exchange but is not a target verdict; use `kali browser` only for a JS interstitial, while hard blocks need route/request/egress correction); `3` = failed, `4` = timed_out, `5` = killed, `6` = transport_error — all of which mean no complete output exists to interpret. `1` is a Vigil-side refusal (scope/policy/audit) and `2` an argparse rejection, so a target verdict never looks like a Vigil failure. `7` reads like a tool failure and is not one: the target response IS in the JSON, but its terminal audit row never became durable, so the run is not yet a completed Vigil operation — reconcile it with `kali sweep-orphans` rather than re-probing the target. `141` means the reader of this stdout went away, so the JSON never arrived; it replaces every status above, and a refusal that reached stderr still stands. The fan-out verbs (`kali sweep`, `arjun-sweep`) aggregate **worst-arm-when-all-failed**: they exit non-zero from the same table only when EVERY arm produced no usable output (the shared status's code, or `3` for a mixed set) — a few dead arms out of many is still a useful sweep, so that exits `0` with the count in the JSON (`failed`/`failed_by_status`, `failed_methods`) and a loud stderr line. Those arms are holes, not negatives: re-run them before reading their absence as a result.
-
-Full catalog (every verb, its use, and its paired reference doc): `vigil assess list-commands --kali-only` — add `--phase <N>` to scope one phase, `--grep <tool>` to jump straight to one verb. Per-verb schema (flags, defaults, common mistakes, JSON example payload): `vigil assess contract kali <verb>`.
-
-`kali exec` is the escape hatch — use it for tools the typed surface does not yet model (dirb, gobuster, hydra, john, hashcat, custom scripts, etc.) and pass the same audit-metadata flags as a typed verb. `kali job` is the supervisor — see the sync-vs-async decision below.
+The fan-out verbs (`kali sweep`, `arjun-sweep`) exit non-zero only when every arm failed (with the
+shared status's code, or `3` for a mixed set). A few dead arms still exit `0`, with
+`failed`/`failed_by_status`/`failed_methods` in the JSON and a stderr line. Those arms are holes,
+not negatives, so re-run them before you read their absence as a result.
 
 ## Long-tail flags via `--extra-args`
 
-Every typed verb accepts an optional `--extra-args "<shell-quoted string>"` to bridge the typed-flag gap without dropping to `kali exec`. The string is shlex-split and appended to the underlying tool argv after the typed-flag-derived arguments — verb identity is preserved in the audit trail (`command-run list --tool-bin httpx` still finds these calls), so reach for raw `kali exec` only when no typed verb fits at all. Audit truth is preserved because the audit row records the full final argv, including the splatted extra args.
+Every typed verb accepts `--extra-args "<shell-quoted string>"`, which is shlex-split and appended
+after the typed arguments. The audit row records the full final argv and keeps the verb identity
+(`command-run list --tool-bin httpx` still finds the call), so prefer this to dropping into
+`kali exec`. Headers (`-H`) and match codes (`-mc`) are typed flags, so pass those directly. If the
+extra args write or delete (`--os-shell` for sqlmap, `--script vuln` for nmap), also pass
+`--destructive` so the audit row records the real blast radius.
 
-Critical: `--destructive` still applies. If the extra args include a write/delete (`--os-shell` for sqlmap, `--script vuln` for nmap, etc.), you must also pass `--destructive` so the audit row reflects the actual blast radius.
-
-```bash
-# Headers (-H) and match-codes (-mc) are now TYPED flags — pass them directly.
-# Reserve --extra-args for genuinely unmodeled flags.
-vigil assess kali httpx -u https://x -tech-detect \
-  -H 'X-Forwarded-For: 127.0.0.1' -mc 200,302 \
-  --extra-args "-sr -include-response" \
-  --technique DISCOVERY --intent "tech detect with custom headers" \
-  --probe-kind fingerprint --phase recon --timeout 60
-```
-
-**Quoting gotcha:** an `--extra-args` VALUE that begins with a now-typed short flag
-(e.g. `-H`, `-t`) is greedily claimed by argparse as that flag and rejected
-("expected one argument"). Use the typed flag instead, or — for an unmodeled flag
-whose value must lead with a dash — the equals form `--extra-args=-X ...`.
+Quoting gotcha: argparse claims an `--extra-args` value that starts with a typed short flag (`-H`,
+`-t`) and rejects it with "expected one argument". Use the typed flag, or the equals form
+`--extra-args=-X ...` for an unmodeled dash-leading value.
 
 ## Synchronous vs. async decision
 
-**Specialists run synchronously — always.** Each `vigil assess kali
-<verb> ... --timeout N` call is awaited in-band — no `run_in_background`, no `kali job start`,
-no dtach, no watcher/poll loop. "Synchronous" means awaited-in-band, NOT one-call-at-a-time:
-issuing several blocking calls in parallel, each awaited in-band, is fine (see `agent/shared-constraints.md` §2). Even heavy probes (nmap+scripts, full-tree
-nuclei sweeps, `sqlmap --level 5 --risk 3`, dirb/gobuster on raft-large
-wordlists, ffuf on `directory-list-2.3-big.txt`) run as a single blocking call
-with a generous `--timeout`. A long synchronous call is killed cleanly on
-`--timeout` expiry — the CLI sends SIGTERM to the process group, then SIGKILL
-after 5 seconds, and the audit row records `timed_out=true`, so the row never
-disappears and nothing is orphaned.
+| Mode | Who | When |
+|------|-----|------|
+| Synchronous | every dispatched specialist | all target-facing work, light or heavy. The call blocks and finalizes its audit row on exit. On `--timeout` the CLI sends SIGTERM, then SIGKILL after 5 s, and records `timed_out=true`. |
+| `kali job start` | operator only | one authorized sweep that must outlive a dispatch, never a per-step loop or a parallel fan-out. It returns a job id, runs under `dtach` in the container, and is managed with `kali job status` / `tail` / `stop <id>`. |
 
-| Mode | Who | When | Mechanism |
-|------|-----|------|-----------|
-| Synchronous (the rule for specialists) | every dispatched specialist | all target-facing work, light or heavy | The CLI runs as a single process, blocks the calling shell, and finalizes the audit row on exit. |
-| Async (`kali job start ...`) | **operator only** | a single authorized sweep that must outlive its dispatch; never a per-step loop and never to fan out parallel probes | `vigil assess kali job start ...` returns a job-id immediately; the worker runs under `dtach` inside the container and survives calling-shell exit. Poll with `kali job status <id>`, read with `kali job tail <id>`, stop with `kali job stop <id>`. |
+If a probe has to outlive your dispatch, say so in the handoff's `next_steps` and the operator
+will run it as a job.
 
-**Why specialists never background:** a subagent that launches a detached job
-and halts "waiting for a completion notification" gets auto-resumed by the
-harness, launches the *next* detached job, and halts again — unbounded relaunch
-thrash that produced duplicate httpx passes and zero net progress in past
-engagements. The fix is structural: keep target traffic synchronous and
-in-band. `--timeout` extends the wall-clock budget; it is **not** a reason to
-reach for `kali job start`. If a probe genuinely must outlive the dispatch, the
-specialist says so in its handoff and the operator owns the job.
+## Audit-flag mapping
 
-## Audit-flag mapping (REQUIRED on every typed verb and `kali exec`)
+`--technique`, `--intent`, `--probe-kind`, `--phase` and `--timeout` are required on every typed
+verb and `kali exec`. The CLI fails closed without them, because an env-var fallback could
+mislabel the row. `--destructive` marks writes and deletes. `--force` only silences the
+dedup-window warning for an intentional retry. The enums are in `vigil assess contract kali <verb>`.
 
-The CLI fails closed when `--technique`, `--intent`, `--probe-kind`, `--phase`, and `--timeout` are missing — pass them explicitly, because there is no env-var fallback for the agent-supplied fields (a stale env-var would silently mislabel the audit row). `--destructive` flags writes/deletes; `--force` only suppresses the dedup-warning log for an intentional retry — a fresh audit row is written regardless.
+Attribution resolves from `--agent-name`, then `--agent-id`, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`,
+then `operator`. A dispatched specialist passes `--agent-id <your dispatch agent_id>` and no
+`--agent-name`, so the run belongs to the dispatch. A command run that backs verifier evidence
+needs that dispatch id. A helper script that calls `kali exec` itself inherits attribution only
+through env: run it as `VIGIL_AGENT_NAME=<your dispatch agent_id> ./tools/<helper>`, or through
+`vigil assess host-exec --agent-name <your dispatch agent_id>`, which exports it to the child. The engagement key comes from the single assessment binding; there is no
+second override.
 
-Full flag-by-flag purpose, the `--technique` enum, and the `--probe-kind` vocabulary: `vigil assess contract kali <verb>` (per-verb) or `vigil assess kali <verb> --help` (live argparse). Phase values: see "Phase tags" below.
+## Required attribution headers (program-mandated, e.g. Bugcrowd)
 
-The engagement key is derived from the single assessment binding documented by
-`vigil assess contract kali <verb>`; there is no second key override. `--agent-name` resolves from
-the explicit flag, `$AGENT_NAME`, `$VIGIL_AGENT_NAME`, then `operator`. Specialists should normally
-inherit `AGENT_NAME=<role>` from their dispatch wrapper; if that context is absent or suspicious,
-pass `--agent-name <role>` explicitly so the audit row is not misattributed to `operator`.
+When `scope.json` has a `required_headers` map (set with `vigil engagement create … --program
+bugcrowd --researcher <handle>`, `--header "Name: Value"`, or later `vigil engagement set-header
+<key> "Name: Value"`), the CLI adds those headers to in-scope HTTP probes for you. How it applies
+them depends on the tool:
 
-## Required attribution headers (program-mandated, e.g. BugCrowd)
+- **Injected** (`curl`, `httpx`, `nuclei`, `ffuf`, `sqlmap`, `katana`, `dalfox` via `-H`;
+  `whatweb` via `--header`, `nikto` via `-Add-header`, `arjun` via `--headers`): the header lands
+  in the recorded argv, so `command-run list` proves the traffic was tagged. `kali browser` hands
+  the headers to the Playwright driver instead of the argv.
+- **Skipped on purpose** (`gau`, `waybackurls`, `subfinder`, `amass`, `dnsx`, `puredns`, `nmap`,
+  `naabu`, `masscan`, `tlsx`): these hit third-party archives, DNS, or L3-L6 without HTTP, and
+  injecting would leak the researcher handle to web.archive.org or CommonCrawl.
+- **Not applicable, offline** (`which`, `find` without `-exec`, `jsluice`, `uro`, `trufflehog
+  filesystem`, and text tools such as `grep` or `jq`): a run whose every command reads only local
+  files makes no target traffic, so it needs no header and records `not_applicable_offline`.
+- **Warned, runs untagged** (`wafw00f`, whose `-H` reads a file, and any tool without a known
+  header flag): if the tool reaches the in-scope target, carry the header another way. A non-HTTP tool the
+  program still wants tagged is the operator's to handle out of band.
 
-When `scope.json` carries a `required_headers` map (set at create time with `vigil engagement create … --program bugcrowd --researcher <handle>` or `--header "Name: Value"`, or after the fact with `vigil engagement set-header <key> "Name: Value"`), `kali_exec` injects those headers into every in-scope HTTP probe automatically. You do **not** add them by hand. The injection is three-way by tool:
+## Out-of-scope carve-outs
 
-- **Injected** (`curl`, `httpx`, `nuclei`, `ffuf`, `sqlmap`, `katana`, `arjun`): the `-H "Name: Value"` is appended and lands in the recorded audit argv, so `command-run list` proves the program got tagged traffic.
-- **Silently skipped** (`gau`, `waybackurls`, `subfinder`, `amass`, `dnsx`, `nmap`, `naabu`, `masscan`, …): these query third-party archives / DNS / L3-L4, not the in-scope target — injecting would leak the researcher handle to web.archive.org/CommonCrawl, so it is intentionally NOT added.
-- **Warned, runs untagged** (`nikto`, `whatweb`, `wafw00f`, any tool with no known `-H` flag): a stderr warning fires; if that tool reaches the in-scope target you must carry the header another way.
-
-A non-HTTP raw tool that the program still requires tagging on is the operator's responsibility to handle out-of-band — the warning is the cue.
-
-## Out-of-scope carve-outs (`out_of_scope` denylist)
-
-`scope.json` `hosts` wildcards (`*.example.com`) match the apex and **every** subdomain, which
-over-includes a program's specific OOS carve-outs. The `out_of_scope` list expresses exceptions: a
-host is admitted to collected coverage IFF it matches an original root AND matches **no**
-`out_of_scope` entry (the denylist wins). Recon, `scope filter`, spec/endpoint ingestion, the work
-buffer, and proxy capture attribution use that admission result to keep unrelated data out of the
-engagement. Add carve-outs at create (`--out-of-scope appointments.acme-telco.example --out-of-scope
-"*.mobile.acme-telco.example"`) or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). Execution
-and dispatch admission are not destination filters; the shared boundary rule remains
-`agent/shared-constraints.md` §1.
+A `scope.json` wildcard (`*.example.com`) matches the apex and every subdomain. `out_of_scope`
+entries are exceptions, and the denylist wins: a host is admitted only if it matches a root and
+no `out_of_scope` entry. Recon, `scope filter`, spec and endpoint ingestion, the work buffer and
+proxy capture attribution all use this admission. Add carve-outs at create time
+(`--out-of-scope appointments.acme-telco.example --out-of-scope "*.mobile.acme-telco.example"`)
+or later (`vigil engagement add-oos <key> <host…>` / `remove-oos`). Execution and dispatch
+admission are not destination filters; the boundary rule is `agent/shared-constraints.md` §1.
 
 ## Phase tags (including half-phase tags)
 
-`--phase` accepts the canonical engagement phases plus two half-phase tags, `recon-pivot` and `exploit-recon` (explained below). The authoritative, drift-free enumeration is generated from `kali_audit.ALLOWED_PHASES` — list it with `vigil assess list-commands --phase <N>` (which also validates that a given phase token is canonical) or `vigil assess contract kali <verb>`. Do not restate the full phase list here.
+`--phase` takes an audit tag: a web phase, a code audit tag, or a half-phase tag. The list is in
+`vigil assess contract kali <verb>`. Pass the phase your dispatch was authorized for, not
+`scope.json.current_phase`, because engagements regularly work between phases and the row should
+say what the run was for. The half-phase tags:
 
-Pass the phase the dispatch was authorized for — `scope.json.current_phase` is operator state and updates only on phase transitions, but engagements regularly operate **between phases**. The half-phase tags exist because the audit row must reflect what the dispatch was for, not what `scope.json` happened to say at the time. Source-analyzer mid-engagement looking up version intel uses `recon-pivot`. An exploit-developer fingerprinting a binary before exploitation uses `exploit-recon`. The CLI rejects calls without `--phase` so agents cannot silently rely on a stale env-var default.
+- `recon-pivot`: recon done mid-engagement, such as source-analyzer looking up version intel.
+- `exploit-recon`: fingerprinting before exploitation.
 
-## Cross-reference: rate-limit calibration
-
-Per-target rate guidance (Cloud-fronted, Origin, WAF-protected, vendor-SaaS, high-friction) lives in `agent/references/recon/rate-calibration.md` (loaded by recon-class roles on first use). Tier-pick prose stays in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
+Code dispatches can carry the track phase as `authorized_phase`, but `--phase` takes only the
+audit tag: `ingest` → `code-ingest`, `classify-map` → `code-classify`, `hunt` → `code-hunt`,
+`verify-variant` → `code-verify`, `fuzz` → `code-fuzz`. A packet that already names the tag
+(claimed code proof work carries `code-verify`) passes it unchanged.
 
 ## Examples per verb
 
-Per-verb worked examples — the full audit-flag set, typed-flag shapes, and copy-paste-ready commands — live in each verb's contract, not here: `vigil assess contract kali <verb>` (a JSON `examples` payload per verb) or `vigil assess kali <verb> --help` for live flag spelling. To find a verb by phase or keyword instead of scanning a table, use `vigil assess list-commands --kali-only --phase <N>` / `--grep <keyword>`.
+Each verb's contract carries copy-paste examples (`vigil assess contract kali <verb>`). Two
+cross-verb pointers that no single contract carries:
 
-Two cross-verb pointers worth restating because a single verb's contract doesn't carry them:
+- **Subdomain enumeration** belongs to `agent/skills/subdomain-enumeration/SKILL.md`. Load it
+  rather than composing `subfinder`/`cero`/`alterx`/`puredns`/`dnsx` calls yourself, because it
+  carries the brute gating, wildcard and permutation bounds, and the host-CPU gate. Stage commands
+  are in `agent/references/recon/subdomain-enum-manual-stages.md`.
+- **Historical URLs:** prefer `vigil assess gau endpoints`, which wraps `kali gau` with cache reuse
+  and work-buffer ingestion. Use raw `kali gau` only for a one-off sweep that won't feed the
+  buffer.
 
-- **Subdomain enumeration (Phase 0/1/2/3 staged workflow)** is owned by [`agent/skills/subdomain-enumeration/SKILL.md`](../subdomain-enumeration/SKILL.md) — load that skill rather than composing `subfinder`/`cero`/`alterx`/`puredns`/`dnsx` calls from first principles. It carries the tool-tier rationale, the quantified bound rules (>5000 subs skip Phase 2, >30% wildcard ratio switch to TLS SAN, >500k permutation estimate abort), and the host-CPU gate on the bruteforce profile. Pair it with `agent/references/tools/recon/subdomain-enumeration-tools.md` for the full tool-tier table.
-- **Historical-URL collection:** prefer `vigil assess gau endpoints` over the raw `kali gau` typed verb — it wraps `kali gau` with cache reuse and inline work-buffer ingestion in one call. Reach for raw `kali gau` only for a one-off archive sweep that does not need to feed the work buffer.
+Per-target rate guidance is in `agent/references/recon/rate-calibration.md`.
 
-## Common Patterns
-
-These are the high-frequency invocation shapes specialists reach for. They are
-written as templates so the operator/specialist substitutes the engagement
-key, target, and audit metadata without re-deriving the path conventions.
+## Common patterns
 
 ### Run a custom Python helper inside the runtime
 
-Authoring path on the host: `$DIR/scripts/<name>.py` (or
-`$ENGAGEMENT_DIR/scripts/<name>.py`). Container path the script sees at
-execution time: `/engagements/$ENGAGEMENT_KEY/scripts/<name>.py`. Both names
-point at the same bind-mounted bytes — the dual naming exists because the
-container and host share one filesystem at one mount point. See
-`agent/shared-constraints.md §11a` for the path-aliasing rule.
+Author the script on the host at `$ENGAGEMENT_DIR/scripts/<name>.py`, and run it at
+`/engagements/$ENGAGEMENT_KEY/scripts/<name>.py`. Both paths name the same bind-mounted bytes
+(`agent/shared-constraints.md` §11a). Everything after `--` is raw argv, so the script is audited
+like a typed verb. The container has no `vigil` executable, so a script run there must be
+self-contained (`agent/skills/write-probe-script/SKILL.md`).
 
 ```bash
 vigil assess kali exec \
-    --technique EXPLOIT --intent "PoC: chained SSRF -> metadata creds" \
+    --technique SSRF --intent "PoC: chained SSRF -> metadata creds" \
     --probe-kind exploit --phase exploit --timeout 600 \
     -- python3 /engagements/$ENGAGEMENT_KEY/scripts/exploit.py \
        --target https://target.example --out /engagements/$ENGAGEMENT_KEY/scans/exploit.log
 ```
 
-The `--` separator is what makes everything after it raw argv to the
-in-container command, which is how arbitrary scripts stay auditable through
-the same wrapper that records typed verbs.
-
 ### Capture stdout/stderr to engagement-scoped paths
 
-Always write outputs under `/engagements/$ENGAGEMENT_KEY/...` so artifacts
-survive container restarts and stay attached to the engagement. `/tmp` and
-`/data` inside the container are non-engagement paths and outputs there are
-invisible from the host.
+Write outputs under `/engagements/$ENGAGEMENT_KEY/...`. Container `/tmp` and `/data` are invisible
+from the host and are lost on restart. A single request looks like this:
 
 ```bash
 vigil assess kali exec \
     --technique RECON --intent "harvest body of /api/health" \
     --probe-kind fingerprint --phase recon --timeout 60 \
     -- bash -lc "curl -sS https://target.example/api/health \
-                   > /engagements/$ENGAGEMENT_KEY/scans/health.json \
-                   2> /engagements/$ENGAGEMENT_KEY/scans/health.err"
+                   > /engagements/$ENGAGEMENT_KEY/scans/health.json"
 ```
 
-The same files are visible from the host at `$DIR/scans/health.json` and
-`$DIR/scans/health.err` for review and for `vigil assess record-*` references.
+### Batch one command across a value list
 
-### Batch one command across a value list and cluster the responses
-
-When you want to probe the SAME command across many literal values you already
-have (e.g. an enumerated set of object ids you captured from recon), use
-`vigil assess kali sweep` instead of hand-looping `kali exec`. It fans one
-audited `kali exec` out per value — `{}` is substituted into the template — so
-every value gets its own `command-runs` row, then it prints a compact table
-clustered by distinct response signature (reachability class + status + body
-marker). The clustering reuses the shared reachability taxonomy, so a
-reachable-but-blocked cluster reads differently from a `dns-failure` /
-`connection-refused` cluster. It is value-agnostic: it expands ONLY the values
-you supply (a literal list and/or inclusive integer ranges `a-b`) and never
-generates ids or hosts. Politeness guards: `--max-values 200` cap, default
-`--concurrency 1` (`>1` requires `--allow-concurrent`, the I-013 per-host rule).
+To run the same command across values you already have (object ids captured in recon, for
+example), use `vigil assess kali sweep` rather than looping `kali exec`. It runs one audited exec
+per value, substituting `{}`, and prints responses clustered by reachability class, status and
+body marker. It expands only the values you supply (a literal list or inclusive `a-b` ranges) and
+never generates ids or hosts. The limits are `--max-values 200` and `--concurrency 1` by default;
+going above 1 needs `--allow-concurrent`, because parallel arms multiply the per-host rate. Add
+`--json` to get each value's `run_id`.
 
 ```bash
 vigil assess kali sweep \
-    --technique RECON --intent "object-id reachability sweep" \
-    --probe-kind baseline --phase recon --timeout 30 \
+    --technique IDOR --intent "object-id reachability sweep" \
+    --probe-kind baseline --phase consume-test --timeout 30 \
     --values "1,2,7-9,42" \
     -- curl -s -o /dev/null -w '%{http_code}' https://target.example/item/{}
 ```
 
-Recover the whole fan-out afterward with
-`vigil assess command-run list --intent-q "sweep"`; add `--json` to the sweep
-to get cluster objects that carry each value's `run_id` for audit linkage.
+## Before and after probing
 
-### Wrap a long-running custom command as a job (operator-only)
-
-This path belongs to the **operator** — `kali job start` backgrounds a probe past the
-synchronous window, and only the operator owns long supervised jobs, because a
-dispatched specialist that backgrounds-and-polls is SIGUSR1-killed mid-wait (see
-`agent/shared-constraints.md` §2). As a specialist, when a probe won't fit the
-synchronous `--timeout`, hand it to the operator in your `next_steps` rather than
-starting a job yourself. The dtach session is parented by tini so it survives the
-calling agent's exit; recover with `kali job status <id>` and `kali job tail <id>`.
-
-```bash
-vigil assess kali job start \
-    --technique FUZZ --intent "long ffuf sweep on /api/v1/{id}" \
-    --probe-kind payload --phase consume-test --timeout 21600 \
-    -- ffuf -u https://target.example/api/v1/FUZZ \
-            -w /usr/share/seclists/Discovery/Web-Content/api/api-endpoints.txt \
-            -mc 200,401,403 -o /engagements/$ENGAGEMENT_KEY/scans/ffuf-api.json -of json
-```
-
-Job output writes through the wrapper so the audit row stays accurate even
-when the agent that started the job has long since exited.
-
-## Coverage check before probing
-
-Every typed verb and `kali exec` writes an audit row with `command`, `argv`, `tool`, `agent`, `phase`, `technique`, `intent`, `probe_kind`, `destructive`, exit code, timings, and an output preview. Treat that history as a coverage map — search for prior work on this surface before dispatching, with `vigil assess command-run list --q <keyword> --show-matches`. The full coverage-vs-duplicate decision table lives in `agent/references/runtime-guides/command-history-auditing.md`. The shared `agent/shared-constraints.md §2b` has the agent-side rule.
-
-## Process cleanup discipline
-
-Use PID-targeted cleanup, not binary-name signals — `pkill -f nmap` or `pkill -f ffuf` kills sibling specialists' parallel scans in the shared runtime, losing potentially hours of recon. For async jobs, use `vigil assess kali job stop <id>` (signals only the job-owned in-container PID); for synchronous calls, the CLI already handles the SIGTERM/SIGKILL escalation on `--timeout` expiry so no manual cleanup is needed.
-
-## Wire-Byte Verification Before Trusting a 406 / Content-Negotiation Verdict
-
-A 406 Not Acceptable response (or any content-negotiation-derived verdict) can be fabricated by a **malformed request**, not by the real target behavior. The most common source is an unquoted header value in shell argv that splits at whitespace into two separate tokens before it reaches the HTTP request:
-
-```bash
-# WRONG — the Accept header splits; the request goes out without a valid Accept
-curl https://TARGET/api/endpoint -H Content-Type: application/json
-
-# CORRECT — quote the entire header value so it reaches the wire intact
-curl https://TARGET/api/endpoint -H "Content-Type: application/json"
-```
-
-Before treating a 406 (or a content-negotiation-driven "handler not reached" result) as target behavior:
-
-1. **Inspect the recorded argv.** The audit row's `resolved_argv` field shows what ACTUALLY ran inside the container. Read it with `vigil assess command-run get <id>` and confirm every `-H` value is quoted and complete.
-2. **Capture the raw wire bytes.** Re-run with `-v` (curl) or `-debug` (httpx) to see the literal request headers sent. A missing or truncated header explains the 406 without any target-side enforcement.
-3. **Send a canonical request.** Construct the request with explicit, fully-quoted headers and confirm the 406 persists before recording "content-negotiation blocked" as a verdict.
-
-An unquoted-header 406 is a **tooling artifact**, not a target signal — it fabricates a "handler not reached" lead that closes coverage prematurely. See `agent/rules/hunting.md §23` ("A non-conclusive response is a LEAD, not a verdict") for the doctrine.
-
-## Troubleshooting and runtime errors
-
-When `vigil assess kali --help` errors or a verb fails unexpectedly, see `agent/references/runtime-guides/kali-cli.md` for diagnosis steps (runtime status, dtach reachability, dedup-window, common error messages).
-
-When you see audit rows stuck in `status=running` long after their tool would have finished — typical after a backend restart, host crash mid-run, or a network blip during the finalize PATCH — run `vigil assess kali sweep-orphans --dry-run` to inspect candidates, then re-run without `--dry-run` to finalize dead rows to `status=lost`. The sweep is non-destructive for live processes (it leaves still-running rows untouched), so a periodic sweep is safe even when nothing looks broken.
+- Search prior runs on the surface first: `vigil assess command-run list --q <keyword>
+  --show-matches` (`agent/shared-constraints.md` §2b; decision table in
+  `agent/references/runtime-guides/command-history-auditing.md`).
+- A 406 or other content-negotiation verdict often comes from an unquoted header that split
+  before reaching the wire. Before treating it as target behaviour, check `resolved_argv` with
+  `vigil assess command-run get <id>`, replay with `-v` (curl) or `-debug` (httpx), and confirm the
+  verdict holds with fully quoted headers (`agent/rules/hunting.md` §12(f)).
+- When a verb errors, a documented verb, flag or skill is missing, or audit rows sit at
+  `status=running` long after the tool finished, see
+  `agent/references/runtime-guides/kali-cli.md`.

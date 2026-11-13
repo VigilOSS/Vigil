@@ -157,41 +157,6 @@ Triangulated conclusion: deployed version is exactly 32.5.1, patched against
 CVE-2025-XXXXX, vulnerable to no published advisory in the 32.5.x branch.
 ```
 
-### Salesforce-style multi-tenant SaaS
-
-Salesforce's exact orgs run a vendor-controlled release train; the deployed
-release is fingerprinted from the Aura framework's bundle hash plus the
-release-name string in the page chrome.
-
-```
-Step 1 — Source-map APP_VERSION:
-    APP_VERSION = "260.18"  (Spring '26 patch 18)
-
-Step 2 — Vendor release calendar:
-    -> "Spring '26 patch 18 deployed 2026-03-21 to Pod NA113"
-
-Step 3 — Vendor security advisory cross-check for Spring '26 line:
-    -> "Patches 1 through 17: vulnerable to CVE-2026-XXXXX"
-    -> "Patch 18 ships the fix"
-
-Conclusion: deployed pod is on patch 18 → CVE-2026-XXXXX no longer applies.
-```
-
-### ServiceNow-style platform
-
-```
-Step 1 — Source-map BUILD_HASH:
-    __GIT_SHA__ = "tokyo-glide-q3-2025-patch4"
-
-Step 2 — Vendor changelog cross-check:
-    -> "Tokyo Glide Q3 2025 Patch 4 deployed 2025-10-08"
-
-Step 3 — npm sister-package probe for vendor SDK:
-    -> "<vendor-sdk>@7.4.4 published 2025-10-08T16:00:00Z"
-
-Conclusion: instance is on Tokyo Glide Q3 2025 Patch 4.
-```
-
 ### Drupal-style CMS
 
 ```
@@ -212,7 +177,7 @@ patched.
 
 ## 7. Triangulation Output Format
 
-Hand back to the operator (and on to exploit-developer for validation):
+Hand back to the operator (and on to `vulnerability-analyst` for validation):
 
 ```
 Vendor product: <vendor>/<product>
@@ -230,7 +195,7 @@ CVEs in scope after patch-line check:
 ```
 
 This payload feeds `vigil assess intel record cve <json>` (one call per
-applicable CVE) and a follow-up exploit-developer dispatch for live
+applicable CVE) and a follow-up `vulnerability-analyst` dispatch for live
 validation before any CVE becomes a durable finding.
 
 ## Cross-references

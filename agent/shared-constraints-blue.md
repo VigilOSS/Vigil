@@ -351,7 +351,7 @@ ambiguous scope). A `blocked` handoff names the exact blocker in `next_steps`.
 
 The ordered steps are owned per role: each blue role's own `### Closing verbs`
 list names which artifact kinds it registers, what it marks scratch, which
-activity entries it writes, and its `render-handoff` self-check; the cross-role
+and which activity entries it writes; the cross-role
 wrapper (checkpoint cadence, `agent_id` keying, skip consequences) is in
 `agent/shared-specialist-core.md` "Mandatory Closing Sequence — wrapper"; the
 `register` / `mark-scratch` commands and the `--kind` enum are in §3 above.
@@ -424,9 +424,8 @@ Use `--intent` for purpose only.
 
 ## Reasoning Quality > Response Brevity
 
-`agent/shared-specialist-core.md` "Reasoning quality > response brevity" owns
-this. Blue substitutions: the calls you narrate between are
-`vigil assess host-exec` calls, and the hypotheses you work through are
+`agent/shared-specialist-core.md` "Reasoned final return" owns
+this. In blue, the hypotheses that return reasons through are
 alternative-explanation hypotheses in the devil's-advocate form
 `agent/rules/triage.md` rule 15 requires.
 

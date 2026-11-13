@@ -359,4 +359,3 @@ index=dns earliest=-24h
 ## Extended Resources
 
 - `agent/references/offensive-tactics/frp-tunneling.md` -- tunnel exposure for DNS C2 callback infrastructure
-- `agent/references/runtime-guides/engagement-methodology.md` -- where DNS tunnel hunting fits in engagement phases

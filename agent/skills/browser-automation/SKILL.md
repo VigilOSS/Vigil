@@ -50,11 +50,21 @@ Full rationale table and the load-bearing finding:
 
 ## Procedure
 
+Headed Chromium runs on the host (the residential egress is the point), so every target-facing
+run goes through `vigil assess host-exec`, which writes the same audit row as a kali call
+(`agent/shared-constraints.md` §2). Bot-manager evasion is operator-authorized work: confirm the
+engagement allows it before starting,
+and surface a block as an operator decision otherwise.
+
 ### 1. Install (first time)
+
+Install Playwright in the engagement directory and copy the skeleton next to it, so Node resolves
+`playwright` from the engagement's `node_modules`:
 
 ```bash
 cd "$ENGAGEMENT_DIR"
 npm i playwright && npx playwright install chromium
+cp <vigil-checkout>/agent/scripts/browser/playwright-login.js "$ENGAGEMENT_DIR/scans/"
 ```
 
 ### 2. Pick the capture mode
@@ -81,13 +91,13 @@ multi-selector two-step login, akredirect/bot-block detection, screenshot-every-
 step, and the Netscape jar dump.
 
 ```bash
-cd "$ENGAGEMENT_DIR"
-TARGET_URL="https://www.target.example/login" \
-USERNAME="$U" PASSWORD="$P" \
-JAR="$ENGAGEMENT_DIR/sessions/target.cookies.txt" \
-SHOTS_DIR="$ENGAGEMENT_DIR/scans/login-shots" \
-node agent/scripts/browser/playwright-login.js
-# Mode A: prepend  PROXY="http://127.0.0.1:8080"  (after vigil mitmproxy start)
+vigil assess host-exec --tool node --technique AUTH --phase collect \
+  --intent "headed stealth login + cookie dump" --target-host www.target.example -- \
+  env TARGET_URL="https://www.target.example/login" USERNAME="$U" PASSWORD="$P" \
+      JAR="$ENGAGEMENT_DIR/sessions/target.cookies.txt" \
+      SHOTS_DIR="$ENGAGEMENT_DIR/scans/login-shots" \
+  node scans/playwright-login.js
+# Mode A: add  PROXY="http://127.0.0.1:8080"  to the env (after vigil mitmproxy start)
 # Two-step IdP: the script submits username, waits, then fills password.
 # OTP step-up: supply OTP="123456" just-in-time; never hardcode.
 ```
@@ -100,12 +110,16 @@ applies all of these; details in the reference.
 
 ### 4. Replay the session headless
 
-Hand the jar to `curl_chrome116` so the JA3 fingerprint survives the edge:
+Import the cookies as a named identity (`vigil auth import --identity <name> --source <file.json>`;
+`vigil auth import --help` shows the JSON shape) so later kali calls inject them with `--identity`, or hand the jar to `curl_chrome116` in the runtime so the JA3
+fingerprint survives the edge:
 
 ```bash
-curl_chrome116 -sS -b "$JAR" \
-  -H "X-CSRF-Token: <MemberGlobalSession value from jar>" \
-  -H "Accept: application/json" "https://api.target/v1/..."
+vigil assess kali exec --technique AUTH --intent "JA3-correct session replay" \
+  --probe-kind replay --phase consume-test --timeout 60 -- \
+  curl_chrome116 -sS -b /engagements/$ENGAGEMENT_KEY/sessions/target.cookies.txt \
+    -H "X-CSRF-Token: <MemberGlobalSession value from jar>" \
+    -H "Accept: application/json" "https://api.target.example/v1/..."
 ```
 
 To *refresh* a short-lived access_token from these cookies on demand (silent-PKCE
@@ -123,10 +137,10 @@ self-mint + cross-issuer X-CSRF envelope), follow
 
 ## Load First
 
-- `agent/references/web/browser-automation-playwright.md` — install, two modes,
-  stealth hardening, login-flow tips, cookie-jar build, tool-choice rationale,
-  the runnable script.
-- `agent/scripts/browser/playwright-login.js` — the copy-pasteable skeleton.
+- `agent/references/web/browser-automation-playwright.md` — tool-choice rationale,
+  the two modes (Mode B attribution headers), stealth hardening, login-flow traps,
+  and the script's env inputs.
+- `agent/scripts/browser/playwright-login.js` — the skeleton (copied into the engagement in step 1).
 
 ## Cross-references
 

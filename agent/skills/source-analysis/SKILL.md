@@ -20,7 +20,7 @@ vuln_class: source-disclosure, secrets-exposure
 
 - `vigil assess gau js-endpoints` — supported endpoint extraction over saved JavaScript bodies
 - `vigil assess gau secrets` — supported body-fetch and secret-discovery pipeline
-- `trufflehog` — scan saved JS/source-map artifacts through `vigil assess kali exec --` (host-side installs
+- `trufflehog` — scan saved JS/source-map artifacts through `vigil assess kali exec … -- trufflehog …` (host-side installs
   aren't required; the runtime image ships trufflehog)
 - `curl`, `grep`/`sed`/`awk`, `jq` — manual extraction and verification
 
@@ -139,18 +139,19 @@ is too loose for CVE work.
 Grep patterns to run against fetched bundles, source-maps, and inline scripts:
 
 ```bash
+# Host-side over the downloaded bundles ($DIR is the engagement directory on the host).
 # Constants commonly inlined by webpack DefinePlugin / Vite define / build scripts
 grep -EHn 'APP_VERSION|__APP_VERSION__|BUILD_HASH|__BUILD_HASH__|__GIT_SHA__|__BUILD_VERSION__' \
-  /engagements/$ENGAGEMENT_KEY/downloads/*.js \
-  /engagements/$ENGAGEMENT_KEY/downloads/*.js.map
+  "$DIR"/downloads/*.js \
+  "$DIR"/downloads/*.js.map
 
 # Sentry release-tag — pinned to git tag or short SHA in production builds
 grep -EHn 'Sentry\.init\([^)]*release:|process\.env\.SENTRY_RELEASE|SENTRY_RELEASE' \
-  /engagements/$ENGAGEMENT_KEY/downloads/*.js \
-  /engagements/$ENGAGEMENT_KEY/downloads/*.js.map
+  "$DIR"/downloads/*.js \
+  "$DIR"/downloads/*.js.map
 
 # package.json fragments are sometimes inlined at the bottom of bundles
-grep -EHn '"version"\s*:\s*"[0-9]+\.[0-9]+\.[0-9]+' /engagements/$ENGAGEMENT_KEY/downloads/*.js
+grep -EHn '"version"\s*:\s*"[0-9]+\.[0-9]+\.[0-9]+' "$DIR"/downloads/*.js
 ```
 
 When a value is found, hand it to osint-analyst as part of the `#### Intelligence` output
@@ -179,17 +180,13 @@ did not run the vendor's hardening checklist.
 vigil assess kali exec --technique INFO-DISCLOSURE \
   --intent "vendor-product CSP/CORS re-baseline header capture" \
   --probe-kind fingerprint --phase recon --timeout 30 -- \
-  curl -sSI 'https://TARGET/' \
-  > /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
+  curl -sSI -o /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt 'https://TARGET/'
 
-vigil assess kali exec --technique INFO-DISCLOSURE \
-  --intent "vendor-product placeholder + unsafe-inline/eval grep" \
-  --probe-kind payload --phase recon --timeout 60 -- bash -c '
-  grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|placeholder|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
-    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
-  grep -iE "script-src[^;]*unsafe-inline[^;]*unsafe-eval|script-src[^;]*unsafe-eval[^;]*unsafe-inline" \
-    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
-'
+# Host-side grep over the captured headers; no target traffic
+grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|placeholder|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
+  "$DIR/scans/headers_TARGET.txt"
+grep -iE "script-src[^;]*unsafe-inline[^;]*unsafe-eval|script-src[^;]*unsafe-eval[^;]*unsafe-inline" \
+  "$DIR/scans/headers_TARGET.txt"
 ```
 
 Match against `Content-Security-Policy`, `Access-Control-Allow-Origin`, `Feature-Policy`,
@@ -260,7 +257,7 @@ consistently.
 
 ## Extended Resources
 
-- `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints, metadata paths, and environment file paths
+- `agent/references/payloads/info-disclosure-probes.md` — standard probe endpoints and environment/config file paths
 - `agent/references/tools/exploitation/dalfox.md` — for JS-discovered parameterized URLs that may be XSS candidates
 - `agent/skills/browser-semantic-analysis/SKILL.md` — runtime-observation path for routes/API calls that static bundle analysis cannot materialize
 - `agent/references/runtime-guides/browser-semantic-evidence.md` — browser-mode triggers, tool choices, and evidence contract

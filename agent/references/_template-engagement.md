@@ -5,26 +5,17 @@ category: Engagement Setup
 
 # Engagement Program Brief — \[ENGAGEMENT NAME / KEY\]
 
-> **Usage:** Copy this file to `$ENGAGEMENT_DIR/ENGAGEMENT.md` and fill in every section
-> before dispatching specialists. Specialists load this file at the start of each dispatch
-> to read the engagement-specific ROE. The operator edits it as the program evolves
-> (new OOS carve-outs, updated rate caps, newly-discovered no-fire endpoints).
+> **Usage:** copy this file to `$ENGAGEMENT_DIR/ENGAGEMENT.md` and fill in every section before
+> dispatching specialists, who read it at the start of each dispatch. Update it as the program
+> changes (new OOS carve-outs, rate caps, no-fire endpoints). It holds only per-program values; the
+> reasoning behind the constraints is in `agent/shared-constraints.md` and `agent/rules/hunting.md`.
 >
-> **Authoring rule:** every slot below receives the *engagement-specific instance*. The
-> capability-neutral judgment (why these constraints exist and how to reason about edge
-> cases) lives in `agent/shared-constraints.md` and `agent/rules/hunting.md`; this file
-> carries only the per-program values.
->
-> **Applicability:** every ROE constraint below (scope headers, rate caps, no-fire
-> endpoints, deconfliction markers, exfiltration limits) governs LIVE target-facing
-> testing — the web/network operator (`agent/operator-core.md`) and any Kali-runtime
-> probing. The static CODE operator (`agent/operator-core-code.md`), doing pure
-> whitebox source review with no traffic to the target, is NOT bound by the header/
-> rate/no-fire/deconfliction/exfil rules below while reading source. BUT every one of
-> them RE-APPLIES the instant the code track runs any live probe — a Phase-4 fuzz
-> campaign (`agent/phases/code-phase-4-fuzz.md`) against a running target, or web
-> testing running alongside the code review (`operator-core-code.md` "Integration
-> with Web Engagement").
+> **Applicability:** these constraints govern live target-facing testing. A code engagement doing
+> pure source review sends no target traffic and isn't bound by the header, rate, no-fire,
+> deconfliction or exfiltration rows while it reads source. They apply again as soon as the code
+> track runs a live probe, such as a fuzz campaign against a running target
+> (`agent/phases/code-phase-4-fuzz.md`) or web testing alongside the review (`operator-core-code.md`
+> "Integration with Web Engagement").
 
 ---
 
@@ -71,11 +62,9 @@ OOS notes:
 
 ## 2. Required Request Headers and Deconfliction Marker
 
-> **Why this section is here:** programs require specific headers on all in-scope traffic
-> so they can attribute and deconflict researcher probes. This is the durable slot for
-> the per-program header set. The `vigil engagement set-header` command registers the
-> header so `kali_exec` injects it automatically into every in-scope HTTP probe
-> (curl/httpx/nuclei/ffuf/katana/arjun). Fill in all program-mandated headers here.
+> Programs require these headers to attribute and deconflict researcher traffic.
+> `vigil engagement set-header` registers each one, and the CLI then injects it into in-scope HTTP
+> probes (`agent/skills/kali-exec/SKILL.md` "Required attribution headers" lists which tools).
 
 ### Program-Mandated Headers
 
@@ -108,8 +97,8 @@ Placement decision (fill in one):
 ## 3. Rate Cap
 
 > Exceeding the program's rate cap risks a ban or invalidation of findings.
-> The per-target rate table in `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy"
-> provides per-trait defaults; the values below OVERRIDE those defaults for this engagement.
+> The per-target rate table in `agent/references/recon/rate-calibration.md` provides per-trait
+> defaults; the values below OVERRIDE those defaults for this engagement.
 
 | Surface | Max requests/sec | Max concurrency | Notes |
 |---------|-----------------|-----------------|-------|
@@ -117,17 +106,18 @@ Placement decision (fill in one):
 | API endpoints | `[FILL]` | `[FILL]` | [FILL: e.g., "strict — returns 429 at > 10 req/s"] |
 | Authenticated flows | `[FILL]` | `[FILL]` | [FILL: e.g., "session invalidates on rapid reuse"] |
 
-Back-off rule: on a 429, pause `[FILL: e.g., 60]` seconds before retrying. Do not bypass
-the rate limit — `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" makes this explicit;
-the program may revoke scope on violation.
+Back-off rule: on a 429, pause `[FILL: e.g., 60]` seconds before retrying, then step down a row
+as `agent/references/runtime-guides/dispatch-resource-policy.md` "When to step down a tier"
+describes. Stay under the cap rather than working around it, because the program may revoke
+scope on violation.
 
 ---
 
 ## 4. No-Fire Endpoints
 
-> These endpoints MUST NOT be probed. They either reach real end-user inboxes/queues/state
-> or are explicitly excluded by the program. Record a `scope_decision` for any lead that
-> touches one — do not fire the request to characterize the behavior.
+> Don't probe these. They reach real end-user inboxes, queues or state, or the program excludes
+> them. For a lead that touches one, record a `scope_decision` instead of firing the request to
+> see what happens.
 
 ```
 # Absolute no-fire list for this engagement (add paths or full URLs):
@@ -177,7 +167,7 @@ genuinely unknown.
 > the "reaches-a-real-third-party" test in `vigil assess contract agent decision` — a
 > researcher-owned mailbox/phone, a documented sandbox with no live inbox, or a
 > self-directed test account. A destination listed here is ordinary surface — hunt
-> it fully; sending to it does not consume the §2d live-fire budget and does not
+> it fully; sending to it does not consume the `agent/shared-constraints.md` §2d live-fire budget and does not
 > need a `human_reach_decision` record.
 
 | Destination | Type | Owner / control | Notes |
@@ -191,8 +181,8 @@ genuinely unknown.
 
 ## 6. Exfiltration Limits
 
-> Proof-of-access requires one exact minimal sample — never bulk-pull real user records.
-> Volume is not stronger evidence and only increases harm. See `agent/shared-constraints.md §4`.
+> Proof of access needs one exact minimal sample. Bulk-pulling real user records adds no evidence
+> and only adds harm (`agent/rules/hunting.md` §10).
 
 Per-finding exfiltration limit: **one exact minimal sample** (enough to prove the
 record class and access). Specific limits for this engagement:
@@ -273,7 +263,7 @@ vigil assess dns-discovery <apex-domain> --engagement-dir <engagement-dir>
 vigil assess kali subfinder -d <apex-domain> -all -recursive \
   -o /engagements/<key>/scans/subs_passive_refresh.txt \
   --technique RECON --intent "subfinder rerun with Chaos+GitHub keys" \
-  --probe-kind fingerprint --phase recon --timeout 1800
+  --probe-kind fingerprint --phase recon --timeout 600
 ```
 
 A re-run with keys typically surfaces 15–40% more subdomains on enterprise targets versus

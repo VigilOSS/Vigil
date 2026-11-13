@@ -1,50 +1,30 @@
 ---
-description: Active DNS brute-force with wildcard filtering — massdns hard-dependency, tier-aware rate-limit profiles, `--wildcard-batch` / `--wildcard-tests` tuning
+description: puredns active brute and wildcard-aware resolve — silent zero-output failure without massdns, resolver-list paths inside the container, --rate-limit-trusted as a pool-wide total, tight-RAM --wildcard-batch
 skill: subdomain-enumeration
 ---
 
 # puredns
 
-**Purpose:** Fast domain resolver and DNS brute-forcer with accurate wildcard filtering
-For live engagement targets, run puredns via `vigil assess kali puredns` (typed verb, audit-flag-aware).
+massdns plus a wildcard filter, run as
+`vigil assess kali puredns {bruteforce,resolve} <wordlist_or_input> [domain]`. Stage commands are
+`agent/references/recon/subdomain-enum-manual-stages.md` "Phase 1" and "Phase 2"; profile flag sets
+are `subdomain-enumeration-tools.md` "Resource profiles and rate reality".
 
-## Hard `massdns` dependency (read first)
-
-puredns is a wrapper around massdns + a wildcard filter — it has no resolver of its own. **If `massdns` is not on `$PATH`, puredns silently fails: zero output, no error, exit code 0.** Rerun the preflight (or fix the runtime) if your puredns invocation produced nothing. Run the tooling preflight (see `agent/skills/subdomain-enumeration/SKILL.md` "Tooling preflight") before any active step:
-
-**Host-CPU and Docker-stability note.** DNS bruteforce is the dominant host-CPU and host-network spike in the engagement runtime — see `agent/skills/subdomain-enumeration/SKILL.md` "Host-CPU note" for the full mechanism. massdns sends thousands of UDP queries per second; the host kernel's per-packet network-stack overhead is amplified well beyond what `--cpus` cgroup limits constrain (cgroup CPU limits the userland process, not the host's kernel networking path). Aggressive puredns rate-limits have crashed Docker on standard laptop hardware. Default to `polite-residential` everywhere; step up to `bursty-OK` only on private/lab resolvers AND with explicit operator opt-in.
-
-```bash
-vigil assess kali exec --technique HEALTH --intent "massdns/puredns preflight" \
-  --probe-kind fingerprint --phase recon --timeout 30 -- \
-  which massdns puredns
-```
-
-`runtime-full/Dockerfile` installs massdns from the kali apt repo; if it's missing in a running container the image is drifting and the runtime needs a `vigil runtime restart` after rebuild — do NOT swap to a degraded fallback.
-
-## Resource-safe profiles
-
-Match the rate-limit to the runtime/target tier — full tier rationale in `agent/skills/subdomain-enumeration/SKILL.md` "Docker-resource-safe profiles" and `agent/references/tools/recon/subdomain-enumeration-tools.md` "puredns — rate-limit reality".
-
-| Profile | Flags |
-|---------|-------|
-| polite-CDN-fronted-target (CDN-fronted / WAF-protected / regulated cautious tier) | `--rate-limit 800 --wildcard-tests 30` |
-| polite-residential default | `--rate-limit 2500 --wildcard-batch 100000` |
-| bursty-OK (opt-in only) | `--rate-limit 5000` |
-
-`--wildcard-batch 100000` is the default for the polite-residential profile; drop to `50000` on tight-RAM containers (`VIGIL_RUNTIME_MEMORY_GB=4` or lower) because the wildcard-filter dedup map dominates puredns's RAM usage and silent truncation produces missing subs without a clean OOM.
-
-`--rate-limit-trusted 200` is the TOTAL qps ceiling for the trusted-resolver pool as a whole (not a per-resolver cap). Separately, individual upstream resolvers may independently throttle traffic per source IP; when they do, the resulting failures look like wildcard misses rather than rate errors. Keep these two ideas distinct: the flag sets one total qps budget across the pool, while upstream per-source throttling is a property of the resolvers themselves. Neither is local saturation.
-
-## Common invocations
-
-**Brute-force subdomains:** `puredns bruteforce wordlist.txt target.example -r resolvers.txt -w results.txt`
-**Resolve a list:** `puredns resolve subdomains.txt -r resolvers.txt -w resolved.txt`
-**Wildcard detection:** Built-in — automatically filters wildcard DNS responses. Tune with `--wildcard-tests 30` for wildcard-heavy targets (regulated apex, brand-name CDN).
-**Custom resolvers:** `-r resolvers.txt` (use trusted public resolvers to avoid false positives).
-**Rate limit:** `--rate-limit 2500` (polite-residential default; see profiles above).
-**Threads:** `-t 100`.
-
-**Pipeline usage:** Use after subfinder (passive) to add active brute-force results. puredns handles wildcard domains correctly, which ffuf vhost fuzzing does not. Feed output into dnsx for record-type enrichment (lean profile — see `dnsx.md` NXDOMAIN trap), then httpx for live host confirmation.
-
-**Resolver list:** Use a curated list of reliable public resolvers. Community lists available at `github.com/trickest/resolvers`.
+- **No massdns, no output.** puredns has no resolver of its own: with `massdns` missing it exits 0
+  with zero output and no error. Run the skill's "Tooling preflight" before active work; a missing
+  binary is image drift to rebuild, not a reason to switch tools.
+- **Resolver paths.** `kali puredns` runs in the container with `/engagements/$ENGAGEMENT_KEY` as
+  its working directory, so the shipped host-side lists under `agent/scripts/assess/data/resolvers/`
+  are not visible to it. `vigil assess dns-discovery --brute` stages `premium-anycast.txt` and
+  `trusted-anycast.txt` into `/engagements/$ENGAGEMENT_KEY/wordlists/` for you; for a hand-run call,
+  copy the list to `$DIR/wordlists/` and pass the `/engagements/...` path.
+- `--rate-limit-trusted` is one total qps budget for the whole trusted pool, as `--rate-limit` is
+  for the brute pool; both values are in `agent/references/recon/rate-calibration.md` (the
+  DNS-brute column and its footnote). Upstream resolvers that throttle per source IP are a separate effect, and it
+  shows up as wildcard misses rather than rate errors.
+- Wildcard handling is the reason to prefer puredns over shuffledns and over ffuf vhost fuzzing;
+  raise `--wildcard-tests` on wildcard-heavy apexes (regulated apex, brand-name CDN). The
+  wildcard dedup map dominates RAM and truncates silently rather than failing with an OOM; the
+  tight-RAM `--wildcard-batch` value is in the manual stages' "Phase 1".
+- Feed survivors to dnsx for enrichment on the lean-then-enrich pattern (`dnsx.md`
+  "NXDOMAIN / CPU-spike trap").

@@ -256,7 +256,7 @@ false-positive — it is only enough to set `verification_status=disputed`.
 
 ## 16. Severity ↔ technique alignment audit before report
 
-Before any report-writer dispatch, query `vigil assess finding list` and verify
+Before any report-writer dispatch, read every finding with `vigil assess fetch findings --paginate` and verify
 each finding's `severity` matches its `details.mitre_techniques` and
 proved impact:
 
@@ -285,7 +285,7 @@ text and strip phrases that contradict current state:
 - "see updated timeline below" when the timeline is now the only timeline
 
 The executable recipe lives in `agent/skills/report-generation/SKILL.md`
-Review-and-Fix QA Mode (`vigil assess finding list --json | jq -r .[].slug` loop).
+"Stale-text scrub" (a slug loop over `vigil assess finding report --mode draft --json`).
 Stale narrative is invisible to backend status fields and ends up in the
 incident report verbatim.
 
@@ -326,7 +326,7 @@ directory. False-positive disposition is not a license to destroy evidence.
 ## 20. Phase exit requires DoD checklist clean
 
 Each blue phase has a Definition-of-Done checklist enforced by
-`vigil assess transition-phase` (see operator-core-blue.md DoD section). Phase
+`vigil assess transition-phase`. Phase
 exit is gated on:
 
 - All dispatched specialists returned a `ready` or `blocked` handoff (no

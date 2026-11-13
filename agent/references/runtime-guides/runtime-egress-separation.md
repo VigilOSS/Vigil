@@ -5,21 +5,12 @@ skill: web-recon
 
 # Runtime egress separation — give the runtime its own egress IP
 
-> **Default is unchanged.** With neither knob set, the runtime container uses
-> Docker's default bridge and NATs out the host's default route — the *same*
-> egress IP as the user's browser. This feature is **opt-in and off by default.**
-
-## Why
-
-The runtime container and the operator's browser share one NAT/egress IP. A
-sustained agent recon/exploit pass can burn the shared CDN (Akamai-style) rate
-budget for that IP and get the **user's own browser session** rate-blocked
-mid-engagement. Routing the runtime's target-facing egress through a separate
-proxy or network gives the fleet its own IP-of-record, off the browser's budget.
-
-This is the *separation* mechanism. Detecting that the egress IP is *already* on
-a CDN reputation list is a different concern — see
-`cdn-ip-blocking.md` (`vigil assess egress-check`).
+This feature is opt-in and off by default. With neither knob set, the runtime container uses
+Docker's default bridge and leaves through the host's default route, which is the same egress IP
+as the operator's browser. A sustained agent recon or exploit pass can then use up the shared CDN
+rate budget for that IP and get the operator's own browser session rate-blocked mid-engagement.
+Separation gives the fleet its own IP of record. Detecting that an IP is already on a reputation
+list is a different job (`cdn-ip-blocking.md`, `vigil assess egress-check`).
 
 ## The two knobs (set in `<install>/.env` or the shell env)
 
@@ -45,14 +36,10 @@ excludes the orchestrator/backend host-gateway:
 host.docker.internal,localhost,127.0.0.1,::1
 ```
 
-(plus anything in `VIGIL_RUNTIME_EGRESS_NO_PROXY`). `host.docker.internal` is the
-stable alias the runtime uses to reach the orchestrator (`docker run
---add-host=host.docker.internal:host-gateway`), so excluding the **name** keeps
-backend calls — `vigil assess` state reads/writes, finding records, the whole
-audit/state pipeline — off the target-facing proxy regardless of the host-gateway's
-runtime IP. Only target-facing tool egress is proxied. This exclusion is enforced
-in `src/vigil_cli/config.py` (`_compose_no_proxy` /
-`RUNTIME_EGRESS_NO_PROXY_DEFAULTS`) and cannot be turned off.
+plus anything in `VIGIL_RUNTIME_EGRESS_NO_PROXY`. Because `host.docker.internal` is the alias the
+runtime uses to reach the orchestrator, excluding the name keeps every `vigil assess` state call off
+the target-facing proxy whatever the gateway's IP. `src/vigil_cli/config.py`
+(`RUNTIME_EGRESS_NO_PROXY_DEFAULTS`) enforces this, and it can't be turned off.
 
 ## The raw-socket caveat (read this before trusting the proxy)
 

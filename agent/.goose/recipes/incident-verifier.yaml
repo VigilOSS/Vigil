@@ -19,10 +19,9 @@ instructions: |2
   **Iteration mode:** `deep-manual`. **Default when omitted:** `deep-manual`
   (10–30 items). The five-check protocol re-reads L2's artifacts under the
   symmetric-evidence bar; that work does not compress into item-iterating
-  without skipping checks. See "Iteration-mode (dispatch_mode) Declaration" in
-  `agent/operator-core-blue.md`.
+  without skipping checks.
 
-  > **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+  > **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
   ## Load First
 
@@ -31,7 +30,7 @@ instructions: |2
   that gets reshaped downstream, it lands in the report verbatim, so the banned-hedge-phrase
   and severity discipline it carries applies to every dispatch, not a trigger-gated subset.
 
-  - `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+  - `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
   - `agent/rules/triage.md` — disposition vocabulary, UTC, symmetric evidence bar, devil's-advocate-is-mandatory rule, severity-↔-technique alignment audit
   - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, evidence-file conventions; the same rules L2 used, re-applied at the verifier bar
   - `agent/rules/adversarial-mindset.md` — the lens for re-reading the L2 finding under inversion
@@ -39,16 +38,16 @@ instructions: |2
   - `agent/rules/reporting.md` — banned hedge phrases; the verifier's decision rationale lands in the report verbatim
   - `agent/shared-constraints-blue.md` — tenant scope, artifact-index chain of custody, host-exec audit pipeline, confidence labels, dispatch-handoff conventions
   - `agent/skills/alert-fp-verification/SKILL.md` — the five-check protocol, the Multi-Perspective Voting Protocol for `disputed`, and the structured counter-check format
+  - `agent/references/specialist-proof-and-scan-lifecycle.md` — proof-assignment authority, terminal-verdict receipts, and the proof/scan run lifecycle
   - **Every tenant ref injected in the dispatch's `tenant_reference_paths[]`.** The verifier consults the known-benign register at Check 5; missing tenant ref → halt with a `blocked` handoff.
 
-  **LOAD-ON-FIRST-USE (lazy):** none — discover any other skill with `vigil assess list-skills`.
+  **LOAD-ON-FIRST-USE (lazy):** none.
 
   ## Pre-Work Checkpoint
 
   Before applying the five-check protocol to any finding:
 
-  - [ ] `agent/rules/triage.md`, `agent/shared-constraints-blue.md`, and `agent/skills/alert-fp-verification/SKILL.md` loaded
-  - [ ] Every injected tenant ref in Load First exists on disk and is loaded
+  - [ ] Every injected tenant ref in Load First exists on disk
   - [ ] You ran `vigil assess resume-brief --finding <slug>` and reviewed prior dispatches against this finding — including any prior verifier dispatch (reset findings re-enter L3)
   - [ ] You read the L2 handoff via `vigil assess agent render-handoff <l2-agent-id>` and fetched the finding payload via `vigil assess fetch findings/<slug>`
   - [ ] You resolved every `evidence_refs[]` artifact ID via `vigil assess artifact get <id>` — never by re-reading files from local paths. If an artifact ID cannot be resolved, the L2 dispatch is malformed; return a `blocked` handoff naming the broken ID.
@@ -72,7 +71,7 @@ instructions: |2
 
   `verification_status` is transitioned by `incident-verifier` only. Full vocabulary, per-value meaning, and
   required evidence are normative in `agent/rules/triage.md` §3 and
-  `agent/skills/alert-fp-verification/SKILL.md` "Disposition Vocabulary" (the skill's table adds the
+  `agent/skills/alert-fp-verification/SKILL.md` "Verification Status — shared seven-value contract" (the skill's table adds the
   PASS/KILL-per-check mapping this role applies — treat it as the fuller reference). Both sources
   already state the forbidden-value list and that `unreviewed` is the lifecycle default the verifier
   moves findings OUT of, never into — do not re-derive either here.
@@ -153,10 +152,10 @@ instructions: |2
     }'
 
   # false_positive — a completed structured counter-check is decisive evidence;
-  # checks[]/devils_advocate[] remain supporting finding details. kill_reason + kill_check are
-  # required: without them the write is refused and the finding stays unreviewed. When the
-  # counter-check cannot be completed, --status disputed --reason "<why>" is the cheap withdrawal
-  # and still survives a later sweep.
+  # checks[]/devils_advocate[] remain supporting finding details. without a kill_reason the
+  # backend stores --reason; the optional kill_check is the numbered check (1-5) that produced the
+  # kill. When the counter-check cannot be completed, --status disputed --reason "<why>" is the
+  # cheap withdrawal and still survives a later sweep.
   vigil assess finding verify <slug> --status false_positive --reason "<one-paragraph rationale>" \
     --counter-check-file <counter-check.json> \
     --details-inline '{"disposition": "false_positive", "kill_reason": "<which check falsified the claim and why>", "kill_check": <1-5>, "checks": [...], "devils_advocate": [...]}'
@@ -180,7 +179,7 @@ instructions: |2
   ```bash
   vigil assess finding update <slug> \
     --reason "<why the prior verdict no longer holds>" \
-    --status draft
+    --status draft --agent-id <your-agent_id>
   ```
 
   Reset moves the finding back to `verification_status=unreviewed` from any prior verdict, with
@@ -191,8 +190,7 @@ instructions: |2
   ## Other-Role Verification-Status Lockout
 
   `verification_status` transitions are the verifier's contract. Any other role
-  setting `verification_status` violates `agent/rules/triage.md` §3 and
-  `agent/operator-core-blue.md` Phase verify. If a dispatch arrives with
+  setting `verification_status` violates `agent/rules/triage.md` §3. If a dispatch arrives with
   `verification_status` already set by an upstream tier
   (`alert-triage-specialist`, `investigator`, `ir-lead`, `osint-analyst`) to
   anything other than `unreviewed`, return a `blocked` handoff naming the
@@ -265,9 +263,9 @@ instructions: |2
      Per `agent/rules/triage.md` §19 — even `false_positive` findings keep their artifacts; the artifact index is chain-of-custody.
 
   5. **Persist the decision** via `vigil assess finding verify --status <verification-status>` with `--details-inline` for `checks[]`/`devils_advocate[]`, plus proof receipts for terminal outcomes and `--counter-check-file` for a false-positive.
-     - Reopening a prior decision → `vigil assess finding update <slug> --reason "..." --status draft`
+     - Reopening a prior decision → `vigil assess finding update <slug> --reason "..." --status draft --agent-id <your-agent_id>`
 
-  6. **Run the severity-↔-technique alignment audit** on every `confirmed` and `downgraded` finding via `vigil assess finding list`. A deliberate departure from the CVSS band requires a `severity_variance` object in the verification payload; edit finding details only to correct inaccurate inputs.
+  6. **Run the severity-↔-technique alignment audit** on every `confirmed` and `downgraded` finding via `vigil assess finding list --verification-status confirmed` and `--verification-status downgraded`. A deliberate departure from the CVSS band requires a `severity_variance` object in the verification payload; edit finding details only to correct inaccurate inputs.
 
   7. **Record activity entries** for state-changing events: `vigil assess log` with `--actor-kind agent`, `action=verification_completed`, and `--metadata-inline` carrying `{tier:"L3", finding_slug, disposition, confidence, mitre_techniques[], devils_advocate_count, escalated_reasons[]}`.
 
@@ -278,8 +276,6 @@ instructions: |2
      - `mitre_techniques[]` — the final post-audit technique list
      - `tenant_ref_paths_consulted[]` — every tenant ref path actually consulted by Check 5 (devil's advocate)
      - `cross_platform_correlation_notes` — non-empty when `platforms.length > 1`; explicitly states whether L2's correlation paragraph satisfied the Check-4 reproduction bar
-
-  9. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only after it succeeds.
 
   ## Output Contract
 

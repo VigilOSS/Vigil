@@ -5,15 +5,13 @@ skill: idor-testing
 
 # IDOR/BOLA Identifier Prediction & Harvesting
 
-> Skill: `idor-testing`
-
-When the object ID isn't a bare incrementing integer, you have two routes to a foreign object. **PREDICT** it when the scheme has exploitable entropy or ordering (time-ordered IDs, ObjectId counters, UUIDv1 MAC+timestamp), or **HARVEST** it when the ID is opaque/random but observable somewhere else (list responses, JWT claims, exports, side-channels). This reference is the deeper companion to `vigil assess classify-payload <value> --mutations`: that tool types a captured value and emits neighbor/boundary/escalation/format/empty variants, but it does not structurally decompose time-ordered ID schemes — that decomposition, plus the harvesting playbook, lives here.
+When the object ID isn't a bare incrementing integer, **predict** it when the scheme has exploitable ordering or low entropy, or **harvest** it when it is random but observable elsewhere. `vigil assess classify-payload <value> --mutations` types a captured value and emits neighbor/boundary/escalation/format/empty variants; it does not decompose time-ordered schemes, which is what the table below is for.
 
 ## Identifier-scheme prediction table
 
 | ID scheme | Structure | What's predictable | How to enumerate |
 |---|---|---|---|
-| **Auto-increment / sequence** | Integer. | Everything — value, neighbors, range. | ±1 sweep / `vigil assess classify-payload <id> neighbor`. |
+| **Auto-increment / sequence** | Integer. | Everything — value, neighbors, range. | ±1 sweep / the `neighbor` bucket of `vigil assess classify-payload <id> --mutations`. |
 | **MongoDB ObjectId** (24 hex) | 4B unix-seconds timestamp · 3B machine · 2B PID · 3B counter. | Timestamp (exact second); machine+PID constant per running instance; counter increments system-wide. | Decode timestamp+machine+PID from one observed ObjectId, brute the 3-byte counter around a seed value (`mongo-objectid-predict` → ~1000 probable IDs). Noisy on high-traffic instances (counter advances fast between requests). |
 | **UUIDv1 / v6** | 60-bit Gregorian 100-ns timestamp + 14-bit clock-seq + 48-bit node (MAC). | Timestamp precise; node = server MAC (often constant / leaked); clock-seq constant per host. | Pin MAC+clock-seq from one observed UUID, sweep timestamp ticks across the known creation window. v6 reorders the timestamp to be sortable but leaks identically. **Sandwich attack:** request a token, capture the victim's, request another → bracket the victim between two attacker-generated tokens, generate every candidate in the time window, `ffuf` the reset/confirm endpoint. |
 | **UUIDv7** | 48-bit unix-ms timestamp + 74 random bits. | The ms timestamp (creation time, sortable). | Random tail blocks naive ±1, but creation-time + ordering enable window-bounded guessing; weak/seeded PRNG tails are bruteable. Increasingly the default for chat THREAD IDs. |
@@ -35,11 +33,6 @@ The version is the **13th hex character** (the 1st nibble of the 3rd dash-group)
 - **V=4** → random. Switch to HARVEST.
 - **V=7** → time-ordered. Window-bounded enumeration.
 
-```bash
-# Extract the version nibble from a captured UUID
-echo "017f22e2-79b0-7cc3-98c4-dc0c0c07398f" | cut -c15   # -> 7
-```
-
 ## Harvesting opaque / unguessable IDs
 
 When prediction fails (UUIDv4, well-configured NanoID), the ID is rarely secret in practice — observe it elsewhere:
@@ -58,22 +51,27 @@ When prediction fails (UUIDv4, well-configured NanoID), the ID is rarely secret 
 
 ## Enumeration & ranking recipe
 
-1. **Build a candidate set** — either `classify-payload` variants for typed values, or a scheme-specific generator (ObjectId counter sweep, Snowflake sequence brute, UUIDv1 timestamp window):
-   ```bash
-   vigil assess classify-payload <id> --mutations --json \
-     | jq -r '.intents | to_entries[].value[]' | sort -u > /tmp/values.txt
-   ```
-2. **Sweep** via `vigil assess kali` (httpx / ffuf / curl), capturing one `{url,status,content_length,title}` record per candidate ID into JSONL:
-   ```bash
-   ffuf -u "https://TARGET/api/objects/FUZZ" -w /tmp/values.txt -o /tmp/sweep.json -of json
-   jq -c '.results[] | {url, status, content_length: .length, title}' /tmp/sweep.json > /tmp/sweep.jsonl
-   ```
-3. **Rank** to surface the leak — a 200 among 403s, or a distinct (larger) body bucket:
-   ```bash
-   vigil assess anomaly-score /tmp/sweep.jsonl --top 10
-   ```
+Build the candidate set from `classify-payload` variants or a scheme-specific generator (ObjectId
+counter sweep, Snowflake sequence brute, UUIDv1 timestamp window), sweep it as a named identity,
+and rank the responses so a 200 among 403s or a distinct body bucket stands out:
 
-Notes: respect rate-limit / audit-logging exposure — window-bounded schemes still mean hundreds-to-thousands of probes; throttle and prefer the smallest candidate set the structure allows. GraphQL aliasing/batching (see the modern-architectures reference) can enumerate at scale within a single request, sidestepping per-request rate limits.
+```bash
+vigil assess classify-payload <id> --mutations --json \
+  | jq -r '.intents | to_entries[].value[]' | sort -u > "$DIR/scans/idor_candidates.txt"
+vigil assess kali ffuf -u "https://TARGET/api/objects/FUZZ" \
+  -w /engagements/$ENGAGEMENT_KEY/scans/idor_candidates.txt \
+  -o /engagements/$ENGAGEMENT_KEY/scans/idor_sweep.json -of json --identity user_b \
+  --technique IDOR --intent "candidate object-id sweep as user_b" \
+  --probe-kind payload --phase consume-test --timeout 300
+jq -c '.results[] | {url, status, length, words, lines}' "$DIR/scans/idor_sweep.json" \
+  > "$DIR/scans/idor_sweep.jsonl"
+vigil assess anomaly-score "$DIR/scans/idor_sweep.jsonl" --top 10
+```
+
+Window-bounded schemes still mean hundreds to thousands of probes: pace them per
+`agent/references/recon/rate-calibration.md` and prefer the smallest candidate set the structure
+allows. GraphQL aliasing/batching (modern-architectures reference, "GraphQL") enumerates at scale
+inside one request, sidestepping per-request rate limits.
 
 ## Related
 

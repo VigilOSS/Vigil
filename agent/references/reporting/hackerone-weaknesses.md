@@ -6,56 +6,27 @@ category: Disclosure & Reporting Formats
 
 # HackerOne CWE Weakness Selection
 
-HackerOne uses a curated subset of MITRE CWE for its weakness field. Consult the current weakness
-choices in the HackerOne submission form or HackerOne's documentation, then use MITRE's CWE entry
-to distinguish a specific weakness from its broader parent.
+HackerOne's weakness field uses a curated subset of MITRE CWE. The platform taxonomy changes
+independently of Vigil, so this repository does not vendor a snapshot: check the current choices in
+the submission form or the [weakness documentation](https://docs.hackerone.com/en/articles/8475333-weaknesses),
+and use [MITRE CWE](https://cwe.mitre.org/find/index.html) to tell a specific weakness from its parent.
 
-The platform taxonomy can change independently of Vigil, so this repository deliberately does not
-vendor a snapshot of HackerOne's weakness list.
+## Pick the single most specific CWE
 
-Useful sources:
+`CWE-89` (SQL Injection) beats its parent `CWE-74` for a SQL injection; `CWE-639` (Authorization
+Bypass Through User-Controlled Key, the IDOR-shaped CWE) beats `CWE-284` for a by-parameter IDOR.
+When two CWEs are plausible, use the one the PoC actually exercises, not the one that sounds more
+general or more serious.
 
-- HackerOne weakness documentation: <https://docs.hackerone.com/en/articles/8475333-weaknesses>
-- MITRE CWE search: <https://cwe.mitre.org/find/index.html>
+## Severity comes from the CVSS vector, not the weakness
 
-## Pick the single MOST SPECIFIC CWE
-
-HackerOne wants one weakness, not a broad category. `CWE-89` (SQL Injection) beats `CWE-74` (Injection,
-the parent) for a SQL injection finding; `CWE-639` (Authorization Bypass Through User-Controlled
-Key — the IDOR-shaped CWE) beats `CWE-284` (Improper Access Control, the parent) for a
-by-parameter IDOR. If two CWEs are plausible, use the one the PoC actually exercises, not the one
-that sounds more general or more serious.
-
-## Severity is CVSS-derived — the CVSS→band table
-
-When the program uses standard CVSS v3.1 or v4.0, record the matching base vector and score in
-Vigil using the standard bands below. Select a version enabled by the program. HackerOne can
-also apply asset severity caps or v3.1 environmental adjustments; keep those platform-specific
-results separate from Vigil's base-score pair. See [HackerOne severity](https://docs.hackerone.com/en/articles/8475343-severity)
-and [CVSS v4.0](https://docs.hackerone.com/en/articles/10502498-cvss-4-0).
-
-| Score | Band |
-|---|---|
-| 0.0 | None |
-| 0.1 – 3.9 | Low |
-| 4.0 – 6.9 | Medium |
-| 7.0 – 8.9 | High |
-| 9.0 – 10.0 | Critical |
-
-Don't hand-pick a severity that disagrees with the vector — if the band looks wrong, the vector is
-wrong; fix the vector (see `agent/rules/reporting.md` Rule 3 and "CVSS Sourcing and Calculation"
-in `agent/skills/report-generation/SKILL.md`), not the label.
-
-## GUARDRAIL — weakness != severity
-
-The CWE weakness and the CVSS-derived severity band are **fully decoupled** on HackerOne. A
-weakness is a label with no inherent severity; the same CWE can appear on a Low finding in one
-report and a Critical finding in another, because severity comes from the specific instance's
-CVSS vector, never from the CWE itself.
-
-- **Never carry a Bugcrowd P-rating into an H1 report.** Bugcrowd's P1–P5 is a VRT-leaf priority
-  scale (see `agent/references/reporting/bugcrowd-vrt.md`) — it has no meaning on HackerOne and
-  must not appear in a HackerOne submission's `Severity:` field or body.
-- **Never put a fixed severity on a CWE.** Don't write "CWE-89 is Critical" as a rule of thumb —
-  the same weakness can land anywhere on the band table depending on the proved impact. Compute
-  the vector from the proof, read the band off the table above, and use that.
+The weakness is a label with no inherent severity: the same CWE can be Low on one report and Critical
+on another. Record the base vector and score in a CVSS version the program enables (v3.1 or v4.0); the
+band follows the score — None 0.0, Low 0.1–3.9, Medium 4.0–6.9, High 7.0–8.9, Critical 9.0–10.0. A
+band that looks wrong means the vector is wrong (`agent/rules/reporting.md` Rule 3,
+`agent/skills/report-generation/SKILL.md` "CVSS Sourcing and Calculation"). HackerOne may apply asset
+severity caps or v3.1 environmental adjustments
+([severity](https://docs.hackerone.com/en/articles/8475343-severity),
+[CVSS 4.0](https://docs.hackerone.com/en/articles/10502498-cvss-4-0)); keep those separate from
+Vigil's base pair. A Bugcrowd P-rating (`agent/references/reporting/bugcrowd-vrt.md`) has no meaning
+here and appears nowhere in a HackerOne submission.

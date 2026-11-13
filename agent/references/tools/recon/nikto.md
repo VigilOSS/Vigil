@@ -1,25 +1,31 @@
 ---
-description: Web vulnerability scanner — **conditional, fingerprint-gated** (legacy/odd-stack triggers; nuclei is the primary web-vuln pass)
+description: nikto web scanner — conditional, fingerprint-gated (legacy/odd-stack triggers; nuclei is the primary web-vuln pass); --host flag, production-safe -Tuning x60, pacing, the plugins that justify it, and where each result class is recorded
 skill: web-recon
 ---
 
 # nikto — Conditional Web Vulnerability Scanner
 
-`nikto` is a **conditional** tool in the recon methodology. The mandatory web-vuln pass is `kali nuclei` with the curated template set (`http/cves/`, `http/misconfiguration/`, `http/exposures/`, `http/default-logins/`, `http/exposed-panels/`, `http/technologies/`). Run `kali nikto` only when the httpx fingerprint matches one of the trigger patterns below — otherwise nikto duplicates nuclei coverage with a higher false-positive rate, slower execution, and no signature-freshness advantage.
-
-The unique value over nuclei sits in a small set of plugins (`apacheusers`, `put_del_test`, `negotiate`, `outdated.db`, `siebel`, `cgi`) plus the eight built-in WAF evasion modes. When the trigger fingerprints fire, those plugins do real work no nuclei template currently covers.
+The mandatory web-vuln pass is `kali nuclei` with the curated template set. Run `kali nikto` only
+when the httpx/whatweb fingerprint matches a trigger below; otherwise it duplicates nuclei with
+more false positives, slower runs and no signature-freshness advantage. Its value is a few plugins
+no nuclei template covers.
 
 ## Trigger fingerprints — run nikto only when at least one of these is true
 
-The triggers come from the httpx output already produced during recon, so adding nikto is a routing decision, not an extra fingerprint pass.
+The triggers come from httpx/whatweb output already produced, so adding nikto is a routing
+decision, not an extra fingerprint pass.
 
-- **`Server:` header** contains any of: `Apache/2.[02]`, `IIS/[67]`, `nginx/1.0` through `nginx/1.10`, or an unrecognized embedded webserver banner. Older banners often advertise unpatched modules nikto's `outdated.db` knows about.
-- **Technology fingerprint** includes Siebel, ColdFusion, classic ASP, PHP < 7, Tomcat < 8, JBoss, WebLogic, WebSphere, Oracle HTTP Server, Lotus Domino, or SAP NetWeaver Java. These legacy stacks have nikto-specific plugins (e.g. `siebel`) with no nuclei equivalent.
-- **Internal / intranet / appliance scope.** When the target is an internal network device, network appliance, or vendor management UI, nikto's exhaustive `cgi` and `put_del_test` checks find issues that public-internet-tuned templates miss.
-- **`401 Unauthorized` with a basic-auth realm string** in the response. nikto's `apacheusers` and credential-discovery plugins are designed for this surface.
-- **OPTIONS response contains `DAV:` header or `MS-Author-Via`** (WebDAV indicator). The `put_del_test` plugin actively demonstrates write capability — nuclei's WebDAV templates are read-only OPTIONS checks.
+- **`Server:` header** contains `Apache/2.[02]`, `IIS/[67]`, `nginx/1.0` through `nginx/1.10`, or
+  an unrecognised embedded-webserver banner (old banners map to modules in nikto's `outdated.db`).
+- **Technology fingerprint** includes Siebel, ColdFusion, classic ASP, PHP < 7, Tomcat < 8, JBoss,
+  WebLogic, WebSphere, Oracle HTTP Server, Lotus Domino or SAP NetWeaver Java.
+- **Internal, intranet or appliance scope:** a network device, appliance or vendor management UI,
+  where `cgi` and `put_del_test` find what internet-tuned templates miss.
+- **`401` with a basic-auth realm** (the `apacheusers` and credential plugins' surface).
+- **OPTIONS shows `DAV:` or `MS-Author-Via`** (WebDAV): `put_del_test` demonstrates write
+  capability, where nuclei's WebDAV templates only read OPTIONS.
 
-If none of these match, skip nikto entirely. The reactive nuclei sweep already covers the common-case web-vuln surface.
+If none match, skip nikto; the reactive nuclei sweep covers the common surface.
 
 ## Standard invocation
 
@@ -32,112 +38,46 @@ vigil assess kali nikto \
   --probe-kind payload --phase recon --timeout 600
 ```
 
-**CLI flag note:** `kali nikto` uses `--host <h>`, NOT `-h`. argparse reserves `-h` for help, so the typed wrapper exposes the target as `--host`. The underlying nikto invocation builds `nikto -h <host>` correctly inside the helper. Do not pass `-h` — argparse will print help and exit.
+The target flag is `--host`: argparse reserves `-h` for help, and the wrapper builds nikto's own
+`-h <host>`. Program attribution headers are injected through nikto's `-Add-header`.
 
-## Tuning — what to include and what to never include
-
-`-Tuning x60` is the standard production-safe profile:
-
-- `x6` excludes File Upload checks (which can write to the target).
-- `x0` excludes DoS checks (never run against production).
-- Combined as `x60` it skips both categories while keeping every other check class.
-
-Use only the exclusion form: `-Tuning x<digits>` (the `x` prefix means "exclude these categories"). The bare positive form (e.g., `-Tuning 6` with no `x`) flips the meaning to "run ONLY these categories" — category `6` is DoS, which will impact target availability. Always include `x0` and `x6` in the tuning string to guarantee DoS and File Upload are excluded; `-Tuning x60` is the safe default that achieves this. The `agent/rules/hunting.md` "no destructive tests against production" rule applies to DoS and file-write checks.
-
-The full tuning category list (use only when researching a specific check class):
-
-| Category | Code | Description |
-|----------|------|-------------|
-| Interesting File / Seen in logs | `1` | Files of interest, files mentioned in logs |
-| Misconfiguration / Default File | `2` | Default install files, misconfigurations |
-| Information Disclosure | `3` | Server status, robots.txt, etc. |
-| Injection (XSS/Script/HTML) | `4` | Cross-site scripting checks |
-| Remote File Retrieval — Inside Web Root | `5` | Inside-webroot file disclosure |
-| Denial of Service | `6` | DoS — **NEVER run against production** |
-| Remote File Retrieval — Server Wide | `7` | Server-wide file retrieval |
-| Command Execution / Remote Shell | `8` | OS command injection |
-| SQL Injection | `9` | SQL injection probes |
-| File Upload | `0` | File upload abuse — destructive |
-| Authentication Bypass | `a` | Auth bypass attempts |
-| Software Identification | `b` | Banner / version fingerprinting |
-| Remote Source Inclusion | `c` | RFI checks |
-| WebService | `d` | SOAP / WebService probes |
-| Administrative Console | `e` | Admin-panel discovery |
-
-`x60` translates to "all categories EXCEPT DoS (`6`) and File Upload (`0`)" — the production-safe default.
+**`-Tuning x60` is the production-safe default.** The `x` prefix excludes the listed categories:
+`6` is Denial of Service and `0` is File Upload, so `x60` runs every other check class. The bare
+form without `x` inverts the meaning to "run only these", and `-Tuning 6` runs only the DoS checks.
+Keep both `0` and `6` in any exclusion string; `agent/shared-constraints.md` §1 and the program's
+no-DoS ROE govern these checks.
 
 ## Pause and rate control
 
-`-Pause N` inserts N seconds between requests. Cautious-tier (rate-limited / regulated) targets need `-Pause 2` (or higher). For default-tier WAF-fronted targets, `-Pause 1` is usually enough. Combine with `-maxtime 300` (5-minute wall-clock cap) so the scan ends before WAF lockout windows.
+`-Pause 2` or more between requests on cautious-tier (rate-limited, regulated, WAF-protected)
+targets; `-Pause 1` is usually enough on default-tier WAF-fronted ones. `-maxtime 300` ends the
+scan before typical WAF lockout windows. When standard requests trip the WAF, nikto's `-evasion`
+modes (combinable digits; `vigil assess kali tool-help nikto`) re-encode the request.
 
-## Eight evasion modes — `-evasion <mode>`
+## Plugins that justify the run
 
-When standard nikto requests trip the WAF, switch evasion mode. Each mode encodes the request differently; pick based on what the target is filtering:
+- `apacheusers`: `mod_userdir` brute (`/~root`, `/~admin`, ...).
+- `put_del_test`: uploads and removes a temporary file over WebDAV. It writes, so pass
+  `--destructive`.
+- `negotiate`: `mod_negotiation` MultiViews abuse that leaks alternate file content.
+- `outdated.db`: banner-driven "N versions behind" advisory engine; nuclei has fingerprints but no
+  curated outdated-version engine.
+- `siebel`: Oracle Siebel probes.
+- `cgi`: `/cgi-bin/` discovery plus a ~6,400-script database in one pass, faster than ffuf plus
+  SecLists on legacy targets.
 
-| Mode | Technique | When to use |
-|------|-----------|-------------|
-| `1` | Random URI encoding (non-UTF8) | First evasion attempt against generic regex filters |
-| `2` | Directory self-reference (`/./`) | When path-prefix matching is the filter |
-| `3` | Premature URL ending | When the WAF examines the trailing path |
-| `4` | Prepend long random string | When the WAF has a length cutoff before it inspects payloads |
-| `5` | Fake parameter | When parameter-name filtering is suspected |
-| `6` | TAB as request spacer (instead of space) | When whitespace normalization is the filter |
-| `7` | Change case of URL | When the WAF is case-sensitive |
-| `8` | Use Windows directory separator (`\`) | Only useful against Windows hosts |
+If the trigger that fired matches none of these, re-check whether nuclei alone is enough.
 
-Combine modes by adding the digits (e.g. `-evasion 124` for modes 1, 2, and 4). Most WAFs require mode-2 or mode-7 to be combined with another mode to slip through.
+## Recording results
 
-## cautious profile (rate-limited, WAF-protected)
-
-```bash
-vigil assess kali nikto \
-  --host www.example.com -ssl \
-  -Tuning x60 -Pause 2 -maxtime 300 \
-  --technique INFO-DISCLOSURE --intent "cautious-tier nikto, x60 production-safe" \
-  --probe-kind payload --phase recon --timeout 600
-```
-
-Cross-reference the cautious-tier rate-limit profile in `agent/references/tools/recon/wafw00f.md` (run wafw00f FIRST so the WAF tier is known before nikto calibrates).
-
-## Output formats
-
-`-Format` accepts `csv | htm | json | txt | xml`. JSON is the most ingestion-friendly:
-
-```bash
-vigil assess kali nikto \
-  --host app.example.com \
-  -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_app.json \
-  --technique INFO-DISCLOSURE --intent "nikto JSON output for app.example.com" \
-  --probe-kind payload --phase recon --timeout 600
-```
-
-The output file lands at `/engagements/$ENGAGEMENT_KEY/scans/nikto_app.json` because the runtime bind mounts engagement state at `/engagements/$ENGAGEMENT_KEY/`. Subsequent `vigil assess` ingestion can pick it up directly without ferrying.
-
-## Common findings
-
-Nikto produces these classes of result; map each to the right intel/finding write:
-
-- **Outdated server versions** (`outdated.db` plugin) — record as `vigil assess intel record tech-component` with `version` and `note=outdated`. Promote to a finding only after osint-analyst confirms a relevant CVE has a working PoC.
-- **Exposed `.htaccess` / `.svn` / `.git` directories** — record as a finding via `vigil assess finding record` with `defect_family=info-disclosure` and the leaked path in `details.evidence`.
-- **Dangerous methods enabled (PUT, DELETE, TRACE)** — TRACE is usually finding-worthy on its own (cross-site tracing). PUT/DELETE require `put_del_test` to actively demonstrate write capability before promoting to a finding; a methods-allowed banner alone is intel.
-- **Default / backup pages** (admin consoles, install scripts, phpMyAdmin defaults) — record as `record-surface` with `type=privileged_write` or `type=auth_entry` depending on what the page exposes.
-- **Known CVE matches** (`outdated.db` advisory engine) — record via `vigil assess intel record cve` and dispatch exploit-developer to validate before promoting to a finding.
-
-## Plugin set — the unique-value-add over nuclei
-
-These are the plugins that justify the conditional invocation. Nikto loads all of them by default unless `-Tuning` excludes their category:
-
-- **`apacheusers`** — UserDir mod brute-force. Probes `/~root`, `/~admin`, `/~user`, etc. against Apache servers with `mod_userdir` enabled. No comprehensive nuclei equivalent.
-- **`put_del_test`** — Active WebDAV PUT/DELETE write test. Uploads a temporary file and removes it. **This plugin does perform writes** — pair it with `--destructive` on the audit row. Nuclei's WebDAV templates are method-OPTIONS read-only.
-- **`negotiate`** — Apache `mod_negotiation` MultiViews abuse. Almost no nuclei coverage. Useful when the target's MultiViews configuration leaks alternate file content.
-- **`outdated.db`** — Banner-driven version advisory engine. Compares the `Server:` and tech banner against a curated database of known-vulnerable versions and emits "N versions behind latest" advisories. Nuclei has `http/technologies/` fingerprints but not a curated outdated-version advisory engine.
-- **`siebel`** — Oracle Siebel-specific probes. Almost no nuclei coverage; if the fingerprint shows Siebel, this plugin is the reason to run nikto.
-- **`cgi`** — Exhaustive `/cgi-bin/` discovery + ~6,400 dangerous-script database in one pass. ffuf+SecLists covers the directory side; nikto combines find-the-cgi-dir with test-every-known-script in one invocation, which is faster than the two-step alternative on legacy targets.
-
-If the fingerprint that triggered nikto does not match one of those plugins, the unique-value-add is small — re-evaluate whether nuclei alone is sufficient.
-
-## Notes
-
-- All paths use `/engagements/$ENGAGEMENT_KEY/` because the runtime bind mounts engagement state there. Writing to `/tmp` loses output on container recreate.
-- `kali nikto` records its audit row before exec so a crashed run still has a row showing what was attempted. Stdout and stderr stream to `${ENGAGEMENT_DIR}/scans/kali/<run-id>.{out,err}` from line one.
-- For long sweeps (>30 minutes wall clock), wrap nikto in `vigil assess kali job start --technique RECON --intent "<why>" --probe-kind fingerprint --phase <phase> --timeout <seconds> --container-name vigil -- nikto ...` — the synchronous `kali nikto` call is killed cleanly on `--timeout` expiry.
+- Outdated server version: `vigil assess intel record tech-component` with `version` and
+  `note=outdated`; it becomes a finding only after osint-analyst confirms a relevant CVE with a
+  working PoC.
+- Exposed `.htaccess` / `.svn` / `.git`: `vigil assess finding record` with
+  `defect_family=info-disclosure` and the leaked path in `details.evidence`.
+- Dangerous methods: TRACE is usually finding-worthy alone. PUT/DELETE need `put_del_test` to show
+  the write before promotion; a methods banner alone is intel.
+- Default or backup pages (admin consoles, install scripts, phpMyAdmin defaults):
+  `vigil assess record-surface` with `type=privileged_write` or `type=auth_entry`.
+- `outdated.db` CVE matches: `vigil assess intel record cve`, then a vulnerability-analyst dispatch
+  validates applicability.

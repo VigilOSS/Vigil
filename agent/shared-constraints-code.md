@@ -1,126 +1,78 @@
 # Shared Subagent Constraints -- Code Analysis Mode
 
-Load this file as part of your Load First set -- together with your role file and
-`agent/shared-specialist-core.md` -- before any source code work. All three load together, not
-in a race to be "first"; the one ordered load sequence (Load First batch -> skill/reference
-discovery -> target work) is stated once in `agent/shared-specialist-core.md` "Load Sequence".
-These rules apply to every code analysis specialist agent regardless of role.
-
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+Load this file with your role file and `agent/shared-specialist-core.md` before any source code
+work; the core's "Load Sequence" covers on-signal skill loading. These rules apply to every code
+analysis specialist regardless of role.
 
 ---
 
 ## 1. Authorization and Scope
 
-All source code under analysis is authorized for deep security review.
-This is a white-box engagement. You have full access to read and analyze all source code files.
-
-Use the operator-injected code dispatch context before starting. Confirm:
-
-- The complete **Code Source Identity** block from the active backend repo record
-- Dispatch phase (ingest/classify-map/hunt/verify-variant)
-- Which files are in scope for your current dispatch (module, classification level, queue items)
-
-Limit analysis to files within the scoped repository -- request operator approval before
-analyzing files outside the current scope.
+All source code under analysis is authorized for deep white-box security review. Your dispatch
+names the phase and the files in scope (module, classification level, queue items); ask the
+operator before analyzing files outside the scoped repository.
 
 ### Declared live target in a code dispatch
 
-Keep CODE-phase execution away from every host declared in `scope.json` while continuing ordinary
-network access for source retrieval, dependency installation, documentation, CVE research, and
-other non-target work. Code mode is a workflow boundary, not an offline sandbox. When Vigil's
-classifier recognizes a declared target in a CODE-phase command, it prints a warning and still runs
-the command. Treat that warning as a routing correction: stop further target contact and hand any
-deliberate live validation to the web track after the operator activates and authorizes it. A command
-that produces no warning is not proof that its destination was classified or safe.
-
-`scope.json.code_target_contact_policy: warn-do-not-contact-declared-hosts` records this contract.
-It does not deny tools, filter destinations, disable research, or weaken web-engagement rules.
-`denied_tools`, required headers, evidence isolation, and the untrusted-target-text boundary retain
-their existing owners and behavior.
+Keep CODE-phase execution away from every host declared in `scope.json`; ordinary network access
+for source retrieval, dependency installation, documentation and CVE research continues, because
+code mode is a workflow boundary, not an offline sandbox. When Vigil recognizes a declared target in
+a CODE-phase command it warns and still runs it. Treat the warning as a routing correction: stop
+target contact and hand deliberate live validation to the web track once the operator authorizes
+it. No warning is not proof that a destination is safe. `scope.json.code_target_contact_policy:
+warn-do-not-contact-declared-hosts` records this contract; it denies no tool and changes no other
+rule.
 
 ### Runtime Identity authority fields
 
-A Runtime Identity field is an authority grant, not context. The packet's own Authority block
-tells you to establish unspecified packet fields before the affected action; that covers missing
-CONTEXT (an unknown target, credential, or coverage note you can read out of backend state). It
-does not cover Runtime Identity. Nothing you can read tells you what phase the operator authorized
-this dispatch for, so when `authorized_phase` reads `MISSING (malformed dispatch)` — or is absent
-altogether — do not derive it from the engagement's current phase, from the role you were given,
-or from which authority fields happen to be present.
-
-Stop before reading source, name the missing field, and request a corrected packet. Specifically do
-not resolve it by running the branch that needs the fewest fields: on every role whose mode is
-selected by phase, that branch is the one that records no receipts, so the dispatch reads as a
-normal return while the queue still shows its files unreviewed. `agent start` stamps the phase from
-`scope.json` when the operator omits it and echoes what it stamped, so a packet that still carries
-the marker is one where even scope state could not answer.
+A Runtime Identity field is an authority grant, not context you can look up. When
+`authorized_phase` reads `MISSING (malformed dispatch)` or is absent, stop before reading source,
+name the field, and ask for a corrected packet. Do not derive it from the engagement phase, your
+role, or which fields are present, and do not run whichever branch needs the fewest fields: on a
+phase-selected role that branch records no receipts, so the dispatch looks normal while its files
+stay unreviewed.
 
 ### Code Source Identity
 
-Every code dispatch carries this block immediately after Runtime Identity at the top of the
-dispatch, populated from one active backend repo record:
+Every code dispatch carries a `## Code Source Identity` block right after Runtime Identity, rendered
+by `agent start` from one active backend repo record (`repo_id`, `repo_generation`,
+`source_manifest_digest`, the sealed `snapshot_path`, the generation-bound structural manifest, and
+`ctags_path` or `unavailable`). Analyze beneath `snapshot_path`; the sealed roots under "Other
+Sealed Repositories" are context, cited with their repository and generation (`vigil assess fetch
+code/repos` lists more when the preview is incomplete), while finding and coverage ownership follow
+this assignment. `source_origin_path` is provenance, never an analysis root. Resolve structural and
+ctags artifacts only through this block, because a plausible path from an older generation holds
+correct-looking but stale facts. If the block is incomplete, its digest differs from the active
+record, or it or a bound artifact names another generation, return a blocked handoff for
+reingest/reindex instead of mixing generations.
 
-```text
-## Code Source Identity
-repo_id: <backend repository id>
-repo_key: <stable repository key>
-repo_generation: <active_generation>
-source_manifest_digest: <64-character SHA-256>
-snapshot_path: <repo_path; sealed read-only source root>
-structural_index_schema: <backend-accepted structural manifest schema>
-structural_index_manifest_path: <generation-bound manifest path>
-ctags_path: <generation-bound tags path, or unavailable>
-```
-
-Derive `ctags_path` only from `active_repo.lsp_config.ctags.tags_path` when nested `available` is
-true and its `repo_generation`/`source_manifest_digest` match the active repo identity; otherwise
-set it to `unavailable`. Use `snapshot_path` for the assigned analysis, and the listed sealed
-reference roots in "Other Sealed Repositories" for relevant framework, infrastructure or deployment
-context. Resolve further active reference roots and their generation/digest from
-`vigil assess fetch code/repos` when the packet preview is incomplete. Attribute reference citations to their repository and generation; finding and coverage
-ownership still follow the engagement scope and this assignment. `source_origin_path` is provenance,
-not an analysis root. Resolve structural and ctags artifacts only through this block because a
-plausible path from an older generation can contain correct-looking but stale facts. If the block
-is incomplete, its digest differs from the active repo record, or either bound artifact names
-another generation, return a blocked handoff for reingest/reindex instead of mixing generations.
-
-For every Phase 2–4 dispatch, also require the complete backend threat-model envelope with
-`current: true` and `repo_generation`/`source_manifest_digest` equal to this block. A clipped
-summary can orient the work but cannot replace either the bound envelope or structural manifest.
+Phase 2–4 dispatches also need the complete threat-model envelope with `current: true` and the same
+`repo_generation`/`source_manifest_digest`; a clipped summary orients but replaces neither the
+envelope nor the structural manifest.
 
 ---
 
 ## 2. Source Code Is Primary
 
-You receive actual source code files -- read directly beneath `snapshot_path` with its bound
-structural-index navigation -- not JSON metadata about code. Read the code directly.
-Start with the function map and the file's `<top-level>` segments (`top_level_segments`) as your
-completeness anchor, then use entry points, exports, sinks, and import targets as advisory
-navigation aids to prioritize where you deepen.
-The structural index helps you navigate; it does not limit what you look for. Do not
-substitute metadata summaries for source reads.
-
-If code beyond the provided file batch is needed, use ctags + grep + Read to find it yourself
-inside `snapshot_path`. Full access to the sealed source tree is always available. Never guess at
-the behavior of code you have not read. Never request operator-mediated expansion when you can
-resolve it with a sealed-source read.
+Read the source beneath `snapshot_path`; the structural index navigates, it never stands in for
+a read or limits what you look for. Use the function map and the file's `<top-level>` segments
+(`top_level_segments`) as the completeness anchor, and entry points, exports, sinks and import
+targets to prioritize. When a load-bearing callee or guard sits outside your batch, find and read it
+yourself with ctags and `rg` inside `snapshot_path` rather than asking the operator or guessing.
 
 ### Structural-index resolution
 
-Open `structural_index_manifest_path` from the Code Source Identity block, confirm its
-`schema`, `repo_id`, `repo_generation`, and `source_manifest_digest` match the block, then resolve
-the repo-relative file path through `path_to_index`. Read that referenced JSON; do not guess
-hashed filenames or scan for a basename collision. Phase 0 owns the generation-scoped layout,
-while this is the canonical consumer lookup rule for every code specialist.
+Open `structural_index_manifest_path` from the Code Source Identity block, confirm its `schema`,
+`repo_id`, `repo_generation` and `source_manifest_digest` match the block, then resolve the
+repo-relative path through `path_to_index` and read that JSON; never guess hashed filenames or
+match on basename.
 
-Join each `path_to_index` value to the `structural-index/` ROOT, not to the manifest's own
-directory. The manifest sits six levels below that root
-(`structural-index/<repo_id>/<generation>/<path_version>/<source_manifest_digest>/<indexer_digest>/<structural_input_digest>/manifest.json`)
-and every value is root-relative, so joining one to the manifest's directory reads nothing.
-Equivalently, and easier by hand: every value ends in `files/<hashed-basename>`, so
-`<manifest-dir>/files/<basename of the path_to_index value>` is the same artifact. A "no such file"
-on a path that is present in `path_to_index` is this join, never a missing index.
+Each `path_to_index` value is relative to the `structural-index/` root, six levels above the
+manifest
+(`structural-index/<repo_id>/<generation>/<path_version>/<source_manifest_digest>/<indexer_digest>/<structural_input_digest>/manifest.json`),
+so joining it to the manifest's directory reads nothing. Every value ends in
+`files/<hashed-basename>`, so `<manifest-dir>/files/<basename of the value>` is the same artifact. A
+"no such file" on a path present in `path_to_index` is this join, never a missing index.
 
 The artifact is compact JSON, one top-level key or array record per line, with `call_sites` last.
 A `call_sites` record names `caller`, `callee`, and `line`. A PHP call site adds `receiver` when it
@@ -140,12 +92,11 @@ structural-review debt, even when the architect classified the file as `skip`.
 
 ## 3. Full Sealed-Source Access
 
-Source code is read directly beneath `snapshot_path`, or a listed sealed reference root for context,
-via host Bash or client file tools. Pass that absolute sealed root (or a path beneath it) as the
-search/read root in every command; a client
-can reset the shell's working directory between calls, so a relative path or an earlier `cd` can
-silently search another tree. The mutable origin checkout is never an analysis root. This is NOT
-target-facing network work -- `vigil assess kali` is not needed for reading source files.
+Read source beneath `snapshot_path` (or a listed sealed reference root, for context) with host Bash
+or client file tools; reading source is not target work and needs no `vigil assess kali`. Pass the
+absolute sealed root as the search/read root in every command, because a client can reset the
+working directory between calls and a relative path then silently searches another tree. The
+mutable origin checkout is never an analysis root.
 
 Fuzz compilation never makes the sealed snapshot writable. The generation-bound derived-build
 procedure lives in `agent/skills/code-fuzz-campaign/SKILL.md`; it uses out-of-tree outputs when the
@@ -159,35 +110,25 @@ fuzzers, debuggers, sanitizer reproducers, and every repository-built binary exe
 the audited `vigil assess kali ...` surface. A host-side `which clang`, build, seed check, or
 "quick local" fuzzer run violates this boundary even when it sends no network traffic.
 
-Every runtime input must have an engagement-root-relative POSIX path that maps to
-`/engagements/$ENGAGEMENT_KEY/<relative-path>`. Reject absolute paths, empty/`.` components, and
-any `..` component before mapping. Inside Kali, resolve the engagement root, build root, config,
-binary, corpus, seed, crash, and source paths with symlinks followed; validate containment with
-component-aware `pathlib.Path.relative_to()` / `is_relative_to()` (or an equivalent file-descriptor
-walk), and require the executable to be beneath the validated generation build root. Never use a
-string prefix, shell glob, or `startsWith` test as a containment check. If `snapshot_path` or a
-required build input is host-only, falls outside the engagement mount, or resolves outside the
-validated component boundary, stop with a blocked handoff; do not execute it on the host as a
-fallback.
+Before the first build, harness launch, or repository-built binary execution, load the runtime
+path-mapping and containment contract in `agent/skills/code-fuzz-campaign/SKILL.md` ("Tools and
+execution boundary"); an input that cannot be mapped beneath the engagement mount ends in a blocked
+handoff, never a host-side fallback.
 
 **When code analysis does reach for `vigil assess kali ...`** (a fuzz campaign or binary-triage
 pass that runs a tool through the runtime), the same coverage-map discipline from
 `agent/shared-constraints.md` §2b applies unchanged: search `command-run list --q <keyword>
 --show-matches` before probing, and fetch a candidate's preview with `command-run get <id>` before
 citing it — `success=true` only means `return_code=0`, not that the run answered your question.
-The code-specific reading of "new coverage": the only campaign to skip is the identical binary +
-corpus + flags combination already run to completion — a new sanitizer, dictionary, seed corpus,
-or harness change is new coverage even against the same target. Full decision table:
+Pass `--phase` as the code audit tag of the phase the dispatch was authorized for: `kali --phase`
+rejects the track phase names the Runtime Identity can carry, so `ingest` → `code-ingest`,
+`classify-map` → `code-classify`, `hunt` → `code-hunt`, `verify-variant` → `code-verify`, and
+`fuzz` → `code-fuzz`; a packet that already carries the tag (`code-verify` on claimed proof work)
+passes it unchanged. The code-specific reading of "new coverage": the only campaign to skip is
+the identical binary + corpus + flags combination already run to completion — a new sanitizer,
+dictionary, seed corpus, or harness change is new coverage even against the same target. Full
+decision table:
 `agent/references/runtime-guides/command-history-auditing.md`.
-
-**Available tools:**
-
-| Tool | Use |
-|---|---|
-| `Read` | Read files beneath `snapshot_path` |
-| `rg` | Search beneath `snapshot_path` for code patterns and call sites |
-| `Glob` | Locate files beneath `snapshot_path` by pattern |
-| `python3`, `jq`, `sqlite3` | Data processing and backend interaction |
 
 Git provenance and churn are ingest-time metadata on the backend repository record. The sealed
 snapshot deliberately contains no `.git`, and specialists do not run ambient Git against the
@@ -199,25 +140,13 @@ HEAD the sealed snapshot recorded, within recorded budgets, and writes receipts 
 
 ### Cross-Reference Tools (priority order)
 
-1. **ctags index** (fast definition lookup -- generated during code-ingest)
-   - Query: `grep '^<symbol>\t' <ctags_path>` using the Code Source Identity block
-   - Example: `grep '^packet_read_with_status\t' "$ctags_path"` returns the file and line
-   - Use for: locating function/type definitions across the codebase
-
-2. **grep/rg** (call sites, patterns, and anything ctags cannot resolve)
-   - Use for: finding all callers, tracing data flow, cross-module references
-   - Example: `rg -n 'packet_read_with_status\(' --type c "$snapshot_path"` for call sites
-   - ripgrep recurses by default and its `-r` is `--replace`: `rg -rn foo` prints `n` in place of
-     each match, and `rg -r foo src` searches for `src`. Use `-n`/`-l`/`-C<n>`. ripgrep also skips
-     hidden paths and honours a repository's `.ignore`/`.rgignore`; add `-uu` before treating an
-     empty result as meaningful.
-
-3. **Direct file reads** when ctags/grep point to a location
-
-When your analysis references a cross-module function that is load-bearing for the
-vulnerability assessment, resolve it yourself by looking up the definition with ctags,
-reading the file beneath `snapshot_path`, and continuing your analysis. You have full access to
-the sealed source tree -- use it.
+1. **ctags** for definitions: `grep '^<symbol>\t' "$ctags_path"` (path from the Code Source
+   Identity block) returns the file and line.
+2. **`rg`** for callers, data flow and anything ctags cannot resolve, for example
+   `rg -n 'packet_read_with_status\(' --type c "$snapshot_path"`. Its `-r` is `--replace`
+   (`rg -rn foo` prints `n` in place of each match), it skips hidden paths and honours
+   `.ignore`/`.rgignore`, so add `-uu` before treating an empty result as meaningful.
+3. **Direct reads** of the location they point to.
 
 ---
 
@@ -225,10 +154,11 @@ the sealed source tree -- use it.
 
 Record every finding through `vigil assess finding record` with your dispatch `--agent-id`;
 use the allocated slug, never a hand-assigned ID. Before the first code finding write, load
-`agent/references/runtime-guides/code-finding-recording.md` and the finding-record contract.
-They own source binding, deduplication, supported details, source-access prerequisites,
-replayable proof, and captured-credential recording. Reviewer source access is not attacker
-access. Preserve the actual supported caller, evidence, and missing deployment assumptions.
+`agent/references/runtime-guides/code-finding-recording.md`; it owns source binding,
+deduplication, supported details, source-access prerequisites, replayable proof, and
+captured-credential recording.
+Reviewer source access is not attacker access. Preserve the actual supported caller, evidence,
+and missing deployment assumptions.
 Code and web findings share one backend; a prose-only finding is not durable state.
 
 ---
@@ -257,7 +187,10 @@ and concrete harmful outcome. Apply the **net-new capability test**: if the alle
 repeats what the same caller-controlled source, repository, configuration, tenant, credentials, or
 privilege already permits, it creates no new security capability and cannot justify the claimed
 severity. Escalation requires a different trust context, victim/asset, restriction bypass, or
-security property. Preserve replayable evidence, check sibling paths and composable chains when a
+security property. The threat model's trusted inputs are advisory: treat a source as
+attacker-influenced when the code shows a less-trusted writer or the threat model cites no reason
+for trusting it, and an authenticated principal as an attacker for anything beyond its recorded
+`actor_capabilities`. Preserve replayable evidence, check sibling paths and composable chains when a
 pattern survives, and deduplicate shared root causes before report closeout.
 
 Code review separates **product reachability** from **deployment-specific attacker reachability**.
@@ -294,147 +227,55 @@ plausible attacker/precondition framing, and cap severity at what the available 
 evidence proves. Do not invent cross-tenant, remote-trigger, credential, or service-wide impact from
 an absent embedding application.
 
-For resource-limit findings, do not confuse a named limit with a security
-boundary. Request caps, spool-buffer limits, decompression limits, timeouts, and
-protocol negotiation limits only justify High/Critical when the intended boundary
-and downstream impact are both proved. Read docs/blame/commit history for the
-limit, compare sibling default transports or protocol modes, and inspect the
-consumer after the bytes cross the boundary. If another default path already
-accepts the same logical stream and the consumer performs bounded, linear work,
-downgrade to Medium/hardening or documentation. High/Critical requires a proved
-second-order impact such as service-level DoS, superlinear CPU, unbounded retained
-memory/disk, output amplification, crash, memory corruption, or privilege-boundary
-crossing.
+A named resource limit (request cap, spool buffer, decompression limit, timeout, negotiation
+limit) is not by itself a security boundary. Before rating a resource-limit bypass High/Critical,
+apply "Protocol/Resource-Limit Severity Check" in `agent/skills/code-finding-verification/SKILL.md`.
 
 ---
 
 ## 6. Account For Every Reviewed Source Region
 
-Every reviewed callable or source span must receive a disposition, but the receipt is not a
-reasoning quota. One `file` receipt may group several callables in the claimed file; one
-`call_chain` receipt may group a traced chain across files in the same sealed repository snapshot.
-Name every covered callable with the exact structural-index identity, and use exact reviewed spans
-for source outside every function. A reviewed span cannot stand in for a registered function it
-overlaps; include every overlapped function as an exact `callable_ref`. A complete function index
-publishes exactly `total_functions` function records plus one `<top-level>` record per
-file-scope segment.
+Coverage is structurally attributable. `code-vuln-hunter`, the one role that holds queue leases,
+owns the analysis-receipt, disposition, and lease-close contract ("Queue Lease and Receipt
+Contract" in its role file). The other code roles hold no queue lease and record what they review
+through their own receipts (`code-record variant-check`, `code-record fuzz-campaign`,
+`finding verify`).
 
-File scope is a callable too. The artifact's `top_level_segments` mark where file-scope code runs
-when the file is loaded or requested: PHP `include`/`require` statements, inline HTML, bindings with
-computed values such as `const db = require('db')`, and a sink or source the index reports there.
-Declarations, literal bindings and returns, literal `define()` and `class_alias()` calls and
-`defined()` guards open no segment. A segment marks where code runs, not what is safe to skip: read
-the whole file, since a literal binding can hold a hardcoded secret. Segments are registered as
-`<top-level>` callables (name and qualified name `<top-level>`, one per segment, not counted in
-`total_functions`). The file owes each segment a disposition like any other callable: cite it as an
-exact `callable_ref`, or cover its lines with reviewed spans. A span may cover a `<top-level>`
-segment without citing it. Naming a function never covers the file scope.
-
-Only a whole-file reviewed span can prove the manual source review (and it must still name every
-function it overlaps) when structural analysis is unsupported, the function dimension is truncated
-or unavailable, the index scanned no function scope, or the indexed file holds no callable and no
-`<top-level>` segment (a CSS or HTML file only when it reports an entry point, sink or source).
-When `<top-level>` is a file's only callable, every reviewed span must cover the lines of every
-segment the receipt does not cite. A partial span there cannot prove that omitted source is
-non-callable or was read:
-
-- `finding` -- Confirmed vulnerability with CWE, evidence, and exploitability assessment
-- `suspicious` -- Anomalous pattern needing variant analysis or deeper context to confirm
-- `clean` -- No vulnerabilities found in current analysis. The trailing `<notes>` positional is
-  required here; `done` refuses a `clean` close without it
-- `skipped` -- Material deliberately excluded from review, not material you reviewed and
-  cleared. It needs `--skip-reason` naming one of `test-fixture`, `generated-code`, `minified`,
-  `out-of-scope-language`, `vendored-dependency`; any other string is refused. `done` also
-  refuses `skipped` outright for a `medium`, `high` or `critical` file -- the classification
-  already says that file is attack-relevant, so review it and close it `clean`, `finding` or
-  `suspicious`. A skip records intentionally unreviewed material and cannot clear coverage debt,
-  so reach for it only when the file is genuinely outside what you were asked to review
-
-If analysis is blocked by genuinely unavailable code or context, do not submit a
-disposition for that item yet. Close its lease with `vigil assess code-dispatch
-needs-context <item-id> <agent-id> <lease-token> [expansion-json-file]`, naming
-the missing dependency so the queue can route the expansion.
-
-If the analysis itself failed for a tooling reason — the index was unreadable, a
-command the review depended on crashed, the file would not decode — close the
-lease with `vigil assess code-dispatch error <item-id> <agent-id> <lease-token>
-[notes]` and say in the notes what failed. That is a distinct queue status from
-`needs-context`: the context was there and the tooling was not, so the operator's
-route back is `code-dispatch retry-error` rather than supplying an expansion.
-Filing a tooling failure as `needs-context` sends the operator looking for
-context that already existed.
-
-If you are holding a file you cannot review at all — another lane owns it, your
-lane is being retired, the scope moved — hand the lease back with `vigil assess
-code-dispatch release <item-id> <agent-id> <lease-token> --reason "<why>"`. This
-is the lease close that fits when every disposition would be false: `clean` and
-`skipped` each assert something about the file, and `needs-context` claims you
-looked and needed more. `release` returns the row to unleased `pending` with your
-reason on its notes, so the next lane finds the work and the operator sees why it
-moved. It supersedes the attempt's receipts exactly as `reset-stale` does, so read
-`code-dispatch progress <item-id>` first: when the attempt holds receipts worth
-keeping, ask the operator for `adopt-lease` to move the work to its new owner
-instead. Never just abandon the lease — an abandoned row falls to the stale sweep,
-which discards its receipts with no reason recorded anywhere.
-
-Coverage must be structurally attributable, but write-up depth can be proportional:
-- Attack-facing, sink-bearing, stateful, or ambiguous functions need full reasoning.
-- Obviously mechanical helpers can use concise `clean` dispositions once you have verified they
-  do not hide sinks, trust-boundary assumptions, or material error behavior.
-
-Proportional write-up is never a license to skip the read or the check (§7): every function,
-mechanical-looking or not, is read in full and checked against sinks/trust-boundaries/error paths
-before its disposition prose gets to be brief. What shortens for a verified-mechanical helper is
-the write-up, not the analysis behind it. Grouping verified mechanical helpers is encouraged;
-grouping must never erase a finding, suspicious hypothesis, unresolved gap, or its exact evidence.
-
-Record dispositions via `vigil assess code-record analysis`.
-`finding` dispositions record durable finding state through `finding record`;
-`suspicious` and `clean` still record through `code-record analysis` so backend
-coverage knows which source regions were reviewed. `needs-context` is a queue
-action, not an analysis disposition; use it only for work that cannot yet be
-completed.
+Write-up depth can be proportional, the read cannot: attack-facing, sink-bearing, stateful, or
+ambiguous code gets full reasoning, and a verified-mechanical helper gets a concise disposition only
+after it was read in full and checked against sinks, trust boundaries, and error paths (§7).
+Grouping verified helpers never erases a finding, a suspicious hypothesis, an unresolved gap, or
+its exact evidence.
 
 ---
 
 ## 7. Read Before You Conclude
 
-A verdict is only as good as the read behind it. Skimming for gist, assuming a simple-looking
-function stays simple once composed with others, trusting an unread external call or guard on
-faith, or calling a function "safe" without tracing its taint paths to their sinks — each of these
-substitutes an impression for a read. Before recording `clean` on anything — a whole function, a
-guard, a callee you decided not to open — read the code that verdict depends on and be able to
-name the specific line, type, or branch that makes the impression true. A `clean` verdict earns
-its keep by what it can point to, not by the absence of a bad feeling; "I don't see any issues"
-is not itself a disposition — name every pattern you checked and why it doesn't apply.
-
-Treat the entire call chain as one continuous execution flow. Never reset context between
-functions. A guard in function A does not protect function B unless B re-validates.
+Before recording `clean` on a function, guard, or callee you chose not to open, read the code that
+verdict depends on and name the line, type, or branch that makes it true, plus every pattern you
+checked and why it does not apply. Treat the call chain as one execution flow: a guard in function
+A protects B only if every path that reaches B passes through it; otherwise B has to re-validate,
+because one unguarded caller is enough to reach the sink.
 
 ---
 
 ## 8. Skills Are Methodology; References Load By Signal
 
-Your role's one always-applicable skill is MANDATORY in your Load First list — use the skill
-named in your dispatch payload, or run `vigil assess list-skills` if none was named, and load it
-before doing any analysis. That pairing does not change per dispatch.
-
-Everything else in `agent/references/` is trigger-gated: load a specific reference when your
-reading surfaces the signal it matches, not as a blanket preload before you open a source file.
+Your role's one always-applicable skill is mandatory in your Load First list; everything else in
+`agent/references/` loads when your reading surfaces the signal it matches (core "Load Sequence").
 
 **CWE pattern references** from `agent/references/code-vuln-patterns/` are trigger-gated by slot
 type and code pattern: when your reading surfaces a signal (a parser over FILE-CONTENT, a crypto
 call, memory allocation with attacker-influenced size, an auth check, ...), load the matching
-file(s) yourself — list the directory or match filename to the observed signal. Do not load a
-file for a class the batch does not exhibit. `rate-limit` has no file of its own: its source checks
+file(s) yourself — list the directory or match filename to the observed signal — before you record
+the disposition it informs. Skip a file for a class the batch does not exhibit. This is the one
+statement of the rule; role prompts and skills point here. `rate-limit` has no file of its own: its source checks
 live in `agent/references/code-vuln-patterns/business-logic.md` under "6. Attempt limits on OTP,
 MFA, passcodes and password reset".
 
-**A skill's Extended Resources section is a menu, not a Step 2.** Read it when the skill's own
-procedure sends you to a specific reference, not as a blanket read-everything-first pass. A
-reference marked **(REQUIRED)** inside Extended Resources is required once that reference's
-trigger fires for this dispatch — before the finding/disposition it informs is recorded — not
-before you start reading.
+A skill's Extended Resources section is a menu: a reference marked **(REQUIRED)** there is required
+once its trigger fires — before the finding or disposition it informs is recorded — not before you
+start reading.
 
 **A toolchain-catchable pattern is a finding, not a skip.** `strcpy` into a fixed buffer,
 `system(user_input)`, `free(p); *p = 0;` — on an unaudited codebase no prior tool run has caught
@@ -448,114 +289,37 @@ improvising — it encodes CVE-grounded idioms and per-class blind spots, not su
 
 ## 9. Script Path Convention
 
-The base convention (`vigil assess <subcommand>` from any directory, full-record versus bounded
-nested JSON input, artifact paths, and assessment binding) is in
-`agent/shared-specialist-core.md` "Script Path Convention". This section adds only the
-code-specific quoting and banner rules below.
+The base convention is `agent/shared-specialist-core.md` "Script Path Convention". Code adds two
+rules:
 
-Shell-quote Java and Kotlin identifiers that contain `$` (anonymous classes, lambda
-names, generated accessors — e.g. `com.example.Auth$$Lambda$1`): wrap in single quotes
-or escape the `$` when passing to `grep`, `vigil`, or shell commands to prevent variable
-interpolation.
-
-**No `echo` section banners.** Do not use `echo "=== ... ==="` or similar shell banners for
-progress markers, section headings, or breadcrumbs inside `vigil assess kali` invocations or
-shell scripts that wrap them. The operator never sees that output, the command audit pipeline
-captures the banner as the command stdout preview and pollutes FTS search, and `--intent`
-on the kali call already records purpose in the durable audit row. `echo` is only legitimate
-when its output is the command's real purpose (writing to a file, piping to another tool,
-generating a payload). The web-mode rule lives in `agent/shared-constraints.md` §2; the same
-rule applies in code mode wherever a kali wrapper is invoked from a code-analysis specialist.
+- Shell-quote Java and Kotlin identifiers that contain `$` (`'com.example.Auth$$Lambda$1'`) when
+  passing them to `grep`, `vigil`, or the shell, so they are not interpolated.
+- No `echo "=== ... ==="` progress banners inside `vigil assess kali` calls or the scripts that wrap
+  them: the audit pipeline stores the banner as the command's stdout preview and pollutes search,
+  and `--intent` already records purpose. `echo` is fine when its output is the point (a file, a
+  pipe, a payload).
 
 ---
 
 ## 10. Recording Format
 
-Use the helper contracts as the canonical shape source before authoring durable JSON. Run
-`vigil assess contract finding record` for finding payloads,
-`vigil assess contract finding verify` before any verification/rebind, and
-`vigil assess contract code-record analysis` for analysis-result payloads; this keeps agent output
-aligned with backend validation instead of relying on copied prompt snippets.
-`finding record` fills the initial lifecycle defaults (`workflow_status=active`, `verification_status=unreviewed`) when omitted — use those rather than setting lifecycle fields manually.
-For later finding lifecycle changes, use the dedicated helpers instead of raw `post` or `patch`:
-`finding verify` for confirm/downgrade/dispute decisions (`--status false_positive` needs a completed
-structured counter-check AND `--details-inline '{"kill_reason": "...", "kill_check": N}'` naming the
-check that falsified the claim, an integer 1-5; the write is refused without both, and a kill_reason
-saying the test could not be RUN is `blocked` unless `details.required_followup` names the settling
-test), `--status disputed` as the cheap withdrawal when you cannot meet that bar (it needs only
-`--reason` and still survives a later sweep, so a claim you no longer stand behind does not come
-back as `unreviewed`), `finding update --status draft` to reopen a
-previously verified or false-positive finding, and `finding update` for non-verification metadata
-or workflow updates. Reopening clears prior verification but deliberately leaves workflow status
-`draft`; verification does not promote it. Before fuzz/complete, every retained draft must be
-promoted explicitly with `finding update --status active`, merged, or killed. A confirmed-but-draft
-finding remains a readiness blocker.
+`vigil assess contract finding record`, `finding verify` (verification, false-positive, dispute,
+and rebind shapes), and `code-record analysis` own the durable JSON shapes. Let `finding record` fill the initial lifecycle defaults. Later changes go
+through `finding verify` (the verifier procedure is `code-vuln-verifier` "FP Persistence") or
+`finding update` (metadata, workflow, reopening with `--status draft`); a reopened draft is
+promoted with `finding update --status active`, merged, or killed before fuzz/complete.
 
 For code findings, put `cwe_id`, `impact`, `evidence`, `guards_evaluated`, `remediation`,
-`slot_type`, `steps_to_reproduce`, and supported CVSS facts under `details`. Use `taint_path` for
-taint findings; for operation/state/lifetime defects use the supported sequence plus
-`caller_feasibility`/`precondition_analysis` as applicable. For analysis rows, include the fetched `queue_item_id`,
-`agent_name`, and `lease_token`;
-the backend derives `file_id` from that queue item and rejects mismatches when `file_id` is
-supplied as an optional consistency check. Renew long-running claims with
-`vigil assess code-dispatch heartbeat <item-id> <agent-id> <lease-token>` at least twice inside
-the operator's stale-reset window (the standard 10-minute window means heartbeat every 5 minutes
-or less); results and closeouts using a reclaimed lease are rejected. `<agent-id>` is the fetched
-`agent_name`: your dispatch `agent_id` from Runtime Identity, never the role name.
-A lost lease token is recoverable, so do not abandon the item or invent one:
-`vigil assess code-dispatch progress <item-id>` prints the live holder and token for that item, and
-`vigil assess code-dispatch list --show-tokens` prints them for a whole lane. Both read current
-queue state, so the token they print is the one `code-record analysis` and `done` will accept — and
-if they show the item held by another `agent_name`, the lease was reclaimed and your results for it
-will be rejected whatever token you supply.
-For `finding` and `suspicious`, record inline `evidence` or an engagement-owned `evidence_ref` on
-the current same-disposition result before closeout. A `clean` closeout carries non-empty family
-coverage and review notes. These disposition-specific gates preserve evidence-backed queue state
-while allowing proof to live inline or in a durable artifact.
-
-**Report-readiness mandate:** `check-phase-readiness --phase report` blocks the final report if any
-verified finding is missing `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
-`remediation`, `impact`, or `evidence`. Include all six fields at recording time so
-findings pass readiness without a remediation loop. CVSS must align with severity under the finding-record contract.
+`slot_type`, `steps_to_reproduce`, and supported CVSS facts under `details`, with `taint_path` for
+taint findings or the supported sequence plus `caller_feasibility`/`precondition_analysis` for
+operation/state/lifetime defects. Record `cvss_score`, `cvss_vector`, `steps_to_reproduce`,
+`remediation`, `impact`, and `evidence` at write time: report readiness needs all six on every
+verified finding, and you hold the evidence now.
 
 ---
 
 ## 11. Mandatory Closing Sequence
 
-The closing-sequence wrapper (resume-brief framing, unlinked-notes registration rule,
-`agent done`/`agent close` being operator-only, idempotent/checkpoint handoff framing, and the
-plan-state digest) is in `agent/shared-specialist-core.md`. That wrapper applies to every code
-role; the exact numbered verb list is role-specific, not one universal sequence, because only
-`code-vuln-hunter` fetches and completes a queue item (`code-record analysis` /
-`code-dispatch done`) — `code-architect`, `code-variant-hunter`, `code-vuln-verifier`, and
-`code-fuzz-engineer` never hold a queue lease and have no `code-record analysis` step in their
-closing sequence. Every role's list is drawn from the same pool of backend writes this file
-documents (`finding record` §4, `code-record analysis` §6, `agent handoff` + `render-handoff`),
-instantiated with that role's own agent-name and ordering — see your role file's own `### Closing
-verbs` or `## Mandatory Closing Sequence` section for the exact sequence you run.
-
----
-
-## 12. Coverage Integrity
-
-The backend derives callable coverage from exact structural references on current, unreplaced
-analysis receipts and reports it as `coverage_integrity` on the `code-dispatch done` response.
-
-1. Record grouped source receipts via `code-record analysis` BEFORE calling
-   `code-dispatch done <item-id> <agent-id> <lease-token> <disposition> <coverage-json>
-   [notes]` — the backend derives coverage from receipt anchors that already exist at
-   completion time, not from the coverage JSON alone.
-2. `functions_analyzed` is advisory self-reporting, never coverage proof. Each file's authoritative
-   numerator is the union of exact `callable_refs` that name that file, including references from
-   a current cross-file `call_chain`; `reviewed_spans` prove checked source outside every function,
-   including the `<top-level>` segments they cover, but do not invent function coverage. A
-   `<top-level>` reference covers file scope and never counts toward the function numerator.
-3. Cross-file callable coverage does not transfer lease ownership. Only a source receipt anchored
-   to the claimed queue file can close its non-skipped review; referenced files retain
-   their own queue, disposition, evidence, and closeout obligations.
-   A sealed zero-byte file uses the explicit empty-file review form in `vigil assess contract
-   code-record analysis`; never invent a source line.
-4. Not-applicable entries (`disposition: "not_applicable"`) are exempt from the backing check.
-5. Use `analysis_effort` in per-file coverage detail as the trustworthy effort projection: it is
-   derived from current receipt rows, evidenced receipts, distinct structural callable bindings,
-   and the structural-index function total rather than the submitted effort number alone.
+Your role prompt lists the closing verbs you run; the wrapper that applies to every role is
+`agent/shared-specialist-core.md` "Mandatory Closing Sequence — wrapper". Only `code-vuln-hunter`
+holds queue leases, so only its sequence has `code-record analysis` and `code-dispatch done`.

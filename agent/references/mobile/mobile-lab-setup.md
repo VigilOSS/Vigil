@@ -37,6 +37,19 @@ Docker is useful for repeatable tooling such as MobSF, jadx, apktool, mitmproxy,
 
 Docker Desktop on macOS runs Linux containers inside a VM, so USB passthrough and KVM-backed Android virtualization are not equivalent to a Linux host.
 
+## Vigil Runtime And The Lab Host
+
+The Kali runtime carries the Android static toolchain: apktool, jadx, aapt, apksigner, adb, apkeep
+and bundletool (confirm with `vigil assess kali exec --technique HEALTH --intent "mobile tooling
+inventory" --probe-kind fingerprint --phase code-ingest --timeout 60 -- which apktool jadx aapt
+apksigner adb apkeep bundletool`). Frida, objection, MobSF, APKiD, Xcode/`simctl`,
+`libimobiledevice` and other iOS tooling are not in the image. Run them, and anything that needs a
+USB-attached device (Docker Desktop on macOS has no native USB passthrough), on the lab host
+through host-exec so the run is audited:
+`vigil assess host-exec --tool <tool> --intent "<why>" --technique <technique> --phase <phase> -- <command>`
+(`vigil assess contract host-exec`; full output lands under `scans/host-exec/`). App API traffic replays through `vigil assess kali exec`. Files the runtime
+reads or writes live under `/engagements/$ENGAGEMENT_KEY/...` (`agent/shared-constraints.md` §11).
+
 ## Reset And Data Hygiene
 
 Use emulator snapshots, Cuttlefish powerwash, `simctl erase`, device-farm cleanup, scripted app uninstall, and account teardown to avoid state drift.
@@ -47,21 +60,8 @@ Export proxy logs, device logs, crash reports, and screenshots into engagement s
 
 ## Source Anchors
 
-- Android Emulator acceleration: https://developer.android.com/studio/run/emulator-acceleration
-- Android Emulator snapshots: https://developer.android.com/studio/run/emulator-snapshots
-- Android Cuttlefish: https://source.android.com/docs/devices/cuttlefish
-- Cuttlefish multi-tenancy: https://source.android.com/docs/devices/cuttlefish/multi-tenancy
-- Pixel factory images: https://developers.google.com/android/images
+- Android Cuttlefish multi-tenancy: https://source.android.com/docs/devices/cuttlefish/multi-tenancy
 - Xcode Developer Mode: https://developer.apple.com/documentation/xcode/enabling-developer-mode-on-a-device
-- Xcode device distribution: https://developer.apple.com/documentation/xcode/distributing-your-app-to-registered-devices
-- Burp mobile interception: https://portswigger.net/burp/documentation/desktop/mobile
-- mitmproxy certificates: https://docs.mitmproxy.org/stable/concepts/certificates/
-- Frida Android: https://frida.re/docs/android/
-- Frida iOS: https://frida.re/docs/ios/
 - Frida Gadget: https://frida.re/docs/gadget/
 - Docker Desktop USB/IP: https://docs.docker.com/desktop/features/usbip/
-- Docker multi-platform builds: https://docs.docker.com/build/building/multi-platform/
-- Firebase Test Lab: https://firebase.google.com/docs/test-lab
-- AWS Device Farm: https://aws.amazon.com/devicefarm/
-- BrowserStack App Live: https://www.browserstack.com/docs/app-live
 - Corellium devices: https://support.corellium.com/devices/ios

@@ -5,30 +5,16 @@ skill: web-recon
 
 # CDN / Edge Defensive Behavior — reading the target edge's reactions
 
-This reference is about **the target edge defending itself against your probe** —
-which probes it denies, how it denies them, and how to tell a per-request denial
-apart from a block that has killed your session. It is **distinct** from
-`agent/references/runtime-guides/cdn-ip-blocking.md`, which covers the opposite
-concern: when **our own runtime egress IP** is on a CDN reputation list and all
-of our recon collapses into uninformative 403s. Read that one when *every* host
-goes dark from our side; read *this* one when a *specific probe* is denied but the
-host is otherwise responsive.
+This file is about the target edge defending itself against your probe: which probes it denies,
+how, and how to tell a per-request deny from a block that has killed your session. If every host
+goes dark from our side, the runtime's own egress IP is the problem; read
+`agent/references/runtime-guides/cdn-ip-blocking.md` instead. Vendor names here are trait
+examples. The worked example is Akamai (App & API Protector + Bot Manager on an edge-protected
+CMS), and the same shapes show up on Cloudflare, Fastly/Signal Sciences, AWS WAF + CloudFront and
+Imperva, so match the row on behaviour rather than brand.
 
-Vendor names below are **trait-match examples**, not canonical categories. The
-worked example is **Akamai** (App & API Protector WAF + Bot Manager, observed
-against an edge-protected CMS), but the same shapes appear on
-Cloudflare WAF + Bot Management, Fastly/Signal Sciences, AWS WAF + CloudFront,
-and Imperva. Match the row on the behavior, not the brand.
-
-## Why this matters
-
-The single most expensive mistake against a CDN-fronted target is **reading a
-per-request WAF deny as a dead host or a global block** and abandoning the host
-(or the whole engagement). A `403` to a `../` or SQLi probe almost always means
-the **edge denied that one request** — the next clean request to the same host
-returns `200`. Treating it as "host down / patched / blocked" produces a false
-negative and burns a coverage lane. The disambiguation below is the load-bearing
-skill; everything else is supporting detail.
+The costly mistake is reading a per-request WAF deny as a dead, patched or globally blocked host
+and abandoning it. That produces a false negative and wastes a coverage lane.
 
 ## A. 403 disambiguation — three different 403s
 
@@ -146,44 +132,22 @@ Crawl nonprod edges more gently (`-rl 2 -c 3`) precisely to avoid tripping this.
 
 ## Calibration procedure (when the numbers above may not generalize)
 
-The defaults in §D were observed against one Akamai configuration. To recalibrate
-against an unknown CDN-fronted target:
+The §D numbers come from one Akamai configuration. On an unknown edge:
 
-1. **Fingerprint the edge** (`wafw00f`, response headers, the §A/§B/§C shapes) and
-   pick the trait row from `agent/references/recon/rate-calibration.md`.
-2. **Map the WAF trigger matrix** (§B): send one of each probe class with a clean
-   control after it; record which classes are denied vs. pass-through.
-3. **Confirm the UA boundary** (§C): one scanner-UA request and one browser-UA
-   request to the same clean path; if they differ, a Bot Manager is in front.
-4. **Find the crawl ceiling:** start at the production GET-crawl default and step
-   the rate up until clean control requests start returning `429`; back off one
-   step. Keep dynamic POST APIs well under that.
-5. **Probe the cooldown** on any nonprod/preview edge: after a deliberate WAF
-   deny, time how long clean control requests keep returning `403`; use that as
-   the nonprod re-probe wait.
+1. Fingerprint it (wafw00f, headers, the §A–§C shapes) and pick the trait row in
+   `agent/references/recon/rate-calibration.md`.
+2. Map the §B matrix with one probe per class, each followed by a clean control.
+3. Check the §C UA boundary with one scanner-UA and one browser-UA request.
+4. Step the GET-crawl rate up from the production default until controls return `429`, then back
+   off one step. Keep dynamic POST APIs well below that.
+5. On a nonprod edge, time how long controls keep returning `403` after a deliberate deny, and use
+   that as the re-probe wait.
 
 ## Cross-references
 
-- `agent/references/runtime-guides/cdn-ip-blocking.md` — the **distinct** concern:
-  our own egress IP is on a CDN reputation list (our recon collapses globally).
-  Reach for it when the §A control request *also* fails; this file is for when the
-  control returns `200` and only the specific probe was denied.
-- `agent/references/recon/cdn-edge-and-bff-reachability.md` — the **third** member
-  of this triad: reading the edge **error envelope** to decide whether a path is
-  architecturally not-exposed (Akamai `27368`), edge-authz-denied (`2736803`), or
-  origin-answered — plus the BFF-capture trap and the confirmed-live-token rule.
-  This file is about the edge denying *your probe*; that file is about deciding
-  whether a *clean* path is even routable.
-- `agent/references/recon/rate-calibration.md` — the per-target rate trait table
-  (nmap/dir-fuzz/nuclei/DNS); use it to pick the trait row, then this file for the
-  katana crawl rate + edge-behavior reads it does not carry.
-- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware
-  defaults, headless escalation, and ingestion handoff.
-- `agent/skills/web-recon/SKILL.md` — wafw00f→tier mapping; this file is the
-  edge-behavior detail behind that step.
-- `agent/skills/rate-limit-bypass/SKILL.md` and
-  `agent/references/payloads/rate-limit-bypass-payloads.md` — *offensive* edge
-  manipulation (IP-spoofing headers); this file is the *defensive*
-  behavior-reading counterpart.
-- `agent/skills/sqli-testing/SKILL.md` — "every payload returns 403 is the WAF,
-  not injection"; consistent with §B.
+- `agent/references/recon/cdn-edge-and-bff-reachability.md`: reading the edge error envelope to
+  decide whether a clean path is not exposed (Akamai `27368`), edge-authz-denied (`2736803`) or
+  answered by the origin, plus the BFF-capture trap.
+- `agent/references/tools/recon/katana.md`: crawl doctrine and headless escalation.
+- `agent/skills/sqli-testing/SKILL.md` "Kill and escalate": a WAF that blocks every payload is a
+  blocked surface to report, not a negative.

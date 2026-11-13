@@ -10,6 +10,13 @@ source: Custom — compiled from ServiceNow REST API documentation and table-ACL
 
 Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a ServiceNow fingerprint. The REST API's `/api/now/v1/table/<table>` endpoint maps directly to the platform's GlideRecord access-control rules; one mis-set ACL or one over-broad role grant exposes adjacent tables, not just the one that triggered detection.
 
+## Fingerprint markers
+
+`/scripts/sn_*.js` or versioned `/styles/*.css?v=…` with `Server: ServiceNow`; body globals
+`g_form`, `g_user`, `g_navigation`, `var NOW = …`; cookies `glide_user`, `glide_session_store`;
+paths `/now/nav/ui/`, `/api/now/`, `/sys_db_object_list.do`. Trigger: any marker plus a 200 from
+`/api/now/v1/table/sys_user?sysparm_limit=1`.
+
 ## Standard table probe list
 
 Probe each table via `vigil assess kali exec` so each request lands in the audit pipeline. A 200 with non-empty `result[]` is anonymous-readable; 401/403 with `User Not Authenticated` is the expected baseline.
@@ -48,7 +55,7 @@ The `?sysparm_query=` parameter accepts encoded queries. Common shapes:
 
 ```
 sysparm_query=active=true                                   # filter on field
-sysparm_query=active=true^ORDERBYsys_created_on             # filter + order
+sysparm_query=active=true^ORDERBYDESCsys_created_on         # filter, newest first
 sysparm_query=name!=admin                                   # not-equals
 sysparm_query=user_nameSTARTSWITHadmin                      # string prefix
 sysparm_query=email.endsWith=@example.test                  # related-field
@@ -85,14 +92,14 @@ Walking `incident.caller_id → sys_user → sys_user.manager → sys_user` is a
 
 ## Bounded-vs-systemic IDOR test
 
-Take one leaked `sys_id` (e.g., the `caller_id` from an incident). Flip the last character and read:
+Sys IDs are random 128-bit values, so a mutated Sys ID points at nothing and always fails: that tells you nothing. Test enumerability with an unfiltered list instead:
 
 ```
-GET /api/now/v1/table/sys_user/<modified-sys-id>
+GET /api/now/v1/table/sys_user?sysparm_limit=5
 ```
 
-- **Bounded** — adjacent Sys ID returns 401/403 or `Record not found`. The leak is the original incident plus its chain.
-- **Systemic** — adjacent Sys ID returns 200 with a different user record. The whole `sys_user` table is anonymous-enumerable, severity escalates accordingly.
+- **Bounded** — the list is refused or returns only the rows the chain walk already reached. The leak is the original record plus its chain.
+- **Systemic** — the list returns rows you were not pointed at. The whole table is anonymous-enumerable; severity escalates accordingly.
 
 ## Aggregate API probe
 

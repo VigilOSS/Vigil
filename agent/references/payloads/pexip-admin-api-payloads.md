@@ -10,6 +10,13 @@ source: Custom — compiled from the Pexip Infinity admin-API documentation and 
 
 Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a Pexip Infinity fingerprint. The admin API at `/api/admin/configuration/v1/<namespace>/` exposes the deployment's configuration; mis-set front-end auth (or an exposed management VLAN) lets anonymous or default-credential callers read or modify it.
 
+## Fingerprint markers
+
+Paths `/admin/`, `/api/admin/`, `/api/admin/configuration/`, `/admin/platform/`; `nginx` with a
+`pexipadmin` cookie; body references to `conferencing_node`, `worker_vm`, `upgrade_package`; title
+`Pexip Infinity Administrator interface`. Trigger: a 200, or a 401 with a body, from
+`/api/admin/configuration/v1/`.
+
 ## Namespace probe list
 
 Each namespace is an independent permission decision. Probe all of them — a deployment that authenticates `/conferencing_node` may still expose `/upgrade_package` because the per-namespace ACL was missed.

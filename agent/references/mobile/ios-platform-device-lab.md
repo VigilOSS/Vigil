@@ -11,11 +11,9 @@ Confirm owned hardware or explicit client authorization, Apple ID separation, de
 
 ## Platform Security Map
 
-- Secure boot verifies each stage from Boot ROM through iBoot, kernel, kernel extensions, baseband firmware, and Secure Enclave firmware.
-- Secure Enclave, keybags, Data Protection classes, APFS encryption, and Keychain access classes shape lock-state and credential-storage behavior.
-- Mandatory code signing, Team ID checks, provisioning, entitlements, sandboxing, ASLR, and runtime protections constrain what third-party apps can load or access.
-- App groups, extensions, URL schemes, universal links, pasteboard, Keychain access groups, and WebKit bridges are common app-level boundary surfaces.
-- XPC, Mach services, launchd, dyld shared cache, XNU, IOKit, AMFI, PAC, and sandbox profiles are platform-research topics that require stronger lab controls than app testing.
+- Boundaries a finding is placed against: secure boot (Boot ROM, iBoot, kernel, baseband and Secure Enclave firmware); Secure Enclave, keybags, Data Protection classes, APFS encryption and Keychain access classes (lock-state and credential storage); code signing, Team ID, provisioning, entitlements and the sandbox.
+- App-level boundary surfaces: app groups, extensions, URL schemes, universal links, pasteboard, Keychain access groups and WebKit bridges.
+- XPC, Mach services, launchd, the dyld shared cache, XNU, IOKit, AMFI, PAC and sandbox profiles are platform-research topics that need stronger lab controls than app testing.
 
 ## Simulator, Device, Jailbreak, And SRD Split
 
@@ -39,17 +37,7 @@ Treat platform crashes as reliability evidence until reachability, trust boundar
 
 ## Source Anchors
 
-- iPhone/iPad boot process: https://support.apple.com/guide/security/boot-process-for-ipad-and-iphone-devices-secb3000f149/web
-- Secure Enclave: https://support.apple.com/guide/security/the-secure-enclave-sec59b0b31ff/web
-- Data Protection: https://support.apple.com/guide/security/data-protection-sece8608431d/web
 - Data Protection classes: https://support.apple.com/guide/security/data-protection-classes-secb010e978a/web
-- Keychain data protection: https://support.apple.com/guide/security/keychain-data-protection-secb0694df1a/web
-- Runtime process security: https://support.apple.com/guide/security/security-of-runtime-process-sec15bfe098e/web
-- App access to user data: https://support.apple.com/guide/security/protecting-app-access-to-user-data-secc01781f46/web
-- Code signing process: https://support.apple.com/guide/security/app-code-signing-process-sec7c917bf14/web
-- XPC: https://developer.apple.com/documentation/xpc
-- XNU source: https://github.com/apple-oss-distributions/xnu
-- dyld source: https://github.com/apple-oss-distributions/dyld
 - Profiles and Logs: https://developer.apple.com/feedback-assistant/profiles-and-logs/?platform=ios
 - Apple Security Research Device: https://security.apple.com/research-device
 - Apple bounty terms: https://security.apple.com/terms-and-conditions/

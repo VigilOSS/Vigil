@@ -20,7 +20,7 @@ there — but still cover the rest. Check current lane state first:
     vigil assess agent list --status in-progress
 <!-- vigil:end -->
 
-**Re-read `agent/rules/hunting.md` rules 5, 9, 15, 16 and 16a before the first batch.** They
+**Re-read `agent/rules/hunting.md` §5 (depth and rotation) and §6 (siblings) before the first batch.** They
 govern this push, including when a surface is genuinely dry and you should rotate off it rather
 than grind. This command widens dispatch volume; it does not override those rules, and it does
 not widen the target boundary — reconfirm `scope.json` hosts and `exploit_policy` first, and

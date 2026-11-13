@@ -6,10 +6,8 @@ languages: C/C++, Python, JS
 
 # Path Traversal — Canonicalization, Archive Writes, and Indirect Filesystem Reachability
 
-> Target: Filesystem access bugs where attacker-controlled path components survive normalization,
-> join logic, archive extraction, or storage indirection and reach sensitive reads/writes.
-
----
+Attacker-controlled path components that survive normalization, join logic, archive extraction, or
+storage indirection and reach sensitive reads or writes.
 
 ## What You're Hunting
 
@@ -37,10 +35,18 @@ The code validates the destination directory once but not each archive entry.
 - Absolute paths
 - Symlink entries that pivot later writes outside the extraction root
 
-**Check the extraction library first.** Some already strip traversal paths internally:
-- Python `zipfile.extractall()` — strips `../` since 3.6. Not vulnerable on any supported Python 3.x.
-- Python `tarfile.extractall()` — no filtering before 3.12. Genuinely vulnerable pre-3.12.
-- Go `archive/zip`, Java `ZipInputStream` — no built-in filtering. Caller must validate.
+**Check the extraction library and the call shape first:**
+- Python `zipfile.extract()`/`extractall()` sanitize `..` and absolute member names (since 2.7.4 and
+  3.3.1). Manual extraction — `zf.open(name)` or `zf.read(name)` written to
+  `os.path.join(dest, name)` — has no such protection and is the vulnerable shape.
+- Python `tarfile.extractall()` trusts member names, links, and modes unless a `filter=` is passed.
+  The parameter exists from 3.12 and was backported to 3.8.17, 3.9.17, 3.10.12, and 3.11.4; the
+  default stays fully trusting through 3.13 (3.12-3.13 warn) and becomes `'data'` in 3.14. The
+  `'data'` filter itself had bypasses (CVE-2025-4517 and related), fixed in 3.12.11 and 3.13.4, so
+  check the patch level when the code relies on it.
+- Go `archive/zip`/`archive/tar` and Java `ZipInputStream`/`ZipFile` do no filtering; the caller must
+  validate each entry. Go 1.20 added `filepath.IsLocal` for that check and Go 1.24 `os.Root` for
+  confined file access.
 
 ### 4. Indirect Traversal
 
@@ -50,6 +56,9 @@ that maps to a path later in the chain.
 - User-controlled profile image ID -> storage path lookup
 - Plugin/theme name -> disk path resolution
 - Import/export job name -> temp file path reuse
+- A server-supplied filename trusted for the local write: CVE-2016-4971, wget following an HTTP-to-FTP
+  redirect saved under the FTP server's filename (`.bash_profile`), because the redirect moved the
+  trust boundary the filename check assumed
 
 ---
 

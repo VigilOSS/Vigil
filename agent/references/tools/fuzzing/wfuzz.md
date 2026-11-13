@@ -1,72 +1,20 @@
 ---
-description: Web fuzzer for parameters, headers, and paths
+description: wfuzz through kali exec, for payload encoder chains other fuzzers lack
 skill: directory-fuzzing
 ---
 
 # wfuzz
 
-**Purpose:** Web fuzzing with advanced filtering and payload encoding
-For live engagement targets, run wfuzz via `vigil assess kali exec --technique FUZZ --intent "<why>" --probe-kind payload --phase <phase> --timeout <seconds> -- wfuzz ...` with the standard audit-flag set.
+wfuzz has no typed verb; run it through `vigil assess kali exec --technique FUZZ --intent "<why>"
+--probe-kind payload --phase <phase> --timeout <seconds> -- wfuzz ...` with the standard audit-flag
+set. Live help: `vigil assess kali tool-help wfuzz`; `wfuzz -e encoders` lists the encoders.
+Directory and parameter fuzzing belong to `vigil assess kali ffuf`
+(`agent/skills/directory-fuzzing/SKILL.md`).
 
-## Basic Usage
-
-**Directory fuzzing:** `wfuzz -c -w wordlist.txt https://target/FUZZ`
-**POST parameter:** `wfuzz -c -w wordlist.txt -d "user=FUZZ&pass=test" https://target/login`
-**Header fuzzing:** `wfuzz -c -w wordlist.txt -H "X-Custom: FUZZ" https://target/`
-**Cookie:** `-b "session=abc123"`
-**Auth header:** `-H "Authorization: Bearer token"`
-
-## Multiple Payloads
-
-FUZZ = first `-w`, FUZ2Z = second `-w`:
-```
-wfuzz -c -w users.txt -w passes.txt -d "user=FUZZ&pass=FUZ2Z" https://target/login
-```
-
-**Iterator modes:** `--mode zip` (parallel), `--mode chain` (sequential), `--mode product` (all combinations)
-
-## Filters
-
-### Hide Filters (exclude from results)
-`--hc 404,403` — hide by status code
-`--hw 12` — hide by word count
-`--hh 1234` — hide by char count
-`--hl 5` — hide by line count
-`--hs "Not Found"` — hide by regex in response
-
-### Show Filters (include only matching)
-`--sc 200,301` — show by status code
-`--sw 42` — show by word count
-`--sh 5000` — show by char count
-`--ss "admin"` — show by regex in response
-
-## Encoders (wfuzz's differentiator)
-
-`-z file,wordlist.txt,encoder` — apply encoding to payloads:
-
-| Encoder | Effect |
-|---------|--------|
-| `urlencode` | URL-encode payload |
-| `double_urlencode` | Double URL-encode |
-| `base64` | Base64-encode |
-| `html_escape` | HTML entity encode |
-| `hexlify` | Hex-encode |
-| `md5` | MD5 hash |
-
-**Chained encoding:** `-z file,wordlist.txt,urlencode-double_urlencode`
-**Example:** `wfuzz -c -z file,payloads.txt,urlencode --hc 404 https://target/page?q=FUZZ`
-
-## Tuning
-
-**Threads:** `-t 20`
-**Delay:** `-s 0.5` (seconds between requests)
-**Proxy:** `-p http://127.0.0.1:8080`
-**Follow redirects:** `-L`
-**Output:** `-o json` or `-f results,json`
-**Recursion:** `-R 2` (depth)
-
-## When to Use
-
-Use wfuzz when you need payload encoding/transformation (its encoder system is unmatched).
-For standard directory fuzzing, prefer ffuf (faster, simpler filters). For recursive content
-discovery, prefer feroxbuster.
+wfuzz earns a run for its encoder chains, which transform each payload before it is sent:
+`-z file,<list>,base64@urlencode` chains encoders (`@`), while `-z file,<list>,urlencode-base64`
+sends one request per listed encoder (`-`). That matters once wafw00f has named the WAF and a specific
+encoding layer is the bypass under test (`agent/references/web/waf-bypass-and-safe-testing.md`).
+The second payload's keyword is `FUZ2Z`, the third `FUZ3Z`. wfuzz has no requests-per-second cap;
+pace it with `-t` and `-s` inside the dir-fuzz rate of the `agent/references/recon/rate-calibration.md`
+row.

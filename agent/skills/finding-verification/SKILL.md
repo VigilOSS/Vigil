@@ -6,63 +6,36 @@ origin: Vigil
 
 # Finding Verification — adversarial Phase-5 review
 
-Before a terminal verdict, finish reproduction/evidence documentation on the same finding.
-Use `finding update --agent-id <your-dispatch-id>` for attributed edits and consult its contract
-for same-verifier enrichment; claim changes require fresh review and a consumed receipt cannot
-support another verdict. The shared specialist core owns approval and receipt discipline.
+Receipt, attribution and terminal-verdict rules are in
+`agent/references/specialist-proof-and-scan-lifecycle.md` ("Terminal verdicts and receipts").
 
 ## When to Activate
 
-Load this skill when `vulnerability-analyst` is dispatched in **review mode** (Phase 5,
-`mode=deep-manual` or `mode=root_cause_review`) to verify findings produced by other agents
-**before** exploitation investment. Catching a false positive, a severity inflation, or weak
-evidence here is far cheaper than discovering it after an exploit-developer pass.
+Load it when `vulnerability-analyst` is dispatched in review mode (Phase 5, `mode=deep-manual` or
+`mode=root_cause_review`) to verify other agents' findings before exploitation is invested in them.
+This skill covers findings with a live HTTP/runtime PoC. Source-only `file:<path>:<line>` findings
+belong to `agent/skills/code-finding-verification/SKILL.md`.
 
-This is the **runtime/web** analog of `code-finding-verification/SKILL.md` (which owns
-source-only findings via its five-check protocol). Use that one for `file:<path>:<line>`
-findings; use this one for findings with a live HTTP/runtime PoC.
-
-## Scope your mandate (do not inflate)
-
-You are the adversary of the evidence, not of the finding count. Challenge only what
-affects a finding's **disposition, severity, or reachability**. Do not manufacture new
-findings, re-litigate settled scope, or downgrade on stylistic grounds — a reviewer
-prompted to "find gaps" will invent them. Every disposition you write must cite specific
-counter-evidence or a reproduced result.
-
-## Division of Labor
-
-- **Operator** selects the review scope — all HIGH/CRITICAL plus MEDIUMs with escalation
-  potential get **Tier 1** (full reproduction); every remaining ordinary MEDIUM/LOW gets
-  **Tier 2** (spot-check) — and passes the trust-boundary / threat-model summary, the finding
-  slugs + payloads, and the matching vuln-class skill. See operator-core Phase 5.
-- **You (vulnerability-analyst, review mode)** re-test Tier-1 findings against the live target
-  via `vigil assess kali ...` — you reproduce, you do not merely read the evidence text — then
-  write a disposition per finding and author the report-ready story for the ones that survive.
-  For Tier-2 findings you run the cheaper audit below instead of silently leaving them
-  unreviewed.
+You are the adversary of the evidence, not of the finding count. Challenge only what affects a
+finding's disposition, severity or reachability, and cite specific counter-evidence or a reproduced
+result for every disposition. Don't manufacture findings, re-litigate settled scope or downgrade
+on style; a reviewer told to find gaps will invent them.
 
 ## Review scope is two-tier, not all-or-nothing
 
-Every finding in scope gets *some* adversarial pass — full reproduction is reserved for the
-findings where it earns its cost, not because everything below HIGH/CRITICAL is exempt from
-review:
+The operator picks the review scope (`agent/phases/phase-5-verify.md` step b) and passes the
+trust-boundary summary, the slugs and payloads, and the matching vuln-class skill. Every finding in
+scope gets a recorded check:
 
-- **Tier 1 — full reproduction.** All HIGH/CRITICAL, plus any MEDIUM with escalation potential
-  (chainable into a higher-severity outcome, or a disposition call close enough to the
-  high/medium boundary that a wrong verdict matters). Run the full Methodology below.
-- **Tier 2 — cheap spot-check.** Every ordinary MEDIUM/LOW that isn't Tier 1. Do not skip these
-  in silence. Run the severity↔CVSS band audit (`agent/operator-core.md` "Mandatory Phase-Exit Passes" — `severity` vs.
-  `details.cvss_score` band mismatch) plus a quick evidence-presence sanity check: is there a
-  captured request/response or command output backing the claim, or is `evidence_type` marked
-  `theoretical` without a `chain_required` rationale? This is a few-minute audit, not a re-run of
-  the PoC. A Tier-2 finding that fails either check — band mismatch, missing evidence, or a smell
-  of a stacked self-induced precondition — gets promoted to Tier 1 and run through the full
+- **Tier 1, full reproduction**, for every HIGH/CRITICAL and any MEDIUM with escalation potential:
+  chainable upward, or close enough to the boundary that a wrong verdict matters. Re-test it live
+  through `vigil assess kali ...` (reading the evidence text isn't enough) and run the full
   Methodology.
-
-This tiering is a cost control, not a license to wave Mediums/Lows through: you are still the
-adversary of the evidence, not of the finding count. Tier 2 exists so "cheap" doesn't collapse
-into "unreviewed" — every finding still gets a recorded check.
+- **Tier 2, spot-check**, for the other in-scope findings. Audit the severity↔CVSS band (`severity`
+  vs `details.cvss_score`) and check that evidence is present: a captured request/response or
+  command output, and no `evidence_type=theoretical` without a `chain_required` rationale. A band
+  mismatch, missing evidence or the smell of a stacked self-induced precondition promotes it to
+  Tier 1.
 
 ## Canonical gates — load, do not restate
 
@@ -86,7 +59,7 @@ For each finding under review:
    kill candidate (note transient vs. genuinely-unreproducible). A non-conclusive response
    (validation error short of a real auth decision, a status code with no body captured, an
    `http=000`/connection-failed runtime error) is a **lead, not a verdict** — push it before
-   closing (`agent/rules/hunting.md` §23).
+   closing (`agent/rules/hunting.md` §12).
 2. **Ground severity in the trust boundary.** Using the operator's threat-model summary, decide:
    is the entry point unauthenticated or privileged? Is the input attacker-controlled or
    operator-trusted (config, internal caller)? Reachability and auth-path severity calls depend
@@ -111,13 +84,13 @@ For each finding under review:
 
 ## Dispositions
 
-Write exactly one per reviewed finding (these are the operator-facing verbs, kept in
-operator-core Phase 5 — listed here so the reviewer self-serves them):
+Write exactly one per reviewed finding (the operator-facing verbs from
+`agent/phases/phase-5-verify.md` step d, listed here so the reviewer self-serves them):
 
 - **Confirmed** — reproduced, severity accurate → `vigil assess finding verify <slug> --status confirmed --reason "..." --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
 - **Upgraded** — real, severity understated → `vigil assess finding verify <slug> --status confirmed --new-severity <higher> --reason "..." --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`. `--new-severity` applies to any terminal status, so the re-band and the fresh attestation land in one write; `finding update --severity` first would invalidate the verdict being recorded.
 - **Downgraded** — real, severity overstated → `vigil assess finding verify <slug> --status downgraded --reason "..." --new-severity <lower> --proof-receipt-id <id> --confirm-check-file <confirm-check.json>`
-- **Killed** — a completed counter-check falsifies the claim → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json> --details-inline '{"kill_reason": "...", "kill_check": <1-5>}'`. Both `details` keys are required: `kill_reason` says which check falsified the claim and why, `kill_check` is that check's number. A kill_reason saying the test could not be RUN is `blocked` instead, unless `details.required_followup` names the settling test. When you cannot meet the counter-check bar at all, `--status disputed` is the cheap withdrawal — only `--reason` is required and it still survives a later sweep, so the claim does not come back as `unreviewed`.
+- **Killed** — a completed counter-check falsifies the claim → `vigil assess finding verify <slug> --status false_positive --reason "..." --counter-check-file <counter-check.json> --details-inline '{"kill_reason": "...", "kill_check": <1-5>}'`. Record the rationale in `details.kill_reason` and, optionally, the Methodology check (1-5) that produced the kill in `details.kill_check`. The vulnerability-analyst 8-Question Gate maps onto those checks: `KILL Q1` → 1 (not reproducible), `KILL Q5` → 2 (needs privilege the attacker lacks), `KILL Q7` → 3 (no attacker outcome), and `KILL Q2`/`Q3`/`Q6`/`Q8` → 4 (the C1–C7 gate and its fast kill triggers); a Q4 duplicate is merged, not killed. Without a kill_reason the backend stores your `--reason`. `false_positive` needs a completed counter-check backed by receipts from completed runs, so an experiment that could not run is `blocked` (`--details-inline '{"block_reason": "..."}'`). A kill that still owes a settling test names it in `details.required_followup`; readiness tracks it as `killed_finding_settling_test_outstanding`. When you cannot meet the counter-check bar at all, `--status disputed` is the cheap withdrawal — only `--reason` is required and it still survives a later sweep, so the claim does not come back as `unreviewed`.
 - **Runtime proof owed** — evidence holds but the decisive test belongs to another route or assignment (a local build or harness, or a target this review does not hold) → `vigil assess finding verify <slug> --status pending_runtime_proof --reason "..." --next-test-file <next-test.json>`. The next test is the operator's preparation plan: hypothesis, confirming observation, falsifying observation, and a `local`/`live`/`unknown` route hint. Missing access is `blocked` and a rules-of-engagement wall is `details.roe_blocked` instead (`agent/rules/hunting.md`).
 
 For confirmed/downgraded, the completed `confirm_check` records the attempted
@@ -151,13 +124,11 @@ class of speculative finding, which the operator can fix upstream.
 
 ## Root-Cause Review Mode (Phase 5 → 6 exit)
 
-When dispatched as `mode=root_cause_review`, additionally run the operator's root-cause grouping
-intent: group intentional root/sibling relationships (`vigil assess finding link`), picking the
-root as the broadest attacker-controllable cause. See "Root-Cause Review Mode" in
-`agent/agents/vulnerability-analyst.md`.
+With `mode=root_cause_review`, also walk the confirmed set for root/sibling groups, with the root as
+the broadest attacker-controllable cause. Propose each `vigil assess finding link` as a handoff
+`next_step` for the operator to run (`agent/references/runtime-guides/va-root-cause-review.md`).
 
 ## Extended Resources
 
-- `agent/agents/vulnerability-analyst.md` — 8-Question Gate, Report-ready story gate, Chain-Only List
-- `agent/skills/blind-triage/SKILL.md` — the zero-context pre-submission gate that re-applies the overclaim catalog on the submission bytes (this skill is the in-context Phase-5 version)
-- `agent/skills/code-finding-verification/SKILL.md` — the source-only analog (five-check protocol)
+- `agent/skills/blind-triage/SKILL.md`: the zero-context pre-submission gate that re-applies the
+  overclaim catalog to the submission bytes

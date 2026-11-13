@@ -2,9 +2,9 @@
 
 All prompts in this system — operator doctrine (`agent/operator-core*.md`), role prompts
 (`agent/agents/*.md`), skill definitions (`agent/skills/*/SKILL.md`), shared constraint layers
-(`agent/shared-constraints*.md`), and always-active rules (`agent/rules/*.md`) — follow the
-conventions below, based on
-[Anthropic's prompt engineering guidance](https://docs.anthropic.com/en/docs/build-with-claude/prompt-engineering/overview).
+(`agent/shared-constraints*.md`), and rules (`agent/rules/*.md`, standing or trigger-loaded) — follow
+the conventions below, based on
+[Anthropic's prompt engineering guidance](https://docs.claude.com/en/docs/build-with-claude/prompt-engineering/overview).
 Apply them when writing a new prompt or editing an existing one.
 
 This document has two parts:
@@ -12,7 +12,8 @@ This document has two parts:
 - **[The prompt health ruleset](#the-prompt-health-ruleset)** — the twelve-rule checklist that
   governs every prompt/doc edit. This is the operative gate: run each edit through it.
 - **[Authoring principles](#authoring-principles)** — the foundations the ruleset builds on
-  (positive instructions with reasoning, division of labor, role clarity, checklists).
+  (positive instructions with reasoning, division of labor, role clarity, stating the judgment,
+  assuming generic methodology).
 
 The root [`AGENTS.md`](../AGENTS.md) maintainer guide points here from its **Prompt system flow**
 section. Apply its cross-layer review requirements alongside this ruleset.
@@ -28,9 +29,12 @@ pointed to.
 
 ### 1. Review the complete standing context
 
-Review the role body together with every **MANDATORY** entry in `## Load First`.
-Keep unconditional instructions necessary for every dispatch; give conditional material
-an explicit loading trigger. Do not put frozen file sizes or line-count ceilings in prompts.
+Review the role body together with every **MANDATORY** entry in `## Load First`, and an operator
+core together with the rules it lists as standing. Keep unconditional instructions necessary for
+every dispatch or session; give conditional material an explicit loading trigger. A trigger-loaded
+file is named, with its trigger, in text that is always loaded, so the model knows it exists — for
+an operator core, a `Trigger-loaded rules` list of ``- `agent/...` — <trigger>`` bullets. Do not put
+frozen file sizes or line-count ceilings in prompts.
 
 Run `vigil assess prompt-census` for the advisory structural and approximate-byte view. Pass
 `--read-bytes <n>` when a reader reports a bounded read so the census shows whether that boundary
@@ -38,7 +42,14 @@ missed or cut through the Load First section; this is visibility, never a progre
 
 The census measures the tree named in `prompt_root`. Pass `--prompt-root` to measure a
 checkout rather than the installed agent tree. Exclusive mandatory bundles are measured
-per track; operator cores are measured separately as session context.
+per track. Operator cores are measured separately as session context: the core plus its standing
+rules is the whole-session standing figure, and trigger-loaded rules are listed beside it with their
+triggers and a ceiling for the case where every trigger fires. A role's LOAD-ON-FIRST-USE files and
+their bytes are in `--json` (`trigger_loaded_references`); lazy pointers that name a glob, a
+directory or a run-time skill choice are not measured and are listed by path instead.
+Specialists never load an operator core, so the census reports a `specialist_cites_operator_core`
+advisory for each line of a role prompt or a file it loads that points at one; point that line at a
+specialist-loaded file or drop it.
 
 ### 2. Split Load First into MANDATORY vs LOAD-ON-FIRST-USE
 
@@ -46,7 +57,7 @@ Every role's `## Load First` section separates what is loaded unconditionally fr
 lazily, trigger-gated on the situation that needs it — see `agent/agents/recon-specialist.md`
 (`## Load First`) for the canonical shape: a **MANDATORY (before any work)** list and a
 **LOAD-ON-FIRST-USE (lazy)** list where each entry states the trigger inline (e.g. "when you run
-the L1 ffuf pass (step 6)"). A file that only a subset of dispatches ever need belongs in the lazy
+the L1 ffuf pass"). A file that only a subset of dispatches ever need belongs in the lazy
 list with its trigger named, not in MANDATORY by default.
 
 ### 3. Give each rule an owner
@@ -55,9 +66,9 @@ Keep procedures and contracts in their owning files, with short pointers from ca
 A brief reminder can be useful at a decision point, or necessary when separate roles do not
 load the same source. Verify that every affected role still receives the rule before deleting
 a copy. Avoid repeating full procedures or persuasive framing. For example, the cross-family pointer for
-context-isolation, the Contract-First Rule, finding-recording format, and closing-sequence wrapper is:
+context-isolation, contract reads, finding-recording format, and closing-sequence wrapper is:
 
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 Write the owning rule for the agent doing the work now, not as repository archaeology. Historical
 mechanisms, superseded names, migration rationale, and commentary addressed to a future editor
@@ -120,9 +131,10 @@ privileged operations or input boundaries traced, the unresolved ones, and the e
 closure. Never tell the agent how many bugs exist or imply that a clean target must contain a
 finding; unknown facts remain unknown.
 
-Per the **Markdown prompt/doc testing policy** in [`AGENTS.md`](../AGENTS.md), prompt/doc health
-(including standing-context review) is enforced as a human authoring checklist plus, at most,
-an advisory WARN — never a blocking CI wording test. A wording or line-count assertion that fails
+Per the **Prompt system flow** section of [`AGENTS.md`](../AGENTS.md) (test executable contracts
+and structural invariants, never Markdown wording), prompt/doc health (including standing-context
+review) is enforced as a human authoring checklist plus, at most, an advisory WARN — never a
+blocking CI wording test. A wording or line-count assertion that fails
 the build turns normal prompt editing into fixture maintenance and rewards preserving stale
 phrasing over improving the instructions; keep any automated signal non-blocking.
 
@@ -149,7 +161,7 @@ otherwise the rollout re-creates the exact duplication Rule 3 exists to kill.
 
 ## Authoring principles
 
-These four principles are the foundation the ruleset above enforces. Reach for them whenever a
+These five principles are the foundation the ruleset above enforces. Reach for them whenever a
 prompt is tempted toward a prohibition list or an ambiguous instruction.
 
 ### Positive instructions with reasoning
@@ -190,8 +202,22 @@ the model's behavior without requiring prohibition lists. Example: *"You are the
 vulnerability analyst for source code. You receive pre-built context slices and your job is to
 determine whether an attacker controlling the identified inputs can cause harm."*
 
-### Checklist format for verification
+### State the judgment; don't restate what a command enforces
 
-Use markdown checkboxes for pre-work and pre-output verification steps. Checklists are more
-reliable than prose because the model can evaluate each item independently rather than holding a
-paragraph of conditions in mind at once.
+A prompt earns its place by carrying the judgment a command cannot make: which evidence is decisive,
+when a lead is dry, what a negative has to name. When a CLI verb already refuses a malformed or
+premature write, point at the command and let its refusal speak; a checklist that re-lists the
+refusal's conditions doubles the standing load, drifts from the code, and teaches the model to tick
+boxes instead of deciding. Write the decision the agent has to make, say why it matters in a clause,
+and name the command whose output settles the mechanics — for example "Read
+`vigil assess contract <verb>` before hand-authoring a payload for a verb you haven't used this
+session; a refusal prints the section you need" rather than a field-by-field pre-write checklist.
+
+### Assume generic methodology; keep only what is hard to find
+
+The models running these prompts already know standard technique: common payload families, header
+lists, OWASP classes, how a timing oracle works. Cut that. Keep what a strong practitioner could not
+recover on their own: Vigil-specific mechanics and verbs, engagement-calibrated notes, specific
+bypasses that took real work to find, and the evidence bar this system holds findings to. Material
+that is valuable but needed only on some dispatches moves to an on-demand reference or skill
+appendix, named with its trigger from the text that is always loaded.

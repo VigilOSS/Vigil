@@ -10,6 +10,21 @@ source: Custom — compiled from the Aura framework, Salesforce platform documen
 
 Use these payloads after `vendor-platform-enum/SKILL.md` triggers on a Salesforce Aura / Lightning fingerprint. The Aura endpoint accepts a single POST shape; the action set inside the envelope determines whether you are doing namespace enumeration, tenant-singleton reads, chain walks, or IDOR boundedness tests.
 
+## Fingerprint markers
+
+`/_slds/` asset prefix; `data-aura-rendered-by` / `data-aura-class` / `data-aura-namespace`
+attributes; scripts from `s.cdn.salesforce.com`, `lightning.force.com`, `force.com`; form fields
+`aura.token`, `aura.context`, `aura.pageURI`; paths `/s/`, `/communities/`, `/sfsites/c/aura`,
+`/aura?…`; headers `X-SFDC-Request-Id`, `X-Sfdc-Page-Cache-Fingerprint`. Trigger: any marker plus
+a 200 from `/aura?aura.ApexAction=…` or `/aura?other.aura.token=…`.
+
+## Managed-package fingerprint
+
+Managed packages namespace custom fields and SObjects as `<PKG>__<Field>` (e.g.
+`npe01__SystemAccountProcessor__c`, `npsp__Batch_Number__c`). Search leaked `ContentVersion`,
+`StaticResource`, `Document` and `Attachment` bodies and describe output for `<PKG>__`; each
+installed package's known-issue list seeds exploit hypotheses.
+
 ## Aura POST envelope
 
 Every probe targets the same path (`/aura?aura.ApexAction.execute=1`, `/aura?other.aura.token=...`, or the `/sfsites/c/aura` variant) with the same body shape. The server is strict — one wrong field name and the response is a generic `aura:invalidSession` error that hides whether the SObject was readable.
@@ -79,10 +94,10 @@ A typical chain walk runs 3-5 hops before terminating on a 401/403 or looping to
 
 ## Bounded-vs-systemic IDOR test
 
-Take one leaked `recordId` (e.g., the `User` Id from a `LastModifiedById` walk). Flip the last character and re-issue `getRecordWithFields`. Two outcomes:
+Salesforce 18-character Ids end in a case-safe checksum, so a mutated Id is malformed and always fails: that tells you nothing. Test enumerability with a real second record instead — an unfiltered list action for the SObject (e.g. a list-view or related-list Aura action), or a second Id harvested from another leaked record's lookup fields:
 
-- **Bounded** — adjacent Id returns `INSUFFICIENT_ACCESS_OR_READONLY` or `NOT_FOUND`. The leak surface is the singleton + chain-walk graph.
-- **Systemic** — adjacent Id returns 200 with a different record. Severity escalates to tenant-wide enumeration.
+- **Bounded** — list actions are refused and only Ids reached through the chain walk read. The leak surface is the singleton + chain-walk graph.
+- **Systemic** — a list action returns records you were not pointed at, or every harvested Id of that SObject reads. Severity escalates to tenant-wide enumeration.
 
 Record the boundedness verdict in the finding's `details.bounded_or_systemic` field — the verifier and report-writer cannot reconstruct it later.
 

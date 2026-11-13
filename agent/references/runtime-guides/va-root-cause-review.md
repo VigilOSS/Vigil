@@ -1,6 +1,6 @@
 # Root-Cause Review Mode (Phase 5 → 6 exit)
 
-This is a **separate mode** from the Phase 5 verification work above. Phase 5 verification validates individual findings (unreviewed → verified / disputed / downgraded / killed). The root-cause review runs AFTER verification, walks the confirmed-finding set as a group, and surfaces three things the per-finding verification cannot:
+Phase 5 verification settles individual findings. The root-cause review runs after it, walks the confirmed-finding set as a group, and surfaces three things the per-finding verification cannot:
 
 1. Root-cause links that should be drawn between confirmed findings (so blast radius is visible to the report-writer)
 2. Findings whose PoC is missing the prerequisites exploit-developer will need (captured tokens, replayed credentials, intermediate state)
@@ -12,14 +12,14 @@ Inputs to consult:
 
 - `vigil assess finding list --status active --verification-status confirmed --json` — confirmed-finding set
 - `vigil assess finding list --root-cause <slug> --json` — the root-cause grouping for a candidate root slug
-- For each finding: read parsed `details` for `poc_request` / `poc_response` / `chain_required` / `evidence_type`
+- For each finding: `vigil assess finding get <slug>` for parsed `details` (`poc_request` / `poc_response` / `chain_required`); `evidence_type` is on the list row
 
 Review checklist (emit one line per gap, naming the finding slug + the missing element):
 
 - [ ] Each confirmed finding evaluated for `finding link` against at least one other confirmed finding when a shared code path / shared auth boundary / shared input vector is plausible. Group obvious siblings as roots even if no one has run `finding link` yet.
 - [ ] Findings that should be grouped under one root cause but currently sit independent are surfaced — propose the `finding link` command in the handoff `next_step`. `--effect` defaults to `eliminates_attack_path`, which groups without claiming anything about what the root fix retires, so a plain grouping proposal needs no effect argument. Name `--effect eliminates_finding` only when the root fix genuinely retires the sibling, and say why: on a confirmed or downgraded sibling that claim raises an independent claim review and a report blocker with it.
 - [ ] Each finding's PoC carries chain-relevant prerequisites: captured token id (in `credentials` table via `details.credential_id`), replayed credential confirmation, intermediate state needed to reach the vulnerable step. If a prerequisite is missing, recommend the operator re-dispatch VA in standard mode to capture it.
-- [ ] Each finding's stated attacker outcome (per the Dispatch Completion Gate in `agent/operator-core.md`) is concrete enough that exploit-developer can build on it without re-deriving the exploitation step.
+- [ ] Each finding's stated attacker outcome is concrete enough that exploit-developer can build on it without re-deriving the exploitation step.
 - [ ] Every `details.chain_required=true` flag has an actual exploit-developer dispatch recorded against the slug — no orphan chain-required flags reaching the exploit phase.
 
-Output: backend handoff via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with per-finding gaps. Each `next_step` names the specific dispatch to fire (role, finding slug, capture target). Do NOT run `finding link` or re-dispatch from inside review mode — those are operator decisions. Review mode is read-only assessment so the operator can sequence the missing dispatches deliberately before Phase 6.
+Output: backend handoff via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` with per-finding gaps. Each `next_step` names the specific dispatch to fire (role, finding slug, capture target). Linking and re-dispatching are the operator's decisions, so review mode stays read-only and the operator can sequence the missing dispatches before Phase 6.

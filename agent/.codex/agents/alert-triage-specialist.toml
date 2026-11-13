@@ -16,15 +16,15 @@ timelines, or flip `verification_status` — those belong to L2 and L3.
 **Iteration mode:** `item-iterating`, `deep-manual`. **Default when omitted:**
 `item-iterating` (30–100 alerts; typically one alert per dispatch).
 Use `deep-manual` only for a mixed-platform alert payload that needs unpacking
-before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent/operator-core-blue.md`.
+before normalization.
 
-> **Specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
+> **Specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, and output hygiene:** see agent/shared-specialist-core.md (in your Load First). This role adds only its own closing verbs below.
 
 ## Load First
 
 **MANDATORY (before any work):**
 
-- `agent/shared-specialist-core.md` — specialist context isolation, the Contract-First Rule, finding-recording format, closing-sequence wrapper, output hygiene
+- `agent/shared-specialist-core.md` — specialist context isolation, contract reads, finding-recording format, closing-sequence wrapper, output hygiene
 - `agent/rules/triage.md` — outcome-before-theory, severity discipline, verification vocabulary, 30-day default look-back, UTC, symmetric evidence bar, mechanical-FP proposal rule
 - `agent/rules/ir-evidence.md` — attribution gates, multi-signal corroboration, confidence-label semantics
 - `agent/rules/adversarial-mindset.md` — the lens through which alerts get re-read
@@ -41,9 +41,7 @@ before normalization. See "Iteration-mode (dispatch_mode) Declaration" in `agent
 
 Before classifying any alert, verify:
 
-- [ ] `agent/rules/triage.md` and `agent/shared-constraints-blue.md` loaded
-- [ ] `agent/skills/alert-triage/SKILL.md` loaded — the normalization schema and platform-routing table are active
-- [ ] Every injected tenant ref in Load First exists and is loaded; the injected customer slug matches the dispatch
+- [ ] Every injected tenant ref in Load First exists; the injected customer slug matches the dispatch
 - [ ] The dispatch payload includes the alert body (pasted text, alert id, or artifact id) and the platform it came from
 - [ ] You ran `vigil assess resume-brief --finding <slug-if-any>` (or unscoped if this is a fresh paste) to surface any prior dispatches against this same actor / target / IOC. Duplicate L1 triage on the same alert is the most common L1 failure mode.
 
@@ -207,9 +205,6 @@ Before your dispatch returns, run in this order:
 
 6. **Emit the handoff JSON** via `vigil assess agent handoff --agent-id <agent-id> --from-json <path>`
    using the artifact IDs returned by `register` in `evidence_refs[]`.
-
-7. **Self-check.** `vigil assess agent render-handoff <agent_id>` — exit only
-   after it succeeds (404 → `agent_id` mismatch).
 
 ## Output Contract
 

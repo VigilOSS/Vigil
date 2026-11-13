@@ -1,17 +1,18 @@
 # Code Phase 1 — Classify + Map
 
-**Read-on-phase-entry.** When you ENTER Code Phase 1 (Classify + Map), Read this doc before
-dispatching `code-architect`, and re-read it on a method re-anchor. It carries the full
-`code-architect` dispatch shape (what to provide, the six required deliverables plus one optional
-historical-CVE artifact), the on-return recording
-commands, the pre-transition coverage-gap review, and the Phase 1 exit gate. Cross-phase machinery —
-the Core Loop, the Phased mindset flow (code) (which sets `code-architect`'s survey lens), the Agent
-Roster, and the Dispatch Context Template / Pre-Dispatch Checklist — stays in
-`agent/operator-core-code.md`; this doc does not restate it.
+**Read-on-phase-entry.** Read this doc before dispatching `code-architect` and re-read it on a
+method re-anchor. It carries the architect dispatch shape and deliverables, the on-return recording,
+the coverage-gap review, and the exit gate. Cross-phase machinery (Core Loop, mindset flow, roster,
+Dispatch) stays in `agent/operator-core-code.md`.
 
 ### Phase 1: CLASSIFY + MAP
 
 Dispatch `code-architect` with `agent/skills/code-architecture-mapping/SKILL.md`.
+
+On a large repository you may split the survey: dispatch one `code-architect` per top-level module or
+directory in parallel, each with its subset of the file list, then one more to assemble the
+cross-module call graph and attack hypotheses from their outputs. The hunt gate still waits until every
+admitted file is classified and queued.
 
 Provide:
 - The Code Source Identity block from `agent/shared-constraints-code.md`; the sealed
@@ -36,7 +37,17 @@ graph and attack hypotheses provide navigational guidance for hunters. The file 
 accounts for every admitted file; classification controls dispatch order, never whether a file
 disappears from the review ledger.
 
-Use the helper contracts as the durable shape source before authoring or reviewing Phase 1 machine artifacts: `vigil assess contract code-record classify`, `vigil assess contract code-record modules`, `vigil assess contract code-record threat-model`, and `vigil assess contract code-dispatch`. Point dispatches at those contracts instead of embedding copied JSON templates, because the CLI contract stays aligned with backend validation and catches field-name drift.
+The Phase 1 machine artifacts are shaped by `vigil assess contract code-record classify`, `code-record
+modules`, `code-record threat-model`, and `code-dispatch`. Point dispatches at those contracts rather than embedding copied JSON templates, which drift
+from backend validation.
+
+**Deployment and framework context.** Register relevant infrastructure or framework source as sealed
+reference repositories and include their roots in the dispatch context. Specialists may read and
+cite those roots while the assignment still names the reviewed subject and finding scope. Use
+`code-ingest --include-path` when deployment configuration belongs in the selected source corpus;
+inspect the exclusion manifest for an unexpectedly absent path. Establish deployment-dependent
+impact facts from those sealed references, or state the unresolved assumption before rating the
+finding, so specialists examine the configuration instead of inheriting an operator's thesis.
 
 **The dependency picture is part of the map.** `vigil assess code-dependencies` reconciles manifests, lockfiles, build configuration and vendored trees against what the build actually ships, and reports what it could not resolve as named gap codes rather than as silence — run `vigil assess contract code-dependencies` for the gap roster. Dispatch it with `agent/skills/dependency-analysis/SKILL.md`, which owns the judgment: which gaps are worth chasing, and how a declared dependency differs from a shipped one. A component the reviewed project activates but never declares is exactly the shape this catches and classification alone does not.
 
@@ -47,7 +58,7 @@ Use the helper contracts as the durable shape source before authoring or reviewi
    CALLBACK-DATA, ENV-VARIABLE, SERIALIZED-DATA, EXEC-POLICY). Each record must include backend `file_id`;
    `file_path` is helper context, not the primary key.
 
-2. **Module map** -- logical groupings of related files. Same as before.
+2. **Module map** -- logical groupings of related files.
 
 3. **Threat model** -- per-module product surface profile (`application/service`,
    `library/framework`, `CLI`, `plugin/extension`, or `mixed/unknown`) with sealed evidence;

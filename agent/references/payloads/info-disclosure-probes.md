@@ -1,5 +1,5 @@
 ---
-description: Standard endpoints checklist (/metrics, /.env, /actuator, cloud metadata)
+description: Standard paths checklist (framework debug and admin endpoints, /.env and config files, manifests, VCS, backups)
 skill: info-disclosure-testing
 source: Custom — compiled from security research and common patterns
 ---
@@ -120,6 +120,9 @@ source: Custom — compiled from security research and common patterns
 /Dockerfile
 ```
 
+Exposed key material: `/keys/`, `/certs/`, `/.ssh/` (`id_rsa`, `authorized_keys`), and `*.pem` /
+`*.key` beside the config files above.
+
 ### Package Manifests (Dependency Enumeration)
 
 ```
@@ -169,120 +172,5 @@ source: Custom — compiled from security research and common patterns
 /*~
 ```
 
-## Cloud Metadata Endpoints
-
-### AWS (EC2)
-
-```bash
-curl http://169.254.169.254/latest/meta-data/
-curl http://169.254.169.254/latest/meta-data/iam/security-credentials/
-curl http://169.254.169.254/latest/user-data
-curl http://169.254.169.254/latest/dynamic/instance-identity/document
-```
-
-### GCP
-
-```bash
-curl -H "Metadata-Flavor: Google" http://169.254.169.254/computeMetadata/v1/
-curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/instance/service-accounts/default/token
-curl -H "Metadata-Flavor: Google" http://metadata.google.internal/computeMetadata/v1/project/project-id
-```
-
-### Azure (IMDS)
-
-```bash
-curl -H "Metadata: true" "http://169.254.169.254/metadata/instance?api-version=2021-02-01"
-curl -H "Metadata: true" "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://management.azure.com/"
-```
-
-### DigitalAcme
-
-```bash
-curl http://169.254.169.254/metadata/v1/
-curl http://169.254.169.254/metadata/v1/id
-```
-
-### Kubernetes
-
-```bash
-curl https://kubernetes.default.svc/
-cat /var/run/secrets/kubernetes.io/serviceaccount/token
-cat /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
-curl -k https://kubernetes.default.svc/api/v1/namespaces
-```
-
-## Error / Stack Trace Triggers
-
-```
-# Trigger 500 errors to leak stack traces
-GET /api/user/../../../../etc/passwd
-GET /api/user/undefined
-GET /api/user/null
-GET /api/user/-1
-GET /api/user/9999999999999999999999
-GET /api/user/' OR 1=1--
-POST /api/user Content-Type: application/json   {"id": []}
-POST /api/user Content-Type: application/json   {"id": {"$gt": ""}}
-GET /api/user/%00
-GET /api/user/%s%s%s%s%s
-
-# Force different Content-Type
-POST /api/endpoint
-Content-Type: application/xml
-<test/>
-
-# Trigger debug mode
-GET /api/?debug=true
-GET /api/?test=true
-GET /api/?trace=true
-```
-
-## HTTP Headers to Check
-
-```bash
-# Check response headers for info disclosure
-curl -s -I http://target.example/ | grep -iE "server|x-powered|x-aspnet|x-debug|x-runtime|x-version|x-generator"
-
-# Common revealing headers
-Server: Apache/2.4.41 (Ubuntu)
-X-Powered-By: PHP/7.4.3
-X-AspNet-Version: 4.0.30319
-X-Generator: Drupal 9
-X-Runtime: 0.023456
-X-Debug-Token: abc123
-```
-
-## Robots.txt and Sitemap
-
-```
-/robots.txt
-/sitemap.xml
-/sitemap.xml.gz
-/sitemapindex.xml
-/humans.txt
-/security.txt
-/.well-known/security.txt
-/crossdomain.xml
-/clientaccesspolicy.xml
-```
-
-## Testing Automation
-
-```bash
-# Probe common info disclosure paths
-PATHS=(
-  "/.env" "/.git/config" "/phpinfo.php" "/actuator/env"
-  "/swagger.json" "/robots.txt" "/wp-config.php.bak"
-  "/server-status" "/server-info" "/.svn/entries"
-  "/package.json" "/composer.json" "/elmah.axd"
-  "/trace.axd" "/api-docs" "/config.yml"
-)
-
-TARGET="http://target.example"
-for path in "${PATHS[@]}"; do
-  CODE=$(curl -s -o /dev/null -w "%{http_code}" "$TARGET$path")
-  if [ "$CODE" != "404" ] && [ "$CODE" != "403" ]; then
-    echo "[${CODE}] $TARGET$path"
-  fi
-done
-```
+Cloud metadata endpoints (reached through SSRF or a proxy) are in `agent/references/payloads/ssrf-payloads.md`
+"Cloud Metadata Endpoints"; robots, sitemap and the other well-known files are in `agent/skills/web-recon/SKILL.md` "Step 9".

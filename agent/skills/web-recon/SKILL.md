@@ -8,541 +8,142 @@ origin: Vigil
 
 ## When to Activate
 
-- Beginning of engagement, new domain/subdomain, need tech stack before deeper testing
-
-## Tools
-
-The recon methodology runs the Default ordering against every live in-scope host for
-unknown internet-facing HTTP targets. The ordering is the default heuristic, not a
-non-negotiable lock — see "Declare-alternate-ordering" below for when an alternate
-ordering is the right call. Conditional tools only fire when the fingerprint matches
-their trigger list.
-
-### Default per target (run for every live host, in this order)
-
-Tool order summary: `wafw00f → nmap → httpx → whatweb → nuclei → ffuf → (nikto IF triggered)`.
-
-### Declare-alternate-ordering
-
-The default ordering applies to unknown internet-facing HTTP targets. A specialist MAY
-declare an alternate ordering at dispatch time when the target shape warrants it, and
-proceed without rerunning the default sequence:
-
-- **IP-only scope** (no DNS surface) — `wafw00f` first is wasted; start with `nmap` for
-  port discovery and let the open-port set drive whether HTTP fingerprinting applies at all.
-- **Non-standard port** (everything on `:8443`/`:9000`/etc.) — `httpx` against the explicit
-  port URL precedes `nmap`; the port set is already known.
-- **Internal / no-WAF target** — skip `wafw00f` (no signal); the rate-limit choice falls
-  through to the no-WAF default from `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy".
-- **Reactive sweep on already-fingerprinted stack** — `nuclei` runs against the URL delta
-  without re-running `wafw00f`/`whatweb`; the fingerprint is already in intel.
-
-Record every alternate ordering declaration in `#### Coverage Gaps` (or in a dedicated
-`#### Tool Sequencing` section) with the dispatch-mode and the one-line rationale. The
-declaration is what makes the skip auditable; an undeclared skip remains a hard failure
-of the dispatch.
-
-1. **`wafw00f`** — WAF identification. Run FIRST because the WAF tier drives the rate-limit
-   choice for every later tool (nmap, httpx, ffuf, nuclei). See
-   `agent/references/tools/recon/wafw00f.md` for the WAF-tier rate adjustment table.
-2. **`nmap` port + service scan** — port and service discovery. Use the cautious-tier
-   profile (CDN-fronted / WAF-protected / rate-limited regulated targets) documented in
-   `agent/skills/port-scanning/SKILL.md` when the target is rate-limited or sitting
-   behind shared infrastructure. The follow-up nmap pass is also where TLS SAN
-   expansion, rDNS vendor identification, and per-host port-data assertions land.
-3. **`httpx` fingerprint** — `-tech-detect -title -tls-grab -status-code` for live host
-   confirmation, technology fingerprint, TLS metadata, and status. Drives the conditional
-   nikto trigger evaluation in step 6 (server banner, basic-auth realm, WebDAV indicators).
-   After httpx, check `agent/skills/browser-semantic-analysis/SKILL.md`
-   activation triggers. Load it when the baseline may not represent the
-   browser-visible application.
-4. **`whatweb`** — second-source technology fingerprinting. Cross-validate the httpx
-   `-tech-detect` output; whatweb catches stacks httpx misses (and vice versa).
-5. **`nuclei` with curated templates** — mandatory web-vuln pass. Templates:
-   `-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`.
-   The `http/` prefix scopes the pass to HTTP templates and avoids non-HTTP
-   variants leaking in. The reactive sweep procedure lives in
-   `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep Mode"; this is the
-   web-recon-side reminder that the pass is mandatory, not optional.
-6. **`ffuf` or `feroxbuster` directory fuzz** — minimum L1 wordlist
-   (`/usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt`), tech-extension
-   variants (PHP `.phps,.phtml,.inc`; ASP `.aspx,.config`; Java `.jsp,.do,.action`).
-   Deeper passes live in `agent/skills/directory-fuzzing/SKILL.md`.
-
-### Conditional (fingerprint-gated)
-
-7. **`nikto` on legacy / odd-stack fingerprints** — only run when the httpx fingerprint
-   matches one of the trigger patterns documented in
-   `agent/references/tools/recon/nikto.md` (Apache/2.x, IIS/[67], nginx/1.0-1.10, Siebel,
-   ColdFusion, Tomcat<8, JBoss, WebLogic, WebSphere, Domino, SAP NetWeaver, embedded
-   webserver banners, WebDAV, basic-auth realms, internal/intranet scope). Skip nikto
-   entirely when no trigger fires — nuclei already covers the common-case web-vuln
-   surface.
-
-8. **`aem-hacker` on Adobe Experience Manager fingerprints** — only run when
-   `httpx`, `whatweb`, headers, paths, or nuclei technologies identify AEM
-   (`/crx/`, `/content/dam/`, `/libs/granite/`, `AEM`, `Adobe Experience
-   Manager`). Start with inventory/read-only checks through
-   `vigil assess kali exec`; destructive or exploit modules require a
-   vulnerability-analyst/exploit-developer dispatch and explicit authorization.
-
-Run each sweep synchronously — one blocking `vigil assess kali <verb> … --timeout N` at a time. Specialists do NOT background target traffic or use `vigil assess kali job start` (operator-only; see `agent/shared-constraints.md` §2); a long sweep is handled by a generous `--timeout`. Never use broad `pkill`/`killall` (e.g. `pkill -f nmap`) — it stomps sibling agents' processes in the shared runtime. See
-`agent/references/runtime-guides/kali-cli.md` "Process cleanup discipline" for the full
-pattern.
-
-## Methodology
-
-Treat each fingerprint as a hypothesis, not a trophy. Infer proxy layers, framework choices,
-auth boundaries, and likely privileged workflows from small signals, then hand those
-hypotheses to the next skill or phase for validation.
-
-### Step 0 — WAF Detection (run FIRST)
-
-```bash
-# Single host
-vigil assess kali wafw00f https://TARGET \
-  --technique RECON --intent "WAF tier identification, drives rate-limit choice for later tools" \
-  --probe-kind fingerprint --phase recon --timeout 300
-
-# Multi-host batch
-vigil assess kali wafw00f -i /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
-  --technique RECON --intent "WAF tier sweep across in-scope live hosts" \
-  --probe-kind fingerprint --phase recon --timeout 1200
-```
-
-Map the WAF identity to a rate-limit tier before starting nmap/httpx/ffuf/nuclei:
-
-- **No WAF** → aggressive defaults (nmap `-T4`, httpx default rate, ffuf `-t 40`).
-- **Basic WAF (modsec-rules tier)** → drop nmap rate by 50%, ffuf threads to 20.
-- **CDN-fronted (any major CDN/edge)** → drop nmap to `-T3 --max-rate 200`, ffuf to
-  `-rate 25`, nuclei `-rate-limit 75`.
-- **WAF-protected / cautious-tier (enterprise WAF or high-friction policy target)** →
-  `-T3 --max-rate 100 --max-retries 2 --host-timeout 300s`, ffuf `-rate 10`, nuclei
-  `-rate-limit 25` and `-c 10`.
-
-Full table and detection commands: `agent/references/tools/recon/wafw00f.md`. The canonical per-target rate calibration table is in `agent/references/recon/rate-calibration.md` — the values above pull from that table.
-
-### Step 0b — Egress reputation (operator-run; you review the verdict)
-
-The **operator** runs `vigil assess egress-check` after the recon job's web stage
-populates the live-host set, producing an evidence-backed `egress_decision` and,
-only for a control-live observed blackhole, a blocked-hosts deferral file. **Review
-that verdict** as part of your completeness assessment: repeated 403/000 patterns
-are candidates, not cause proof; `000` means no HTTP answer was observed, and a WAF
-or edge response is inconclusive rather than application reachability. One control
-cannot prove an estate-wide, per-host, or per-route claim. Running nmap, ffuf, and nuclei against a
-blocked egress burns a full dispatch with no signal. If you must sample manually as
-a fallback, this bounded one-shot catches the block once:
-
-```bash
-vigil assess kali exec --technique RECON \
-  --intent "egress reputation sample (CDN-IP-block detection)" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- bash -c '
-REPRS=$(head -10 /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt)
-blocked=0; total=0
-for h in $REPRS; do
-  # curl -w "%{http_code}" prints "000" cleanly on connection failure; no
-  # ||-fallback needed (the fallback would print "000\n000" and break the
-  # comparison below).
-  code=$(curl -sS -o /dev/null -w "%{http_code}" -m 10 "https://$h/")
-  case "$code" in
-    000)
-      # No HTTP answer observed. Cause unknown; exclude from this legacy
-      # percentage rather than pretending it is dead or blocked.
-      ;;
-    403)
-      blocked=$((blocked+1)); total=$((total+1))
-      ;;
-    *)
-      total=$((total+1))
-      ;;
-  esac
-  sleep 1
-done
-if [ "$total" -eq 0 ]; then
-  echo "egress check skipped: no live hosts to sample"
-  exit 0
-fi
-pct=$((blocked * 100 / total))
-echo "egress_block_pct=$pct (blocked=$blocked alive=$total)"
-[ "$pct" -gt 50 ] && echo "WARN: egress reputation blocked on >50% of alive sampled hosts"
-'
-```
-
-If the evidence-backed `egress-check` verdict is `cluster_blackholed`, STOP
-target-facing recon, pause five minutes,
-and re-run the sample. Transient rate-limit shape often clears on its own
-and trips the sweep above the 50% line for one sample window. Only when
-the second sample also stays >50% should you surface the Egress reputation
-checkpoint (numbered choice with the four mitigation options). Methodology,
-the four mitigation options, and the give-up-vs-escalate rule live in
-`agent/references/runtime-guides/cdn-ip-blocking.md`.
-
-Use the supported verb's emitted blocked-hosts file only when it reports an
-observed blackhole; a bare 403 percentage is not sufficient. Subsequent `vigil
-assess ingest endpoints --egress-blocked-hosts <file>` invocations
-defer URLs to those hosts with `cluster_key=deferred:egress-blocked`
-instead of polluting the work buffer.
-
-### Step 1 — Port + Service Scan
-
-```bash
-vigil assess kali nmap-scan --target www.example.com \
-  --ports top-1000 --scripts safe --extra-args "-T3 --max-rate 200 --max-retries 2 --host-timeout 300s" \
-  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_top1000 \
-  --technique RECON --intent "cautious rate (CDN/WAF-fronted) initial nmap pass" \
-  --probe-kind fingerprint --phase recon --timeout 900
-```
-
-Profile selection (see `agent/skills/port-scanning/SKILL.md` for the full list):
-
-- **Lab / unrestricted** → default `-T4`.
-- **Shared infrastructure / unknown WAF tier** → `-T3` (do not assume `-T4` is safe).
-- **Cautious-tier profile (CDN-fronted / WAF-protected / rate-limited regulated targets)**
-  → `-T3 --max-rate 200 --max-retries 2 --host-timeout 300s`.
-- **Multi-host batch** → `-iL <hosts.txt>` with the same rate profile; the per-batch
-  port-data assertion in port-scanning/SKILL.md catches host-timeout failures.
-
-The follow-up nmap pass at a cautious rate routinely surfaces signal that aggressive
-default `-T4` profiles miss: TLS SAN expansion (staging / internal subdomains),
-rDNS vendor identification (CDN / SaaS edge ownership), per-host WAF tier mapping,
-edge-auth identifiers (e.g. CDN-issued access JWTs), and dense API-cluster
-footprints invisible to every other tool. The depth comes from the rate
-calibration, not from extra scripts — defaulting to `-T4` against a regulated or
-CDN-fronted host trips the rate limit and leaves this data uncaptured.
-
-After the scan completes, extract TLS SAN hosts from the nmap output:
-
-```bash
-grep -oE 'DNS:[^ ,]+' /engagements/$ENGAGEMENT_KEY/scans/nmap_top1000.nmap | \
-  sed 's/DNS://' | sort -u > /engagements/$ENGAGEMENT_KEY/scans/nmap_san_hosts.txt
-```
-
-Feed `nmap_san_hosts.txt` back into subdomain enumeration / httpx — TLS SANs
-routinely surface staging hosts and adjacent services that passive sources miss.
-
-### Step 2 — httpx Fingerprint
-
-```bash
-vigil assess kali httpx -l /engagements/$ENGAGEMENT_KEY/scans/live_hosts.txt \
-  -tech-detect -title -tls-grab -status-code -web-server -cl -follow-redirects \
-  -o /engagements/$ENGAGEMENT_KEY/scans/httpx_fingerprint.jsonl \
-  --technique RECON --intent "httpx tech + tls-grab fingerprint" \
-  --probe-kind fingerprint --phase recon --timeout 900
-```
-
-Capture the `Server:` header, basic-auth realm, OPTIONS `DAV:`/`MS-Author-Via`, and
-status-code patterns — those are the trigger inputs for the conditional nikto step.
-
-```bash
-# Compare headers across unauthenticated, error, and alternate routes
-vigil assess kali exec --technique RECON --intent "header diff across routes" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- \
-  curl -sI -L https://TARGET
-vigil assess kali exec --technique RECON --intent "OPTIONS for DAV / methods detection" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- \
-  curl -sI -X OPTIONS https://TARGET
-```
-
-Differences across routes often expose reverse proxies, app servers, framework routing,
-and auth enforcement boundaries.
-
-#### Browser-semantic trigger check
-
-If the httpx/curl baseline may not represent the browser-visible app, load
-`agent/skills/browser-semantic-analysis/SKILL.md` before settling recon coverage.
-Record the baseline command-run id, the browser-mode command-run id or coverage
-gap, and the delta because downstream specialists need the true coverage state.
-
-### Step 3 — whatweb (verify httpx tech)
-
-```bash
-vigil assess kali exec --technique RECON --intent "whatweb deep technology fingerprint" \
-  --probe-kind fingerprint --phase recon --timeout 300 -- \
-  whatweb -a 3 https://TARGET
-```
-
-Cross-validate the httpx `-tech-detect` output. whatweb catches stacks httpx misses
-(legacy ColdFusion banners, classic ASP signatures, niche WebSphere variants); the union
-of httpx + whatweb is the input to the conditional nikto trigger logic.
-
-### Step 4 — Nuclei (mandatory curated template set)
-
-The mandatory invocation lives in `agent/skills/nuclei-scanning/SKILL.md` "Reactive
-Sweep Mode" — run that procedure against the URL delta this step produces (httpx live
-hosts, TLS SAN expansions, vhost-fuzz live hits). The template set:
-
-```
--t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/
-```
-
-Run nuclei reactively after the httpx pass so template hits become intel/finding
-candidates *before* Phase 4 specialists dispatch. Treat the recon-side nuclei sweep
-as required, not as the optional "broad scan before exploitation" of older runbooks.
-
-### Step 5 — Directory Fuzzing (mandatory L1 wordlist + tech extensions)
-
-```bash
-vigil assess kali ffuf -u https://TARGET/FUZZ \
-  -w /usr/share/seclists/Discovery/Web-Content/raft-small-directories.txt \
-  --extra-args "-e .php,.html,.js,.txt,.bak,.old,.conf,.xml,.json,.yml,.env,.log,.sql,.zip -ac" \
-  -o /engagements/$ENGAGEMENT_KEY/scans/ffuf_dirs.json -of json \
-  --technique RECON --intent "L1 directory fuzz with tech-extension variants" \
-  --probe-kind fingerprint --phase recon --timeout 1800
-```
-
-Tech-extension variants by stack:
-- **PHP** — `.phps,.phtml,.inc`
-- **ASP** — `.aspx,.config,.asmx`
-- **Java** — `.jsp,.do,.action`
-- **Generic** — `.bak,.old,.orig,.swp,~`
-
-Deeper passes (L2/L3 wordlists, recursive feroxbuster, SaaS API namespace fuzzing) live
-in `agent/skills/directory-fuzzing/SKILL.md`. The web-recon-mandatory minimum is L1 +
-tech extensions; under-coverage at this step has the same downstream cost as skipping
-nmap.
-
-### Step 6 — Conditional Nikto
-
-Evaluate the trigger fingerprints from `agent/references/tools/recon/nikto.md` against
-the httpx + whatweb output. Run nikto only when at least one trigger fires:
-
-```bash
-vigil assess kali nikto --host www.example.com -ssl \
-  -Tuning x60 -Pause 2 -maxtime 300 \
-  -Format json -output /engagements/$ENGAGEMENT_KEY/scans/nikto_www.json \
-  --technique INFO-DISCLOSURE --intent "nikto on legacy IIS/7.5 fingerprint" \
-  --probe-kind payload --phase recon --timeout 600
-```
-
-Skip nikto entirely when the fingerprint is a modern stack with no trigger match. The
-reactive nuclei pass already covers the common-case surface; running nikto blindly
-duplicates coverage at higher false-positive rate.
-
-### Step 7 — CMS-Specific Probes
-
-When httpx/whatweb identifies a CMS, the targeted probes still fire (these are quick
-and not redundant with nuclei `technologies/`):
-
-```bash
-vigil assess kali exec --technique RECON --intent "CMS detection probes" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  curl -s https://TARGET/wp-login.php -o /dev/null -w "%{http_code}\n"     # WordPress
-  curl -s https://TARGET/wp-json/wp/v2/users
-  curl -s https://TARGET/administrator/ -o /dev/null -w "%{http_code}\n"   # Joomla
-  curl -s https://TARGET/CHANGELOG.txt | head -5                            # Drupal
-  curl -s https://TARGET/readme.html -o /dev/null -w "%{http_code}\n"
-'
-```
-
-### Step 8 — SSL/TLS Analysis
-
-```bash
-vigil assess kali exec --technique RECON --intent "TLS cert SAN/CN/issuer extraction" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  echo | openssl s_client -connect TARGET:443 -servername TARGET 2>/dev/null \
-    | openssl x509 -noout -text \
-    | grep -E "Subject:|Issuer:|Not Before|Not After|DNS:"
-  for proto in tls1 tls1_1 tls1_2 tls1_3; do
-    echo | openssl s_client -connect TARGET:443 -$proto 2>/dev/null \
-      | grep -q "Protocol" && echo "$proto: supported"
-  done
-'
-```
-
-The TLS cert SAN list often exposes adjacent hosts that should be added to the
-engagement's discovered surface.
-
-### Step 8a — TLS / SAN / vhost cross-host
-
-When the per-host TLS-grab in step 8 (and the SAN extraction inside `nmap` / `httpx`
-in steps 1-2) surfaces signals of shared multi-tenant infrastructure — a SAN list
-spanning multiple tenants, a CDN/edge fingerprint, an rDNS pointing at a shared
-platform — load `agent/skills/tls-vhost-correlation/SKILL.md` and run its three
-sub-procedures: Multi-time DNS resolution (split-VIP detection), Cross-host SAN
-collision detection, and vhost-cert mismatch detection. The cross-host view flags
-shared multi-tenant certs, vhost-cert mismatches, and split-VIP load-balanced
-clusters — none of which the per-host tools surface on their own. Run before leaving
-Phase 1 so SAN-discovered subdomains feed back into Phase 1a / Phase 4.
-
-Methodology and recipes live in
-[`agent/skills/tls-vhost-correlation/SKILL.md`](../tls-vhost-correlation/SKILL.md).
-The load-bearing patterns it uses:
-
-```bash
-# Multi-time DNS resolution (split-VIP detection)
-for i in 1 2 3 4 5; do dig +short TARGET_HOST A; sleep 60; done | sort -u
-```
-
-Plus the Cross-host SAN collision counter and the vhost-cert mismatch check —
-mechanics in `agent/references/tools/recon/openssl-sans.md`.
-
-### Step 8b — Vendor-template CSP/CORS re-baseline check
-
-When step 3 (whatweb) or step 4 (nuclei `technologies/`) identifies a vendor
-product (Salesforce Communities, ServiceNow, Drupal, Pexip Infinity, generic
-appliance vendors), re-pull the response headers and grep for placeholder
-literals from the vendor's installer template. A vendor product fingerprint is
-the trigger for this re-baseline pass — the initial recon-pass headers
-established the deployment exists; the re-baseline check examines whether the
-headers reflect the vendor's hardened defaults or the installer-template
-defaults. Run this step before leaving Phase 1.
-
-```bash
-vigil assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template CSP/CORS re-baseline header capture" \
-  --probe-kind fingerprint --phase recon --timeout 30 -- \
-  curl -sSI 'https://TARGET/' \
-  > /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
-
-vigil assess kali exec --technique INFO-DISCLOSURE --intent "vendor-template placeholder grep" \
-  --probe-kind payload --phase recon --timeout 60 -- bash -c '
-  grep -inE "example\.(com|org|net|test)|domain-here\.tld|your-domain\.tld|your\.domain|placeholder|change-?me|REPLACE_ME|TODO|FIXME|localhost|127\.0\.0\.1|::1" \
-    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
-  grep -iE "script-src[^;]*unsafe-inline[^;]*unsafe-eval|script-src[^;]*unsafe-eval[^;]*unsafe-inline" \
-    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
-  grep -iE "script-src[^;]*\bhttps?:\b|script-src[^;]*\bdata:|script-src[^;]*\bblob:" \
-    /engagements/$ENGAGEMENT_KEY/scans/headers_TARGET.txt
-'
-```
-
-The four checks fire together:
-
-1. **Placeholder-literal grep** — `https://example.com`, `https://example.org`,
-   `localhost`, `*.example.org`, `domain-here.tld`, `placeholder`,
-   `your-domain.tld` in any directive of `Content-Security-Policy`,
-   `Access-Control-Allow-Origin`, `Feature-Policy`, `Permissions-Policy`,
-   `X-Frame-Options`. A placeholder surviving into production confirms the
-   operator did not run the vendor's hardening checklist.
-2. **`'unsafe-inline'` + `'unsafe-eval'` in `script-src`** — either alone is a
-   yellow flag; both together inside one `script-src` is a red flag that the
-   policy was generated by a permissive-by-default template.
-3. **Overly-broad wildcards** — `*.amazonaws.com`, `*.cloudfront.net`,
-   `https:` alone, `data:` / `blob:` in `script-src` are XSS-amplification
-   hazards.
-4. **Compare against vendor's published "production hardening checklist"** —
-   most vendors ship a hardening guide that flags exactly these defaults. When
-   one item fires, retrieve the vendor's checklist and verify whether the
-   deployment fails three or more items — the pattern is "the operator skipped
-   the checklist," not the specific directive.
-
-Full grep regexes, the per-vendor known-default snippets (Salesforce
-Communities, ServiceNow, Drupal, Pexip Infinity, Cisco appliance), and the
-sweep helper script live in `agent/references/payloads/csp-default-grep.md`.
-
-### Step 9 — Well-Known Files
-
-```bash
-vigil assess kali exec --technique RECON --intent "well-known file checklist" \
-  --probe-kind fingerprint --phase recon --timeout 120 -- bash -c '
-  curl -s https://TARGET/robots.txt
-  curl -s https://TARGET/sitemap.xml | head -50
-  curl -s https://TARGET/.well-known/security.txt
-  for path in crossdomain.xml clientaccesspolicy.xml humans.txt .well-known/openid-configuration; do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "https://TARGET/$path")
-    [ "$code" != "404" ] && echo "$path -> $code"
-  done
-'
-```
-
-### Step 10 — JS / HTML Surface (deferred to source-analyzer)
-
-```bash
-vigil assess kali exec --technique RECON --intent "JS extraction for source-analyzer handoff" \
-  --probe-kind fingerprint --phase recon --timeout 60 -- bash -c '
-  curl -sL https://TARGET | grep -oE "src=\"[^\"]*\\.js\"" | sed "s/src=\"//;s/\"//"
-'
-```
-
-Surface-level extraction only. Hand JS bundles to source-analyzer for deep route /
-secret extraction — the source-analysis skill has the methodology depth for that pass.
-
-The supervised `vigil assess recon` pipeline runs a bounded automated pass over the
-crawled `.js` assets after the crawl: `vigil assess js-mining` fetches the bundles
-(carrying the program attribution header + per-host rate cap), extracts endpoints
-with jsluice (AST) plus the shipped route patterns, runs a trufflehog secret scan, and
-ingests the recovered routes as `js-extract`. Assess its output (endpoint count,
-any leaked secrets) as part of the recon-completeness verdict; it complements — does
-not replace — the source-analyzer deep pass.
-
-Only queue endpoints that are directly requestable and evidenced by a real response or
-real HTML/form/link extraction. Directory stems, SPA routes, and guessed names should
-stay as follow-up notes or surface candidates, not queue inputs.
-
-### Step 11 — API Surface Discovery
-
-```bash
-vigil assess kali exec --technique RECON --intent "OpenAPI / Swagger / GraphQL endpoint sweep" \
-  --probe-kind fingerprint --phase recon --timeout 120 -- bash -c '
-  for path in /swagger.json /openapi.json /api-docs /swagger/v1/swagger.json /v2/api-docs /v3/api-docs; do
-    code=$(curl -s -o /dev/null -w "%{http_code}" "https://TARGET$path")
-    [ "$code" != "404" ] && echo "$path -> $code"
-  done
-
-  for path in /graphql /gql /api/graphql /graphql/console; do
-    code=$(curl -s -o /dev/null -w "%{http_code}" -X POST "https://TARGET$path" \
-      -H "Content-Type: application/json" -d "{\"query\":\"{__typename}\"}")
-    [ "$code" != "404" ] && echo "$path -> $code"
-  done
-'
-```
-
-### Step 12 — Recon-to-Hypothesis Conversion
-
-- Reverse-proxy plus framework leakage: test for route normalization, cache confusion,
-  and trust-boundary mistakes.
-- Auth-protected admin or internal-looking routes: treat them as realistic escalation
-  paths, not dead ends.
-- Error traces, version strings, or verbose debug hints: validate in stages before
-  attempting full exploitation.
-- Reused cookie scope, shared API prefixes, or odd host routing: look for cross-app
-  chains and auth-context drift.
+- Beginning of engagement, a new domain/subdomain, or a stack that needs fingerprinting before
+  deeper testing.
+
+Exact invocations: `agent/references/recon/web-recon-commands.md` (load when you run a step);
+`vigil assess list-references --skill web-recon` lists per-tool references (plus
+`agent/references/tools/recon/{nmap,katana}.md`, `agent/references/tools/fuzzing/ffuf.md`,
+`agent/references/payloads/info-disclosure-probes.md` for those steps).
+
+## Ordering
+
+Default per live host on unknown internet-facing HTTP targets:
+`wafw00f → nmap → httpx → whatweb → nuclei → ffuf → (nikto, aem-hacker IF triggered)`.
+
+Declare an alternate ordering when the target shape warrants it, and record it with a one-line
+rationale under `#### Coverage Gaps` (or `#### Tool Sequencing`); an undeclared skip is a
+dispatch failure, a declared one is auditable:
+
+- **IP-only scope** — start with nmap; the open ports decide whether HTTP fingerprinting applies.
+- **Non-standard ports** — httpx against the explicit port URLs before nmap.
+- **Internal / no-WAF target** — skip wafw00f; use the Origin / single-server row of
+  `agent/references/recon/rate-calibration.md`.
+- **Reactive sweep on an already-fingerprinted stack** — nuclei on the URL delta only.
+
+## Steps
+
+Treat each fingerprint as a hypothesis about deployment shape (proxy layers, framework, auth
+boundaries, privileged workflows) and hand it to the next skill or phase.
+
+**Step 0 — WAF detection, first.** The WAF result picks the row of
+`agent/references/recon/rate-calibration.md` that sets the rate for every later tool
+(`agent/references/tools/recon/wafw00f.md` "WAF-tier rate adjustment table" maps result to row).
+
+**Step 0b — Egress reputation (operator-run; you review the verdict).** The operator runs
+`vigil assess egress-check` once the live-host set exists. Review its `egress_decision`: repeated
+403/000 are candidates, not cause proof (`000` = no HTTP answer observed; a WAF/edge response is
+inconclusive; one control proves nothing estate-wide or per-route). On `cluster_blackholed` (at
+least 80% of the sample blackholed with controls live, the `--block-threshold` default), stop
+target-facing recon, wait five minutes and re-run the check; only a second `cluster_blackholed`
+surfaces the operator's Egress reputation checkpoint
+(`agent/references/runtime-guides/cdn-ip-blocking.md` owns the four mitigations and the give-up
+rule). Only an observed blackhole's blocked-hosts file goes to
+`vigil assess ingest endpoints --egress-blocked-hosts <file>` (defers as
+`cluster_key=deferred:egress-blocked`). The appendix's manual sample is a fallback when the
+verdict is missing.
+
+**Step 1 — nmap.** `-T3` on shared infrastructure or an unknown WAF tier; the cautious profile
+above on CDN/WAF-fronted or regulated targets (`agent/skills/port-scanning/SKILL.md` owns
+profiles and the per-host port-data assertion). A cautious follow-up pass routinely captures
+what `-T4` trips over: TLS SAN expansion (staging/internal names), rDNS vendor ownership,
+per-host WAF tier, edge-auth identifiers (e.g. CDN-issued access JWTs), dense API clusters. The
+depth comes from the rate, not extra scripts. Feed nmap SAN hosts back into enumeration/httpx.
+
+**Step 2 — httpx** (`-tech-detect -title -tls-grab -status-code`). Capture `Server:`,
+basic-auth realm, OPTIONS `DAV:`/`MS-Author-Via` and status patterns (the nikto triggers), and
+diff headers across unauthenticated, error and alternate routes to expose proxies, app servers
+and auth boundaries. **Browser-semantic trigger check:** when the curl/httpx baseline may not
+be what a browser sees (interstitial, soft-200, SPA shell, browser-vs-curl delta), load
+`agent/skills/browser-semantic-analysis/SKILL.md` before settling coverage and record the
+baseline and browser command-run ids (or the gap) and the delta.
+
+**Step 3 — whatweb** `-a 3` cross-validates httpx; it catches legacy ColdFusion, classic ASP and
+niche WebSphere banners httpx misses. The union feeds the nikto triggers.
+
+**Step 4 — nuclei, mandatory.** Run `agent/skills/nuclei-scanning/SKILL.md` "Reactive Sweep
+Mode" on the URL delta (live hosts, SAN expansions, vhost hits) with
+`-t http/cves/,http/exposures/,http/misconfiguration/,http/default-logins/,http/exposed-panels/,http/technologies/`,
+so hits become candidates before Phase 4 dispatches.
+
+**Step 5 — directory fuzz, mandatory L1.** `raft-small-directories.txt` plus stack extensions
+(PHP `.phps,.phtml,.inc`; ASP `.aspx,.config,.asmx`; Java `.jsp,.do,.action`; generic
+`.bak,.old,.orig,.swp,~`). Under-coverage here costs as much downstream as skipping nmap. L2/L3,
+recursion and SaaS API namespaces: `agent/skills/directory-fuzzing/SKILL.md`.
+
+**Step 6 — nikto, only on a trigger** from `agent/references/tools/recon/nikto.md` (legacy
+Apache/IIS/nginx, ColdFusion, Tomcat < 8, JBoss, WebLogic, WebSphere, Domino, SAP NetWeaver,
+Siebel, embedded servers, WebDAV, basic-auth realms, intranet scope). Otherwise skip: nuclei
+covers the common surface and blind nikto adds false positives.
+
+**Step 7 — product-specific probes.** On a CMS fingerprint run the quick CMS checks (WordPress
+login and `wp-json/wp/v2/users`, Joomla `/administrator/`, Drupal `CHANGELOG.txt`). On Adobe
+Experience Manager (`/crx/`, `/content/dam/`, `/libs/granite/`) run `aem-hacker` inventory/read-only
+checks through `vigil assess kali exec`; destructive or exploit modules need a VA/exploit-developer
+dispatch and explicit authorization.
+
+**Step 8 — TLS.** Pull SAN/CN/issuer/validity and supported protocol versions per host; SANs are adjacent surface.
+**TLS / SAN / vhost cross-host:** when SANs span tenants, a CDN/edge fingerprint appears, or rDNS
+points at a shared platform, load `agent/skills/tls-vhost-correlation/SKILL.md` (multi-time DNS
+split-VIP check, cross-host SAN collision, vhost-cert mismatch; recipes in
+`agent/references/tools/recon/openssl-sans.md`) before leaving Phase 1.
+
+**Step 8b — vendor-template CSP/CORS re-baseline.** When a vendor product is fingerprinted
+(Salesforce Communities, ServiceNow, Drupal, Pexip Infinity, appliances), re-capture headers and
+check for installer-template defaults: placeholder literals (`example.org`, `localhost`,
+`domain-here.tld`, `your-domain.tld`, `placeholder`) in CSP / ACAO / Permissions-Policy /
+X-Frame-Options; `'unsafe-inline'` and `'unsafe-eval'` together in one `script-src`; broad
+sources (`*.amazonaws.com`, `*.cloudfront.net`, bare `https:`, `data:`/`blob:`) in `script-src`.
+One hit means fetch the vendor's hardening checklist: three or more failed items is the finding
+pattern ("the checklist was skipped"), not the single directive. Regexes and per-vendor known
+defaults: `agent/references/payloads/csp-default-grep.md`.
+
+**Step 9 — well-known files**: robots, sitemap, security.txt, crossdomain/clientaccesspolicy,
+`.well-known/openid-configuration`.
+
+**Step 10 — JS surface.** List bundles and hand them to source-analyzer. The recon job's
+`vigil assess js-mining` stage (jsluice + route patterns + trufflehog, ingested as `js-extract`)
+complements the deep pass; include its endpoint and secret counts in the completeness verdict.
+Queue only endpoints that are directly requestable and evidenced by a real response or real
+HTML/form/link extraction; directory stems, SPA routes and guessed names stay notes or surface
+candidates.
+
+**Step 11 — API surface**: OpenAPI/Swagger paths and GraphQL endpoints (POST `{__typename}`).
+
+**Step 12 — recon to hypothesis.** Proxy + framework leakage → route normalisation, cache
+confusion, trust-boundary mistakes. Auth-protected admin/internal routes → realistic escalation
+paths. Error traces/versions → validate in stages. Shared cookie scope, API prefixes or odd host
+routing → cross-app chains and auth-context drift.
 
 ## What to Record
 
-- Live targets with status codes, titles, and server headers
-- Technology stack (framework, CMS, server, WAF, CDN)
-- WAF tier and the rate-limit profile chosen for downstream tools
-- Authentication mechanism identified
-- API specs discovered (OpenAPI, GraphQL)
-- Admin/management endpoints found
-- TLS certificate details (SANs, CN, issuer) and any hosts surfaced from SAN extraction
-- rDNS vendor identification for shared / CDN-fronted infrastructure
-- JavaScript files queued for source-analyzer
-- Surface candidates for operator ingestion
-- Coverage gaps when any mandatory step did not complete (record explicitly — the
-  recon-specialist's pre-output self-check fails loudly when a mandatory step is missing)
+Live hosts (status, title, server), stack (framework, CMS, server, WAF, CDN), WAF tier and the
+rate profile chosen (every wafw00f result per host, a negative included, as a tech-component row
+with `provenance.waf` and the `command_run_id` of a successful run whose target is that host), auth mechanism, API specs, admin endpoints, TLS details and SAN-surfaced
+hosts, rDNS vendor identification, JS handed to source-analyzer, surface candidates, and a
+coverage gap for every mandatory step that did not complete.
 
 ## Output Contract
 
-The skill produces these structured sections in the recon-specialist's return payload.
-Backend writes (`finding record`, `intel record`, `record-surface`, `vigil assess agent handoff`) are
-the durable record; this contract names what each markdown section should hold so
-downstream specialists can parse the output consistently.
+Backend writes (`finding record`, `intel record`, `record-surface`, `vigil assess agent handoff`)
+are the durable record; these sections make the return payload parseable downstream.
 
 | Section | Holds |
 |---|---|
-| `#### Summary` | One-paragraph engagement-level summary of what was scanned, the WAF tier picked, and the headline take (live host count, WAF tier, vendor-SaaS hits, egress block %). |
-| `#### Live Hosts` | Confirmed live in-scope hosts with status code, title, server banner, and tech-detect output. Source for downstream phases. |
-| `#### Findings` | Decisive findings the recon pass already proved (e.g., exposed admin panel, default-creds login, public bucket). Each must also be recorded via `vigil assess finding record`. |
-| `#### Surface Candidates` | Routes / endpoints / hosts evidenced by a real response or artifact, ready for `vigil assess record-surface`. |
-| `#### Intelligence` | Tech components (framework, CMS, server, WAF, CDN), TLS / SAN intel, rDNS vendor identification, version strings, vendor-template CSP / CORS placeholders, build-version constants — each row landed via `vigil assess intel record <type>`. |
-| `#### Coverage Gaps` | Every mandatory step that did not complete, every conditional step that fired and why, every dispatch-mode-authorized skip with rationale, and every shared-frontend-trigger sub-procedure that was skipped because the trigger did not fire. The operator reads this section to decide whether to re-dispatch. |
-| `#### Recommended Phase 4 Ordering` | Risk-ranked surface clusters and the recommended specialist + skill for each. The handoff renderer feeds this to surface-collector and downstream specialists. |
-
-## Extended Resources
-
-- `agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — canonical per-target rate calibration table (cautious tier, CDN-fronted, WAF-protected, vendor SaaS, origin)
-- `agent/references/runtime-guides/cdn-ip-blocking.md` — egress reputation check, four mitigation options (allowlist / proxy / browser / accept gap), give-up-vs-escalate rule
-- `agent/references/tools/recon/katana.md` — live crawl doctrine, JS-aware defaults, headless escalation, and ingestion handoff
-- `agent/skills/browser-semantic-analysis/SKILL.md` — browser execution decision tree for JS-heavy apps, soft errors, browser-originated APIs, and headless/headed deltas
-- `agent/references/runtime-guides/browser-semantic-evidence.md` — evidence contract and headed-browser escalation rules
-- `agent/references/tools/recon/nmap.md` — port/service discovery, cautious-tier profile, TLS SAN extraction, rDNS, multi-host `-iL`, port-data presence assertion
-- `agent/references/tools/recon/whatweb.md` — web technology fingerprinting depth levels
-- `agent/references/tools/recon/httpx.md` — HTTP probing, tech detection, live host confirmation
-- `agent/references/tools/recon/wafw00f.md` — WAF identification, scan-ordering ("run FIRST"), WAF-tier rate adjustment table, multi-host batch
-- `agent/references/tools/recon/nikto.md` — conditional trigger fingerprint list, `-Tuning x60` profile, cautious-tier rate guidance, evasion modes
-- `agent/references/tools/recon/curl.md` — HTTP request crafting, manual inspection, and `curl_chrome116` baseline notes
-- `agent/references/tools/fuzzing/ffuf.md` — directory/parameter/vhost fuzzing, L1/L2/L3 wordlist escalation
-- `agent/references/payloads/info-disclosure-probes.md` — standard endpoint checklist (/metrics, /.env, /actuator, cloud metadata)
-- `agent/references/tools/recon/openssl-sans.md` — per-host TLS SAN extraction, cross-host SAN collision detection (shared multi-tenant cert flag), vhost / cert mismatch detection, multi-time DNS resolution recipe (powers Step 8a)
-- `agent/references/payloads/csp-default-grep.md` — vendor-template CSP / CORS placeholder-literal grep, unsafe-inline+unsafe-eval check, overly-broad wildcard check, per-vendor known-default snippets, sweep helper (powers Step 8b)
+| `#### Summary` | What was scanned, WAF tier, live-host count, vendor-SaaS hits, egress block %. |
+| `#### Live Hosts` | Live in-scope hosts with status, title, server banner, tech-detect. |
+| `#### Findings` | Findings the recon pass already proved, each also recorded via `vigil assess finding record`. |
+| `#### Surface Candidates` | Routes/hosts evidenced by a real response, ready for `vigil assess record-surface`. |
+| `#### Intelligence` | Stack, TLS/SAN, rDNS vendor, versions, vendor-template CSP/CORS placeholders, build constants — each via `vigil assess intel record <type>`. |
+| `#### Coverage Gaps` | Every mandatory step not completed, conditional steps fired and why, declared skips, untriggered shared-frontend sub-procedures. |
+| `#### Recommended Phase 4 Ordering` | Risk-ranked surface clusters with the recommended specialist + skill. |

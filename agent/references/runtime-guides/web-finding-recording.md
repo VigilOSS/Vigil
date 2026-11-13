@@ -5,73 +5,57 @@ skill: finding-verification
 
 # Web finding recording
 
-**MANDATORY: Every finding MUST be recorded via `vigil assess finding record`.** Never hand-allocate
-finding IDs. Never write findings only to markdown. Never skip the recording step. If you
-produce a finding in any output section, you MUST also call `vigil assess finding record` before your
-task is complete. Findings that exist only in your output text and were not recorded via the
-script are considered lost data.
+Record every finding with `vigil assess finding record` before your task ends. A finding that
+exists only in your output text is lost: the backend allocates IDs under a lock, and every later
+gate, verifier and report reads the recorded row. Findings are always JSON (converted from
+markdown before recording):
 
-The finding-record contract owns allocated ID prefixes and CVSS/severity consistency;
-use the returned slug and the version-matched score.
-
-**Deduplication:** Query existing findings with `vigil assess fetch findings` first. One
-vulnerability class across many parameter values of the same endpoint is **one** finding, not one
-per value — that judgment is yours. The enforced dedup key, what it refuses outright, and
-`--update <slug>` versus `finding link` are in `vigil assess contract finding record`.
-
-Record every finding with:
 ```
 vigil assess finding record <agent-name> <finding-json-file> --agent-id <your-agent_id>
 ```
 
-`--agent-id` is your DISPATCH id from the Runtime Identity block (e.g. `VA-RUN-3`), never the role
-name the positional `<agent-name>` carries. The JSON payload must match
-`schemas/finding-record.schema.json` — findings are always JSON, converted from markdown before
-recording. **Run `vigil assess contract finding record` before your first record**: it owns the
-canonical field list, the `details` keys (CVSS vector/score, remediation, CWE, chain metadata),
-the lifecycle defaults, and the exact consequences of omitting or mis-stating `--agent-id`.
+`--agent-id` is your dispatch id from the Runtime Identity block (e.g. `VA-RUN-3`), not the role
+name carried by the positional `<agent-name>`. `vigil assess contract finding record` owns the ID
+prefixes, the CVSS/severity consistency check, the field list, the `details` keys (CVSS, remediation,
+CWE, chain metadata), lifecycle defaults, the enforced dedup key, and what a missing or wrong
+`--agent-id` does. Use the slug and score it returns.
 
-**The reproduction is yours to record, not the report-writer's to infer.** Write
-`steps_to_reproduce` from what you actually ran, with concrete values (the real session cookie,
-the real object id, the real payload) — you hold the live session and the exact argv, and nobody
-downstream can recover them. `repro_runs` carries the `command-run` ids behind those steps, in step
-order (`vigil assess command-run list --q "<url/param/payload>"` finds ids you did not note);
-`export submission` renders their real argv and reports an id that does not resolve. **A step with
-no run id behind it was imagined, not executed.** Do not sanitize as you write: credentials and
-local state are self-owned (see "Credentials and Local State Are Self-Owned"). Preserve exact
-values through submission; an unbound placeholder — or one placeholder reused
-across different objects — makes the reproduction unfollowable by construction.
+**Deduplication.** Run `vigil assess finding list --search <endpoint path>` first. One vulnerability
+class across many parameter values of the same endpoint is one finding, not one per value; that
+judgment is yours. `--update <slug>` versus `finding link` is in the contract. When your lane reached
+an already-recorded finding on its own and adds no new evidence, record
+`vigil assess finding corroborate <slug> --dispatch <your agent_id> --reason '<how you reached it>'`
+instead of a duplicate. A corroboration is an audited link, not proof: it never changes
+verification status, and a verifier still needs its own receipts.
 
-Record the working proof as readable Markdown while the session is still live: one numbered
-`steps_to_reproduce` string, fenced commands/requests/responses, and annotated
-`details.evidence` that says what each excerpt proves. Large raw captures belong in an artifact or
-`poc_request`/`poc_response`. The report-writer owns final submission editing, but it must not have
-to recover structure or distinguish commands from prose in an unformatted blob.
+**The reproduction is yours to record, not the report-writer's to infer.** You hold the live
+session and the exact argv, and nobody downstream can recover them. Write `steps_to_reproduce`
+from what you actually ran, with concrete values (the real session cookie, object id, payload).
+Put the `command-run` ids behind those steps in `repro_runs`, in step order;
+`vigil assess command-run list --q "<url/param/payload>"` finds ids you didn't note, and
+`export submission` renders their real argv and reports an id that doesn't resolve. A step with no
+run id behind it was imagined, not executed. Keep exact values all the way through submission
+(credentials and local state are self-owned, see `agent/shared-constraints.md` "Credentials and
+Local State Are Self-Owned"). An unbound placeholder, or one placeholder reused across different
+objects, makes the reproduction unfollowable.
 
-When a finding is only reportable as part of a chain, keep it in the same finding lifecycle and set
-`details.chain_required`/`chain_rationale`/`required_followup` — at `finding record` time or later
-via `vigil assess finding update <slug> --details-inline '{...}'` (shapes and enforcement:
-`vigil assess contract finding record`). Never invent a special workflow status for chain-only
-findings.
+Write the proof as readable Markdown while the session is live: one numbered `steps_to_reproduce`
+string, fenced commands, requests and responses, and annotated `details.evidence` saying what each
+excerpt proves. Large raw captures go in an artifact or `poc_request`/`poc_response`. The
+report-writer edits the final submission, but it shouldn't have to recover structure from an
+unformatted blob.
 
-**Proof-not-collection — one minimal sample is sufficient.** When you have proven access
-to a data set, one minimal sample is all the evidence the finding needs.
-Never bulk-pull real user records, credentials, or PII to "demonstrate" a finding —
-volume does not strengthen the proof and only increases harm. The "evidence beats volume"
-rule (`hunting.md §6`) applies at the collection boundary: more records is not more
-proof, and extracting more is the harm, not the demonstration.
+`notes` (up to 20 KB) is an operational replay log. It should hold the replayable commands
+themselves, not a description: the curl with its headers, cookies and body, sqlmap with exact
+flags, the gadget chain and target. Someone reproducing later should need nothing else.
 
-**The `notes` field is an operational replay log and must contain replayable commands** — not prose
-descriptions. Use readable Markdown: short sections or a numbered sequence, with exact commands,
-requests, responses, and tool output in fenced code blocks. Instead of
-"Login to phpMyAdmin with blank password," write the actual command: curl with headers, cookies,
-and POST body; sqlmap with exact flags; ysoserial with gadget chain and target; or whatever tool
-proved the finding. The field allows up to 20 KB. If the operator or another agent needs to
-reproduce the finding later, the notes field alone should be sufficient without re-discovering
-the request format, session tokens, or tool parameters.
+A finding that is reportable only as part of a chain stays in the normal lifecycle with
+`details.chain_required` / `chain_rationale` / `required_followup`, set at record time or later with
+`vigil assess finding update <slug> --details-inline '{...}'`. There is no special status for it.
 
-Every payload in a `#### Findings` block must have been recorded during your session — do not defer
-recording to the operator.
+**Proof-not-collection — one minimal sample is sufficient.** Once you have proven access to a data
+set, one minimal sample is the evidence. Bulk-pulling real user records, credentials or PII adds no
+proof and is itself the harm (`agent/rules/hunting.md` §10).
 
----
-
+Record every finding you report in a `#### Findings` block during your own session rather than
+leaving it to the operator.

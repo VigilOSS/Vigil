@@ -17,29 +17,22 @@ work as done:
   or leaning on a `deferred` / `not_applicable` resolution as if it were closed),
 - before **generating a report** (the Definition-of-Done wind-down).
 
-It is the per-PHASE analogue of `agent/skills/blind-triage/SKILL.md`: blind-triage
-is a per-FINDING QC (it judges one submission's bytes); phase-qc lifts that same
-critic's eye to the **whole phase's coverage, grading, and chains**. Run
-blind-triage on each Medium-or-above finding; run phase-qc once at the boundary.
+It does for a whole phase's coverage, grading and chains what `agent/skills/blind-triage/SKILL.md`
+does for one submission: blind-triage runs on each Medium-or-above finding, and phase-qc runs once
+at the boundary.
 
 ## What it is — and what it deliberately is NOT
 
-- **Advisory, never blocking.** phase-qc emits a miss-list; the operator consumes
-  it and re-dispatches / re-grades / fixes. It does **not** gate a transition. The
-  blocking gates are `check-phase-readiness` / `transition-phase` and blind-triage's
-  recorded-verdict gate — phase-qc complements those, it does not replace them.
-- **Reasons AGAINST the ledger; does NOT recompute coverage.** `vigil assess
-  coverage` is the measured baseline (route counts, `real_app?`, `recorded-verdict?`,
-  the computed coverage-state, `needs_browser_reprobe`). phase-qc reasons **on top
-  of** those numbers; it never re-derives them. If phase-qc and the ledger disagree
-  on a raw count, the ledger wins — the fix is to re-probe so the ledger moves, not
-  to argue with it.
-- **Catches the JUDGMENT a binary gate cannot.** It does **not** re-walk the
-  command-checkable boxes the gate already owns ("does a verdict row exist?", "is
-  the variant-rotation dispatch present?", "is the blind verdict recorded?"). It
-  catches the misses those binary passes are blind to: *only the obvious endpoints
-  were hit*; *this P4 is, impact-if-true, a P2*; *the finding was filed account-gated
-  but the gate self-mints accounts*; *a clean verdict came off a WAF challenge page*.
+- **Advisory, never blocking.** The operator acts on the miss-list. The blocking gates stay
+  `check-phase-readiness` / `transition-phase` and blind-triage's recorded verdict.
+- **Reasons against the ledger; never recomputes it.** `vigil assess coverage` is the measured
+  baseline (route counts, `real_app?`, `recorded-verdict?`, coverage state,
+  `needs_browser_reprobe`). When phase-qc and the ledger disagree on a raw count, the ledger wins,
+  and the fix is to re-probe so the ledger moves.
+- **Catches judgment, not checkboxes.** Leave "does a verdict row exist?" or "is the
+  variant-rotation dispatch present?" to the gate. phase-qc catches what binary passes can't see:
+  only the obvious endpoints were hit; a P4 that is a P2 if true; a finding filed as account-gated
+  where the gate self-mints accounts; a clean verdict that came off a WAF challenge page.
 
 ## Inputs (low-context — bounded projections, never transcripts)
 
@@ -52,7 +45,8 @@ phase's full dispatch transcripts:
 2. **The lanes' handoffs:** enumerate the phase's dispatches with `vigil assess agent
    list` (filter by phase / role), then `vigil assess agent render-handoff <agent-id>`
    for each — the bounded blob (summary, coverage gaps, next steps), NOT the transcript.
-3. **The findings list:** `vigil assess finding list` / `vigil assess fetch findings`
+3. **The findings list:** `vigil assess fetch findings --paginate` (every finding) or a filtered
+   `vigil assess finding list` (every match)
    — slug, severity, status, `canonical_location`, and the `details` story (evidence /
    impact / cvss_vector).
 
@@ -83,6 +77,11 @@ ask the five judgment questions below and emit a miss row whenever the answer
 reveals a gap. Then hand the miss-list back to the operator. After the operator
 re-dispatches, **re-run phase-qc** to confirm the miss cleared (the loop closes
 only when the boundary is clean or every open miss is a recorded, justified deferral).
+
+Before a report, also read the working notes (`notes/*.md` and the engagement-root notes the team
+wrote) and each lane's handoff summary for a finding nobody recorded. A candidate that exists only
+as prose has no ledger row, so no gate sees it; emit it as a `coverage` miss whose redispatch is
+`vigil assess finding record` (or a verifier lane when it still needs proof).
 
 ### The miss-list schema (one row per miss)
 
@@ -157,16 +156,7 @@ A miss that is silently dropped is the failure mode this skill exists to prevent
 
 ## Cross-references
 
-- `agent/skills/blind-triage/SKILL.md` — the per-FINDING QC gate phase-qc extends to
-  the per-PHASE level. blind-triage judges one submission's bytes blind; phase-qc
-  judges a whole phase's coverage / depth / grading / chains. They stack: blind-triage
-  per Medium+ finding, phase-qc once at the boundary.
-- `vigil assess coverage` (operator-core "Read the coverage ledger…") — the measured
-  baseline phase-qc reasons against and never recomputes.
-- operator-core "Closed-surface dead-vs-unfinished re-audit" + "Depth Doctrine" — the
-  `coverage` / `depth` miss source.
-- operator-core "Mandatory Phase-Exit Passes" + Phase-4 "System-level synthesis" — the
-  `chain` miss source.
-- `agent/skills/browser-semantic-analysis/SKILL.md` — the re-probe for `waf-blind` misses.
-- `check-phase-readiness` / `transition-phase` — the binary, blocking gates phase-qc
-  complements; phase-qc is the advisory judgment layer on top, not a second gate.
+- `agent/phases/phase-4-consume-test.md` "Dead vs unfinished" and "Depth Doctrine — Per-Domain VA
+  Fan-Out": where `coverage` and `depth` misses come from.
+- Operator core "Mandatory Phase-Exit Passes" and Phase-4 "System-level synthesis": where `chain`
+  misses come from.

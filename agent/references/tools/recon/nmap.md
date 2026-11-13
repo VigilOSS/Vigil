@@ -1,204 +1,55 @@
 ---
-description: Port/service discovery and enumeration
+description: nmap through the nmap-scan verb — Docker -sT vs -sS and raw-packet limits, one -iL process, SAN and rDNS extraction from scan output, the XML-closure trap and the per-host port-data presence gate
 skill: port-scanning
 ---
 
 # nmap
 
-**Purpose:** Port/service discovery and enumeration
-For live engagement targets, run Nmap via `vigil assess kali nmap-scan` (typed verb, audit-flag-aware).
-Run `vigil assess kali nmap-scan --help` for the live flag set, or `vigil assess contract kali nmap-scan` for the canonical schema and example payload.
+Run as `vigil assess kali nmap-scan` (`vigil assess contract kali nmap-scan` for defaults and an
+example; `agent/skills/port-scanning/SKILL.md` for the canonical runs). Timing comes from the row
+of `agent/references/recon/rate-calibration.md` the wafw00f result picks; only the Lab / CTF row
+runs `-T4`.
 
-## Discovery Scans
+**Docker runtime.** The verb defaults to `-sT` (connect). Raw SYN probes do not pass Docker's
+userland NAT (Docker Desktop/macOS especially), so `-sS` silently returns 0-open on live hosts;
+`--scan-type sS` belongs only on a bridged-network Linux runtime. Everything else that needs raw
+packets has the same limit: `-O`, `-f`, `--source-port`, decoys (`-D`, which also spoofs
+third-party sources and sits outside most ROEs).
 
-Run all discovery scans via `vigil assess kali nmap-scan` — the typed verb passes audit flags and writes the coverage row. Pass the required audit flags (`--technique`, `--intent`, `--probe-kind`, `--phase`, `--timeout`) per `shared-constraints.md §2`. See `agent/skills/kali-exec/SKILL.md` "Examples per verb" for complete invocation profiles.
+**One process.** Scan a host list with one `-iL` process rather than N per-host calls; nmap
+parallelises internally, and extra processes add CPU and audit rows without speed (the skill's
+"Process consolidation"; per-tier cap in `rate-calibration.md`).
 
-Flag reference (used inside the wrapper):
+## SAN and rDNS extraction
 
-**Quick (with host discovery skip):** `--flags "-sV -sC -Pn -T4"`
-**Full port scan:** `--flags "-sV -sC -Pn -T4 -p-"`
-**Top 1000 ports (default):** `--flags "-sV -sC -Pn"`
-**Specific ports:** `--ports 80,443,8080,8443` (typed flag) or `--flags "-p 80,443,8080,8443"`
-**UDP top ports:** `--flags "-sU --top-ports 50 -Pn"`
-
-`-Pn` is required when ICMP is blocked by firewall (common in lab/engagement environments).
-
-## Profile selection — pick before running, not after the timeout fires
-
-Default `-T4` is *not* the right choice for shared infrastructure. Pick the timing flags
-from the WAF tier and the engagement scope. `agent/skills/port-scanning/SKILL.md` carries
-the full table; the load-bearing entries:
-
-- **Lab / unrestricted CTF** → `-T4`. Default speed, no rate cap.
-- **Bug bounty (residential / SMB infra)** → `-T3 --max-rate 500 --max-retries 2`. Drop
-  default `-T4`; shared infra is the common case.
-- **Cautious tier — CDN-fronted / WAF-protected / regulated** → `-T3 --max-rate 200
-  --max-retries 2 --host-timeout 300s`. Enterprise CDN / WAF fronts. The `--host-timeout`
-  is the trap documented under "XML-closure trap" below.
-- **Hardened cautious tier (bot-management / aggressive WAF)** → `-T3 --max-rate 100
-  --max-retries 2 --host-timeout 600s`. Tighter rate, longer per-host budget;
-  bot-management blocks at the edge.
-- **Multi-host batch** → `-iL <hosts.txt>` with the matching rate profile. Pair with the
-  per-host port-data presence assertion to catch host-timeout failures across hosts.
-
-A follow-up nmap pass at the cautious-tier profile routinely surfaces signal that an
-aggressive `-T4` default misses: TLS SAN expansion (staging / internal subdomains),
-rDNS vendor identification (CDN / SaaS edge ownership), per-host WAF tier mapping,
-edge-auth identifiers, and dense API-cluster footprints invisible to every other tool.
-The depth comes from the rate calibration — the default `-T4` profile trips the rate
-limit and leaves the SAN/rDNS data uncaptured.
-
-The canonical per-target rate calibration table lives in
-`agent/references/runtime-guides/dispatch-resource-policy.md` "Recon Dispatch Resource Policy" — the values above pull from
-that table. The same policy section caps concurrent nmap processes at 1 per dispatch
-(consolidate via `-iL`, see "Why one process beats N processes" below).
-
-## Why one process beats N processes
-
-Prefer one nmap process scanning multiple hosts via `-iL hosts.txt` over N parallel
-`nmap host` invocations. Nmap's parallelism is **internal** — `--max-parallelism`,
-`--min-parallelism`, and the `-T<n>` template tune host-and-port concurrency without
-spawning extra processes. Spawning N nmap processes amplifies host CPU per port without
-proportional speedup, and creates N audit rows that look like progress while actually
-competing for the same network/CPU budget.
-
-The full mechanism (and the 2-process concurrency cap that the operator enforces across
-specialists) is documented in `agent/skills/port-scanning/SKILL.md` "Process consolidation".
-
-## TLS SAN extraction
-
-The TLS-grab output that nmap captures during `-sV` against TLS-bearing ports carries
-certificate metadata that surfaces adjacent hosts no other tool sees. Extract SAN hosts
-after the scan completes:
+TLS SANs in the `-sV` output surface staging and internal names; rDNS identifies CDN/SaaS edge
+ownership. Newly found names are intel until admitted to scope (the skill's "Adjacent hosts and ownership").
 
 ```bash
-grep -oE 'DNS:[^ ,]+' nmap_initial.nmap | sed 's/DNS://' | sort -u > nmap_san_hosts.txt
+grep -ohE 'DNS:[^ ,]+' "$DIR"/scans/nmap_initial.nmap | sed 's/DNS://' | sort -u > "$DIR/scans/nmap_san_hosts.txt"
+grep -oE 'Host: [0-9.]+ \([^)]+\)' "$DIR/scans/nmap_initial.gnmap" \
+  | sed -E 's/Host: ([0-9.]+) \(([^)]+)\)/\1\t\2/' | sort -u > "$DIR/scans/nmap_rdns.tsv"
 ```
-
-Feed `nmap_san_hosts.txt` back into subdomain-enumeration / httpx — TLS SANs routinely
-surface staging hosts and adjacent services that passive sources miss.
-
-## rDNS extraction
-
-Reverse DNS reveals shared / CDN-fronted infrastructure ownership. Extract from the nmap
-greppable output:
-
-```bash
-grep -oE 'Host: [0-9.]+ \([^)]+\)' nmap_initial.gnmap \
-  | sed -E 's/Host: ([0-9.]+) \(([^)]+)\)/\1\t\2/' \
-  | sort -u > nmap_rdns.tsv
-```
-
-When rDNS resolves to a third-party vendor or CDN domain, the host is a CDN/SaaS edge
-rather than a primary target — the testing approach changes once you know. Vendor edges
-typically have their own disclosure scope, and origin-server vulns probed through the
-edge often produce false positives.
-
-## Multi-host batch (`-iL`)
-
-Run via `vigil assess kali nmap-scan` with `-iL` passed through `--extra-args` or the typed `--input-file` flag so the audit row records the batch and the scan stays inside the runtime:
-
-```bash
-vigil assess kali nmap-scan \
-  --target placeholder \
-  -iL /engagements/$ENGAGEMENT_KEY/scans/hosts.txt \
-  --ports top-1000 --service-detection \
-  --max-rate 200 --max-retries 2 \
-  -oA /engagements/$ENGAGEMENT_KEY/scans/nmap_batch \
-  --technique RECON --intent "cautious-tier multi-host batch" \
-  --probe-kind fingerprint --phase recon --timeout 1800
-```
-
-Always pair `-iL` with the per-host port-data presence assertion — a single batch can
-contain a mix of hosts that pass and hosts that hit `--host-timeout`, and the naive "did
-the binary finish?" gate cannot tell the two apart.
 
 ## XML-closure trap and the correct port-data presence gate
 
-`grep -c '</nmaprun>' *.xml` shows clean closure even when host-timeout fires mid-flight
-with zero port data captured. **XML closure means the nmap binary exited normally, NOT
-that every host scan finished.** `grep -c "Nmap scan report for $host"` returns 1 even
-when the host scan started and timed out before any port data was captured.
-
-Use the port-data presence check, not XML closure or scan-report line. Two layers, both
-required before declaring a batch complete:
+`</nmaprun>` closure and a "Nmap scan report for" line both appear when a host hit
+`--host-timeout` with no port data captured: closure means the binary exited, not that every host
+finished. A `-iL` batch can mix finished hosts and timed-out ones, so check presence per host. Run
+both layers host-side against `$DIR/scans` before declaring a batch complete:
 
 ```bash
-# Layer 1 — text output (port-data presence)
-for f in scans/*.nmap; do
-  hostname=$(basename "$f" .nmap)
-  open_ports=$(grep -cE '^[0-9]+/(tcp|udp).*open' "$f")
-  finished=$(grep -c "Nmap done" "$f")
-  if [ "$open_ports" -eq 0 ] && [ "$finished" -eq 0 ]; then
-    echo "GAP: $hostname (scan started but timed out — port data empty)"
-  fi
-done
+# Layer 1: nmap's own per-host timeout line in the normal output.
+grep -H "due to host timeout" "$DIR"/scans/*.nmap
 
-# Layer 2 — XML host-status (xmllint XPath)
-for f in scans/*.xml; do
-  port_bytes=$(xmllint --xpath '//host[@status="up"]/ports' "$f" 2>/dev/null | wc -c)
-  [ "$port_bytes" -eq 0 ] && echo "GAP: $f — host up but zero port data (host-timeout fired)"
+# Layer 2: per host in the XML, timed out or up with no <ports> element.
+for f in "$DIR"/scans/*.xml; do
+  xmllint --xpath '//host[@timedout="true" or (status/@state="up" and not(ports))]/address[@addrtype!="mac"]/@addr' "$f" 2>/dev/null \
+    | grep -oE '"[^"]+"' | tr -d '"' | sed "s|^|GAP $f: |"
 done
 ```
 
-Hosts the assertion flags fall into two categories:
-
-1. **Local rate / WAF intercept** — re-queue at the slower retry profile
-   (`-T2 --host-timeout 1500-1800s`, or `-sT` if upstream filtering rejects SYN).
-2. **Upstream filtering kill-evidence** — if the slower retry STILL hits host-timeout
-   with zero port data, that's defensible kill-evidence. Record an intel-note documenting
-   the upstream filtering before moving on. When this pattern recurs across multiple
-   origin hosts in the same scope, each one needs its own intel-note so the report can
-   show the filtered surface explicitly.
-
-The full mandatory assertion + intel-note recipe lives in
-`agent/skills/port-scanning/SKILL.md` "Per-host port-data presence assertion".
-
-## Scan Types
-
-Pass scan-type flags through `--extra-args` on the `vigil assess kali nmap-scan` typed verb, or use `vigil assess kali exec -- nmap ...` when building a complex pipeline not covered by the typed verb. Audit flags are required on both paths.
-
-**TCP connect (runtime default):** `-sT` (full handshake, logged) — the `nmap-scan` verb defaults to this. Required in the Docker runtime: raw SYN probes are not delivered through Docker's userland NAT (esp. Docker Desktop/macOS), so `-sS` silently returns 0-open on live hosts.
-**SYN scan (Linux bridged-network only, needs root):** `-sS` (stealthy, half-open) — opt in with `--scan-type sS` only on a runtime where raw packets traverse the network unchanged.
-**Version detection:** `-sV` with `--version-intensity 5` (0=light, 9=deep)
-**OS detection (needs root):** `-O`
-**Aggressive:** `-A` (combines -O, -sV, -sC, --traceroute)
-
-## NSE Scripts
-
-**Default scripts:** `-sC` (same as `--script=default`)
-**Vuln category:** `--script=vuln`
-**Specific script:** `--script=http-enum`
-**Script args:** `--script-args='http-enum.basepath=/api/'`
-
-Common categories: `auth`, `broadcast`, `brute`, `default`, `discovery`, `dos`, `exploit`, `external`, `fuzzer`, `intrusive`, `malware`, `safe`, `version`, `vuln`
-
-## Speed & Evasion
-
-**Timing:** `-T0` (paranoid) to `-T5` (insane). Default: `-T3`
-**Min rate:** `--min-rate 1000`
-**Max retries:** `--max-retries 2`
-**Fragment packets:** `-f`
-**Source port spoof:** `--source-port 53`
-
-## Output
-
-`-oN file.txt` — normal text
-`-oX file.xml` — XML (for parsing)
-`-oG file.gnmap` — greppable
-`-oA basename` — all formats at once
-
-## Common Port Quick Reference
-
-| Port | Service | Notes |
-|------|---------|-------|
-| 21 | FTP | Check anonymous login |
-| 22 | SSH | Version → CVE check |
-| 25 | SMTP | Open relay check |
-| 53 | DNS | Zone transfer |
-| 80/443 | HTTP/HTTPS | Web application |
-| 139/445 | SMB | EternalBlue, null session |
-| 3306 | MySQL | Remote auth |
-| 3389 | RDP | BlueKeep, NLA check |
-| 5432 | PostgreSQL | Remote auth |
-| 8080/8443 | HTTP alt | Admin panels |
+Each flagged host is either a local rate/WAF intercept (re-queue alone at the slow profile) or,
+when that retry also returns no port data, upstream-filtering kill-evidence that gets its own
+intel note. The retry profile and the note are the skill's
+"Per-host port-data presence assertion".

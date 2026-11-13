@@ -5,133 +5,43 @@ origin: Vigil
 vuln_class: race-condition
 ---
 
-# Race Condition / TOCTOU Testing
-
-> **`vigil assess kali` audit flags:** use `--technique OTHER` (race/TOCTOU has no dedicated enum class; outcomes span double-spend, auth-bypass, and state corruption).
+# Race Condition Testing
 
 ## When to Activate
 
-- Application has single-use actions (coupons, vouchers, invites)
-- Financial operations (transfers, purchases, withdrawals)
-- Voting, rating, or counting mechanisms
-- Inventory or stock management
-- Any operation that should execute exactly once
+- Single-use or limited actions (coupons, gift cards, votes, invites, withdrawals, transfers),
+  check-then-act flows (balance, quota, file, token), or state that settles asynchronously
+  (verification, scanning, initialization).
 
-## Tools
-
-- Burp Suite Turbo Intruder
-- `curl --parallel` (HTTP/2 multiplexing)
-- Custom Python scripts (asyncio + aiohttp)
-- Burp Repeater (send group in parallel)
-- GNU parallel
-
-For current-engagement target requests, execute `curl` through `vigil assess kali exec --` so
-the burst lands in the audit pipeline alongside the audit-flag set you pass. Add explicit
-`Cookie:` or `Authorization:` headers only when intentionally testing alternate-user races or
-session override behavior.
+`--technique RACE-CONDITION`. Run the burst inside one `vigil assess kali exec` call as a named
+identity; for a shell-wrapped burst use `--identity-env A=user_a` and the exported
+`$VIGIL_COOKIE_A`/`$VIGIL_HEADERS_A` (idor-testing "Vigil mechanics"). Techniques and the audited
+burst recipe: `agent/references/payloads/race-condition-payloads.md` (HTTP/2 single-packet,
+HTTP/1.1 last-byte synchronization, Turbo-Intruder-style gating, h2spacex, and the in-runtime
+`curl --parallel` and asyncio bursts); load it before the first burst.
 
 ## Methodology
 
-### 1. Identify Race Condition Targets
+- **Pick the synchronization deliberately.** A curl/xargs burst spreads requests over
+  milliseconds and finds wide windows only; the single-packet / last-byte techniques collapse the
+  window to microseconds. A negative from a wide burst is not conclusive (`agent/rules/hunting.md`
+  §13 needs the technique and a positive control).
+- Standard targets: limit overrun / double spend, TOCTOU on balance, quota, file and token checks,
+  OTP/2FA and rate-limit counters.
+- **Multi-endpoint races:** redeem on one endpoint while checking status on another, apply a
+  coupon and check out together, and **change email while requesting a password reset** (an
+  account-takeover race).
+- **Partial construction:** log in right after registration before verification, access an
+  object before initialization completes, fetch an upload before the AV scan runs.
+- **Indicators:** more than one success where one is expected; duplicate-key or constraint errors
+  in some responses; a 409/500 mix (partial protection); counters or balances off afterwards.
 
-- [ ] Coupon/promo code redemption
-- [ ] Money transfer / payment
-- [ ] Gift card activation
-- [ ] Vote or like functionality
-- [ ] Account creation with unique constraints (email, username)
-- [ ] File operations (read-then-write sequences)
-- [ ] Inventory purchase (limited stock)
-- [ ] Token/OTP validation
+## Proof and cleanup
 
-### 2. Single-Packet Attack (HTTP/2)
-
-- [ ] Prepare N identical requests via curl config file:
-      ```bash
-      # Create config file with 20 parallel POST requests
-      for i in $(seq 1 20); do
-        echo "url = https://target/redeem-coupon"
-        echo "request = POST"
-        echo "data = code=DISCOUNT50"
-        echo "next"
-      done > /tmp/race_config.txt
-
-      # Send all simultaneously via HTTP/2 multiplexing
-      curl --parallel --parallel-max 20 -K /tmp/race_config.txt -o /dev/null -w '%{http_code}\n'
-      ```
-- [ ] Alternative: Python asyncio for precise timing
-      ```python
-      import asyncio, aiohttp
-      async def race():
-          async with aiohttp.ClientSession() as s:
-              tasks = [s.post('https://target/redeem-coupon', data={'code':'DISCOUNT50'}) for _ in range(20)]
-              return await asyncio.gather(*tasks)
-      asyncio.run(race())
-      ```
-- [ ] Count successful responses — more than 1 success = race condition confirmed
-
-### 3. Turbo Intruder Script
-
-- [ ] Use `race-single-packet-attack.py` in Turbo Intruder
-- [ ] Configure: capture request, set N copies, send simultaneously
-- [ ] Analyze responses: count successes vs expected single success
-- [ ] Gate technique: send requests with incomplete body, release all at once
-
-### 4. Limit Overrun Testing
-
-- [ ] Send 20-50 identical requests in parallel
-- [ ] Check if action executed more than once
-- [ ] Example: redeem coupon 50 times → check if discount applied multiple times
-- [ ] Transfer money: send same transfer 20 times → check total deducted vs transferred
-- [ ] Vote: send 50 votes → check if count increased by >1
-
-### 5. TOCTOU (Time-of-Check to Time-of-Use)
-
-- [ ] Identify check-then-act sequences:
-      1. Server checks balance ≥ amount
-      2. Server deducts amount
-- [ ] Race between check and deduction = double-spend
-- [ ] File access: race between permission check and file read
-- [ ] Token validation: race between check and invalidation
-
-### 6. Multi-Endpoint Races
-
-- [ ] Race between different endpoints:
-      - Endpoint A: redeem coupon
-      - Endpoint B: check coupon status
-- [ ] Race between update and read operations
-- [ ] Race state changes: apply coupon + checkout simultaneously
-- [ ] Session race: change email + password reset at same time
-
-### 7. Partial Construction Race
-
-- [ ] Register user → immediately login before email verification
-- [ ] Create object → access before initialization completes
-- [ ] Upload file → access before antivirus scan
-
-### 8. Detection Indicators
-
-- [ ] Multiple 200 responses where only one expected
-- [ ] Database constraint violations in some responses (duplicate key)
-- [ ] Balance or counter inconsistencies after test
-- [ ] Some requests succeed, others get 409/500 → partial protection
-
-### 9. Cleanup
-
-- [ ] Verify actual impact: check database state, balances, counts
-- [ ] Document exact number of successful duplicate actions
-- [ ] Revert test data if possible
-
-## What to Record
-
-- Endpoint and action with race condition
-- Number of parallel requests sent
-- Number of successful duplicate executions — prove the attacker outcome (`agent/rules/hunting.md` §2), e.g., the coupon was redeemed 18 times in a single burst, the discount was applied 18 times reducing the total from $500 to $0, confirmed by checking the order total in the response; the gift card balance of $50 was withdrawn 12 times totaling $600 withdrawn from a $50 balance; the vote count increased by 8 from a single user confirming no server-side uniqueness enforcement
-- Technique used (single-packet, Turbo Intruder, curl --parallel)
-- Business impact (financial loss, integrity violation, privilege escalation)
-- Timing window observed
-- Severity: High (financial) to Medium (logic bypass)
-- Remediation: database locks, idempotency keys, atomic operations, mutex
-
-## Extended Resources
-
-- `agent/references/payloads/race-condition-payloads.md` — HTTP/2 single-packet, limit overrun, multi-endpoint race
+Read back the state (balance, count, order total) and state how many duplicate executions
+succeeded and the window observed; a small burst that shows the duplicate is enough. The strongest
+proof is an impossible end state (a negative balance, two completed redemptions of a single-use
+code) beside a solo-request control in which the same action sent alone is validated correctly, so
+the check exists and fails only under concurrency. Revert test data with an audited
+`--probe-kind cleanup` run. Severity: `agent/references/finding-fp-and-severity-gate.md`. Format:
+`agent/references/runtime-guides/web-finding-recording.md`.
