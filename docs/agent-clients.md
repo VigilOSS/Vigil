@@ -216,6 +216,9 @@ a `native_agent_role_mismatch` advisory. A dispatch already bound to another
 session is left bound there and reported as `dispatch_already_bound`. The
 dispatch row's `actual_model` and `actual_reasoning` stay `unknown`, because
 the backend accepts no client-reported runtime identity.
+When a bound specialist's task returns empty, without a final handoff, or still
+holding code-queue leases, the result also ends with a `Vigil dispatch status:`
+JSON line listing the leases and the exact close, continue and lease commands.
 
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
 is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.

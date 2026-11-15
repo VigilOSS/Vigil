@@ -1,6 +1,6 @@
 // Native web/code adapter. The legacy standard plugin remains Blue-owned.
-import {execFile, execFileSync} from "node:child_process"
-import {readFileSync, realpathSync, writeFileSync, renameSync, existsSync, lstatSync, openSync, closeSync, unlinkSync} from "node:fs"
+import {execFile, execFileSync, spawn} from "node:child_process"
+import {readFileSync, realpathSync, writeFileSync, renameSync, existsSync, lstatSync, openSync, closeSync, unlinkSync, appendFileSync} from "node:fs"
 import {join, dirname} from "node:path"
 import {createHash, randomUUID} from "node:crypto"
 import {promisify} from "node:util"
@@ -8,8 +8,16 @@ import {promisify} from "node:util"
 const execFileAsync = promisify(execFile)
 const PACKET_REFERENCE = /tools\/dispatch-packets\/(\d+)\/([0-9a-f]{64})\.md/g
 const BIND_ATTEMPTS = 3
+// The queue-adoption window `code-dispatch adopt-lease` applies by default.
+const ADOPTION_STALE_MINUTES = 10
+const LEASE_PAGE = 50
+const ACTIVITY_BACKLOG = 200
+const FINAL_HANDOFF = new Set(["ready", "blocked"])
+const shellWord = value => /^[A-Za-z0-9_./:=@%+,-]+$/.test(String(value)) ? String(value)
+  : `'${String(value).replace(/'/g, `'\\''`)}'`
 
-export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT}) => {
+export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VIGIL_CLIENT_CONTEXT,
+  activityTimeoutMs = 60000}) => {
   const states = new Map()
   const readContext = () => {
     if (!bindingPath) throw new Error("No native Vigil context binding")
@@ -112,10 +120,11 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
   // content-addressed packet path. The packet's leading Runtime Identity names
   // the dispatch, and the backend row must agree before the handle is bound.
   const dispatches = new Map()
-  const helper = async (context, args) => {
+  // Most verbs end with one JSON line; `whole` reads a document printed with indentation.
+  const helper = async (context, args, {whole = false} = {}) => {
     const {stdout} = await execFileAsync(context.vigil_cli, args, {cwd: context.workspace, env: env(context),
       encoding: "utf8", timeout: 15000, maxBuffer: 4 * 1024 * 1024})
-    return JSON.parse(stdout.trim().split("\n").at(-1))
+    return JSON.parse(whole ? stdout : stdout.trim().split("\n").at(-1))
   }
   const failure = error => String(error.stderr || error.message || error).trim().slice(-500)
   const packetIdentity = (context, id, sha256) => {
@@ -197,16 +206,102 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     return record
   }
   // The operator sees the task result, never the child's system prompt.
-  const reportDispatch = async output => {
-    const session = output?.metadata?.sessionId
-    if (typeof session !== "string" || !dispatches.has(session)) return
-    const record = await dispatches.get(session)
+  const reportDispatch = async (output, record) => {
     if (record.reason === "no_dispatch_packet" || record.reported) return
     record.reported = true
     const {reported, attempts, ...shown} = record
     output.output = `${output.output ?? ""}\n\nVigil dispatch binding: ${JSON.stringify(shown)}`
       + (["bound", "already_bound"].includes(record.status)
         ? "\nThis handle is recorded; run `agent bind-client-handle` only to correct it." : "")
+  }
+  const vigilCommand = (context, ...args) => [context.vigil_cli, "assess", ...args].map(shellWord).join(" ")
+  // The same reading OpenCode's renderer applies to a task result.
+  const taskResultEmpty = text => {
+    const value = String(text ?? "")
+    const wrapped = /<task_result>\s*([\s\S]*?)\s*<\/task_result>/.exec(value)
+    return !(wrapped ? wrapped[1] : value.split("\n").filter(line => !line.startsWith("task_id:")).join("\n")).trim()
+  }
+  // A missing handoff is a failed point read that `render-handoff` confirms with
+  // its documented exit 2; any other failure leaves the handoff unverified.
+  const readHandoff = async (context, agentId) => {
+    try {
+      const row = await helper(context, ["assess", "fetch", `dispatch-handoffs/${encodeURIComponent(agentId)}`, "--compact"])
+      if (row?.agent_id !== agentId) throw new Error("Handoff read names another dispatch")
+      return row
+    } catch (error) {
+      try {
+        await execFileAsync(context.vigil_cli, ["assess", "agent", "render-handoff", agentId, "--max-lines", "1"],
+          {cwd: context.workspace, env: env(context), encoding: "utf8", timeout: 15000, maxBuffer: 4 * 1024 * 1024})
+      } catch (probe) { if (probe.code === 2) return null }
+      throw error
+    }
+  }
+  const leaseRead = agentId => ["code-dispatch", "list", "--status", "processing", "--agent-id", agentId, "--json"]
+  const readLeases = async (context, agentId) => {
+    const page = await helper(context, ["assess", ...leaseRead(agentId), "--limit", String(LEASE_PAGE)], {whole: true})
+    if (!Array.isArray(page?.items) || !Number.isInteger(page.total)) throw new Error("Lease listing has no items/total")
+    return page
+  }
+  // A native task can end with no error and no text (an empty provider stream),
+  // and the native loop treats that as completion. One bounded read per return
+  // says what the dispatch still owes; a failed read says how to check by hand.
+  const dispatchStatus = async (context, record, empty) => {
+    const agentId = record.agent_id
+    const reference = {agent_id: agentId, dispatch_id: record.dispatch_id, empty_result: empty}
+    const code = context.mode === "code"
+    let handoff, page
+    try {
+      [handoff, page] = await Promise.all([readHandoff(context, agentId), code ? readLeases(context, agentId) : null])
+    } catch (error) {
+      return {...reference, verified: false, detail: failure(error), check: [
+        vigilCommand(context, "agent", "render-handoff", agentId),
+        ...(code ? [vigilCommand(context, ...leaseRead(agentId))] : [])]}
+    }
+    const handoffStatus = handoff ? String(handoff.handoff_status || "checkpointed") : null
+    const final = FINAL_HANDOFF.has(handoffStatus)
+    const leases = (page?.items || []).map(item => ({item_id: item.id, repo_id: item.repo_id, file_path: item.file_path,
+      receipts: Number(item.current_result_count || 0), heartbeat_age_seconds: item.heartbeat_age_seconds,
+      lease_token: item.lease_token}))
+    const held = page ? page.total : 0
+    if (final && !held && !empty) return null
+    const next = []
+    if (final && empty) next.push(vigilCommand(context, "agent", "render-handoff", agentId, "--max-lines", "0"))
+    if (!final) {
+      // Durable work on incomplete scope is a blocked return; nothing usable is a failed one.
+      const durable = Boolean(handoff) || leases.some(lease => lease.receipts > 0)
+      next.push(vigilCommand(context, "agent", "close", agentId, "--status", durable ? "blocked" : "failed",
+        "--reason", "<observed return and execution state>"))
+      next.push(vigilCommand(context, "agent", "continue", agentId, "--task", "<restated objective>"))
+    }
+    for (const lease of leases)
+      next.push(lease.receipts > 0
+        ? vigilCommand(context, "code-dispatch", "adopt-lease", lease.item_id, "<replacement-agent-id>",
+          "--from-agent", agentId, "--from-lease", lease.lease_token, "--reason", "<why>")
+        : vigilCommand(context, "code-dispatch", "reset-stale", ADOPTION_STALE_MINUTES,
+          "--repo-id", lease.repo_id, "--path-prefix", lease.file_path))
+    if (held > leases.length)
+      next.push(vigilCommand(context, ...leaseRead(agentId), "--offset", leases.length))
+    if (final) next.push(vigilCommand(context, "agent", "close", agentId))
+    return {...reference, handoff: Boolean(handoff), handoff_status: handoffStatus,
+      ...(page ? {held_leases: held, leases, ...(held > leases.length ? {leases_omitted: held - leases.length} : {})} : {}),
+      next}
+  }
+  const reportTask = async output => {
+    const session = output?.metadata?.sessionId
+    if (typeof session !== "string" || !dispatches.has(session)) return
+    const record = await dispatches.get(session)
+    const empty = taskResultEmpty(output.output)
+    await reportDispatch(output, record)
+    // Only a packet-verified dispatch is checked: its agent_id came from the digest-checked packet.
+    if (!record.agent_id || !(["bound", "already_bound", "failed"].includes(record.status) || empty)) return
+    let status
+    try { status = await dispatchStatus(readContext(), record, empty) } catch (error) {
+      status = {agent_id: record.agent_id, dispatch_id: record.dispatch_id, empty_result: empty,
+        verified: false, detail: failure(error), check: [
+          ["vigil", "assess", "agent", "render-handoff", record.agent_id],
+          ["vigil", "assess", ...leaseRead(record.agent_id)]].map(words => words.map(shellWord).join(" "))}
+    }
+    if (status) output.output = `${output.output ?? ""}\n\nVigil dispatch status: ${JSON.stringify(status)}`
   }
   const toolName = tool => ({bash: "Bash", read: "Read", write: "Write", edit: "Edit",
     task: "Agent", webfetch: "WebFetch", websearch: "WebSearch", skill: "Skill"}[tool] || tool)
@@ -230,6 +325,67 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
     } finally { clearTimeout(timer) }
     return tool
   }
+  // Activity rows are written off the tool's path, one at a time, so a loaded
+  // host neither stalls the native event loop nor fans out shell hooks. The
+  // hook claims a call identity before it posts, so a write that timed out is
+  // never retried (the retry would no-op on that claim); only a spawn that never
+  // started is. An unconfirmed row is counted and kept beside the health receipts.
+  let activity = Promise.resolve()
+  let unconfirmed = 0
+  const queued = new Set()
+  process.once("exit", () => {
+    for (const write of queued) keepUnconfirmed(write.context, write.payload, write.body,
+      new Error("OpenCode exited before the queued write was confirmed"))
+  })
+  const runHook = (context, name, body) => new Promise((resolve, reject) => {
+    let settled = false
+    const settle = (error, started) => {
+      if (settled) return
+      settled = true
+      clearTimeout(timer)
+      if (error) reject(Object.assign(error, {started})); else resolve()
+    }
+    const child = spawn(context.tools?.bash || "bash", [join(context.agent_root, "scripts/hooks", name)],
+      {env: env(context), stdio: ["pipe", "ignore", "ignore"]})
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL")
+      settle(new Error(`${name} did not finish within ${activityTimeoutMs} ms`), true)
+    }, activityTimeoutMs)
+    child.once("spawn", () => { child.started = true })
+    child.once("error", error => settle(error, Boolean(child.started)))
+    child.once("exit", (code, signal) => settle(code === 0 ? null
+      : new Error(`${name} exited ${signal ? "on " + signal : code}`), true))
+    child.stdin.on("error", () => {})
+    child.stdin.end(body)
+  })
+  const keepUnconfirmed = (context, payload, body, error) => {
+    unconfirmed += 1
+    const path = join(context.workspace, ".vigil-activity-unrecorded.jsonl")
+    let kept = `its hook payload is kept in ${path}`
+    try {
+      if (existsSync(path) && lstatSync(path).isSymbolicLink()) throw new Error("Unsafe activity spool path")
+      appendFileSync(path, JSON.stringify({recorded_at: new Date().toISOString(), error: error.message,
+        unconfirmed_this_session: unconfirmed}).slice(0, -1) + `,"payload":${body}}\n`, {mode: 0o600})
+    } catch (spool) { kept = `its hook payload could not be kept (${spool.message})` }
+    console.error(`[vigil] Native activity for ${payload.tool_name} call ${payload.tool_use_id} in session `
+      + `${payload.session_id} was not confirmed recorded: ${error.message}. ${unconfirmed} unconfirmed this session; `
+      + `${kept}. Compare with \`vigil assess fetch activity-entries\`.`)
+  }
+  const writeActivity = (context, payload) => {
+    // Serialized now: the write runs after the tool result has moved on.
+    const write = {context, payload, body: JSON.stringify({...payload, cwd: context.engagement_dir})}
+    if (queued.size >= ACTIVITY_BACKLOG)
+      return keepUnconfirmed(context, payload, write.body, new Error(`${ACTIVITY_BACKLOG} activity writes already queued`))
+    queued.add(write)
+    activity = activity.then(async () => {
+      try { await runHook(context, "post-tool-log.sh", write.body) } catch (error) {
+        if (error.started) throw error
+        await new Promise(resolve => setTimeout(resolve, 250))
+        await runHook(context, "post-tool-log.sh", write.body)
+      }
+    }).finally(() => queued.delete(write)).catch(error => keepUnconfirmed(context, payload, write.body, error))
+      .catch(error => console.error(`[vigil] Native activity accounting failed: ${error.message}`))
+  }
   const log = async (input, output, failed = false) => {
     try {
       const context = readContext()
@@ -243,7 +399,7 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
       // original native data available to that projection, including mixed MCP
       // content and structured-only results; never stringify undefined output.
       if (name.startsWith("mcp__")) response.output = JSON.stringify(response)
-      hook(context, "post-tool-log.sh", {hook_event_name: "PostToolUse", client_name: "opencode",
+      writeActivity(context, {hook_event_name: "PostToolUse", client_name: "opencode",
         session_id: input.sessionID, tool_use_id: input.callID, agent_type: actor,
         tool_name: name, native_tool_name: input.tool, tool_input: ["write", "edit"].includes(input.tool)
           ? {...(input.args || {}), file_path: input.args?.file_path ?? input.args?.filePath}
@@ -253,7 +409,7 @@ export const VigilAssessmentHooks = async ({client, bindingPath = process.env.VI
   }
   return {
     "tool.execute.after": async (input, output) => {
-      if (input.tool === "task") await reportDispatch(output)
+      if (input.tool === "task") await reportTask(output)
       return log(input, output)
     },
     event: async ({event}) => {
