@@ -316,6 +316,34 @@ def test_opencode_helper_path_finds_opencode_by_its_linked_name(context, monkeyp
     assert binding["tools"]["opencode"] == str(opencode)
 
 
+@pytest.mark.parametrize("arguments", [
+    ["--model", "zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"],
+    ["--model=zai-coding-plan/glm-5.3#max", "--dangerously-skip-permissions"]])
+def test_opencode_2_start_selects_the_operator_and_model_through_config(context, monkeypatch, arguments):
+    """OpenCode 2 TUIs take neither --agent nor --model, and a background service
+    would not see the session environment, so the launch runs standalone."""
+    root, engagement, _ = context
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: "/native/opencode" if name == "opencode" else original(name))
+    monkeypatch.setattr(clients.subprocess, "run", lambda *a, **kw: SimpleNamespace(returncode=0, stdout="2.3.0", stderr=""))
+    monkeypatch.setenv("OPENCODE_CONFIG_CONTENT", json.dumps({"share": "disabled"}))
+    calls = []
+    monkeypatch.chdir(ROOT)
+    monkeypatch.setattr(clients.os, "execve", lambda path, argv, env: calls.append((path, argv, env)))
+    engagements.start_engagement(root, engagement, "opencode", arguments, "web")
+    _, argv, environment = calls[0]
+    assert "--agent" not in argv
+    assert not any(argument.startswith(("--model", "-m")) for argument in argv)
+    assert "--standalone" in argv and "--auto" in argv
+    assert "--dangerously-skip-permissions" not in argv
+    assert "--prompt" in argv
+    content = json.loads(environment["OPENCODE_CONFIG_CONTENT"])
+    assert content == {"share": "disabled", "model": "zai-coding-plan/glm-5.3#max"}
+    workspace = Path(environment["VIGIL_CLIENT_CONTEXT"]).parent
+    configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
+    assert configuration["default_agent"] == "operator"
+
+
 def test_native_helper_executes_docker_from_resolved_directory(context, monkeypatch):
     root, engagement, _ = context
     docker = root / "Acme container tools/docker"

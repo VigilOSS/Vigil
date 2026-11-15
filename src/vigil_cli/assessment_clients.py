@@ -230,7 +230,9 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         from .engagements import _OPENCODE_PERMISSION
         workspace_files[".opencode/opencode.json"] = _json({"$schema": "https://opencode.ai/config.json",
             "compaction": {"auto": True}, "instructions": [str(binding["project"]) + "/AGENTS.md"],
-            "permission": dict(_OPENCODE_PERMISSION), "autoupdate": False})
+            "permission": dict(_OPENCODE_PERMISSION), "autoupdate": False,
+            # OpenCode 2 TUIs take no --agent; both majors honour default_agent.
+            "default_agent": "operator"})
     else:
         plugin_root = install_root / "client-plugins" / release_hash[:24] / "zcode"
         plugin_files = {}
@@ -354,6 +356,36 @@ def _write_opencode_variant_state(path: Path, saved: dict) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _opencode_major(version: str | None) -> int | None:
+    """Major version from ``opencode --version`` output, or None when unknown."""
+    head = (version or "").strip().lstrip("v").split(".", 1)[0]
+    return int(head) if head.isdigit() else None
+
+
+def _opencode_2_arguments(forwarded: list[str]) -> tuple[list[str], str | None]:
+    """Map 1.x-style launch flags onto the OpenCode 2 TUI.
+
+    The 2.x TUI accepts neither ``--agent`` nor ``--model``; the model (with an
+    optional ``#variant``) moves into the session's config content, and the
+    hidden 1.x permission alias becomes ``--auto``.
+    """
+    arguments: list[str] = []
+    model = None
+    tail = iter(forwarded)
+    for argument in tail:
+        if argument in {"--model", "-m"}:
+            model = next(tail, None)
+            if model is None:
+                raise SystemExit(f"OpenCode {argument} requires provider/model or provider/model#variant")
+        elif argument.startswith(("--model=", "-m=")):
+            model = argument.split("=", 1)[1]
+        elif argument == "--dangerously-skip-permissions":
+            arguments.append("--auto")
+        else:
+            arguments.append(argument)
+    return arguments, model
+
+
 def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                  extra_args: list[str], *, no_autoprompt: bool = False) -> None:
     """Start one selected mode; do not infer GUI native-session ownership."""
@@ -380,8 +412,6 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                 if focus is not None:
                     raise SystemExit("Supply one OpenCode operator prompt, not repeated --prompt values")
                 focus = value
-    forwarded, variants = _opencode_model_variants(forwarded)
-    variant_state = _opencode_variant_state(variants)
     application = None
     native_version = None
     executable = None
@@ -399,6 +429,15 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
                 native_version = probe.stdout.strip() or probe.stderr.strip()
         except (OSError, subprocess.TimeoutExpired):
             pass  # Diagnostic state remains unverified; no native version invented.
+    opencode_2 = client == "opencode" and (_opencode_major(native_version) or 0) >= 2
+    variants: dict[str, str] = {}
+    variant_state = None
+    opencode_2_model = None
+    if opencode_2:
+        forwarded, opencode_2_model = _opencode_2_arguments(forwarded)
+    else:
+        forwarded, variants = _opencode_model_variants(forwarded)
+        variant_state = _opencode_variant_state(variants)
     from .client_sessions import client_session_bootstrap, record_client_session
     # Native preparation writes only immutable task assets and its own stable
     # selector; it does not refresh the shared engagement-root client files.
@@ -478,7 +517,23 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
         "VIGIL_INSTALL_DIR": binding["install_root"], "VIGIL_CLIENT_NAME": client,
         "VIGIL_REQUESTED_CLIENT": client, "ORCHESTRATOR_BASE_URL": binding["backend_url"]})
     assert executable is not None
-    argv = [executable, "--agent", "operator", *forwarded]
+    if opencode_2:
+        # A background service would not inherit this session's config and
+        # environment, so the TUI runs its own server.
+        argv = [executable, "--standalone", *forwarded]
+        if opencode_2_model is not None:
+            try:
+                content = json.loads(environment.get("OPENCODE_CONFIG_CONTENT") or "{}")
+            except ValueError as exc:
+                raise SystemExit(f"OPENCODE_CONFIG_CONTENT is not valid JSON: {exc}") from exc
+            if not isinstance(content, dict):
+                raise SystemExit("OPENCODE_CONFIG_CONTENT must be a JSON object")
+            environment["OPENCODE_CONFIG_CONTENT"] = json.dumps({**content, "model": opencode_2_model})
+            print(f"model: {opencode_2_model} (session config)", flush=True)
+        print(term.row("warn", f"OpenCode {native_version}: Vigil's OpenCode plugin and hooks are verified on 1.x; "
+                       "check specialist dispatch and hook activity in this session.", stream=sys.stdout), flush=True)
+    else:
+        argv = [executable, "--agent", "operator", *forwarded]
     if not no_autoprompt or focus is not None:
         prompt = "" if no_autoprompt else opening
         if focus is not None:

@@ -220,6 +220,9 @@ When a bound specialist's task returns empty, without a final handoff, or still
 holding code-queue leases, the result also ends with a `Vigil dispatch status:`
 JSON line listing the leases and the exact close, continue and lease commands.
 
+On OpenCode 2, Vigil selects the operator through the session config and starts the TUI with
+`--standalone`; its plugin and hooks are verified on OpenCode 1.
+
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
 is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.
 

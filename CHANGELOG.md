@@ -5,6 +5,14 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.9.1] - 2026-11-15
+
+### Fixed
+
+- `vigil engagement start --client opencode` launches OpenCode 2: the operator agent and any
+  `--model` come from the session config, and the TUI runs standalone so the session's settings
+  apply. OpenCode 1 launches are unchanged.
+
 ## [2.9.0] - 2026-11-15
 
 ### Added
