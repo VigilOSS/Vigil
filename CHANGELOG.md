@@ -5,6 +5,43 @@ versioning follows [Semantic Versioning][semver].
 
 Durable design decisions live in [`docs/adr/`](docs/adr/).
 
+## [2.8.0] - 2026-11-15
+
+### Added
+
+- Code track: a critical or high closeout below its depth floor is accepted and raises a
+  `depth_floor` trigger per family. `code-dispatch withdraw` takes back an
+  unclaimed directed attempt, and superseded triggers stay readable with their reason.
+- Code track: architect-recorded `context_tags` set the families a file owes, including
+  `client-bundle` for browser-only code. A `vuln_family_exclusion` decision rules a family out
+  engagement-wide.
+- Sealed code snapshots bind their source relative to the engagement, so a moved or cloned
+  engagement still validates them; `code-snapshot-repair` rewrites older absolute bindings.
+- Each offensive track starts Claude on its own default model, overridable per track.
+  Compaction and resume point every operator mode at the resume rule.
+- The operator UI shows leads, engagement files, report QC and WAF measurement state, and
+  opens files in the shared record view.
+- `finding corroborate` and `chain list`; decisions and classifications record which
+  dispatch, or the operator, recorded them.
+
+### Changed
+
+- Prompts are lighter and load references on demand; contracts print a compact view.
+- Assess tools and the backend derive missing fields and refuse only contradictions.
+- Katana crawls, through `kali katana` and `web-discovery`, are fenced to the hosts
+  `scope.json` declares.
+- Report-writer deliverables pass independent QC before export.
+- OpenCode operators dispatch specialists through the native `task` tool with the registered
+  role. Choose the OpenCode reasoning variant with the model at start
+  (`--model=<provider>/<model>#<variant>`).
+
+### Fixed
+
+- OpenCode specialist dispatches run unattended without hanging on permission prompts, and
+  OpenCode engagements load no personal Claude Code context.
+- The missing subfinder key warning appears when the runtime starts, not in every Kali tool
+  result.
+
 ## [2.7.1] - 2026-11-09
 
 ### Added
