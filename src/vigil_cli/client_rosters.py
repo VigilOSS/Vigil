@@ -220,14 +220,12 @@ def ensure_codex_skills_link(agent_root: Path, codex_dir: Path) -> None:
 # The hook scripts each client template binds. Their commands are rewritten to the
 # rendered agent root on every refresh, so a generated binding never depends on cwd.
 _CLAUDE_HOOK_SCRIPTS = (
-    "application-read-only.sh",
     "post-tool-log.sh",
     "pre-compact.sh",
     "post-compact-resume.sh",
     "session-end.sh",
 )
 _CODEX_HOOK_SCRIPTS = (
-    "application-read-only.sh",
     "post-tool-log.sh",
     "post-compact-resume.sh",
     "session-end.sh",
@@ -687,14 +685,14 @@ def ensure_goose_standard_hooks(
     *,
     rendered_agent_root: Path | None = None,
 ) -> None:
-    """Write the standard Goose hooks plugin into an engagement.
+    """Write the standard Goose hooks plugin (activity log) into an engagement.
 
     Mirrors ``ensure_opencode_plugin``: Goose hooks invoke shell scripts directly, so
-    this reuses the SHARED scripts via goose-hook-adapter.sh (payload reshape):
-    application-read-only.sh on PreToolUse (the application tree is read-only,
-    ADR 0048) and post-tool-log.sh (activity log) on PostToolUse. Deterministic
-    content → idempotent overwrite, refreshed on repair so a hook-path fix reaches
-    existing engagements.
+    this reuses the SHARED post-tool-log.sh (activity log) on
+    PostToolUse, via goose-hook-adapter.sh (payload reshape). Deterministic content →
+    idempotent overwrite, refreshed on repair so a hook-path fix reaches existing
+    engagements. There is no standard PreToolUse hook: Vigil does not filter its own
+    operator's commands (ADR 0019).
     """
     hooks_src = agent_root / "scripts" / "hooks"
     command_agent_root = rendered_agent_root or agent_root
@@ -710,19 +708,6 @@ def ensure_goose_standard_hooks(
     matcher = "shell|write|edit|tree|read_image|text_editor"
     config = {
         "hooks": {
-            # Only the shell and the writing file tools can modify the application.
-            "PreToolUse": [
-                {
-                    "matcher": "shell|write|edit|text_editor",
-                    "hooks": [{
-                        "type": "command",
-                        "command": _goose_hook_command(
-                            command_agent_root, command_hooks_src / "application-read-only.sh"
-                        ),
-                        "timeout": 10,
-                    }],
-                }
-            ],
             "PostToolUse": [
                 {
                     "matcher": matcher,

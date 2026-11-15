@@ -650,7 +650,10 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
     origin.mkdir()
     origin_file = origin / "main.py"
     origin_file.write_bytes(raw)
-    builder = SnapshotBuilder(tmp_path / "snapshots", "demo-repo")
+    engagement_dir = tmp_path / "engagement"
+    builder = SnapshotBuilder(
+        engagement_dir / "tools" / "analysis-state" / "code-snapshots", "demo-repo"
+    )
     builder.add("main.py", capture_regular_file(origin_file), language="python")
     sealed = builder.finish(
         repo_key="demo-repo",
@@ -659,8 +662,7 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
         git={"head": "", "branch": "", "dirty": None},
     )
     repo_path = sealed.source_path
-    engagement_dir = tmp_path / "engagement"
-    engagement_dir.mkdir()
+    engagement_dir.mkdir(exist_ok=True)
     (engagement_dir / "scope.json").write_text("{}", encoding="utf-8")
 
     monkeypatch.setitem(sys.modules, "tree_sitter", SimpleNamespace())
@@ -729,7 +731,7 @@ def test_code_index_default_output_uses_engagement_analysis_state(monkeypatch, t
             raise AssertionError(endpoint)
 
     monkeypatch.setattr(module, "AssessmentClient", FakeClient)
-    _patch_load_config(monkeypatch, module)
+    _patch_load_config(monkeypatch, module, engagement_dir=str(engagement_dir))
 
     module.run(
         SimpleNamespace(

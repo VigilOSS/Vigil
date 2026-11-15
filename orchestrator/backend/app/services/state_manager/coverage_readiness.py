@@ -22,7 +22,6 @@ from ._common import (
 from .command_run_queries import (
     COMMAND_RUN_STATUS_MEANINGS,
     command_run_status,
-    command_run_target,
 )
 from .dispatches import CURRENT_DECISION_SQL, _serialize_decision
 
@@ -465,14 +464,45 @@ def _waf_measurement_host(host: str) -> str:
     return _coverage_endpoint_host(host) or host.strip().lower()
 
 
+# wafw00f options that take a separate value; mirror of the CLI's
+# ``kali_audit._WAFW00F_VALUE_FLAGS`` (the test asserts the two agree). A value
+# (a -p proxy above all) is never the measured target.
+WAFW00F_VALUE_FLAGS: frozenset[str] = frozenset(
+    {"-p", "--proxy", "-o", "--output", "-i", "--input", "-t", "--test", "-H", "--headers", "-f", "--format"}
+)
+
+
+def _waf_tool_argv_hosts(argv: list[str]) -> set[str]:
+    """The hosts a wafw00f argv names as its targets: its positional operands.
+
+    Structural only: the executed argv's own head must be wafw00f, and an option's
+    value is skipped. Any other head (an echo, curl, a ``bash -c`` body) names no
+    measured host, whatever its text mentions; such a run backs a measurement only
+    through its stored ``target_host``.
+    """
+    if not argv or argv[0].rsplit("/", 1)[-1].lower() != "wafw00f":
+        return set()
+    hosts: set[str] = set()
+    skip = False
+    for arg in argv[1:]:
+        if skip:
+            skip = False
+        elif arg in WAFW00F_VALUE_FLAGS:
+            skip = True
+        elif not arg.startswith("-") and arg.strip():
+            hosts.add(_waf_measurement_host(arg))
+    return hosts
+
+
 def _waf_run_problem(run: Any, provenance: dict[str, Any]) -> str | None:
     """Why the cited command run does not back a WAF measurement of the hosts named.
 
     The run must have succeeded (lifecycle status ``completed`` and marked
-    successful, the run ledger's own definition) and its structured target, the
-    stored ``target_host`` (a comma-separated list when a run covered several
-    hosts) or the target ``command_run_target`` parses from its argv, must name
-    every measured host.
+    successful, the run ledger's own definition) and its structured target must
+    name every measured host: the stored ``target_host`` (a comma-separated list
+    when a run covered several hosts), or, with none stored, the positional
+    targets of a wafw00f argv (`_waf_tool_argv_hosts`). The command text is never
+    read for a host.
     """
     run_id = provenance["command_run_id"]
     if run is None:
@@ -492,18 +522,17 @@ def _waf_run_problem(run: Any, provenance: dict[str, Any]) -> str | None:
             f"(status {status_value}: {why}); cite a completed, successful run that "
             "measured these hosts"
         )
-    try:
-        argv = json.loads(run["argv_json"] or "[]")
-    except (TypeError, ValueError):
-        argv = []
-    target, source = command_run_target(
-        str(run["command"] or ""),
-        [str(arg) for arg in argv] if isinstance(argv, list) else [],
-        str(run["tool_bin"] or ""),
-        str(run["target_host"] or ""),
-    )
-    targets = target.split(",") if source == "stored" else [target]
-    run_hosts = {_waf_measurement_host(value) for value in targets if value.strip()}
+    stored = str(run["target_host"] or "").strip()
+    if stored:
+        run_hosts = {_waf_measurement_host(value) for value in stored.split(",") if value.strip()}
+    else:
+        try:
+            argv = json.loads(run["argv_json"] or "[]")
+        except (TypeError, ValueError):
+            argv = []
+        run_hosts = _waf_tool_argv_hosts(
+            [str(arg) for arg in argv] if isinstance(argv, list) else []
+        )
     missing = [
         host for host in provenance["waf"]["hosts"] if _waf_measurement_host(host) not in run_hosts
     ]
@@ -511,10 +540,10 @@ def _waf_run_problem(run: Any, provenance: dict[str, Any]) -> str | None:
         recorded = ", ".join(sorted(run_hosts)) if run_hosts else "no host"
         return (
             f"provenance.waf.hosts names {', '.join(missing)}, which command run {run_id} "
-            f"has no structured record of targeting (its target_host and argv name: "
-            f"{recorded}). Cite a run whose recorded target is each named host (a "
-            "single-target run, or one whose target_host lists the hosts it measured), "
-            "or name only the hosts this run targeted"
+            f"has no structured record of targeting (its target_host, or the targets of "
+            f"its wafw00f argv, name: {recorded}). Cite a run whose recorded target is "
+            "each named host (a single-target run, or one whose target_host lists the "
+            "hosts it measured), or name only the hosts this run targeted"
         )
     return None
 
@@ -532,7 +561,7 @@ def check_waf_measurement(engagement_id: int, provenance: Any) -> None:
         engagement = _engagement_or_404(engagement_id)
         with _common.get_connection() as connection:
             run = connection.execute(
-                "SELECT status, success, timed_out, command, argv_json, tool_bin, target_host "
+                "SELECT status, success, timed_out, argv_json, target_host "
                 "FROM assessment_command_runs WHERE engagement_id = ? AND id = ?",
                 (engagement.id, provenance["command_run_id"]),
             ).fetchone()

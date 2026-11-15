@@ -340,7 +340,7 @@ _OBJECTIVE_DISPATCH_HINTS: dict[str, str] = {
         "\"hosts\": [\"{host}\"]}}}} (a measured negative counts; `vigil assess contract "
         "intel record tech-component`). The cited run must have completed successfully "
         "and record each named host as its target (its target_host, or the target its "
-        "argv names); a measurement citing a host-list run with no target_host is "
+        "wafw00f argv names); a measurement citing a host-list run with no target_host is "
         "refused, so measure each host with a single-target run. Dispatch "
         f"{_HINT_RECON_SPECIALIST} with skill web-recon (wafw00f) to measure it, "
     ) + _DEFERRAL_HINT,

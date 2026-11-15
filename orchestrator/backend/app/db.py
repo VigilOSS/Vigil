@@ -1765,6 +1765,21 @@ def _ensure_decision_supersession_columns(connection: sqlite3.Connection) -> Non
             )
 
 
+def _ensure_decision_recorder_columns(connection: sqlite3.Connection) -> None:
+    """Additive migration for who recorded a decision.
+
+    ``recorded_by_agent_id`` is the dispatch the write named and
+    ``recorded_by_role`` that dispatch's role, or ``operator`` with no dispatch
+    named. Rows recorded before the columns existed keep both NULL: their
+    recorder was never recorded and is not guessed.
+    """
+
+    columns = _table_columns(connection, "assessment_dispatch_decisions")
+    for name in ("recorded_by_agent_id", "recorded_by_role"):
+        if columns and name not in columns:
+            connection.execute(f"ALTER TABLE assessment_dispatch_decisions ADD COLUMN {name} TEXT")
+
+
 def _ensure_decision_finding_index(connection: sqlite3.Connection) -> None:
     """Index dispatch decisions by the finding their payload names.
 
@@ -4773,7 +4788,9 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
                 created_at TEXT NOT NULL,
                 supersedes_id INTEGER REFERENCES assessment_dispatch_decisions(id),
                 superseded_by_id INTEGER REFERENCES assessment_dispatch_decisions(id),
-                superseded_at TEXT
+                superseded_at TEXT,
+                recorded_by_agent_id TEXT,
+                recorded_by_role TEXT
             )
             """,
         "CREATE INDEX IF NOT EXISTS idx_decisions_engagement_kind "
@@ -4828,6 +4845,7 @@ def _create_dispatch_tables(connection: sqlite3.Connection) -> None:
             """,
     )
     _ensure_decision_supersession_columns(connection)
+    _ensure_decision_recorder_columns(connection)
     _ensure_decision_finding_index(connection)
     # Additive migration for deployments whose table predates the code track.
     # Nullable with no default, so every existing row keeps its web phase and

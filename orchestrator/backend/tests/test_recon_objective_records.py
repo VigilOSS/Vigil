@@ -57,6 +57,8 @@ def _command_run(
     target_host: str = "",
     status: str = "completed",
     return_code: int | None = 0,
+    tool_name: str = "wafw00f",
+    command: str | None = None,
 ) -> int:
     """A wafw00f run; the gate reads its outcome and the hosts it targeted.
 
@@ -67,9 +69,9 @@ def _command_run(
         f"{ASSESSMENT_BASE}/command-runs",
         json={
             "run_uuid": f"objective-records-{uuid.uuid4().hex[:12]}",
-            "command": " ".join(argv),
+            "command": command if command is not None else " ".join(argv),
             "argv": list(argv),
-            "tool_name": "wafw00f",
+            "tool_name": tool_name,
             "agent_name": "recon-specialist-1",
             "phase": "recon",
             "status": status,
@@ -312,6 +314,54 @@ def test_waf_result_naming_a_host_the_run_did_not_target_is_refused(client, enga
     assert "api.example.com" in detail  # what the run did target
 
 
+@pytest.mark.parametrize(
+    ("argv", "tool_name", "command"),
+    [
+        # The host is only text the run printed.
+        (("echo", "https://api.example.com"), "exec", None),
+        # A proxy is not what wafw00f measured.
+        (("wafw00f", "-p", "http://api.example.com:8080", "https://other.example.com"), "exec", None),
+        # A request header naming the host is request content, not the target.
+        (("curl", "-H", "Origin: https://api.example.com", "https://other.example.com"), "exec", None),
+        # The command text names the host; the argv the run executed does not.
+        (("wafw00f", "https://other.example.com"), "wafw00f",
+         "wafw00f https://other.example.com # api.example.com"),
+        (("bash", "-c", "wafw00f https://api.example.com"), "exec", None),
+    ],
+    ids=["echo", "proxy", "origin-header", "comment-text", "shell-body"],
+)
+def test_waf_result_citing_a_run_that_only_mentions_the_host_is_refused(
+    client, engagement_id, argv, tool_name, command
+):
+    _service(engagement_id, "api.example.com")
+    run_id = _command_run(client, *argv, tool_name=tool_name, command=command)
+
+    response = _measure(client, run_id, ["api.example.com"])
+
+    assert response.status_code == 422, response.text
+    assert "api.example.com" in response.json()["detail"]
+    assert _by_host(client)["api.example.com"]["outcomes"]["waf_tier"]["met"] is False
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ("wafw00f", "-a", "https://api.example.com"),
+        ("/usr/bin/wafw00f", "-p", "http://proxy.example:8080", "api.example.com"),
+        ("wafw00f", "--proxy=http://proxy.example:8080", "https://api.example.com:443/"),
+    ],
+    ids=["positional-url", "path-head-bare-host", "inline-proxy"],
+)
+def test_waf_result_accepts_the_target_a_wafw00f_argv_names(client, engagement_id, argv):
+    _service(engagement_id, "api.example.com")
+    run_id = _command_run(client, *argv, tool_name="exec")
+
+    response = _measure(client, run_id, ["api.example.com"])
+
+    assert response.status_code == 201, response.text
+    assert _by_host(client)["api.example.com"]["outcomes"]["waf_tier"]["met"] is True
+
+
 def test_waf_result_accepts_each_host_a_run_stored_as_its_targets(client, engagement_id):
     _service(engagement_id, "api.example.com")
     _service(engagement_id, "www.example.com:8443")
@@ -413,3 +463,11 @@ def test_cli_record_schema_mirrors_the_waf_measurement_vocabulary():
     assert collect_validation_errors(measured, schema) == []
     measured["provenance"]["waf"]["verdict"] = "absent"
     assert collect_validation_errors(measured, schema)
+
+
+def test_wafw00f_value_flags_mirror_the_cli_target_parser():
+    from assess.lib import kali_audit
+
+    from app.services.state_manager.coverage_readiness import WAFW00F_VALUE_FLAGS
+
+    assert WAFW00F_VALUE_FLAGS == kali_audit._WAFW00F_VALUE_FLAGS

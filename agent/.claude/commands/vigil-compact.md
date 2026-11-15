@@ -20,6 +20,12 @@ consequences worth knowing: the hook steers the **operator** session's compactio
 dispatched specialist's, and a `PreCompact` hook that exited 2 would **block** compaction
 outright, which is why the shared hook always exits 0.
 
+After the summary, a `SessionStart` hook matching `compact` runs `post-compact-resume.sh`, whose
+output reaches the continuation as context: it routes the operator through `vigil engagement mode`,
+`agent/rules/resume.md` and `vigil assess resume-brief` before any other action. The operator does
+not run `/vigil-resume` afterwards. Confirm `.claude/settings.json` has exactly one `SessionStart`
+entry with matcher `compact` invoking that script.
+
 Run the hook now and show the operator exactly what will be injected:
 
 !`bash -c 'if [ -n "${VIGIL_AGENT_ROOT:-}" ]; then s="$VIGIL_AGENT_ROOT/scripts/hooks/pre-compact.sh"; elif [ -f agent/scripts/hooks/pre-compact.sh ]; then s=agent/scripts/hooks/pre-compact.sh; else s=../../scripts/hooks/pre-compact.sh; fi; echo "hook: $s"; echo; echo "{\"trigger\":\"manual\"}" | bash "$s"'`

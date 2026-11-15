@@ -1144,8 +1144,53 @@ def list_handoffs(
         rows = connection.execute(query, tuple(params)).fetchall()
     return [_serialize_handoff(row) for row in rows]
 
+# The role a decision records when the write names no dispatch: Vigil's
+# attribution default, the operator session.
+OPERATOR_RECORDER = "operator"
+
+
+def decision_recorded_by(row) -> dict[str, Any] | None:
+    """``{"agent_id", "agent_role"}`` of the dispatch that recorded a decision row,
+    ``agent_id`` None for the operator's; None for a row recorded before the
+    recorder was stored."""
+    keys = row.keys()
+    role = row["recorded_by_role"] if "recorded_by_role" in keys else None
+    if role is None:
+        return None
+    return {"agent_id": row["recorded_by_agent_id"], "agent_role": role}
+
+
+def _decision_recorder(connection, engagement_id: int, agent_id: str | None) -> tuple[str | None, str]:
+    """``(dispatch agent_id or None, role)`` for the recorder a decision write names.
+
+    The role is the dispatch row's, never the caller's. No id (or ``operator``)
+    is the operator session; an id that names no dispatch of this engagement is
+    refused rather than stored as a recorder nobody can be.
+    """
+    named = (agent_id or "").strip()
+    if not named or named == OPERATOR_RECORDER:
+        return None, OPERATOR_RECORDER
+    row = connection.execute(
+        "SELECT agent_role FROM assessment_dispatches WHERE engagement_id = ? AND agent_id = ?",
+        (engagement_id, named),
+    ).fetchone()
+    if row is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail=(
+                f"recorded_by_agent_id {named!r} names no recorded dispatch in this engagement; "
+                "pass your dispatch agent_id from your packet's Runtime Identity, or omit it "
+                "when the operator records the decision"
+            ),
+        )
+    return named, str(row["agent_role"])
+
+
 def _serialize_decision(row) -> dict[str, Any]:
     data = dict(row)
+    data["recorded_by"] = decision_recorded_by(row)
+    data.pop("recorded_by_agent_id", None)
+    data.pop("recorded_by_role", None)
     raw = data.pop("payload_json", None) or "{}"
     try:
         data["payload"] = json.loads(raw)
@@ -1531,6 +1576,7 @@ def record_decision(
     payload: dict[str, Any],
     surfaced_to_user: bool = False,
     supersedes: int | None = None,
+    recorded_by_agent_id: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     if not (kind or "").strip():
@@ -1540,6 +1586,24 @@ def record_decision(
         _observe_report_bytes(engagement, payload) if kind == "report_qc_verdict" else None
     )
     with _common.get_connection() as connection:
+        recorder_id, recorder_role = _decision_recorder(
+            connection, engagement.id, recorded_by_agent_id
+        )
+        if recorder_id is not None:
+            from ..code_analysis import FAMILY_EXCLUSION_DECISION_KIND
+
+            if kind == FAMILY_EXCLUSION_DECISION_KIND:
+                # The exclusion records a program's or the user's ruling and must be
+                # surfaced to the user, which only the operator does.
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+                    detail=(
+                        f"{kind} not recorded: dispatch {recorder_id} ({recorder_role}) is a "
+                        "specialist, and the exclusion records a program or user ruling the "
+                        "operator surfaces to the user. Report the ruling in your handoff "
+                        "(open_questions) for the operator to record"
+                    ),
+                )
         if supersedes is not None:
             _check_supersedable(connection, engagement.id, kind, supersedes)
         if kind == "claim_equivalence":
@@ -1681,8 +1745,9 @@ def record_decision(
             """
             INSERT INTO assessment_dispatch_decisions (
                 engagement_id, kind, payload_json, surfaced_to_user, resolved,
-                resolution_json, created_at, supersedes_id
-            ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?)
+                resolution_json, created_at, supersedes_id, recorded_by_agent_id,
+                recorded_by_role
+            ) VALUES (?, ?, ?, ?, 0, NULL, ?, ?, ?, ?)
             """,
             (
                 engagement.id,
@@ -1691,6 +1756,8 @@ def record_decision(
                 1 if surfaced_to_user else 0,
                 created_at,
                 supersedes,
+                recorder_id,
+                recorder_role,
             ),
         )
         if supersedes is not None:

@@ -102,6 +102,13 @@ unchanged.
 "attacker outcome proof" discipline that does not map to defender work.
 `agent/rules/triage.md` supersedes it for blue.
 
+The Vigil application tree (`$VIGIL_APPLICATION_DIR`, which holds `$VIGIL_AGENT_ROOT`) is read-only
+for this session. Do not edit, format, revert or check out files there, even to fix a defect you have
+pinned to a file and line: the harness defines what every gate and recorded result means, and the
+tree may be a maintainer's working copy with uncommitted work. Log the defect with the failing
+command, the error and your per-run workaround in the engagement's `ISSUES-AND-ENHANCEMENTS.md`,
+tell the user, and carry on with the workaround.
+
 For `vigil assess` writes, put prose and other shell-sensitive values in the command's payload-file
 option when available; otherwise pass each value as one shell-quoted argument, never as an assembled
 shell command string. A bounded read is not absence evidence: if output reports truncation, a partial

@@ -173,3 +173,52 @@ def test_decision_list_supports_offset_pagination(client, isolate_settings) -> N
         params={"kind": "scope_decision", "offset": -1},
     )
     assert bad.status_code == 422
+
+
+def _dispatch(client, agent_id: str, role: str) -> None:
+    response = client.post(f"{BASE}/dispatches", json={
+        "agent_id": agent_id, "agent_role": role, "task": "Acme recon lane",
+    })
+    assert response.status_code == 201, response.text
+
+
+def test_a_decision_records_the_dispatch_that_recorded_it(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+    _dispatch(client, "rs-acme-1", "recon-specialist")
+
+    created = client.post(f"{BASE}/dispatch-decisions", json={
+        "kind": "scope_decision", "payload": {"host": "a.example.com", "choice": "in_scope"},
+        "recorded_by_agent_id": "rs-acme-1",
+    })
+
+    assert created.status_code == 201, created.text
+    # The role is the dispatch row's, never the caller's.
+    expected = {"agent_id": "rs-acme-1", "agent_role": "recon-specialist"}
+    assert created.json()["recorded_by"] == expected
+    (listed,) = client.get(f"{BASE}/dispatch-decisions?kind=scope_decision").json()
+    assert listed["recorded_by"] == expected
+    assert client.get(f"{BASE}/dispatch-decisions/{listed['id']}").json()["recorded_by"] == expected
+
+
+def test_a_decision_without_a_dispatch_identity_is_the_operators(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+
+    for body in ({}, {"recorded_by_agent_id": "operator"}):
+        created = client.post(f"{BASE}/dispatch-decisions", json={
+            "kind": "egress_decision", "payload": {"verdict": "open"}, **body,
+        })
+        assert created.status_code == 201, created.text
+        assert created.json()["recorded_by"] == {"agent_id": None, "agent_role": "operator"}
+
+
+def test_a_decision_naming_an_unrecorded_dispatch_is_refused(client, isolate_settings) -> None:
+    _seed(client, isolate_settings)
+
+    refused = client.post(f"{BASE}/dispatch-decisions", json={
+        "kind": "scope_decision", "payload": {"host": "a.example.com"},
+        "recorded_by_agent_id": "rs-unknown",
+    })
+
+    assert refused.status_code == 422, refused.text
+    assert "rs-unknown" in refused.json()["detail"]
+    assert client.get(f"{BASE}/dispatch-decisions").json() == []

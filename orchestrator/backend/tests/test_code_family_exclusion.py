@@ -52,6 +52,7 @@ def test_an_excluded_family_is_owed_by_no_file_and_names_its_ruling(client, isol
     assert [(row["family"], row["decision_id"], row["ruling"]) for row in exclusions["families"]] == [
         ("algorithmic-dos", decision["id"], _RULING),
     ]
+    assert exclusions["families"][0]["recorded_by"] == {"agent_id": None, "agent_role": "operator"}
     assert "algorithmic-dos" not in {
         group["family"] for group in (coverage["gate"].get("effort_gaps") or {}).get("groups", [])
     }
@@ -66,6 +67,7 @@ def test_an_excluded_family_is_owed_by_no_file_and_names_its_ruling(client, isol
     assert again["excluded_vuln_classes"] == [{
         "family": "algorithmic-dos", "decision_id": decision["id"], "ruling": _RULING,
         "recorded_at": exclusions["families"][0]["recorded_at"],
+        "recorded_by": {"agent_id": None, "agent_role": "operator"},
     }]
     body = _close(client, key, again, [
         entry for entry in _network_input_coverage(default_effort=80)
@@ -146,3 +148,43 @@ def test_an_exclusion_no_longer_surfaced_to_the_user_excludes_nothing_and_is_nam
     ).json()["gate"]["family_exclusions"]["invalid_decisions"]
     assert invalid["decision_id"] == decision["id"]
     assert any("surfaced_to_user" in problem for problem in invalid["problems"])
+
+
+def test_an_exclusion_whose_ruling_is_not_text_is_refused(client, isolate_settings):
+    key = "2026-11-15-acme-family-exclusion-ruling-type"
+    _seed(client, isolate_settings, key)
+    url = f"/engagements/{key}/assessment/dispatch-decisions"
+
+    for ruling in ({"rule": 7}, ["rule 7"], 7, True):
+        refused = client.post(url, json={
+            "kind": "vuln_family_exclusion",
+            "payload": {"vuln_classes": ["algorithmic-dos"], "ruling": ruling},
+            "surfaced_to_user": True,
+        })
+        assert refused.status_code == 422, (ruling, refused.text)
+        assert "ruling" in refused.json()["detail"]
+
+
+def test_a_specialist_cannot_record_an_exclusion(client, isolate_settings):
+    # The ruling is a program's or the user's and must be surfaced to the user,
+    # which only the operator does; a dispatched specialist recording one is refused
+    # by its structured identity.
+    key = "2026-11-15-acme-family-exclusion-specialist"
+    base, repo, parser = _seed(client, isolate_settings, key)
+    registered = client.post(f"/engagements/{key}/assessment/dispatches", json={
+        "agent_id": "cvh-acme-1", "agent_role": "code-vuln-hunter", "task": "Acme parser review",
+    })
+    assert registered.status_code == 201, registered.text
+
+    refused = client.post(f"/engagements/{key}/assessment/dispatch-decisions", json={
+        "kind": "vuln_family_exclusion",
+        "payload": {"vuln_classes": ["algorithmic-dos"], "ruling": _RULING},
+        "surfaced_to_user": True,
+        "recorded_by_agent_id": "cvh-acme-1",
+    })
+
+    assert refused.status_code == 422, refused.text
+    detail = refused.json()["detail"]
+    assert "cvh-acme-1" in detail and "code-vuln-hunter" in detail
+    claim = _claim_file_for_analysis(client, key, int(parser["id"]))
+    assert "algorithmic-dos" in claim["applicable_vuln_classes"]

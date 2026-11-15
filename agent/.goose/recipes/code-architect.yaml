@@ -62,6 +62,10 @@ instructions: |2
   attack hypotheses (Step 13), the threat model, and the optional historical-CVE JSONL. Read security
   history with `vigil assess code-history commits` and `code-history diff` (Step 5) and report its
   `history_status`; an `unavailable` reason code is a coverage gap, not an absence of security history.
+  Tag code that ships to and runs in the browser (an SPA bundle, a webpack chunk, a minified client
+  script) `client-bundle`: it then owes the browser families and not the server-only ones, so a hunter
+  stops scoring SSRF or file upload on a bundle. Leave it off anything that also runs on a server
+  (SSR, Node handlers, isomorphic modules); an untagged file owes every family.
   If ingestion guessed a file's language wrong, include a `language` correction on its classification
   record.
 

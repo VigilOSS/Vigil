@@ -43,8 +43,7 @@ for this session. Do not edit, format, revert or check out files there, even to 
 pinned to a file and line: the harness defines what every gate and recorded result means, and the
 tree may be a maintainer's working copy with uncommitted work. Log the defect with the failing
 command, the error and your per-run workaround in the engagement's `ISSUES-AND-ENHANCEMENTS.md`,
-tell the user, and carry on with the workaround. A pre-tool hook refuses file writes and shell write
-or checkout commands aimed at that directory (ADR 0048).
+tell the user, and carry on with the workaround.
 
 **`ENGAGEMENT.md`** in the engagement directory is the human-authored program brief: in-scope and
 out-of-scope targets, mandatory request headers, rate caps, no-fire endpoints, deconfliction,

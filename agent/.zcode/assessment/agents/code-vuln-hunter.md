@@ -67,9 +67,19 @@ tier they are the list to work through. Covering them all still leaves the rest 
 behaviour yours to read. `path_suggested_vuln_classes` (a path word such as `refunds` or
 `webhooks`) and `unread_code_suggested_vuln_classes` (a markup file whose index could not rule out
 server-side code) are hints: check whether the code does what the hint suggests and review the
-family where it does. The packet's list is a dispatch-time snapshot that `done` recomputes, so
-re-read the live set with `vigil assess code-dispatch progress <item-id>` before `done`: a family
-left in its `missing_cwe_families` is recorded at effort 0 as a coverage gap. A family your packet
+family where it does. `optional_vuln_classes` are the server-only families a `client-bundle` tag
+took off a browser bundle; score one only if the file turns out to do more than run in the browser,
+and say so in the handoff so the architect can correct the tag. `excluded_vuln_classes` are
+families an engagement ruling puts out of bounds, each with the ruling it cites: do not score,
+pursue or report them. A family the file's runtime cannot express is a `disposition:
+not_applicable` entry, not a low effort number: an effort below the tier floor (critical 70, high
+50) says the family was read too shallowly and becomes a depth_floor trigger, so record the effort
+you actually spent, and where a sink-first read covered the family completely, say how in its
+`notes`. On a critical or high file a `not_applicable` entry needs `notes` saying why the family
+cannot occur in the file: the reason settles that family's depth floor and is kept on its trigger.
+The packet's list is a dispatch-time snapshot that `done` recomputes, so re-read the live set with
+`vigil assess code-dispatch progress <item-id>` before `done`: a family left in its
+`missing_cwe_families` is recorded at effort 0 as a coverage gap. A family your packet
 never named is drift; review it or say in the handoff that the set moved.
 
 ## Queue Lease and Receipt Contract

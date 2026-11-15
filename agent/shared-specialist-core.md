@@ -55,8 +55,7 @@ to fix a defect you have pinned to a file and line. The harness defines what eve
 result means, and the tree may be a maintainer's working copy with uncommitted work. Put a harness
 defect in the handoff's `runtime_issues` with the failing command, the error and your workaround,
 then carry on with the workaround. A traceback from a `vigil` command is often a transient install
-state: retry it once before you report it. A pre-tool hook refuses file writes and shell write or
-checkout commands aimed at that directory.
+state: retry it once before you report it.
 
 **Do the assigned sweeps yourself**, sequentially or as parallel tool calls. Starting nested
 subagents competes with the operator's other lanes for the client's concurrent-subagent cap, and a

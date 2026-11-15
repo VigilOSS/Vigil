@@ -658,6 +658,17 @@ class DecisionCreate(BaseModel):
             "only current rows; it stays readable by id."
         ),
     )
+    recorded_by_agent_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description=(
+            "The dispatch agent_id of the specialist recording this decision (its "
+            "Runtime Identity). The row records it with that dispatch's role; an id no "
+            "dispatch of this engagement holds is refused. Omitted (or `operator`), the "
+            "row is the operator's. A specialist cannot record a vuln_family_exclusion."
+        ),
+    )
     # What the POST stored in place of what was sent, for the response's
     # ``derived`` list.
     _derived: list[dict[str, Any]] = PrivateAttr(default_factory=list)
@@ -1053,6 +1064,7 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
         payload=request.payload,
         surfaced_to_user=request.surfaced_to_user,
         supersedes=request.supersedes,
+        recorded_by_agent_id=request.recorded_by_agent_id,
     )
     await _offload(
         _audit_assessment_mutation,
@@ -1064,6 +1076,7 @@ async def create_decision(engagement_key: str, request: DecisionCreate) -> dict[
             "kind": request.kind,
             "surfaced_to_user": request.surfaced_to_user,
             "supersedes": request.supersedes,
+            "recorded_by": record["recorded_by"],
         },
     )
     await _broadcast(engagement.key, "dispatch_decision", record)

@@ -22,8 +22,7 @@ read-only for this session. Do not edit, format, revert or check out files there
 defect you have pinned to a file and line: the harness defines what every gate and recorded result
 means, and the tree may be a maintainer's working copy with uncommitted work. Log the defect with
 the failing command, the error and your per-run workaround in the engagement's
-`ISSUES-AND-ENHANCEMENTS.md`, tell the user, and carry on with the workaround. A pre-tool hook
-refuses file writes and shell write or checkout commands aimed at that directory (ADR 0048).
+`ISSUES-AND-ENHANCEMENTS.md`, tell the user, and carry on with the workaround.
 
 Trigger-loaded rules (none load at session start; read each when its trigger fires):
 

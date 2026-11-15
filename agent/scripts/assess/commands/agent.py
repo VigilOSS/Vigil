@@ -367,6 +367,16 @@ def register(subparsers) -> None:
     decision.add_argument("--phase", dest="decision_phase", default=None)
     decision.add_argument("--reason", default="")
     decision.add_argument(
+        "--agent-id",
+        dest="decision_agent_id",
+        default=None,
+        help=(
+            "Your dispatch agent_id from your packet's Runtime Identity, when a specialist "
+            "records the decision: the row records that dispatch, with its role, as its "
+            "recorder (an id no dispatch holds is refused). Omit it when the operator records."
+        ),
+    )
+    decision.add_argument(
         "--supersedes",
         dest="decision_supersedes",
         type=int,

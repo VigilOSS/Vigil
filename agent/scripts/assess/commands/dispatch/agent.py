@@ -642,6 +642,11 @@ def _record_decision(args) -> None:
     supersedes = getattr(args, "decision_supersedes", None)
     if supersedes is not None:
         body["supersedes"] = supersedes
+    # Only the explicit flag names the recorder: $AGENT_NAME / $VIGIL_AGENT_NAME
+    # carry run attribution (often a role label), not dispatch identity.
+    recorder = (getattr(args, "decision_agent_id", None) or "").strip()
+    if recorder:
+        body["recorded_by_agent_id"] = recorder
     client, _ = _client_for(args)
     try:
         row = client.record_decision(body)

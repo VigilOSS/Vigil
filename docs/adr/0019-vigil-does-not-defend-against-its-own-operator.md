@@ -112,14 +112,10 @@ one that silently disabled the guard for every repository path containing a
 space. Both passed review. A guard whose failure mode is *silence* is worse than
 no guard, because it is trusted.
 
-A future agent-error guardrail that anything relies on as a boundary must therefore
-act where the command is executed rather than where it is spelled — the client's own
-permission layer, or a constrained execution surface Vigil owns. A guardrail that reads
-the spelled command can only be a tripwire behind a rule the prompts already carry, with its
-blind spots documented, and it still requires a separate review of that trust boundary.
-[ADR 0048](0048-the-application-tree-is-read-only-from-an-engagement.md) is that review for one
-such tripwire: a `PreToolUse` hook that refuses writes to the Vigil application tree from an
-engagement session, backing a prompt rule rather than standing in for one.
+A future agent-error guardrail must therefore act where the command is executed
+rather than where it is spelled — the client's own permission layer, or a
+constrained execution surface Vigil owns. Such a change requires a separate review of that
+trust boundary.
 
 The distinguishing question is always the same: *who is the adversary, and what
 does this stop them reaching?* If the answer is "the operator, from their own

@@ -141,6 +141,7 @@ from .state_manager.findings import (
     is_file_finding,
     load_code_repo_snapshot_states,
 )
+from .state_manager.dispatches import decision_recorded_by
 from .state_manager.taxonomy_bridge import vuln_taxonomy
 from .state_manager import run_accounting
 from .variant_scopes import (
@@ -889,7 +890,7 @@ FAMILY_EXCLUSION_DECISION_KIND = "vuln_family_exclusion"
 def family_exclusion_problems(payload: Any, *, surfaced_to_user: bool) -> list[str]:
     """Why a ``vuln_family_exclusion`` decision excludes nothing; empty when it is valid."""
     named = payload.get("vuln_classes") if isinstance(payload, dict) else None
-    ruling = str(payload.get("ruling") or "").strip() if isinstance(payload, dict) else ""
+    ruling = payload.get("ruling") if isinstance(payload, dict) else None
     problems: list[str] = []
     if not isinstance(named, list) or not named:
         problems.append("vuln_classes must be a non-empty list of review families")
@@ -903,8 +904,8 @@ def family_exclusion_problems(payload: Any, *, surfaced_to_user: bool) -> list[s
                 f"unknown review families: {', '.join(unknown)} "
                 f"(canonical: {', '.join(sorted(vuln_taxonomy.VULN_CLASSES))})"
             )
-    if not ruling:
-        problems.append("ruling must quote the ruling and say where it is recorded")
+    if not isinstance(ruling, str) or not ruling.strip():
+        problems.append("ruling must be text that quotes the ruling and says where it is recorded")
     if not surfaced_to_user:
         problems.append(
             "surfaced_to_user must be true: the exclusion records a program or user ruling "
@@ -914,12 +915,16 @@ def family_exclusion_problems(payload: Any, *, surfaced_to_user: bool) -> list[s
 
 
 def _engagement_family_exclusions(connection, engagement_id: int) -> dict[str, Any]:
-    """``{"families": {family: {decision_id, ruling, recorded_at}}, "invalid": [...]}``."""
+    """``{"families": {family: {decision_id, ruling, recorded_at, recorded_by}}, "invalid": [...]}``.
+
+    ``recorded_by`` is the decision row's recorder (`decision_recorded_by`)."""
     families: dict[str, dict[str, Any]] = {}
     invalid: list[dict[str, Any]] = []
     rows = connection.execute(
         """
-        SELECT id, payload_json, surfaced_to_user, created_at FROM assessment_dispatch_decisions
+        SELECT id, payload_json, surfaced_to_user, created_at, recorded_by_agent_id,
+               recorded_by_role
+        FROM assessment_dispatch_decisions
         WHERE engagement_id = ? AND kind = ? AND resolved = 0
           AND superseded_by_id IS NULL
         ORDER BY id
@@ -932,12 +937,13 @@ def _engagement_family_exclusions(connection, engagement_id: int) -> dict[str, A
         if problems:
             invalid.append({"decision_id": int(row["id"]), "problems": problems})
             continue
-        ruling = str(payload["ruling"]).strip()
+        ruling = payload["ruling"].strip()
         for family in payload["vuln_classes"]:
             families.setdefault(str(family), {
                 "decision_id": int(row["id"]),
                 "ruling": ruling,
                 "recorded_at": row["created_at"],
+                "recorded_by": decision_recorded_by(row),
             })
     return {"families": families, "invalid": invalid}
 

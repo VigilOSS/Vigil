@@ -1036,15 +1036,50 @@ def argv_makes_no_target_traffic(cmd: list[str]) -> bool:
     return all(_command_makes_no_target_traffic(words) for words in commands)
 
 
+# Heads whose traffic this module or the scope classifier declares: target-facing
+# tools, tools that reach archives, resolvers or the target below HTTP, HTTP tools
+# whose attribution header is injected, and tools declared offline. A run whose
+# every executable is one of these records ``target_facing`` false when the policy
+# saw no target traffic; any other head is program code this classification does
+# not know, so the audit row records "unknown".
+_TRAFFIC_PROFILED_HEADS: frozenset[str] = (
+    scope_lib._TARGET_FACING_TOOLS
+    | scope_lib._NON_REQUESTING_HEADS
+    | frozenset(_NO_TARGET_TRAFFIC_TOOLS)
+    | _REQUIRED_HEADER_SKIP
+    | _REQUIRED_HEADER_INJECTABLE
+    | frozenset(_REQUIRED_HEADER_FLAG_SPECS)
+    | _HTTP_PROBER_TOOLS
+)
+
+
+def _head_traffic_is_unknown(words: list[str]) -> bool:
+    """True when ``words`` runs code whose destinations its argv does not show."""
+    raw = words[0]
+    head = Path(raw).name.lower()
+    if "/" in raw or head.startswith(("$", "`")) or head in scope_lib._SCRIPT_FILE_EXECUTORS:
+        # A path head is a file the run executes (``./probe.sh``, a script under
+        # the engagement), not a tool on PATH this classification knows.
+        return True
+    if head not in _TRAFFIC_PROFILED_HEADS:
+        return True
+    # An offline tool that runs another command (``find -exec``) runs a child
+    # whose traffic is not classified here.
+    return any(word in _CHILD_COMMAND_OPTIONS.get(head, frozenset()) for word in words[1:])
+
+
 def recorded_target_facing(cmd: list[str], *, recognized: bool) -> bool | str:
     """``target_facing`` as a command-run audit row records it.
 
     ``True`` when the execution policy recognized target traffic. Otherwise
-    ``"unknown"`` when the run executes program code whose destinations the
-    argv does not show — a script file or inline program under an interpreter
-    or shell (``python3 login.py``, ``node -e …``, ``bash probe.sh``), a dynamic
-    head, or a shell body that cannot be lexed — unless every executable is
-    declared offline; else ``False`` ("not recognized as target-facing").
+    ``"unknown"`` when the run executes code whose destinations the argv does
+    not show: a script file or inline program under an interpreter or shell
+    (``python3 login.py``, ``node -e …``, ``bash probe.sh``), a path head
+    (``./probe.sh``), a head with no declared traffic profile (``go run``,
+    ``java -jar``, an unknown binary), a dynamic head, an offline tool running a
+    child command, or a shell body that cannot be lexed; else ``False``: every
+    executable is a tool whose traffic is declared and none was recognized as
+    target-facing.
 
     Only the audit record carries ``"unknown"``: the execution policy's own
     boolean, which gates the scope ``hosts`` requirement and the cross-lane
@@ -1053,12 +1088,8 @@ def recorded_target_facing(cmd: list[str], *, recognized: bool) -> bool | str:
     if recognized:
         return True
     commands, ambiguous = _simple_commands(cmd)
-    if ambiguous:
+    if ambiguous or any(_head_traffic_is_unknown(words) for words in commands):
         return "unknown"
-    for words in commands:
-        head = Path(words[0]).name.lower()
-        if head.startswith(("$", "`")) or head in scope_lib._SCRIPT_FILE_EXECUTORS:
-            return "unknown"
     return False
 
 

@@ -145,7 +145,9 @@ instructions: |2
   blocked. Reserve blocked for a tool that genuinely never executed (missing from
   the image, target unreachable, hard WAF lockout). For the recon JOB, read
   `recon-status` + the stage `exit_code`s: a `failed` stage is a real gap; a
-  `done`-with-low-counts stage is `dry`, not blocked.
+  `partial` stage ran but some of its rows (`backend_refused`, `write_uncertain`) never reached
+  the work buffer, and its errors say where those rows are listed; a `done`-with-low-counts stage
+  is `dry`, not blocked.
 
   ### Closing verbs
 
@@ -191,7 +193,11 @@ instructions: |2
 
   Emit one line per gap (host + missing outcome):
   - [ ] Every literal or `discovered_hosts` inventory host has ≥1 live service row OR an explicit `coverage_deferral`
-  - [ ] Every host has a WAF tier classified (intel tech-component, or `coverage_deferral` with reason)
+  - [ ] Every host has a WAF tier classified: a tech-component row whose `provenance.waf` records the
+    measurement (`{"verdict": "detected"|"none_detected", "hosts": [...]}` with
+    `provenance.command_run_id` of a successful run whose target is that host), or a
+    `coverage_deferral` with reason. A measured negative closes
+    the objective; never name a vendor the run did not see (`vigil assess contract intel record tech-component`)
   - [ ] Wildcard expansion produced ≥1 subdomain or an explicit defer reason
   - [ ] No host has 0 surfaces AND 0 work-buffer items AND no defer reason
   - [ ] Egress reputation check ran (or an operator decision is recorded)

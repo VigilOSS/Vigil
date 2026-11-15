@@ -2019,8 +2019,9 @@ def _record_intel_contract(intel_type: str) -> CommandContract | None:
             "\"hosts\": [<host>, ...]} with `provenance.command_run_id` naming the run that "
             "measured them (wafw00f or an equivalent probe). The run must have completed "
             "successfully and record each named host as its target: its target_host (a "
-            "list-mode run records the hosts its list file holds) or the target its argv "
-            "names. Record a measured negative as `none_detected`, and name a WAF in "
+            "list-mode run records the hosts its list file holds), or, with no target_host, "
+            "a target URL or host its wafw00f argv names; the command text is never read "
+            "for a host. Record a measured negative as `none_detected`, and name a WAF in "
             "`component` only when the run saw one. A row that says 'no WAF' only in its "
             "text closes nothing; the backend refuses a measurement whose run is not in this "
             "engagement, did not succeed, or did not target a named host, and names the host."
@@ -2853,14 +2854,17 @@ def _dispatch_verb_contract(verb: str) -> CommandContract | None:
                 "--payload-json OR shorthand flags (--host / --vendor / --choice / --note / --reason / --phase) that build the payload dict",
                 "--surfaced-to-user (set when the operator presented the decision to the human; controls whether it appears in user-visible logs)",
                 "--supersedes <decision-id> (optional): the earlier row of the same --kind this row replaces",
+                "--agent-id <your dispatch agent_id> (a specialist recording the decision; from your packet's Runtime Identity): the row's `recorded_by` names that dispatch and its recorded role; an id no dispatch of this engagement holds is refused. Omitted, `recorded_by` is the operator",
             ),
             helper_defaults=(
                 ("payload", "constructed from --host/--vendor/--choice/--note/--reason/--phase when --payload-json is omitted"),
                 ("surfaced_to_user", "false unless --surfaced-to-user is set"),
+                ("recorded_by", "the operator unless --agent-id names your dispatch; $AGENT_NAME / $VIGIL_AGENT_NAME are never read for it"),
             ),
             notes=(
                 "Vendor-SaaS scope warnings, egress-block decisions, and dispatch-blocked rows all share this table — keep the --kind taxonomy disciplined so report-writer can summarize by kind.",
                 "Set --surfaced-to-user for operator-facing decisions (vendor-SaaS, egress reputation, blocked dispatch) so the human-visible audit log matches what the operator was shown.",
+                "A vuln_family_exclusion records a program or user ruling the operator surfaces to the user, so the operator records it: one recorded with --agent-id naming a dispatch is refused. A specialist that finds such a ruling reports it in its handoff for the operator.",
                 "--supersedes <decision-id> CORRECTS A ROW INSTEAD OF STACKING ONE: the new row records `supersedes_id`, the named row is stamped `superseded_by_id` in the same write, and every gate, readiness reader and approval flow reads only current rows. The superseded row stays readable (`vigil assess fetch dispatch-decisions/<id>`, or `dispatch-decisions?include_superseded=true` for the history) and can no longer be resolved. Refused: a row of another kind (record the correction under that kind), a row this engagement does not hold, a row already superseded (supersede its replacement), and severity_variance (it attaches to the current verification; correct it on a fresh `finding verify --severity-variance-file`).",
                 "For coverage_deferral, deferred_objectives accepts exactly the per-host objectives `check-phase-readiness --by-host` evaluates (its `objectives:` line; a refusal names them). A deferred step that is none of them (authenticated recon, a skipped scan) is not a coverage_deferral; record it as an ungated kind such as `phase_step_deferral` with the hosts, step and reason, which no gate reads.",
                 "--payload-json COMPOSES, THEN THE FLAGS WIN: the JSON object is loaded into the payload first and each supplied shorthand flag (--host / --vendor / --choice / --note / --reason / --phase) then overrides its own key, exactly as `agent start --from-json` and `host-exec --from-json` behave. Supply a value once: a flag repeating a JSON key wins, a flag naming a key the JSON omits adds it, and a flag you leave off changes nothing. The gate reads `payload.choice`, so `choice` must come from one of the two — inside the JSON object or as --choice — and must not be spelled differently in each.",
