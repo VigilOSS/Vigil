@@ -280,6 +280,26 @@ def test_handoff_without_a_role_takes_the_dispatch_role(client, isolate_settings
     assert [entry["field"] for entry in resp.json()["derived"]] == ["agent_role"]
 
 
+def test_handoff_naming_the_current_role_of_a_renamed_dispatch_role_is_accepted(
+    client, isolate_settings
+) -> None:
+    """A dispatch stored under a role's retired spelling keeps it; a handoff that
+    names the role it was renamed to names the same role, not a contradiction."""
+    _seed(client, isolate_settings)
+    _register_dispatch(client, agent_id="ROLE-RENAMED", agent_role="general")
+
+    resp = client.post(
+        f"{BASE}/dispatch-handoffs",
+        json=_full_payload(agent_id="ROLE-RENAMED", agent_role="blind-reviewer"),
+    )
+
+    assert resp.status_code == 201, resp.text
+    assert resp.json()["agent_role"] == "general"
+    assert [entry["field"] for entry in resp.json()["derived"]] == ["agent_role"]
+    dispatch = client.get(f"{BASE}/dispatches/ROLE-RENAMED")
+    assert dispatch.json()["agent_role"] == "general"
+
+
 def test_handoff_with_the_dispatch_role_derives_nothing(client, isolate_settings) -> None:
     _seed(client, isolate_settings)
     _register_dispatch(client, agent_id="ROLE-MATCH", agent_role="recon-specialist")

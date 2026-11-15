@@ -368,9 +368,10 @@ and authority boundaries) and returns a short `launch_message` naming its path a
 that envelope to a fresh native specialist with the registered role selected; never copy identity
 blocks into a second prompt. Launch only on a `launch_required=true` receipt: an exact retry returns
 the same capture with `launch_required=false`, for inspection, not a second worker. After launch, bind
-the native handle with `vigil assess agent bind-client-handle`; the handle and the backend dispatch ID
-are different namespaces. After an interrupted return, inspect the actual native tasks and command
-execution before any replacement (ZCode: `docs/zcode-setup.md` "Interrupted specialists").
+the native handle with `vigil assess agent bind-client-handle` unless the task result's
+`Vigil dispatch binding:` line (OpenCode) reports `bound` or `already_bound`; the handle and the backend
+dispatch ID are different namespaces. After an interrupted return, inspect the actual native tasks and
+command execution before any replacement (ZCode: `docs/zcode-setup.md` "Interrupted specialists").
 
 Put engagement-wide briefing in `--standing-brief-file <path>`; it is captured once and each packet
 points to its digest. Keep `--task` and `--packet-file` about this lane. Continuation

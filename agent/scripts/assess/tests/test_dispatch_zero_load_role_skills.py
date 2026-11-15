@@ -7,7 +7,7 @@ packet for procedural steps. That is correct for every investigative role, whose
 `Load First` already names repository files it must open.
 
 It is the whole failure mode for a role that opens nothing. The blind-triage
-Pass-2 reviewer (`agent/agents/general.md`) exists so that a Medium-or-above
+Pass-2 reviewer (`agent/agents/blind-reviewer.md`) exists so that a Medium-or-above
 submission is judged by an agent that cannot look up how the submission was
 produced; its entire admissible input is the packet the operator exports. A
 `--skills` name on that dispatch does not add context the packet lacks, it adds

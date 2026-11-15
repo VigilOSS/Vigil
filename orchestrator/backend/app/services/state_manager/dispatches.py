@@ -818,6 +818,17 @@ def _serialize_handoff(row) -> dict[str, Any]:
 
 HANDOFF_SUMMARY_MAX_CHARS = 16384
 
+# A role's retired spelling -> the role that replaced it. A dispatch keeps the
+# role it was registered under; a handoff naming the current role of a retired
+# spelling names that same dispatch role. The CLI mirror
+# (`contract_registry.py:RENAMED_DISPATCH_ROLES`) registers new dispatches under
+# the current role; `test_renamed_dispatch_roles_mirror.py` pins the two.
+RENAMED_DISPATCH_ROLES: dict[str, str] = {"general": "blind-reviewer"}
+
+
+def _current_dispatch_role(role: str) -> str:
+    return RENAMED_DISPATCH_ROLES.get(role, role)
+
 def _register_handoff_artifacts(engagement_id: int, handoff: dict[str, Any]) -> None:
     artifacts = handoff.get("working_artifacts") or []
     if not isinstance(artifacts, list):
@@ -893,10 +904,11 @@ def record_handoff(
         # and its registered role is the one every role-keyed read joins on. A
         # role the caller left out is filled from it, and the response says so;
         # a different role contradicts the dispatch the handoff names and is
-        # refused, because one of the two identities is wrong.
+        # refused, because one of the two identities is wrong. The current name
+        # of a renamed role is the same role, so the stored spelling is kept.
         registered_role = str(dispatch_row["agent_role"])
         derived: list[dict[str, Any]] = []
-        if agent_role and agent_role != registered_role:
+        if agent_role and _current_dispatch_role(agent_role) != _current_dispatch_role(registered_role):
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
                 detail=(
@@ -914,6 +926,16 @@ def record_handoff(
                 "detail": (
                     f"stored the registered dispatch role {registered_role!r}; "
                     "the handoff named none"
+                ),
+            })
+        elif agent_role != registered_role:
+            derived.append({
+                "field": "agent_role",
+                "value": registered_role,
+                "derived_from": "dispatch",
+                "detail": (
+                    f"stored the registered dispatch role {registered_role!r}; "
+                    f"{agent_role!r} is its current name"
                 ),
             })
         agent_role = registered_role

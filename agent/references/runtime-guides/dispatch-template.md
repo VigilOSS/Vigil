@@ -21,7 +21,8 @@ size and `launch_message`. Capture has succeeded only when both the backend regi
 immutable local packet are published. `--dry-run` validates without registering, publishing or
 authorizing a launch. The command spawns nothing. Choose the registered role in the client,
 launch a fresh child with the envelope, then record the child's real handle with
-`agent bind-client-handle`. The backend dispatch ID and the native client handle are separate
+`agent bind-client-handle` unless the task result's `Vigil dispatch binding:` line (OpenCode)
+reports `bound` or `already_bound`. The backend dispatch ID and the native client handle are separate
 namespaces.
 
 An exact registration retry returns the same dispatch and packet with `launch_required=false`.

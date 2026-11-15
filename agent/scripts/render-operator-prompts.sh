@@ -179,13 +179,13 @@ AGENT_NAMES=(
   code-variant-hunter
   code-vuln-verifier
   code-fuzz-engineer
-  general
+  blind-reviewer
 )
 
 # Blue specialist roster. Note that `operator`, `osint-analyst`,
-# `report-writer`, and `general` are shared with red and their source files live
+# `report-writer`, and `blind-reviewer` are shared with red and their source files live
 # under agent/agents/<name>.md. The other four are blue-only.
-# `general` is the blind-triage reviewer: its Accept verdict gates final export
+# `blind-reviewer` is the blind-triage reviewer: its Accept verdict gates final export
 # and web `transition-phase complete` for every Medium-or-above submittable
 # finding. Both rosters render its wrapper so the role resolves in either tree.
 BLUE_AGENT_NAMES=(
@@ -196,7 +196,7 @@ BLUE_AGENT_NAMES=(
   ir-lead
   osint-analyst
   report-writer
-  general
+  blind-reviewer
 )
 
 # -----------------------------------------------------------------------------
@@ -619,7 +619,7 @@ agent_description() {
     investigator) printf '%s\n' "L2 platform investigator. Pulls telemetry, builds evidence ladder, drafts findings with timeline + IOCs + MITRE techniques. Loads one platform skill per dispatch." ;;
     incident-verifier) printf '%s\n' "L3 false-positive verifier. Five-check protocol with symmetric evidence bar. Only role that records terminal verification_status decisions." ;;
     ir-lead) printf '%s\n' "L4 incident response lead. Containment / eradication / recovery proposals via propose-contain → operator approval → host-exec → contain. No automated WRITE actions." ;;
-    general) printf '%s\n' "Zero-context blind reviewer for the blind-triage Pass-2 gate. Judges a prepared packet's own bytes only — no repository read, no command, no backend query, no engagement history." ;;
+    blind-reviewer) printf '%s\n' "Zero-context blind reviewer for the blind-triage Pass-2 gate. Judges a prepared packet's own bytes only — no repository read, no command, no backend query, no engagement history." ;;
   esac
 }
 
@@ -665,7 +665,7 @@ agent_model() {
     # Pro — operator + hard multi-step exploit/analysis/verification/synthesis.
     # (operator, vulnerability-analyst, exploit-developer, osint-analyst,
     #  report-writer, code-architect, code-vuln-hunter, code-vuln-verifier,
-    #  code-fuzz-engineer, investigator, incident-verifier, ir-lead, general,
+    #  code-fuzz-engineer, investigator, incident-verifier, ir-lead, blind-reviewer,
     #  + default.)
     *)
       printf '%s\n' "$OPENCODE_PRO_MODEL" ;;
@@ -754,7 +754,7 @@ agent_prompt_body() {
 render_specialist_stop_sign() {
   cat <<'EOF'
 <!-- STOP — DISPATCHED SPECIALIST: if you are a specialist subagent (including a
-     general blind reviewer, recon, source, surface, vuln, exploit, fuzzer, osint,
+     blind reviewer, recon, source, surface, vuln, exploit, fuzzer, osint,
      report, or any code-* role), do NOT load this OPERATOR prompt or its startup banner.
      Investigative specialists load ONLY their own role and its `Load First` entries.
      A blind packet reviewer reads ONLY its supplied packet and review request instead.

@@ -6,7 +6,7 @@ falls back to telling the specialist to self-select and to record the loaded
 names in its handoff.
 
 That fallback is wrong for the two roles the skills requirement exempts, and for
-`general` it is wrong in the way that matters: the blind packet reviewer loads
+`blind-reviewer` it is wrong in the way that matters: the blind packet reviewer loads
 nothing by design, makes no tool calls, and does not write the handoff -- the
 operator does. A packet that tells it to self-select skills and record them
 contradicts its own role prompt, which is the same defect as the one that made
@@ -21,7 +21,7 @@ from assess.commands.agent import _dispatch_skill_lines
 
 
 def test_the_blind_reviewer_is_not_told_to_self_select_or_record_skills() -> None:
-    rendered = "\n".join(_dispatch_skill_lines(None, role="general"))
+    rendered = "\n".join(_dispatch_skill_lines(None, role="blind-reviewer"))
 
     assert "self-selected" not in rendered, rendered
     assert "record the loaded skill names" not in rendered, rendered

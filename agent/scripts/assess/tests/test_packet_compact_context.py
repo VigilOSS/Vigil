@@ -11,7 +11,7 @@ def test_packet_context_preserves_actionable_values_and_traffic_identity(tmp_pat
     context = {key: 'not supplied' for key in agent._PROMPT_CONTEXT_FIELDS}
     context.update({'authorized_phase': 'code-hunt', 'auth_context': 'Acme reviewer',
                     'credential_id': 'unknown', 'prior_state': 'unknown'})
-    payload = {'agent_id': 'acme-lane', 'agent_role': 'general', 'task': 'Review assigned files',
+    payload = {'agent_id': 'acme-lane', 'agent_role': 'blind-reviewer', 'task': 'Review assigned files',
                'requested_model': 'acme-model', 'requested_reasoning': 'high'}
     rendered = agent._dispatch_prompt(payload, engagement_dir=tmp_path, agent_root=tmp_path,
         source_identity=[], args=argparse.Namespace(prompt_context=context, prompt_context_json=None,

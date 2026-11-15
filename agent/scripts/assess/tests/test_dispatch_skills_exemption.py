@@ -3,13 +3,13 @@
 The `skills` warning exists so a dispatch row is a truthful audit of the
 specialist context a role loaded. Two roles have nothing to audit, for opposite
 reasons: `operator` coordinates phases rather than executing a skill, and
-`general` is the blind packet reviewer whose whole premise is that it loads
+`blind-reviewer` is the blind packet reviewer whose whole premise is that it loads
 nothing -- `agent/skills/blind-triage/SKILL.md` instructs the operator to name
 no `--skills` on that dispatch, precisely because `agent start` renders a
 "you MUST read and follow <skill>" line for every skill named, and this role's
 defining rule is that it reads no repository file.
 
-So for `general` the warning advises the one thing the gating skill forbids.
+So for `blind-reviewer` the warning advises the one thing the gating skill forbids.
 These drive the real predicate rather than asserting the exempt set, so the
 roles stay in step with what the CLI actually does.
 """
@@ -36,7 +36,7 @@ def _skill_warnings(role: str) -> list[str]:
 
 
 def test_the_blind_reviewer_is_not_told_to_name_a_skill_it_must_not_read() -> None:
-    assert _skill_warnings("general") == []
+    assert _skill_warnings("blind-reviewer") == []
 
 
 def test_the_operator_keeps_its_own_exemption() -> None:

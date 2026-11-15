@@ -281,7 +281,8 @@ optional only with exactly one active repository). It captures one immutable pac
 short `launch_message`: send only that to a fresh specialist with the registered role selected
 (`fork_turns: none` where exposed), never a second prompt carrying the packet contents. Proof work
 uses its `proof-work claim` receipt's `launch.launch_message` instead of `agent start`. Bind the
-native handle with `agent bind-client-handle`, and wait for the result in the current turn unless you
+native handle with `agent bind-client-handle` unless the task result's `Vigil dispatch binding:` line
+(OpenCode) reports `bound` or `already_bound`, and wait for the result in the current turn unless you
 have verified the client's background completion. After an interrupted return, inspect native task
 and command state before replacing work (ZCode: `docs/zcode-setup.md` **Interrupted specialists**).
 

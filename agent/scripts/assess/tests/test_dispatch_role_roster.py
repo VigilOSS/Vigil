@@ -5,7 +5,7 @@ packet renders "read agent/agents/<role>.md and its mandatory references before
 work" into the launch envelope and a missing file means the dispatch runs with no
 role prompt at all. The refusal is only as good as the agreement between that
 roster and the prompts that name roles: `agent/skills/blind-triage/SKILL.md`
-prescribes `--role general` for the Pass-2 reviewer that gates
+prescribes `--role blind-reviewer` for the Pass-2 reviewer that gates
 `transition-phase report` / `complete` for every Medium-or-above finding, so a
 role named there but absent from the roster makes the documented route to
 satisfying that gate exit 1.
@@ -114,7 +114,7 @@ def test_every_role_named_in_a_prompt_source_is_dispatchable() -> None:
 
 @pytest.mark.parametrize(
     "skill_relative, role",
-    [("agent/skills/blind-triage/SKILL.md", "general")],
+    [("agent/skills/blind-triage/SKILL.md", "blind-reviewer")],
 )
 def test_the_gating_skill_reviewer_role_passes_the_start_predicate(
     skill_relative: str, role: str
@@ -133,6 +133,30 @@ def test_the_gating_skill_reviewer_role_passes_the_start_predicate(
         "track the role the skill actually names"
     )
     _require_registered_role({"agent_role": role}, _cfg())
+
+
+# Subagent names the supported clients ship built in. A native launch selects
+# the role by this name, and a role sharing one is not reliably the agent that
+# runs: an OpenCode launch of a role that shared its built-in `general` ran the
+# built-in, which loads no role wrapper.
+_CLIENT_BUILTIN_SUBAGENTS: dict[str, frozenset[str]] = {
+    "opencode": frozenset({"build", "plan", "general", "explore"}),
+    "claude": frozenset({"general-purpose", "explore", "plan", "statusline-setup"}),
+}
+
+
+def test_no_registered_role_shares_a_client_builtin_subagent_name() -> None:
+    roster = _role_roster_dir(_cfg())
+    assert roster is not None
+    roles = {path.stem for path in roster.glob("*.md")}
+    shadowed = {
+        client: sorted(role for role in roles if role.lower() in builtins)
+        for client, builtins in _CLIENT_BUILTIN_SUBAGENTS.items()
+    }
+    assert not any(shadowed.values()), (
+        "These registered roles share a client's built-in subagent name, so a "
+        f"native launch by that name can run the built-in instead: {shadowed}"
+    )
 
 
 # The iteration modes a role prompt describes: the backticked modes between its

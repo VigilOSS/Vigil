@@ -20,6 +20,7 @@ from assess.lib.config import load_config
 from assess.lib.contract_registry import HANDOFF_SUMMARY_MAX_CHARS as _HANDOFF_SUMMARY_MAX_CHARS
 from assess.lib.contracts import (
     MIXED_ASSESSMENT_ROLES,
+    current_dispatch_role,
     default_dispatch_mode_for_role,
     validate_specialist_dispatch_contract,
 )
@@ -147,6 +148,8 @@ def _build_register_payload(args) -> dict:
         args.prompt_context = merged
     if not payload.get("agent_role"):
         fail("agent start", "--agent-role is required (or include 'agent_role' in --from-json)")
+    if isinstance(payload["agent_role"], str):
+        payload["agent_role"] = current_dispatch_role(payload["agent_role"], verb="agent start")
     if not payload.get("agent_id"):
         if getattr(args, "action", None) == "start":
             role_slug = (

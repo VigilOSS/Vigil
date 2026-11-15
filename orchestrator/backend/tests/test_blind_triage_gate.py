@@ -356,7 +356,7 @@ def test_blind_triage_verdict_round_trips_to_dispatch_decisions(client, isolate_
     _seed_engagement(client, isolate_settings)
     from tests.test_report_export import _finding
 
-    for agent_id, role in [("SOURCE-VA-007", "vulnerability-analyst"), ("WRITE-VA-007", "report-writer"), ("REVIEW-VA-007", "general")]:
+    for agent_id, role in [("SOURCE-VA-007", "vulnerability-analyst"), ("WRITE-VA-007", "report-writer"), ("REVIEW-VA-007", "blind-reviewer")]:
         dispatch = client.post(f"{_RT_BASE}/dispatches", json={"agent_id": agent_id, "agent_role": role, "task": "review Acme submission"})
         assert dispatch.status_code == 201, dispatch.text
     finding = client.post(f"{_RT_BASE}/findings", json=_finding("VA-007", "Missing authorization"))

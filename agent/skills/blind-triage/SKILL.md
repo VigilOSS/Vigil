@@ -31,7 +31,7 @@ blind isolation is what gives Pass 2 its value.
 request, the verdict table, and the FP/overclaim bar below; that vocabulary and that bar are what the
 reviewer answers in. The operator's sections — Pass 1 above, "Running the review", and "Gating rule" —
 say what the operator does with the verdict and are not instructions to the reviewer;
-`agent/agents/general.md` ("Your Return") holds that line.
+`agent/agents/blind-reviewer.md` ("Your Return") holds that line.
 
 ## Running the review (operator)
 
@@ -42,18 +42,18 @@ dispatch prompt and attach each file under `attachments/` to the launch message.
 printed path has no submission to judge and no way to say so.
 
 **Register the reviewer.** Before native launch, run `vigil assess agent start` with a fresh ID,
-`--role general`, `--dispatch-mode deep-manual`, and `--no-target-traffic`, on the strongest available
-model; the reviewer is neither the report-writer nor the analyst who found the issue. `general` is the
-registered zero-context reviewer role (`agent/agents/general.md`): its `## Load First` is empty by
-design, while any investigative role's packet orders it to read its role file and mandatory
-references, which carry engagement-shaped instruction this reviewer must not have. Bind the returned
-native handle to that registered ID.
+`--role blind-reviewer`, `--dispatch-mode deep-manual`, and `--no-target-traffic`, on the strongest
+available model; the reviewer is neither the report-writer nor the analyst who found the issue.
+`blind-reviewer` is the registered zero-context reviewer role (`agent/agents/blind-reviewer.md`): its
+`## Load First` is empty by design, while any investigative role's packet orders it to read its role
+file and mandatory references, which carry engagement-shaped instruction this reviewer must not have.
+Bind the returned native handle to that registered ID.
 
 **Name no skills on this dispatch, not even this one.** `agent start` turns each named skill into an
 order to read its repository path ahead of the packet, which on the one role that must open nothing is
 an instruction to read the repository; naming this skill would also hand the reviewer the operator's
-half of the gate. `export triage-packet` already packages this file as the rubric, and `general` is
-exempt from the skill-audit requirement for this reason, so `agent start` asks for no skills and warns
+half of the gate. `export triage-packet` already packages this file as the rubric, and `blind-reviewer`
+is exempt from the skill-audit requirement for this reason, so `agent start` asks for no skills and warns
 about none, and the handoff written from the return names none either.
 
 **Keep the first pass blind.** The reviewer receives the program brief, the rubric, the external

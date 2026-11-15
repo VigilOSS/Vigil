@@ -486,8 +486,9 @@ tenant_reference_paths:
 
 Choose and register the backend `agent_id` before native launch. Pass it unchanged in
 Runtime Identity and backend writes. Bind the returned native client session/agent handle
-separately with `vigil assess agent bind-client-handle`; the native handle never replaces the
-backend dispatch identity.
+separately with `vigil assess agent bind-client-handle` unless the task result's
+`Vigil dispatch binding:` line (OpenCode) reports `bound` or `already_bound`; the native handle never
+replaces the backend dispatch identity.
 
 Pass this block verbatim at the top of the dispatch prompt. The specialist
 writes these values into the handoff JSON; `agent handoff` refuses an

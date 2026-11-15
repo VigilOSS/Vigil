@@ -134,7 +134,12 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   write's contract block (`lib/contract_sections.py` maps validator errors to the field names).
 - `contract_registry.py:DISPATCH_MODES_BY_ROLE` owns the iteration modes each role prompt describes (default first);
   `agent start` warns on another mode. Pinned against each role's "Iteration mode" line by
-  `agent/scripts/assess/tests/test_dispatch_role_roster.py`.
+  `agent/scripts/assess/tests/test_dispatch_role_roster.py`, which also keeps role names off the
+  clients' built-in subagent names.
+- `state_manager/dispatches.py:RENAMED_DISPATCH_ROLES` owns which role a retired role spelling means: a
+  stored dispatch keeps its spelling and a handoff may name the current role. `contract_registry.py`
+  mirrors it, and `agent start`/`start-swarm`/`continue` register the current role. See:
+  `orchestrator/backend/tests/test_renamed_dispatch_roles_mirror.py`.
 - `agent/scripts/assess/lib/producer_identity.py:resolve_report_writer` owns which dispatch a `report.md` or
   submission registration is attributed to when `--agent-id` is omitted (`export submission`,
   `artifact register --kind report`). See: `agent/scripts/assess/tests/test_report_writer_attribution.py`.

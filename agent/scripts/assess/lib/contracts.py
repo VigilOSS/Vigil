@@ -64,6 +64,7 @@ from .contract_registry import (
     MAX_LEAD_BINDING_PAGE as MAX_LEAD_BINDING_PAGE,
     MAX_VARIANT_PARENT_FINDINGS as MAX_VARIANT_PARENT_FINDINGS,
     MAX_VARIANT_RECEIPT_PAGE as MAX_VARIANT_RECEIPT_PAGE,
+    RENAMED_DISPATCH_ROLES as RENAMED_DISPATCH_ROLES,
     SPECIALIST_DISPATCH_MODES as SPECIALIST_DISPATCH_MODES,
     SUBMISSION_STATUSES as SUBMISSION_STATUSES,
     VERIFICATION_STATUSES as VERIFICATION_STATUSES,
@@ -78,6 +79,25 @@ from .contract_registry import (
     _kali_invocation,
     dispatch_finding_slugs_help,
 )
+def current_dispatch_role(role: str | None, *, verb: str | None = None) -> str:
+    """Return the role a dispatch request means, resolving a retired spelling.
+
+    A spelling in ``RENAMED_DISPATCH_ROLES`` resolves to its current role; with
+    ``verb`` the resolution is named on stderr, so the operator sees which role
+    was registered. Every other value is returned stripped and unchanged.
+    """
+    text = str(role or "").strip()
+    current = RENAMED_DISPATCH_ROLES.get(text.lower())
+    if current is None:
+        return text
+    if verb:
+        print(
+            f"WARN {verb}: role {text!r} is now {current!r}; registering {current!r}.",
+            file=sys.stderr,
+        )
+    return current
+
+
 def default_dispatch_mode_for_role(role: str | None) -> str:
     """Return the default ``dispatch_mode`` for a role (L2-1).
 
@@ -93,15 +113,15 @@ _SPECIALIST_DISPATCH_REQUIRED_FIELDS: tuple[str, ...] = ()
 
 # Roles exempt from the `skills` requirement. The operator coordinates phases
 # and dispatch decisions rather than executing a single skill, so requiring an
-# explicit skill list on operator dispatches would be misleading. `general` is
-# the blind packet reviewer, and its exemption is the stronger case: `agent
+# explicit skill list on operator dispatches would be misleading.
+# `blind-reviewer` is the blind packet reviewer, and its exemption is the stronger case: `agent
 # start` renders a "you MUST read and follow <skill>" line for every skill
 # named, while the role's defining rule is that it reads no repository file, so
 # `agent/skills/blind-triage/SKILL.md` instructs the operator to name none. For
 # that role the warning advises the one thing the gating skill forbids.
 # Every other specialist role must declare which skills it loaded so the
 # dispatch row is a truthful audit of the specialist context.
-_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator", "general"})
+_DISPATCH_ROLES_WITHOUT_SKILLS: frozenset[str] = frozenset({"operator", "blind-reviewer"})
 
 
 def role_declares_no_skills(role: str | None) -> bool:

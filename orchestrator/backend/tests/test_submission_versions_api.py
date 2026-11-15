@@ -1733,7 +1733,7 @@ def _triage_dispatches(client, slug: str) -> dict[str, str]:
     for field, agent_id in identities.items():
         response = client.post(f"{BASE}/dispatches", json={
             "agent_id": agent_id,
-            "agent_role": "report-writer" if field.startswith("writer") else "general",
+            "agent_role": "report-writer" if field.startswith("writer") else "blind-reviewer",
             "task": f"review submission for {slug}" if field.startswith("reviewer") else f"write submission for {slug}",
         })
         assert response.status_code in {201, 409}, response.text
