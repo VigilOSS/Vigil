@@ -193,7 +193,10 @@ DeepSeek key or force assessment specialist models. To use Z.AI Coding Plan,
 connect the corresponding provider through `/connect` and choose an entitled
 model through `/models`. See [OpenCode providers](https://opencode.ai/docs/providers/#zai).
 Generated assessment roles inherit the selected model. Installed role files do
-not prove that a particular specialist was dispatched successfully.
+not prove that a particular specialist was dispatched successfully. Choose the
+reasoning variant in the TUI; OpenCode stores that choice per model for every
+session on the machine. Vigil's OpenCode sessions do not load Claude Code's
+global `CLAUDE.md` or skills.
 
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop
 is not the tested Vigil surface; this integration targets stable 1.x CLI/TUI.

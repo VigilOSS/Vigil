@@ -226,6 +226,8 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert environment["VIGIL_OPERATOR_MODE"] == "web"
     workspace = Path(environment["VIGIL_CLIENT_CONTEXT"]).parent
     assert environment["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
+    # The operator's personal ~/.claude prompt and skills stay out of the engagement.
+    assert environment["OPENCODE_DISABLE_CLAUDE_CODE"] == "1"
     assert environment["OPENCODE_CONFIG_DIR"] == str(workspace / ".opencode")
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
     binding = json.loads((workspace / ".vigil-client-context.json").read_text())
@@ -241,12 +243,16 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]
 
 
-def test_opencode_helper_path_finds_the_resolved_opencode(context, monkeypatch):
+def test_opencode_helper_path_finds_opencode_by_its_linked_name(context, monkeypatch):
     root, engagement, _ = context
+    # Homebrew links bin/opencode to a differently named executable elsewhere.
+    target = root / "Acme cellar/opencode.exe"
+    target.parent.mkdir()
+    target.write_text("#!/bin/sh\nprintf '%s\\n' acme-opencode\n")
+    target.chmod(0o755)
     opencode = root / "Acme client tools/opencode"
     opencode.parent.mkdir()
-    opencode.write_text("#!/bin/sh\nprintf '%s\\n' acme-opencode\n")
-    opencode.chmod(0o755)
+    opencode.symlink_to(target)
     original = clients.shutil.which
     monkeypatch.setattr(clients.shutil, "which", lambda name: str(opencode) if name == "opencode" else original(name))
     helper = root / "session-helper"
@@ -259,7 +265,7 @@ def test_opencode_helper_path_finds_the_resolved_opencode(context, monkeypatch):
         env={**os.environ, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "acme-opencode"
-    assert binding["tools"]["opencode"] == str(opencode.resolve())
+    assert binding["tools"]["opencode"] == str(opencode)
 
 
 def test_native_helper_executes_docker_from_resolved_directory(context, monkeypatch):
