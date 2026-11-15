@@ -2737,11 +2737,19 @@ def _require_install_prerequisites(agent_root: Path, engagement_type: str) -> No
         else [_canonical_operator_prompt(agent_root, engagement_type)]
     )
     missing = next((prompt for prompt in prompts if not prompt.is_file()), None)
-    if missing is not None:
-        raise SystemExit(
-            f"canonical operator prompt not found at {missing}; "
-            f"run `vigil install {agent_root.parent}` first"
+    if missing is None:
+        return
+    if (agent_root.parent / "bundle.json").exists():
+        remedy = f"the application release at {agent_root.parent} is incomplete; reinstall the release wheel"
+    elif missing.name in {"AGENTS.md", "AGENTS-blue.md"}:
+        # A source checkout's client prompt trees are generated, not committed.
+        remedy = (
+            "run `vigil install` to render this checkout's client prompt trees "
+            f"(or `cd {agent_root} && ./scripts/render-operator-prompts.sh repo`) first"
         )
+    else:
+        remedy = "it is a prompt source of this checkout; restore it from version control"
+    raise SystemExit(f"canonical operator prompt not found at {missing}; {remedy}")
 
 
 def _write_prompt_wrappers(

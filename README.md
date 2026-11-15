@@ -280,7 +280,7 @@ Some gaps block progress, some warn, and some accept an explicit deferral or aud
 A code audit cannot be forced to complete with outstanding durable coverage debt. None of
 these checks can decide whether the reasoning was good enough or the target is free of bugs.
 
-The methodology lives in the [lead agent prompt](agent/AGENTS.md),
+The methodology lives in the [lead agent prompt](agent/operator-core.md),
 [specialist roles](agent/agents/), [skills](agent/skills/), and [references](agent/references/).
 The backend preserves the work and checks its relationships. Read both when evaluating what
 Vigil can do.

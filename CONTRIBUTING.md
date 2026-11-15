@@ -48,7 +48,11 @@ There is no commit-message convention. Write a message that says what changed an
 ## Development and verification
 
 Install the CLI from your checkout with `uv tool install --editable .`; the checkout then supplies
-the prompts, backend, and UI assets. `vigil up` starts the local stack. For UI work, run
+the prompts, backend, and UI assets. Then run `vigil install`: it renders the generated client
+prompt trees (`agent/AGENTS*.md`, `agent/CLAUDE.md`, and the wrappers under `agent/.claude`,
+`.codex`, `.goose`, `.opencode` and `.zcode`) into the checkout. They are not committed; run
+`vigil install` or `(cd agent && ./scripts/render-operator-prompts.sh repo)` again after editing
+prompt sources or pulling changes. `vigil up` starts the local stack. For UI work, run
 `npm ci && npm run dev` in `orchestrator/frontend/`; the Vite dev server proxies API calls to the
 backend at `http://127.0.0.1:18000`.
 
@@ -68,8 +72,8 @@ against the current tree for the exact reason you are about to fix, watch it fai
 production change and watch it pass. Run the impacted suites afterwards. A change that arrives with
 no test that would have caught the defect is not finished.
 
-Prompt changes require regeneration and direct diff review; do not add tests that pin Markdown
-wording.
+Prompt changes require regeneration and direct review of the regenerated wrappers, which VCS
+diffs do not show; do not add tests that pin Markdown wording.
 
 Code style is `ruff` with `select = ["E4", "E7", "E9", "F"]` (see `pyproject.toml`) — correctness
 rules only. There is no formatter and no broader style gate; match the surrounding code.

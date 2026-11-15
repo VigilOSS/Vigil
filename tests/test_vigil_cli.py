@@ -355,18 +355,17 @@ def test_render_stamps_every_out_of_tree_mirror_with_the_source_digest(tmp_path)
 
 @requires_bash
 def test_repo_tree_artifacts_stay_unstamped_and_render_check_stays_clean():
-    """In-tree artifacts are committed and byte-guarded by render-check already.
+    """The application's own generated trees are covered by its content digests.
 
-    Stamping them would churn every tracked wrapper on every render for no
-    staleness signal, so the stamp is out-of-tree only — and render-check
-    compares modulo the stamp, so a stamped copy never reads as prompt drift.
+    A wall-clock stamp there would change the install and bundle digests on
+    every render for no staleness signal, so the stamp is out-of-tree only.
     """
-    for tracked in (
+    for generated in (
         REPO_ROOT / "agent" / "AGENTS.md",
         REPO_ROOT / "agent" / "CLAUDE.md",
         REPO_ROOT / "agent" / ".codex" / "agents" / "fuzzer.toml",
     ):
-        assert STAMP_MARKER not in tracked.read_text(encoding="utf-8")
+        assert STAMP_MARKER not in generated.read_text(encoding="utf-8")
 
     check = _render("check")
     assert check.returncode == 0, check.stdout + check.stderr

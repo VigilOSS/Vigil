@@ -242,7 +242,7 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 
 ## Sync rules worth remembering
 
-- `agent/operator-core.md`, `agent/operator-core-blue.md` and `agent/agents/*.md` render to committed wrappers and per-client agent trees via `agent/scripts/render-operator-prompts.sh` (`repo` writes; `check` fails on drift).
+- `agent/operator-core.md`, `agent/operator-core-blue.md` and `agent/agents/*.md` render to untracked wrappers and per-client agent trees via `agent/scripts/render-operator-prompts.sh` (`repo` writes red and blue into `agent/` and prunes its `GENERATED_PATHS`, which `.gitignore` mirrors; `check` validates sources, render determinism and red/blue agreement on shared paths). `vigil install` renders a checkout (`install.py:render_checkout_client_trees`, set by `InstallOptions.render_client_trees`); `vigil_build.py:_render_client_trees` renders the release bundle.
 - `agent/commands/` owns operator commands. Renderer `COMMAND_NAMES` and explicit client metadata drive `agent/.claude/commands`, `agent/.codex/skills`, and native OpenCode/ZCode command trees. See: ADR 0017.
 - `render-operator-prompts.sh` renders native assessment command/role assets under
   `agent/.opencode/assessment` and `agent/.zcode/assessment`; `assessment_clients.py`

@@ -103,16 +103,24 @@ def test_zcode_marketplace_resolves_native_plugin_and_command(rendered):
     assert (plugin_root / "commands/vigil-remediate.md").is_file()
 
 
-def test_bundle_copies_native_command_assets_and_hashes_inventory(rendered, tmp_path):
-    _, output, result = rendered
+def _without_stamp(path: Path) -> list[str]:
+    return [line for line in path.read_text().splitlines() if "vigil-prompt-stamp" not in line]
+
+
+def test_bundle_renders_native_command_assets_and_hashes_inventory(rendered, tmp_path):
+    source, output, result = rendered
     assert result.returncode == 0, result.stderr
     spec = importlib.util.spec_from_file_location("vigil_build_assets", REPO_ROOT / "vigil_build.py")
     build = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(build)
     bundle = tmp_path / "bundle"
     for name in build._AGENT_DIRS:
-        build._copy_tree(output / name, bundle / "agent" / name)
+        build._copy_tree(source / name, bundle / "agent" / name)
+    for name in ("operator-core.md", "operator-core-blue.md"):
+        shutil.copy2(source / name, bundle / "agent" / name)
+    build._render_client_trees(bundle / "agent")
     inventory = build._manifest(bundle, "0.0.0")["files"]
+    assert {"agent/AGENTS.md", "agent/AGENTS-blue.md", "agent/CLAUDE.md"} <= set(inventory)
     for path in (
         "agent/.opencode/commands/vigil-remediate.md",
         "agent/.zcode/commands/vigil-remediate.md",
@@ -120,30 +128,35 @@ def test_bundle_copies_native_command_assets_and_hashes_inventory(rendered, tmp_
         "agent/.zcode/marketplace.json",
     ):
         assert path in inventory
-        assert (bundle / path).read_bytes() == (output / path.removeprefix("agent/")).read_bytes()
+        assert _without_stamp(bundle / path) == _without_stamp(output / path.removeprefix("agent/"))
 
 
-@pytest.mark.parametrize("relative", [
-    ".opencode/commands/vigil-remediate.md",
-    ".zcode/commands/vigil-remediate.md",
-    ".zcode/.zcode-plugin/plugin.json",
-    ".zcode/marketplace.json",
-])
-def test_render_check_detects_native_asset_drift(rendered, tmp_path, relative):
+def test_source_tree_render_installs_native_assets_and_prunes_retired_outputs(rendered, tmp_path):
     source, output, result = rendered
     assert result.returncode == 0, result.stderr
-    check_root = tmp_path / "agent"
-    shutil.copytree(source, check_root)
-    shutil.copytree(output, check_root, dirs_exist_ok=True)
-    argv = ["bash", str(check_root / "scripts/render-operator-prompts.sh"), "check", "--type", "red"]
-    clean = subprocess.run(argv, capture_output=True, text=True)
-    assert clean.returncode == 0, clean.stderr
-    asset = check_root / relative
-    if asset.suffix == ".json":
-        metadata = json.loads(asset.read_text())
-        metadata["description"] = "Acme changed local metadata"
-        asset.write_text(json.dumps(metadata))
-    else:
-        asset.write_text(asset.read_text() + "\n```sh\nprintf '%s\\n' changed\n```\n")
-    drift = subprocess.run(argv, capture_output=True, text=True)
-    assert drift.returncode == 1
+    agent = tmp_path / "agent"
+    shutil.copytree(source, agent)
+    hooks = agent / ".zcode/hooks/hooks.json"
+    hooks.parent.mkdir(parents=True)
+    hooks.write_text('{"acme": "hand-authored"}\n')
+    retired = [agent / ".zcode/commands/vigil-acme-retired.md", agent / ".claude/agents/acme-retired.md"]
+    for path in retired:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("retired render\n")
+    script = agent / "scripts/render-operator-prompts.sh"
+
+    render = subprocess.run(["bash", str(script), "repo"], capture_output=True, text=True)
+
+    assert render.returncode == 0, render.stderr
+    assert not any(path.exists() for path in retired)
+    assert hooks.read_text() == '{"acme": "hand-authored"}\n'
+    for relative in (
+        ".opencode/commands/vigil-remediate.md",
+        ".zcode/commands/vigil-remediate.md",
+        ".zcode/.zcode-plugin/plugin.json",
+        ".zcode/marketplace.json",
+    ):
+        assert "vigil-prompt-stamp" not in (agent / relative).read_text()
+        assert _without_stamp(agent / relative) == _without_stamp(output / relative)
+    check = subprocess.run(["bash", str(script), "check"], capture_output=True, text=True)
+    assert check.returncode == 0, check.stderr

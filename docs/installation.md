@@ -47,7 +47,8 @@ startup to change the limit; it is capped one below the backend's worker pool.
 - **From the repository:** `uv tool install git+https://github.com/VigilOSS/Vigil vigil` builds
   the frontend and report locally, so it needs Git, Node.js, and npm on `PATH`.
 - **For development:** run `uv tool install --editable .` in a source checkout; the checkout
-  supplies the application assets.
+  supplies the application assets. `vigil install` renders the checkout's generated client prompt
+  files; run it again after updating the checkout.
 
 Start your first engagement with the three commands in the README:
 `vigil install`, `vigil engagement create`, and `vigil engagement start`.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -56,6 +57,9 @@ class InstallOptions:
     verify_docker_image: bool = False
     repair_ambiguous_client_permissions_as_skip: bool = False
     refresh_physical_client_rosters: bool = False
+    # `vigil install` renders a source checkout's generated client prompt trees;
+    # programmatic callers that only adopt a workspace leave the application alone.
+    render_client_trees: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -226,6 +230,34 @@ def _report_client_repairs(
             print(_diagnostic(f"[vigil] warning: client-entrypoint repair skipped {entrypoints.skipped_count - 20} additional engagements"), file=sys.stderr)
 
 
+def render_checkout_client_trees(application_root: Path) -> bool:
+    """Generate a source checkout's untracked client prompt trees from its sources.
+
+    A release bundle ships them prebuilt and validated, so it is never rewritten.
+    The renderer replaces each changed file by atomic rename, so engagements
+    reading the live trees never see a partial file. Returns whether it ran.
+    """
+    if (application_root / "bundle.json").exists():
+        return False
+    agent = application_root / "agent"
+    renderer = agent / "scripts" / "render-operator-prompts.sh"
+    if not renderer.is_file():
+        raise SystemExit(
+            f"{application_root} is neither a release bundle nor a Vigil source checkout: "
+            f"its client prompt renderer {renderer} is missing"
+        )
+    result = subprocess.run(
+        ["bash", str(renderer), "repo"],
+        cwd=agent, capture_output=True, text=True, check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            f"Rendering the client prompt trees in {agent} failed; fix the prompt sources and re-run "
+            f"`vigil install`:\n{(result.stderr or result.stdout).strip()}"
+        )
+    return True
+
+
 def install_from_source(
     options: InstallOptions,
     *,
@@ -247,6 +279,9 @@ def install_from_source(
         from .client_sessions import active_client_sessions, guard_client_session_upgrade
         for session in active_client_sessions(install_root):
             guard_client_session_upgrade(install_root, Path(session["engagement"]), source_root)
+
+    if options.render_client_trees and render_checkout_client_trees(source_root):
+        print(_diagnostic(f"[vigil] rendered client prompt trees in {source_root / 'agent'}"), file=sys.stderr)
 
     caller_config_path = config_module.config_path()
     caller_config = config_module.load_config(caller_config_path)

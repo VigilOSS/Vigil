@@ -3362,44 +3362,66 @@ def test_no_operator_prompt_invokes_update_finding_with_details_json() -> None:
 
 
 # ---------------------------------------------------------------------------
-# render-operator-prompts.sh check — drift detection
+# render-operator-prompts.sh check — source validation
 # ---------------------------------------------------------------------------
 
 
-def test_render_check_flags_missing_wrapper_as_drift(tmp_path: Path) -> None:
-    """A deleted/missing specialist wrapper must be reported as drift.
+def test_render_check_rejects_a_command_source_missing_from_the_roster(tmp_path: Path) -> None:
+    """A canonical command that COMMAND_NAMES does not list renders to nothing.
 
-    Before this guard, the per-wrapper diff block was wrapped in `[[ -f ]]`,
-    so deleting `.claude/agents/recon-specialist.md` from the repo silently
-    passed render-check — operators reading from the wrapper directory then
-    hit a missing file at dispatch time.
+    The client trees are generated, not committed, so the check validates the
+    sources: an unregistered command would silently never reach any client.
     """
     import shutil
     import subprocess
 
     agent_root = _scripts_root().parent  # .../agent
-    output_dir = tmp_path / "agent-tree"
-    shutil.copytree(agent_root, output_dir, symlinks=False)
+    sources = tmp_path / "agent"
+    (sources / "scripts").mkdir(parents=True)
+    shutil.copy2(agent_root / "scripts" / "render-operator-prompts.sh", sources / "scripts")
+    for name in ("operator-core.md", "operator-core-blue.md"):
+        shutil.copy2(agent_root / name, sources / name)
+    for name in ("agents", "commands"):
+        shutil.copytree(agent_root / name, sources / name)
+    script = sources / "scripts" / "render-operator-prompts.sh"
 
-    # Sanity: the file should exist before we delete it.
-    victim = output_dir / ".claude" / "agents" / "recon-specialist.md"
-    assert victim.is_file()
-    victim.unlink()
+    clean = subprocess.run(["bash", str(script), "check"], capture_output=True, text=True, check=False)
+    assert clean.returncode == 0, clean.stdout + clean.stderr
 
-    script = _scripts_root() / "render-operator-prompts.sh"
-    proc = subprocess.run(
-        ["bash", str(script), "check", str(output_dir)],
-        capture_output=True,
-        text=True,
-        check=False,
+    (sources / "commands" / "vigil-acme-audit.md").write_text(
+        "---\nname: vigil-acme-audit\ndescription: Acme fixture\n---\nAudit Acme.\n",
+        encoding="utf-8",
     )
+    proc = subprocess.run(["bash", str(script), "check"], capture_output=True, text=True, check=False)
 
-    assert proc.returncode != 0, (
-        "render-check should exit non-zero when a wrapper is missing. "
-        f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
-    )
-    assert "recon-specialist.md" in proc.stderr
-    assert "missing" in proc.stderr.lower()
+    assert proc.returncode != 0, f"stdout={proc.stdout!r} stderr={proc.stderr!r}"
+    assert "commands/vigil-acme-audit.md is not in COMMAND_NAMES" in proc.stderr
+
+
+@pytest.mark.parametrize("missing", ["agents/ir-lead.md", "operator-core-blue.md"])
+def test_render_check_fails_when_a_blue_source_is_missing(tmp_path: Path, missing: str) -> None:
+    """The source-tree render always needs blue, so the check cannot pass without it."""
+    import shutil
+    import subprocess
+
+    agent_root = _scripts_root().parent
+    sources = tmp_path / "agent"
+    (sources / "scripts").mkdir(parents=True)
+    shutil.copy2(agent_root / "scripts" / "render-operator-prompts.sh", sources / "scripts")
+    for name in ("operator-core.md", "operator-core-blue.md"):
+        shutil.copy2(agent_root / name, sources / name)
+    for name in ("agents", "commands"):
+        shutil.copytree(agent_root / name, sources / name)
+    (sources / missing).unlink()
+    script = sources / "scripts" / "render-operator-prompts.sh"
+
+    for argv in (["check"], ["check", "--type", "blue"]):
+        proc = subprocess.run(["bash", str(script), *argv], capture_output=True, text=True, check=False)
+        assert proc.returncode != 0, f"{argv}: stdout={proc.stdout!r} stderr={proc.stderr!r}"
+        assert missing in proc.stderr
+    render = subprocess.run(["bash", str(script), "repo"], capture_output=True, text=True, check=False)
+    assert render.returncode != 0
+    assert missing in render.stderr
 
 
 # ---------------------------------------------------------------------------
@@ -3970,44 +3992,3 @@ def test_s11_spec_parses_refs_composed_form_and_pathlevel_params(monkeypatch, tm
     post_path = json.loads(by_method["POST"][4])
     assert {"file", "a", "b"} <= set(post_body.keys())
     assert "id" in post_path
-
-
-def test_opencode_works_inline_claude_codex_dispatch_carveout() -> None:
-    """OpenCode works the engagement INLINE, while Claude/Codex (and Goose) keep
-    the normal dispatch model.
-
-    The 2026-06-18 switch to "OpenCode dispatches specialists exactly like
-    Claude/Codex" was REVERTED: on headless ``opencode run`` the built-in
-    ``task`` tool's ``subagent_type`` enum exposes only the server-registered
-    built-ins (``explore``/``general``), so our ``.opencode/agent/*.md`` custom
-    roles are not dispatchable (opencode#29616). Mandating dispatch on OpenCode
-    regressed a bench family 100%->60%, so the operator works OpenCode targets
-    inline (issuing the sanctioned ``vigil assess kali`` probes itself). This
-    guards that operator-core.md carries the opencode#29616-keyed INLINE
-    carve-out and that it rendered into AGENTS.md, while Claude/Codex keep
-    dispatching. Kept consistent with the passing
-    ``tests/test_bench.py::test_dispatch_doctrine_opencode_inline_carveout*``
-    tests.
-    """
-    repo_root = Path(__file__).resolve().parents[3]
-    core = (repo_root / "agent" / "operator-core.md").read_text(encoding="utf-8")
-    agents = (repo_root / "agent" / "AGENTS.md").read_text(encoding="utf-8")
-
-    assert "### Runtime Dispatch Syntax" in core
-    assert "### Runtime Dispatch Syntax" in agents
-
-    # The OpenCode INLINE carve-out is present and rendered (Runtime Dispatch
-    # Syntax now uses a table; locate the OpenCode row by its table cell marker).
-    for src, name in ((core, "operator-core.md"), (agents, "AGENTS.md")):
-        oc_idx = src.index("| **OpenCode**")
-        oc_row = src[oc_idx:].split("\n", 1)[0]
-        assert "INLINE" in oc_row, f"{name}: OpenCode row lost INLINE posture"
-        # Claude/Codex keep the normal dispatch model.
-        assert "Claude Code and Codex keep the normal dispatch model" in src, name
-
-    # Claude/Codex rows carry NO inline-probe override — they dispatch.
-    claude_idx = core.index("| **Claude Code**")
-    codex_idx = core.index("| **Codex**")
-    oc_idx = core.index("| **OpenCode**")
-    assert claude_idx < codex_idx < oc_idx
-    assert "INLINE" not in core[claude_idx:oc_idx]

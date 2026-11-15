@@ -1,6 +1,7 @@
 """Build matched application releases without collecting operator workspaces.
 
-Publishing from a checkout needs Node to build the two locked UI projects.
+Publishing from a checkout needs Node to build the two locked UI projects and
+renders the untracked client prompt trees from the staged prompt sources.
 The sdist carries those outputs and their provenance; building its wheel is
 entirely Python-only. Editable installs remain development checkouts.
 """
@@ -166,6 +167,11 @@ def _validate_cli_snapshot(outer: Path, bundle: Path) -> None:
         )
 
 
+def _render_client_trees(agent: Path) -> None:
+    """Generate the untracked client prompt trees from the staged prompt sources."""
+    subprocess.run(["bash", str(agent / "scripts/render-operator-prompts.sh"), "repo"], cwd=agent, check=True)
+
+
 def _build_bundle(source: Path, bundle: Path, version: str, *, tracked: frozenset[Path]) -> None:
     if shutil.which("npm") is None:
         raise ValueError(
@@ -183,6 +189,7 @@ def _build_bundle(source: Path, bundle: Path, version: str, *, tracked: frozense
             _copy_file(path, bundle / "agent" / path.name)
     for name in _AGENT_DIRS:
         _copy_tree(source / "agent" / name, bundle / "agent" / name, tracked=tracked)
+    _render_client_trees(bundle / "agent")
     for name in ("app", "scripts"):
         _copy_tree(source / "orchestrator/backend" / name, bundle / "orchestrator/backend" / name, tracked=tracked)
     for name in ("pyproject.toml", "uv.lock"):

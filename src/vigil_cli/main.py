@@ -1363,6 +1363,7 @@ def _main(argv: list[str], *, project_mode: str | None = None) -> None:
                     args.repair_ambiguous_client_permissions_as_skip
                 ),
                 refresh_physical_client_rosters=args.refresh_physical_client_rosters,
+                render_client_trees=True,
             )
         )
         if not args.dry_run:

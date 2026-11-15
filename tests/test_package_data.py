@@ -320,3 +320,39 @@ def test_source_build_without_node_names_the_requirement(tmp_path, monkeypatch):
     monkeypatch.setattr(backend.shutil, "which", lambda _name: None)
     with pytest.raises(ValueError, match="Node.*npm.*release wheel"):
         backend._build_bundle(REPO_ROOT, tmp_path / "bundle", "1.1.0", tracked=frozenset())
+
+
+def test_rendered_client_trees_are_ignored_and_hand_authored_client_files_stay_tracked(tmp_path):
+    spec = importlib.util.spec_from_file_location("vigil_build", REPO_ROOT / "vigil_build.py")
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+    agent = tmp_path / "agent"
+    (agent / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "agent/scripts/render-operator-prompts.sh", agent / "scripts")
+    for name in ("operator-core.md", "operator-core-blue.md"):
+        shutil.copy2(REPO_ROOT / "agent" / name, agent / name)
+    for name in ("agents", "commands"):
+        shutil.copytree(REPO_ROOT / "agent" / name, agent / name)
+    sources = {path for path in agent.rglob("*") if path.is_file()}
+    subprocess.run(["bash", str(agent / "scripts/render-operator-prompts.sh"), "repo"], check=True, capture_output=True)
+    rendered = {
+        "agent/" + path.relative_to(agent).as_posix()
+        for path in agent.rglob("*") if path.is_file() and path not in sources
+    }
+    assert {"agent/AGENTS.md", "agent/AGENTS-blue.md", "agent/CLAUDE.md"} <= rendered
+
+    def ignored(names) -> set[str]:
+        result = subprocess.run(
+            ["git", "check-ignore", "--no-index", "--stdin"], cwd=REPO_ROOT,
+            input="\n".join(sorted(names)) + "\n", capture_output=True, text=True,
+        )
+        assert result.returncode in {0, 1}, result.stderr
+        return set(result.stdout.split())
+
+    assert ignored(rendered) == rendered
+    tracked = {path.relative_to(REPO_ROOT).as_posix() for path in backend._publisher_inventory(REPO_ROOT)}
+    assert not tracked & rendered
+    client_trees = tuple(f"agent/.{client}/" for client in ("claude", "codex", "goose", "opencode", "zcode"))
+    hand_authored = {name for name in tracked if name.startswith(client_trees)}
+    assert "agent/.claude/settings.json" in hand_authored
+    assert not ignored(hand_authored)

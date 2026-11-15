@@ -2531,6 +2531,7 @@ def test_collect_status_includes_install_staleness(
 def test_install_cli_stamps_install_meta(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
+    from vigil_cli import install as install_module
     from vigil_cli import main as main_module
     from vigil_cli.status import read_install_meta
 
@@ -2540,6 +2541,8 @@ def test_install_cli_stamps_install_meta(
     sha = _init_git_repo(source, {"README.md": "seed\n"})
     install = tmp_path / "install"
     monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    # The synthetic source holds no prompt sources to render.
+    monkeypatch.setattr(install_module, "render_checkout_client_trees", lambda _root: False)
 
     main_module.main(
         ["--root", str(install), "--source", str(source), "install", "--skip-image-check"]

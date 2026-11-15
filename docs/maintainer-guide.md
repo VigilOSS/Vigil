@@ -334,11 +334,18 @@ Native project contexts stay independent. Track routing changes retain the live 
 the same lock. Explicit global client maintenance keeps its cross-release guard. Routine adoption
 does not refresh client files. Restart requirements belong to `restart_manifest.consumer_states`.
 
-`vigil_build.py` reads the tracked publisher inventory, excludes private/state/auth files, builds both
-locked UI projects in a temporary stage, and records input/output digests. Snapshot intended JJ files
-before a publisher build. The resulting sdist carries matched assets and prebuilt UI; its wheel build
-must work without Git or Node. Keep bundle inputs and CLI snapshots matched, including hidden client
-trees, backend lockfile, Docker definitions, documentation and legal notices.
+`vigil_build.py` reads the tracked publisher inventory, excludes private/state/auth files, renders the
+untracked client prompt trees from the staged prompt sources, builds both locked UI projects in a
+temporary stage, and records input/output digests. Snapshot intended JJ files before a publisher
+build. The resulting sdist carries matched assets, the rendered client trees and prebuilt UI; its
+wheel build must work without Git or Node. Keep bundle inputs and CLI snapshots matched, including
+hidden client trees, backend lockfile, Docker definitions, documentation and legal notices.
+
+A source checkout has no client trees until `vigil install` (or
+`(cd agent && ./scripts/render-operator-prompts.sh repo)`) renders them, and they stay as rendered
+until the next run, so re-run either after pulling prompt changes. The source-tree render writes
+changed files by atomic rename, leaves identical files untouched, and removes only files under the
+renderer's `GENERATED_PATHS` that it no longer produces; `/.gitignore` lists exactly those paths.
 
 Sets derived from `sys.modules` need no upkeep, with one qualification: the startup snapshot is
 taken once at import, so a module first imported LATER is in neither the snapshot nor the declared

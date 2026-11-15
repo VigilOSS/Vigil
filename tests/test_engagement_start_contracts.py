@@ -140,10 +140,39 @@ def test_create_refuses_before_any_side_effect_without_an_installed_prompt(
 
     message = str(excinfo.value)
     assert "canonical operator prompt not found" in message
-    assert f"run `vigil install {install_root}` first" in message
+    # The application is a source checkout: `vigil install` takes a workspace, not
+    # the application root, and renders the checkout's generated prompt trees.
+    assert "run `vigil install`" in message
+    assert f"vigil install {install_root}" not in message
+    assert f"cd {install_root / 'agent'} && ./scripts/render-operator-prompts.sh repo" in message
     # A string SystemExit code is a non-zero exit, and nothing was written.
     assert isinstance(excinfo.value.code, str)
     assert not (install_root / "agent" / "engagements").exists()
+
+
+@pytest.mark.parametrize(
+    ("bundled", "prompt", "remedy"),
+    [
+        (False, "AGENTS.md", "render-operator-prompts.sh repo"),
+        (False, "operator-core-code.md", "restore it from version control"),
+        (True, "AGENTS.md", "reinstall the release wheel"),
+    ],
+)
+def test_missing_prompt_refusal_names_the_remedy_for_the_application_kind(
+    tmp_path: Path, bundled: bool, prompt: str, remedy: str
+) -> None:
+    agent_root = tmp_path / "application" / "agent"
+    agent_root.mkdir(parents=True)
+    if bundled:
+        (agent_root.parent / "bundle.json").write_text("{}")
+    for name in {"AGENTS.md", "operator-core-code.md"} - {prompt}:
+        (agent_root / name).write_text("# Acme operator\n")
+
+    with pytest.raises(SystemExit) as excinfo:
+        engagements._require_install_prerequisites(agent_root, "offensive")
+
+    assert str(agent_root / prompt) in str(excinfo.value)
+    assert remedy in str(excinfo.value)
 
 
 def test_create_refuses_for_blue_without_the_installed_blue_prompt(

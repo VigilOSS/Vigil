@@ -10,8 +10,19 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 # Usage:
 #   render-operator-prompts.sh [MODE] [OUTPUT_DIR] [--type red|blue]
 #
-# MODE: repo | claude-install | codex-install | check | render-check | source-sha
-#   - `check` and `render-check` are aliases (CI/tests use `check`).
+# MODE: repo | check | render-check | source-sha
+#   - `repo` with no OUTPUT_DIR (or OUTPUT_DIR = agent/) generates the
+#     application's own client trees: red AGENTS.md/CLAUDE.md, blue
+#     AGENTS-blue.md, and the union of both rosters' wrappers. These outputs
+#     are not committed; `vigil install` from a checkout and the release build
+#     run this mode. It ignores --type, installs changed files by atomic rename,
+#     and prunes files under GENERATED_PATHS that the render no longer produces.
+#   - `check` and `render-check` are aliases (CI/tests use `check`). They render
+#     into temp dirs and validate the sources: complete per-client output for
+#     every roster role, a registered source for every command, deterministic
+#     output, every output inside GENERATED_PATHS, and (with no --type) identical
+#     bytes wherever red and blue render the same path. They never read the
+#     generated trees in agent/, which may be absent or stale in a checkout.
 #   - `source-sha` prints the current prompt-source digest for --type and exits;
 #     it is the value a consumer compares an already-rendered copy's stamp
 #     against (see "Prompt stamp" below).
@@ -24,11 +35,9 @@ SOURCE_DIR=$(cd "$SCRIPT_DIR/.." && pwd)
 #
 # Special cases:
 #   - `check` (or `render-check`) with NO --type runs BOTH red and blue
-#     checks. Blue is skipped (with stderr warning) if any of its required
-#     specialist source files are missing.
-#   - `repo --type blue` against the agent/ SOURCE_DIR writes the canonical
-#     agent/AGENTS-blue.md without overwriting agent/AGENTS.md (the canonical
-#     red rendering). Engagements point at these canonical installed files.
+#     checks. A missing blue source fails the check, as it fails `repo`.
+#   - Any other OUTPUT_DIR (an engagement or test directory) receives one
+#     --type render with its operator prompt at OUTPUT_DIR/AGENTS.md.
 # -----------------------------------------------------------------------------
 
 MODE=""
@@ -37,9 +46,10 @@ TYPE=""
 TYPE_EXPLICIT=0
 
 usage() {
-  echo "Usage: $0 [repo|claude-install|codex-install|check|render-check|source-sha] [output-dir] [--type red|blue]" >&2
+  echo "Usage: $0 [repo|check|render-check|source-sha] [output-dir] [--type red|blue]" >&2
   echo "" >&2
-  echo "  check/render-check  Render to a temp dir and diff against existing files. Exits 1 if any drift." >&2
+  echo "  repo                With no output dir, generate agent/'s red+blue client trees (ignores --type)." >&2
+  echo "  check/render-check  Render to temp dirs and validate sources and output. Exits 1 on any problem." >&2
   echo "                      With no --type, runs BOTH red and blue checks." >&2
   echo "  source-sha          Print the current prompt-source digest for --type and exit." >&2
 }
@@ -122,6 +132,34 @@ set_output_paths() {
   ZCODE_COMMANDS_DIR="$OUTPUT_DIR/.zcode/commands"
 }
 set_output_paths
+
+# Every path, relative to agent/, that a source-tree `repo` render owns. The
+# render prunes files under these paths it no longer produces, `check` fails on
+# any output outside them, and /.gitignore must ignore exactly these paths
+# (plus the STAGE_PREFIX staged-copy name at agent/'s root).
+# Hand-authored client files (.claude/settings.json, .codex/config.toml,
+# .opencode/plugin/, .zcode/hooks/, .zcode/assessment/hooks/) sit beside them
+# and stay tracked.
+GENERATED_PATHS=(
+  AGENTS.md
+  AGENTS-blue.md
+  CLAUDE.md
+  .claude/agents
+  .claude/commands
+  .codex/agents
+  .codex/skills
+  .goose
+  .opencode/agent
+  .opencode/commands
+  .opencode/assessment
+  .zcode/commands
+  .zcode/.zcode-plugin
+  .zcode/marketplace.json
+  .zcode/assessment/agents
+  .zcode/assessment/commands
+  .zcode/assessment/.zcode-plugin
+  .zcode/assessment/marketplace.json
+)
 
 # -----------------------------------------------------------------------------
 # Agent rosters
@@ -484,11 +522,11 @@ render_assessment_clients() {
 # `<copy>` stamp vs `render-operator-prompts.sh source-sha --type <t>` and warns
 # on a mismatch — no second copy of the digest rule anywhere.
 #
-# Renders INTO the source tree are deliberately NOT stamped: those artifacts are
-# committed and already guarded byte-for-byte by render-check, so a wall-clock
-# line would churn every tracked wrapper on every render while adding nothing.
-# render-check itself compares modulo the stamp (it renders into a temp dir), so
-# a stamped copy never registers as prompt drift.
+# Renders INTO the source tree are deliberately NOT stamped: they are part of
+# the application whose install and bundle digests cover agent/, so a wall-clock
+# line would change those digests on every render while adding nothing.
+# render-check renders into temp dirs with the stamp disabled too, so its
+# determinism comparison is byte-for-byte.
 STAMP_MARKER="vigil-prompt-stamp"
 STAMP_ENABLED=1
 if [[ "$(cd "$OUTPUT_DIR" 2>/dev/null && pwd)" == "$SOURCE_DIR" ]]; then
@@ -801,7 +839,7 @@ render_operator_prompt_blue() {
     cat <<'EOF'
 <!-- GENERATED FILE — DO NOT EDIT. -->
 <!-- Source: agent/operator-core-blue.md (+ agent/agents/*.md for embedded specialist text) -->
-<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo --type blue -->
+<!-- Regenerate with: cd agent && ./scripts/render-operator-prompts.sh repo -->
 EOF
     render_stamp md
     printf '\n'
@@ -843,9 +881,8 @@ EOF
 render_agents() {
   # NOTE: red and blue both write to $OUTPUT_DIR/AGENTS.md. A single
   # engagement is either red or blue, never both, so they cannot collide in
-  # an engagement directory. Against the agent/ SOURCE_DIR, the checked-in
-  # AGENTS.md is the red rendering — blue rendering there is refused below
-  # in main().
+  # an engagement directory. The source tree takes its blue prompt as
+  # AGENTS-blue.md instead (render_type_tree).
   if [[ "$TYPE" == "blue" ]]; then
     render_operator_prompt_blue "$AGENTS_OUT"
   else
@@ -1131,280 +1168,257 @@ render_all_wrappers() {
   render_assessment_clients
 }
 
-# Return 0 if all blue specialist sources exist on disk, 1 otherwise. Used by
-# render-check to skip the blue check gracefully when a source is unavailable.
+# Return 0 if every blue source exists on disk; otherwise name each missing one
+# on stderr, prefixed with $1, and return 1. Every source-tree render needs blue,
+# so `repo` and `check` both refuse rather than skip it.
 # Note: `operator` is rendered from a hardcoded template inside
 # render_claude_wrapper/render_codex_wrapper, so it does not need a source
 # file under agent/agents/.
-blue_sources_ready() {
-  local agent_name
+require_blue_sources() {
+  local agent_name missing=()
   for agent_name in "${BLUE_AGENT_NAMES[@]}"; do
-    if [[ "$agent_name" == "operator" ]]; then
-      continue
-    fi
-    if [[ ! -f "$SOURCE_DIR/agents/$agent_name.md" ]]; then
-      return 1
+    if [[ "$agent_name" != "operator" && ! -f "$SOURCE_DIR/agents/$agent_name.md" ]]; then
+      missing+=("agents/$agent_name.md")
     fi
   done
   if [[ ! -f "$CORE_BLUE_FILE" ]]; then
-    return 1
+    missing+=("operator-core-blue.md")
   fi
-  return 0
+  if [[ ${#missing[@]} -eq 0 ]]; then
+    return 0
+  fi
+  printf '%s: blue prompt sources missing under agent/: %s\n' "$1" "${missing[*]}" >&2
+  return 1
 }
 
-# Drift comparison ignores the prompt stamp: it is provenance metadata (source
-# digest + render time), not prompt content, so a differing or absent stamp must
-# never read as prompt drift. Everything else is still compared byte-for-byte.
-strip_stamp() {
-  grep -v "$STAMP_MARKER" "$1" || true
+# Render one type in the source-tree layout into $2: red writes AGENTS.md and
+# CLAUDE.md, blue writes AGENTS-blue.md, and both write their roster's
+# wrappers and the shared commands. Rendering red then blue into one directory
+# yields the union the application ships. The caller restores TYPE/OUTPUT_DIR.
+render_type_tree() {
+  TYPE="$1"
+  OUTPUT_DIR="$2"
+  set_output_paths
+  if [[ "$TYPE" == "blue" ]]; then
+    render_operator_prompt_blue "$OUTPUT_DIR/AGENTS-blue.md"
+  else
+    render_claude
+    render_agents
+  fi
+  render_all_wrappers
 }
 
-# 0 (true) when the two rendered files differ in prompt content, or either is
-# missing — the caller reports that as drift, matching the old `diff -q` contract.
-prompt_files_differ() {
-  [[ -f "$1" && -f "$2" ]] || return 0
-  ! diff -q <(strip_stamp "$1") <(strip_stamp "$2") >/dev/null 2>&1
+# 0 (true) when agent-relative path $1 lies inside a GENERATED_PATHS entry.
+is_generated_path() {
+  local owned
+  for owned in "${GENERATED_PATHS[@]}"; do
+    if [[ "$1" == "$owned" || "$1" == "$owned/"* ]]; then
+      return 0
+    fi
+  done
+  return 1
 }
 
-# Print the content diff for a drifting pair (stamp lines excluded, as above).
-print_prompt_diff() {
-  diff -u <(strip_stamp "$1") <(strip_stamp "$2") >&2 || true
+# Temp dirs and staged files this invocation created, removed on any exit so an
+# interrupted or failed render leaves nothing behind in agent/ or $TMPDIR.
+CLEANUP_PATHS=()
+cleanup_render_paths() {
+  if [[ ${#CLEANUP_PATHS[@]} -gt 0 ]]; then
+    rm -rf "${CLEANUP_PATHS[@]}"
+  fi
+}
+trap cleanup_render_paths EXIT
+
+# A fresh temp dir registered for cleanup, in the global $RENDER_TEMP_DIR (a
+# command substitution would run in a subshell and lose the registration).
+new_render_temp_dir() {
+  RENDER_TEMP_DIR=$(mktemp -d)
+  CLEANUP_PATHS+=("$RENDER_TEMP_DIR")
 }
 
-# Inner render-check for a single type. Renders into a fresh temp dir, diffs
-# against the committed files under $source_output_dir, and returns 0 if
-# clean / 1 if drift. Resets OUTPUT_DIR-derived paths back to the caller's
-# values before returning.
+# Staged copies are written beside their destination under this prefix and
+# renamed over it. /.gitignore ignores the prefix at agent/'s root; inside a
+# GENERATED_PATHS directory a leftover is pruned like any other stale output.
+STAGE_PREFIX=".vigil-render."
+
+# Make $2 match the render in $1 within GENERATED_PATHS. A changed or new file
+# is written beside its destination and renamed over it, so a client reading
+# the live tree never sees a truncated file; byte-identical files are left
+# untouched. Files the render no longer produces are removed.
+sync_rendered_tree() {
+  local rendered="$1" target="$2" rel dest staged owned path
+  # A staged copy left at agent/'s root by a killed render is never renamed.
+  find "$target" -maxdepth 1 -type f -name "$STAGE_PREFIX*" -exec rm -f {} +
+  while IFS= read -r rel; do
+    rel="${rel#./}"
+    dest="$target/$rel"
+    if [[ -f "$dest" && ! -L "$dest" ]] && cmp -s "$rendered/$rel" "$dest"; then
+      continue
+    fi
+    mkdir -p "$(dirname "$dest")"
+    staged=$(mktemp "$(dirname "$dest")/${STAGE_PREFIX}XXXXXX")
+    CLEANUP_PATHS+=("$staged")
+    cat "$rendered/$rel" > "$staged"
+    chmod 644 "$staged"
+    mv -f "$staged" "$dest"
+  done < <(cd "$rendered" && find . -type f | sort)
+  for owned in "${GENERATED_PATHS[@]}"; do
+    path="$target/$owned"
+    if [[ -d "$path" && ! -L "$path" ]]; then
+      while IFS= read -r rel; do
+        rel="${rel#"$target/"}"
+        if [[ ! -f "$rendered/$rel" ]]; then
+          rm -f "$target/$rel"
+          echo "render (source-tree): removed $rel (no longer rendered)" >&2
+        fi
+      done < <(find "$path" \( -type f -o -type l \) | sort)
+      find "$path" -mindepth 1 -depth -type d -empty -delete
+    elif [[ ( -f "$path" || -L "$path" ) && ! -f "$rendered/$owned" ]]; then
+      rm -f "$path"
+      echo "render (source-tree): removed $owned (no longer rendered)" >&2
+    fi
+  done
+}
+
+# Generate agent/'s own client trees (red + blue) from source. Both types are
+# rendered into one temp dir first, so a render failure leaves the live tree
+# untouched.
+render_source_tree() {
+  require_blue_sources "Cannot render" || exit 1
+  if [[ "$TYPE_EXPLICIT" -eq 1 ]]; then
+    echo "render (source-tree): agent/ always receives red and blue together; --type $TYPE has no effect here." >&2
+  fi
+  new_render_temp_dir
+  local tmp_dir="$RENDER_TEMP_DIR"
+  render_type_tree red "$tmp_dir"
+  render_type_tree blue "$tmp_dir"
+  TYPE=red
+  OUTPUT_DIR="$SOURCE_DIR"
+  set_output_paths
+  sync_rendered_tree "$tmp_dir" "$SOURCE_DIR"
+}
+
+# Validate one type's render. Renders it twice into fresh temp dirs and returns
+# 0 when the output is complete, deterministic, owned, and every command source
+# is registered; 1 otherwise. Restores TYPE/OUTPUT_DIR before returning.
 check_render_one() {
   local check_type="$1"
-  local source_output_dir="$OUTPUT_DIR"
   local saved_type="$TYPE"
   local saved_output_dir="$OUTPUT_DIR"
-  local tmp_dir
-  tmp_dir=$(mktemp -d)
-
+  local first second
+  new_render_temp_dir
+  first="$RENDER_TEMP_DIR"
+  new_render_temp_dir
+  second="$RENDER_TEMP_DIR"
+  render_type_tree "$check_type" "$first"
+  render_type_tree "$check_type" "$second"
   TYPE="$check_type"
-  OUTPUT_DIR="$tmp_dir"
-  set_output_paths
-
-  local roster=()
-  if [[ "$check_type" == "blue" ]]; then
-    roster=("${BLUE_AGENT_NAMES[@]}")
-  else
-    roster=("${AGENT_NAMES[@]}")
-  fi
-
-  render_claude
-  render_agents
-  render_all_wrappers
 
   local drift=0
-  local f
-  local check_files=()
-  if [[ "$check_type" == "blue" ]]; then
-    if prompt_files_differ "$source_output_dir/AGENTS-blue.md" "$tmp_dir/AGENTS.md"; then
-      printf 'DRIFT (%s): AGENTS-blue.md differs from source render\n' "$check_type" >&2
-      print_prompt_diff "$source_output_dir/AGENTS-blue.md" "$tmp_dir/AGENTS.md"
-      drift=1
-    fi
-    check_files=()
-  else
-    check_files=(CLAUDE.md AGENTS.md)
+  if ! diff -r "$first" "$second" >&2; then
+    printf 'DRIFT (%s): two renders of the same sources differ\n' "$check_type" >&2
+    drift=1
   fi
-  for f in ${check_files[@]+"${check_files[@]}"}; do
-    if prompt_files_differ "$source_output_dir/$f" "$tmp_dir/$f"; then
-      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$f" >&2
-      print_prompt_diff "$source_output_dir/$f" "$tmp_dir/$f"
-      drift=1
-    fi
-  done
 
-  local agent_name
+  local roster=() expected=()
+  if [[ "$check_type" == "blue" ]]; then
+    roster=("${BLUE_AGENT_NAMES[@]}")
+    expected=(AGENTS-blue.md)
+  else
+    roster=("${AGENT_NAMES[@]}")
+    expected=(AGENTS.md CLAUDE.md)
+  fi
+  local agent_name opp_model
   for agent_name in "${roster[@]}"; do
-    local claude_rel=".claude/agents/$agent_name.md"
-    local codex_rel=".codex/agents/$agent_name.toml"
-    local opencode_rel=".opencode/agent/$agent_name.md"
-    local target_claude="$source_output_dir/$claude_rel"
-    local target_codex="$source_output_dir/$codex_rel"
-    local target_opencode="$source_output_dir/$opencode_rel"
-    # Missing wrapper IS drift — the render produced it but the checked-in
-    # copy is absent. Operators reading from .claude/.codex/.opencode hit nothing.
-    if [[ ! -f "$target_claude" ]]; then
-      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$claude_rel" >&2
-      drift=1
-    elif prompt_files_differ "$target_claude" "$tmp_dir/$claude_rel"; then
-      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$claude_rel" >&2
-      print_prompt_diff "$target_claude" "$tmp_dir/$claude_rel"
-      drift=1
-    fi
-    if [[ ! -f "$target_codex" ]]; then
-      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$codex_rel" >&2
-      drift=1
-    elif prompt_files_differ "$target_codex" "$tmp_dir/$codex_rel"; then
-      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$codex_rel" >&2
-      print_prompt_diff "$target_codex" "$tmp_dir/$codex_rel"
-      drift=1
-    fi
-    if [[ ! -f "$target_opencode" ]]; then
-      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_rel" >&2
-      drift=1
-    elif prompt_files_differ "$target_opencode" "$tmp_dir/$opencode_rel"; then
-      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_rel" >&2
-      print_prompt_diff "$target_opencode" "$tmp_dir/$opencode_rel"
-      drift=1
-    fi
-    # OpenCode-only opposite-tier variant sibling (fast+deep pair). No
-    # corresponding .claude/.codex variant exists by design, so this is checked
-    # only for the opencode path.
-    local opp_model variant_suffix opencode_variant_rel target_opencode_variant
     opp_model=$(agent_opposite_model "$agent_name")
-    variant_suffix=$(opencode_variant_name_suffix "$opp_model")
-    opencode_variant_rel=".opencode/agent/$agent_name$variant_suffix.md"
-    target_opencode_variant="$source_output_dir/$opencode_variant_rel"
-    if [[ ! -f "$target_opencode_variant" ]]; then
-      printf 'DRIFT (%s): %s missing — expected rendered wrapper not present in repo\n' "$check_type" "$opencode_variant_rel" >&2
-      drift=1
-    elif prompt_files_differ "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel"; then
-      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$opencode_variant_rel" >&2
-      print_prompt_diff "$target_opencode_variant" "$tmp_dir/$opencode_variant_rel"
-      drift=1
-    fi
-    # Goose specialist recipe. No operator recipe exists by design (operator prompt
-    # is the engagement .goosehints), so the recipe check is skipped for operator.
+    expected+=(
+      ".claude/agents/$agent_name.md"
+      ".codex/agents/$agent_name.toml"
+      ".opencode/agent/$agent_name.md"
+      ".opencode/agent/$agent_name$(opencode_variant_name_suffix "$opp_model").md"
+    )
+    # Goose has no operator recipe by design: the operator prompt is the
+    # engagement .goosehints.
     if [[ "$agent_name" != "operator" ]]; then
-      local goose_rel=".goose/recipes/$agent_name.yaml"
-      local target_goose="$source_output_dir/$goose_rel"
-      if [[ ! -f "$target_goose" ]]; then
-        printf 'DRIFT (%s): %s missing — expected rendered recipe not present in repo\n' "$check_type" "$goose_rel" >&2
-        drift=1
-      elif prompt_files_differ "$target_goose" "$tmp_dir/$goose_rel"; then
-        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$goose_rel" >&2
-        print_prompt_diff "$target_goose" "$tmp_dir/$goose_rel"
-        drift=1
-      fi
+      expected+=(".goose/recipes/$agent_name.yaml")
+    fi
+  done
+  local rel
+  for rel in "${expected[@]}"; do
+    if [[ ! -s "$first/$rel" ]]; then
+      printf 'DRIFT (%s): %s was not rendered\n' "$check_type" "$rel" >&2
+      drift=1
     fi
   done
 
-  # Operator commands. Rendered from agent/commands/ into the same temp dir by
-  # render_all_wrappers above, so the same missing/differs contract applies.
-  local command_name
+  # Commands: every COMMAND_NAMES entry needs its canonical source, and every
+  # canonical source must be registered, or it renders to nothing.
+  local command_name rendered
   for command_name in "${COMMAND_NAMES[@]}"; do
-    local command_src="$SOURCE_DIR/commands/$command_name.md"
-    if [[ ! -f "$command_src" ]]; then
+    if [[ ! -f "$COMMANDS_SRC_DIR/$command_name.md" ]]; then
       printf 'DRIFT (%s): commands/%s.md missing — listed in COMMAND_NAMES but no canonical source\n' \
         "$check_type" "$command_name" >&2
       drift=1
-      continue
-    fi
-    local claude_command_rel=".claude/commands/$command_name.md"
-    local codex_skill_rel=".codex/skills/$command_name/SKILL.md"
-    local rel
-    for rel in "$claude_command_rel" "$codex_skill_rel" \
-      ".opencode/commands/$command_name.md" ".zcode/commands/$command_name.md"; do
-      if [[ ! -f "$tmp_dir/$rel" ]]; then
-        continue
-      fi
-      if [[ ! -f "$source_output_dir/$rel" ]]; then
-        printf 'DRIFT (%s): %s missing — expected rendered command not present in repo\n' \
-          "$check_type" "$rel" >&2
-        drift=1
-      elif prompt_files_differ "$source_output_dir/$rel" "$tmp_dir/$rel"; then
-        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$rel" >&2
-        print_prompt_diff "$source_output_dir/$rel" "$tmp_dir/$rel"
-        drift=1
-      fi
-    done
-  done
-
-  local manifest_rel
-  for manifest_rel in .zcode/.zcode-plugin/plugin.json .zcode/marketplace.json; do
-    [[ -f "$tmp_dir/$manifest_rel" ]] || continue
-    if prompt_files_differ "$source_output_dir/$manifest_rel" "$tmp_dir/$manifest_rel"; then
-      printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$manifest_rel" >&2
-      print_prompt_diff "$source_output_dir/$manifest_rel" "$tmp_dir/$manifest_rel"
-      drift=1
     fi
   done
-
-  if [[ "$check_type" == red ]]; then
-    local native_rel
-    while IFS= read -r native_rel; do
-      native_rel="${native_rel#"$tmp_dir/"}"
-      if [[ ! -f "$source_output_dir/$native_rel" ]] || prompt_files_differ "$source_output_dir/$native_rel" "$tmp_dir/$native_rel"; then
-        printf 'DRIFT (%s): %s differs from source render\n' "$check_type" "$native_rel" >&2
-        drift=1
-      fi
-    done < <(find "$tmp_dir/.opencode/assessment" "$tmp_dir/.zcode/assessment" -type f | sort)
-  fi
-
-  # Orphans. agent/.claude and agent/.codex are mirror-synced into the install
-  # root by `vigil install` (install.py::_sync_client_entrypoints_fds), so a
-  # rendered command left behind after its canonical source was renamed or
-  # deleted would keep shipping to every engagement with nothing regenerating
-  # it. A canonical source that is not in COMMAND_NAMES is caught the same way.
-  local rendered orphan_name
-  local native_commands_rel
-  for native_commands_rel in .opencode/commands .zcode/commands; do
-    [[ -d "$source_output_dir/$native_commands_rel" ]] || continue
-    for rendered in "$source_output_dir/$native_commands_rel"/*.md; do
-      [[ -e "$rendered" ]] || continue
-      orphan_name=$(basename "$rendered" .md)
-      if [[ ! -f "$tmp_dir/$native_commands_rel/$orphan_name.md" ]]; then
-        printf 'DRIFT (%s): %s/%s.md is not rendered by any canonical source\n' \
-          "$check_type" "$native_commands_rel" "$orphan_name" >&2
-        drift=1
-      fi
-    done
-  done
-  if [[ -d "$source_output_dir/.claude/commands" ]]; then
-    for rendered in "$source_output_dir"/.claude/commands/*.md; do
-      [[ -e "$rendered" ]] || continue
-      orphan_name=$(basename "$rendered" .md)
-      if [[ ! -f "$tmp_dir/.claude/commands/$orphan_name.md" ]]; then
-        printf 'DRIFT (%s): .claude/commands/%s.md is not rendered by any canonical source\n' \
-          "$check_type" "$orphan_name" >&2
-        drift=1
-      fi
-    done
-  fi
-  if [[ -d "$source_output_dir/.codex/skills" ]]; then
-    for rendered in "$source_output_dir"/.codex/skills/*/SKILL.md; do
-      [[ -e "$rendered" ]] || continue
-      orphan_name=$(basename "$(dirname "$rendered")")
-      if [[ ! -f "$tmp_dir/.codex/skills/$orphan_name/SKILL.md" ]]; then
-        printf 'DRIFT (%s): .codex/skills/%s/SKILL.md is not rendered by any canonical source\n' \
-          "$check_type" "$orphan_name" >&2
-        drift=1
-      fi
-    done
-  fi
   if [[ -d "$COMMANDS_SRC_DIR" ]]; then
     for rendered in "$COMMANDS_SRC_DIR"/*.md; do
       [[ -e "$rendered" ]] || continue
-      orphan_name=$(basename "$rendered" .md)
-      if [[ ! -f "$tmp_dir/.claude/commands/$orphan_name.md" && ! -f "$tmp_dir/.codex/skills/$orphan_name/SKILL.md" ]]; then
+      command_name=$(basename "$rendered" .md)
+      if [[ " ${COMMAND_NAMES[*]} " != *" $command_name "* ]]; then
         printf 'DRIFT (%s): commands/%s.md is not in COMMAND_NAMES — it renders to nothing\n' \
-          "$check_type" "$orphan_name" >&2
+          "$check_type" "$command_name" >&2
         drift=1
       fi
     done
   fi
 
-  rm -rf "$tmp_dir"
+  # Ownership: the source-tree render prunes, and .gitignore ignores, only
+  # GENERATED_PATHS, so an output outside them would be left stale or committed.
+  while IFS= read -r rel; do
+    rel="${rel#./}"
+    if ! is_generated_path "$rel"; then
+      printf 'DRIFT (%s): %s is rendered outside GENERATED_PATHS\n' "$check_type" "$rel" >&2
+      drift=1
+    fi
+  done < <(cd "$first" && find . -type f | sort)
+
+  if [[ "$check_type" == "blue" ]]; then
+    CHECKED_BLUE_DIR="$first"
+  else
+    CHECKED_RED_DIR="$first"
+  fi
   TYPE="$saved_type"
   OUTPUT_DIR="$saved_output_dir"
   set_output_paths
 
   if [[ "$drift" -ne 0 ]]; then
-    if [[ "$check_type" == "blue" ]]; then
-      printf 'render-check (%s): drift detected. Re-run from repo root:\n  cd agent && ./scripts/render-operator-prompts.sh repo --type blue\n' "$check_type" >&2
-    else
-      printf 'render-check (%s): drift detected. Re-run from repo root:\n  cd agent && ./scripts/render-operator-prompts.sh repo\n' "$check_type" >&2
-    fi
+    printf 'render-check (%s): failed\n' "$check_type" >&2
     return 1
   fi
-  echo "render-check (${check_type}): clean (${#roster[@]} specialist wrappers, ${#COMMAND_NAMES[@]} operator commands match source)"
+  echo "render-check (${check_type}): clean (${#roster[@]} specialist wrappers, ${#COMMAND_NAMES[@]} operator commands; deterministic)"
   return 0
+}
+
+# The source tree is the union of the red and blue renders, with blue written
+# second. A path both rosters render (shared roles, the commands) must come out
+# byte-identical from each, or the union would silently keep only blue's copy.
+CHECKED_RED_DIR=""
+CHECKED_BLUE_DIR=""
+check_union() {
+  local rel conflict=0
+  while IFS= read -r rel; do
+    rel="${rel#./}"
+    if [[ -f "$CHECKED_RED_DIR/$rel" ]] && ! cmp -s "$CHECKED_RED_DIR/$rel" "$CHECKED_BLUE_DIR/$rel"; then
+      printf 'DRIFT (union): %s renders differently for red and blue\n' "$rel" >&2
+      diff -u "$CHECKED_RED_DIR/$rel" "$CHECKED_BLUE_DIR/$rel" >&2 || true
+      conflict=1
+    fi
+  done < <(cd "$CHECKED_BLUE_DIR" && find . -type f | sort)
+  if [[ "$conflict" -ne 0 ]]; then
+    return 1
+  fi
+  echo "render-check (union): clean (paths shared by red and blue render identically)"
 }
 
 # Outer render-check dispatcher. Runs red and/or blue based on $TYPE and
@@ -1413,22 +1427,22 @@ check_render() {
   local any_failed=0
   if [[ "$TYPE_EXPLICIT" -eq 1 ]]; then
     if [[ "$TYPE" == "blue" ]]; then
-      if ! blue_sources_ready; then
-        echo "render-check (blue): SKIPPED — required blue specialist source files are missing." >&2
-        return 0
+      if require_blue_sources "render-check (blue)"; then
+        check_render_one blue || any_failed=1
+      else
+        any_failed=1
       fi
-      check_render_one blue || any_failed=1
     else
       check_render_one red || any_failed=1
     fi
   else
-    # No --type → run both. Red is always available. Blue is skipped with a
-    # stderr warning if its source files are not yet present.
+    # No --type → run both, then compare the paths they share.
     check_render_one red || any_failed=1
-    if blue_sources_ready; then
+    if require_blue_sources "render-check (blue)"; then
       check_render_one blue || any_failed=1
+      check_union || any_failed=1
     else
-      echo "render-check (blue): SKIPPED — required blue specialist source files are missing." >&2
+      any_failed=1
     fi
   fi
   if [[ "$any_failed" -ne 0 ]]; then
@@ -1441,39 +1455,14 @@ check_render() {
 # -----------------------------------------------------------------------------
 case "$MODE" in
   repo)
-    # In source-tree-blue mode, preserve the canonical red AGENTS.md/CLAUDE.md
-    # and write the full blue doctrine to its own canonical AGENTS-blue.md.
-    # Specialist wrappers remain shared under agent/.claude/.codex/.opencode.
-    SOURCE_TREE_BLUE=0
-    if [[ "$TYPE" == "blue" && "$(cd "$OUTPUT_DIR" && pwd)" == "$SOURCE_DIR" ]]; then
-      SOURCE_TREE_BLUE=1
+    if [[ "$(cd "$OUTPUT_DIR" && pwd)" == "$SOURCE_DIR" ]]; then
+      render_source_tree
+      exit 0
     fi
-    if [[ "$TYPE" == "blue" ]] && ! blue_sources_ready; then
-      echo "Cannot render blue: required source files missing under agent/." >&2
-      exit 1
-    fi
-    if [[ "$SOURCE_TREE_BLUE" -eq 1 ]]; then
-      render_operator_prompt_blue "$SOURCE_DIR/AGENTS-blue.md"
-      echo "render (blue, source-tree): wrote canonical AGENTS-blue.md; preserved red AGENTS.md and CLAUDE.md." >&2
-    else
-      render_claude
-      render_agents
-    fi
-    render_all_wrappers
-    ;;
-  claude-install)
-    if [[ "$TYPE" == "blue" ]] && ! blue_sources_ready; then
-      echo "Cannot render blue: required source files missing under agent/." >&2
-      exit 1
+    if [[ "$TYPE" == "blue" ]]; then
+      require_blue_sources "Cannot render blue" || exit 1
     fi
     render_claude
-    render_all_wrappers
-    ;;
-  codex-install)
-    if [[ "$TYPE" == "blue" ]] && ! blue_sources_ready; then
-      echo "Cannot render blue: required source files missing under agent/." >&2
-      exit 1
-    fi
     render_agents
     render_all_wrappers
     ;;

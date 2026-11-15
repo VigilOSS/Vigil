@@ -73,7 +73,11 @@ Edit canonical prompt sources, never generated wrappers:
 - `agent/operator-core.md`, its code overlay, and the blue core own operator workflows.
 - `agent/agents/*.md`, `agent/shared-constraints*.md`, and `agent/rules/*.md` own role-specific,
   cross-role, and always-active guidance respectively.
-- Generated `agent/AGENTS*.md`, `agent/CLAUDE.md`, and client wrapper trees come from the renderer.
+- Generated `agent/AGENTS*.md`, `agent/CLAUDE.md`, and client wrapper trees come from the renderer
+  and are not committed: `.gitignore` mirrors the renderer's `GENERATED_PATHS`. `vigil install`
+  renders them into a checkout and the release build renders them into the bundle. Hand-authored
+  client files beside them (`.claude/settings.json`, `.codex/config.toml`, `.opencode/plugin/`,
+  `.zcode/hooks/`, `.zcode/assessment/hooks/`) stay tracked.
 
 Before deleting apparently duplicated instructions, determine which roles load each copy
 and search for references to its heading. Specialists do not load operator cores; deleting
@@ -85,13 +89,13 @@ prompt primitives to every applicable role and apply the
 [prompt-authoring standards](docs/prompt-authoring-standards.md).
 
 ```bash
+# Regenerate the red and blue client trees after editing prompt sources or pulling changes:
 (cd agent && ./scripts/render-operator-prompts.sh repo)
-# Also regenerate blue wrappers when blue/shared blue prompt sources change:
-(cd agent && ./scripts/render-operator-prompts.sh repo --type blue)
 ```
 
-Review generated diffs directly. Do not add tests that pin Markdown wording or headings;
-test executable contracts and structural invariants instead.
+Generated output is absent from VCS diffs, so read the regenerated wrappers for each affected
+role and client directly. Do not add tests that pin Markdown wording or headings; test
+executable contracts and structural invariants instead.
 
 ## Tests & verification
 
@@ -101,6 +105,7 @@ Absolute suite paths are required because `uv --directory` changes the working d
 
 ```bash
 VIGIL_REPO=$(jj root)
+(cd agent && ./scripts/render-operator-prompts.sh repo)  # tests read the generated trees
 uv run --directory orchestrator/backend --extra dev pytest
 uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/tests" --ignore="$VIGIL_REPO/tests/eval"
 uv run --directory orchestrator/backend --extra dev pytest "$VIGIL_REPO/agent/scripts/assess/tests"
@@ -109,8 +114,7 @@ uvx ruff check .
 uvx --with-editable . mypy src/vigil_cli
 (cd orchestrator/frontend && npm ci && npm test && npm run build)
 (cd orchestrator/report && npm ci && npm test && npm run build)
-(cd agent && ./scripts/render-operator-prompts.sh check)
-(cd agent && ./scripts/render-operator-prompts.sh check --type blue)
+(cd agent && ./scripts/render-operator-prompts.sh check)  # red, blue and their shared paths
 uv run --directory orchestrator/backend python scripts/generate_agent_schemas.py --check
 ```
 

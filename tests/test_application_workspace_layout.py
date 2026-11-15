@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tomllib
@@ -132,6 +133,79 @@ def test_install_initializes_workspace_without_copying_application(tmp_path, mon
     assert (root / "workspace.json").is_file()
     assert not (root / "agent").exists()
     assert not (root / "orchestrator").exists()
+
+
+def _prompt_source_checkout(application: Path) -> Path:
+    """A checkout holding prompt sources only, as a fresh clone has them."""
+    agent = application / "agent"
+    (application / "orchestrator").mkdir(parents=True)
+    (agent / "scripts").mkdir(parents=True)
+    shutil.copy2(REPO_ROOT / "agent/scripts/render-operator-prompts.sh", agent / "scripts")
+    for name in ("operator-core.md", "operator-core-blue.md"):
+        shutil.copy2(REPO_ROOT / "agent" / name, agent / name)
+    for name in ("agents", "commands"):
+        shutil.copytree(REPO_ROOT / "agent" / name, agent / name)
+    return agent
+
+
+@pytest.fixture
+def cli_install(tmp_path, monkeypatch):
+    monkeypatch.setenv("VIGIL_CONFIG", str(tmp_path / "config.json"))
+    monkeypatch.delenv("VIGIL_APPLICATION_DIR", raising=False)
+    monkeypatch.delenv("VIGIL_OOB_DOMAIN", raising=False)
+    monkeypatch.setattr(paths, "DEFAULT_INSTALL_ROOT", tmp_path / "home-vigil")
+    monkeypatch.setattr(main, "_print_post_install", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_print_install_dry_run", lambda *a, **k: None)
+
+
+def test_cli_install_generates_a_source_checkout_client_trees(tmp_path, cli_install):
+    """A checkout carries prompt sources only; `vigil install` renders its client trees."""
+    application = tmp_path / "Acme checkout"
+    agent = _prompt_source_checkout(application)
+    settings = agent / ".claude" / "settings.json"
+    settings.parent.mkdir()
+    settings.write_text('{"acme": "hand-authored"}\n')
+    workspace = tmp_path / "workspace"
+
+    main.main(["--source", str(application), "install", str(workspace), "--dry-run"])
+    assert not (agent / "AGENTS.md").exists()
+
+    main.main(["--source", str(application), "install", str(workspace)])
+    for relative in (
+        "AGENTS.md", "AGENTS-blue.md", "CLAUDE.md",
+        ".claude/agents/recon-specialist.md", ".claude/commands/vigil-resume.md",
+        ".codex/agents/ir-lead.toml", ".codex/skills/vigil-resume/SKILL.md",
+        ".goose/recipes/fuzzer.yaml", ".opencode/agent/operator.md",
+        ".opencode/assessment/agents/operator.md", ".zcode/assessment/marketplace.json",
+    ):
+        assert (agent / relative).is_file(), relative
+    assert "vigil-prompt-stamp" not in (agent / "AGENTS.md").read_text()
+    assert settings.read_text() == '{"acme": "hand-authored"}\n'
+    assert json.loads((workspace / "workspace.json").read_text())
+
+
+def test_cli_install_refuses_before_workspace_setup_when_the_render_fails(tmp_path, cli_install):
+    application = tmp_path / "checkout"
+    agent = _prompt_source_checkout(application)
+    (agent / "commands" / "vigil-resume.md").write_text(
+        "---\nname: vigil-resume\ndescription: Acme fixture\n---\n<!-- vigil:only acme -->\nx\n<!-- vigil:end -->\n"
+    )
+    workspace = tmp_path / "workspace"
+
+    with pytest.raises(SystemExit) as refused:
+        main.main(["--source", str(application), "install", str(workspace)])
+
+    assert "unknown capability client 'acme'" in str(refused.value)
+    assert str(agent) in str(refused.value)
+    assert not (workspace / "workspace.json").exists()
+    assert not (agent / "AGENTS.md").exists()
+
+
+def test_programmatic_install_leaves_the_application_tree_alone(tmp_path):
+    application = tmp_path / "checkout"
+    agent = _prompt_source_checkout(application)
+    install_from_source(InstallOptions(application, tmp_path / "workspace", verify_docker_image=False))
+    assert not (agent / "AGENTS.md").exists()
 
 
 def test_install_adopts_without_rewriting_live_client_entrypoints(tmp_path):
