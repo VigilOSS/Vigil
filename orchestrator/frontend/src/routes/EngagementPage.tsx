@@ -93,7 +93,7 @@ type EngagementPageProps = {
   initialCoverageItemId?: number;
   // Submission whose document is open (?tab=submissions&submission=…&dtab=…).
   initialSubmissionSlug?: string;
-  // Engagement file open in the viewer (?tab=artifacts&file=…).
+  // Engagement file whose record is open (?tab=artifacts&file=…&dtab=raw).
   initialFileName?: string;
   // Activity search, categories (comma-separated), actor kind and time range
   // (?tab=activity&q=…&cats=…&actor=…&range=…).
@@ -1072,6 +1072,7 @@ function EngagementWorkspace({
               engagementKey={engagementKey}
               refreshVersion={viewVersion("artifacts")}
               initialFileName={routed("artifacts", initialFileName)}
+              initialDrawerTab={routed("artifacts", initialDrawerTab)}
             />
           )}
           </div>

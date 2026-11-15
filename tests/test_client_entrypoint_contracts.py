@@ -1816,12 +1816,55 @@ def test_codex_config_materializes_absolute_paths_for_all_hooks(tmp_path: Path) 
         for hook in entry["hooks"]
     ]
     assert commands == [
-        shlex.join(["bash", str(hooks_dir / "application-read-only.sh")]),
         shlex.join(["bash", str(hooks_dir / "post-tool-log.sh")]),
         shlex.join(["bash", str(hooks_dir / "post-compact-resume.sh")]),
         shlex.join(["bash", str(hooks_dir / "session-end.sh")]),
     ]
     assert all("VIGIL_AGENT_ROOT" not in command for command in commands)
+
+
+def test_codex_refresh_adds_a_missing_template_hook_to_an_existing_engagement(tmp_path: Path) -> None:
+    """A refresh binds a template hook the engagement config lacks, once, and keeps operator tables."""
+    repo_root = Path(__file__).resolve().parents[1]
+    template_path = repo_root / "agent" / ".codex" / "config.toml"
+    agent_root = tmp_path / "application" / "agent"
+    (agent_root / ".codex").mkdir(parents=True)
+    shutil.copy2(template_path, agent_root / ".codex" / "config.toml")
+    shutil.copytree(repo_root / "agent" / "scripts", agent_root / "scripts")
+    hooks = agent_root / "scripts" / "hooks"
+    engagement = tmp_path / "engagement"
+    (engagement / ".codex").mkdir(parents=True)
+    (engagement / "scope.json").write_text("{}", encoding="utf-8")
+
+    # An older engagement config: no SessionStart table, hooks bound to an old root.
+    old_hooks = tmp_path / "old-application" / "agent" / "scripts" / "hooks"
+    lines = template_path.read_text(encoding="utf-8").splitlines(keepends=True)
+    start = next(i for i, line in enumerate(lines) if line.strip() == "[[hooks.SessionStart]]")
+    end = next(i for i, line in enumerate(lines) if line.strip() == "[[hooks.SessionEnd]]")
+    stale = []
+    for line in lines[:start] + lines[end:]:
+        for script in ("post-tool-log.sh", "session-end.sh"):
+            if line.startswith("command =") and script in line:
+                line = f"command = {json.dumps(shlex.join(['bash', str(old_hooks / script)]))}\n"
+        stale.append(line)
+    config_path = engagement / ".codex" / "config.toml"
+    config_path.write_text("".join(stale) + '\n[acme_operator]\nnote = "kept"\n', encoding="utf-8")
+
+    client_rosters.ensure_codex_config(agent_root, engagement / ".codex", preserve_existing=True)
+    refreshed = config_path.read_text(encoding="utf-8")
+    config = tomllib.loads(refreshed)
+    (session_start,) = config["hooks"]["SessionStart"]
+    template_entry = tomllib.loads(template_path.read_text(encoding="utf-8"))["hooks"]["SessionStart"][0]
+    assert session_start["matcher"] == template_entry["matcher"]
+    assert session_start["hooks"][0]["timeout"] == template_entry["hooks"][0]["timeout"]
+    for event, script in (("PostToolUse", "post-tool-log.sh"), ("SessionStart", "post-compact-resume.sh"),
+                          ("SessionEnd", "session-end.sh")):
+        (entry,) = config["hooks"][event]
+        assert entry["hooks"][0]["command"] == shlex.join(["bash", str(hooks / script)])
+    assert config["acme_operator"] == {"note": "kept"}
+
+    client_rosters.ensure_codex_config(agent_root, engagement / ".codex", preserve_existing=True)
+    assert config_path.read_text(encoding="utf-8") == refreshed
 
 
 def test_codex_compact_prompt_refresh_preserves_engagement_local_hooks(
@@ -1968,6 +2011,10 @@ def test_committed_claude_settings_register_compaction_and_session_end_hooks() -
         assert len(commands) == 1
         assert script in commands[0]["command"]
     assert hooks["SessionEnd"][0]["hooks"][0]["timeout"] >= 5
+    (session_start,) = hooks["SessionStart"]
+    assert session_start["matcher"] == "compact"
+    (resume_command,) = session_start["hooks"]
+    assert "post-compact-resume.sh" in resume_command["command"]
 
 
 def test_committed_codex_config_registers_compaction_resume_and_session_end() -> None:

@@ -230,10 +230,36 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
     binding = json.loads((workspace / ".vigil-client-context.json").read_text())
     assert configuration["instructions"] == [str(Path(binding["project"]) / "AGENTS.md")]
+    # Project config is disabled, so the staged config must resolve every tool to
+    # allow: a task child's "ask" is never answered and hangs the dispatch.
+    assert configuration["permission"] == engagements._OPENCODE_PERMISSION
+    # An update modal over the TUI would capture the next keystroke.
+    assert configuration["autoupdate"] is False
     assert Path.cwd() == Path(binding["project"])
     assert receipts[0][2:] == ("opencode", "web")
     history, _ = client_sessions.historical_client_starts(root)
     assert [(row["client"], row["event"]) for row in history] == [("opencode", "launch_requested")]
+
+
+def test_opencode_helper_path_finds_the_resolved_opencode(context, monkeypatch):
+    root, engagement, _ = context
+    opencode = root / "Acme client tools/opencode"
+    opencode.parent.mkdir()
+    opencode.write_text("#!/bin/sh\nprintf '%s\\n' acme-opencode\n")
+    opencode.chmod(0o755)
+    original = clients.shutil.which
+    monkeypatch.setattr(clients.shutil, "which", lambda name: str(opencode) if name == "opencode" else original(name))
+    helper = root / "session-helper"
+    helper.mkdir()
+    (helper / "vigil").write_text('#!/bin/sh\nexec opencode "$@"\n')
+    (helper / "vigil").chmod(0o755)
+    monkeypatch.setattr(clients, "session_cli_directory", lambda _: helper)
+    workspace, binding = clients.prepare_workspace(root, engagement, "opencode", "web")
+    result = subprocess.run([str(workspace / "bin/vigil"), "version"],
+        env={**os.environ, "PATH": "/usr/bin:/bin"}, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == "acme-opencode"
+    assert binding["tools"]["opencode"] == str(opencode.resolve())
 
 
 def test_native_helper_executes_docker_from_resolved_directory(context, monkeypatch):

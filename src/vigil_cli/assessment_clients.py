@@ -118,6 +118,9 @@ def _tools(client: str) -> dict[str, str]:
     docker = shutil.which("docker")
     if docker is not None:
         tools["docker"] = str(Path(docker).resolve())
+    # In-session client checks look for the client by name on the helper PATH.
+    if client == "opencode" and (opencode := shutil.which("opencode")) is not None:
+        tools["opencode"] = str(Path(opencode).resolve())
     return tools
 
 
@@ -221,8 +224,12 @@ def prepare_workspace(install_root: Path, engagement: Path, client: str, mode: s
         from .client_projects import forwarding_assets
         for name, data in forwarding_assets(agent, client).items():
             workspace_files[f".opencode/{name}"] = data
+        # Project config is disabled for the task, so the permission block that
+        # keeps task children from hanging on an unanswered "ask" lives here.
+        from .engagements import _OPENCODE_PERMISSION
         workspace_files[".opencode/opencode.json"] = _json({"$schema": "https://opencode.ai/config.json",
-            "compaction": {"auto": True}, "instructions": [str(binding["project"]) + "/AGENTS.md"]})
+            "compaction": {"auto": True}, "instructions": [str(binding["project"]) + "/AGENTS.md"],
+            "permission": dict(_OPENCODE_PERMISSION), "autoupdate": False})
     else:
         plugin_root = install_root / "client-plugins" / release_hash[:24] / "zcode"
         plugin_files = {}

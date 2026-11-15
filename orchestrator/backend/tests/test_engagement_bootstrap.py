@@ -459,7 +459,6 @@ def test_repair_refreshes_stale_claude_hook_settings(tmp_path: Path) -> None:
     assert {
         shlex.split(command)[1] for command in repaired_commands
     } == {
-        str(sandbox_root / "scripts" / "hooks" / "application-read-only.sh"),
         str(sandbox_root / "scripts" / "hooks" / "post-tool-log.sh"),
         str(sandbox_root / "scripts" / "hooks" / "pre-compact.sh"),
         str(sandbox_root / "scripts" / "hooks" / "post-compact-resume.sh"),

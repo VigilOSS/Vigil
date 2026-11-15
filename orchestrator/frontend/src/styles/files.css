@@ -1,23 +1,16 @@
-/* ── Files view (FilesTab / ArtifactViewer) ─────────────────────────────
- * Bounded two-pane layout: the panel fits the viewport under the sticky
- * workspace header, and the file list and reading pane scroll on their own
- * so the page chrome never scrolls away. */
+/* ── Files tab (FilesTab / ArtifactViewer) ──────────────────────────────
+ * The file list is the tab's results: full-width rows grouped by role. An
+ * open file shows in the shared record view (styles/record.css); the rules
+ * below it style the record's notices and document body. */
 
 .files-page {
-  display: flex;
-  flex-direction: column;
-  height: calc(100vh - var(--workspace-header-height) - 48px);
-  min-height: 520px;
   min-width: 0;
 }
-.files-page > .ui-page-header { flex: none; }
 
 .files-view {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  flex: 1;
-  min-height: 0;
   min-width: 0;
 }
 
@@ -57,21 +50,11 @@
   overflow-wrap: anywhere;
 }
 
-.files-layout {
-  display: grid;
-  grid-template-columns: minmax(220px, 280px) minmax(0, 1fr);
-  gap: 16px;
-  flex: 1;
-  min-height: 0;
-}
-
 .files-list {
   display: grid;
   align-content: start;
-  gap: 16px;
-  min-height: 0;
-  overflow: auto;
-  padding-right: 4px;
+  gap: 18px;
+  min-width: 0;
 }
 
 .files-list ul {
@@ -96,11 +79,14 @@
   color: var(--muted);
 }
 
+/* One file: name, what it is for, size and age. */
 .files-row {
   display: grid;
-  gap: 2px;
+  grid-template-columns: minmax(180px, 1.2fr) minmax(0, 2.6fr) auto;
+  align-items: start;
+  gap: 4px 20px;
   width: 100%;
-  padding: 8px 10px;
+  padding: 10px 12px;
   border: 1px solid transparent;
   border-radius: 5px;
   background: transparent;
@@ -110,24 +96,26 @@
   cursor: pointer;
 }
 
+.files-list li + li .files-row {
+  border-top-color: var(--divider);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
+}
+
 .files-row:hover {
   background: var(--panel-hover);
 }
 
 .files-row:focus-visible {
   outline: 2px solid var(--accent);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
-.files-row[aria-pressed="true"] {
-  border-color: var(--accent-muted);
-  background: var(--count-bg-active);
-}
-
-/* On the selected row's tint --muted falls under 4.5:1. */
-.files-row[aria-pressed="true"] .files-row-path,
-.files-row[aria-pressed="true"] .files-row-meta {
-  color: var(--ink-2);
+.files-row-main,
+.files-row-about {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
 }
 
 .files-row-name {
@@ -138,8 +126,9 @@
 }
 
 .files-row-role {
-  font-size: 11px;
-  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--ink);
 }
 
 .files-row-path {
@@ -149,12 +138,20 @@
   overflow-wrap: anywhere;
 }
 
+.files-row-desc {
+  font-size: 12px;
+  line-height: 1.4;
+  color: var(--ink-2);
+}
+
 .files-row-meta {
   display: flex;
   flex-wrap: wrap;
-  gap: 8px;
+  justify-content: flex-end;
+  gap: 4px 10px;
   font-size: 11px;
   color: var(--muted);
+  white-space: nowrap;
 }
 
 /* The stub pill (shared StatusPill) sits on its own line under the file name. */
@@ -195,56 +192,18 @@
   line-height: 1.4;
 }
 
-.files-viewer {
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
-  min-height: 0;
-  min-width: 0;
-  overflow: auto;
-  padding: 14px 16px;
-  border: 1px solid var(--border);
-  border-radius: 5px;
-  background: var(--panel-soft);
-}
-
-.files-viewer-head {
-  display: grid;
-  gap: 4px;
-  padding-bottom: 10px;
-  border-bottom: 1px solid var(--divider);
-}
-
-.files-viewer-title {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 8px 10px;
-}
-
-.files-viewer-title strong {
-  font-family: "Source Code Pro", "SFMono-Regular", monospace;
-  font-size: 13px;
-  overflow-wrap: anywhere;
-}
-
-.files-viewer-desc {
+/* The open file's record: what the file is for under its dates, then the
+ * document. The record body scrolls with the page. */
+.files-record-desc {
   margin: 0;
-  font-size: 12px;
+  font-size: 0.86rem;
   color: var(--ink-2);
 }
 
-.files-viewer-meta {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 4px 14px;
-  margin: 0;
-  font-size: 11px;
-  color: var(--muted);
-}
-
-.files-viewer-meta .timestamp-age {
-  color: var(--muted);
+.files-document {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
 }
 
 .files-body {
@@ -273,10 +232,6 @@
   margin: 0 0 8px;
   font-size: 12px;
   color: var(--muted);
-}
-
-.files-pick {
-  margin: 0;
 }
 
 .files-jsonl {
@@ -314,31 +269,28 @@
   margin: 0;
 }
 
-@media (max-width: 900px) {
-  .files-page {
-    height: auto;
-    min-height: 0;
+@media (max-width: 720px) {
+  /* Name, purpose, then size and age, stacked. */
+  .files-row {
+    grid-template-columns: minmax(0, 1fr);
   }
 
-  .files-layout {
-    grid-template-columns: 1fr;
-  }
-
-  .files-list {
-    max-height: 40vh;
-  }
-
-  .files-viewer {
-    max-height: 75vh;
-    padding: 12px;
+  .files-row-meta {
+    justify-content: flex-start;
   }
 }
 
-/* Document headings sized for a reading pane, not a page title. */
-.files-markdown .md-body h1 {
-  font-size: 22px;
+/* Document headings sized for a record's body, under the record's own
+ * title: a document's "# Title" is a level-3 heading there. */
+.files-document .files-markdown .md-body h3 {
+  font-size: 20px;
 }
 
-.files-markdown .md-body h2 {
-  font-size: 18px;
+.files-document .files-markdown .md-body h4 {
+  font-size: 17px;
+}
+
+.files-document .files-markdown .md-body h5,
+.files-document .files-markdown .md-body h6 {
+  font-size: 15px;
 }

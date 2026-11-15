@@ -39,14 +39,3 @@ export function readEngagementFile(engagementKey: string, name: string) {
     `/engagements/${encodeURIComponent(engagementKey)}/artifacts/${encodeURIComponent(name)}`,
   );
 }
-
-// The brief first; the legacy brief name, then scope, when it is absent.
-const DEFAULT_FILE_ORDER = ["ENGAGEMENT.md", "RULES.md", "scope.json"];
-
-export function defaultEngagementFile(files: Pick<EngagementFile, "name" | "exists">[]): string | null {
-  const present = files.filter((file) => file.exists);
-  for (const name of DEFAULT_FILE_ORDER) {
-    if (present.some((file) => file.name === name)) return name;
-  }
-  return present[0]?.name ?? null;
-}

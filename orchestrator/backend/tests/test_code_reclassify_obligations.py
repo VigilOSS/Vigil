@@ -1,25 +1,34 @@
-"""A context-tag change recomputes a reviewed file's obligations; it reopens nothing.
+"""A tag or tier change recomputes a reviewed file's obligations; it reopens nothing.
 
-Context tags only map to review families (`CONTEXT_TAG_VULN_CLASSES` and the
-families `client-bundle` makes optional). Classification tier, role, slot types
-and language are the file's review identity: a change to one of those reopens
-the review. A tag change leaves the review, its coverage and its trigger
-history as they are; a family the tag makes required that the current review
-left below the floor is raised as a depth_floor trigger for that family alone,
-and a family it makes optional is no longer measured. Trigger history is never
-deleted: a reopen supersedes the reopened review's own triggers and keeps them
-readable.
+A file's review identity is its slot types and language: a change to either
+reopens the review. Context tags only map to review families
+(`CONTEXT_TAG_VULN_CLASSES` and the families `client-bundle` makes optional)
+and the tier only sets the depth floor, so a tag or tier change leaves the
+review, its coverage and its trigger history as they are: a family the change
+makes owed that the review on record left below the floor is raised as a
+depth_floor trigger for that family alone, and a floor trigger it stops owing
+is superseded and named. The role is descriptive metadata. Trigger history is
+never deleted: a reopen supersedes the reopened review's own triggers and
+keeps them readable.
 """
 from __future__ import annotations
+
+import re
 
 from app import db as db_module
 from test_code_analysis_api import (
     _append_repo_files,
     _claim_file_for_analysis,
+    _classify_file,
     _close_queue_item,
+    _create_code_parent_finding,
     _network_input_coverage,
     _owned,
+    _register_variant_dispatch,
+    _seed_repo_files,
     _source_hash,
+    _variant_receipt_payload,
+    _verify_code_finding,
 )
 from test_code_depth_floor_triggers import _floor_triggers, _seed
 
@@ -575,7 +584,9 @@ def test_a_tag_change_that_retires_every_queued_trigger_withdraws_the_unclaimed_
     assert change["depth_floor_triggers_retired"] == [floor["id"]]
     (withdrawn,) = change["requeue_withdrawn"]
     assert withdrawn["queue_item_id"] == directed
-    assert withdrawn["returned_trigger_ids"] == [floor["id"]]
+    # The trigger it carried was retired, so it stays retired: nothing returns.
+    assert withdrawn["returned_trigger_ids"] == []
+    assert withdrawn["retired_trigger_ids"] == [floor["id"]]
     assert _current_attempts(client, base, parser) == [(claim["id"], "done")]
     assert _file(client, base, parser)["analysis_status"] == "analyzed"
     readiness = client.get(f"{base}/readiness?target_phase=verify-variant").json()
@@ -651,3 +662,216 @@ def test_coverage_counts_the_floor_triggers_a_reclassification_retired(
     summary = client.get(f"{base}/coverage?repo_id={repo['id']}").json()["trigger_summary"]
     assert summary["depth_floor_retired"] == 2
     assert summary["depth_floor_pending"] == 0
+
+
+def _shallow_review(client, key, base, parser, *, ssrf_effort):
+    claim = _claim_file_for_analysis(client, key, int(parser["id"]))
+    receipt = client.post(f"{base}/analysis-results", json=_owned(
+        claim, queue_item_id=claim["id"], disposition="clean",
+        evidence="Fixture reviewed the exact current source.",
+    ))
+    assert receipt.status_code == 201, receipt.text
+    closed = _close_queue_item(
+        client, key, claim, disposition="clean", notes="Acme review",
+        cwe_coverage=_network_input_coverage(
+            default_effort=80, overrides={"ssrf": {"effort": ssrf_effort}}
+        ),
+    )
+    assert closed.status_code == 200, closed.text
+    return claim
+
+
+def _floor_trigger_row(trigger_id):
+    with db_module.get_connection() as connection:
+        return dict(connection.execute(
+            "SELECT status, resolved_queue_item_id, resolution_note, source_superseded_at, "
+            "source_supersession_reason FROM code_analysis_triggers WHERE id = ?",
+            (trigger_id,),
+        ).fetchone())
+
+
+def test_coverage_and_readiness_name_the_files_a_tier_drop_retired_floor_triggers_on(
+    client, isolate_settings
+):
+    """A lowered tier legitimately lowers the floor; the retirement is never silent."""
+    key = "2026-11-15-acme-retired-files"
+    base, repo, parser = _seed(client, isolate_settings, key)
+    _shallow_review(client, key, base, parser, ssrf_effort=10)
+    (floor,) = _floor_triggers(client, base)
+
+    dropped = client.post(f"{base}/files/bulk-classify", json={"classifications": [
+        _classification(parser, classification="medium", analysis_priority=30),
+    ]})
+
+    assert dropped.status_code == 200, dropped.text
+    gate = client.get(f"{base}/coverage?repo_id={repo['id']}").json()["gate"]
+    retired = gate["depth_floor_retired_files"]
+    assert retired["count"] == 1 and retired["triggers"] == 1
+    assert retired["by_reason"] == {"tier_floor_lowered": 1}
+    assert retired["sample"] == [{
+        "file_path": "src/parser.py", "classification": "medium", "families": ["ssrf"],
+        "reasons": ["tier_floor_lowered"], "trigger_ids": [floor["id"]],
+    }]
+    assert retired["omitted"] == 0
+    # The full list is an exact read: the same triggers, nothing else.
+    (route,) = re.findall(r"'(code/triggers\?[^']+)'", retired["full_list"])
+    listed = client.get(f"/engagements/{key}/assessment/{route}").json()
+    assert [row["id"] for row in listed["items"]] == [floor["id"]]
+    assert listed["items"][0]["source_supersession_reason"] == "tier_floor_lowered"
+    readiness = client.get(f"{base}/readiness?target_phase=verify-variant").json()
+    assert readiness["depth_floor_retired_files"] == retired
+
+
+def test_the_classify_audit_names_the_dispatch_or_operator_that_classified(
+    client, isolate_settings
+):
+    key = "2026-11-15-acme-classify-actor"
+    base, _repo, parser = _seed(client, isolate_settings, key)
+    _shallow_review(client, key, base, parser, ssrf_effort=10)
+    architect = client.post(f"/engagements/{key}/assessment/dispatches", json={
+        "agent_id": "acme-architect", "agent_role": "code-architect",
+        "task": "Classify the Acme repository.",
+    })
+    assert architect.status_code == 201, architect.text
+
+    by_dispatch = client.post(f"{base}/files/bulk-classify", json={
+        "classifications": [_classification(parser, classification="high", analysis_priority=60)],
+        "recorded_by_agent_id": "acme-architect",
+    })
+    by_operator = client.post(f"{base}/files/bulk-classify", json={"classifications": [
+        _classification(parser, classification="medium", analysis_priority=30),
+    ]})
+    unknown = client.post(f"{base}/files/bulk-classify", json={
+        "classifications": [_classification(parser, classification="low", analysis_priority=10)],
+        "recorded_by_agent_id": "acme-nobody",
+    })
+    patched = client.patch(f"{base}/files/{parser['id']}", json={
+        "classification": "high", "analysis_priority": 60,
+        "recorded_by_agent_id": "acme-architect",
+    })
+
+    assert by_dispatch.status_code == 200, by_dispatch.text
+    assert by_dispatch.json()["recorded_by"] == {
+        "agent_id": "acme-architect", "agent_role": "code-architect",
+    }
+    assert by_operator.status_code == 200, by_operator.text
+    assert by_operator.json()["recorded_by"] == {"agent_id": None, "agent_role": "operator"}
+    assert unknown.status_code == 422, unknown.text
+    assert "acme-nobody" in unknown.text
+    assert patched.status_code == 200, patched.text
+    assert patched.json()["recorded_by"]["agent_id"] == "acme-architect"
+    assert _file(client, base, parser)["classification"] == "high"
+    activity = client.get(
+        f"/engagements/{key}/activity-entries", params={"q": "code-record classify"}
+    ).json()["items"]
+    audited = sorted(
+        (row["id"], row["actor_name"], row["metadata"].get("recorded_by"))
+        for row in activity if row["title"] == "code-record classify"
+    )
+    # The fixture's own classifications, then the three accepted writes above.
+    assert [(actor, recorder) for _id, actor, recorder in audited[-3:]] == [
+        ("acme-architect", {"agent_id": "acme-architect", "agent_role": "code-architect"}),
+        ("operator", {"agent_id": None, "agent_role": "operator"}),
+        ("acme-architect", {"agent_id": "acme-architect", "agent_role": "code-architect"}),
+    ]
+
+
+def test_a_tier_drop_under_a_pending_requeue_measures_the_review_before_it(
+    client, isolate_settings
+):
+    key = "2026-11-15-acme-requeue-tier-drop"
+    base, _repo, parser = _seed(client, isolate_settings, key)
+    claim = _shallow_review(client, key, base, parser, ssrf_effort=60)
+    (floor,) = _floor_triggers(client, base)
+    requeued = client.post(
+        f"{base}/analysis-queue/requeue", json={"items": [{"trigger_id": floor["id"]}]}
+    )
+    assert requeued.status_code == 201, requeued.text
+    directed = int(requeued.json()["outcomes"][0]["queue_item_id"])
+
+    high = client.post(f"{base}/files/bulk-classify", json={"classifications": [
+        _classification(parser, classification="high", analysis_priority=60),
+    ]})
+
+    assert high.status_code == 200, high.text
+    (change,) = high.json()["obligation_changes"]
+    # ssrf at 60 meets the high floor of 50 on the review the requeue suspended.
+    assert change["depth_floor_triggers_retired_reasons"] == {
+        str(floor["id"]): "tier_floor_lowered",
+    }
+    assert [entry["queue_item_id"] for entry in change["requeue_withdrawn"]] == [directed]
+    assert _current_attempts(client, base, parser) == [(claim["id"], "done")]
+    assert _file(client, base, parser)["analysis_status"] == "analyzed"
+
+
+def test_withdrawing_an_emptied_requeue_leaves_its_retired_triggers_retired(
+    client, isolate_settings
+):
+    key = "2026-11-15-acme-requeue-retired-kept"
+    base, _repo, parser = _seed(client, isolate_settings, key)
+    _shallow_review(client, key, base, parser, ssrf_effort=10)
+    (floor,) = _floor_triggers(client, base)
+    requeued = client.post(
+        f"{base}/analysis-queue/requeue", json={"items": [{"trigger_id": floor["id"]}]}
+    )
+    assert requeued.status_code == 201, requeued.text
+    before = _floor_trigger_row(floor["id"])
+    assert before["status"] == "queued"
+
+    medium = client.post(f"{base}/files/bulk-classify", json={"classifications": [
+        _classification(parser, classification="medium", analysis_priority=30),
+    ]})
+
+    assert medium.status_code == 200, medium.text
+    (change,) = medium.json()["obligation_changes"]
+    (withdrawn,) = change["requeue_withdrawn"]
+    assert withdrawn["returned_trigger_ids"] == []
+    assert withdrawn["retired_trigger_ids"] == [floor["id"]]
+    after = _floor_trigger_row(floor["id"])
+    assert after["status"] == "queued"
+    assert after["resolution_note"] == before["resolution_note"]
+    assert after["source_supersession_reason"] == "tier_floor_lowered"
+    assert after["source_superseded_at"]
+
+
+def _variant_checked_parser(client, isolate_settings, key):
+    repo, files = _seed_repo_files(client, isolate_settings, key, repo_key=f"{key}-repo")
+    parser = next(row for row in files if row["file_path"] == "src/parser.py")
+    _classify_file(client, key, int(parser["id"]), "critical", 100)
+    _create_code_parent_finding(client, key, int(repo["id"]), slug="AC-701")
+    _verify_code_finding(client, key, int(repo["id"]), "AC-701")
+    dispatch = _register_variant_dispatch(client, key, agent_id="acme-variant", finding_slugs=["AC-701"])
+    base = f"/engagements/{key}/assessment/code"
+    recorded = client.post(f"{base}/variant-checks", json=_variant_receipt_payload(
+        client, key, int(repo["id"]), parser, dispatch, parent_finding_slugs=["AC-701"],
+    ))
+    assert recorded.status_code == 201, recorded.text
+    assert recorded.json()["current"] is True
+    return base, parser, recorded.json()
+
+
+def test_a_variant_check_receipt_stays_current_across_role_and_tier_changes(
+    client, isolate_settings
+):
+    """The receipt proves the file's bytes were checked against the parent set;
+    the role label and the tier set review order, never receipt eligibility."""
+    base, parser, receipt = _variant_checked_parser(
+        client, isolate_settings, "2026-11-15-acme-variant-relabel"
+    )
+
+    relabeled = client.patch(f"{base}/files/{parser['id']}", json={"role": "acme-relabel"})
+    lowered = client.patch(
+        f"{base}/files/{parser['id']}", json={"classification": "high", "analysis_priority": 60}
+    )
+
+    assert relabeled.status_code == 200, relabeled.text
+    assert lowered.status_code == 200, lowered.text
+    stored = _file(client, base, parser)
+    assert (stored["role"], stored["classification"]) == ("acme-relabel", "high")
+    assert stored["variant_check_status"] == "done"
+    current = client.get(f"{base}/variant-checks?file_id={parser['id']}").json()
+    assert [(row["id"], row["current"]) for row in current] == [(receipt["id"], True)]
+    # The receipt keeps the labels it was recorded under.
+    assert (current[0]["role"], current[0]["classification"]) == (
+        receipt["role"], receipt["classification"],
+    )

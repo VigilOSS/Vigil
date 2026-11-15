@@ -1,31 +1,40 @@
 // ── FilesTab ──────────────────────────────────────────────────────────
 // The engagement's root documents (brief, handoff, memory, issues log,
-// snapshots). Owns its reads: the file list and the selected file's content,
-// both re-read on every parent refresh bump. Reloads coalesce — one request
-// in flight per source, re-run once afterwards if another bump arrived — and
-// previous data stays on screen while they run. The open file lives in the
-// URL (`file=`), so it survives reload and Back. ArtifactViewer renders.
+// snapshots). The tab shows the file list, the brief first; opening a file
+// replaces the list with the shared record view, and Back, Escape and browser
+// Back return to the list. Owns its reads: the file list and the open file's
+// content, both re-read on every parent refresh bump. Reloads coalesce — one
+// request in flight per source, re-run once afterwards if another bump
+// arrived — and previous data stays on screen while they run. The open file
+// and its section live in the URL (`file=`, `dtab=raw`), so they survive
+// reload and Back.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { engagementHref, writeWorkspaceHash } from "../lib/workspaceRoutes";
 import {
-  defaultEngagementFile,
   listEngagementFiles,
   readEngagementFile,
   type EngagementFile,
   type EngagementFileContent,
 } from "../lib/filesApi";
 import { useCoalescedRunner } from "../lib/useCoalescedRequest";
-import { ArtifactViewer } from "./ArtifactViewer";
+import { FileList, FileRecord, isFileSection, shownFileOrder, type FileSection } from "./ArtifactViewer";
+import { RecordView, useResultsScrollMemory, type RecordNavigation } from "./record/RecordView";
+import { listNavigation } from "./record/recordNavigation";
+import { PageHeader } from "./ui";
 
 type FilesTabProps = {
   engagementKey: string;
   // Bumped by EngagementPage after every refresh pass; a change re-reads the
   // list and the open file in the background.
   refreshVersion?: number;
-  /** `file=` in the URL: the engagement file open in the viewer. */
+  /** `file=` in the URL: the engagement file whose record is open. */
   initialFileName?: string;
+  /** `dtab=` in the URL: the open file's section (`raw`; Rendered is the default). */
+  initialDrawerTab?: string;
 };
+
+const RECORD_TITLE_ID = "file-record-title";
 
 function errorText(error: unknown, fallback: string) {
   return error instanceof Error && error.message ? error.message : fallback;
@@ -39,15 +48,17 @@ function sameContent(held: EngagementFileContent | null, read: EngagementFileCon
   return true;
 }
 
-/** A file the URL named that the engagement does not have (or has not created yet). */
+/** A file the address named, or that was open, which the engagement does not have (or has not created yet). */
 type RouteMiss = { name: string; listed: boolean };
 
-export function FilesTab({ engagementKey, refreshVersion, initialFileName }: FilesTabProps) {
+export function FilesTab({ engagementKey, refreshVersion, initialFileName, initialDrawerTab }: FilesTabProps) {
   const [files, setFiles] = useState<EngagementFile[]>([]);
   const [listLoaded, setListLoaded] = useState(false);
   const [listError, setListError] = useState<string | null>(null);
   const [listLoading, setListLoading] = useState(false);
-  const [selectedName, setSelectedName] = useState<string | null>(initialFileName ?? null);
+  // The file whose record is open; null while the list shows.
+  const [openName, setOpenName] = useState<string | null>(initialFileName ?? null);
+  const [section, setSection] = useState<FileSection>(isFileSection(initialDrawerTab) ? initialDrawerTab : "rendered");
   const [routeMiss, setRouteMiss] = useState<RouteMiss | null>(null);
   const [content, setContent] = useState<EngagementFileContent | null>(null);
   const [contentLoading, setContentLoading] = useState(false);
@@ -55,30 +66,32 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
 
   const keyRef = useRef(engagementKey);
   keyRef.current = engagementKey;
-  const selectedRef = useRef<string | null>(selectedName);
-  selectedRef.current = selectedName;
+  const openRef = useRef<string | null>(openName);
+  openRef.current = openName;
   const filesRef = useRef<EngagementFile[] | null>(null);
-  // The file the URL names; a missing one is reported, not silently swapped.
-  const routeFileRef = useRef<string | undefined>(initialFileName);
-  routeFileRef.current = initialFileName;
-  // The `file=` value the selection last followed (or wrote).
-  const appliedRouteFile = useRef(initialFileName);
+  // The `file=` and `dtab=` values the open record last followed (or wrote).
+  const appliedRoute = useRef({ file: initialFileName, section: initialDrawerTab });
+  // The row a record was opened from: focus returns there when it closes.
+  const invokerRef = useRef<HTMLElement | null>(null);
 
-  // Settle the selection against a known file list: keep a present file,
-  // otherwise open the default, saying so when the URL named the missing one.
-  const settleSelection = useCallback((wanted: string | null, list: EngagementFile[]) => {
-    if (wanted && list.some((file) => file.name === wanted && file.exists)) {
-      setSelectedName(wanted);
-      return;
-    }
-    const fallback = defaultEngagementFile(list);
-    setSelectedName(fallback);
-    if (wanted && wanted === routeFileRef.current) {
-      setRouteMiss({ name: wanted, listed: list.some((file) => file.name === wanted) });
-      appliedRouteFile.current = undefined;
-      writeWorkspaceHash(engagementHref(keyRef.current, { tab: "artifacts" }), "replace");
-    }
+  const writeHash = useCallback((name: string | null, shown: FileSection = "rendered", mode: "push" | "replace" = "push") => {
+    appliedRoute.current = { file: name ?? undefined, section: name && shown === "raw" ? "raw" : undefined };
+    writeWorkspaceHash(
+      engagementHref(keyRef.current, { tab: "artifacts", file: name ?? undefined, dtab: appliedRoute.current.section }),
+      mode,
+    );
   }, []);
+
+  // Settle the open record against a known file list: a file the engagement
+  // does not hold cannot stay open, so the list shows and says why.
+  const settleOpen = useCallback((list: EngagementFile[]) => {
+    const wanted = openRef.current;
+    if (!wanted || list.some((file) => file.name === wanted && file.exists)) return;
+    setRouteMiss({ name: wanted, listed: list.some((file) => file.name === wanted) });
+    setOpenName(null);
+    invokerRef.current = null;
+    writeHash(null, "rendered", "replace");
+  }, [writeHash]);
 
   // A different engagement starts from a clean slate.
   useEffect(() => {
@@ -87,7 +100,7 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
     setListLoaded(false);
     setListError(null);
     setRouteMiss(null);
-    setSelectedName(routeFileRef.current ?? null);
+    setOpenName(appliedRoute.current.file ?? null);
     setContent(null);
     setContentLoading(false);
     setContentError(null);
@@ -102,8 +115,7 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
       setFiles(next);
       filesRef.current = next;
       setListError(null);
-      // Keep the open file while it still exists; otherwise open the default.
-      settleSelection(selectedRef.current, next);
+      settleOpen(next);
     } catch (error) {
       if (keyRef.current === key) setListError(errorText(error, "Failed to load engagement files"));
     } finally {
@@ -115,13 +127,13 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
   });
 
   // Content reads coalesce per file: a refresh during an in-flight read of
-  // the same file re-runs once afterwards, while selecting another file
+  // the same file re-runs once afterwards, while opening another file
   // starts its read at once instead of queueing behind a slow one.
   const contentInFlightRef = useRef<string | null>(null);
   const contentQueuedRef = useRef(false);
   const loadContent = useCallback(async () => {
     const key = keyRef.current;
-    const name = selectedRef.current;
+    const name = openRef.current;
     if (!name) return;
     const token = `${key}\n${name}`;
     if (contentInFlightRef.current === token) {
@@ -130,7 +142,7 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
     }
     contentInFlightRef.current = token;
     contentQueuedRef.current = false;
-    const current = () => keyRef.current === key && selectedRef.current === name;
+    const current = () => keyRef.current === key && openRef.current === name;
     setContentLoading(true);
     try {
       do {
@@ -138,7 +150,7 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
         try {
           const next = await readEngagementFile(key, name);
           if (!current()) return;
-          // An unchanged file keeps the content object the viewer rendered,
+          // An unchanged file keeps the content object the record rendered,
           // so a refresh does not render the document again.
           setContent((held) => (sameContent(held, next) ? held : next));
           setContentError(null);
@@ -164,28 +176,45 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
   }, [engagementKey, loadList]);
 
   useEffect(() => {
-    if (!selectedName) return;
+    if (!openName) return;
     setContentError(null);
     void loadContent();
-  }, [engagementKey, selectedName, loadContent]);
+  }, [engagementKey, openName, loadContent]);
 
-  // The URL changing under the tab (Back / Forward, a link) opens its file;
-  // no `file=` means the default document.
+  // The URL changing under the tab (Back / Forward, a link) opens its file
+  // and section; no `file=` shows the list.
   useEffect(() => {
-    if (appliedRouteFile.current === initialFileName) return;
-    appliedRouteFile.current = initialFileName;
+    const applied = appliedRoute.current;
+    if (applied.file === initialFileName && applied.section === initialDrawerTab) return;
+    const stepping = openRef.current !== null && initialFileName !== undefined;
+    appliedRoute.current = { file: initialFileName, section: initialDrawerTab };
     setRouteMiss(null);
-    const list = filesRef.current;
-    if (list) settleSelection(initialFileName ?? defaultEngagementFile(list), list);
-    else setSelectedName(initialFileName ?? null);
-  }, [initialFileName, settleSelection]);
+    if (!stepping) invokerRef.current = null;
+    openRef.current = initialFileName ?? null;
+    setOpenName(initialFileName ?? null);
+    setSection(isFileSection(initialDrawerTab) ? initialDrawerTab : "rendered");
+    if (filesRef.current) settleOpen(filesRef.current);
+  }, [initialFileName, initialDrawerTab, settleOpen]);
 
-  const selectFile = useCallback((name: string) => {
+  // Opening from the list remembers the row; stepping from an open record
+  // keeps the row the first one was opened from. Each file opens rendered.
+  const openFile = useCallback((name: string, invoker?: HTMLElement | null) => {
+    if (openRef.current === null) invokerRef.current = invoker ?? null;
     setRouteMiss(null);
-    setSelectedName(name);
-    appliedRouteFile.current = name;
-    writeWorkspaceHash(engagementHref(keyRef.current, { tab: "artifacts", file: name }));
-  }, []);
+    setOpenName(name);
+    setSection("rendered");
+    writeHash(name);
+  }, [writeHash]);
+
+  const closeFile = useCallback(() => {
+    setOpenName(null);
+    writeHash(null);
+  }, [writeHash]);
+
+  const chooseSection = useCallback((next: FileSection) => {
+    setSection(next);
+    if (openRef.current) writeHash(openRef.current, next);
+  }, [writeHash]);
 
   // Background refresh on parent bumps; the first render is the mount load.
   const lastVersionRef = useRef(refreshVersion);
@@ -193,29 +222,76 @@ export function FilesTab({ engagementKey, refreshVersion, initialFileName }: Fil
     if (lastVersionRef.current === refreshVersion) return;
     lastVersionRef.current = refreshVersion;
     void loadList();
-    if (selectedRef.current) void loadContent();
+    if (openRef.current) void loadContent();
   }, [refreshVersion, loadList, loadContent]);
 
+  const investigating = openName !== null;
+  const present = files.filter((file) => file.exists);
+  const missing = files.length - present.length;
+  // Previous / Next walk the list as shown. Until the list has loaded (or
+  // when it could not be read), the open file's place in it is not known.
+  const order = useMemo(() => shownFileOrder(files), [files]);
+  const navigation: RecordNavigation = files.length === 0 && listError
+    ? { index: undefined, total: undefined, error: listError }
+    : listLoaded || files.length > 0
+      ? listNavigation(order, openName, openFile)
+      : { index: undefined, total: undefined };
+  const resultsRef = useRef<HTMLDivElement | null>(null);
+  useResultsScrollMemory(resultsRef, investigating, { recordKey: openName });
+
   return (
-    <ArtifactViewer
-      artifacts={files}
-      selectedName={selectedName}
-      selectedArtifact={content}
-      loadError={contentError?.name === selectedName ? contentError.message : null}
-      listLoading={!listLoaded}
-      listError={listError}
-      contentLoading={contentLoading}
-      refreshing={listLoaded && (listLoading || (contentLoading && content?.name === selectedName))}
-      routeNotice={routeMiss
-        ? routeMiss.listed
-          ? <><strong>{routeMiss.name} has not been created yet.</strong> Showing {selectedName ?? "the file list"} instead.</>
-          : <><strong>{routeMiss.name} is not one of this engagement&apos;s files.</strong> Showing {selectedName ?? "the file list"} instead.</>
-        : null}
-      onRetry={() => {
-        void loadList();
-        if (selectedRef.current) void loadContent();
-      }}
-      onSelect={selectFile}
-    />
+    <div className="files-page">
+      <PageHeader
+        title="Files"
+        titleId="files-title"
+        purpose="The engagement's working documents: the program brief, handoff notes, memory and snapshots. Start with the brief."
+        stats={!listLoaded && files.length === 0 ? [] : [
+          { value: present.length, label: present.length === 1 ? "document" : "documents" },
+          { value: missing || null, label: "not created yet" },
+        ]}
+        status={listLoaded && listLoading ? "Updating…" : null}
+        hidden={investigating}
+      />
+      {/* The list (an open record replaces it; it stays mounted behind) */}
+      <div ref={resultsRef} className="files-results" hidden={investigating}>
+        <FileList
+          files={files}
+          labelledBy="files-title"
+          loading={!listLoaded}
+          error={listError}
+          refreshing={listLoading}
+          notice={routeMiss
+            ? routeMiss.listed
+              ? <><strong>{routeMiss.name} has not been created yet.</strong> The file list is shown.</>
+              : <><strong>{routeMiss.name} is not one of this engagement&apos;s files.</strong> The file list is shown.</>
+            : null}
+          onRetry={() => void loadList()}
+          onOpen={openFile}
+        />
+      </div>
+      {openName !== null && (
+        <RecordView
+          label="File"
+          noun="file"
+          navigation={navigation}
+          onBack={closeFile}
+          titleId={RECORD_TITLE_ID}
+          returnFocusRef={invokerRef}
+        >
+          <FileRecord
+            key={openName}
+            name={openName}
+            file={files.find((file) => file.name === openName) ?? null}
+            content={content}
+            loadError={contentError?.name === openName ? contentError.message : null}
+            loading={contentLoading}
+            section={section}
+            onSectionChange={chooseSection}
+            onRetry={() => void loadContent()}
+            titleId={RECORD_TITLE_ID}
+          />
+        </RecordView>
+      )}
+    </div>
   );
 }

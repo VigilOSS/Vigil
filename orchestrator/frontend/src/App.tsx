@@ -47,7 +47,7 @@ type EngagementRoute = {
 // #/engagements/{key}?tab=proof&work={id}, #/engagements/{key}?tab=commands&command={id}&dtab={recordSection},
 // #/engagements/{key}?tab=surfaces&surface={id}, #/engagements/{key}?tab=oast&probe={id},
 // #/engagements/{key}?tab=http&view=inventory|exchanges&request={id}|flow={id} (record views also carry dtab={recordSection}),
-// #/engagements/{key}?tab=submissions&submission={slug}&dtab={documentTab}, #/engagements/{key}?tab=artifacts&file={name},
+// #/engagements/{key}?tab=submissions&submission={slug}&dtab={documentTab}, #/engagements/{key}?tab=artifacts&file={name}&dtab=raw,
 // or #/engagements/{key}?tab=activity&q={text}&cats={category,…}&actor={kind}&range={key}.
 // (The Code view reads its own view/repo/disposition params; see components/code/useCodeRoute.ts.)
 // Explicit selections push canonical history; hashchange and popstate restore

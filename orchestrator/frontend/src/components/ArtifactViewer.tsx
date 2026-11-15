@@ -1,7 +1,9 @@
 // ── ArtifactViewer ────────────────────────────────────────────────────
-// Presentational Files view: the engagement's root documents grouped by role
-// (working documents first, then snapshots and config), with a reading pane.
-// FilesTab owns fetching and selection; this component only renders.
+// Presentational pieces of the Files tab: the list of the engagement's root
+// documents grouped by role (working documents first, then snapshots and
+// config), and one file's record (header, Rendered / Raw sections, body) for
+// the shared record view. FilesTab owns fetching, the open file and the
+// address; these components only render.
 //
 // Operator data renders verbatim (ADR 0019). File text can echo target
 // output, so Markdown goes through MarkdownBlock (no raw HTML, inert images)
@@ -13,8 +15,9 @@ import type { EngagementFile, EngagementFileMeta } from "../lib/filesApi";
 import { TimeStamp, formatBytes } from "./formatting";
 import { JsonView } from "./JsonView";
 import { MarkdownBlock } from "./Markdown";
+import { RecordBody, RecordCopyLinkButton, RecordHeader, RecordTabs, type RecordTab } from "./record/RecordView";
 import { Skeleton, SlowLoadHint } from "./Skeletons";
-import { EmptyState, PageHeader, SegmentedControl, StatusPill } from "./ui";
+import { EmptyState, StatusPill } from "./ui";
 import "../styles/files.css";
 
 // The role metadata is optional so a file renders even when the listing
@@ -27,26 +30,12 @@ export type ViewerContent = ViewerFile & {
   returned_bytes?: number;
 };
 
-type ArtifactViewerProps = {
-  artifacts: ViewerFile[];
-  selectedName: string | null;
-  selectedArtifact: ViewerContent | null;
-  // Failure reading the selected file.
-  loadError?: string | null;
-  // First list load still in flight (no list yet).
-  listLoading?: boolean;
-  // Failure loading the file list.
-  listError?: string | null;
-  // The selected file is being (re)read; previous content stays visible.
-  contentLoading?: boolean;
-  // A background re-read of the list or the open file (shown as "Updating…").
-  refreshing?: boolean;
-  // Why the file the URL named is not the one shown.
-  routeNotice?: ReactNode;
-  // Re-reads the list (and the open file) after a failure.
-  onRetry?: () => void;
-  onSelect: (name: string) => void;
-};
+/** A file record's sections: the rendered document, or the exact text. */
+export type FileSection = "rendered" | "raw";
+
+export function isFileSection(value: string | undefined): value is FileSection {
+  return value === "rendered" || value === "raw";
+}
 
 const JSONL_PAGE_ROWS = 100;
 const BRIEF_NAMES = new Set(["ENGAGEMENT.md", "RULES.md"]);
@@ -100,19 +89,22 @@ export function JsonTree({ label, value, defaultOpen = false }: { label?: string
   );
 }
 
-function isJsonArtifact(artifact: ViewerContent) {
+/** What decides how a file renders: its name and media type, known from the list before its text arrives. */
+type FileShape = Pick<ViewerFile, "name" | "media_type">;
+
+function isJsonArtifact(artifact: FileShape) {
   return artifact.media_type.includes("json") || artifact.name.endsWith(".json");
 }
 
-function isJsonlArtifact(artifact: ViewerContent) {
+function isJsonlArtifact(artifact: FileShape) {
   return artifact.name.endsWith(".jsonl");
 }
 
-function isMarkdownArtifact(artifact: ViewerContent) {
+function isMarkdownArtifact(artifact: FileShape) {
   return artifact.media_type.includes("markdown") || artifact.name.endsWith(".md");
 }
 
-function hasRenderedView(artifact: ViewerContent) {
+function hasRenderedView(artifact: FileShape) {
   return isJsonlArtifact(artifact) || isJsonArtifact(artifact) || isMarkdownArtifact(artifact);
 }
 
@@ -200,8 +192,8 @@ function MarkdownContent({ content }: { content: string }) {
           {hidden} HTML comment{hidden === 1 ? "" : "s"} hidden; Raw shows the exact file.
         </p>
       )}
-      {/* The document's own "# Title" sits under the page's one level-1 heading. */}
-      <MarkdownBlock text={text} headingOffset={1} />
+      {/* The document's own "# Title" sits under the record's level-2 title. */}
+      <MarkdownBlock text={text} headingOffset={2} />
     </div>
   );
 }
@@ -219,8 +211,8 @@ function parseJsonArtifact(artifact: ViewerContent): ParsedJson {
 }
 
 // Rendering a large document is the costly part of this view, so it happens
-// once per content: the viewer's other updates (loading states, the file
-// list) leave it alone.
+// once per content: the record's other updates (loading states, a refresh
+// that read the same text) leave it alone.
 const RenderedBody = memo(function RenderedBody({ artifact, json }: { artifact: ViewerContent; json: ParsedJson }) {
   if (isJsonlArtifact(artifact)) {
     return <JsonlContent content={artifact.content} truncated={Boolean(artifact.truncated)} />;
@@ -248,97 +240,95 @@ function StubNotice({ waiver }: { waiver: string }) {
   );
 }
 
-function FileRow({ file, selected, onSelect }: { file: ViewerFile; selected: boolean; onSelect: (name: string) => void }) {
-  const stubLabel = file.is_stub ? (file.stub_waiver?.trim() ? "Template · waived" : "Unfilled template") : null;
+function stubPill(file: Pick<ViewerFile, "is_stub" | "stub_waiver">, className?: string) {
+  if (!file.is_stub) return null;
+  const waived = Boolean(file.stub_waiver?.trim());
+  return (
+    <StatusPill
+      className={className}
+      size="sm"
+      value={waived ? "waived" : "unfilled"}
+      tone={waived ? "neutral" : "warning"}
+      label={waived ? "Template · waived" : "Unfilled template"}
+      title={waived ? "An unfilled template the operator waived" : "Target-facing commands are blocked until this brief is filled in or waived"}
+    />
+  );
+}
+
+function FileRow({ file, onOpen }: { file: ViewerFile; onOpen: (name: string, invoker: HTMLElement) => void }) {
   return (
     <li>
       <button
         type="button"
         className="files-row"
-        aria-pressed={selected}
-        aria-current={selected ? "true" : undefined}
-        onClick={() => onSelect(file.name)}
+        data-record-key={file.name}
+        onClick={(event) => onOpen(file.name, event.currentTarget)}
       >
-        <span className="files-row-name">{file.name}</span>
-        {file.role && <span className="files-row-role">{file.role}</span>}
-        {file.relative_path !== file.name && <span className="files-row-path">{file.relative_path}</span>}
+        <span className="files-row-main">
+          <span className="files-row-name">{file.name}</span>
+          {file.relative_path !== file.name && <span className="files-row-path">{file.relative_path}</span>}
+          {stubPill(file, "files-flag")}
+        </span>
+        <span className="files-row-about">
+          {file.role && <span className="files-row-role">{file.role}</span>}
+          {file.description && <span className="files-row-desc">{file.description}</span>}
+        </span>
         <span className="files-row-meta">
           {file.size_bytes != null && <span>{formatBytes(file.size_bytes)}</span>}
           {file.modified_at && <TimeStamp value={file.modified_at} />}
         </span>
-        {stubLabel && (
-          <StatusPill
-            className="files-flag"
-            size="sm"
-            value={file.stub_waiver?.trim() ? "waived" : "unfilled"}
-            tone={file.stub_waiver?.trim() ? "neutral" : "warning"}
-            label={stubLabel}
-            title={file.stub_waiver?.trim() ? "An unfilled template the operator waived" : "Target-facing commands are blocked until this brief is filled in or waived"}
-          />
-        )}
       </button>
     </li>
   );
 }
 
-export function ArtifactViewer({
-  artifacts,
-  selectedName,
-  selectedArtifact,
-  loadError,
-  listLoading = false,
-  listError,
-  contentLoading = false,
-  refreshing = false,
-  routeNotice,
-  onRetry,
-  onSelect,
-}: ArtifactViewerProps) {
-  const [view, setView] = useState<"rendered" | "raw">("rendered");
-  // Each file opens rendered; Raw is a per-file choice.
-  useEffect(() => setView("rendered"), [selectedName]);
-  const displayedArtifact = selectedArtifact?.name === selectedName ? selectedArtifact : null;
-  const selectedFile = artifacts.find((file) => file.name === selectedName) ?? null;
-  const present = artifacts.filter((file) => file.exists);
-  const missing = artifacts.filter((file) => !file.exists);
+/** The files a record's Previous / Next walk, in the order the list shows them: working documents, then snapshots and config. */
+export function shownFileOrder(files: ViewerFile[]): string[] {
+  const present = files.filter((file) => file.exists);
+  return [
+    ...present.filter((file) => (file.group ?? "working") === "working"),
+    ...present.filter((file) => file.group === "snapshot"),
+  ].map((file) => file.name);
+}
+
+type FileListProps = {
+  files: ViewerFile[];
+  /** Id of the page heading that names this list. */
+  labelledBy?: string;
+  // First list load still in flight (no list yet).
+  loading?: boolean;
+  // Failure loading the file list.
+  error?: string | null;
+  // A background re-read of the list is running.
+  refreshing?: boolean;
+  // Why the file the address named is not open.
+  notice?: ReactNode;
+  // Re-reads the list after a failure.
+  onRetry?: () => void;
+  /** Open a file's record; `invoker` is the row used, where focus returns. */
+  onOpen: (name: string, invoker: HTMLElement) => void;
+};
+
+/** The tab's results: every engagement file, grouped by role, the brief first. */
+export function FileList({ files, labelledBy, loading = false, error, refreshing = false, notice, onRetry, onOpen }: FileListProps) {
+  const present = files.filter((file) => file.exists);
+  const missing = files.filter((file) => !file.exists);
   const working = present.filter((file) => (file.group ?? "working") === "working");
   const snapshots = present.filter((file) => file.group === "snapshot");
   const hasBrief = present.some((file) => BRIEF_NAMES.has(file.name));
   const hasScope = present.some((file) => file.name === "scope.json");
-  const waiting = Boolean(selectedName) && !displayedArtifact && !loadError;
-  const meta: Partial<EngagementFileMeta> & { relative_path?: string } = { ...selectedFile, ...displayedArtifact };
-  const json = useMemo<ParsedJson>(
-    () => (displayedArtifact && isJsonArtifact(displayedArtifact) && !isJsonlArtifact(displayedArtifact) ? parseJsonArtifact(displayedArtifact) : null),
-    [displayedArtifact],
-  );
-  // A JSON file whose text does not parse has no rendered view: it shows as its exact text.
-  const unparsedJson = Boolean(displayedArtifact) && isJsonArtifact(displayedArtifact!) && !isJsonlArtifact(displayedArtifact!) && json === null;
-  const renderable = displayedArtifact ? hasRenderedView(displayedArtifact) && !unparsedJson : false;
-  const effectiveView = renderable ? view : "raw";
-
   return (
-    <div className="files-page">
-    <PageHeader
-      title="Files"
-      titleId="files-title"
-      purpose="The engagement's working documents: the program brief, handoff notes, memory and snapshots. Start with the brief."
-      stats={listLoading && artifacts.length === 0 ? [] : [
-        { value: present.length, label: present.length === 1 ? "document" : "documents" },
-        { value: missing.length || null, label: "not created yet" },
-      ]}
-      status={refreshing ? "Updating…" : null}
-    />
-    <section className="panel files-view" aria-labelledby="files-title">
-      {listError && (
+    <section className="panel files-view" aria-labelledby={labelledBy}>
+      {error && (
         <div className="files-list-error">
           <p className="error-text" role="alert">
-            {artifacts.length ? `File list refresh failed: ${listError} (showing the last loaded list)` : `File list unavailable: ${listError}`}
+            {files.length ? `File list refresh failed: ${error} (showing the last loaded list)` : `File list unavailable: ${error}`}
           </p>
           {onRetry && <button type="button" className="ui-button" onClick={onRetry} disabled={refreshing}>Try again</button>}
         </div>
       )}
-      {routeNotice && <div className="files-notice files-notice-warn" role="status">{routeNotice}</div>}
-      {!listLoading && artifacts.length > 0 && !hasBrief && (
+      {notice && <div className="files-notice files-notice-warn" role="status">{notice}</div>}
+      {!loading && files.length > 0 && !hasBrief && (
         <div className="files-notice" role="note">
           <strong>No program brief.</strong>{" "}
           {hasScope
@@ -346,128 +336,165 @@ export function ArtifactViewer({
             : "This engagement has no ENGAGEMENT.md and no scope.json, so agents have neither program-specific rules of engagement nor a recorded scope."}
         </div>
       )}
-      <div className="files-layout">
-        <nav className="files-list" aria-label="Engagement files">
-          {listLoading && artifacts.length === 0 ? (
-            <div className="files-list-skeleton" aria-hidden="true">
-              {[0, 1, 2, 3].map((index) => <Skeleton key={index} height={44} />)}
-            </div>
-          ) : (
-            <>
-              {working.length > 0 && (
-                <div className="files-group">
-                  <h3 className="files-group-title">Working documents</h3>
-                  <ul>
-                    {working.map((file) => (
-                      <FileRow key={file.name} file={file} selected={file.name === selectedName} onSelect={onSelect} />
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {snapshots.length > 0 && (
-                <div className="files-group">
-                  <h3 className="files-group-title">Snapshots &amp; config</h3>
-                  <ul>
-                    {snapshots.map((file) => (
-                      <FileRow key={file.name} file={file} selected={file.name === selectedName} onSelect={onSelect} />
-                    ))}
-                  </ul>
-                </div>
-              )}
-              {missing.length > 0 && (
-                <details className="files-missing">
-                  <summary>Not created yet ({missing.length})</summary>
-                  <ul>
-                    {missing.map((file) => (
-                      <li key={file.name}>
-                        <span className="files-row-name">{file.name}</span>
-                        {file.role && <span className="files-row-role">{file.role}</span>}
-                        {file.description && <span className="files-missing-desc">{file.description}</span>}
-                      </li>
-                    ))}
-                  </ul>
-                </details>
-              )}
-            </>
-          )}
-        </nav>
-        <article
-          className="files-viewer"
-          aria-busy={contentLoading || waiting}
-          aria-label={selectedName ? `${selectedName} contents` : "File contents"}
-        >
-          {selectedName && (
-            <header className="files-viewer-head">
-              <div className="files-viewer-title">
-                <strong>{selectedName}</strong>
-                {meta.role && <span className="files-row-role">{meta.role}</span>}
-                {renderable && (
-                  <SegmentedControl
-                    className="files-view-switch"
-                    label="File view"
-                    value={effectiveView}
-                    onChange={setView}
-                    options={[{ value: "rendered", label: "Rendered" }, { value: "raw", label: "Raw" }]}
-                  />
-                )}
+      <nav className="files-list" aria-label="Engagement files">
+        {loading && files.length === 0 ? (
+          <div className="files-list-skeleton" aria-hidden="true">
+            {[0, 1, 2, 3].map((index) => <Skeleton key={index} height={44} />)}
+          </div>
+        ) : (
+          <>
+            {working.length > 0 && (
+              <div className="files-group">
+                <h3 className="files-group-title">Working documents</h3>
+                <ul>
+                  {working.map((file) => <FileRow key={file.name} file={file} onOpen={onOpen} />)}
+                </ul>
               </div>
-              {meta.description && <p className="files-viewer-desc">{meta.description}</p>}
-              <p className="files-viewer-meta">
-                {meta.relative_path && meta.relative_path !== selectedName && <span className="mono">{meta.relative_path}</span>}
-                {meta.size_bytes != null && <span>{formatBytes(meta.size_bytes)}</span>}
-                {meta.modified_at && <span>Modified <TimeStamp value={meta.modified_at} mode="both" /></span>}
-              </p>
-            </header>
-          )}
+            )}
+            {snapshots.length > 0 && (
+              <div className="files-group">
+                <h3 className="files-group-title">Snapshots &amp; config</h3>
+                <ul>
+                  {snapshots.map((file) => <FileRow key={file.name} file={file} onOpen={onOpen} />)}
+                </ul>
+              </div>
+            )}
+            {missing.length > 0 && (
+              <details className="files-missing">
+                <summary>Not created yet ({missing.length})</summary>
+                <ul>
+                  {missing.map((file) => (
+                    <li key={file.name}>
+                      <span className="files-row-name">{file.name}</span>
+                      {file.role && <span className="files-row-role">{file.role}</span>}
+                      {file.description && <span className="files-missing-desc">{file.description}</span>}
+                    </li>
+                  ))}
+                </ul>
+              </details>
+            )}
+            {!loading && !error && present.length === 0 && (
+              <EmptyState variant="empty" compact title="No engagement files exist yet.">
+                The brief, handoff notes and memory documents appear here once the engagement writes them.
+              </EmptyState>
+            )}
+          </>
+        )}
+      </nav>
+    </section>
+  );
+}
+
+type FileRecordProps = {
+  /** The open file's name; the record shows its loading shape until `content` is this file's. */
+  name: string;
+  /** The file's entry in the list, once the list is known. */
+  file: ViewerFile | null;
+  /** The text last read; ignored while it belongs to another file. */
+  content: ViewerContent | null;
+  // Failure reading the file.
+  loadError?: string | null;
+  // The file is being (re)read; previous content stays visible.
+  loading?: boolean;
+  section: FileSection;
+  onSectionChange: (next: FileSection) => void;
+  // Reads the file again after a failure.
+  onRetry?: () => void;
+  /** Id for the record heading (RecordView focuses it on open). */
+  titleId: string;
+};
+
+/** One file inside the shared RecordView (FilesTab owns the view, the list and the address). */
+export function FileRecord({ name, file, content, loadError, loading = false, section, onSectionChange, onRetry, titleId }: FileRecordProps) {
+  const displayed = content?.name === name ? content : null;
+  const waiting = !displayed && !loadError;
+  const meta: Partial<EngagementFileMeta> & { relative_path?: string } = { ...file, ...displayed };
+  const known = Boolean(file || displayed);
+  const shape: FileShape = { name, media_type: displayed?.media_type ?? file?.media_type ?? "" };
+  const json = useMemo<ParsedJson>(
+    () => (displayed && isJsonArtifact(displayed) && !isJsonlArtifact(displayed) ? parseJsonArtifact(displayed) : null),
+    [displayed],
+  );
+  // A JSON file whose text does not parse has no rendered view: it shows as its exact text.
+  const unparsedJson = Boolean(displayed) && isJsonArtifact(displayed!) && !isJsonlArtifact(displayed!) && json === null;
+  const renderable = hasRenderedView(shape) && !unparsedJson;
+  const shown: FileSection = renderable ? section : "raw";
+  const path = meta.relative_path ?? name;
+  const tabs: RecordTab<FileSection>[] = [
+    { id: "rendered", label: "Rendered", hidden: !renderable },
+    { id: "raw", label: "Raw" },
+  ];
+
+  return (
+    <>
+      <RecordHeader
+        id={
+          <>
+            {!known ? "Engagement file" : meta.group === "snapshot" ? "Snapshot or config file" : "Working document"}
+            {path !== name && <> · <span className="mono">{path}</span></>}
+          </>
+        }
+        copyId={path}
+        copyIdLabel="Copy path"
+        title={name}
+        titleId={titleId}
+        actions={<RecordCopyLinkButton noun="file" />}
+        pills={known ? (
+          <>
+            {meta.role && <span className="tag">{meta.role}</span>}
+            {stubPill(meta)}
+            {meta.size_bytes != null && <span className="record-pill-reason">{formatBytes(meta.size_bytes)}</span>}
+          </>
+        ) : undefined}
+        dates={known ? [{ label: "Modified", value: meta.modified_at }] : undefined}
+        datesLabel="File dates"
+      >
+        {meta.description && <p className="files-record-desc">{meta.description}</p>}
+        {displayed?.is_stub && <StubNotice waiver={displayed.stub_waiver ?? ""} />}
+        {displayed?.truncated && (
+          <div className="files-notice" role="note">
+            <strong>Showing the first {formatBytes(displayed.returned_bytes)} of {formatBytes(displayed.size_bytes)}.</strong>{" "}
+            Open {displayed.relative_path} in the engagement directory for the rest.
+          </div>
+        )}
+        {unparsedJson && displayed && (
+          <div className="files-notice" role="note">
+            <strong>No rendered view.</strong>{" "}
+            This file's text does not parse as JSON{displayed.truncated ? " (the read stops partway through it)" : ""}, so it is shown exactly as stored.
+          </div>
+        )}
+      </RecordHeader>
+      <RecordTabs tabs={tabs} active={shown} onChange={onSectionChange} label="File sections" />
+      <RecordBody>
+        <article className="files-document" aria-busy={loading || waiting} aria-label={`${name} contents`}>
           {loadError && (
-            <p className="error-text" role="alert">
-              {displayedArtifact
-                ? `Showing last available content for ${selectedName}. Refresh failed: ${loadError}`
-                : `${selectedName} unavailable: ${loadError}`}
-            </p>
+            <div className="files-list-error">
+              <p className="error-text" role="alert">
+                {displayed
+                  ? `Showing last available content for ${name}. Refresh failed: ${loadError}`
+                  : `${name} unavailable: ${loadError}`}
+              </p>
+              {onRetry && <button type="button" className="ui-button" onClick={onRetry} disabled={loading}>Try again</button>}
+            </div>
           )}
-          {displayedArtifact ? (
-            <>
-              {displayedArtifact.is_stub && <StubNotice waiver={displayedArtifact.stub_waiver ?? ""} />}
-              {displayedArtifact.truncated && (
-                <div className="files-notice" role="note">
-                  <strong>Showing the first {formatBytes(displayedArtifact.returned_bytes)} of {formatBytes(displayedArtifact.size_bytes)}.</strong>{" "}
-                  Open {displayedArtifact.relative_path} in the engagement directory for the rest.
-                </div>
-              )}
-              {unparsedJson && (
-                <div className="files-notice" role="note">
-                  <strong>No rendered view.</strong>{" "}
-                  This file's text does not parse as JSON{displayedArtifact.truncated ? " (the read stops partway through it)" : ""}, so it is shown exactly as stored.
-                </div>
-              )}
-              <div className="files-body">
-                {effectiveView === "raw" ? <RawText content={displayedArtifact.content} /> : <RenderedBody artifact={displayedArtifact} json={json} />}
-              </div>
-            </>
+          {displayed ? (
+            <div className="files-body">
+              {shown === "raw" ? <RawText content={displayed.content} /> : <RenderedBody artifact={displayed} json={json} />}
+            </div>
           ) : waiting ? (
             <>
-              <div className="files-body-skeleton" role="status" aria-label={`Loading ${selectedName}`}>
+              <div className="files-body-skeleton" role="status" aria-label={`Loading ${name}`}>
                 <Skeleton height={18} width="40%" />
                 <Skeleton height={12} />
                 <Skeleton height={12} />
                 <Skeleton height={12} width="85%" />
                 <Skeleton height={12} width="70%" />
               </div>
-              <SlowLoadHint active what={selectedName ?? "the file"} />
+              <SlowLoadHint active what={name} />
             </>
-          ) : !loadError && !listLoading ? (
-            present.length ? (
-              <p className="meta-text files-pick" role="status">Select a file to read it.</p>
-            ) : (
-              <EmptyState variant="empty" compact title="No engagement files exist yet.">
-                The brief, handoff notes and memory documents appear here once the engagement writes them.
-              </EmptyState>
-            )
           ) : null}
         </article>
-      </div>
-    </section>
-    </div>
+      </RecordBody>
+    </>
   );
 }
