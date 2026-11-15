@@ -16,6 +16,7 @@ from assess.lib.client import (
     DEFAULT_READ_TIMEOUT_SECONDS,
     AssessmentClient,
     AssessError,
+    require_recorded_dispatch,
     require_write_result,
 )
 from assess.lib.code_languages import CANONICAL_CODE_LANGUAGES, CODE_LANGUAGE_ALIASES
@@ -73,6 +74,16 @@ _CLASSIFICATION_PRIORITY_BANDS = {
 def register(subparsers) -> None:
     p = subparsers.add_parser("classify", help="Bulk-classify code files for analysis prioritization")
     p.add_argument("classifications_json", help="Path to JSON file with array of classification objects")
+    p.add_argument(
+        "--agent-id",
+        default=None,
+        help=(
+            "Your dispatch agent_id from your packet's Runtime Identity, when a specialist "
+            "classifies: each chunk's `code-record classify` audit entry records that "
+            "dispatch, with its role (an id no dispatch holds is refused). Omit it when "
+            "the operator classifies."
+        ),
+    )
     p.set_defaults(func=run)
 
 
@@ -353,15 +364,24 @@ def run(args) -> None:
     language_changes: list[dict] = []
     derived: list[dict] = []
     obligation_changes: list[dict] = []
+    recorded_by: dict | None = None
+    # Only the explicit flag names the recorder: $AGENT_NAME / $VIGIL_AGENT_NAME
+    # carry run attribution (often a role label), not dispatch identity.
+    agent_id = (getattr(args, "agent_id", None) or "").strip()
     chunk_starts = range(0, len(normalized_payload), DEFAULT_BULK_WRITE_SIZE)
     with AssessmentClient(cfg.base_url, cfg.engagement_key) as client:
+        if agent_id:
+            require_recorded_dispatch(client, agent_id, operation="code-record classify")
         for start in chunk_starts:
             chunk = normalized_payload[start : start + DEFAULT_BULK_WRITE_SIZE]
             chunk_timeout = _BULK_CLASSIFY_SECONDS_PER_FILE * len(chunk)
             try:
                 result = client.post(
                     'code/files/bulk-classify',
-                    {'classifications': chunk},
+                    {
+                        'classifications': chunk,
+                        **({'recorded_by_agent_id': agent_id} if agent_id else {}),
+                    },
                     **(
                         {"read_timeout": chunk_timeout}
                         if chunk_timeout > DEFAULT_READ_TIMEOUT_SECONDS
@@ -418,6 +438,8 @@ def run(args) -> None:
                 obligation_changes.extend(
                     change for change in raw_changes if isinstance(change, dict)
                 )
+            if isinstance(result.get('recorded_by'), dict):
+                recorded_by = result['recorded_by']
 
     tier_counts = Counter(
         item.get('classification', 'unknown') for item in normalized_payload
@@ -425,6 +447,10 @@ def run(args) -> None:
 
     print("=== Code Classification Summary ===")
     print(f"Total classified: {classified_count}")
+    if recorded_by is not None:
+        recorder = str(recorded_by.get('agent_id') or 'operator')
+        role = str(recorded_by.get('agent_role') or '')
+        print(f"Recorded by: {recorder}" + (f" ({role})" if role and role != recorder else ""))
     print("\nBreakdown by tier:")
     for tier, count in sorted(tier_counts.items()):
         print(f"  {tier}: {count}")

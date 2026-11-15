@@ -396,6 +396,9 @@ def start_client(install_root: Path, engagement: Path, client: str, mode: str,
     environment.update({"VIGIL_CLIENT_CONTEXT": str(snapshot / CONTEXT_FILE),
         "OPENCODE_DISABLE_PROJECT_CONFIG": "1", "OPENCODE_CONFIG_DIR": str(snapshot / ".opencode"),
         "OPENCODE_DISABLE_CLAUDE_CODE": "1",
+        # OpenCode reads autoupdate only from its global config; an update modal over
+        # the TUI would capture the next keystroke.
+        "OPENCODE_DISABLE_AUTOUPDATE": "1",
         "VIGIL_AGENT_ROOT": binding["agent_root"], "ENGAGEMENT_DIR": binding["engagement_dir"],
         "VIGIL_SESSION_ENGAGEMENT_DIR": binding["engagement_dir"], "VIGIL_OPERATOR_MODE": mode,
         "VIGIL_INSTALL_DIR": binding["install_root"], "VIGIL_CLIENT_NAME": client,

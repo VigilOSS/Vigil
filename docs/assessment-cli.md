@@ -298,7 +298,7 @@ The optional prompt-context JSON shape is documented in
 | Phases | `transition-phase`, `check-phase-readiness` |
 | Discovery of docs | `list-skills`, `list-references`, `list-commands`, `list-mindsets`, `prompt-census` |
 | Blue | `host-exec`, `approve-proposal` |
-| Code track | `code-ingest`, `code-index`, `code-history`, `code-coverage`, `code-record`, `code-dispatch`, `code-size-summary`, `code-sourcemap-extract` |
+| Code track | `code-ingest`, `code-index`, `code-history`, `code-coverage`, `code-record`, `code-dispatch`, `code-size-summary`, `code-snapshot-repair`, `code-sourcemap-extract` |
 | Runtime tools | `kali` (see below), `egress-check` |
 
 `vigil assess code-dispatch list|fetch ... [--path-prefix PATH]... [--path-glob GLOB]...`

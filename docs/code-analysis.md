@@ -101,6 +101,20 @@ engagement-owned manifest, the real source bytes, the staged inventory, and the
 declared counts before recording the snapshot as `verified`. An API caller cannot
 grant that trust state by supplying the label alone.
 
+A sealed manifest names its source tree relative to itself, so an engagement directory can be
+moved or cloned and its snapshots still validate and refresh. A snapshot sealed under an earlier
+location can carry that absolute path instead; it keeps working while the path names the same
+snapshot, and `vigil assess code-snapshot-repair` rewrites it to the relative form in place,
+recording each rewrite under `tools/analysis-state/`. Run it with `--dry-run` first, and while no
+`code-ingest` is running. Two repairs of the same snapshot never run at once: the second is
+refused and can be retried. If a repair is interrupted, readers report the snapshot as
+mid-repair; run `code-snapshot-repair` again to restore it.
+
+The backend keeps each snapshot's path as it was recorded, and reads name the copy under the
+engagement's current location, so a moved or cloned engagement still points at its own
+snapshot; a recorded path that differs stays readable as `recorded_repo_path`. `code-index
+build` and `code-index sync` bind only a snapshot that sits under this engagement.
+
 ## Phase gating
 
 Two independent signals steer the track.
@@ -136,21 +150,27 @@ for the target phase's actual blocker set.
 A file's review identity is its slot types and its language. Changing either on a reviewed
 file reopens the review: the review, its receipts and the depth-floor triggers it raised on the
 file are superseded and stay readable, and a fresh attempt is queued. A role change is metadata
-and changes nothing else.
+and changes nothing else. Variant-check receipts bind the file's bytes, path, language and slot
+types, so a tier or role change leaves them current.
 
 A tier or context-tag change reopens nothing. Vigil recomputes what the file owes against the
 review on record. On a critical or high file, each family the change makes owed at the depth
 floor that the review left below it becomes a pending depth-floor trigger. A pending or queued
 trigger the change no longer owes is superseded with its reason (`family_no_longer_required` or
-`tier_floor_lowered`), coverage counts it under `trigger_summary.depth_floor_retired`, and an
-unclaimed `requeue-triggers` attempt left with nothing to carry is withdrawn. Moving a
-skip-closed file to critical, high or medium does reopen it, because those tiers cannot be
-skipped.
+`tier_floor_lowered`), and coverage counts it under `trigger_summary.depth_floor_retired`.
+`code-coverage` and code readiness also name those files in `depth_floor_retired_files`, with
+each file's current tier, the retired families and reasons, and the read that lists every
+retired trigger; it never blocks. While a directed `requeue-triggers` attempt is pending, a
+lower floor is measured against the review that attempt suspended. An unclaimed
+`requeue-triggers` attempt left with nothing to carry is withdrawn, and the retired triggers it
+carried stay retired. Moving a skip-closed file to critical, high or medium does reopen it,
+because those tiers cannot be skipped.
 
 A classification that leaves out `role`, `slot_types` or `context_tags` keeps the stored value
 and names it in the output. `code-record classify` prints each file's obligation change and
-writes it to a `code-record classify` activity entry; on a large pass it prints a sample, the
-number left out and the read that lists them all.
+writes it to a `code-record classify` activity entry that names who classified: the dispatch
+`--agent-id` names, or the operator. On a large pass it prints a sample, the number left out and
+the read that lists them all.
 
 ## Working one part of a repository
 
@@ -194,10 +214,20 @@ below its tier's effort floor (or does not name, which records it at effort 0) b
 `code-dispatch requeue-triggers` sends a directed pass that settles a trigger once it reaches the
 floor; `code-dispatch resolve-triggers` records why another pass would not move one
 (`reviewed_at_sufficient_depth` when the file was read at depth and the recorded effort understates it).
-A family the closeout marks `not_applicable` never raises a trigger, whatever a receipt scored for
-it. A close recorded before the backend raised depth-floor triggers is not given them retroactively:
-its below-floor families are listed as `untriggered_depth_shortfalls` on the coverage gate and code
-readiness (grouped by tier and family, with sample paths), and they do not block.
+A family the closeout marks `not_applicable` never raises a trigger and settles one, whatever a
+receipt scored for it; on a critical or high file the entry must carry notes saying why, and the
+trigger keeps them. A below-floor family no depth-floor trigger names (a close recorded before
+they existed, or a file classified critical/high after its review) is listed as
+`untriggered_depth_shortfalls` on the coverage gate and code readiness (grouped by tier and family,
+with sample paths; `code-coverage --cwe-matrix` lists every row), and it does not block.
+A directed attempt sent by mistake is taken back with `code-dispatch withdraw <ids> --reason`
+while no lane has claimed it; its triggers return to pending.
+
+A file whose code runs only in the browser is classified with the `client-bundle` context tag: it
+owes the browser families (web-app-injection, open-redirect, prototype-pollution,
+secrets-exposure and injection) and lists the server-only ones as optional. A family a current
+`vuln_family_exclusion` decision rules out for the engagement is owed by no file; claims list it
+with the ruling.
 A source-review receipt's `cwe_coverage` is held to the closeout's rules, because the harness
 merges both into one effort per family: a canonical family named once, an effort from 0 to 100, and a
 confidence of high, medium or low. One refusal names every problem.

@@ -278,7 +278,9 @@ def _normalize_file_location(
 
     * The candidate prefix is a contiguous SUFFIX of a real repo root's path
       segments (longest first), so it strips the origin root the author echoed,
-      not an arbitrary leading directory.
+      not an arbitrary leading directory. The roots are the recorded
+      ``repo_path``, the sealed copy it names under the engagement's current
+      root (`_engagement_local_sealed_paths`), and ``source_origin_path``.
     * A one-segment candidate — the repo's own directory name — is accepted ONLY
       when the backend's file inventory corroborates it: the stripped form must
       name a known ``code_files`` path and the authored form must not. Without
@@ -297,19 +299,34 @@ def _normalize_file_location(
         body = body[2:]
     if not body:
         return text
+    # Imported here: code_analysis_support imports this module.
+    from ..code_analysis_support import _engagement_local_sealed_paths
+
     rows = connection.execute(
         """
-        SELECT id, repo_path, source_origin_path
+        SELECT id, repo_key, snapshot_digest, repo_path, source_origin_path
         FROM code_repos
         WHERE engagement_id = ?
         """,
         (engagement_id,),
     ).fetchall()
+    engagement_row = connection.execute(
+        "SELECT engagement_root FROM engagements WHERE id = ?", (engagement_id,)
+    ).fetchone()
+    engagement_root = None if engagement_row is None else engagement_row["engagement_root"]
     candidates: list[tuple[int, str]] = []
     for row in rows:
         if repo_id is not None and int(row["id"]) != repo_id:
             continue
-        for raw_root in (row["repo_path"], row["source_origin_path"]):
+        # After the engagement moves, the recorded repo_path names the old
+        # location; the sealed copy is read under the current root, so a path
+        # copied from either one names the same file.
+        located = dict(row)
+        _engagement_local_sealed_paths(located, engagement_root)
+        roots = dict.fromkeys(
+            (located["repo_path"], row["repo_path"], row["source_origin_path"])
+        )
+        for raw_root in roots:
             segments = [part for part in str(raw_root or "").split("/") if part]
             for depth in range(len(segments), 0, -1):
                 prefix = "/".join(segments[-depth:]) + "/"

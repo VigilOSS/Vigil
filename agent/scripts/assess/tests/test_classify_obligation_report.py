@@ -47,6 +47,12 @@ class _Client(StubClient):
         return {**self.response, "updated": count, "total": count}
 
     def get(self, endpoint: str) -> dict:
+        if endpoint.startswith("dispatches/"):
+            agent_id = endpoint.removeprefix("dispatches/")
+            if agent_id != "acme-architect":
+                from assess.lib.client import AssessError
+                raise AssessError(f"GET {endpoint} failed: HTTP 404")
+            return {"agent_id": agent_id, "agent_role": "code-architect"}
         assert endpoint.startswith("code/files?")
         return {
             "total": len(self.files), "offset": 0, "count": len(self.files),
@@ -54,7 +60,9 @@ class _Client(StubClient):
         }
 
 
-def _classify(monkeypatch, tmp_path: Path, client: _Client, items: list[dict]) -> None:
+def _classify(
+    monkeypatch, tmp_path: Path, client: _Client, items: list[dict], *, agent_id: str | None = None
+) -> None:
     monkeypatch.setattr(code_classify, "AssessmentClient", lambda *_args: client)
     monkeypatch.setattr(
         code_classify, "load_config",
@@ -66,7 +74,9 @@ def _classify(monkeypatch, tmp_path: Path, client: _Client, items: list[dict]) -
     path = tmp_path / "classifications.json"
     path.write_text(json.dumps(items), encoding="utf-8")
     code_classify.run(
-        SimpleNamespace(classifications_json=str(path), engagement_dir=str(tmp_path))
+        SimpleNamespace(
+            classifications_json=str(path), engagement_dir=str(tmp_path), agent_id=agent_id,
+        )
     )
 
 
@@ -146,3 +156,34 @@ def test_a_critical_item_with_no_slot_types_to_keep_is_refused_before_sending(
     assert exited.value.code == 1
     assert client.posts == []
     assert "records none to keep" in capsys.readouterr().err
+
+
+def test_agent_id_names_the_recording_dispatch_on_every_chunk(monkeypatch, tmp_path, capsys):
+    client = _Client({"recorded_by": {"agent_id": "acme-architect", "agent_role": "code-architect"}})
+    items = [_medium(file_id) for file_id in range(1, code_classify.DEFAULT_BULK_WRITE_SIZE + 2)]
+
+    _classify(monkeypatch, tmp_path, client, items, agent_id="acme-architect")
+
+    assert len(client.posts) == 2
+    assert {post["recorded_by_agent_id"] for post in client.posts} == {"acme-architect"}
+    assert "Recorded by: acme-architect (code-architect)" in capsys.readouterr().out
+
+
+def test_without_agent_id_the_classification_is_the_operators(monkeypatch, tmp_path, capsys):
+    client = _Client({"recorded_by": {"agent_id": None, "agent_role": "operator"}})
+
+    _classify(monkeypatch, tmp_path, client, [_medium(1)])
+
+    (posted,) = client.posts
+    assert "recorded_by_agent_id" not in posted
+    assert "Recorded by: operator" in capsys.readouterr().out
+
+
+def test_an_agent_id_no_dispatch_holds_is_refused_before_sending(monkeypatch, tmp_path):
+    from assess.lib.client import AssessError
+
+    client = _Client({})
+
+    with pytest.raises(AssessError, match="acme-nobody"):
+        _classify(monkeypatch, tmp_path, client, [_medium(1)], agent_id="acme-nobody")
+    assert client.posts == []

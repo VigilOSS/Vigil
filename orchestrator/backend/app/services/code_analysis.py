@@ -141,7 +141,7 @@ from .state_manager.findings import (
     is_file_finding,
     load_code_repo_snapshot_states,
 )
-from .state_manager.dispatches import decision_recorded_by
+from .state_manager.dispatches import _decision_recorder, decision_recorded_by
 from .state_manager.taxonomy_bridge import vuln_taxonomy
 from .state_manager import run_accounting
 from .variant_scopes import (
@@ -2736,9 +2736,30 @@ def _kept_classification_fields(
     return result
 
 
+def _classification_recorder(
+    connection, engagement_id: int, agent_id: str | None
+) -> dict[str, Any]:
+    """``{"agent_id", "agent_role"}`` of who records a classification.
+
+    The dispatch a classify write names, with that dispatch's own role, or the
+    operator when it names none: the recorder decision rows store
+    (`_decision_recorder`). An id no dispatch of the engagement holds is
+    refused before anything is written.
+    """
+    if agent_id is not None and not isinstance(agent_id, str):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="recorded_by_agent_id must be a dispatch agent_id string",
+        )
+    recorder_id, recorder_role = _decision_recorder(connection, engagement_id, agent_id)
+    return {"agent_id": recorder_id, "agent_role": recorder_role}
+
+
 def bulk_classify_code_files(
     engagement_id: int,
     classifications: list[dict[str, Any]],
+    *,
+    recorded_by_agent_id: str | None = None,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
     submitted_file_ids = [
@@ -2756,6 +2777,7 @@ def bulk_classify_code_files(
     updated = 0
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        recorded_by = _classification_recorder(connection, engagement.id, recorded_by_agent_id)
         file_rows = _get_file_rows(
             connection,
             engagement.id,
@@ -2982,6 +3004,9 @@ def bulk_classify_code_files(
         # Each context-tag or tier change that moved what a file owes
         # (`_apply_obligation_change`).
         "obligation_changes": obligation_changes,
+        # Who recorded the classification (`_classification_recorder`); the
+        # `code-record classify` audit entry carries it.
+        "recorded_by": recorded_by,
     }
 
 
@@ -2995,6 +3020,8 @@ _CODE_FILE_ALLOWED_FIELDS = frozenset({
 def update_code_file(
     engagement_id: int,
     file_id: int,
+    *,
+    recorded_by_agent_id: str | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
     engagement = _engagement_or_404(engagement_id)
@@ -3007,6 +3034,7 @@ def update_code_file(
 
     with get_connection() as connection:
         connection.execute("BEGIN IMMEDIATE")
+        recorded_by = _classification_recorder(connection, engagement.id, recorded_by_agent_id)
         file_row = _get_file_rows(connection, engagement.id, {file_id})[file_id]
 
         normalized_kwargs = dict(kwargs)
@@ -3264,6 +3292,7 @@ def update_code_file(
             payload["obligation_change"] = obligation_change
         if kept["derived"]:
             payload["derived"] = kept["derived"]
+        payload["recorded_by"] = recorded_by
     return payload
 
 
@@ -8960,9 +8989,19 @@ def _variant_receipt_is_current(
         cache[int(row["repo_id"])] = current_parent_slugs
     current_slots = sorted(set(_json_decode(file_row["slot_types_json"], [])))
     receipt_slots = sorted(set(_json_decode(row.get("slot_types_json"), [])))
+    # The receipt proves one variant hunter checked these bytes, at this path,
+    # in this language with these input slots, against this parent set. The
+    # tier and role labels set review order, never receipt eligibility (every
+    # admitted file owes a receipt), so the receipt records the labels it was
+    # checked under and its input digest is recomputed with them: relabeling
+    # or re-tiering the file leaves the receipt current.
     expected_input_digest = variant_input_identity_digest(
         repo=dict(repo),
-        file_row=dict(file_row),
+        file_row={
+            **dict(file_row),
+            "classification": str(row.get("classification", "") or ""),
+            "role": str(row.get("role", "") or ""),
+        },
         parent_finding_slugs=covered_parent_slugs,
     )
     expected_fingerprint = _variant_receipt_fingerprint(
@@ -8985,9 +9024,6 @@ def _variant_receipt_is_current(
         == str(file_row["file_hash"] or "")
         and str(row.get("language", "") or "")
         == _normalized_variant_language(file_row["language"])
-        and str(row.get("classification", "") or "")
-        == str(file_row["classification"] or "").strip().lower()
-        and str(row.get("role", "") or "") == str(file_row["role"] or "").strip()
         and receipt_slots == current_slots
         and set(current_parent_slugs).issubset(set(covered_parent_slugs))
         and str(row.get("parent_finding_set_digest", ""))
@@ -10039,10 +10075,12 @@ def code_coverage_summary(
                 depth_floor_pending += int(row["total"])
         # The depth_floor triggers a tag or tier change stopped owing
         # (`_apply_obligation_change`): superseded, so no count above holds
-        # them, and readable with `list-triggers --include-superseded`.
-        depth_floor_retired = int(connection.execute(
+        # them; `depth_floor_retired_files` names their files.
+        retired_rows = connection.execute(
             f"""
-            SELECT COUNT(*) AS total
+            SELECT t.id, t.vuln_class, t.source_supersession_reason,
+                   COALESCE(tf.file_path, t.target_file_path) AS file_path,
+                   COALESCE(tf.classification, '') AS classification
             FROM code_analysis_triggers AS t
             JOIN code_files AS sf
               ON sf.id = t.source_file_id
@@ -10052,6 +10090,9 @@ def code_coverage_summary(
              AND repos.engagement_id = sf.engagement_id
              AND repos.active_generation > 0
              AND {_analysis_repo_sql("repos")}
+            LEFT JOIN code_files AS tf
+              ON tf.id = t.target_file_id
+             AND tf.engagement_id = t.engagement_id
             WHERE t.engagement_id = ?{trigger_repo_clause}
               AND t.origin = ?
               AND t.repo_generation = repos.active_generation
@@ -10059,12 +10100,15 @@ def code_coverage_summary(
               AND t.source_supersession_reason IN (
                   {','.join('?' for _ in _RECLASSIFICATION_RETIREMENT_REASONS)}
               )
+            ORDER BY file_path, t.id
             """,
             (
                 engagement.id, *repo_params, TRIGGER_ORIGIN_DEPTH_FLOOR,
                 *_RECLASSIFICATION_RETIREMENT_REASONS,
             ),
-        ).fetchone()["total"] or 0)
+        ).fetchall()
+        depth_floor_retired = len(retired_rows)
+        depth_floor_retired_files = _depth_floor_retired_files(retired_rows, repo_id=repo_id)
         skip_repo_clause = "" if repo_id is None else " AND files.repo_id = ?"
         skip_reason_rows = connection.execute(
             f"""
@@ -10575,7 +10619,70 @@ def code_coverage_summary(
             "client_bundle_conflicts": client_bundle_conflicts,
             "family_exclusions": family_exclusions,
             "untriggered_depth_shortfalls": untriggered_depth_shortfalls,
+            "depth_floor_retired_files": depth_floor_retired_files,
         },
+    }
+
+
+# Sample files `depth_floor_retired_files` names; `full_list` reads every row.
+DEPTH_FLOOR_RETIRED_SAMPLE_FILES = 10
+
+
+def _depth_floor_retired_files(
+    rows: list[Any], *, repo_id: int | None
+) -> dict[str, Any] | None:
+    """The files whose depth_floor triggers a tag or tier change retired.
+
+    A lowered tier or a dropped context tag legitimately stops owing a floor
+    the review on record left unmet, and the retirement is superseded history
+    no count of owed work holds. This pointer names those files, with the
+    file's current tier, the retired families and why, and the exact read
+    that lists every retired trigger. It is never a gate reason.
+    """
+    if not rows:
+        return None
+    files: dict[str, dict[str, Any]] = {}
+    by_reason: dict[str, int] = {}
+    for row in rows:
+        reason = str(row["source_supersession_reason"])
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+        entry = files.setdefault(str(row["file_path"]), {
+            "file_path": str(row["file_path"]),
+            "classification": str(row["classification"]),
+            "families": [],
+            "reasons": [],
+            "trigger_ids": [],
+        })
+        if str(row["vuln_class"]) not in entry["families"]:
+            entry["families"].append(str(row["vuln_class"]))
+        if reason not in entry["reasons"]:
+            entry["reasons"].append(reason)
+        entry["trigger_ids"].append(int(row["id"]))
+    sample = [
+        {**entry, "families": sorted(entry["families"]), "reasons": sorted(entry["reasons"])}
+        for entry in list(files.values())[:DEPTH_FLOOR_RETIRED_SAMPLE_FILES]
+    ]
+    reasons_query = "".join(
+        f"&supersession_reason={reason}" for reason in _RECLASSIFICATION_RETIREMENT_REASONS
+    )
+    return {
+        "count": len(files),
+        "triggers": len(rows),
+        "by_reason": dict(sorted(by_reason.items())),
+        "sample": sample,
+        "omitted": len(files) - len(sample),
+        "full_list": (
+            f"vigil assess fetch --paginate 'code/triggers?origin={TRIGGER_ORIGIN_DEPTH_FLOOR}"
+            f"{reasons_query}" + ("" if repo_id is None else f"&repo_id={int(repo_id)}") + "'"
+        ),
+        "detail": (
+            "depth_floor triggers a reclassification stopped owing: `tier_floor_lowered` "
+            "when the file's tier dropped to one whose floor the review on record meets or "
+            "that owes none, `family_no_longer_required` when its context tags stopped "
+            "requiring the family; each `code-record classify` audit entry names the "
+            "change and who made it. Not owed work; when the tier or tags were lowered in "
+            "error, re-classify the file and the floor is measured again"
+        ),
     }
 
 
@@ -12680,6 +12787,9 @@ def code_readiness(
         # Below-floor families no depth_floor trigger names (closes recorded
         # before the backend raised them): a pointer, never a blocker.
         "untriggered_depth_shortfalls": coverage_gate.get("untriggered_depth_shortfalls"),
+        # Files whose depth_floor triggers a tag or tier change retired
+        # (`_depth_floor_retired_files`): a pointer, never a blocker.
+        "depth_floor_retired_files": coverage_gate.get("depth_floor_retired_files"),
     }
     if include_debt_paths:
         payload["structural_debt"] = structural_debt
@@ -14090,6 +14200,7 @@ def list_code_triggers(
     repo_id: int | None = None,
     include_superseded: bool = False,
     origin: str | None = None,
+    supersession_reasons: Collection[str] = (),
     limit: int = TRIGGER_PAGE_DEFAULT,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -14099,6 +14210,10 @@ def list_code_triggers(
     counts, so a count and the list behind it agree. ``by_origin`` counts every
     row under the same status, repository and generation filters whatever
     ``origin`` selects, so a reader shows both kinds' totals from one page.
+    ``supersession_reasons`` selects the rows superseded for one of those
+    reasons: in the active source generation, the set
+    `depth_floor_retired_files` counts, or in every generation with
+    ``include_superseded``.
     """
     engagement = _engagement_or_404(engagement_id)
     if status_filter and status_filter not in _TRIGGER_STATUSES:
@@ -14114,9 +14229,18 @@ def list_code_triggers(
                 f"{TRIGGER_ORIGIN_CROSS_FILE}, {TRIGGER_ORIGIN_DEPTH_FLOOR}"
             ),
         )
+    reasons = sorted({str(reason).strip() for reason in supersession_reasons if str(reason).strip()})
     clauses = ["t.engagement_id = ?", _analysis_repo_sql("repos")]
     params: list[Any] = [engagement.id]
-    if not include_superseded:
+    if reasons:
+        clauses.extend([
+            "t.source_superseded_at IS NOT NULL",
+            f"t.source_supersession_reason IN ({','.join('?' for _ in reasons)})",
+        ])
+        params.extend(reasons)
+        if not include_superseded:
+            clauses.append("t.repo_generation = repos.active_generation")
+    elif not include_superseded:
         clauses.extend(
             [
                 "t.repo_generation = repos.active_generation",

@@ -642,6 +642,7 @@ def run(args) -> None:
     _print_context_tags_unrecorded(result)
     _print_client_bundle_advisories(result)
     _print_untriggered_depth_shortfalls(result)
+    _print_depth_floor_retired_files(result)
     print()
 
     if failed:
@@ -802,6 +803,7 @@ def _run_cwe_matrix(cfg, args) -> tuple[bool, list[str]]:
     _print_context_tags_unrecorded(result)
     _print_client_bundle_advisories(result)
     _print_untriggered_depth_shortfalls(result)
+    _print_depth_floor_retired_files(result)
     return _review_quality(result)
 
 
@@ -1303,6 +1305,33 @@ def _print_untriggered_depth_shortfalls(data: dict) -> None:
             f"{shortfalls.get('full_list')}"
         )
     print(f"  {shortfalls.get('detail')}")
+
+
+def _print_depth_floor_retired_files(data: dict) -> None:
+    """Name the files whose depth_floor triggers a reclassification retired (a pointer)."""
+    gate = data.get('gate')
+    retired = gate.get('depth_floor_retired_files') if isinstance(gate, dict) else None
+    if not isinstance(retired, dict) or not retired.get('count'):
+        return
+    reasons = ", ".join(
+        f"{reason} {count}" for reason, count in (retired.get('by_reason') or {}).items()
+    )
+    print(
+        f"\nRetired Depth Floors: {retired.get('triggers', '?')} depth_floor trigger(s) on "
+        f"{retired['count']} file(s) a tier or tag change stopped owing ({reasons}; pointer, "
+        "never gates)"
+    )
+    for entry in retired.get('sample') or []:
+        if isinstance(entry, dict):
+            print(
+                f"  - {entry.get('file_path')} (now {entry.get('classification') or '?'}): "
+                f"{', '.join(entry.get('families') or [])} "
+                f"[{', '.join(entry.get('reasons') or [])}]"
+            )
+    if retired.get('omitted'):
+        print(f"  ... +{retired['omitted']} more file(s)")
+    print(f"  Every retired trigger: {retired.get('full_list')}")
+    print(f"  {retired.get('detail')}")
 
 
 def _print_vuln_class_summary(data: dict) -> None:

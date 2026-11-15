@@ -1,14 +1,16 @@
 """Shared fixtures for the root ``tests/`` suite (the installable ``vigil`` CLI
 and the bench harness).
 
-Three concerns live here, all about running this suite hermetically from a fresh
+Five concerns live here, all about running this suite hermetically from a fresh
 checkout without the operator's shell environment leaking in:
 
 1. **Importability.** Modules like ``test_active_engagement_pointer`` import
-   ``vigil_cli`` directly. The package lives under the repo's ``src/`` and is
-   not installed into the collection interpreter, so we put ``src/`` on
-   ``sys.path`` at import time — this makes ``pytest tests/`` collect without a
-   ``PYTHONPATH=src`` prefix.
+   ``vigil_cli`` directly, and modules like ``test_release_workspace_reliability``
+   import the ``assess`` CLI package. Neither is installed into the collection
+   interpreter, so we put ``src/`` and ``agent/scripts/`` on ``sys.path`` at
+   import time (``vigil_cli.paths.add_assess_import_path`` does the latter at
+   runtime) — this makes every module collect alone or in any order without a
+   ``PYTHONPATH`` prefix.
 
 2. **Config/pointer isolation.** The active-engagement pointer is persisted in
    ``~/.config/vigil/config.json`` (``$VIGIL_CONFIG`` overrides the path — see
@@ -24,9 +26,20 @@ checkout without the operator's shell environment leaking in:
 3. **Runtime data isolation.** An exported ``VIGIL_RUNTIME_DATA_DIR`` (or
    ``KALI_MCP_DATA_DIR``) relocates every install's runtime state, so the
    autouse fixture clears both; tests that exercise the override set it.
+
+4. **Launch model isolation.** An exported ``VIGIL_CLAUDE_MODEL_CODE`` or
+   ``VIGIL_CLAUDE_MODEL_WEB`` changes the ``--model=`` every Claude operator
+   launch passes, so the autouse fixture clears both; tests that exercise the
+   override set it.
+
+5. **Application selection.** ``VIGIL_APPLICATION_DIR`` selects the application
+   tree every install, prompt and freshness read resolves. Source builders that
+   synthesize an application set it directly, so the autouse fixture restores
+   its value after every test and none can steer a later one at its tree.
 """
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
 
@@ -34,9 +47,11 @@ import pytest
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _SRC_ROOT = _REPO_ROOT / "src"
+_ASSESS_SCRIPTS_ROOT = _REPO_ROOT / "agent" / "scripts"
 
-if _SRC_ROOT.is_dir() and str(_SRC_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SRC_ROOT))
+for _import_root in (_ASSESS_SCRIPTS_ROOT, _SRC_ROOT):
+    if _import_root.is_dir() and str(_import_root) not in sys.path:
+        sys.path.insert(0, str(_import_root))
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +70,25 @@ def _isolate_runtime_data_dir(monkeypatch):
     would aim allocations at the operator's real ``/data`` mount."""
     monkeypatch.delenv("VIGIL_RUNTIME_DATA_DIR", raising=False)
     monkeypatch.delenv("KALI_MCP_DATA_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _restore_application_selection():
+    """Undo a test's direct ``os.environ["VIGIL_APPLICATION_DIR"]`` write."""
+    previous = os.environ.get("VIGIL_APPLICATION_DIR")
+    yield
+    if previous is None:
+        os.environ.pop("VIGIL_APPLICATION_DIR", None)
+    else:
+        os.environ["VIGIL_APPLICATION_DIR"] = previous
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_launch_model(monkeypatch):
+    """Keep exact-argv Claude launch assertions independent of the operator's
+    ``VIGIL_CLAUDE_MODEL_<TRACK>`` overrides."""
+    monkeypatch.delenv("VIGIL_CLAUDE_MODEL_CODE", raising=False)
+    monkeypatch.delenv("VIGIL_CLAUDE_MODEL_WEB", raising=False)
 
 
 @pytest.fixture(autouse=True)

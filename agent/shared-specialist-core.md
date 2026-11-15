@@ -208,7 +208,7 @@ backend rather than retyping them. Keep the reasoning in the existing handoff `n
 `coverage_gaps`, `open_questions`, or `extras`, and in intel notes when it is target knowledge.
 Use free prose where the structured fields do not explain the connection; no separate
 investigation file or operator acknowledgement is needed. The backend handoff is the lane report:
-`render-handoff <agent-id> --max-lines 0` prints it in full, and a capped excerpt is context
+`vigil assess agent render-handoff <agent-id> --max-lines 0` prints it in full, and a capped excerpt is context
 selection, not the whole result.
 
 ### Mandatory Closing Sequence — wrapper

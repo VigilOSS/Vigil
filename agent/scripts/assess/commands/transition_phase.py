@@ -1451,8 +1451,9 @@ def _code_readiness_advisories(readiness: dict) -> list[dict[str, str]]:
     Code readiness returns critical/high files whose signal came only from wide
     passes (`depth_advisories`), classified files that record no context
     tags (`context_tags_unrecorded`), client-bundle optional families and
-    conflicts, engagement family exclusions, and below-floor families no
-    trigger covers. They do not block; they are printed so the
+    conflicts, engagement family exclusions, below-floor families no
+    trigger covers, and the files whose floor triggers a reclassification
+    retired. They do not block; they are printed so the
     transition does not pass over them in silence.
     """
     items: list[dict[str, str]] = []
@@ -1568,6 +1569,26 @@ def _code_readiness_advisories(readiness: dict) -> list[dict[str, str]]:
                 + (f" +{more} more groups" if more > 0 else "")
                 + "). Not blocking; sample paths per group: `vigil assess code-coverage`. "
                 + str(shortfalls.get("detail") or "")
+            ),
+            "overrideable": True,
+        })
+    retired = readiness.get("depth_floor_retired_files")
+    if isinstance(retired, dict) and retired.get("count"):
+        entries = [
+            f"{entry.get('file_path')} ({', '.join(entry.get('reasons') or [])})"
+            for entry in retired.get("sample") or [] if isinstance(entry, dict)
+        ]
+        shown = entries[:_CODE_ADVISORY_SAMPLES]
+        more = int(retired.get("omitted") or 0) + len(entries) - len(shown)
+        items.append({
+            "kind": "code_depth_floor_retired_files",
+            "severity": "advisory",
+            "detail": (
+                f"{retired.get('triggers', '?')} depth_floor trigger(s) on {retired['count']} "
+                f"file(s) retired by a tier or tag change: {', '.join(shown)}"
+                + (f" +{more} more" if more > 0 else "")
+                + f". Not blocking; every retired trigger: `{retired.get('full_list')}`. "
+                + str(retired.get("detail") or "")
             ),
             "overrideable": True,
         })

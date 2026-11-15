@@ -25,11 +25,14 @@
       "description": "Security relevance tier. critical: parses untrusted input, auth, crypto, protocol state machines. high: memory mgmt, command building, file I/O. medium: utility, string handling. low: build, test infra. skip: generated, docs, vendored."
     },
     "role": {
-      "default": "",
       "maxLength": 128,
+      "type": [
+        "string",
+        "null"
+      ],
+      "default": null,
       "title": "Role",
-      "type": "string",
-      "description": "Functional role of the file (for example, protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation)."
+      "description": "Functional role of the file (for example, protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation). Omitted (or null), the stored role is kept."
     },
     "slot_types": {
       "items": {
@@ -46,10 +49,13 @@
         ],
         "type": "string"
       },
+      "type": [
+        "array",
+        "null"
+      ],
+      "default": null,
       "title": "Slot Types",
-      "type": "array",
-      "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
-      "default": []
+      "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — a critical/high file with none degrades taint-path scheduling. Omitted (or null), the stored slot types are kept. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend."
     },
     "context_tags": {
       "items": {

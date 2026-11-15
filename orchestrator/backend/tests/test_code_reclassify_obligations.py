@@ -719,7 +719,9 @@ def test_coverage_and_readiness_name_the_files_a_tier_drop_retired_floor_trigger
     assert [row["id"] for row in listed["items"]] == [floor["id"]]
     assert listed["items"][0]["source_supersession_reason"] == "tier_floor_lowered"
     readiness = client.get(f"{base}/readiness?target_phase=verify-variant").json()
-    assert readiness["depth_floor_retired_files"] == retired
+    engagement_wide = client.get(f"{base}/coverage").json()["gate"]["depth_floor_retired_files"]
+    assert readiness["depth_floor_retired_files"] == engagement_wide
+    assert engagement_wide["sample"] == retired["sample"]
 
 
 def test_the_classify_audit_names_the_dispatch_or_operator_that_classified(

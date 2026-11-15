@@ -91,11 +91,25 @@ Import contracts from their owner; pin standalone mirrors with regressions.
 - `code_analysis.py:_record_depth_floor_triggers` owns what a critical/high closeout leaves below its tier's
   `code_analysis_support.py:EFFORT_THRESHOLDS` floor: a `depth_floor` trigger per family (`TRIGGER_ORIGIN_DEPTH_FLOOR`),
   never a refusal (ADR 0046). `trigger_review_basis` holds a bound trigger to the same floor; code readiness names
-  pending ones as `depth_floor_triggers`, which `codeLabels.ts:BLOCKER_LABELS` labels. See: `test_code_depth_floor_triggers.py`.
+  pending ones as `depth_floor_triggers`, which `codeLabels.ts:BLOCKER_LABELS` labels. A family the closeout marks
+  not_applicable raises none and is answered whatever a receipt scored (`code_analysis_support.py:_closeout_not_applicable_families`).
+  `_untriggered_depth_shortfalls` owns `gate.untriggered_depth_shortfalls` (below-floor critical/high families no trigger
+  names) and `_depth_floor_retired_files` owns `depth_floor_retired_files` (files whose triggers a reclassification
+  retired); both are pointers, never gates. See: `test_code_depth_floor_triggers.py`, `test_code_reclassify_obligations.py`.
+- `code_analysis.py:withdraw_queue_items` (`POST code/analysis-queue/withdraw`, `code-dispatch withdraw`) owns taking back
+  an unclaimed `requeue-triggers` attempt: the row is removed and its live triggers return to pending.
+  See: `test_code_queue_withdraw.py`.
+- `code_analysis.py`'s `_*_REASON` constants own trigger supersession reasons; `api/code_analysis.py:list_code_triggers`
+  mirrors them as its `supersession_reason` filter. See: `test_trigger_supersession_reason_mirror.py`.
+- `state_manager/dispatches.py:_decision_recorder` owns recorder identity: a named dispatch with its own stored role,
+  else the operator, an unknown id refused. Decision rows and `code-record classify` audits (`--agent-id`,
+  `code_analysis.py:_classification_recorder`) record it as `recorded_by`. See: `test_code_reclassify_obligations.py`.
 - `code_analysis.py:CONTEXT_TAG_VULN_CLASSES` owns the families each architect-recorded context tag (a file's `context_tags`) requires
   (`_applicable_families_for_file`; `app/api/code_analysis.py:CodeContextTag` is the same vocabulary), and
   `WORKFLOW_PATH_CONTEXT_TAGS` the tags whose families path words only suggest (`_path_suggested_families_for_file`).
-  The free-text role adds no family. Recomputed on every read. See: `test_workflow_state_families.py`. `_markup_unread_code` owns what unread markup code adds:
+  The free-text role adds no family. Recomputed on every read. See: `test_workflow_state_families.py`.
+  `CLIENT_BUNDLE_OPTIONAL_FAMILIES` owns the server-only families a `client-bundle` tag makes optional
+  (`_optional_families_for_file`, served as `optional_vuln_classes`). See: `test_client_bundle_context_tag.py`. `_markup_unread_code` owns what unread markup code adds:
   server-side code requires the code slot families, a browser `<script>` the browser families, and a streaming
   fallback only suggests them (`_unread_code_suggested_families_for_file`). See: `test_code_effort_obligations.py`.
 - `orchestrator/backend/app/services/state_manager/cvss.py:base_score` owns CVSS v3.1/v4.0 base-vector
@@ -146,6 +160,9 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   mirrors `paths.py:resolve_orchestrator_base_url` across the assess exec boundary. See:
   `tests/test_orchestrator_endpoint_selection.py`, `agent/scripts/assess/tests/test_assess_workspace_base_url.py`.
 - `src/vigil_cli/host_tools.py` owns optional host recon install planning for `vigil doctor`; selected-client launch checks stay in `preflight.py`.
+- `src/vigil_cli/config.py:claude_session_model` owns the Claude operator model per offensive track (`CLAUDE_TRACK_MODELS`)
+  and its `VIGIL_CLAUDE_MODEL_<TRACK>` / `claude.model.<track>` overrides; `engagements.py:start_engagement` passes it as
+  `--model=` unless the client tail forwards one. See: `tests/test_claude_session_model.py`.
 - `agent/scripts/assess/commands/proof_work.py` renders proof-claim packets through `commands/agent.py` before atomic ownership, validating source identity and deriving mandatory loads through `lib/prompt_census.py`.
 - `agent/scripts/assess/commands/agent.py` captures optional standing briefs by content digest;
   dispatch packets, launch continuations and `dispatch/handoff_renderer.py` share the immutable path and digest.
@@ -199,6 +216,11 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   it reads existing database snapshots without initialization and excludes backend sync/housekeeping clocks.
 - `lib/scope.py:ingest_scope_filter` must run on every new file-to-buffer ingest
   path. Arjun and proxy ingestion reuse already-filtered URLs.
+- `lib/scope.py:crawl_fence` owns the katana crawl fence (`-fs`/`-cs`/`-cos` from scope.json, matching `host_admitted`)
+  that `kali katana` and `web-discovery` apply; scope flags in passthrough args replace it with a warning (ADR 0019).
+  See: `agent/scripts/assess/tests/test_crawl_scope_fence.py`.
+- `agent/scripts/assess/lib/vocabulary.py:word_folder` mirrors `api/assessment.py:folded_vocabulary` (case and
+  `-`/`_`/space ignored) for CLI status and label flags. See: `agent/scripts/assess/tests/test_cli_word_folding.py`.
 - `src/vigil_cli/engagements.py` owns offensive track creation, add-track, session mode validation, official-start
   track initialization (`prepare_engagement_mode`) and engagement-local prompt routing. Scopes store `tracks.web.phase`
   and/or `tracks.code.phase` (scalar phase scopes stay readable); `agent/scripts/assess/lib/tracks.py` and
@@ -241,6 +263,12 @@ Import contracts from their owner; pin standalone mirrors with regressions.
   validators shared by structural build and sync. See: `agent/scripts/assess/tests/test_structural_artifact_validation.py`.
   Its `TOP_LEVEL_CALLABLE_NAME` is mirrored in `code_analysis_support.py`, as is
   `treesitter_streaming.py:STREAMING_FALLBACK_BASELINE_UNAVAILABLE` (`test_structural_scan_scope_honesty.py`).
+- `agent/scripts/assess/lib/code_snapshot.py:_require_source_binding` owns the sealed manifest's `source_path` rule
+  (new seals record `source`; an absolute path is accepted only while it names the same `<repo_key>/<digest>/source`);
+  `app/code_snapshot.py:_sealed_source_binding_matches` mirrors it for refresh attestation, and `rebind_snapshot_source`
+  (`code-snapshot-repair`) rewrites an absolute binding in place, audited. Backend reads resolve the engagement-local copy
+  through `code_analysis_support.py:_engagement_local_sealed_paths`. See: `agent/scripts/assess/tests/test_code_snapshot_relocation.py`,
+  `orchestrator/backend/tests/test_code_snapshot_relocation_api.py`.
 - `agent/scripts/assess/lib/kali_audit.py` threads the command-run audit chain. A persisted Kali flag
   must also land in `kali_cli.py`, `api/assessment.py`, `app/db.py`, and
   `state_manager/command_runs.py`.

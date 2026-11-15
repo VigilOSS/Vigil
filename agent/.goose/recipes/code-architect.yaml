@@ -123,7 +123,7 @@ instructions: |2
 
   1. `vigil assess code-record threat-model <repo-id> <threat-model-json> --repo-generation <generation> --source-manifest-digest <digest>` using the Code Source Identity values captured before analysis
   2. `vigil assess code-record modules <repo-id> <modules-json>`
-  3. `vigil assess code-record classify <classifications-json>` (per-file)
+  3. `vigil assess code-record classify <classifications-json> --agent-id <your-agent_id>` (per-file)
   4. `vigil assess intel record note <intel-json>` for each attack hypothesis (so the hunter inherits them as intel notes)
   5. `vigil assess finding record code-architect <finding-json> --agent-id <your-agent_id>` for each architectural finding (rare — only when an obvious vulnerability is visible from project structure) (shape: `vigil assess contract finding record`)
   6. `vigil assess agent handoff --agent-id <agent-id> --from-json <path>` to capture summary, coverage gaps, next steps, runtime issues, working artifacts (point at `tools/analysis-state/file-analysis-queue.json`, the `code-history` receipts you used, and, when emitted, `tools/analysis-state/cve-bug-shapes.jsonl`), open questions, and role-specific extras (`modules_classified`, `critical_count`, `high_count`)

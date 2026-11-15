@@ -325,9 +325,9 @@ Generated specialist definitions embed the role prompt. Specialists never load t
 |---------|-----------|------|
 | **Claude Code** | Native `Agent` tool with `subagent_type` set to the registered role | A general-purpose child does not load the role wrapper. |
 | **Codex** | Actual native spawn schema | Set `fork_turns: none` when exposed (or the fresh-context equivalent). Installed TOML alone does not prove the role loaded. |
-| **OpenCode** | **INLINE** — the operator issues `vigil assess kali` probes itself and applies the specialist methodology directly | Custom roles are not dispatchable headless on `opencode run`. **Claude Code and Codex keep the normal dispatch model.** |
+| **OpenCode** | Native `task` tool with `subagent_type` set to the registered role | OpenCode's built-in default subagent does not load the role wrapper. |
 | **Goose** | `delegate source <role>` | Roster in `.goose/recipes/*.yaml`, resolved through `GOOSE_RECIPE_PATH`. |
-| **Kimi Code** | **INLINE**, as for OpenCode | No specialist roster is generated. |
+| **Kimi Code** | **INLINE** — the operator runs `vigil assess kali` itself and applies the role's methodology directly | No specialist roster is generated. |
 
 ### Dispatch Context Template
 

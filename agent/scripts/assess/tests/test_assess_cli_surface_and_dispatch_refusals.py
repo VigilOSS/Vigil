@@ -14,19 +14,27 @@ from unittest import mock
 import pytest
 
 from assess import cli
+from assess.commands import code_index
 from assess.lib import contracts
 from assess.lib.contract_registry import _CONTRACTS
+from assess.lib.parser_boundary import MAX_DEFAULT_PARSER_JOBS
 
 
 # --------------------------------------------------------------------------- #
 # The whole `vigil assess` argparse tree, to the depth the CLI contract covers:
 # every leaf path, option string, dest, nargs, const, default, type, choices,
 # required flag, help text and metavar. Pinned as one digest because the tree is
-# an external contract (200 leaves) whose every field is operator-visible.
+# an external contract (201 leaves) whose every field is operator-visible.
+#
+# The digest is host- and interpreter-independent. A default the CLI derives
+# from the host (`code-index build --jobs` counts usable cores) is built as it
+# is on a host at the cap. Python 3.11 marks a `nargs="*"` or REMAINDER
+# positional `required` though it accepts zero values, and later releases do
+# not, so an optional-arity positional is recorded by its arity alone.
 # --------------------------------------------------------------------------- #
 
-_EXPECTED_LEAF_COUNT = 200
-_EXPECTED_TREE_DIGEST = "13c5faecbce6d52d41e515372485d11c8a52fe5d244abcedfafa28c1c08085c2"
+_EXPECTED_LEAF_COUNT = 201
+_EXPECTED_TREE_DIGEST = "a85ac26a40104cf6dd6074589a08eed5fcd54f1d873f290ee891396c5a7a68d8"
 
 
 def _stable(value: object) -> object:
@@ -53,7 +61,9 @@ def _action_signature(action: argparse.Action) -> dict[str, object]:
         "default": _stable(action.default),
         "type": _stable(action.type),
         "choices": list(action.choices) if action.choices is not None else None,
-        "required": bool(action.required),
+        "required": bool(action.required) and not (
+            not action.option_strings and action.nargs in ("?", "*", argparse.REMAINDER)
+        ),
         "help": action.help,
         "metavar": _stable(action.metavar),
     }
@@ -94,7 +104,10 @@ def _root_parser() -> argparse.ArgumentParser:
             raise SystemExit(0)
         return real_parse_args(self, args, namespace)
 
-    with mock.patch.object(argparse.ArgumentParser, "parse_args", _capture):
+    with (
+        mock.patch.object(argparse.ArgumentParser, "parse_args", _capture),
+        mock.patch.object(code_index, "default_parser_jobs", lambda: MAX_DEFAULT_PARSER_JOBS),
+    ):
         with pytest.raises(SystemExit):
             cli.main([])
 
@@ -133,9 +146,9 @@ def test_assess_argparse_tree_signature_is_unchanged() -> None:
 _DISPATCH_VERB_ALIASES = ("register", "update-status", "record-handoff", "record-decision")
 _KALI_BESPOKE_VERBS = ("sweep-orphans", "sweep", "tool-help", "gf")
 _KALI_INLINE_VERBS = ("job", "exec", "browser")
-_EXPECTED_CONTRACT_NAME_COUNT = 153
-_EXPECTED_EPILOG_COUNT = 90
-_EXPECTED_CONTRACT_DIGEST = "e4f3d656ecb132125534b095f286040f94f3b6c11e5362582ba9d58c9331423d"
+_EXPECTED_CONTRACT_NAME_COUNT = 154
+_EXPECTED_EPILOG_COUNT = 91
+_EXPECTED_CONTRACT_DIGEST = "58cedbdb6f77c689076bbf99e8482393f02423030f8436183a0248a55283ef1c"
 
 
 def _renderable_contract_names() -> list[str]:

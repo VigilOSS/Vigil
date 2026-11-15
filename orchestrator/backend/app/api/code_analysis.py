@@ -268,6 +268,17 @@ class CodeFilesBulkClassifyRequest(BaseModel):
     classifications: list[CodeFileClassification] = Field(
         min_length=1, max_length=MAX_BULK_ASSESSMENT_WRITE_ITEMS
     )
+    recorded_by_agent_id: str | None = Field(
+        default=None,
+        min_length=1,
+        max_length=128,
+        description=(
+            "The dispatch agent_id of the specialist recording this classification (its "
+            "Runtime Identity). The audit entry records it with that dispatch's role; an id "
+            "no dispatch of this engagement holds is refused. Omitted (or `operator`), the "
+            "classification is the operator's."
+        ),
+    )
 
 
 class CodeModuleRecord(BaseModel):
@@ -1355,6 +1366,7 @@ async def bulk_classify_files(engagement_key: str, request: CodeFilesBulkClassif
         lambda engagement_id: code_analysis.bulk_classify_code_files(
             engagement_id,
             classifications=[c.model_dump() for c in request.classifications],
+            recorded_by_agent_id=request.recorded_by_agent_id,
         ),
         audit=lambda engagement_id, record: _audit_code_mutation(
             engagement_id,
@@ -1363,7 +1375,9 @@ async def bulk_classify_files(engagement_key: str, request: CodeFilesBulkClassif
                 f"updated={record.get('updated', 0)} total={record.get('total', 0)} "
                 f"obligation_changes={len(record.get('obligation_changes', []))}"
             ),
+            actor_name=_classification_actor(record),
             metadata={
+                "recorded_by": record.get("recorded_by"),
                 # What each tag or tier change moved: families added and
                 # removed, triggers raised and retired, directed attempts
                 # withdrawn. The retired triggers stay readable; this is where
@@ -1386,6 +1400,14 @@ async def update_file(engagement_key: str, file_id: int, request: dict[str, Any]
     )
 
 
+def _classification_actor(record: dict[str, Any]) -> str:
+    """The audit actor of a classification: the recording dispatch, else the operator."""
+    recorder = record.get("recorded_by") if isinstance(record, dict) else None
+    if isinstance(recorder, dict) and recorder.get("agent_id"):
+        return str(recorder["agent_id"])
+    return "operator"
+
+
 def _audit_file_obligation_change(engagement_id: int, record: dict[str, Any]) -> None:
     """Audit a file patch whose tag or tier change moved what the file owes."""
     change = record.get("obligation_change") if isinstance(record, dict) else None
@@ -1395,7 +1417,12 @@ def _audit_file_obligation_change(engagement_id: int, record: dict[str, Any]) ->
         engagement_id,
         title="code-record classify",
         action=f"file_id={record.get('id')} obligation_changes=1",
-        metadata={"obligation_changes": [change], "derived": record.get("derived", [])},
+        actor_name=_classification_actor(record),
+        metadata={
+            "recorded_by": record.get("recorded_by"),
+            "obligation_changes": [change],
+            "derived": record.get("derived", []),
+        },
     )
 
 
@@ -1842,6 +1869,18 @@ def list_code_triggers(
     repo_id: int | None = Query(default=None),
     include_superseded: bool = Query(default=False),
     origin: Literal["cross_file", "depth_floor"] | None = Query(default=None),
+    supersession_reason: list[
+        Literal[
+            "source_generation_replaced", "file_review_reopened",
+            "family_no_longer_required", "tier_floor_lowered",
+        ]
+    ] | None = Query(
+        default=None,
+        description=(
+            "Repeatable: the rows superseded for one of these reasons, in the active "
+            "source generation (every generation with include_superseded)."
+        ),
+    ),
     limit: int = Query(
         default=code_analysis.TRIGGER_PAGE_DEFAULT, ge=1, le=code_analysis.TRIGGER_PAGE_MAX
     ),
@@ -1854,6 +1893,7 @@ def list_code_triggers(
         repo_id=repo_id,
         include_superseded=include_superseded,
         origin=origin,
+        supersession_reasons=supersession_reason or (),
         limit=limit,
         offset=offset,
     )

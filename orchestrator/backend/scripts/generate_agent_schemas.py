@@ -564,15 +564,12 @@ def _schema_specs() -> tuple[SchemaSpec, ...]:
                         "enum": ["critical", "high", "medium", "low", "skip"],
                         "description": "Security relevance tier. critical: parses untrusted input, auth, crypto, protocol state machines. high: memory mgmt, command building, file I/O. medium: utility, string handling. low: build, test infra. skip: generated, docs, vendored.",
                     },
-                    "role": "Functional role of the file (for example, protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation).",
+                    "role": "Functional role of the file (for example, protocol_parser, auth_handler, crypto_impl, entry_point, memory_allocator, config_parser, utility, test, build, documentation). Omitted (or null), the stored role is kept.",
                     "language": {
                         "type": "string",
                         "description": "Optional language correction when ingestion guessed wrong. Omit when the stored language is already correct.",
                     },
-                    "slot_types": {
-                        "description": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — omitting it on those tiers degrades taint-path scheduling. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
-                        "default": [],
-                    },
+                    "slot_types": "Untrusted data types or execution-policy decisions that flow into this file. Set at least one for critical/high files — a critical/high file with none degrades taint-path scheduling. Omitted (or null), the stored slot types are kept. The enum values above are the only accepted slot types; auth/crypto/error families are derived from role+language by the backend.",
                     "analysis_priority": "Priority score combining classification tier, git churn, entry-point proximity, and past CVE history. critical: 80-100, high: 50-79, medium: 20-49, low: 5-19, skip: 0.",
                     # Projected from the backend's own vocabulary
                     # (``app.services.code_analysis.SKIP_REASONS``, the set

@@ -228,6 +228,7 @@ def test_opencode_start_merges_opening_and_user_focus_once(context, monkeypatch,
     assert environment["OPENCODE_DISABLE_PROJECT_CONFIG"] == "1"
     # The operator's personal ~/.claude prompt and skills stay out of the engagement.
     assert environment["OPENCODE_DISABLE_CLAUDE_CODE"] == "1"
+    assert environment["OPENCODE_DISABLE_AUTOUPDATE"] == "1"
     assert environment["OPENCODE_CONFIG_DIR"] == str(workspace / ".opencode")
     configuration = json.loads((workspace / ".opencode/opencode.json").read_text())
     binding = json.loads((workspace / ".vigil-client-context.json").read_text())

@@ -194,8 +194,9 @@ connect the corresponding provider through `/connect` and choose an entitled
 model through `/models`. See [OpenCode providers](https://opencode.ai/docs/providers/#zai).
 Generated assessment roles inherit the selected model. Installed role files do
 not prove that a particular specialist was dispatched successfully. Choose the
-reasoning variant in the TUI; OpenCode stores that choice per model for every
-session on the machine. Vigil's OpenCode sessions do not load Claude Code's
+reasoning variant at start with the model, for example
+`vigil engagement start <key> --client opencode --mode code -- --model=zai-coding-plan/glm-5.3#max`;
+the TUI applies a variant per message, so changing it mid-session affects only later messages. Vigil's OpenCode sessions do not load Claude Code's
 global `CLAUDE.md` or skills.
 
 Blue's existing provider/model routing is unchanged. OpenCode native GUI/desktop

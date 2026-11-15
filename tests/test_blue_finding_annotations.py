@@ -18,22 +18,12 @@ from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 
 import pytest
 
+from assess.commands import update_finding, verify_finding
 from vigil_cli import blue
-
-# ``agent/scripts`` holds the assess CLI the blue wrapper shells into. It is not
-# an installed distribution, so put it on the path the way the assess suite's
-# own conftest does (and ``vigil_cli.paths.add_assess_import_path`` does at
-# runtime) before importing the commands under test.
-_SCRIPTS_ROOT = Path(__file__).resolve().parents[1] / "agent" / "scripts"
-if str(_SCRIPTS_ROOT) not in sys.path:
-    sys.path.insert(0, str(_SCRIPTS_ROOT))
-
-from assess.commands import update_finding, verify_finding  # noqa: E402
 
 
 class _Cfg:

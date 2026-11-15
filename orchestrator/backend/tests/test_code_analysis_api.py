@@ -4607,6 +4607,7 @@ def test_bulk_classify_reports_the_structural_invalidation_it_caused(
         "language_changes": [],
         "derived": [],
         "obligation_changes": [],
+        "recorded_by": {"agent_id": None, "agent_role": "operator"},
     }
 
     corrected = _bulk_classify(
@@ -4637,6 +4638,7 @@ def test_bulk_classify_reports_the_structural_invalidation_it_caused(
         ],
         "derived": [],
         "obligation_changes": [],
+        "recorded_by": {"agent_id": None, "agent_role": "operator"},
     }
 
 
